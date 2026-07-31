@@ -482,23 +482,33 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.width = int32(win.LOWORD(uint32(lParam)))
 		u.height = int32(win.HIWORD(uint32(lParam)))
 		if u.width > 0 && u.height > 0 {
-			cols := int(u.width / cellW)
+			cw, ch := u.metricW, u.metricH
+			if cw < 1 {
+				cw = cellW
+			}
+			if ch < 1 {
+				ch = cellH
+			}
+			const padX int32 = 4
+			cols := int((u.width - padX) / cw)
 			if cols < 20 {
 				cols = 20
 			}
-			u.cols = cols
 			u.chrome.Width = cols
 			u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: 24}).Model
 			u.chromePx = u.chromePixelHeight()
-			rows := int((u.height - u.chromePx) / cellH)
+			rows := int((u.height - u.chromePx) / ch)
 			if rows < 5 {
 				rows = 5
 			}
 			if rows != u.rows || cols != u.cols {
+				u.cols = cols
 				u.rows = rows
 				for _, t := range u.tabs {
 					t.resize(cols, rows)
 				}
+			} else {
+				u.cols = cols
 			}
 		}
 		return 0
@@ -806,31 +816,22 @@ func (u *winUI) paint(hwnd win.HWND) {
 	win.SelectObject(hdc, oldF)
 }
 
-// blitGrid paints colored cells at fixed pitch. Selection uses one brush;
-// text runs flush when FG/BG changes so we keep TextOut count low.
+// blitGrid paints colored cells at fixed pitch.
+// Backgrounds/selection use FillRect (no pen hairlines) coalesced into runs so
+// selection never shows a per-cell grid. Glyphs are placed at x*cellW so the
+// font’s natural advance cannot drift off the grid.
 func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, curY int, curVis bool) {
 	tab := u.activeTab()
 	if tab == nil {
 		return
 	}
 
-	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.BLACK_BRUSH)))
-	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
-	win.Rectangle_(hdc, rect.Left, rect.Top, rect.Right, rect.Bottom)
+	fillRect(hdc, rect, win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)))
 
 	oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	defer win.SelectObject(hdc, oldFont)
 
-	cw, ch := int32(cellW), int32(cellH)
-	var tm win.TEXTMETRIC
-	if win.GetTextMetrics(hdc, &tm) {
-		if tm.TmAveCharWidth > 0 {
-			cw = tm.TmAveCharWidth
-		}
-		if tm.TmHeight > 0 {
-			ch = tm.TmHeight
-		}
-	}
+	cw, ch := measureCellSize(hdc)
 	const padX int32 = 4
 	padY := u.chromePixelHeight()
 	if padY < 1 {
@@ -848,10 +849,8 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		defer win.DeleteObject(win.HGDIOBJ(selBrush))
 	}
 
-	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
-
 	for y, row := range grid {
-		// Non-default backgrounds first (one rect per run of same BG).
+		// Non-default backgrounds: one FillRect per run of the same BG.
 		type bgRun struct {
 			x0, x1     int
 			r, g, b    byte
@@ -871,71 +870,64 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		for _, br := range bgs {
 			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(br.r, br.g, br.b)}
 			if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-				old := win.SelectObject(hdc, win.HGDIOBJ(brush))
-				px0 := padX + int32(br.x0)*cw
-				px1 := padX + int32(br.x1+1)*cw
-				py := padY + int32(y)*ch
-				win.Rectangle_(hdc, px0, py, px1, py+ch)
-				win.SelectObject(hdc, old)
+				r := win.RECT{
+					Left:   padX + int32(br.x0)*cw,
+					Top:    padY + int32(y)*ch,
+					Right:  padX + int32(br.x1+1)*cw,
+					Bottom: padY + int32(y+1)*ch,
+				}
+				fillRect(hdc, r, brush)
 				win.DeleteObject(win.HGDIOBJ(brush))
 			}
 		}
 
-		// Selection overlay
+		// Selection: coalesce contiguous cells into one rect (no grid seams).
 		if selBrush != 0 {
+			absY := tab.sb.absLine(y, u.rows, u.rows)
+			run0 := -1
+			flushSel := func(x1 int) {
+				if run0 < 0 {
+					return
+				}
+				r := win.RECT{
+					Left:   padX + int32(run0)*cw,
+					Top:    padY + int32(y)*ch,
+					Right:  padX + int32(x1+1)*cw,
+					Bottom: padY + int32(y+1)*ch,
+				}
+				fillRect(hdc, r, selBrush)
+				run0 = -1
+			}
 			for x := range row {
-				absY := tab.sb.absLine(y, u.rows, u.rows)
 				if tab.sel.containsAbs(x, absY) {
-					old := win.SelectObject(hdc, win.HGDIOBJ(selBrush))
-					px := padX + int32(x)*cw
-					py := padY + int32(y)*ch
-					win.Rectangle_(hdc, px, py, px+cw, py+ch)
-					win.SelectObject(hdc, old)
+					if run0 < 0 {
+						run0 = x
+					}
+				} else {
+					flushSel(x - 1)
 				}
 			}
+			flushSel(len(row) - 1)
 		}
 
-		// Text runs: same FG (+ selection) and no spaces.
-		type tRun struct {
-			x0         int
-			text       []rune
-			fr, fg, fb byte
-			sel        bool
-		}
-		var runs []tRun
+		// Glyphs at fixed cell origins (never multi-char TextOut advance).
+		win.SetBkMode(hdc, win.TRANSPARENT)
 		for x, c := range row {
 			r := c.Ch
-			if r == 0 {
-				r = ' '
-			}
-			absY := tab.sb.absLine(y, u.rows, u.rows)
-			sel := tab.sel.containsAbs(x, absY)
-			if r == ' ' {
+			if r == 0 || r == ' ' {
 				continue
 			}
+			absY := tab.sb.absLine(y, u.rows, u.rows)
 			fr, fg, fb := c.FR, c.FG, c.FB
-			if sel {
+			if tab.sel.containsAbs(x, absY) {
 				fr, fg, fb = 255, 255, 255
 			}
-			n := len(runs)
-			if n > 0 {
-				last := &runs[n-1]
-				if last.sel == sel && last.fr == fr && last.fg == fg && last.fb == fb && last.x0+len(last.text) == x {
-					last.text = append(last.text, r)
-					continue
-				}
-			}
-			runs = append(runs, tRun{x0: x, text: []rune{r}, fr: fr, fg: fg, fb: fb, sel: sel})
-		}
-		win.SetBkMode(hdc, win.TRANSPARENT)
-		for i := range runs {
-			rn := &runs[i]
-			s, err := syscall.UTF16FromString(string(rn.text))
+			s, err := syscall.UTF16FromString(string(r))
 			if err != nil || len(s) < 2 {
 				continue
 			}
-			win.SetTextColor(hdc, win.RGB(rn.fr, rn.fg, rn.fb))
-			px := padX + int32(rn.x0)*cw
+			win.SetTextColor(hdc, win.RGB(fr, fg, fb))
+			px := padX + int32(x)*cw
 			py := padY + int32(y)*ch
 			win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
 		}
@@ -948,20 +940,58 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		if curY < 0 {
 			curY = 0
 		}
-		px := padX + int32(curX)*cw
-		py := padY + int32(curY)*ch
 		elapsed := time.Since(u.blinkStart).Seconds()
 		period := cursorBlinkPeriod.Seconds()
 		alpha := 0.5 + 0.5*math.Sin(2*math.Pi*(elapsed/period))
 		level := byte(50 + alpha*205)
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(level, level, level)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			oldBr := win.SelectObject(hdc, win.HGDIOBJ(brush))
-			win.Rectangle_(hdc, px, py, px+cw, py+ch-1)
-			win.SelectObject(hdc, oldBr)
+			r := win.RECT{
+				Left:   padX + int32(curX)*cw,
+				Top:    padY + int32(curY)*ch,
+				Right:  padX + int32(curX+1)*cw,
+				Bottom: padY + int32(curY+1)*ch,
+			}
+			fillRect(hdc, r, brush)
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
+}
+
+// measureCellSize returns the monospaced cell size for the font selected in hdc.
+// GetTextExtent of "M" matches glyph advance better than TmAveCharWidth, which
+// is often 1px short and produces a visible grid of seams under selection.
+func measureCellSize(hdc win.HDC) (cw, ch int32) {
+	cw, ch = cellW, cellH
+	var tm win.TEXTMETRIC
+	if win.GetTextMetrics(hdc, &tm) {
+		if tm.TmHeight > 0 {
+			ch = tm.TmHeight
+		}
+		if tm.TmAveCharWidth > 0 {
+			cw = tm.TmAveCharWidth
+		}
+	}
+	m, err := syscall.UTF16FromString("M")
+	if err == nil {
+		var sz win.SIZE
+		if win.GetTextExtentPoint32(hdc, &m[0], 1, &sz) && sz.CX > 0 {
+			cw = sz.CX
+		}
+	}
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	return cw, ch
+}
+
+// fillRect is user32 FillRect — solid fill with no pen border (avoids GDI
+// Rectangle hairlines between adjacent cells).
+func fillRect(hdc win.HDC, r win.RECT, brush win.HBRUSH) {
+	_, _, _ = procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&r)), uintptr(brush))
 }
 
 func displayRune(r rune) rune {
@@ -1137,6 +1167,7 @@ var (
 	modUser32         = windows.NewLazySystemDLL("user32.dll")
 	modGdi32          = windows.NewLazySystemDLL("gdi32.dll")
 	procSetWindowText = modUser32.NewProc("SetWindowTextW")
+	procFillRect      = modUser32.NewProc("FillRect")
 	procGetTextFace   = modGdi32.NewProc("GetTextFaceW")
 )
 
@@ -1300,26 +1331,42 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	}
 	// vt10x.Size returns (cols, rows).
 	ccols, crows := ct.Size()
-	win.SetBkMode(hdc, win.OPAQUE)
-	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
+	// Coalesce horizontal runs of identical BG to avoid a per-cell grid.
+	type bgRun struct {
+		x0, x1     int
+		r, g, b    byte
+	}
 	for y := 0; y < crows; y++ {
+		var runs []bgRun
 		for x := 0; x < cols && x < ccols; x++ {
-			g := ct.Cell(x, y)
-			cell := glyphToCell(g)
-			px := int32(4) + int32(x)*cw
-			py := int32(y) * ch
-			// Always paint chrome bg so it covers the shell underneath.
+			cell := glyphToCell(ct.Cell(x, y))
 			br, bg, bb := cell.BR, cell.BG, cell.BB
 			if br == 0 && bg == 0 && bb == 0 {
 				br, bg, bb = 35, 35, 40
 			}
-			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(br, bg, bb)}
+			if n := len(runs); n > 0 && runs[n-1].x1 == x-1 &&
+				runs[n-1].r == br && runs[n-1].g == bg && runs[n-1].b == bb {
+				runs[n-1].x1 = x
+				continue
+			}
+			runs = append(runs, bgRun{x0: x, x1: x, r: br, g: bg, b: bb})
+		}
+		for _, rn := range runs {
+			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(rn.r, rn.g, rn.b)}
 			if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-				old := win.SelectObject(hdc, win.HGDIOBJ(brush))
-				win.Rectangle_(hdc, px, py, px+cw, py+ch)
-				win.SelectObject(hdc, old)
+				r := win.RECT{
+					Left:   4 + int32(rn.x0)*cw,
+					Top:    int32(y) * ch,
+					Right:  4 + int32(rn.x1+1)*cw,
+					Bottom: int32(y+1) * ch,
+				}
+				fillRect(hdc, r, brush)
 				win.DeleteObject(win.HGDIOBJ(brush))
 			}
+		}
+		win.SetBkMode(hdc, win.TRANSPARENT)
+		for x := 0; x < cols && x < ccols; x++ {
+			cell := glyphToCell(ct.Cell(x, y))
 			r := cell.Ch
 			if r == 0 || r == ' ' {
 				continue
@@ -1328,9 +1375,8 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 			if err != nil || len(s) < 2 {
 				continue
 			}
-			win.SetBkMode(hdc, win.TRANSPARENT)
 			win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
-			win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
+			win.TextOut(hdc, 4+int32(x)*cw, int32(y)*ch, &s[0], int32(len(s)-1))
 		}
 	}
 	u.chromePx = int32(crows) * ch
