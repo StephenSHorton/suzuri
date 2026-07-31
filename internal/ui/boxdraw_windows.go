@@ -229,68 +229,100 @@ func drawDoubleCorner(hdc win.HDC, cell win.RECT, a arm, fr, fg, fb byte) {
 	drawArms(hdc, cell, a, true, fr, fg, fb)
 }
 
-// drawRoundCorner paints Unicode light arcs ╭╮╯╰ as true quarter-circles with
-// edge-to-edge arms (matches Windows Terminal / font rounded box drawing).
-// Angle convention: 0 = east, increasing clockwise (screen y grows downward).
+// drawRoundCorner paints Unicode light arcs ╭╮╯╰.
+//
+// Important: use a *quarter-ellipse* with rx=cw/2, ry=ch/2 so the curve spans
+// from mid-edge to mid-edge. A small circular fillet (r=min/2) in a tall cell
+// sits between long arms and reads as a diagonal miter — what we were doing.
+//
+// Angle: 0=east, increasing clockwise (y grows downward).
 func drawRoundCorner(hdc win.HDC, cell win.RECT, which rune, fr, fg, fb byte) {
 	cx, cy := cellMid(cell)
 	t := lineThick(cell, false)
 	cw := cell.Right - cell.Left
 	ch := cell.Bottom - cell.Top
-	// Radius fills half the cell so the curve is obvious and arms still reach edges.
-	r := min32(cw, ch) / 2
-	if r < 3 {
-		r = 3
+	rx := cw / 2
+	ry := ch / 2
+	if rx < 2 {
+		rx = 2
+	}
+	if ry < 2 {
+		ry = 2
 	}
 
 	var start, end float64
 	switch which {
-	case '╭': // arc down and right — SE quarter, arms E + S
+	case '╭': // down + right — SE quarter-ellipse
 		start, end = 0, math.Pi/2
-		hStroke(hdc, cx+r-t/2, cell.Right, cy, t, fr, fg, fb)
-		vStroke(hdc, cx, cy+r-t/2, cell.Bottom, t, fr, fg, fb)
-	case '╮': // arc down and left — SW quarter, arms W + S
+	case '╮': // down + left — SW
 		start, end = math.Pi/2, math.Pi
-		hStroke(hdc, cell.Left, cx-r+t/2, cy, t, fr, fg, fb)
-		vStroke(hdc, cx, cy+r-t/2, cell.Bottom, t, fr, fg, fb)
-	case '╯': // arc up and left — NW quarter, arms W + N
+	case '╯': // up + left — NW
 		start, end = math.Pi, 3*math.Pi/2
-		hStroke(hdc, cell.Left, cx-r+t/2, cy, t, fr, fg, fb)
-		vStroke(hdc, cx, cell.Top, cy-r+t/2, t, fr, fg, fb)
-	case '╰': // arc up and right — NE quarter, arms E + N
+	case '╰': // up + right — NE
 		start, end = 3*math.Pi/2, 2*math.Pi
-		hStroke(hdc, cx+r-t/2, cell.Right, cy, t, fr, fg, fb)
-		vStroke(hdc, cx, cell.Top, cy-r+t/2, t, fr, fg, fb)
 	default:
 		return
 	}
-	strokeArcCW(hdc, cx, cy, r, t, start, end, fr, fg, fb)
+	// Ellipse ends already sit on the cell mid-edges; short arms only if
+	// rounding left a gap (odd cell sizes).
+	switch which {
+	case '╭':
+		// east end (cx+rx, cy) → right; south end (cx, cy+ry) → bottom
+		if cx+rx < cell.Right {
+			hStroke(hdc, cx+rx, cell.Right, cy, t, fr, fg, fb)
+		}
+		if cy+ry < cell.Bottom {
+			vStroke(hdc, cx, cy+ry, cell.Bottom, t, fr, fg, fb)
+		}
+	case '╮':
+		if cell.Left < cx-rx {
+			hStroke(hdc, cell.Left, cx-rx, cy, t, fr, fg, fb)
+		}
+		if cy+ry < cell.Bottom {
+			vStroke(hdc, cx, cy+ry, cell.Bottom, t, fr, fg, fb)
+		}
+	case '╯':
+		if cell.Left < cx-rx {
+			hStroke(hdc, cell.Left, cx-rx, cy, t, fr, fg, fb)
+		}
+		if cell.Top < cy-ry {
+			vStroke(hdc, cx, cell.Top, cy-ry, t, fr, fg, fb)
+		}
+	case '╰':
+		if cx+rx < cell.Right {
+			hStroke(hdc, cx+rx, cell.Right, cy, t, fr, fg, fb)
+		}
+		if cell.Top < cy-ry {
+			vStroke(hdc, cx, cell.Top, cy-ry, t, fr, fg, fb)
+		}
+	}
+	strokeEllipseCW(hdc, cx, cy, rx, ry, t, start, end, fr, fg, fb)
 }
 
-// strokeArcCW draws a thick arc by stamping small rects along the curve.
-// Angles: 0=east, increasing clockwise (y-down screen space).
-func strokeArcCW(hdc win.HDC, cx, cy, radius, thick int32, start, end float64, fr, fg, fb byte) {
-	if radius < 1 {
+// strokeEllipseCW stamps a thick elliptical arc.
+// Angles: 0=east, clockwise, y-down (x = cx + rx*cos, y = cy + ry*sin).
+func strokeEllipseCW(hdc win.HDC, cx, cy, rx, ry, thick int32, start, end float64, fr, fg, fb byte) {
+	if rx < 1 || ry < 1 {
 		return
 	}
 	if thick < 1 {
 		thick = 1
 	}
-	// ~1 sample per pixel of arc length
-	arcLen := math.Abs(end-start) * float64(radius)
+	// Arc length ≈ average radius * Δθ
+	avgR := float64(rx+ry) / 2
+	arcLen := math.Abs(end-start) * avgR
 	steps := int(arcLen + 0.5)
-	if steps < 12 {
-		steps = 12
+	if steps < 16 {
+		steps = 16
 	}
-	if steps > 64 {
-		steps = 64
+	if steps > 96 {
+		steps = 96
 	}
 	half := thick / 2
 	for i := 0; i <= steps; i++ {
 		th := start + (end-start)*float64(i)/float64(steps)
-		// clockwise from east with y-down: x=cos, y=sin
-		x := cx + int32(math.Round(float64(radius)*math.Cos(th)))
-		y := cy + int32(math.Round(float64(radius)*math.Sin(th)))
+		x := cx + int32(math.Round(float64(rx)*math.Cos(th)))
+		y := cy + int32(math.Round(float64(ry)*math.Sin(th)))
 		fillRGB(hdc, win.RECT{
 			Left:   x - half,
 			Top:    y - half,
