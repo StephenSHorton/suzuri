@@ -5,7 +5,7 @@ package ui
 import (
 	"io"
 	"math"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -23,11 +23,11 @@ const (
 	className = "SuzuriTerminalClass"
 	appTitle  = "suzuri（硯）"
 
-	wmSuzuriOutput = win.WM_APP + 1
-	wmSuzuriBlink  = win.WM_APP + 2
+	wmSuzuriRedraw = win.WM_APP + 1
 
 	cursorBlinkPeriod = 1200 * time.Millisecond
-	cursorBlinkTick   = 33 * time.Millisecond
+	// Blink ticks are infrequent — full-frame invalidates every 33ms starved the message loop.
+	cursorBlinkTick = 100 * time.Millisecond
 
 	cellW = 9
 	cellH = 18
@@ -37,11 +37,13 @@ const (
 func Run(sess *host.Session) error {
 	cols, rows := 100, 30
 	ui := &winUI{
-		sess: sess,
-		cols: cols,
-		rows: rows,
-		cfg:  config.Default(),
-		term: vt10x.New(vt10x.WithSize(cols, rows)),
+		sess:      sess,
+		cols:      cols,
+		rows:      rows,
+		cfg:       config.Default(),
+		term:      vt10x.New(vt10x.WithSize(cols, rows)),
+		writeCh:   make(chan []byte, 256),
+		blinkStart: time.Now(),
 	}
 	return ui.loop()
 }
@@ -58,12 +60,14 @@ type winUI struct {
 	rows   int
 	cfg    config.Config
 
-	// Serialize term writes (readLoop) vs paint/resize (UI thread).
-	// vt10x has Lock/Unlock for reads; Write also locks internally.
-	// We only paint under term.Lock.
+	// writeCh decouples keyboard handling from ConPTY writes so a full pipe
+	// never freezes the Win32 message loop ("Not Responding").
+	writeCh chan []byte
 
 	blinkStart time.Time
-	destroyed  sync.Once
+	// redrawPending coalesces PostMessage spam from the PTY reader.
+	redrawPending atomic.Bool
+	alive         atomic.Bool
 }
 
 func (u *winUI) loop() error {
@@ -82,6 +86,7 @@ func (u *winUI) loop() error {
 		LpszClassName: cname,
 		HCursor:       win.LoadCursor(0, win.MAKEINTRESOURCE(win.IDC_IBEAM)),
 		HbrBackground: win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)),
+		Style:         win.CS_DBLCLKS,
 	}
 	if atom := win.RegisterClassEx(&wc); atom == 0 {
 		if errno := windows.GetLastError(); errno != windows.ERROR_CLASS_ALREADY_EXISTS {
@@ -109,10 +114,11 @@ func (u *winUI) loop() error {
 	}
 	u.hwnd = hwnd
 	u.font = createFont()
-	u.blinkStart = time.Now()
+	u.alive.Store(true)
 	win.ShowWindow(hwnd, win.SW_SHOW)
 	win.UpdateWindow(hwnd)
 
+	go u.writeLoop()
 	go u.readLoop()
 	go u.blinkLoop()
 
@@ -131,23 +137,54 @@ func (u *winUI) loop() error {
 	return nil
 }
 
+func (u *winUI) writeLoop() {
+	for b := range u.writeCh {
+		if len(b) == 0 {
+			continue
+		}
+		if _, err := u.sess.Write(b); err != nil {
+			// Session gone — stop accepting.
+			return
+		}
+	}
+}
+
+// sendKey never blocks the UI thread for more than a brief channel send.
+func (u *winUI) sendKey(b []byte) {
+	if !u.alive.Load() || len(b) == 0 {
+		return
+	}
+	// Copy — callers often pass stack-backed slices.
+	p := append([]byte(nil), b...)
+	select {
+	case u.writeCh <- p:
+	default:
+		// Drop if flooded; better than freezing the window.
+	}
+}
+
+func (u *winUI) requestRedraw() {
+	if !u.alive.Load() || u.hwnd == 0 {
+		return
+	}
+	// Coalesce: at most one outstanding redraw message.
+	if u.redrawPending.CompareAndSwap(false, true) {
+		win.PostMessage(u.hwnd, wmSuzuriRedraw, 0, 0)
+	}
+}
+
 func (u *winUI) readLoop() {
 	buf := make([]byte, 8192)
 	for {
 		n, err := u.sess.Read(buf)
 		if n > 0 {
-			// vt10x interprets CSI/OSC/UTF-8 and maintains a cell grid.
-			// This replaces the broken "strip + append lines" approach that
-			// duplicated text whenever the shell redrew the line.
 			_, _ = u.term.Write(buf[:n])
-			if u.hwnd != 0 {
-				win.PostMessage(u.hwnd, wmSuzuriOutput, 0, 0)
-			}
+			u.requestRedraw()
 		}
 		if err != nil {
-			if err != io.EOF && u.hwnd != 0 {
+			if err != io.EOF {
 				_, _ = u.term.Write([]byte("\r\n[suzuri] session ended\r\n"))
-				win.PostMessage(u.hwnd, wmSuzuriOutput, 0, 0)
+				u.requestRedraw()
 			}
 			return
 		}
@@ -158,16 +195,17 @@ func (u *winUI) blinkLoop() {
 	t := time.NewTicker(cursorBlinkTick)
 	defer t.Stop()
 	for range t.C {
-		if u.hwnd == 0 {
+		if !u.alive.Load() {
 			return
 		}
-		win.PostMessage(u.hwnd, wmSuzuriBlink, 0, 0)
+		u.requestRedraw()
 	}
 }
 
 func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
-	case wmSuzuriOutput, wmSuzuriBlink:
+	case wmSuzuriRedraw:
+		u.redrawPending.Store(false)
 		win.InvalidateRect(hwnd, nil, false)
 		return 0
 
@@ -186,62 +224,57 @@ func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintp
 			if cols != u.cols || rows != u.rows {
 				u.cols, u.rows = cols, rows
 				u.term.Resize(cols, rows)
-				_ = u.sess.Resize(cols, rows)
+				// Resize PTY off the UI thread — ConPTY can block.
+				c, r := cols, rows
+				go func() { _ = u.sess.Resize(c, r) }()
 			}
 		}
 		return 0
 
 	case win.WM_CHAR:
 		ch := rune(wParam)
-		// Backspace arrives as WM_CHAR 0x08 *and* WM_KEYDOWN VK_BACK.
-		// Handle only on KEYDOWN to avoid double-send.
-		// Keys handled exclusively on WM_KEYDOWN — ignore their WM_CHAR twins.
 		switch ch {
-		case 0x08, 0x09, 0x0a: // BS, TAB, LF
+		case 0x08, 0x09, 0x0a:
 			return 0
-		case 0x0d: // Enter
-			_, _ = u.sess.Write([]byte("\r"))
+		case 0x0d:
+			u.sendKey([]byte("\r"))
 			return 0
 		}
 		if ch >= 32 {
 			var buf [4]byte
 			n := utf8Encode(buf[:], ch)
-			_, _ = u.sess.Write(buf[:n])
+			u.sendKey(buf[:n])
 		} else if ch > 0 && ch < 32 {
-			_, _ = u.sess.Write([]byte{byte(ch)})
+			u.sendKey([]byte{byte(ch)})
 		}
 		return 0
 
 	case win.WM_KEYDOWN:
 		switch wParam {
 		case win.VK_UP:
-			_, _ = u.sess.Write([]byte("\x1b[A"))
+			u.sendKey([]byte("\x1b[A"))
 		case win.VK_DOWN:
-			_, _ = u.sess.Write([]byte("\x1b[B"))
+			u.sendKey([]byte("\x1b[B"))
 		case win.VK_RIGHT:
-			_, _ = u.sess.Write([]byte("\x1b[C"))
+			u.sendKey([]byte("\x1b[C"))
 		case win.VK_LEFT:
-			_, _ = u.sess.Write([]byte("\x1b[D"))
+			u.sendKey([]byte("\x1b[D"))
 		case win.VK_DELETE:
-			_, _ = u.sess.Write([]byte("\x1b[3~"))
+			u.sendKey([]byte("\x1b[3~"))
 		case win.VK_HOME:
-			_, _ = u.sess.Write([]byte("\x1b[H"))
+			u.sendKey([]byte("\x1b[H"))
 		case win.VK_END:
-			_, _ = u.sess.Write([]byte("\x1b[F"))
+			u.sendKey([]byte("\x1b[F"))
 		case win.VK_PRIOR:
-			_, _ = u.sess.Write([]byte("\x1b[5~"))
+			u.sendKey([]byte("\x1b[5~"))
 		case win.VK_NEXT:
-			_, _ = u.sess.Write([]byte("\x1b[6~"))
+			u.sendKey([]byte("\x1b[6~"))
 		case win.VK_ESCAPE:
-			_, _ = u.sess.Write([]byte{0x1b})
+			u.sendKey([]byte{0x1b})
 		case win.VK_BACK:
-			// Windows ConPTY: BS. (DEL is Forward-delete / different.)
-			_, _ = u.sess.Write([]byte{0x08})
+			u.sendKey([]byte{0x08})
 		case win.VK_TAB:
-			// Prefer KEYDOWN for Tab; ignore duplicate WM_CHAR if any.
-			_, _ = u.sess.Write([]byte{'\t'})
-		case win.VK_SPACE:
-			// Space is normally WM_CHAR; do not also write here or it doubles.
+			u.sendKey([]byte{'\t'})
 		}
 		return 0
 
@@ -250,17 +283,54 @@ func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintp
 		return 0
 
 	case win.WM_DESTROY:
-		u.destroyed.Do(func() {
-			_ = u.sess.Close()
-			if u.font != 0 {
-				win.DeleteObject(win.HGDIOBJ(u.font))
-			}
-			u.hwnd = 0
-		})
+		u.alive.Store(false)
+		// Unblock writeLoop
+		close(u.writeCh)
+		go func() { _ = u.sess.Close() }()
+		if u.font != 0 {
+			win.DeleteObject(win.HGDIOBJ(u.font))
+			u.font = 0
+		}
+		u.hwnd = 0
 		win.PostQuitMessage(0)
 		return 0
 	}
 	return win.DefWindowProc(hwnd, msg, wParam, lParam)
+}
+
+// rowSnapshot is a paint-friendly copy of one terminal row.
+type rowSnapshot struct {
+	text string
+}
+
+type frameSnapshot struct {
+	rows   []rowSnapshot
+	curX   int
+	curY   int
+	curVis bool
+}
+
+func (u *winUI) snapshot() frameSnapshot {
+	u.term.Lock()
+	defer u.term.Unlock()
+
+	cols, rows := u.term.Size()
+	cur := u.term.Cursor()
+	vis := u.term.CursorVisible()
+	out := make([]rowSnapshot, rows)
+	buf := make([]rune, cols)
+	for y := 0; y < rows; y++ {
+		for x := 0; x < cols; x++ {
+			buf[x] = displayRune(u.term.Cell(x, y).Char)
+		}
+		out[y] = rowSnapshot{text: string(buf)}
+	}
+	return frameSnapshot{
+		rows:   out,
+		curX:   cur.X,
+		curY:   cur.Y,
+		curVis: vis,
+	}
 }
 
 func (u *winUI) paint(hwnd win.HWND) {
@@ -268,8 +338,33 @@ func (u *winUI) paint(hwnd win.HWND) {
 	hdc := win.BeginPaint(hwnd, &ps)
 	defer win.EndPaint(hwnd, &ps)
 
+	// Snapshot under lock only — never call ConPTY or do heavy work while locked.
+	frame := u.snapshot()
+
 	var rect win.RECT
 	win.GetClientRect(hwnd, &rect)
+
+	// Double-buffer to avoid flicker and reduce time with a half-drawn frame.
+	memDC := win.CreateCompatibleDC(hdc)
+	if memDC == 0 {
+		u.paintFrame(hdc, rect, frame)
+		return
+	}
+	defer win.DeleteDC(memDC)
+	bmp := win.CreateCompatibleBitmap(hdc, rect.Right-rect.Left, rect.Bottom-rect.Top)
+	if bmp == 0 {
+		u.paintFrame(hdc, rect, frame)
+		return
+	}
+	defer win.DeleteObject(win.HGDIOBJ(bmp))
+	oldBmp := win.SelectObject(memDC, win.HGDIOBJ(bmp))
+	defer win.SelectObject(memDC, oldBmp)
+
+	u.paintFrame(memDC, rect, frame)
+	win.BitBlt(hdc, 0, 0, rect.Right-rect.Left, rect.Bottom-rect.Top, memDC, 0, 0, win.SRCCOPY)
+}
+
+func (u *winUI) paintFrame(hdc win.HDC, rect win.RECT, frame frameSnapshot) {
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.BLACK_BRUSH)))
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
 	win.Rectangle_(hdc, rect.Left, rect.Top, rect.Right, rect.Bottom)
@@ -279,34 +374,19 @@ func (u *winUI) paint(hwnd win.HWND) {
 	win.SetBkMode(hdc, win.TRANSPARENT)
 	win.SetTextColor(hdc, win.RGB(220, 220, 220))
 
-	u.term.Lock()
-	cols, rows := u.term.Size()
-	cur := u.term.Cursor()
-	curVis := u.term.CursorVisible()
-
-	// Build each row as a string of displayable runes (spaces for empty).
-	for y := 0; y < rows; y++ {
-		// row string — use runes to avoid invalid UTF-16 later
-		runes := make([]rune, cols)
-		for x := 0; x < cols; x++ {
-			g := u.term.Cell(x, y)
-			runes[x] = displayRune(g.Char)
+	for y, row := range frame.rows {
+		if row.text == "" {
+			continue
 		}
-		// trim trailing spaces for slightly cheaper TextOut (optional full width)
-		line := string(runes)
-		if line != "" {
-			utf16, err := syscall.UTF16FromString(line)
-			if err == nil && len(utf16) > 1 {
-				win.TextOut(hdc, 4, int32(y*cellH+2), &utf16[0], int32(len(utf16)-1))
-			}
+		utf16, err := syscall.UTF16FromString(row.text)
+		if err != nil || len(utf16) < 2 {
+			continue
 		}
+		win.TextOut(hdc, 4, int32(y*cellH+2), &utf16[0], int32(len(utf16)-1))
 	}
 
-	cx, cy := cur.X, cur.Y
-	u.term.Unlock()
-
-	// Block cursor with opacity pulse
-	if u.cfg.Cursor == config.CursorBlock && curVis {
+	if u.cfg.Cursor == config.CursorBlock && frame.curVis {
+		cx, cy := frame.curX, frame.curY
 		if cx < 0 {
 			cx = 0
 		}
@@ -334,16 +414,10 @@ func (u *winUI) paint(hwnd win.HWND) {
 	}
 }
 
-// displayRune maps terminal cell contents to something TextOut can show.
-// Empty cells and non-printables become a space — never U+FFFD tofu.
 func displayRune(r rune) rune {
-	if r == 0 || r == utf8RuneError {
+	if r == 0 || r == 0xFFFD {
 		return ' '
 	}
-	if r == 0xFFFD {
-		return ' '
-	}
-	// Skip other C0/C1 controls that sometimes leak into the grid.
 	if r < 0x20 || (r >= 0x7f && r < 0xa0) {
 		return ' '
 	}
@@ -352,8 +426,6 @@ func displayRune(r rune) rune {
 	}
 	return r
 }
-
-const utf8RuneError = '\uFFFD'
 
 func utf8Encode(p []byte, r rune) int {
 	switch {
