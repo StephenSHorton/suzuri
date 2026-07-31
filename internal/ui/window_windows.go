@@ -4,9 +4,12 @@ package ui
 
 import (
 	"io"
+	"math"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/lxn/win"
@@ -20,6 +23,16 @@ import (
 const (
 	className = "SuzuriTerminalClass"
 	appTitle  = "suzuri（硯）"
+
+	// Custom message: PTY produced output (posted from readLoop).
+	wmSuzuriOutput = win.WM_APP + 1
+	// Cursor blink tick.
+	wmSuzuriBlink = win.WM_APP + 2
+
+	// Blink period for opacity pulse (full in→out→in cycle).
+	cursorBlinkPeriod = 1200 * time.Millisecond
+	// How often we repaint the caret for smooth fade.
+	cursorBlinkTick = 33 * time.Millisecond // ~30 fps
 )
 
 // Run opens a native Win32 window and drives the ConPTY session until closed.
@@ -27,9 +40,10 @@ func Run(sess *host.Session) error {
 	ui := &winUI{
 		sess: sess,
 		// rough cell metrics for default window
-		cols: 100,
-		rows: 30,
-		cfg:  config.Default(), // CursorBlock by default
+		cols:  100,
+		rows:  30,
+		cfg:   config.Default(), // CursorBlock by default
+		lines: []string{""},
 	}
 	return ui.loop()
 }
@@ -44,9 +58,15 @@ type winUI struct {
 	cols   int
 	rows   int
 
-	mu     sync.Mutex
-	lines  []string // scrollback lines (plain text after strip)
-	cfg    config.Config
+	mu    sync.Mutex
+	lines []string // scrollback lines (plain text after strip)
+	cfg   config.Config
+
+	// pending chunks from PTY, drained on UI thread
+	pendingMu sync.Mutex
+	pending   strings.Builder
+
+	blinkStart time.Time
 }
 
 func (u *winUI) loop() error {
@@ -94,11 +114,14 @@ func (u *winUI) loop() error {
 	}
 	u.hwnd = hwnd
 	u.font = createFont()
+	u.blinkStart = time.Now()
 	win.ShowWindow(hwnd, win.SW_SHOW)
 	win.UpdateWindow(hwnd)
 
 	// PTY → UI
 	go u.readLoop()
+	// Cursor opacity pulse
+	go u.blinkLoop()
 
 	var msg win.MSG
 	for {
@@ -123,43 +146,111 @@ func (u *winUI) readLoop() {
 		if n > 0 {
 			text := string(vt.StripCSI(buf[:n]))
 			if text != "" {
-				u.append(text)
+				u.pendingMu.Lock()
+				u.pending.WriteString(text)
+				u.pendingMu.Unlock()
+				// Marshal buffer mutations onto the UI thread.
+				win.PostMessage(u.hwnd, wmSuzuriOutput, 0, 0)
 			}
 		}
 		if err != nil {
 			if err != io.EOF {
-				u.append("\n[suzuri] session ended\n")
+				u.pendingMu.Lock()
+				u.pending.WriteString("\n[suzuri] session ended\n")
+				u.pendingMu.Unlock()
+				win.PostMessage(u.hwnd, wmSuzuriOutput, 0, 0)
 			}
 			return
 		}
 	}
 }
 
-func (u *winUI) append(s string) {
+func (u *winUI) blinkLoop() {
+	t := time.NewTicker(cursorBlinkTick)
+	defer t.Stop()
+	for range t.C {
+		if u.hwnd == 0 {
+			return
+		}
+		// Don't force a full erase; just repaint caret region via invalidate.
+		win.PostMessage(u.hwnd, wmSuzuriBlink, 0, 0)
+	}
+}
+
+func (u *winUI) drainPending() {
+	u.pendingMu.Lock()
+	chunk := u.pending.String()
+	u.pending.Reset()
+	u.pendingMu.Unlock()
+	if chunk == "" {
+		return
+	}
+	u.applyOutput(chunk)
+	win.InvalidateRect(u.hwnd, nil, true)
+}
+
+// applyOutput interprets soft-terminal controls on the line buffer.
+// Handles LF, CR (line rewrite), BS/DEL (erase last rune).
+func (u *winUI) applyOutput(s string) {
 	u.mu.Lock()
-	// Normalize to lines; keep last N
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
-	parts := strings.Split(s, "\n")
+	defer u.mu.Unlock()
+
 	if len(u.lines) == 0 {
 		u.lines = []string{""}
 	}
-	u.lines[len(u.lines)-1] += parts[0]
-	for i := 1; i < len(parts); i++ {
-		u.lines = append(u.lines, parts[i])
+
+	for _, r := range s {
+		switch r {
+		case '\n':
+			u.lines = append(u.lines, "")
+		case '\r':
+			// Carriage return: stay on this row, rewrite from column 0.
+			u.lines[len(u.lines)-1] = ""
+		case '\b', 0x7f:
+			// Backspace / DEL: erase one rune on the current line.
+			line := u.lines[len(u.lines)-1]
+			if line == "" {
+				continue
+			}
+			_, size := utf8.DecodeLastRuneInString(line)
+			if size <= 0 {
+				continue
+			}
+			u.lines[len(u.lines)-1] = line[:len(line)-size]
+		case '\t':
+			line := u.lines[len(u.lines)-1]
+			// tab stops every 8 columns (rune-based)
+			col := len([]rune(line))
+			pad := 8 - (col % 8)
+			if pad == 0 {
+				pad = 8
+			}
+			u.lines[len(u.lines)-1] = line + strings.Repeat(" ", pad)
+		default:
+			if r >= 0x20 {
+				u.lines[len(u.lines)-1] += string(r)
+			}
+		}
 	}
+
 	const maxLines = 5000
 	if len(u.lines) > maxLines {
-		u.lines = u.lines[len(u.lines)-maxLines:]
-	}
-	u.mu.Unlock()
-	if u.hwnd != 0 {
-		win.InvalidateRect(u.hwnd, nil, true)
+		u.lines = append([]string(nil), u.lines[len(u.lines)-maxLines:]...)
 	}
 }
 
 func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
+	case wmSuzuriOutput:
+		u.drainPending()
+		return 0
+
+	case wmSuzuriBlink:
+		if u.cfg.Cursor == config.CursorBlock {
+			win.InvalidateRect(hwnd, nil, false)
+		}
+		return 0
+
 	case win.WM_SIZE:
 		u.width = int32(win.LOWORD(uint32(lParam)))
 		u.height = int32(win.HIWORD(uint32(lParam)))
@@ -227,7 +318,8 @@ func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintp
 		case win.VK_ESCAPE:
 			_, _ = u.sess.Write([]byte{0x1b})
 		case win.VK_BACK:
-			// ConPTY + Windows shells expect BS (0x08), not DEL (0x7f).
+			// BS for classic console; many ConPTY hosts also accept DEL.
+			// Send BS — display will follow whatever the shell echoes back.
 			_, _ = u.sess.Write([]byte{0x08})
 		}
 		return 0
@@ -241,6 +333,7 @@ func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintp
 		if u.font != 0 {
 			win.DeleteObject(win.HGDIOBJ(u.font))
 		}
+		u.hwnd = 0
 		win.PostQuitMessage(0)
 		return 0
 	}
@@ -282,35 +375,52 @@ func (u *winUI) paint(hwnd win.HWND) {
 	var lastLine string
 	var lastY int32
 	for _, line := range lines[start:] {
-		// Expand tabs simply
-		line = strings.ReplaceAll(line, "\t", "    ")
 		lastLine = line
 		lastY = y
-		utf16, err := syscall.UTF16FromString(line)
-		if err != nil {
-			continue
+		// UTF-16 for TextOut; empty line still advances
+		if line != "" {
+			utf16, err := syscall.UTF16FromString(line)
+			if err == nil {
+				win.TextOut(hdc, 8, y, &utf16[0], int32(len(utf16)-1))
+			}
 		}
-		win.TextOut(hdc, 8, y, &utf16[0], int32(len(utf16)-1))
 		y += lineH
 		if y > rect.Bottom {
 			break
 		}
 	}
 
-	// Provisional caret: block at end of last visible line until the VT
-	// grid tracks a real cursor position. Default style is CursorBlock.
+	// Provisional block caret with animated opacity (sine pulse).
 	if u.cfg.Cursor == config.CursorBlock {
 		cellW := int32(9)
-		// Approximate monospace advance (Consolas ~0.5em of height).
 		col := int32(len([]rune(lastLine)))
 		cx := int32(8) + col*cellW
 		cy := lastY
 		if cy == 0 {
 			cy = 4
 		}
-		win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.WHITE_BRUSH)))
-		win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
-		win.Rectangle_(hdc, cx, cy, cx+cellW, cy+lineH-2)
+
+		// alpha 0..1 via sine; map to gray so it fades in/out on black.
+		elapsed := time.Since(u.blinkStart).Seconds()
+		period := cursorBlinkPeriod.Seconds()
+		// 0 → 1 → 0 over one period
+		phase := 2 * math.Pi * (elapsed / period)
+		alpha := 0.5 + 0.5*math.Sin(phase) // 0..1
+		// Keep a floor so the caret never fully vanishes (still "breathing").
+		level := byte(40 + alpha*215) // 40..255
+
+		lb := win.LOGBRUSH{
+			LbStyle: win.BS_SOLID,
+			LbColor: win.RGB(level, level, level),
+		}
+		brush := win.CreateBrushIndirect(&lb)
+		if brush != 0 {
+			oldBr := win.SelectObject(hdc, win.HGDIOBJ(brush))
+			win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
+			win.Rectangle_(hdc, cx, cy, cx+cellW, cy+lineH-2)
+			win.SelectObject(hdc, oldBr)
+			win.DeleteObject(win.HGDIOBJ(brush))
+		}
 	}
 }
 

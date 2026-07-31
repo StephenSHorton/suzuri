@@ -5,6 +5,8 @@ import "bytes"
 // StripCSI removes common ANSI/VT escape sequences so a naïve UI can show
 // readable text before a full cell grid exists.
 //
+// Preserves C0 controls the soft display understands: BS, TAB, LF, CR, DEL.
+//
 // This is intentionally incomplete — a real parser lands in internal/vt next.
 func StripCSI(in []byte) []byte {
 	var out bytes.Buffer
@@ -12,10 +14,15 @@ func StripCSI(in []byte) []byte {
 	i := 0
 	for i < len(in) {
 		if in[i] != 0x1b {
-			// Skip other C0 controls except tab/LF/CR.
 			c := in[i]
-			if c == '\n' || c == '\r' || c == '\t' || c >= 0x20 {
+			switch c {
+			case '\n', '\r', '\t', '\b', 0x7f:
 				out.WriteByte(c)
+			default:
+				if c >= 0x20 {
+					out.WriteByte(c)
+				}
+				// drop other C0 (BEL, etc.)
 			}
 			i++
 			continue
