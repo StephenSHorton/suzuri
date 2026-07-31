@@ -926,7 +926,9 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 			flushSel(len(row) - 1)
 		}
 
-		// Glyphs at fixed cell origins (never multi-char TextOut advance).
+		// Glyphs at fixed cell origins. Box-drawing / blocks are drawn as
+		// geometry that fills the cell (Windows Terminal-style seamless TUI
+		// chrome); normal text uses TextOut.
 		win.SetBkMode(hdc, win.TRANSPARENT)
 		for x, c := range row {
 			r := c.Ch
@@ -938,13 +940,17 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 			if tab.sel.containsAbs(x, absY) {
 				fr, fg, fb = 255, 255, 255
 			}
+			px := padX + int32(x)*cw
+			py := padY + int32(y)*ch
+			cell := win.RECT{Left: px, Top: py, Right: px + cw, Bottom: py + ch}
+			if drawCellGlyph(hdc, r, cell, fr, fg, fb) {
+				continue
+			}
 			s, err := syscall.UTF16FromString(string(r))
 			if err != nil || len(s) < 2 {
 				continue
 			}
 			win.SetTextColor(hdc, win.RGB(fr, fg, fb))
-			px := padX + int32(x)*cw
-			py := padY + int32(y)*ch
 			win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
 		}
 	}
