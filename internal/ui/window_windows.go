@@ -70,9 +70,10 @@ type winUI struct {
 	// UI → PTY: never WriteFile on the message loop.
 	writeCh chan []byte
 
-	blinkStart time.Time
-	alive      atomic.Bool
-	bytesMsg   atomic.Bool // coalesce wmSuzuriBytes
+	blinkStart    time.Time
+	alive         atomic.Bool
+	bytesMsg      atomic.Bool // coalesce wmSuzuriBytes
+	lastBackspace time.Time   // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
 }
 
 func (u *winUI) loop() error {
@@ -349,7 +350,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		case win.VK_ESCAPE:
 			u.sendKey([]byte{0x1b})
 		case win.VK_BACK:
-			u.sendKey([]byte{0x08})
+			// One physical press must erase one character. After freezes (or when
+			// the message pump catches up), Windows can deliver a burst of
+			// autorepeat KEYDOWNs for VK_BACK — that looked like "wipe the line".
+			u.handleBackspace(hwnd, lParam)
 		case win.VK_TAB:
 			u.sendKey([]byte{'\t'})
 		}
@@ -388,6 +392,43 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 func (u *winUI) closeWriter() {
 	defer func() { _ = recover() }()
 	close(u.writeCh)
+}
+
+// handleBackspace sends at most one BS for this message, then drops any
+// immediately queued Backspace KEYDOWN/CHAR so a burst cannot erase the line.
+func (u *winUI) handleBackspace(hwnd win.HWND, lParam uintptr) {
+	// bit 30: 1 = key was already down (autorepeat). Allow repeats, but not faster
+	// than ~30/sec, and never a simultaneous burst from a stalled queue.
+	wasDown := (uint32(lParam) & (1 << 30)) != 0
+	now := time.Now()
+	if wasDown && now.Sub(u.lastBackspace) < 30*time.Millisecond {
+		u.drainQueuedBackspaces(hwnd)
+		return
+	}
+	u.lastBackspace = now
+	u.sendKey([]byte{0x08})
+	u.drainQueuedBackspaces(hwnd)
+}
+
+func (u *winUI) drainQueuedBackspaces(hwnd win.HWND) {
+	var msg win.MSG
+	for {
+		if !win.PeekMessage(&msg, hwnd, 0, 0, win.PM_NOREMOVE) {
+			return
+		}
+		switch {
+		case msg.Message == win.WM_KEYDOWN && msg.WParam == uintptr(win.VK_BACK):
+			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
+		case msg.Message == win.WM_KEYUP && msg.WParam == uintptr(win.VK_BACK):
+			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
+		case msg.Message == win.WM_CHAR && msg.WParam == 0x08:
+			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
+		case msg.Message == win.WM_SYSKEYDOWN && msg.WParam == uintptr(win.VK_BACK):
+			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
+		default:
+			return
+		}
+	}
 }
 
 func (u *winUI) paint(hwnd win.HWND) {
