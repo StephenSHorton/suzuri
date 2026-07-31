@@ -13,12 +13,18 @@ const (
 
 // Config holds product defaults. Persistence comes later.
 type Config struct {
-	Cursor CursorStyle
+	Cursor   CursorStyle
+	// FontFace is the preferred monospaced face (Cascadia Mono when installed).
+	FontFace string
+	// FontSizePx is logical cell height in pixels (negative LOGFONT height).
+	FontSizePx int
 }
 
 // Default returns shipping defaults.
 func Default() Config {
 	return Config{
-		Cursor: CursorBlock,
+		Cursor:     CursorBlock,
+		FontFace:   "Cascadia Mono",
+		FontSizePx: 16,
 	}
 }

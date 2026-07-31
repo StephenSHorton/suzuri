@@ -17,6 +17,7 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | Drag select + copy/paste | ✅ |
 | ANSI 16 / 256 / truecolor + bold | ✅ |
 | **Charm chrome** (tabs, status, palette) | ✅ |
+| Font: **Cascadia Mono** (fallback Consolas…) | ✅ |
 | Splits / richer menus | soon |
 
 ### Keys

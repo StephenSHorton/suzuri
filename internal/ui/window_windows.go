@@ -200,7 +200,7 @@ func (u *winUI) loop() error {
 		return lastErr("CreateWindowEx")
 	}
 	u.hwnd = hwnd
-	u.font = createFont()
+	u.font = createFontFor(u.cfg)
 	registerUI(hwnd, u)
 
 	win.ShowWindow(hwnd, win.SW_SHOW)
@@ -979,8 +979,8 @@ func displayRune(r rune) rune {
 	if r >= 0xF0000 {
 		return ' '
 	}
-	// v0: only draw scripts Consolas/Cascadia cover well. Everything else
-	// becomes a space so we never show the font's "missing glyph" tofu.
+	// v0: only draw scripts Cascadia Mono (and fallbacks) cover well.
+	// Everything else becomes a space so we never show missing-glyph tofu.
 	if r > 0x024F && // beyond Latin Extended-B
 		!(r >= 0x2500 && r <= 0x259F) && // box / block drawing
 		!(r >= 0x2000 && r <= 0x206F) { // general punctuation (keep sparse)
@@ -1027,27 +1027,106 @@ func utf8Encode(p []byte, r rune) int {
 	}
 }
 
+// Preferred monospaced faces. Cascadia Mono is default (ships with Windows
+// Terminal / modern Windows); CreateFont always "succeeds" via substitution,
+// so we verify the face with GetTextFaceW and fall through if GDI faked it.
+var fontFallbacks = []string{
+	"Cascadia Mono",
+	"Cascadia Code",
+	"Consolas",
+	"Lucida Console",
+	"Courier New",
+}
+
 func createFont() win.HFONT {
-	// Prefer Cascadia Mono (ships with Windows Terminal) for cleaner coverage.
-	for _, name := range []string{"Cascadia Mono", "Cascadia Code", "Consolas", "Lucida Console"} {
-		var lf win.LOGFONT
-		lf.LfHeight = -16
-		lf.LfWeight = win.FW_NORMAL
-		lf.LfCharSet = win.DEFAULT_CHARSET
-		lf.LfOutPrecision = win.OUT_DEFAULT_PRECIS
-		lf.LfClipPrecision = win.CLIP_DEFAULT_PRECIS
-		lf.LfQuality = win.CLEARTYPE_QUALITY
-		lf.LfPitchAndFamily = win.FIXED_PITCH | win.FF_MODERN
-		face, err := syscall.UTF16FromString(name)
-		if err != nil {
+	return createFontFor(config.Default())
+}
+
+func createFontFor(cfg config.Config) win.HFONT {
+	size := cfg.FontSizePx
+	if size < 10 {
+		size = 16
+	}
+	names := make([]string, 0, len(fontFallbacks)+1)
+	if cfg.FontFace != "" {
+		names = append(names, cfg.FontFace)
+	}
+	for _, n := range fontFallbacks {
+		if n == cfg.FontFace {
 			continue
 		}
-		copy(lf.LfFaceName[:], face)
-		if h := win.CreateFontIndirect(&lf); h != 0 {
+		names = append(names, n)
+	}
+	for _, name := range names {
+		h := createNamedFont(name, -int32(size))
+		if h == 0 {
+			continue
+		}
+		got := fontFaceName(h)
+		if faceMatches(got, name) {
 			return h
 		}
+		// GDI substituted a different face (font not installed).
+		win.DeleteObject(win.HGDIOBJ(h))
 	}
-	return 0
+	// Last resort: any FIXED_PITCH without a face claim.
+	var lf win.LOGFONT
+	lf.LfHeight = -int32(size)
+	lf.LfWeight = win.FW_NORMAL
+	lf.LfCharSet = win.DEFAULT_CHARSET
+	lf.LfQuality = win.CLEARTYPE_QUALITY
+	lf.LfPitchAndFamily = win.FIXED_PITCH | win.FF_MODERN
+	return win.CreateFontIndirect(&lf)
+}
+
+func createNamedFont(faceName string, height int32) win.HFONT {
+	var lf win.LOGFONT
+	lf.LfHeight = height
+	lf.LfWeight = win.FW_NORMAL
+	lf.LfCharSet = win.DEFAULT_CHARSET
+	lf.LfOutPrecision = win.OUT_TT_ONLY_PRECIS
+	lf.LfClipPrecision = win.CLIP_DEFAULT_PRECIS
+	lf.LfQuality = win.CLEARTYPE_QUALITY
+	lf.LfPitchAndFamily = win.FIXED_PITCH | win.FF_MODERN
+	face, err := syscall.UTF16FromString(faceName)
+	if err != nil {
+		return 0
+	}
+	copy(lf.LfFaceName[:], face)
+	return win.CreateFontIndirect(&lf)
+}
+
+func faceMatches(got, want string) bool {
+	g := strings.ToLower(strings.TrimSpace(got))
+	w := strings.ToLower(strings.TrimSpace(want))
+	if g == "" || w == "" {
+		return false
+	}
+	return g == w || strings.HasPrefix(g, w)
+}
+
+// fontFaceName returns the face actually selected into a temp DC (after GDI
+// substitution), not merely the LOGFONT request string.
+func fontFaceName(h win.HFONT) string {
+	if h == 0 {
+		return ""
+	}
+	hdc := win.CreateCompatibleDC(0)
+	if hdc == 0 {
+		return ""
+	}
+	defer win.DeleteDC(hdc)
+	old := win.SelectObject(hdc, win.HGDIOBJ(h))
+	if old == 0 {
+		return ""
+	}
+	defer win.SelectObject(hdc, old)
+	var buf [64]uint16
+	n, _, _ := procGetTextFace.Call(uintptr(hdc), uintptr(len(buf)), uintptr(unsafe.Pointer(&buf[0])))
+	if n == 0 {
+		return ""
+	}
+	return windows.UTF16ToString(buf[:])
 }
 
 func lastErr(op string) error {
@@ -1055,8 +1134,10 @@ func lastErr(op string) error {
 }
 
 var (
-	modUser32       = windows.NewLazySystemDLL("user32.dll")
+	modUser32         = windows.NewLazySystemDLL("user32.dll")
+	modGdi32          = windows.NewLazySystemDLL("gdi32.dll")
 	procSetWindowText = modUser32.NewProc("SetWindowTextW")
+	procGetTextFace   = modGdi32.NewProc("GetTextFaceW")
 )
 
 func setWindowTitle(hwnd win.HWND, title string) {
