@@ -5,7 +5,6 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/StephenSHorton/suzuri/internal/host"
 	"github.com/StephenSHorton/suzuri/internal/ui"
 )
 
@@ -20,15 +19,7 @@ func main() {
 	// and the window stops processing messages ("Not Responding").
 	runtime.LockOSThread()
 
-	cols, rows := 100, 30
-	sess, err := host.StartSession(host.DefaultShell(), cols, rows)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "suzuri: start session: %v\n", err)
-		os.Exit(1)
-	}
-	defer sess.Close()
-
-	if err := ui.Run(sess); err != nil {
+	if err := ui.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "suzuri: %v\n", err)
 		os.Exit(1)
 	}

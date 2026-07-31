@@ -4,7 +4,7 @@
 
 A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a TUI inside someone else’s emulator, and not a Warp fork.
 
-## Status (v0.3)
+## Status (v0.4)
 
 | Feature | State |
 |---------|--------|
@@ -16,12 +16,18 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | Multi-row scroll capture | ✅ |
 | Drag select + copy/paste | ✅ |
 | ANSI 16 / 256 / truecolor + bold | ✅ |
-| Tabs / splits / Charm menus | soon |
+| **Tabs** | ✅ |
+| Splits / Charm menus | soon |
 
 ### Keys
 
 | Shortcut | Action |
 |----------|--------|
+| `Ctrl+Shift+T` | New tab |
+| `Ctrl+W` | Close tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+1`…`Ctrl+9` | Jump to tab |
+| Click tab strip | Activate tab |
 | `Ctrl+Shift+C` / `Ctrl+Insert` | Copy selection |
 | `Ctrl+Shift+V` / `Shift+Insert` / `Ctrl+V` | Paste |
 | `Ctrl+C` | Copy if selection; else `^C` to shell |

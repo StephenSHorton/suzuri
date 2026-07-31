@@ -13,12 +13,10 @@ import (
 	"unicode"
 	"unsafe"
 
-	"github.com/hinshun/vt10x"
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 
 	"github.com/StephenSHorton/suzuri/internal/config"
-	"github.com/StephenSHorton/suzuri/internal/host"
 )
 
 const (
@@ -35,30 +33,36 @@ const (
 
 	cellW = 9
 	cellH = 18
+
+	tabBarH     = 28 // pixels reserved for the tab strip
+	maxTabs     = 16
 )
 
-// Run opens a native Win32 window and drives the ConPTY session until closed.
-func Run(sess *host.Session) error {
-	cols, rows := 100, 30
+// Run opens a native Win32 window with one shell tab (more via Ctrl+Shift+T).
+func Run() error {
+	cols, rows := 100, 28 // rows exclude tab bar visually
 	ui := &winUI{
-		sess:       sess,
 		cols:       cols,
 		rows:       rows,
 		cfg:        config.Default(),
-		term:       vt10x.New(vt10x.WithSize(cols, rows)),
-		writeCh:    make(chan []byte, 256),
 		blinkStart: time.Now(),
-		sb:         newScrollback(),
+		nextTabID:  0,
 	}
 	ui.alive.Store(true)
+	t, err := newTab(ui.nextTabID, cols, rows)
+	if err != nil {
+		return err
+	}
+	ui.nextTabID++
+	ui.tabs = []*tab{t}
+	ui.active = 0
 	return ui.loop()
 }
 
 type winUI struct {
-	sess *host.Session
-	term vt10x.Terminal // ONLY touched on the UI thread
-	sb   *scrollback
-	sel  cellSel
+	tabs      []*tab
+	active    int
+	nextTabID int
 
 	hwnd   win.HWND
 	font   win.HFONT
@@ -71,17 +75,9 @@ type winUI struct {
 	metricW int32
 	metricH int32
 
-	// PTY → UI: raw bytes only. VT parse runs on the UI thread.
-	inMu  sync.Mutex
-	inBuf []byte
-
-	// UI → PTY: never WriteFile on the message loop.
-	writeCh chan []byte
-
 	blinkStart    time.Time
 	alive         atomic.Bool
-	bytesMsg      atomic.Bool // coalesce wmSuzuriBytes
-	lastBackspace time.Time   // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
+	lastBackspace time.Time // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
 	selecting     bool
 
 	// Reused double-buffer (recreated on resize) to avoid GDI thrash.
@@ -89,6 +85,13 @@ type winUI struct {
 	memBmp win.HBITMAP
 	memW   int32
 	memH   int32
+}
+
+func (u *winUI) activeTab() *tab {
+	if u.active < 0 || u.active >= len(u.tabs) {
+		return nil
+	}
+	return u.tabs[u.active]
 }
 
 func (u *winUI) loop() error {
@@ -144,8 +147,10 @@ func (u *winUI) loop() error {
 	win.ShowWindow(hwnd, win.SW_SHOW)
 	win.UpdateWindow(hwnd)
 
-	go u.writeLoop()
-	go u.readLoop()
+	// Start I/O for the first tab; more tabs start in newTabUI.
+	if t := u.activeTab(); t != nil {
+		t.startWorkers(u)
+	}
 	go u.blinkLoop()
 
 	var msg win.MSG
@@ -199,55 +204,23 @@ func wndProcMain(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	return u.handle(hwnd, msg, wParam, lParam)
 }
 
-func (u *winUI) writeLoop() {
-	for b := range u.writeCh {
-		if _, err := u.sess.Write(b); err != nil {
-			return
-		}
+func postBytes(u *winUI, tabID int) {
+	if u.hwnd == 0 {
+		return
 	}
+	win.PostMessage(u.hwnd, wmSuzuriBytes, uintptr(tabID), 0)
+}
+
+func postClosed(u *winUI, tabID int) {
+	if u.hwnd == 0 {
+		return
+	}
+	win.PostMessage(u.hwnd, wmSuzuriClosed, uintptr(tabID), 0)
 }
 
 func (u *winUI) sendKey(b []byte) {
-	if !u.alive.Load() || len(b) == 0 {
-		return
-	}
-	p := append([]byte(nil), b...)
-	select {
-	case u.writeCh <- p:
-	default:
-	}
-}
-
-func (u *winUI) readLoop() {
-	buf := make([]byte, 4096)
-	for {
-		n, err := u.sess.Read(buf)
-		if n > 0 {
-			chunk := append([]byte(nil), buf[:n]...)
-			u.inMu.Lock()
-			u.inBuf = append(u.inBuf, chunk...)
-			// Cap runaway buffer (shell spam) so we don't OOM.
-			if len(u.inBuf) > 1<<20 {
-				u.inBuf = u.inBuf[len(u.inBuf)-1<<19:]
-			}
-			u.inMu.Unlock()
-			u.postBytes()
-		}
-		if err != nil {
-			if u.hwnd != 0 {
-				win.PostMessage(u.hwnd, wmSuzuriClosed, 0, 0)
-			}
-			return
-		}
-	}
-}
-
-func (u *winUI) postBytes() {
-	if u.hwnd == 0 || !u.alive.Load() {
-		return
-	}
-	if u.bytesMsg.CompareAndSwap(false, true) {
-		win.PostMessage(u.hwnd, wmSuzuriBytes, 0, 0)
+	if t := u.activeTab(); t != nil {
+		t.sendKey(b)
 	}
 }
 
@@ -267,42 +240,149 @@ func (u *winUI) blinkLoop() {
 	}
 }
 
-// drainAndParse runs ONLY on the UI thread.
-func (u *winUI) drainAndParse() {
-	u.inMu.Lock()
-	data := u.inBuf
-	u.inBuf = nil
-	u.inMu.Unlock()
-	u.bytesMsg.Store(false)
-
-	if len(data) == 0 {
+// drainAndParse runs ONLY on the UI thread for the given tab id.
+func (u *winUI) drainAndParse(tabID int) {
+	t := u.tabByID(tabID)
+	if t == nil {
 		return
 	}
-	// Parse VT on UI thread — no cross-thread lock fights with paint.
-	_, _ = u.term.Write(data)
-	u.sb.noteScreen(u.term)
-	// Live output sticks to bottom when already following the end.
-	if u.sb.atBottom() {
-		u.sb.stickBottom()
+	data := t.takeInput()
+	if len(data) == 0 {
+		// More may have been queued; re-arm if needed.
+		t.inMu.Lock()
+		more := len(t.inBuf) > 0
+		t.inMu.Unlock()
+		if more {
+			t.postBytes(u)
+		}
+		return
 	}
-	if t := u.term.Title(); t != "" {
-		setWindowTitle(u.hwnd, "suzuri — "+t)
+	_, _ = t.term.Write(data)
+	t.sb.noteScreen(t.term)
+	if t.sb.atBottom() {
+		t.sb.stickBottom()
 	}
-	win.InvalidateRect(u.hwnd, nil, false)
-
-	// If more bytes arrived while we parsed, schedule another pass.
-	u.inMu.Lock()
-	more := len(u.inBuf) > 0
-	u.inMu.Unlock()
+	if title := t.term.Title(); title != "" {
+		t.title = shortTitle(title)
+	}
+	// Only repaint if this is the visible tab.
+	if u.activeTab() == t {
+		if title := t.term.Title(); title != "" {
+			setWindowTitle(u.hwnd, "suzuri — "+title)
+		}
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+	t.inMu.Lock()
+	more := len(t.inBuf) > 0
+	t.inMu.Unlock()
 	if more {
-		u.postBytes()
+		t.postBytes(u)
 	}
 }
+
+func (u *winUI) tabByID(id int) *tab {
+	for _, t := range u.tabs {
+		if t.id == id {
+			return t
+		}
+	}
+	return nil
+}
+
+func shortTitle(s string) string {
+	// basename-ish for tab strip
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "shell"
+	}
+	if i := strings.LastIndexAny(s, `/\`); i >= 0 && i+1 < len(s) {
+		s = s[i+1:]
+	}
+	if len(s) > 18 {
+		return s[:16] + "…"
+	}
+	return s
+}
+
+func (u *winUI) newTabUI() {
+	if len(u.tabs) >= maxTabs {
+		return
+	}
+	t, err := newTab(u.nextTabID, u.cols, u.rows)
+	if err != nil {
+		return
+	}
+	u.nextTabID++
+	u.tabs = append(u.tabs, t)
+	u.active = len(u.tabs) - 1
+	t.startWorkers(u)
+	u.selecting = false
+	setWindowTitle(u.hwnd, "suzuri — "+t.title)
+	win.InvalidateRect(u.hwnd, nil, false)
+}
+
+func (u *winUI) closeTabUI(id int) {
+	idx := -1
+	for i, t := range u.tabs {
+		if t.id == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	u.tabs[idx].close()
+	u.tabs = append(u.tabs[:idx], u.tabs[idx+1:]...)
+	if len(u.tabs) == 0 {
+		win.DestroyWindow(u.hwnd)
+		return
+	}
+	if u.active >= len(u.tabs) {
+		u.active = len(u.tabs) - 1
+	} else if u.active > idx {
+		u.active--
+	}
+	if t := u.activeTab(); t != nil {
+		setWindowTitle(u.hwnd, "suzuri — "+t.title)
+	}
+	win.InvalidateRect(u.hwnd, nil, false)
+}
+
+func (u *winUI) switchTab(delta int) {
+	if len(u.tabs) == 0 {
+		return
+	}
+	u.active = (u.active + delta + len(u.tabs)) % len(u.tabs)
+	u.selecting = false
+	if t := u.activeTab(); t != nil {
+		t.sel.clear()
+		setWindowTitle(u.hwnd, "suzuri — "+t.title)
+	}
+	win.InvalidateRect(u.hwnd, nil, false)
+}
+
+func (u *winUI) hitTab(px int32) int {
+	// Equal-width tabs across the bar.
+	if len(u.tabs) == 0 || u.width <= 0 {
+		return -1
+	}
+	tw := u.width / int32(len(u.tabs))
+	if tw < 1 {
+		tw = 1
+	}
+	i := int(px / tw)
+	if i < 0 || i >= len(u.tabs) {
+		return -1
+	}
+	return i
+}
+
 
 func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
 	case wmSuzuriBytes:
-		u.drainAndParse()
+		u.drainAndParse(int(wParam))
 		return 0
 
 	case wmSuzuriBlink:
@@ -310,13 +390,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case wmSuzuriClosed:
-		// Show a note; do not block.
-		_, _ = u.term.Write([]byte("\r\n[suzuri] session ended\r\n"))
-		win.InvalidateRect(hwnd, nil, false)
+		id := int(wParam)
+		if t := u.tabByID(id); t != nil {
+			_, _ = t.term.Write([]byte("\r\n[suzuri] session ended\r\n"))
+			if u.activeTab() == t {
+				win.InvalidateRect(hwnd, nil, false)
+			}
+		}
 		return 0
 
 	case win.WM_ERASEBKGND:
-		// We paint the full frame — skip erase to reduce flicker/extra work.
 		return 1
 
 	case win.WM_SIZE:
@@ -324,7 +407,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.height = int32(win.HIWORD(uint32(lParam)))
 		if u.width > 0 && u.height > 0 {
 			cols := int(u.width / cellW)
-			rows := int(u.height / cellH)
+			rows := int((u.height - int32(tabBarH)) / cellH)
 			if cols < 20 {
 				cols = 20
 			}
@@ -333,17 +416,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 			if cols != u.cols || rows != u.rows {
 				u.cols, u.rows = cols, rows
-				u.term.Resize(cols, rows)
-				c, r := cols, rows
-				go func() { _ = u.sess.Resize(c, r) }()
+				for _, t := range u.tabs {
+					t.resize(cols, rows)
+				}
 			}
 		}
 		return 0
 
 	case win.WM_CHAR:
 		ch := rune(wParam)
-		// BS/DEL/TAB/LF are handled on KEYDOWN only (or ignored). Treating
-		// 0x7f as a "printable" via utf8Encode would double-send deletes.
 		switch ch {
 		case 0x08, 0x09, 0x0a, 0x7f:
 			return 0
@@ -351,13 +432,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.sendKey([]byte("\r"))
 			return 0
 		}
-		if ch == 0x03 { // Ctrl+C — copy handled on KEYDOWN when selection exists
-			if u.sel.empty() {
+		if ch == 0x03 {
+			tab := u.activeTab()
+			if tab == nil || tab.sel.empty() {
 				u.sendKey([]byte{0x03})
 			}
 			return 0
 		}
-		if ch == 0x16 { // Ctrl+V — paste handled on KEYDOWN
+		if ch == 0x16 {
 			return 0
 		}
 		if ch >= 32 && ch != 0x7f {
@@ -370,7 +452,39 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_KEYDOWN:
 		ctrl := win.GetKeyState(win.VK_CONTROL) < 0
 		shift := win.GetKeyState(win.VK_SHIFT) < 0
-		// Copy / paste shortcuts (do not steal bare Ctrl+C — shell interrupt).
+		tab := u.activeTab()
+
+		if ctrl && shift && (wParam == 'T' || wParam == 't') {
+			u.newTabUI()
+			return 0
+		}
+		if ctrl && !shift && (wParam == 'W' || wParam == 'w') {
+			if tab != nil {
+				u.closeTabUI(tab.id)
+			}
+			return 0
+		}
+		if ctrl && wParam == win.VK_TAB {
+			if shift {
+				u.switchTab(-1)
+			} else {
+				u.switchTab(1)
+			}
+			return 0
+		}
+		if ctrl && wParam >= '1' && wParam <= '9' {
+			i := int(wParam - '1')
+			if i >= 0 && i < len(u.tabs) {
+				u.active = i
+				u.selecting = false
+				if t := u.activeTab(); t != nil {
+					t.sel.clear()
+					setWindowTitle(u.hwnd, "suzuri — "+t.title)
+				}
+				win.InvalidateRect(hwnd, nil, false)
+			}
+			return 0
+		}
 		if ctrl && shift && (wParam == 'C' || wParam == 'c') {
 			u.copySelection()
 			return 0
@@ -387,8 +501,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.pasteClipboard()
 			return 0
 		}
-		// When scrolled up, PageUp/Down and wheel already move view; bare
-		// arrows still go to the shell (readline history etc.).
+		if tab == nil {
+			return 0
+		}
 		switch wParam {
 		case win.VK_UP:
 			u.sendKey([]byte("\x1b[A"))
@@ -405,10 +520,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		case win.VK_END:
 			u.sendKey([]byte("\x1b[F"))
 		case win.VK_PRIOR:
-			u.sb.scrollBy(u.rows/2, u.rows)
+			tab.sb.scrollBy(u.rows/2, u.rows)
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_NEXT:
-			u.sb.scrollBy(-(u.rows / 2), u.rows)
+			tab.sb.scrollBy(-(u.rows / 2), u.rows)
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_ESCAPE:
 			u.sendKey([]byte{0x1b})
@@ -418,8 +533,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.sendKey([]byte{'\t'})
 		case 'C', 'c':
 			if ctrl && !shift {
-				// Interrupt — only when no selection; else copy (Windows Terminal-ish).
-				if !u.sel.empty() {
+				if !tab.sel.empty() {
 					u.copySelection()
 				} else {
 					u.sendKey([]byte{0x03})
@@ -435,8 +549,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_MOUSEWHEEL:
+		tab := u.activeTab()
+		if tab == nil {
+			return 0
+		}
 		delta := int16(wParam >> 16)
-		// Wheel away from user (positive) → older history.
 		steps := int(delta) / 120
 		if steps == 0 {
 			if delta > 0 {
@@ -445,36 +562,56 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				steps = -1
 			}
 		}
-		u.sb.scrollBy(steps*3, u.rows)
+		tab.sb.scrollBy(steps*3, u.rows)
 		win.InvalidateRect(hwnd, nil, false)
 		return 0
 
 	case win.WM_LBUTTONDOWN:
 		u.focus()
-		x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
-		absY := u.sb.absLine(y, u.rows, u.rows)
-		u.sel.active = true
-		u.sel.x0, u.sel.y0 = x, absY
-		u.sel.x1, u.sel.y1 = x, absY
+		px := int32(win.LOWORD(uint32(lParam)))
+		py := int32(win.HIWORD(uint32(lParam)))
+		if py < int32(tabBarH) {
+			if i := u.hitTab(px); i >= 0 {
+				u.active = i
+				u.selecting = false
+				if t := u.activeTab(); t != nil {
+					t.sel.clear()
+					setWindowTitle(u.hwnd, "suzuri — "+t.title)
+				}
+				win.InvalidateRect(hwnd, nil, false)
+			}
+			return 0
+		}
+		tab := u.activeTab()
+		if tab == nil {
+			return 0
+		}
+		x, y := u.pixelToCell(px, py)
+		absY := tab.sb.absLine(y, u.rows, u.rows)
+		tab.sel.active = true
+		tab.sel.x0, tab.sel.y0 = x, absY
+		tab.sel.x1, tab.sel.y1 = x, absY
 		u.selecting = true
 		win.SetCapture(hwnd)
 		win.InvalidateRect(hwnd, nil, false)
 		return 0
 
 	case win.WM_MOUSEMOVE:
-		if u.selecting && (wParam&win.MK_LBUTTON) != 0 {
+		tab := u.activeTab()
+		if tab != nil && u.selecting && (wParam&win.MK_LBUTTON) != 0 {
 			x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
-			absY := u.sb.absLine(y, u.rows, u.rows)
-			u.sel.x1, u.sel.y1 = x, absY
+			absY := tab.sb.absLine(y, u.rows, u.rows)
+			tab.sel.x1, tab.sel.y1 = x, absY
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
 
 	case win.WM_LBUTTONUP:
-		if u.selecting {
+		tab := u.activeTab()
+		if tab != nil && u.selecting {
 			x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
-			absY := u.sb.absLine(y, u.rows, u.rows)
-			u.sel.x1, u.sel.y1 = x, absY
+			absY := tab.sb.absLine(y, u.rows, u.rows)
+			tab.sel.x1, tab.sel.y1 = x, absY
 			u.selecting = false
 			win.ReleaseCapture()
 			win.InvalidateRect(hwnd, nil, false)
@@ -482,7 +619,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_RBUTTONUP:
-		// Right-click paste (classic Windows console affordance).
 		u.pasteClipboard()
 		return 0
 
@@ -497,14 +633,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_DESTROY:
 		u.alive.Store(false)
 		unregisterUI(hwnd)
-		// Close write queue once.
-		select {
-		case <-u.writeCh:
-		default:
+		for _, t := range u.tabs {
+			t.close()
 		}
-		// Closing may panic if already closed — use sync.Once pattern.
-		u.closeWriter()
-		go func() { _ = u.sess.Close() }()
+		u.tabs = nil
 		u.releaseBackbuffer()
 		if u.font != 0 {
 			win.DeleteObject(win.HGDIOBJ(u.font))
@@ -517,91 +649,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	return win.DefWindowProc(hwnd, msg, wParam, lParam)
 }
 
-func (u *winUI) releaseBackbuffer() {
-	if u.memDC != 0 {
-		if u.memBmp != 0 {
-			win.SelectObject(u.memDC, win.HGDIOBJ(0))
-			win.DeleteObject(win.HGDIOBJ(u.memBmp))
-			u.memBmp = 0
-		}
-		win.DeleteDC(u.memDC)
-		u.memDC = 0
-	}
-	u.memW, u.memH = 0, 0
-}
-
-func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
-	if w < 1 {
-		w = 1
-	}
-	if h < 1 {
-		h = 1
-	}
-	if u.memDC != 0 && u.memBmp != 0 && u.memW == w && u.memH == h {
-		return true
-	}
-	u.releaseBackbuffer()
-	u.memDC = win.CreateCompatibleDC(hdc)
-	if u.memDC == 0 {
-		return false
-	}
-	u.memBmp = win.CreateCompatibleBitmap(hdc, w, h)
-	if u.memBmp == 0 {
-		win.DeleteDC(u.memDC)
-		u.memDC = 0
-		return false
-	}
-	win.SelectObject(u.memDC, win.HGDIOBJ(u.memBmp))
-	u.memW, u.memH = w, h
-	return true
-}
-
-func (u *winUI) closeWriter() {
-	defer func() { _ = recover() }()
-	close(u.writeCh)
-}
-
-// handleBackspace sends at most one delete for this message, then drops any
-// immediately queued Backspace KEYDOWN/CHAR so a burst cannot erase the line.
-//
-// Important: on Windows ConPTY + PowerShell, 0x08 (BS) does NOT erase one
-// character — probing shows it blanks the whole input with spaces. Single-char
-// erase is DEL (0x7f), which PowerShell answers with the classic "\b \b".
-func (u *winUI) handleBackspace(hwnd win.HWND, lParam uintptr) {
-	// bit 30: 1 = key was already down (autorepeat). Allow repeats, but not faster
-	// than ~30/sec, and never a simultaneous burst from a stalled queue.
-	wasDown := (uint32(lParam) & (1 << 30)) != 0
-	now := time.Now()
-	if wasDown && now.Sub(u.lastBackspace) < 30*time.Millisecond {
-		u.drainQueuedBackspaces(hwnd)
-		return
-	}
-	u.lastBackspace = now
-	u.sendKey([]byte{0x7f})
-	u.drainQueuedBackspaces(hwnd)
-}
-
-func (u *winUI) drainQueuedBackspaces(hwnd win.HWND) {
-	var msg win.MSG
-	for {
-		if !win.PeekMessage(&msg, hwnd, 0, 0, win.PM_NOREMOVE) {
-			return
-		}
-		switch {
-		case msg.Message == win.WM_KEYDOWN && msg.WParam == uintptr(win.VK_BACK):
-			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
-		case msg.Message == win.WM_KEYUP && msg.WParam == uintptr(win.VK_BACK):
-			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
-		case msg.Message == win.WM_CHAR && (msg.WParam == 0x08 || msg.WParam == 0x7f):
-			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
-		case msg.Message == win.WM_SYSKEYDOWN && msg.WParam == uintptr(win.VK_BACK):
-			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
-		default:
-			return
-		}
-	}
-}
-
 func (u *winUI) paint(hwnd win.HWND) {
 	var ps win.PAINTSTRUCT
 	hdc := win.BeginPaint(hwnd, &ps)
@@ -610,12 +657,16 @@ func (u *winUI) paint(hwnd win.HWND) {
 	var rect win.RECT
 	win.GetClientRect(hwnd, &rect)
 
+	tab := u.activeTab()
+	if tab == nil {
+		return
+	}
 	// Viewport = history + live screen (live cells carry FG/BG/bold).
-	grid := u.sb.viewCells(u.term, u.rows)
-	cur := u.term.Cursor()
-	curVis := u.term.CursorVisible() && u.sb.atBottom()
+	grid := tab.sb.viewCells(tab.term, u.rows)
+	cur := tab.term.Cursor()
+	curVis := tab.term.CursorVisible() && tab.sb.atBottom()
 	curY := cur.Y
-	if !u.sb.atBottom() {
+	if !tab.sb.atBottom() {
 		curVis = false
 	}
 
@@ -627,11 +678,20 @@ func (u *winUI) paint(hwnd win.HWND) {
 	}
 	u.blitGrid(u.memDC, rect, grid, cur.X, curY, curVis)
 	win.BitBlt(hdc, 0, 0, w, h, u.memDC, 0, 0, win.SRCCOPY)
+	// Tab strip on top of the terminal bitmap.
+	oldF := win.SelectObject(hdc, win.HGDIOBJ(u.font))
+	u.paintTabBar(hdc, rect)
+	win.SelectObject(hdc, oldF)
 }
 
 // blitGrid paints colored cells at fixed pitch. Selection uses one brush;
 // text runs flush when FG/BG changes so we keep TextOut count low.
 func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, curY int, curVis bool) {
+	tab := u.activeTab()
+	if tab == nil {
+		return
+	}
+
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.BLACK_BRUSH)))
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
 	win.Rectangle_(hdc, rect.Left, rect.Top, rect.Right, rect.Bottom)
@@ -649,11 +709,12 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 			ch = tm.TmHeight
 		}
 	}
-	const padX, padY int32 = 4, 2
+	const padX int32 = 4
+	padY := int32(tabBarH)+2
 	u.metricW, u.metricH = cw, ch
 
 	selBrush := win.HBRUSH(0)
-	if u.sel.active && !u.sel.empty() {
+	if tab.sel.active && !tab.sel.empty() {
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(40, 80, 160)}
 		selBrush = win.CreateBrushIndirect(&lb)
 	}
@@ -697,8 +758,8 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		// Selection overlay
 		if selBrush != 0 {
 			for x := range row {
-				absY := u.sb.absLine(y, u.rows, u.rows)
-				if u.sel.containsAbs(x, absY) {
+				absY := tab.sb.absLine(y, u.rows, u.rows)
+				if tab.sel.containsAbs(x, absY) {
 					old := win.SelectObject(hdc, win.HGDIOBJ(selBrush))
 					px := padX + int32(x)*cw
 					py := padY + int32(y)*ch
@@ -721,8 +782,8 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 			if r == 0 {
 				r = ' '
 			}
-			absY := u.sb.absLine(y, u.rows, u.rows)
-			sel := u.sel.containsAbs(x, absY)
+			absY := tab.sb.absLine(y, u.rows, u.rows)
+			sel := tab.sel.containsAbs(x, absY)
 			if r == ' ' {
 				continue
 			}
@@ -894,7 +955,8 @@ func (u *winUI) pixelToCell(px, py int32) (x, y int) {
 	if ch < 1 {
 		ch = cellH
 	}
-	const padX, padY int32 = 4, 2
+	const padX int32 = 4
+	padY := int32(tabBarH) + 2
 	x = int((px - padX) / cw)
 	y = int((py - padY) / ch)
 	if x < 0 {
@@ -913,10 +975,11 @@ func (u *winUI) pixelToCell(px, py int32) (x, y int) {
 }
 
 func (u *winUI) copySelection() {
-	if u.sel.empty() {
+	tab := u.activeTab()
+	if tab == nil || tab.sel.empty() {
 		return
 	}
-	text := u.sel.text(u.sb, u.term)
+	text := tab.sel.text(tab.sb, tab.term)
 	if text == "" {
 		return
 	}
@@ -924,14 +987,137 @@ func (u *winUI) copySelection() {
 }
 
 func (u *winUI) pasteClipboard() {
+	tab := u.activeTab()
+	if tab == nil {
+		return
+	}
 	text, err := getClipboardText(u.hwnd)
 	if err != nil || text == "" {
 		return
 	}
-	// Normalize Windows newlines for the shell.
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
-	u.sendKey([]byte(text))
-	// Jump to live end after paste.
-	u.sb.stickBottom()
+	tab.sendKey([]byte(text))
+	tab.sb.stickBottom()
+}
+
+func (u *winUI) handleBackspace(hwnd win.HWND, lParam uintptr) {
+	wasDown := (uint32(lParam) & (1 << 30)) != 0
+	now := time.Now()
+	if wasDown && now.Sub(u.lastBackspace) < 30*time.Millisecond {
+		u.drainQueuedBackspaces(hwnd)
+		return
+	}
+	u.lastBackspace = now
+	u.sendKey([]byte{0x7f})
+	u.drainQueuedBackspaces(hwnd)
+}
+
+func (u *winUI) drainQueuedBackspaces(hwnd win.HWND) {
+	var msg win.MSG
+	for {
+		if !win.PeekMessage(&msg, hwnd, 0, 0, win.PM_NOREMOVE) {
+			return
+		}
+		switch {
+		case msg.Message == win.WM_KEYDOWN && msg.WParam == uintptr(win.VK_BACK):
+			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
+		case msg.Message == win.WM_KEYUP && msg.WParam == uintptr(win.VK_BACK):
+			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
+		case msg.Message == win.WM_CHAR && (msg.WParam == 0x08 || msg.WParam == 0x7f):
+			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
+		case msg.Message == win.WM_SYSKEYDOWN && msg.WParam == uintptr(win.VK_BACK):
+			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
+		default:
+			return
+		}
+	}
+}
+
+func (u *winUI) releaseBackbuffer() {
+	if u.memDC != 0 {
+		if u.memBmp != 0 {
+			win.DeleteObject(win.HGDIOBJ(u.memBmp))
+			u.memBmp = 0
+		}
+		win.DeleteDC(u.memDC)
+		u.memDC = 0
+	}
+	u.memW, u.memH = 0, 0
+}
+
+func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	if u.memDC != 0 && u.memBmp != 0 && u.memW == w && u.memH == h {
+		return true
+	}
+	u.releaseBackbuffer()
+	u.memDC = win.CreateCompatibleDC(hdc)
+	if u.memDC == 0 {
+		return false
+	}
+	u.memBmp = win.CreateCompatibleBitmap(hdc, w, h)
+	if u.memBmp == 0 {
+		win.DeleteDC(u.memDC)
+		u.memDC = 0
+		return false
+	}
+	win.SelectObject(u.memDC, win.HGDIOBJ(u.memBmp))
+	u.memW, u.memH = w, h
+	return true
+}
+
+func (u *winUI) paintTabBar(hdc win.HDC, rect win.RECT) {
+	if len(u.tabs) == 0 {
+		return
+	}
+	n := int32(len(u.tabs))
+	tw := rect.Right / n
+	if tw < 40 {
+		tw = 40
+	}
+	for i, t := range u.tabs {
+		x0 := int32(i) * tw
+		x1 := x0 + tw
+		if i == len(u.tabs)-1 {
+			x1 = rect.Right
+		}
+		bg := win.RGB(40, 40, 40)
+		fg := win.RGB(180, 180, 180)
+		if i == u.active {
+			bg = win.RGB(55, 55, 70)
+			fg = win.RGB(240, 240, 240)
+		}
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: bg}
+		if br := win.CreateBrushIndirect(&lb); br != 0 {
+			old := win.SelectObject(hdc, win.HGDIOBJ(br))
+			win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
+			win.Rectangle_(hdc, x0, 0, x1, int32(tabBarH))
+			win.SelectObject(hdc, old)
+			win.DeleteObject(win.HGDIOBJ(br))
+		}
+		label := t.title
+		if label == "" {
+			label = "shell"
+		}
+		s, err := syscall.UTF16FromString(label)
+		if err == nil && len(s) > 1 {
+			win.SetBkMode(hdc, win.TRANSPARENT)
+			win.SetTextColor(hdc, fg)
+			win.TextOut(hdc, x0+8, 6, &s[0], int32(len(s)-1))
+		}
+	}
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(70, 70, 70)}
+	if br := win.CreateBrushIndirect(&lb); br != 0 {
+		old := win.SelectObject(hdc, win.HGDIOBJ(br))
+		win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
+		win.Rectangle_(hdc, 0, int32(tabBarH)-1, rect.Right, int32(tabBarH))
+		win.SelectObject(hdc, old)
+		win.DeleteObject(win.HGDIOBJ(br))
+	}
 }
