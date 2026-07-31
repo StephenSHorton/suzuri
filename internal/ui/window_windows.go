@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"fmt"
 	"math"
 	"runtime"
 	"strings"
@@ -13,9 +14,11 @@ import (
 	"unicode"
 	"unsafe"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 
+	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
@@ -34,19 +37,21 @@ const (
 	cellW = 9
 	cellH = 18
 
-	tabBarH     = 28 // pixels reserved for the tab strip
-	maxTabs     = 16
+	maxTabs         = 16
+	tabBarFallback  = 36 // used before first paint measures font
 )
 
 // Run opens a native Win32 window with one shell tab (more via Ctrl+Shift+T).
+// Chrome (tabs, status, palette) is a Charm Bubble Tea model; the shell is VT.
 func Run() error {
-	cols, rows := 100, 28 // rows exclude tab bar visually
+	cols, rows := 100, 28
 	ui := &winUI{
 		cols:       cols,
 		rows:       rows,
 		cfg:        config.Default(),
 		blinkStart: time.Now(),
 		nextTabID:  0,
+		chrome:     chrome.New(cols),
 	}
 	ui.alive.Store(true)
 	t, err := newTab(ui.nextTabID, cols, rows)
@@ -56,6 +61,7 @@ func Run() error {
 	ui.nextTabID++
 	ui.tabs = []*tab{t}
 	ui.active = 0
+	ui.syncChrome()
 	return ui.loop()
 }
 
@@ -63,6 +69,7 @@ type winUI struct {
 	tabs      []*tab
 	active    int
 	nextTabID int
+	chrome    chrome.Model // Charm UI: tabs, status, palette
 
 	hwnd   win.HWND
 	font   win.HFONT
@@ -74,6 +81,7 @@ type winUI struct {
 	// last measured cell size (for hit-testing)
 	metricW int32
 	metricH int32
+	chromePx int32 // pixel height of Charm chrome
 
 	blinkStart    time.Time
 	alive         atomic.Bool
@@ -92,6 +100,57 @@ func (u *winUI) activeTab() *tab {
 		return nil
 	}
 	return u.tabs[u.active]
+}
+
+func (u *winUI) syncChrome() {
+	tabs := make([]chrome.Tab, len(u.tabs))
+	for i, t := range u.tabs {
+		title := t.title
+		if title == "" {
+			title = fmt.Sprintf("shell %d", i+1)
+		}
+		tabs[i] = chrome.Tab{ID: t.id, Title: title}
+	}
+	r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
+	u.chrome = r.Model
+	u.chrome.Width = u.cols
+}
+
+func (u *winUI) chromePixelHeight() int32 {
+	rows := u.chrome.RowCount()
+	ch := u.metricH
+	if ch < 1 {
+		ch = cellH
+	}
+	return int32(rows) * ch
+}
+
+func (u *winUI) applyChromeAction(act chrome.HostAction, index int) {
+	switch act {
+	case chrome.ActionNewTab:
+		u.newTabUI()
+	case chrome.ActionCloseTab:
+		if t := u.activeTab(); t != nil {
+			u.closeTabUI(t.id)
+		}
+	case chrome.ActionNextTab:
+		u.switchTab(1)
+	case chrome.ActionPrevTab:
+		u.switchTab(-1)
+	case chrome.ActionSelectTab:
+		if index >= 0 && index < len(u.tabs) {
+			u.active = index
+			u.selecting = false
+			if t := u.activeTab(); t != nil {
+				t.sel.clear()
+			}
+		}
+	case chrome.ActionQuit:
+		if u.hwnd != 0 {
+			win.DestroyWindow(u.hwnd)
+		}
+	}
+	u.syncChrome()
 }
 
 func (u *winUI) loop() error {
@@ -318,6 +377,7 @@ func (u *winUI) newTabUI() {
 	t.startWorkers(u)
 	u.selecting = false
 	setWindowTitle(u.hwnd, "suzuri — "+t.title)
+	u.syncChrome()
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
@@ -346,6 +406,7 @@ func (u *winUI) closeTabUI(id int) {
 	if t := u.activeTab(); t != nil {
 		setWindowTitle(u.hwnd, "suzuri — "+t.title)
 	}
+	u.syncChrome()
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
@@ -359,23 +420,38 @@ func (u *winUI) switchTab(delta int) {
 		t.sel.clear()
 		setWindowTitle(u.hwnd, "suzuri — "+t.title)
 	}
+	u.syncChrome()
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
+// hitTab maps an x pixel to a tab index using the same label layout as chrome.View
+// ("n:title" with Lip Gloss horizontal padding of 1).
 func (u *winUI) hitTab(px int32) int {
-	// Equal-width tabs across the bar.
-	if len(u.tabs) == 0 || u.width <= 0 {
+	if len(u.tabs) == 0 {
 		return -1
 	}
-	tw := u.width / int32(len(u.tabs))
-	if tw < 1 {
-		tw = 1
+	cw := u.metricW
+	if cw < 1 {
+		cw = cellW
 	}
-	i := int(px / tw)
-	if i < 0 || i >= len(u.tabs) {
-		return -1
+	x := int32(4) // same left pad as paintChrome / blitGrid
+	for i, t := range u.tabs {
+		title := t.title
+		if title == "" {
+			title = fmt.Sprintf("shell %d", i+1)
+		}
+		rs := []rune(title)
+		if len(rs) > 16 {
+			title = string(rs[:14]) + "…"
+		}
+		labelW := len([]rune(fmt.Sprintf("%d:%s", i+1, title))) + 2 // Padding(0,1)
+		w := int32(labelW) * cw
+		if px >= x && px < x+w {
+			return i
+		}
+		x += w
 	}
-	return i
+	return -1
 }
 
 
@@ -407,15 +483,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.height = int32(win.HIWORD(uint32(lParam)))
 		if u.width > 0 && u.height > 0 {
 			cols := int(u.width / cellW)
-			rows := int((u.height - int32(tabBarH)) / cellH)
 			if cols < 20 {
 				cols = 20
 			}
+			u.cols = cols
+			u.chrome.Width = cols
+			u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: 24}).Model
+			u.chromePx = u.chromePixelHeight()
+			rows := int((u.height - u.chromePx) / cellH)
 			if rows < 5 {
 				rows = 5
 			}
-			if cols != u.cols || rows != u.rows {
-				u.cols, u.rows = cols, rows
+			if rows != u.rows || cols != u.cols {
+				u.rows = rows
 				for _, t := range u.tabs {
 					t.resize(cols, rows)
 				}
@@ -425,6 +505,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_CHAR:
 		ch := rune(wParam)
+		// Charm palette filter: printable runes only (specials via KEYDOWN).
+		if u.chrome.PaletteOpen {
+			if ch >= 32 && ch != 0x7f {
+				km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
+				r := u.chrome.UpdateChrome(km)
+				u.chrome = r.Model
+				u.applyChromeAction(r.Action, r.Index)
+				u.syncChrome()
+				u.chromePx = u.chromePixelHeight()
+				win.InvalidateRect(hwnd, nil, false)
+			}
+			return 0
+		}
 		switch ch {
 		case 0x08, 0x09, 0x0a, 0x7f:
 			return 0
@@ -454,6 +547,26 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		shift := win.GetKeyState(win.VK_SHIFT) < 0
 		tab := u.activeTab()
 
+		// Charm palette owns navigation keys while open (text via WM_CHAR).
+		if u.chrome.PaletteOpen {
+			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
+				r := u.chrome.UpdateChrome(*km)
+				u.chrome = r.Model
+				u.applyChromeAction(r.Action, r.Index)
+				u.syncChrome()
+				u.chromePx = u.chromePixelHeight()
+				win.InvalidateRect(hwnd, nil, false)
+			}
+			return 0
+		}
+		if ctrl && !shift && (wParam == 'K' || wParam == 'k' || wParam == 'P' || wParam == 'p') {
+			r := u.chrome.UpdateChrome(chrome.OpenPaletteMsg{})
+			u.chrome = r.Model
+			u.chromePx = u.chromePixelHeight()
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+
 		if ctrl && shift && (wParam == 'T' || wParam == 't') {
 			u.newTabUI()
 			return 0
@@ -481,6 +594,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					t.sel.clear()
 					setWindowTitle(u.hwnd, "suzuri — "+t.title)
 				}
+				u.syncChrome()
 				win.InvalidateRect(hwnd, nil, false)
 			}
 			return 0
@@ -570,15 +684,23 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.focus()
 		px := int32(win.LOWORD(uint32(lParam)))
 		py := int32(win.HIWORD(uint32(lParam)))
-		if py < int32(tabBarH) {
-			if i := u.hitTab(px); i >= 0 {
-				u.active = i
-				u.selecting = false
-				if t := u.activeTab(); t != nil {
-					t.sel.clear()
-					setWindowTitle(u.hwnd, "suzuri — "+t.title)
+		// Only the first chrome row is the tab strip (status/palette below).
+		chH := u.metricH
+		if chH < 1 {
+			chH = cellH
+		}
+		if py < u.chromePixelHeight() {
+			if py < chH {
+				if i := u.hitTab(px); i >= 0 {
+					u.active = i
+					u.selecting = false
+					if t := u.activeTab(); t != nil {
+						t.sel.clear()
+						setWindowTitle(u.hwnd, "suzuri — "+t.title)
+					}
+					u.syncChrome()
+					win.InvalidateRect(hwnd, nil, false)
 				}
-				win.InvalidateRect(hwnd, nil, false)
 			}
 			return 0
 		}
@@ -678,9 +800,9 @@ func (u *winUI) paint(hwnd win.HWND) {
 	}
 	u.blitGrid(u.memDC, rect, grid, cur.X, curY, curVis)
 	win.BitBlt(hdc, 0, 0, w, h, u.memDC, 0, 0, win.SRCCOPY)
-	// Tab strip on top of the terminal bitmap.
+	// Charm chrome (tabs/status/palette) composited on top.
 	oldF := win.SelectObject(hdc, win.HGDIOBJ(u.font))
-	u.paintTabBar(hdc, rect)
+	u.paintChrome(hdc, rect)
 	win.SelectObject(hdc, oldF)
 }
 
@@ -710,8 +832,12 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		}
 	}
 	const padX int32 = 4
-	padY := int32(tabBarH)+2
+	padY := u.chromePixelHeight()
+	if padY < 1 {
+		padY = int32(tabBarFallback)
+	}
 	u.metricW, u.metricH = cw, ch
+	u.chromePx = padY
 
 	selBrush := win.HBRUSH(0)
 	if tab.sel.active && !tab.sel.empty() {
@@ -956,7 +1082,10 @@ func (u *winUI) pixelToCell(px, py int32) (x, y int) {
 		ch = cellH
 	}
 	const padX int32 = 4
-	padY := int32(tabBarH) + 2
+	padY := u.chromePixelHeight()
+	if padY < 1 {
+		padY = int32(tabBarFallback)
+	}
 	x = int((px - padX) / cw)
 	y = int((py - padY) / ch)
 	if x < 0 {
@@ -1072,52 +1201,93 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	return true
 }
 
-func (u *winUI) paintTabBar(hdc win.HDC, rect win.RECT) {
-	if len(u.tabs) == 0 {
-		return
+// paintChrome renders the Charm View() through a mini VT grid (Lip Gloss ANSI
+// → cells) so tabs/status/palette use the same paint path as the shell.
+func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
+	u.syncChrome()
+	cols := u.cols
+	if cols < 20 {
+		cols = 20
 	}
-	n := int32(len(u.tabs))
-	tw := rect.Right / n
-	if tw < 40 {
-		tw = 40
+	ct := chrome.RenderToTerm(u.chrome, cols)
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
 	}
-	for i, t := range u.tabs {
-		x0 := int32(i) * tw
-		x1 := x0 + tw
-		if i == len(u.tabs)-1 {
-			x1 = rect.Right
-		}
-		bg := win.RGB(40, 40, 40)
-		fg := win.RGB(180, 180, 180)
-		if i == u.active {
-			bg = win.RGB(55, 55, 70)
-			fg = win.RGB(240, 240, 240)
-		}
-		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: bg}
-		if br := win.CreateBrushIndirect(&lb); br != 0 {
-			old := win.SelectObject(hdc, win.HGDIOBJ(br))
-			win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
-			win.Rectangle_(hdc, x0, 0, x1, int32(tabBarH))
-			win.SelectObject(hdc, old)
-			win.DeleteObject(win.HGDIOBJ(br))
-		}
-		label := t.title
-		if label == "" {
-			label = "shell"
-		}
-		s, err := syscall.UTF16FromString(label)
-		if err == nil && len(s) > 1 {
+	if ch < 1 {
+		ch = cellH
+	}
+	// vt10x.Size returns (cols, rows).
+	ccols, crows := ct.Size()
+	win.SetBkMode(hdc, win.OPAQUE)
+	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
+	for y := 0; y < crows; y++ {
+		for x := 0; x < cols && x < ccols; x++ {
+			g := ct.Cell(x, y)
+			cell := glyphToCell(g)
+			px := int32(4) + int32(x)*cw
+			py := int32(y) * ch
+			// Always paint chrome bg so it covers the shell underneath.
+			br, bg, bb := cell.BR, cell.BG, cell.BB
+			if br == 0 && bg == 0 && bb == 0 {
+				br, bg, bb = 35, 35, 40
+			}
+			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(br, bg, bb)}
+			if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+				old := win.SelectObject(hdc, win.HGDIOBJ(brush))
+				win.Rectangle_(hdc, px, py, px+cw, py+ch)
+				win.SelectObject(hdc, old)
+				win.DeleteObject(win.HGDIOBJ(brush))
+			}
+			r := cell.Ch
+			if r == 0 || r == ' ' {
+				continue
+			}
+			s, err := syscall.UTF16FromString(string(r))
+			if err != nil || len(s) < 2 {
+				continue
+			}
 			win.SetBkMode(hdc, win.TRANSPARENT)
-			win.SetTextColor(hdc, fg)
-			win.TextOut(hdc, x0+8, 6, &s[0], int32(len(s)-1))
+			win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
+			win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
 		}
 	}
-	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(70, 70, 70)}
-	if br := win.CreateBrushIndirect(&lb); br != 0 {
-		old := win.SelectObject(hdc, win.HGDIOBJ(br))
-		win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
-		win.Rectangle_(hdc, 0, int32(tabBarH)-1, rect.Right, int32(tabBarH))
-		win.SelectObject(hdc, old)
-		win.DeleteObject(win.HGDIOBJ(br))
+	u.chromePx = int32(crows) * ch
+}
+
+// teaKeyFromWin maps Win32 navigation keys into Bubble Tea messages for the
+// palette. Printable text arrives via WM_CHAR so filter typing works.
+func teaKeyFromWin(wParam uintptr, ctrl, shift bool) *tea.KeyMsg {
+	_ = ctrl
+	switch wParam {
+	case win.VK_ESCAPE:
+		km := tea.KeyMsg{Type: tea.KeyEsc}
+		return &km
+	case win.VK_RETURN:
+		km := tea.KeyMsg{Type: tea.KeyEnter}
+		return &km
+	case win.VK_UP:
+		km := tea.KeyMsg{Type: tea.KeyUp}
+		return &km
+	case win.VK_DOWN:
+		km := tea.KeyMsg{Type: tea.KeyDown}
+		return &km
+	case win.VK_TAB:
+		if shift {
+			km := tea.KeyMsg{Type: tea.KeyShiftTab}
+			return &km
+		}
+		km := tea.KeyMsg{Type: tea.KeyTab}
+		return &km
+	case win.VK_BACK:
+		km := tea.KeyMsg{Type: tea.KeyBackspace}
+		return &km
+	case win.VK_LEFT:
+		km := tea.KeyMsg{Type: tea.KeyLeft}
+		return &km
+	case win.VK_RIGHT:
+		km := tea.KeyMsg{Type: tea.KeyRight}
+		return &km
 	}
+	return nil
 }

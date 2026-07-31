@@ -4,7 +4,7 @@
 
 A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a TUI inside someone else’s emulator, and not a Warp fork.
 
-## Status (v0.4)
+## Status (v0.5)
 
 | Feature | State |
 |---------|--------|
@@ -16,8 +16,8 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | Multi-row scroll capture | ✅ |
 | Drag select + copy/paste | ✅ |
 | ANSI 16 / 256 / truecolor + bold | ✅ |
-| **Tabs** | ✅ |
-| Splits / Charm menus | soon |
+| **Charm chrome** (tabs, status, palette) | ✅ |
+| Splits / richer menus | soon |
 
 ### Keys
 
@@ -28,6 +28,7 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+1`…`Ctrl+9` | Jump to tab |
 | Click tab strip | Activate tab |
+| `Ctrl+K` / `Ctrl+P` | Command palette (Charm) |
 | `Ctrl+Shift+C` / `Ctrl+Insert` | Copy selection |
 | `Ctrl+Shift+V` / `Shift+Insert` / `Ctrl+V` | Paste |
 | `Ctrl+C` | Copy if selection; else `^C` to shell |
@@ -47,14 +48,19 @@ go run ./cmd/suzuri
 
 ## Architecture
 
+Charm owns **all UI chrome** (tab strip, status line, command palette) via Bubble Tea + Lip Gloss. The shell viewport stays a VT cell grid driven by ConPTY.
+
 ```
 Win32 window  →  key/mouse
-      ↓
-  write queue  →  ConPTY  →  shell
-      ↑                         ↓
-  VT parse (UI thread)  ←  byte queue
-      ↓
-  cell grid + scrollback → paint
+      │
+      ├─ Charm chrome (tabs / status / palette)  → View → mini VT → paint
+      │
+      └─ active tab
+           write queue  →  ConPTY  →  shell
+                ↑                         ↓
+           VT parse (UI thread)  ←  byte queue
+                ↓
+           cell grid + scrollback → paint
 ```
 
 ## Name
