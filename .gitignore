@@ -1,0 +1,8 @@
+/suzuri
+/suzuri.exe
+*.exe
+dist/
+.idea/
+.vscode/
+*.log
+fyne-cross/
