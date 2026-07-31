@@ -47,6 +47,16 @@ go run ./cmd/suzuri
 .\suzuri.exe
 ```
 
+## Logs
+
+Charm [`log`](https://github.com/charmbracelet/log) writes to:
+
+```
+%LOCALAPPDATA%\suzuri\suzuri.log
+```
+
+(usually `C:\Users\<you>\AppData\Local\suzuri\suzuri.log`). Level defaults to `debug`; set `SUZURI_LOG_LEVEL=info` (or `warn` / `error`) to quiet it. Panics in the UI thread are recovered and written with a stack trace.
+
 ## Architecture
 
 Charm owns **all UI chrome** (tab strip, status line, command palette) via Bubble Tea + Lip Gloss. The shell viewport stays a VT cell grid driven by ConPTY.

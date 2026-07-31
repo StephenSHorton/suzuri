@@ -15,9 +15,11 @@ import (
 	"unsafe"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/log"
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 
+	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
@@ -45,10 +47,12 @@ const (
 // Chrome (tabs, status, palette) is a Charm Bubble Tea model; the shell is VT.
 func Run() error {
 	cols, rows := 100, 28
+	cfg := config.Default()
+	log.Info("ui.Run", "cols", cols, "rows", rows, "font", cfg.FontFace, "fontPx", cfg.FontSizePx)
 	ui := &winUI{
 		cols:       cols,
 		rows:       rows,
-		cfg:        config.Default(),
+		cfg:        cfg,
 		blinkStart: time.Now(),
 		nextTabID:  0,
 		chrome:     chrome.New(cols),
@@ -56,6 +60,7 @@ func Run() error {
 	ui.alive.Store(true)
 	t, err := newTab(ui.nextTabID, cols, rows)
 	if err != nil {
+		log.Error("first tab failed", "err", err)
 		return err
 	}
 	ui.nextTabID++
@@ -201,6 +206,8 @@ func (u *winUI) loop() error {
 	}
 	u.hwnd = hwnd
 	u.font = createFontFor(u.cfg)
+	face := fontFaceName(u.font)
+	log.Info("window created", "hwnd", uintptr(hwnd), "font", face, "want", u.cfg.FontFace)
 	registerUI(hwnd, u)
 
 	win.ShowWindow(hwnd, win.SW_SHOW)
@@ -209,6 +216,7 @@ func (u *winUI) loop() error {
 	// Start I/O for the first tab; more tabs start in newTabUI.
 	if t := u.activeTab(); t != nil {
 		t.startWorkers(u)
+		log.Info("tab started", "id", t.id, "pid", t.sess.Pid())
 	}
 	go u.blinkLoop()
 
@@ -216,10 +224,13 @@ func (u *winUI) loop() error {
 	for {
 		ret := win.GetMessage(&msg, 0, 0, 0)
 		if ret == 0 {
+			log.Info("WM_QUIT — message loop exit")
 			break
 		}
 		if ret == -1 {
-			return lastErr("GetMessage")
+			err := lastErr("GetMessage")
+			log.Error("GetMessage failed", "err", err)
+			return err
 		}
 		win.TranslateMessage(&msg)
 		win.DispatchMessage(&msg)
@@ -256,6 +267,8 @@ func uiFor(hwnd win.HWND) *winUI {
 var wndProcCallback = syscall.NewCallback(wndProcMain)
 
 func wndProcMain(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
+	// A panic in WndProc would otherwise kill the process with no trail.
+	defer applog.Recover("wndproc", false)
 	u := uiFor(hwnd)
 	if u == nil {
 		return win.DefWindowProc(hwnd, msg, wParam, lParam)
@@ -365,10 +378,12 @@ func shortTitle(s string) string {
 
 func (u *winUI) newTabUI() {
 	if len(u.tabs) >= maxTabs {
+		log.Warn("max tabs reached", "max", maxTabs)
 		return
 	}
 	t, err := newTab(u.nextTabID, u.cols, u.rows)
 	if err != nil {
+		log.Error("new tab failed", "err", err)
 		return
 	}
 	u.nextTabID++
@@ -763,6 +778,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_DESTROY:
+		log.Info("WM_DESTROY — tearing down")
 		u.alive.Store(false)
 		unregisterUI(hwnd)
 		for _, t := range u.tabs {

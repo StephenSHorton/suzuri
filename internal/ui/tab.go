@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/charmbracelet/log"
 	"github.com/hinshun/vt10x"
 
 	"github.com/StephenSHorton/suzuri/internal/host"
@@ -32,8 +33,10 @@ type tab struct {
 }
 
 func newTab(id, cols, rows int) (*tab, error) {
-	sess, err := host.StartSession(host.DefaultShell(), cols, rows)
+	shell := host.DefaultShell()
+	sess, err := host.StartSession(shell, cols, rows)
 	if err != nil {
+		log.Error("conpty start failed", "tab", id, "shell", shell, "err", err)
 		return nil, err
 	}
 	t := &tab{
@@ -45,6 +48,7 @@ func newTab(id, cols, rows int) (*tab, error) {
 		writeCh: make(chan []byte, 256),
 	}
 	t.alive.Store(true)
+	log.Info("tab created", "id", id, "shell", shell, "cols", cols, "rows", rows, "pid", sess.Pid())
 	return t, nil
 }
 
@@ -56,6 +60,7 @@ func (t *tab) startWorkers(u *winUI) {
 func (t *tab) writeLoop() {
 	for b := range t.writeCh {
 		if _, err := t.sess.Write(b); err != nil {
+			log.Warn("pty write failed", "tab", t.id, "err", err)
 			return
 		}
 	}
@@ -88,6 +93,7 @@ func (t *tab) readLoop(u *winUI) {
 		}
 		if err != nil {
 			t.alive.Store(false)
+			log.Info("pty read ended", "tab", t.id, "err", err)
 			if u != nil && u.hwnd != 0 && u.alive.Load() {
 				// wParam carries tab id for UI thread cleanup.
 				postClosed(u, t.id)
