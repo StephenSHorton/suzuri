@@ -30,7 +30,7 @@ const (
 	wmSuzuriClosed = win.WM_APP + 3 // session read ended
 
 	cursorBlinkPeriod = 1200 * time.Millisecond
-	cursorBlinkTick   = 200 * time.Millisecond
+	cursorBlinkTick   = 500 * time.Millisecond
 
 	cellW = 9
 	cellH = 18
