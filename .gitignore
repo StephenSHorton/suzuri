@@ -6,3 +6,7 @@ dist/
 .vscode/
 *.log
 fyne-cross/
+
+suzuri.exe~
+*.exe~
+
