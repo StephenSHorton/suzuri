@@ -593,8 +593,9 @@ func (u *winUI) paint(hwnd win.HWND) {
 }
 
 // blitGrid paints each VT cell at a fixed pixel pitch so the caret lines up
-// with glyphs (TextOut of a whole row used proportional advances and left a
-// gap that looked like a mystery glyph beside the cursor).
+// with glyphs. Keep this cheap: one background fill, one selection brush, and
+// TextOut only for non-space glyphs. (Per-cell CreateBrush used to freeze the
+// UI — thousands of GDI allocs per frame.)
 func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]rune, curX, curY int, curVis bool) {
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.BLACK_BRUSH)))
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
@@ -603,7 +604,6 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]rune, curX, curY i
 	oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	defer win.SelectObject(hdc, oldFont)
 
-	// Measure real mono cell size from the font once per paint.
 	cw, ch := int32(cellW), int32(cellH)
 	var tm win.TEXTMETRIC
 	if win.GetTextMetrics(hdc, &tm) {
@@ -614,45 +614,74 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]rune, curX, curY i
 			ch = tm.TmHeight
 		}
 	}
-	// Keep a little padding from the window edge.
 	const padX, padY int32 = 4, 2
-
 	u.metricW, u.metricH = cw, ch
 
+	// One brush for all selection cells.
+	selBrush := win.HBRUSH(0)
+	if u.sel.active && !u.sel.empty() {
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(40, 80, 160)}
+		selBrush = win.CreateBrushIndirect(&lb)
+	}
+	if selBrush != 0 {
+		defer win.DeleteObject(win.HGDIOBJ(selBrush))
+	}
+
+	win.SetBkMode(hdc, win.TRANSPARENT)
+	win.SetTextColor(hdc, win.RGB(220, 220, 220))
+	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
+
 	for y, row := range grid {
+		// Build a dense run of glyphs for this row to cut TextOut calls.
+		// Selection backgrounds still drawn per selected cell (few cells).
 		for x, r := range row {
 			px := padX + int32(x)*cw
 			py := padY + int32(y)*ch
 			absY := u.sb.absLine(y, u.rows, u.rows)
-			selected := u.sel.containsAbs(x, absY)
-
-			// Cell background (selection highlight).
-			bg := win.RGB(0, 0, 0)
-			fg := win.RGB(220, 220, 220)
-			if selected {
-				bg = win.RGB(40, 80, 160)
-				fg = win.RGB(255, 255, 255)
-			}
-			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: bg}
-			if br := win.CreateBrushIndirect(&lb); br != 0 {
-				oldBr := win.SelectObject(hdc, win.HGDIOBJ(br))
-				win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
+			if selBrush != 0 && u.sel.containsAbs(x, absY) {
+				oldBr := win.SelectObject(hdc, win.HGDIOBJ(selBrush))
 				win.Rectangle_(hdc, px, py, px+cw, py+ch)
 				win.SelectObject(hdc, oldBr)
-				win.DeleteObject(win.HGDIOBJ(br))
 			}
-
-			if r == ' ' || r == 0 {
-				continue
-			}
-			s, err := syscall.UTF16FromString(string(r))
-			if err != nil || len(s) < 2 {
-				continue
-			}
-			win.SetBkMode(hdc, win.TRANSPARENT)
-			win.SetTextColor(hdc, fg)
-			win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
+			_ = r
 		}
+		// Emit non-space characters in contiguous runs.
+		runStart := -1
+		var run []rune
+		flush := func(endX int) {
+			if runStart < 0 || len(run) == 0 {
+				return
+			}
+			s, err := syscall.UTF16FromString(string(run))
+			if err == nil && len(s) > 1 {
+				px := padX + int32(runStart)*cw
+				py := padY + int32(y)*ch
+				// Selected text: white
+				absY := u.sb.absLine(y, u.rows, u.rows)
+				if u.sel.containsAbs(runStart, absY) {
+					win.SetTextColor(hdc, win.RGB(255, 255, 255))
+				} else {
+					win.SetTextColor(hdc, win.RGB(220, 220, 220))
+				}
+				win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
+			}
+			runStart = -1
+			run = run[:0]
+		}
+		for x, r := range row {
+			if r == 0 {
+				r = ' '
+			}
+			if r == ' ' {
+				flush(x)
+				continue
+			}
+			if runStart < 0 {
+				runStart = x
+			}
+			run = append(run, r)
+		}
+		flush(len(row))
 	}
 
 	if u.cfg.Cursor == config.CursorBlock && curVis {
@@ -669,10 +698,8 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]rune, curX, curY i
 		alpha := 0.5 + 0.5*math.Sin(2*math.Pi*(elapsed/period))
 		level := byte(50 + alpha*205)
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(level, level, level)}
-		brush := win.CreateBrushIndirect(&lb)
-		if brush != 0 {
+		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
 			oldBr := win.SelectObject(hdc, win.HGDIOBJ(brush))
-			win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
 			win.Rectangle_(hdc, px, py, px+cw, py+ch-1)
 			win.SelectObject(hdc, oldBr)
 			win.DeleteObject(win.HGDIOBJ(brush))
