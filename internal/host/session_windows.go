@@ -21,15 +21,17 @@ type Session struct {
 }
 
 // DefaultShell returns a sensible Windows shell command line.
+//
+// -NoProfile keeps the prompt ASCII-simple for v0 (profile themes often inject
+// Nerd-Font / private-use glyphs that show as "unknown character" boxes).
 func DefaultShell() string {
+	if ps, err := exec.LookPath("pwsh.exe"); err == nil {
+		return ps + " -NoLogo -NoProfile"
+	}
+	if ps, err := exec.LookPath("powershell.exe"); err == nil {
+		return ps + " -NoLogo -NoProfile"
+	}
 	if s := os.Getenv("COMSPEC"); s != "" {
-		// Prefer PowerShell when available for a modern default.
-		if ps, err := exec.LookPath("pwsh.exe"); err == nil {
-			return ps
-		}
-		if ps, err := exec.LookPath("powershell.exe"); err == nil {
-			return ps + " -NoLogo"
-		}
 		return s
 	}
 	return `C:\Windows\System32\cmd.exe`

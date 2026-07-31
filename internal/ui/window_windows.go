@@ -445,22 +445,22 @@ func (u *winUI) paint(hwnd win.HWND) {
 	var rect win.RECT
 	win.GetClientRect(hwnd, &rect)
 
-	// Build row strings on UI thread (term is only used here + drainAndParse).
+	// Snapshot grid (UI thread owns term).
 	cols, rows := u.term.Size()
 	cur := u.term.Cursor()
 	curVis := u.term.CursorVisible()
-	rowText := make([]string, rows)
-	buf := make([]rune, cols)
+	grid := make([][]rune, rows)
 	for y := 0; y < rows; y++ {
+		row := make([]rune, cols)
 		for x := 0; x < cols; x++ {
-			buf[x] = displayRune(u.term.Cell(x, y).Char)
+			row[x] = displayRune(u.term.Cell(x, y).Char)
 		}
-		rowText[y] = string(buf)
+		grid[y] = row
 	}
 
 	memDC := win.CreateCompatibleDC(hdc)
 	if memDC == 0 {
-		u.blit(hdc, rect, rowText, cur.X, cur.Y, curVis)
+		u.blitGrid(hdc, rect, grid, cur.X, cur.Y, curVis)
 		return
 	}
 	defer win.DeleteDC(memDC)
@@ -474,35 +474,58 @@ func (u *winUI) paint(hwnd win.HWND) {
 	}
 	bmp := win.CreateCompatibleBitmap(hdc, w, h)
 	if bmp == 0 {
-		u.blit(hdc, rect, rowText, cur.X, cur.Y, curVis)
+		u.blitGrid(hdc, rect, grid, cur.X, cur.Y, curVis)
 		return
 	}
 	defer win.DeleteObject(win.HGDIOBJ(bmp))
 	old := win.SelectObject(memDC, win.HGDIOBJ(bmp))
-	u.blit(memDC, rect, rowText, cur.X, cur.Y, curVis)
+	u.blitGrid(memDC, rect, grid, cur.X, cur.Y, curVis)
 	win.BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, win.SRCCOPY)
 	win.SelectObject(memDC, old)
 }
 
-func (u *winUI) blit(hdc win.HDC, rect win.RECT, rows []string, curX, curY int, curVis bool) {
+// blitGrid paints each VT cell at a fixed pixel pitch so the caret lines up
+// with glyphs (TextOut of a whole row used proportional advances and left a
+// gap that looked like a mystery glyph beside the cursor).
+func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]rune, curX, curY int, curVis bool) {
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.BLACK_BRUSH)))
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
 	win.Rectangle_(hdc, rect.Left, rect.Top, rect.Right, rect.Bottom)
 
 	oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	defer win.SelectObject(hdc, oldFont)
-	win.SetBkMode(hdc, win.TRANSPARENT)
+
+	// Measure real mono cell size from the font once per paint.
+	cw, ch := int32(cellW), int32(cellH)
+	var tm win.TEXTMETRIC
+	if win.GetTextMetrics(hdc, &tm) {
+		if tm.TmAveCharWidth > 0 {
+			cw = tm.TmAveCharWidth
+		}
+		if tm.TmHeight > 0 {
+			ch = tm.TmHeight
+		}
+	}
+	// Keep a little padding from the window edge.
+	const padX, padY int32 = 4, 2
+
+	win.SetBkMode(hdc, win.OPAQUE)
+	win.SetBkColor(hdc, win.RGB(0, 0, 0))
 	win.SetTextColor(hdc, win.RGB(220, 220, 220))
 
-	for y, line := range rows {
-		if line == "" {
-			continue
+	for y, row := range grid {
+		for x, r := range row {
+			if r == ' ' || r == 0 {
+				continue // background already black
+			}
+			s, err := syscall.UTF16FromString(string(r))
+			if err != nil || len(s) < 2 {
+				continue
+			}
+			px := padX + int32(x)*cw
+			py := padY + int32(y)*ch
+			win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
 		}
-		utf16, err := syscall.UTF16FromString(line)
-		if err != nil || len(utf16) < 2 {
-			continue
-		}
-		win.TextOut(hdc, 4, int32(y*cellH+2), &utf16[0], int32(len(utf16)-1))
 	}
 
 	if u.cfg.Cursor == config.CursorBlock && curVis {
@@ -512,8 +535,8 @@ func (u *winUI) blit(hdc win.HDC, rect win.RECT, rows []string, curX, curY int, 
 		if curY < 0 {
 			curY = 0
 		}
-		px := int32(4 + curX*cellW)
-		py := int32(2 + curY*cellH)
+		px := padX + int32(curX)*cw
+		py := padY + int32(curY)*ch
 		elapsed := time.Since(u.blinkStart).Seconds()
 		period := cursorBlinkPeriod.Seconds()
 		alpha := 0.5 + 0.5*math.Sin(2*math.Pi*(elapsed/period))
@@ -523,7 +546,7 @@ func (u *winUI) blit(hdc win.HDC, rect win.RECT, rows []string, curX, curY int, 
 		if brush != 0 {
 			oldBr := win.SelectObject(hdc, win.HGDIOBJ(brush))
 			win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
-			win.Rectangle_(hdc, px, py, px+cellW, py+cellH-2)
+			win.Rectangle_(hdc, px, py, px+cw, py+ch-1)
 			win.SelectObject(hdc, oldBr)
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
@@ -538,15 +561,30 @@ func displayRune(r rune) rune {
 	if r < 0x20 || (r >= 0x7f && r < 0xa0) {
 		return ' '
 	}
-	// Private Use / surrogates / noncharacters often render as "unknown glyph"
-	// boxes next to the caret when fonts lack coverage (and DEC-graphics mishaps).
+	// Private Use (Nerd Fonts etc.) → empty, not a □ mystery box
 	if r >= 0xE000 && r <= 0xF8FF {
 		return ' '
 	}
 	if r >= 0xF0000 {
 		return ' '
 	}
-	if unicode.Is(unicode.Cf, r) { // format chars (ZWJ, etc.)
+	// v0: only draw scripts Consolas/Cascadia cover well. Everything else
+	// becomes a space so we never show the font's "missing glyph" tofu.
+	if r > 0x024F && // beyond Latin Extended-B
+		!(r >= 0x2500 && r <= 0x259F) && // box / block drawing
+		!(r >= 0x2000 && r <= 0x206F) { // general punctuation (keep sparse)
+		// Allow a few common prompt marks; drop the rest.
+		switch r {
+		case '✓', '✗', '→', '←', '▶', '❯', 'λ', '•':
+			// still may miss in Consolas — prefer ASCII fallback
+			return ' '
+		default:
+			if !unicode.In(r, unicode.Latin, unicode.Common) {
+				return ' '
+			}
+		}
+	}
+	if unicode.Is(unicode.Cf, r) {
 		return ' '
 	}
 	if !unicode.IsPrint(r) && r != ' ' {
@@ -579,17 +617,26 @@ func utf8Encode(p []byte, r rune) int {
 }
 
 func createFont() win.HFONT {
-	var lf win.LOGFONT
-	lf.LfHeight = -16
-	lf.LfWeight = win.FW_NORMAL
-	lf.LfCharSet = win.DEFAULT_CHARSET
-	lf.LfOutPrecision = win.OUT_DEFAULT_PRECIS
-	lf.LfClipPrecision = win.CLIP_DEFAULT_PRECIS
-	lf.LfQuality = win.CLEARTYPE_QUALITY
-	lf.LfPitchAndFamily = win.FIXED_PITCH | win.FF_MODERN
-	face, _ := syscall.UTF16FromString("Consolas")
-	copy(lf.LfFaceName[:], face)
-	return win.CreateFontIndirect(&lf)
+	// Prefer Cascadia Mono (ships with Windows Terminal) for cleaner coverage.
+	for _, name := range []string{"Cascadia Mono", "Cascadia Code", "Consolas", "Lucida Console"} {
+		var lf win.LOGFONT
+		lf.LfHeight = -16
+		lf.LfWeight = win.FW_NORMAL
+		lf.LfCharSet = win.DEFAULT_CHARSET
+		lf.LfOutPrecision = win.OUT_DEFAULT_PRECIS
+		lf.LfClipPrecision = win.CLIP_DEFAULT_PRECIS
+		lf.LfQuality = win.CLEARTYPE_QUALITY
+		lf.LfPitchAndFamily = win.FIXED_PITCH | win.FF_MODERN
+		face, err := syscall.UTF16FromString(name)
+		if err != nil {
+			continue
+		}
+		copy(lf.LfFaceName[:], face)
+		if h := win.CreateFontIndirect(&lf); h != 0 {
+			return h
+		}
+	}
+	return 0
 }
 
 func lastErr(op string) error {
