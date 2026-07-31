@@ -2,38 +2,52 @@
 
 **Suzuri** means *inkstone* — the stone where ink is ground before writing.
 
-This is a **real terminal host**: your window, your PTY, your grid. Not a TUI that lives inside someone else’s emulator, and not a Warp fork.
+A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a TUI inside someone else’s emulator, and not a Warp fork.
 
-## Intent
+## Status (v0.2)
 
-| Layer | Responsibility |
-|-------|----------------|
-| **Host window** | OS window, input, clipboard, drag-and-drop (later) |
-| **ConPTY** | Windows pseudo-console + shell process |
-| **VT / grid** | Parse escapes, maintain cell buffer, render (growing) |
-| **Product UI** | Tabs, command palette, agents — *later*, can use Charm as *overlay* only |
+| Feature | State |
+|---------|--------|
+| Own Win32 window + ConPTY shell | ✅ |
+| VT cell emulator (`vt10x`) | ✅ |
+| Block caret (opacity pulse) | ✅ |
+| PowerShell-friendly Backspace (DEL) | ✅ |
+| Scrollback + mouse wheel / PgUp·PgDn | ✅ |
+| Drag select + copy/paste | ✅ |
+| Tabs / splits / truecolor / Charm menus | soon |
 
-## Status
+### Keys
 
-**v0 (now):** Windows-only spike
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+Shift+C` / `Ctrl+Insert` | Copy selection |
+| `Ctrl+Shift+V` / `Shift+Insert` / `Ctrl+V` | Paste |
+| `Ctrl+C` | Copy if selection; else `^C` to shell |
+| Right-click | Paste |
+| Mouse wheel / `PgUp` `PgDn` | Scroll history |
 
-- Own desktop window
-- Spawns a shell via **ConPTY**
-- Forwards keyboard input
-- Shows output (ANSI stripped for the early renderer)
+Shell defaults to `powershell -NoLogo -NoProfile` so themed prompts don’t inject missing-font glyphs.
 
-Not yet: full VT fidelity, GPU text, tabs, scrollback chrome, Charm menus.
-
-Defaults: **block cursor** (`config.CursorBlock`).
-
-## Run (Windows)
+## Run
 
 ```powershell
 cd C:\Users\4step\projects\suzuri
 go run ./cmd/suzuri
+# or
+.\suzuri.exe
 ```
 
-Requires a recent Windows 10/11 (ConPTY).
+## Architecture
+
+```
+Win32 window  →  key/mouse
+      ↓
+  write queue  →  ConPTY  →  shell
+      ↑                         ↓
+  VT parse (UI thread)  ←  byte queue
+      ↓
+  cell grid + scrollback → paint
+```
 
 ## Name
 

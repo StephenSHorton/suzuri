@@ -4,6 +4,7 @@ package ui
 
 import (
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -46,6 +47,7 @@ func Run(sess *host.Session) error {
 		term:       vt10x.New(vt10x.WithSize(cols, rows)),
 		writeCh:    make(chan []byte, 256),
 		blinkStart: time.Now(),
+		sb:         newScrollback(),
 	}
 	ui.alive.Store(true)
 	return ui.loop()
@@ -54,6 +56,8 @@ func Run(sess *host.Session) error {
 type winUI struct {
 	sess *host.Session
 	term vt10x.Terminal // ONLY touched on the UI thread
+	sb   *scrollback
+	sel  cellSel
 
 	hwnd   win.HWND
 	font   win.HFONT
@@ -62,6 +66,9 @@ type winUI struct {
 	cols   int
 	rows   int
 	cfg    config.Config
+	// last measured cell size (for hit-testing)
+	metricW int32
+	metricH int32
 
 	// PTY → UI: raw bytes only. VT parse runs on the UI thread.
 	inMu  sync.Mutex
@@ -74,6 +81,7 @@ type winUI struct {
 	alive         atomic.Bool
 	bytesMsg      atomic.Bool // coalesce wmSuzuriBytes
 	lastBackspace time.Time   // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
+	selecting     bool
 }
 
 func (u *winUI) loop() error {
@@ -257,6 +265,14 @@ func (u *winUI) drainAndParse() {
 	}
 	// Parse VT on UI thread — no cross-thread lock fights with paint.
 	_, _ = u.term.Write(data)
+	u.sb.noteScreen(u.term)
+	// Live output sticks to bottom when already following the end.
+	if u.sb.atBottom() {
+		u.sb.stickBottom()
+	}
+	if t := u.term.Title(); t != "" {
+		setWindowTitle(u.hwnd, "suzuri — "+t)
+	}
 	win.InvalidateRect(u.hwnd, nil, false)
 
 	// If more bytes arrived while we parsed, schedule another pass.
@@ -320,16 +336,44 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.sendKey([]byte("\r"))
 			return 0
 		}
+		if ch == 0x03 { // Ctrl+C — copy handled on KEYDOWN when selection exists
+			if u.sel.empty() {
+				u.sendKey([]byte{0x03})
+			}
+			return 0
+		}
+		if ch == 0x16 { // Ctrl+V — paste handled on KEYDOWN
+			return 0
+		}
 		if ch >= 32 && ch != 0x7f {
 			var buf [4]byte
 			n := utf8Encode(buf[:], ch)
 			u.sendKey(buf[:n])
-		} else if ch > 0 && ch < 32 {
-			u.sendKey([]byte{byte(ch)})
 		}
 		return 0
 
 	case win.WM_KEYDOWN:
+		ctrl := win.GetKeyState(win.VK_CONTROL) < 0
+		shift := win.GetKeyState(win.VK_SHIFT) < 0
+		// Copy / paste shortcuts (do not steal bare Ctrl+C — shell interrupt).
+		if ctrl && shift && (wParam == 'C' || wParam == 'c') {
+			u.copySelection()
+			return 0
+		}
+		if ctrl && shift && (wParam == 'V' || wParam == 'v') {
+			u.pasteClipboard()
+			return 0
+		}
+		if ctrl && !shift && wParam == win.VK_INSERT {
+			u.copySelection()
+			return 0
+		}
+		if shift && !ctrl && wParam == win.VK_INSERT {
+			u.pasteClipboard()
+			return 0
+		}
+		// When scrolled up, PageUp/Down and wheel already move view; bare
+		// arrows still go to the shell (readline history etc.).
 		switch wParam {
 		case win.VK_UP:
 			u.sendKey([]byte("\x1b[A"))
@@ -346,19 +390,85 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		case win.VK_END:
 			u.sendKey([]byte("\x1b[F"))
 		case win.VK_PRIOR:
-			u.sendKey([]byte("\x1b[5~"))
+			u.sb.scrollBy(u.rows/2, u.rows)
+			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_NEXT:
-			u.sendKey([]byte("\x1b[6~"))
+			u.sb.scrollBy(-(u.rows / 2), u.rows)
+			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_ESCAPE:
 			u.sendKey([]byte{0x1b})
 		case win.VK_BACK:
-			// One physical press must erase one character. After freezes (or when
-			// the message pump catches up), Windows can deliver a burst of
-			// autorepeat KEYDOWNs for VK_BACK — that looked like "wipe the line".
 			u.handleBackspace(hwnd, lParam)
 		case win.VK_TAB:
 			u.sendKey([]byte{'\t'})
+		case 'C', 'c':
+			if ctrl && !shift {
+				// Interrupt — only when no selection; else copy (Windows Terminal-ish).
+				if !u.sel.empty() {
+					u.copySelection()
+				} else {
+					u.sendKey([]byte{0x03})
+				}
+				return 0
+			}
+		case 'V', 'v':
+			if ctrl && !shift {
+				u.pasteClipboard()
+				return 0
+			}
 		}
+		return 0
+
+	case win.WM_MOUSEWHEEL:
+		delta := int16(wParam >> 16)
+		// Wheel away from user (positive) → older history.
+		steps := int(delta) / 120
+		if steps == 0 {
+			if delta > 0 {
+				steps = 1
+			} else {
+				steps = -1
+			}
+		}
+		u.sb.scrollBy(steps*3, u.rows)
+		win.InvalidateRect(hwnd, nil, false)
+		return 0
+
+	case win.WM_LBUTTONDOWN:
+		u.focus()
+		x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
+		absY := u.sb.absLine(y, u.rows, u.rows)
+		u.sel.active = true
+		u.sel.x0, u.sel.y0 = x, absY
+		u.sel.x1, u.sel.y1 = x, absY
+		u.selecting = true
+		win.SetCapture(hwnd)
+		win.InvalidateRect(hwnd, nil, false)
+		return 0
+
+	case win.WM_MOUSEMOVE:
+		if u.selecting && (wParam&win.MK_LBUTTON) != 0 {
+			x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
+			absY := u.sb.absLine(y, u.rows, u.rows)
+			u.sel.x1, u.sel.y1 = x, absY
+			win.InvalidateRect(hwnd, nil, false)
+		}
+		return 0
+
+	case win.WM_LBUTTONUP:
+		if u.selecting {
+			x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
+			absY := u.sb.absLine(y, u.rows, u.rows)
+			u.sel.x1, u.sel.y1 = x, absY
+			u.selecting = false
+			win.ReleaseCapture()
+			win.InvalidateRect(hwnd, nil, false)
+		}
+		return 0
+
+	case win.WM_RBUTTONUP:
+		// Right-click paste (classic Windows console affordance).
+		u.pasteClipboard()
 		return 0
 
 	case win.WM_PAINT:
@@ -445,22 +555,20 @@ func (u *winUI) paint(hwnd win.HWND) {
 	var rect win.RECT
 	win.GetClientRect(hwnd, &rect)
 
-	// Snapshot grid (UI thread owns term).
-	cols, rows := u.term.Size()
+	// Viewport = history + live screen, with scroll offset.
+	grid := u.sb.view(u.term, u.rows)
 	cur := u.term.Cursor()
-	curVis := u.term.CursorVisible()
-	grid := make([][]rune, rows)
-	for y := 0; y < rows; y++ {
-		row := make([]rune, cols)
-		for x := 0; x < cols; x++ {
-			row[x] = displayRune(u.term.Cell(x, y).Char)
-		}
-		grid[y] = row
+	// Cursor only when pinned to live bottom (otherwise hide caret).
+	curVis := u.term.CursorVisible() && u.sb.atBottom()
+	// Map live cursor into viewport row when at bottom.
+	curY := cur.Y
+	if !u.sb.atBottom() {
+		curVis = false
 	}
 
 	memDC := win.CreateCompatibleDC(hdc)
 	if memDC == 0 {
-		u.blitGrid(hdc, rect, grid, cur.X, cur.Y, curVis)
+		u.blitGrid(hdc, rect, grid, cur.X, curY, curVis)
 		return
 	}
 	defer win.DeleteDC(memDC)
@@ -474,12 +582,12 @@ func (u *winUI) paint(hwnd win.HWND) {
 	}
 	bmp := win.CreateCompatibleBitmap(hdc, w, h)
 	if bmp == 0 {
-		u.blitGrid(hdc, rect, grid, cur.X, cur.Y, curVis)
+		u.blitGrid(hdc, rect, grid, cur.X, curY, curVis)
 		return
 	}
 	defer win.DeleteObject(win.HGDIOBJ(bmp))
 	old := win.SelectObject(memDC, win.HGDIOBJ(bmp))
-	u.blitGrid(memDC, rect, grid, cur.X, cur.Y, curVis)
+	u.blitGrid(memDC, rect, grid, cur.X, curY, curVis)
 	win.BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, win.SRCCOPY)
 	win.SelectObject(memDC, old)
 }
@@ -509,21 +617,40 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]rune, curX, curY i
 	// Keep a little padding from the window edge.
 	const padX, padY int32 = 4, 2
 
-	win.SetBkMode(hdc, win.OPAQUE)
-	win.SetBkColor(hdc, win.RGB(0, 0, 0))
-	win.SetTextColor(hdc, win.RGB(220, 220, 220))
+	u.metricW, u.metricH = cw, ch
 
 	for y, row := range grid {
 		for x, r := range row {
+			px := padX + int32(x)*cw
+			py := padY + int32(y)*ch
+			absY := u.sb.absLine(y, u.rows, u.rows)
+			selected := u.sel.containsAbs(x, absY)
+
+			// Cell background (selection highlight).
+			bg := win.RGB(0, 0, 0)
+			fg := win.RGB(220, 220, 220)
+			if selected {
+				bg = win.RGB(40, 80, 160)
+				fg = win.RGB(255, 255, 255)
+			}
+			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: bg}
+			if br := win.CreateBrushIndirect(&lb); br != 0 {
+				oldBr := win.SelectObject(hdc, win.HGDIOBJ(br))
+				win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
+				win.Rectangle_(hdc, px, py, px+cw, py+ch)
+				win.SelectObject(hdc, oldBr)
+				win.DeleteObject(win.HGDIOBJ(br))
+			}
+
 			if r == ' ' || r == 0 {
-				continue // background already black
+				continue
 			}
 			s, err := syscall.UTF16FromString(string(r))
 			if err != nil || len(s) < 2 {
 				continue
 			}
-			px := padX + int32(x)*cw
-			py := padY + int32(y)*ch
+			win.SetBkMode(hdc, win.TRANSPARENT)
+			win.SetTextColor(hdc, fg)
 			win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
 		}
 	}
@@ -641,4 +768,73 @@ func createFont() win.HFONT {
 
 func lastErr(op string) error {
 	return windows.Errno(win.GetLastError())
+}
+
+var (
+	modUser32       = windows.NewLazySystemDLL("user32.dll")
+	procSetWindowText = modUser32.NewProc("SetWindowTextW")
+)
+
+func setWindowTitle(hwnd win.HWND, title string) {
+	p, err := syscall.UTF16PtrFromString(title)
+	if err != nil {
+		return
+	}
+	_, _, _ = procSetWindowText.Call(uintptr(hwnd), uintptr(unsafe.Pointer(p)))
+}
+
+func (u *winUI) focus() {
+	if u.hwnd != 0 {
+		win.SetFocus(u.hwnd)
+	}
+}
+
+func (u *winUI) pixelToCell(px, py int32) (x, y int) {
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	const padX, padY int32 = 4, 2
+	x = int((px - padX) / cw)
+	y = int((py - padY) / ch)
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	if x >= u.cols {
+		x = u.cols - 1
+	}
+	if y >= u.rows {
+		y = u.rows - 1
+	}
+	return
+}
+
+func (u *winUI) copySelection() {
+	if u.sel.empty() {
+		return
+	}
+	text := u.sel.text(u.sb, u.term)
+	if text == "" {
+		return
+	}
+	_ = setClipboardText(u.hwnd, text)
+}
+
+func (u *winUI) pasteClipboard() {
+	text, err := getClipboardText(u.hwnd)
+	if err != nil || text == "" {
+		return
+	}
+	// Normalize Windows newlines for the shell.
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	u.sendKey([]byte(text))
+	// Jump to live end after paste.
+	u.sb.stickBottom()
 }
