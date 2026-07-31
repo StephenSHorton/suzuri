@@ -3,8 +3,8 @@
 package ui
 
 import (
-	"io"
 	"math"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -23,11 +23,13 @@ const (
 	className = "SuzuriTerminalClass"
 	appTitle  = "suzuri（硯）"
 
-	wmSuzuriRedraw = win.WM_APP + 1
+	// UI-thread work items (never do ConPTY/VT work from foreign threads).
+	wmSuzuriBytes  = win.WM_APP + 1 // drain incoming PTY byte queue into vt10x
+	wmSuzuriBlink  = win.WM_APP + 2
+	wmSuzuriClosed = win.WM_APP + 3 // session read ended
 
 	cursorBlinkPeriod = 1200 * time.Millisecond
-	// Blink ticks are infrequent — full-frame invalidates every 33ms starved the message loop.
-	cursorBlinkTick = 100 * time.Millisecond
+	cursorBlinkTick   = 200 * time.Millisecond
 
 	cellW = 9
 	cellH = 18
@@ -37,20 +39,21 @@ const (
 func Run(sess *host.Session) error {
 	cols, rows := 100, 30
 	ui := &winUI{
-		sess:      sess,
-		cols:      cols,
-		rows:      rows,
-		cfg:       config.Default(),
-		term:      vt10x.New(vt10x.WithSize(cols, rows)),
-		writeCh:   make(chan []byte, 256),
+		sess:       sess,
+		cols:       cols,
+		rows:       rows,
+		cfg:        config.Default(),
+		term:       vt10x.New(vt10x.WithSize(cols, rows)),
+		writeCh:    make(chan []byte, 256),
 		blinkStart: time.Now(),
 	}
+	ui.alive.Store(true)
 	return ui.loop()
 }
 
 type winUI struct {
 	sess *host.Session
-	term vt10x.Terminal
+	term vt10x.Terminal // ONLY touched on the UI thread
 
 	hwnd   win.HWND
 	font   win.HFONT
@@ -60,14 +63,16 @@ type winUI struct {
 	rows   int
 	cfg    config.Config
 
-	// writeCh decouples keyboard handling from ConPTY writes so a full pipe
-	// never freezes the Win32 message loop ("Not Responding").
+	// PTY → UI: raw bytes only. VT parse runs on the UI thread.
+	inMu  sync.Mutex
+	inBuf []byte
+
+	// UI → PTY: never WriteFile on the message loop.
 	writeCh chan []byte
 
 	blinkStart time.Time
-	// redrawPending coalesces PostMessage spam from the PTY reader.
-	redrawPending atomic.Bool
-	alive         atomic.Bool
+	alive      atomic.Bool
+	bytesMsg   atomic.Bool // coalesce wmSuzuriBytes
 }
 
 func (u *winUI) loop() error {
@@ -79,14 +84,15 @@ func (u *winUI) loop() error {
 	cname, _ := syscall.UTF16PtrFromString(className)
 	title, _ := syscall.UTF16PtrFromString(appTitle)
 
+	// Stable callback: keep ui pinned via global map so GC never collects it
+	// while Win32 still has the WndProc pointer.
 	wc := win.WNDCLASSEX{
 		CbSize:        uint32(unsafe.Sizeof(win.WNDCLASSEX{})),
-		LpfnWndProc:   syscall.NewCallback(u.wndProc),
+		LpfnWndProc:   wndProcCallback,
 		HInstance:     hInst,
 		LpszClassName: cname,
 		HCursor:       win.LoadCursor(0, win.MAKEINTRESOURCE(win.IDC_IBEAM)),
 		HbrBackground: win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)),
-		Style:         win.CS_DBLCLKS,
 	}
 	if atom := win.RegisterClassEx(&wc); atom == 0 {
 		if errno := windows.GetLastError(); errno != windows.ERROR_CLASS_ALREADY_EXISTS {
@@ -114,7 +120,8 @@ func (u *winUI) loop() error {
 	}
 	u.hwnd = hwnd
 	u.font = createFont()
-	u.alive.Store(true)
+	registerUI(hwnd, u)
+
 	win.ShowWindow(hwnd, win.SW_SHOW)
 	win.UpdateWindow(hwnd)
 
@@ -137,57 +144,91 @@ func (u *winUI) loop() error {
 	return nil
 }
 
+// --- hwnd → *winUI map (WndProc cannot close over a Go method safely long-term)
+
+var (
+	uiMu  sync.Mutex
+	uiMap = map[win.HWND]*winUI{}
+)
+
+func registerUI(hwnd win.HWND, u *winUI) {
+	uiMu.Lock()
+	uiMap[hwnd] = u
+	uiMu.Unlock()
+}
+
+func unregisterUI(hwnd win.HWND) {
+	uiMu.Lock()
+	delete(uiMap, hwnd)
+	uiMu.Unlock()
+}
+
+func uiFor(hwnd win.HWND) *winUI {
+	uiMu.Lock()
+	defer uiMu.Unlock()
+	return uiMap[hwnd]
+}
+
+//export-style fixed callback (function, not method).
+var wndProcCallback = syscall.NewCallback(wndProcMain)
+
+func wndProcMain(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
+	u := uiFor(hwnd)
+	if u == nil {
+		return win.DefWindowProc(hwnd, msg, wParam, lParam)
+	}
+	return u.handle(hwnd, msg, wParam, lParam)
+}
+
 func (u *winUI) writeLoop() {
 	for b := range u.writeCh {
-		if len(b) == 0 {
-			continue
-		}
 		if _, err := u.sess.Write(b); err != nil {
-			// Session gone — stop accepting.
 			return
 		}
 	}
 }
 
-// sendKey never blocks the UI thread for more than a brief channel send.
 func (u *winUI) sendKey(b []byte) {
 	if !u.alive.Load() || len(b) == 0 {
 		return
 	}
-	// Copy — callers often pass stack-backed slices.
 	p := append([]byte(nil), b...)
 	select {
 	case u.writeCh <- p:
 	default:
-		// Drop if flooded; better than freezing the window.
-	}
-}
-
-func (u *winUI) requestRedraw() {
-	if !u.alive.Load() || u.hwnd == 0 {
-		return
-	}
-	// Coalesce: at most one outstanding redraw message.
-	if u.redrawPending.CompareAndSwap(false, true) {
-		win.PostMessage(u.hwnd, wmSuzuriRedraw, 0, 0)
 	}
 }
 
 func (u *winUI) readLoop() {
-	buf := make([]byte, 8192)
+	buf := make([]byte, 4096)
 	for {
 		n, err := u.sess.Read(buf)
 		if n > 0 {
-			_, _ = u.term.Write(buf[:n])
-			u.requestRedraw()
+			chunk := append([]byte(nil), buf[:n]...)
+			u.inMu.Lock()
+			u.inBuf = append(u.inBuf, chunk...)
+			// Cap runaway buffer (shell spam) so we don't OOM.
+			if len(u.inBuf) > 1<<20 {
+				u.inBuf = u.inBuf[len(u.inBuf)-1<<19:]
+			}
+			u.inMu.Unlock()
+			u.postBytes()
 		}
 		if err != nil {
-			if err != io.EOF {
-				_, _ = u.term.Write([]byte("\r\n[suzuri] session ended\r\n"))
-				u.requestRedraw()
+			if u.hwnd != 0 {
+				win.PostMessage(u.hwnd, wmSuzuriClosed, 0, 0)
 			}
 			return
 		}
+	}
+}
+
+func (u *winUI) postBytes() {
+	if u.hwnd == 0 || !u.alive.Load() {
+		return
+	}
+	if u.bytesMsg.CompareAndSwap(false, true) {
+		win.PostMessage(u.hwnd, wmSuzuriBytes, 0, 0)
 	}
 }
 
@@ -195,19 +236,56 @@ func (u *winUI) blinkLoop() {
 	t := time.NewTicker(cursorBlinkTick)
 	defer t.Stop()
 	for range t.C {
-		if !u.alive.Load() {
+		if !u.alive.Load() || u.hwnd == 0 {
 			return
 		}
-		u.requestRedraw()
+		win.PostMessage(u.hwnd, wmSuzuriBlink, 0, 0)
 	}
 }
 
-func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
+// drainAndParse runs ONLY on the UI thread.
+func (u *winUI) drainAndParse() {
+	u.inMu.Lock()
+	data := u.inBuf
+	u.inBuf = nil
+	u.inMu.Unlock()
+	u.bytesMsg.Store(false)
+
+	if len(data) == 0 {
+		return
+	}
+	// Parse VT on UI thread — no cross-thread lock fights with paint.
+	_, _ = u.term.Write(data)
+	win.InvalidateRect(u.hwnd, nil, false)
+
+	// If more bytes arrived while we parsed, schedule another pass.
+	u.inMu.Lock()
+	more := len(u.inBuf) > 0
+	u.inMu.Unlock()
+	if more {
+		u.postBytes()
+	}
+}
+
+func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
-	case wmSuzuriRedraw:
-		u.redrawPending.Store(false)
+	case wmSuzuriBytes:
+		u.drainAndParse()
+		return 0
+
+	case wmSuzuriBlink:
 		win.InvalidateRect(hwnd, nil, false)
 		return 0
+
+	case wmSuzuriClosed:
+		// Show a note; do not block.
+		_, _ = u.term.Write([]byte("\r\n[suzuri] session ended\r\n"))
+		win.InvalidateRect(hwnd, nil, false)
+		return 0
+
+	case win.WM_ERASEBKGND:
+		// We paint the full frame — skip erase to reduce flicker/extra work.
+		return 1
 
 	case win.WM_SIZE:
 		u.width = int32(win.LOWORD(uint32(lParam)))
@@ -224,7 +302,6 @@ func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintp
 			if cols != u.cols || rows != u.rows {
 				u.cols, u.rows = cols, rows
 				u.term.Resize(cols, rows)
-				// Resize PTY off the UI thread — ConPTY can block.
 				c, r := cols, rows
 				go func() { _ = u.sess.Resize(c, r) }()
 			}
@@ -282,10 +359,20 @@ func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintp
 		u.paint(hwnd)
 		return 0
 
+	case win.WM_CLOSE:
+		win.DestroyWindow(hwnd)
+		return 0
+
 	case win.WM_DESTROY:
 		u.alive.Store(false)
-		// Unblock writeLoop
-		close(u.writeCh)
+		unregisterUI(hwnd)
+		// Close write queue once.
+		select {
+		case <-u.writeCh:
+		default:
+		}
+		// Closing may panic if already closed — use sync.Once pattern.
+		u.closeWriter()
 		go func() { _ = u.sess.Close() }()
 		if u.font != 0 {
 			win.DeleteObject(win.HGDIOBJ(u.font))
@@ -298,39 +385,9 @@ func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintp
 	return win.DefWindowProc(hwnd, msg, wParam, lParam)
 }
 
-// rowSnapshot is a paint-friendly copy of one terminal row.
-type rowSnapshot struct {
-	text string
-}
-
-type frameSnapshot struct {
-	rows   []rowSnapshot
-	curX   int
-	curY   int
-	curVis bool
-}
-
-func (u *winUI) snapshot() frameSnapshot {
-	u.term.Lock()
-	defer u.term.Unlock()
-
-	cols, rows := u.term.Size()
-	cur := u.term.Cursor()
-	vis := u.term.CursorVisible()
-	out := make([]rowSnapshot, rows)
-	buf := make([]rune, cols)
-	for y := 0; y < rows; y++ {
-		for x := 0; x < cols; x++ {
-			buf[x] = displayRune(u.term.Cell(x, y).Char)
-		}
-		out[y] = rowSnapshot{text: string(buf)}
-	}
-	return frameSnapshot{
-		rows:   out,
-		curX:   cur.X,
-		curY:   cur.Y,
-		curVis: vis,
-	}
+func (u *winUI) closeWriter() {
+	defer func() { _ = recover() }()
+	close(u.writeCh)
 }
 
 func (u *winUI) paint(hwnd win.HWND) {
@@ -338,70 +395,82 @@ func (u *winUI) paint(hwnd win.HWND) {
 	hdc := win.BeginPaint(hwnd, &ps)
 	defer win.EndPaint(hwnd, &ps)
 
-	// Snapshot under lock only — never call ConPTY or do heavy work while locked.
-	frame := u.snapshot()
-
 	var rect win.RECT
 	win.GetClientRect(hwnd, &rect)
 
-	// Double-buffer to avoid flicker and reduce time with a half-drawn frame.
+	// Build row strings on UI thread (term is only used here + drainAndParse).
+	cols, rows := u.term.Size()
+	cur := u.term.Cursor()
+	curVis := u.term.CursorVisible()
+	rowText := make([]string, rows)
+	buf := make([]rune, cols)
+	for y := 0; y < rows; y++ {
+		for x := 0; x < cols; x++ {
+			buf[x] = displayRune(u.term.Cell(x, y).Char)
+		}
+		rowText[y] = string(buf)
+	}
+
 	memDC := win.CreateCompatibleDC(hdc)
 	if memDC == 0 {
-		u.paintFrame(hdc, rect, frame)
+		u.blit(hdc, rect, rowText, cur.X, cur.Y, curVis)
 		return
 	}
 	defer win.DeleteDC(memDC)
-	bmp := win.CreateCompatibleBitmap(hdc, rect.Right-rect.Left, rect.Bottom-rect.Top)
+	w := rect.Right - rect.Left
+	h := rect.Bottom - rect.Top
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	bmp := win.CreateCompatibleBitmap(hdc, w, h)
 	if bmp == 0 {
-		u.paintFrame(hdc, rect, frame)
+		u.blit(hdc, rect, rowText, cur.X, cur.Y, curVis)
 		return
 	}
 	defer win.DeleteObject(win.HGDIOBJ(bmp))
-	oldBmp := win.SelectObject(memDC, win.HGDIOBJ(bmp))
-	defer win.SelectObject(memDC, oldBmp)
-
-	u.paintFrame(memDC, rect, frame)
-	win.BitBlt(hdc, 0, 0, rect.Right-rect.Left, rect.Bottom-rect.Top, memDC, 0, 0, win.SRCCOPY)
+	old := win.SelectObject(memDC, win.HGDIOBJ(bmp))
+	u.blit(memDC, rect, rowText, cur.X, cur.Y, curVis)
+	win.BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, win.SRCCOPY)
+	win.SelectObject(memDC, old)
 }
 
-func (u *winUI) paintFrame(hdc win.HDC, rect win.RECT, frame frameSnapshot) {
+func (u *winUI) blit(hdc win.HDC, rect win.RECT, rows []string, curX, curY int, curVis bool) {
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.BLACK_BRUSH)))
 	win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
 	win.Rectangle_(hdc, rect.Left, rect.Top, rect.Right, rect.Bottom)
 
-	old := win.SelectObject(hdc, win.HGDIOBJ(u.font))
-	defer win.SelectObject(hdc, old)
+	oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
+	defer win.SelectObject(hdc, oldFont)
 	win.SetBkMode(hdc, win.TRANSPARENT)
 	win.SetTextColor(hdc, win.RGB(220, 220, 220))
 
-	for y, row := range frame.rows {
-		if row.text == "" {
+	for y, line := range rows {
+		if line == "" {
 			continue
 		}
-		utf16, err := syscall.UTF16FromString(row.text)
+		utf16, err := syscall.UTF16FromString(line)
 		if err != nil || len(utf16) < 2 {
 			continue
 		}
 		win.TextOut(hdc, 4, int32(y*cellH+2), &utf16[0], int32(len(utf16)-1))
 	}
 
-	if u.cfg.Cursor == config.CursorBlock && frame.curVis {
-		cx, cy := frame.curX, frame.curY
-		if cx < 0 {
-			cx = 0
+	if u.cfg.Cursor == config.CursorBlock && curVis {
+		if curX < 0 {
+			curX = 0
 		}
-		if cy < 0 {
-			cy = 0
+		if curY < 0 {
+			curY = 0
 		}
-		px := int32(4 + cx*cellW)
-		py := int32(2 + cy*cellH)
-
+		px := int32(4 + curX*cellW)
+		py := int32(2 + curY*cellH)
 		elapsed := time.Since(u.blinkStart).Seconds()
 		period := cursorBlinkPeriod.Seconds()
-		phase := 2 * math.Pi * (elapsed / period)
-		alpha := 0.5 + 0.5*math.Sin(phase)
+		alpha := 0.5 + 0.5*math.Sin(2*math.Pi*(elapsed/period))
 		level := byte(50 + alpha*205)
-
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(level, level, level)}
 		brush := win.CreateBrushIndirect(&lb)
 		if brush != 0 {
