@@ -4,7 +4,7 @@
 
 A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a TUI inside someone else’s emulator, and not a Warp fork.
 
-## Status (v0.2)
+## Status (v0.3)
 
 | Feature | State |
 |---------|--------|
@@ -13,8 +13,10 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | Block caret (opacity pulse) | ✅ |
 | PowerShell-friendly Backspace (DEL) | ✅ |
 | Scrollback + mouse wheel / PgUp·PgDn | ✅ |
+| Multi-row scroll capture | ✅ |
 | Drag select + copy/paste | ✅ |
-| Tabs / splits / truecolor / Charm menus | soon |
+| ANSI 16 / 256 / truecolor + bold | ✅ |
+| Tabs / splits / Charm menus | soon |
 
 ### Keys
 

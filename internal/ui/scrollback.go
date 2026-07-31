@@ -8,21 +8,20 @@ import (
 
 const defaultScrollbackMax = 5000
 
-// scrollback keeps lines that have scrolled off the live VT screen so the user
-// can wheel upward. Detection is heuristic: after each parse, if the screen
-// shifted up by one row, the old top row is pushed into history.
+// scrollback keeps rows that have scrolled off the live VT screen.
+// History stores plain text (color not preserved for v0.3); live rows keep full cells.
 type scrollback struct {
-	lines  []string // oldest → newest (scrolled-off rows only)
+	lines  []string
 	max    int
-	prev   []string // previous live screen snapshot
-	offset int      // 0 = pinned to bottom; >0 = lines scrolled up
+	prev   []string
+	offset int
 }
 
 func newScrollback() *scrollback {
 	return &scrollback{max: defaultScrollbackMax}
 }
 
-func snapshotScreen(term vt10x.Terminal) []string {
+func snapshotScreenText(term vt10x.Terminal) []string {
 	cols, rows := term.Size()
 	out := make([]string, rows)
 	buf := make([]rune, cols)
@@ -30,38 +29,63 @@ func snapshotScreen(term vt10x.Terminal) []string {
 		for x := 0; x < cols; x++ {
 			buf[x] = displayRune(term.Cell(x, y).Char)
 		}
-		// Keep full width so selection/copy stay column-aligned.
 		out[y] = string(buf)
 	}
 	return out
 }
 
+func snapshotScreenCells(term vt10x.Terminal) [][]cellPix {
+	cols, rows := term.Size()
+	out := make([][]cellPix, rows)
+	for y := 0; y < rows; y++ {
+		row := make([]cellPix, cols)
+		for x := 0; x < cols; x++ {
+			row[x] = glyphToCell(term.Cell(x, y))
+		}
+		out[y] = row
+	}
+	return out
+}
+
 func (s *scrollback) noteScreen(term vt10x.Terminal) {
-	cur := snapshotScreen(term)
+	cur := snapshotScreenText(term)
 	if len(s.prev) == len(cur) && len(cur) > 1 {
-		// Scrolled up by one: prev[1:] == cur[:len-1]
-		if screenShiftedUp(s.prev, cur) {
-			s.push(s.prev[0])
+		// Multi-line scroll: find largest n where prev[n:] == cur[:len-n]
+		if n := scrollAmount(s.prev, cur); n > 0 {
+			for i := 0; i < n; i++ {
+				s.push(s.prev[i])
+			}
 		}
 	}
 	s.prev = cur
-	// Clamp offset if history shrank somehow
 	if s.offset > len(s.lines) {
 		s.offset = len(s.lines)
 	}
 }
 
-func screenShiftedUp(prev, cur []string) bool {
+// scrollAmount returns how many rows the screen shifted up (0 if none).
+func scrollAmount(prev, cur []string) int {
 	if len(prev) != len(cur) || len(cur) < 2 {
-		return false
+		return 0
 	}
-	for i := 0; i < len(cur)-1; i++ {
-		if prev[i+1] != cur[i] {
-			return false
+	maxN := len(cur) - 1
+	for n := maxN; n >= 1; n-- {
+		ok := true
+		for i := 0; i < len(cur)-n; i++ {
+			if prev[i+n] != cur[i] {
+				ok = false
+				break
+			}
+		}
+		if ok && (prev[0] != cur[0] || prev[len(prev)-1] != cur[len(cur)-1]) {
+			return n
 		}
 	}
-	// Top line must have changed (otherwise no scroll, just identical frame)
-	return prev[0] != cur[0] || prev[len(prev)-1] != cur[len(cur)-1]
+	return 0
+}
+
+func screenShiftedUp(prev, cur []string) bool {
+	return scrollAmount(prev, cur) == 1
 }
 
 func (s *scrollback) push(line string) {
@@ -93,33 +117,38 @@ func (s *scrollback) atBottom() bool { return s.offset == 0 }
 
 func (s *scrollback) stickBottom() { s.offset = 0 }
 
-// view assembles viewportRows lines for painting (top → bottom).
-func (s *scrollback) view(term vt10x.Terminal, viewportRows int) [][]rune {
-	live := snapshotScreen(term)
-	// Combined document: history + live
-	doc := make([]string, 0, len(s.lines)+len(live))
-	doc = append(doc, s.lines...)
-	doc = append(doc, live...)
-
+// viewCells builds the viewport with color for live rows and default colors for history.
+func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPix {
+	live := snapshotScreenCells(term)
 	cols, _ := term.Size()
 	if viewportRows < 1 {
 		viewportRows = 1
 	}
-	start := len(doc) - viewportRows - s.offset
+
+	// Document length in lines
+	docLen := len(s.lines) + len(live)
+	start := docLen - viewportRows - s.offset
 	if start < 0 {
 		start = 0
 	}
-	out := make([][]rune, viewportRows)
+
+	out := make([][]cellPix, viewportRows)
 	for i := 0; i < viewportRows; i++ {
-		row := make([]rune, cols)
+		row := make([]cellPix, cols)
 		for x := range row {
-			row[x] = ' '
+			row[x] = cellPix{Ch: ' ', FR: 220, FG: 220, FB: 220}
 		}
 		idx := start + i
-		if idx >= 0 && idx < len(doc) {
-			rs := []rune(doc[idx])
+		if idx < len(s.lines) {
+			// history: monochrome
+			rs := []rune(s.lines[idx])
 			for x := 0; x < cols && x < len(rs); x++ {
-				row[x] = rs[x]
+				row[x] = cellPix{Ch: rs[x], FR: 180, FG: 180, FB: 180}
+			}
+		} else {
+			li := idx - len(s.lines)
+			if li >= 0 && li < len(live) {
+				copy(row, live[li])
 			}
 		}
 		out[i] = row
@@ -127,7 +156,20 @@ func (s *scrollback) view(term vt10x.Terminal, viewportRows int) [][]rune {
 	return out
 }
 
-// absLine maps a viewport row to an absolute document line index.
+// view keeps rune-only API for tests / simple callers.
+func (s *scrollback) view(term vt10x.Terminal, viewportRows int) [][]rune {
+	cells := s.viewCells(term, viewportRows)
+	out := make([][]rune, len(cells))
+	for y := range cells {
+		row := make([]rune, len(cells[y]))
+		for x := range cells[y] {
+			row[x] = cells[y][x].Ch
+		}
+		out[y] = row
+	}
+	return out
+}
+
 func (s *scrollback) absLine(viewY, viewportRows, liveRows int) int {
 	docLen := len(s.lines) + liveRows
 	start := docLen - viewportRows - s.offset
@@ -144,7 +186,7 @@ func (s *scrollback) lineText(abs int, term vt10x.Terminal) string {
 	if abs < len(s.lines) {
 		return s.lines[abs]
 	}
-	live := snapshotScreen(term)
+	live := snapshotScreenText(term)
 	i := abs - len(s.lines)
 	if i >= 0 && i < len(live) {
 		return strings.TrimRight(live[i], " ")

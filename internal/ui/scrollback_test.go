@@ -16,6 +16,14 @@ func TestScreenShiftedUp(t *testing.T) {
 	}
 }
 
+func TestScrollAmountMulti(t *testing.T) {
+	prev := []string{"a", "b", "c", "d"}
+	cur := []string{"c", "d", "e", "f"}
+	if n := scrollAmount(prev, cur); n != 2 {
+		t.Fatalf("got %d want 2", n)
+	}
+}
+
 func TestScrollByClamp(t *testing.T) {
 	s := newScrollback()
 	s.lines = []string{"1", "2", "3"}
