@@ -4,6 +4,7 @@ package ui
 
 import (
 	"math"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,9 +83,18 @@ type winUI struct {
 	bytesMsg      atomic.Bool // coalesce wmSuzuriBytes
 	lastBackspace time.Time   // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
 	selecting     bool
+
+	// Reused double-buffer (recreated on resize) to avoid GDI thrash.
+	memDC  win.HDC
+	memBmp win.HBITMAP
+	memW   int32
+	memH   int32
 }
 
 func (u *winUI) loop() error {
+	// Must stay on this OS thread for the life of the HWND (see main).
+	runtime.LockOSThread()
+
 	hInst := win.GetModuleHandle(nil)
 	if hInst == 0 {
 		return lastErr("GetModuleHandle")
@@ -247,6 +257,11 @@ func (u *winUI) blinkLoop() {
 	for range t.C {
 		if !u.alive.Load() || u.hwnd == 0 {
 			return
+		}
+		// Only blink when we are the foreground window — idle background
+		// invalidates were a major source of "sit for a bit → frozen".
+		if win.GetForegroundWindow() != u.hwnd {
+			continue
 		}
 		win.PostMessage(u.hwnd, wmSuzuriBlink, 0, 0)
 	}
@@ -490,6 +505,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Closing may panic if already closed — use sync.Once pattern.
 		u.closeWriter()
 		go func() { _ = u.sess.Close() }()
+		u.releaseBackbuffer()
 		if u.font != 0 {
 			win.DeleteObject(win.HGDIOBJ(u.font))
 			u.font = 0
@@ -499,6 +515,45 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 	}
 	return win.DefWindowProc(hwnd, msg, wParam, lParam)
+}
+
+func (u *winUI) releaseBackbuffer() {
+	if u.memDC != 0 {
+		if u.memBmp != 0 {
+			win.SelectObject(u.memDC, win.HGDIOBJ(0))
+			win.DeleteObject(win.HGDIOBJ(u.memBmp))
+			u.memBmp = 0
+		}
+		win.DeleteDC(u.memDC)
+		u.memDC = 0
+	}
+	u.memW, u.memH = 0, 0
+}
+
+func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	if u.memDC != 0 && u.memBmp != 0 && u.memW == w && u.memH == h {
+		return true
+	}
+	u.releaseBackbuffer()
+	u.memDC = win.CreateCompatibleDC(hdc)
+	if u.memDC == 0 {
+		return false
+	}
+	u.memBmp = win.CreateCompatibleBitmap(hdc, w, h)
+	if u.memBmp == 0 {
+		win.DeleteDC(u.memDC)
+		u.memDC = 0
+		return false
+	}
+	win.SelectObject(u.memDC, win.HGDIOBJ(u.memBmp))
+	u.memW, u.memH = w, h
+	return true
 }
 
 func (u *winUI) closeWriter() {
@@ -566,30 +621,14 @@ func (u *winUI) paint(hwnd win.HWND) {
 		curVis = false
 	}
 
-	memDC := win.CreateCompatibleDC(hdc)
-	if memDC == 0 {
-		u.blitGrid(hdc, rect, grid, cur.X, curY, curVis)
-		return
-	}
-	defer win.DeleteDC(memDC)
 	w := rect.Right - rect.Left
 	h := rect.Bottom - rect.Top
-	if w < 1 {
-		w = 1
-	}
-	if h < 1 {
-		h = 1
-	}
-	bmp := win.CreateCompatibleBitmap(hdc, w, h)
-	if bmp == 0 {
+	if !u.ensureBackbuffer(hdc, w, h) {
 		u.blitGrid(hdc, rect, grid, cur.X, curY, curVis)
 		return
 	}
-	defer win.DeleteObject(win.HGDIOBJ(bmp))
-	old := win.SelectObject(memDC, win.HGDIOBJ(bmp))
-	u.blitGrid(memDC, rect, grid, cur.X, curY, curVis)
-	win.BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, win.SRCCOPY)
-	win.SelectObject(memDC, old)
+	u.blitGrid(u.memDC, rect, grid, cur.X, curY, curVis)
+	win.BitBlt(hdc, 0, 0, w, h, u.memDC, 0, 0, win.SRCCOPY)
 }
 
 // blitGrid paints each VT cell at a fixed pixel pitch so the caret lines up

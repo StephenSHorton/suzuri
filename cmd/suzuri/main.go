@@ -15,6 +15,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Win32 requires CreateWindow + GetMessage + WndProc on one OS thread.
+	// Without this, the Go scheduler can migrate the UI goroutine after idle
+	// and the window stops processing messages ("Not Responding").
+	runtime.LockOSThread()
+
 	cols, rows := 100, 30
 	sess, err := host.StartSession(host.DefaultShell(), cols, rows)
 	if err != nil {
