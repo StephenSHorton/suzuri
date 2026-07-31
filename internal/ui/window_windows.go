@@ -311,14 +311,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_CHAR:
 		ch := rune(wParam)
+		// BS/DEL/TAB/LF are handled on KEYDOWN only (or ignored). Treating
+		// 0x7f as a "printable" via utf8Encode would double-send deletes.
 		switch ch {
-		case 0x08, 0x09, 0x0a:
+		case 0x08, 0x09, 0x0a, 0x7f:
 			return 0
 		case 0x0d:
 			u.sendKey([]byte("\r"))
 			return 0
 		}
-		if ch >= 32 {
+		if ch >= 32 && ch != 0x7f {
 			var buf [4]byte
 			n := utf8Encode(buf[:], ch)
 			u.sendKey(buf[:n])
@@ -394,8 +396,12 @@ func (u *winUI) closeWriter() {
 	close(u.writeCh)
 }
 
-// handleBackspace sends at most one BS for this message, then drops any
+// handleBackspace sends at most one delete for this message, then drops any
 // immediately queued Backspace KEYDOWN/CHAR so a burst cannot erase the line.
+//
+// Important: on Windows ConPTY + PowerShell, 0x08 (BS) does NOT erase one
+// character — probing shows it blanks the whole input with spaces. Single-char
+// erase is DEL (0x7f), which PowerShell answers with the classic "\b \b".
 func (u *winUI) handleBackspace(hwnd win.HWND, lParam uintptr) {
 	// bit 30: 1 = key was already down (autorepeat). Allow repeats, but not faster
 	// than ~30/sec, and never a simultaneous burst from a stalled queue.
@@ -406,7 +412,7 @@ func (u *winUI) handleBackspace(hwnd win.HWND, lParam uintptr) {
 		return
 	}
 	u.lastBackspace = now
-	u.sendKey([]byte{0x08})
+	u.sendKey([]byte{0x7f})
 	u.drainQueuedBackspaces(hwnd)
 }
 
@@ -421,7 +427,7 @@ func (u *winUI) drainQueuedBackspaces(hwnd win.HWND) {
 			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
 		case msg.Message == win.WM_KEYUP && msg.WParam == uintptr(win.VK_BACK):
 			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
-		case msg.Message == win.WM_CHAR && msg.WParam == 0x08:
+		case msg.Message == win.WM_CHAR && (msg.WParam == 0x08 || msg.WParam == 0x7f):
 			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
 		case msg.Message == win.WM_SYSKEYDOWN && msg.WParam == uintptr(win.VK_BACK):
 			win.PeekMessage(&msg, hwnd, 0, 0, win.PM_REMOVE)
@@ -528,7 +534,19 @@ func displayRune(r rune) rune {
 	if r == 0 || r == 0xFFFD {
 		return ' '
 	}
+	// C0 / DEL / C1 controls
 	if r < 0x20 || (r >= 0x7f && r < 0xa0) {
+		return ' '
+	}
+	// Private Use / surrogates / noncharacters often render as "unknown glyph"
+	// boxes next to the caret when fonts lack coverage (and DEC-graphics mishaps).
+	if r >= 0xE000 && r <= 0xF8FF {
+		return ' '
+	}
+	if r >= 0xF0000 {
+		return ' '
+	}
+	if unicode.Is(unicode.Cf, r) { // format chars (ZWJ, etc.)
 		return ' '
 	}
 	if !unicode.IsPrint(r) && r != ' ' {
