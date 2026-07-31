@@ -3,6 +3,8 @@
 package ui
 
 import (
+	"math"
+
 	"github.com/lxn/win"
 )
 
@@ -185,18 +187,10 @@ func drawBoxDrawing(hdc win.HDC, r rune, cell win.RECT, fr, fg, fb byte) bool {
 	case '╋':
 		drawArms(hdc, cell, armN|armS|armE|armW, true, fr, fg, fb)
 		return true
-	// Rounded corners (Lip Gloss RoundedBorder) — same arms, edge-to-edge.
-	case '╭': // U+256D
-		drawArms(hdc, cell, armS|armE, false, fr, fg, fb)
-		return true
-	case '╮': // U+256E
-		drawArms(hdc, cell, armS|armW, false, fr, fg, fb)
-		return true
-	case '╯': // U+256F
-		drawArms(hdc, cell, armN|armW, false, fr, fg, fb)
-		return true
-	case '╰': // U+2570
-		drawArms(hdc, cell, armN|armE, false, fr, fg, fb)
+	// Rounded corners (Lip Gloss RoundedBorder / Unicode light arcs).
+	// These must be real quarter-circles — square L-arms look sharp vs WT.
+	case '╭', '╮', '╯', '╰': // U+256D–U+2570
+		drawRoundCorner(hdc, cell, r, fr, fg, fb)
 		return true
 	// Double lines — two parallel light strokes.
 	case '═':
@@ -233,6 +227,77 @@ func drawBoxDrawing(hdc win.HDC, r rune, cell win.RECT, fr, fg, fb byte) bool {
 func drawDoubleCorner(hdc win.HDC, cell win.RECT, a arm, fr, fg, fb byte) {
 	// Approximate double corners with heavy single arms for now (still seamless).
 	drawArms(hdc, cell, a, true, fr, fg, fb)
+}
+
+// drawRoundCorner paints Unicode light arcs ╭╮╯╰ as true quarter-circles with
+// edge-to-edge arms (matches Windows Terminal / font rounded box drawing).
+// Angle convention: 0 = east, increasing clockwise (screen y grows downward).
+func drawRoundCorner(hdc win.HDC, cell win.RECT, which rune, fr, fg, fb byte) {
+	cx, cy := cellMid(cell)
+	t := lineThick(cell, false)
+	cw := cell.Right - cell.Left
+	ch := cell.Bottom - cell.Top
+	// Radius fills half the cell so the curve is obvious and arms still reach edges.
+	r := min32(cw, ch) / 2
+	if r < 3 {
+		r = 3
+	}
+
+	var start, end float64
+	switch which {
+	case '╭': // arc down and right — SE quarter, arms E + S
+		start, end = 0, math.Pi/2
+		hStroke(hdc, cx+r-t/2, cell.Right, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cy+r-t/2, cell.Bottom, t, fr, fg, fb)
+	case '╮': // arc down and left — SW quarter, arms W + S
+		start, end = math.Pi/2, math.Pi
+		hStroke(hdc, cell.Left, cx-r+t/2, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cy+r-t/2, cell.Bottom, t, fr, fg, fb)
+	case '╯': // arc up and left — NW quarter, arms W + N
+		start, end = math.Pi, 3*math.Pi/2
+		hStroke(hdc, cell.Left, cx-r+t/2, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cell.Top, cy-r+t/2, t, fr, fg, fb)
+	case '╰': // arc up and right — NE quarter, arms E + N
+		start, end = 3*math.Pi/2, 2*math.Pi
+		hStroke(hdc, cx+r-t/2, cell.Right, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cell.Top, cy-r+t/2, t, fr, fg, fb)
+	default:
+		return
+	}
+	strokeArcCW(hdc, cx, cy, r, t, start, end, fr, fg, fb)
+}
+
+// strokeArcCW draws a thick arc by stamping small rects along the curve.
+// Angles: 0=east, increasing clockwise (y-down screen space).
+func strokeArcCW(hdc win.HDC, cx, cy, radius, thick int32, start, end float64, fr, fg, fb byte) {
+	if radius < 1 {
+		return
+	}
+	if thick < 1 {
+		thick = 1
+	}
+	// ~1 sample per pixel of arc length
+	arcLen := math.Abs(end-start) * float64(radius)
+	steps := int(arcLen + 0.5)
+	if steps < 12 {
+		steps = 12
+	}
+	if steps > 64 {
+		steps = 64
+	}
+	half := thick / 2
+	for i := 0; i <= steps; i++ {
+		th := start + (end-start)*float64(i)/float64(steps)
+		// clockwise from east with y-down: x=cos, y=sin
+		x := cx + int32(math.Round(float64(radius)*math.Cos(th)))
+		y := cy + int32(math.Round(float64(radius)*math.Sin(th)))
+		fillRGB(hdc, win.RECT{
+			Left:   x - half,
+			Top:    y - half,
+			Right:  x - half + thick,
+			Bottom: y - half + thick,
+		}, fr, fg, fb)
+	}
 }
 
 func drawBlockElement(hdc win.HDC, r rune, cell win.RECT, fr, fg, fb byte) bool {
