@@ -24,6 +24,8 @@ This is a **real terminal host**: your window, your PTY, your grid. Not a TUI th
 
 Not yet: full VT fidelity, GPU text, tabs, scrollback chrome, Charm menus.
 
+Defaults: **block cursor** (`config.CursorBlock`).
+
 ## Run (Windows)
 
 ```powershell

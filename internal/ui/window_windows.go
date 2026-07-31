@@ -12,6 +12,7 @@ import (
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 
+	"github.com/StephenSHorton/suzuri/internal/config"
 	"github.com/StephenSHorton/suzuri/internal/host"
 	"github.com/StephenSHorton/suzuri/internal/vt"
 )
@@ -28,6 +29,7 @@ func Run(sess *host.Session) error {
 		// rough cell metrics for default window
 		cols: 100,
 		rows: 30,
+		cfg:  config.Default(), // CursorBlock by default
 	}
 	return ui.loop()
 }
@@ -44,7 +46,7 @@ type winUI struct {
 
 	mu     sync.Mutex
 	lines  []string // scrollback lines (plain text after strip)
-	cursor int      // line count used as caret row hint
+	cfg    config.Config
 }
 
 func (u *winUI) loop() error {
@@ -177,10 +179,11 @@ func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintp
 		return 0
 
 	case win.WM_CHAR:
-		// Printable + backspace/enter via CHAR
+		// Printable / control chars. Backspace is handled only on WM_KEYDOWN
+		// (VK_BACK) so we don't double-send when TranslateMessage also emits
+		// WM_CHAR 0x08.
 		ch := rune(wParam)
-		if ch == 0x08 { // backspace sometimes arrives here
-			_, _ = u.sess.Write([]byte{0x7f})
+		if ch == 0x08 {
 			return 0
 		}
 		if ch == 0x0d { // CR
@@ -224,8 +227,8 @@ func (u *winUI) wndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintp
 		case win.VK_ESCAPE:
 			_, _ = u.sess.Write([]byte{0x1b})
 		case win.VK_BACK:
-			// Prefer WM_CHAR for backspace when delivered; also handle here
-			_, _ = u.sess.Write([]byte{0x7f})
+			// ConPTY + Windows shells expect BS (0x08), not DEL (0x7f).
+			_, _ = u.sess.Write([]byte{0x08})
 		}
 		return 0
 
@@ -276,9 +279,13 @@ func (u *winUI) paint(hwnd win.HWND) {
 		start = len(lines) - maxRows
 	}
 	y := int32(4)
+	var lastLine string
+	var lastY int32
 	for _, line := range lines[start:] {
 		// Expand tabs simply
 		line = strings.ReplaceAll(line, "\t", "    ")
+		lastLine = line
+		lastY = y
 		utf16, err := syscall.UTF16FromString(line)
 		if err != nil {
 			continue
@@ -288,6 +295,22 @@ func (u *winUI) paint(hwnd win.HWND) {
 		if y > rect.Bottom {
 			break
 		}
+	}
+
+	// Provisional caret: block at end of last visible line until the VT
+	// grid tracks a real cursor position. Default style is CursorBlock.
+	if u.cfg.Cursor == config.CursorBlock {
+		cellW := int32(9)
+		// Approximate monospace advance (Consolas ~0.5em of height).
+		col := int32(len([]rune(lastLine)))
+		cx := int32(8) + col*cellW
+		cy := lastY
+		if cy == 0 {
+			cy = 4
+		}
+		win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.WHITE_BRUSH)))
+		win.SelectObject(hdc, win.HGDIOBJ(win.GetStockObject(win.NULL_PEN)))
+		win.Rectangle_(hdc, cx, cy, cx+cellW, cy+lineH-2)
 	}
 }
 
