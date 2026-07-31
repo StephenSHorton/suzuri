@@ -66,6 +66,9 @@ type winUI struct {
 	pendingMu sync.Mutex
 	pending   strings.Builder
 
+	// stream holds incomplete UTF-8 / CSI across ConPTY reads (readLoop only).
+	stream vt.Stream
+
 	blinkStart time.Time
 }
 
@@ -144,7 +147,8 @@ func (u *winUI) readLoop() {
 	for {
 		n, err := u.sess.Read(buf)
 		if n > 0 {
-			text := string(vt.StripCSI(buf[:n]))
+			// Streaming strip+UTF-8: never emit � for split sequences.
+			text := u.stream.Write(buf[:n])
 			if text != "" {
 				u.pendingMu.Lock()
 				u.pending.WriteString(text)
@@ -154,12 +158,17 @@ func (u *winUI) readLoop() {
 			}
 		}
 		if err != nil {
+			if tail := u.stream.Flush(); tail != "" {
+				u.pendingMu.Lock()
+				u.pending.WriteString(tail)
+				u.pendingMu.Unlock()
+			}
 			if err != io.EOF {
 				u.pendingMu.Lock()
 				u.pending.WriteString("\n[suzuri] session ended\n")
 				u.pendingMu.Unlock()
-				win.PostMessage(u.hwnd, wmSuzuriOutput, 0, 0)
 			}
+			win.PostMessage(u.hwnd, wmSuzuriOutput, 0, 0)
 			return
 		}
 	}
