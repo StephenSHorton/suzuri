@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>suzuri（硯）— Windows terminal host</title>
+  <meta name="description" content="suzuri is a native Win32 terminal host: ConPTY, VT grid, Charm chrome, Warp-style input bar. Not a TUI inside someone else's emulator." />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Shippori+Mincho:wght@500;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="bg" aria-hidden="true"></div>
+  <header class="wrap">
+    <p class="brand"><span class="kanji">硯</span> suzuri</p>
+    <nav>
+      <a href="https://github.com/StephenSHorton/suzuri">GitHub</a>
+      <a href="https://github.com/StephenSHorton/suzuri/releases/latest">Download</a>
+      <a href="https://github.com/StephenSHorton/suzuri#readme">Docs</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1>Your window.<br />Your ConPTY.<br /><em>Real terminal host.</em></h1>
+      <p class="lede">
+        <strong>suzuri（硯）</strong> means <em>inkstone</em> — where ink is ground before writing.
+        A native Windows terminal: Win32 + ConPTY + VT cells + Charm chrome.
+        Not a TUI inside someone else’s emulator. Not a Warp fork.
+      </p>
+      <div class="cta">
+        <a class="btn primary" id="download" href="https://github.com/StephenSHorton/suzuri/releases/latest">
+          Download for Windows
+        </a>
+        <a class="btn ghost" href="https://github.com/StephenSHorton/suzuri">
+          Source on GitHub
+        </a>
+      </div>
+      <p class="meta" id="release-meta">Portable <code>.exe</code> · MIT License · amd64</p>
+    </section>
+
+    <section class="grid">
+      <article>
+        <h2>Host, not guest</h2>
+        <p>Owns the window, the PTY, selection, scrollback, and fonts. Shells run for real — PowerShell, cmd, pwsh — not a fake pipe.</p>
+      </article>
+      <article>
+        <h2>Charm chrome</h2>
+        <p>Tabs, command palette, settings, themes, and help are Bubble Tea + Lip Gloss — composited over a dimmed shell, Crush-inspired without the AI product.</p>
+      </article>
+      <article>
+        <h2>Warp-style bar</h2>
+        <p>Local line edit, multiline, history, echo suppression. Full-screen apps reclaim the bottom. Quiet prompts keep the shell clean.</p>
+      </article>
+      <article>
+        <h2>Polish that sticks</h2>
+        <p>Window placement, high-contrast themes, matrix/ripple intros, MCP diagnostics for agents, and GitHub Releases auto-update.</p>
+      </article>
+    </section>
+
+    <section class="keys">
+      <h2>Essentials</h2>
+      <table>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Command palette</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>Settings</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd></td><td>New tab</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>/</kbd></td><td>Help</td></tr>
+      </table>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <p>MIT © Stephen S. Horton · <a href="https://github.com/StephenSHorton/suzuri">StephenSHorton/suzuri</a></p>
+    <p class="fine">GohuFont uni14 Nerd Font Mono is bundled under WTFPL (see <code>assets/fonts</code>).</p>
+  </footer>
+
+  <script>
+    // Best-effort: surface latest release tag on the page.
+    fetch('https://api.github.com/repos/StephenSHorton/suzuri/releases/latest')
+      .then(r => r.ok ? r.json() : null)
+      .then(rel => {
+        if (!rel || !rel.tag_name) return;
+        const meta = document.getElementById('release-meta');
+        meta.innerHTML = `Latest <strong>${rel.tag_name}</strong> · portable <code>.exe</code> · MIT · amd64`;
+        const a = document.getElementById('download');
+        a.href = rel.html_url;
+        const exe = (rel.assets || []).find(x => /windows-amd64\.exe$/i.test(x.name));
+        if (exe) a.href = exe.browser_download_url;
+      })
+      .catch(() => {});
+  </script>
+</body>
+</html>

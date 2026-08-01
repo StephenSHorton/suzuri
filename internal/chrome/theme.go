@@ -69,7 +69,7 @@ var StockANSI16 = [16][3]byte{
 }
 
 func init() {
-	ApplyTheme(config.ThemeInkstone)
+	ApplyTheme(config.ThemeHighContrast)
 }
 
 // ApplyTheme sets chrome colors, GDI bytes, and ShellANSI16.
@@ -113,21 +113,23 @@ func ApplyTheme(id string) {
 			rgbArr(hex("#f8f0f4")),
 		}
 	case config.ThemeHighContrast:
+		// Primary is the fill for active tabs + settings selection — keep it a
+		// deep green so it doesn't glare. Border stays neon for outlines.
 		setPalette(
 			hex("#000000"),
 			hex("#0a0a0a"),
 			hex("#141414"),
-			hex("#00e676"), // primary
+			hex("#0a5c32"), // primary — dark green fills (was neon #00e676)
 			hex("#ffeb3b"), // secondary
-			hex("#000000"), // onPrimary
+			hex("#e8fff0"), // onPrimary — light text on dark green fills
 			hex("#ffffff"),
 			hex("#e0e0e0"),
 			hex("#b0b0b0"),
 			hex("#707070"),
-			hex("#00331a"),
+			hex("#064528"), // tab sel (even deeper)
 			hex("#69f0ae"),
 			hex("#00e5ff"),
-			hex("#00e676"), // border = primary
+			hex("#00e676"), // border — bright outline / accents
 			hex("#000000"),
 		)
 		ShellANSI16 = StockANSI16
@@ -218,7 +220,9 @@ func setPalette(void, bar, panel, primary, secondary, onPrimary, text, soft, dim
 	VoidR, VoidG, VoidB = rgb8(void)
 	DimR, DimG, DimB = rgb8(dimMatte)
 	PanelR, PanelG, PanelB = rgb8(panel)
-	PrimR, PrimG, PrimB = rgb8(primary)
+	// GDI accents (prompt, hairlines) follow border so HC can keep neon
+	// outlines while selection fills use a darker primary.
+	PrimR, PrimG, PrimB = rgb8(border)
 	TextR, TextG, TextB = rgb8(text)
 	SoftR, SoftG, SoftB = rgb8(soft)
 }
@@ -318,7 +322,7 @@ func styleStatus() lipgloss.Style {
 func styleDialogView() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colPrimary).
+		BorderForeground(colBorder).
 		BorderBackground(colPanel).
 		Background(colPanel).
 		Padding(1, 2)
@@ -330,17 +334,20 @@ func stylePaletteBorder() lipgloss.Style {
 }
 
 func styleBrand() lipgloss.Style {
+	// Tight around 硯 — no side padding (tabs keep a single gap after the mark).
+	// Border color keeps brand bright on HC while selection fills stay dark green.
 	return lipgloss.NewStyle().
-		Foreground(colPrimary).
+		Foreground(colBorder).
 		Background(colBar).
 		Bold(true).
-		Padding(0, 1)
+		Padding(0, 0)
 }
 
 func styleDialogTitle() lipgloss.Style {
 	// Crush: Padding(0,1).Foreground(primary) — panel bg so width-fill is seamless.
+	// Use border so HC titles stay neon while primary is the dark selection fill.
 	return lipgloss.NewStyle().
-		Foreground(colPrimary).
+		Foreground(colBorder).
 		Background(colPanel).
 		Bold(true).
 		Padding(0, 1)
@@ -370,6 +377,27 @@ func styleDialogActive() lipgloss.Style {
 func styleDialogHint() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(colMute). // fgMostSubtle
+		Background(colPanel)
+}
+
+// Settings help caption under the modal — panel fill, no border (not interactive).
+func styleSettingsHelpPanel() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Background(colPanel).
+		Foreground(colMute).
+		Padding(1, 2)
+}
+
+func styleSettingsHelpTitle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(colSoft).
+		Background(colPanel).
+		Bold(true)
+}
+
+func styleSettingsHelpBody() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(colMute).
 		Background(colPanel)
 }
 

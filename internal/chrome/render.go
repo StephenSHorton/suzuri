@@ -3,6 +3,7 @@ package chrome
 import (
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/hinshun/vt10x"
 )
@@ -13,12 +14,18 @@ func RenderToTerm(m Model, cols int) vt10x.Terminal {
 }
 
 // RenderOverlayToTerm writes the floating palette/settings card.
+// Row count follows the actual Lip Gloss height so tall views (settings +
+// help caption) are not clipped by a fixed estimate / paint cap.
 func RenderOverlayToTerm(m Model, cols int) vt10x.Terminal {
-	rows := m.OverlayRowCount()
+	view := m.OverlayView()
+	rows := lipgloss.Height(view)
 	if rows < 2 {
 		rows = 2
 	}
-	return renderString(m.OverlayView(), cols, rows)
+	if rows > 48 {
+		rows = 48
+	}
+	return renderString(view, cols, rows)
 }
 
 func renderString(view string, cols, rows int) vt10x.Terminal {

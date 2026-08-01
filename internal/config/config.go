@@ -34,6 +34,13 @@ const (
 	ANSIMapFull = "full"
 )
 
+// Startup intro styles (shell curtain after launch).
+const (
+	IntroMatrix = "matrix" // digital rain
+	IntroRipple = "ripple" // 猫咪 puddle from center mark
+	IntroNone   = "none"   // skip curtain
+)
+
 // Profile is a named shell launch recipe (cwd + command + optional theme).
 type Profile struct {
 	Name  string `json:"name"`
@@ -52,17 +59,48 @@ type Config struct {
 	Profiles      []Profile
 	ActiveProfile string // name of default profile for new tabs
 	FirstRunDone  bool
+	// Intro is the post-launch shell curtain (matrix | ripple | none).
+	Intro string
+	// Window is last outer frame placement (multi-monitor). Zero = use default.
+	Window WindowPlacement
+}
+
+// WindowPlacement is the outer frame rect in screen coordinates (Win32).
+// Used to reopen on the same monitor/size as last session.
+type WindowPlacement struct {
+	X         int  `json:"x"`
+	Y         int  `json:"y"`
+	Width     int  `json:"width"`
+	Height    int  `json:"height"`
+	Maximized bool `json:"maximized,omitempty"`
+}
+
+// Valid reports whether placement is usable for CreateWindow / SetWindowPos.
+func (w WindowPlacement) Valid() bool {
+	if w.Width < 320 || w.Height < 200 {
+		return false
+	}
+	if w.Width > 16000 || w.Height > 16000 {
+		return false
+	}
+	// Reject "empty" zero structs from old configs.
+	if w.X == 0 && w.Y == 0 && w.Width == 0 && w.Height == 0 {
+		return false
+	}
+	return true
 }
 
 type fileDTO struct {
-	FontFace      string    `json:"font_face"`
-	FontSizePx    int       `json:"font_size_px"`
-	Cursor        string    `json:"cursor"`
-	Theme         string    `json:"theme"`
-	ShellANSIMap  string    `json:"shell_ansi_map"`
-	Profiles      []Profile `json:"profiles,omitempty"`
-	ActiveProfile string    `json:"active_profile,omitempty"`
-	FirstRunDone  bool      `json:"first_run_done,omitempty"`
+	FontFace      string           `json:"font_face"`
+	FontSizePx    int              `json:"font_size_px"`
+	Cursor        string           `json:"cursor"`
+	Theme         string           `json:"theme"`
+	ShellANSIMap  string           `json:"shell_ansi_map"`
+	Profiles      []Profile        `json:"profiles,omitempty"`
+	ActiveProfile string           `json:"active_profile,omitempty"`
+	FirstRunDone  bool            `json:"first_run_done,omitempty"`
+	Intro         string          `json:"intro,omitempty"`
+	Window        WindowPlacement `json:"window,omitempty"`
 }
 
 // DefaultFontFace is the shipping monospaced face (bundled GohuFont uni14 Mono).
@@ -79,8 +117,9 @@ func Default() Config {
 		Cursor:        CursorBlock,
 		FontFace:      DefaultFontFace,
 		FontSizePx:    DefaultFontSizePx,
-		Theme:         ThemeInkstone,
+		Theme:         ThemeHighContrast,
 		ShellANSIMap:  ANSIMapSoft,
+		Intro:         IntroMatrix,
 		Profiles:      DefaultProfiles(),
 		ActiveProfile: "Default",
 		FirstRunDone:  false,
@@ -171,7 +210,7 @@ func Normalize(c Config) Config {
 	case ThemeInkstone, ThemeCharmtone, ThemeHighContrast:
 		c.Theme = strings.ToLower(strings.TrimSpace(c.Theme))
 	default:
-		c.Theme = ThemeInkstone
+		c.Theme = ThemeHighContrast
 	}
 	switch strings.ToLower(strings.TrimSpace(c.ShellANSIMap)) {
 	case ANSIMapNone, ANSIMapSoft, ANSIMapFull:
@@ -180,6 +219,14 @@ func Normalize(c Config) Config {
 		c.ShellANSIMap = d.ShellANSIMap
 	default:
 		c.ShellANSIMap = ANSIMapSoft
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Intro)) {
+	case IntroMatrix, IntroRipple, IntroNone:
+		c.Intro = strings.ToLower(strings.TrimSpace(c.Intro))
+	case "":
+		c.Intro = d.Intro
+	default:
+		c.Intro = IntroMatrix
 	}
 	if len(c.Profiles) == 0 {
 		c.Profiles = DefaultProfiles()
@@ -282,6 +329,23 @@ func ANSIMapLabel(id string) string {
 	}
 }
 
+// IntroIDs lists selectable startup intros.
+func IntroIDs() []string {
+	return []string{IntroMatrix, IntroRipple, IntroNone}
+}
+
+// IntroLabel is a human title for a startup intro id.
+func IntroLabel(id string) string {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case IntroRipple:
+		return "Ripple"
+	case IntroNone:
+		return "None"
+	default:
+		return "Matrix"
+	}
+}
+
 // MonoFontFaces are preferred faces for the settings cycle.
 // DefaultFontFace is first (bundled into the binary when available).
 func MonoFontFaces() []string {
@@ -308,6 +372,8 @@ func fromDTO(d fileDTO) Config {
 		Profiles:      d.Profiles,
 		ActiveProfile: d.ActiveProfile,
 		FirstRunDone:  d.FirstRunDone,
+		Intro:         d.Intro,
+		Window:        d.Window,
 	}
 }
 
@@ -321,5 +387,7 @@ func toDTO(c Config) fileDTO {
 		Profiles:      c.Profiles,
 		ActiveProfile: c.ActiveProfile,
 		FirstRunDone:  c.FirstRunDone,
+		Intro:         c.Intro,
+		Window:        c.Window,
 	}
 }

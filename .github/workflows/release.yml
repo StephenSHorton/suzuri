@@ -1,0 +1,77 @@
+name: Release
+
+# Cut a release: git tag v0.6.0 && git push origin v0.6.0
+# Or Actions → Release → Run workflow with tag input.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.6.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Releasing $tag (version $version)"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $ld = "-s -w -X main.version=$v"
+          go build -ldflags $ld -o suzuri.exe ./cmd/suzuri
+          Get-Item suzuri.exe | Format-List Name, Length, LastWriteTime
+
+      - name: Package assets
+        id: assets
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $zip = "suzuri-$v-windows-amd64.zip"
+          $exe = "suzuri-$v-windows-amd64.exe"
+          Copy-Item suzuri.exe $exe
+          Compress-Archive -Path suzuri.exe -DestinationPath $zip -Force
+          $lines = foreach ($f in @($exe, $zip)) {
+            "{0}  {1}" -f (Get-FileHash -Algorithm SHA256 $f).Hash.ToLower(), $f
+          }
+          $lines -join "`n" | Out-File -Encoding ascii -NoNewline SHA256SUMS
+          Get-Content SHA256SUMS
+          "exe=$exe" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "zip=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: suzuri ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            ${{ steps.assets.outputs.exe }}
+            ${{ steps.assets.outputs.zip }}
+            SHA256SUMS

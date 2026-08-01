@@ -35,10 +35,29 @@ const (
 	wmSuzuriBlink  = win.WM_APP + 2
 	wmSuzuriClosed = win.WM_APP + 3 // session read ended
 	wmSuzuriMCP    = win.WM_APP + 4 // MCP bridge submit jobs
+	// wmSuzuriLayoutSettle runs AFTER WM_EXITSIZEMOVE returns. Heavy layout +
+	// ConPTY resize during EXITSIZEMOVE itself was hard-killing the process
+	// (no Go panic — native AV on the size-move stack).
+	wmSuzuriLayoutSettle = win.WM_APP + 5
+	// wmSuzuriSaveFinish runs after settings Enter/save returns — GDI cache drop,
+	// palette rebuild, and toast must not run on the keydown stack.
+	wmSuzuriSaveFinish = win.WM_APP + 6
+	// wmSuzuriOpenPalette rebuilds the bubbles list off the Ctrl+K keydown stack
+	// (rebuild + first View on KEYDOWN hard-crashed for some users).
+	wmSuzuriOpenPalette = win.WM_APP + 7
+
+	// Hard caps so a bad metric cannot ask ConPTY/VT for a multi-megagrid.
+	maxTermCols = 400
+	maxTermRows = 200
 
 	// Smooth opacity pulse (sine), not a hard on/off blink.
 	cursorBlinkPeriod = 1200 * time.Millisecond
 	cursorBlinkTick   = 40 * time.Millisecond // ~25 fps for soft fade
+
+	// Startup rain: spawn new streams for this long, then let them fall off.
+	matrixIntroSpawn = 2 * time.Second
+	// Safety cap so wind-down cannot run forever on a stuck paint path.
+	matrixIntroMaxTotal = 12 * time.Second
 
 	cellW = 9
 	cellH = 18
@@ -112,11 +131,14 @@ type winUI struct {
 	hwnd     win.HWND
 	font     win.HFONT
 	fontBold win.HFONT
-	width    int32
-	height   int32
-	cols   int
-	rows   int
-	cfg    config.Config
+	// CJK-capable mono fallback (MS Gothic, etc.) for 硯 / 猫 / shell JP text.
+	// Primary UI fonts (Gohu, Cascadia) typically lack Han glyphs.
+	cjkFont win.HFONT
+	width   int32
+	height  int32
+	cols    int
+	rows    int
+	cfg     config.Config
 	// last measured cell size (for hit-testing)
 	metricW int32
 	metricH int32
@@ -129,6 +151,11 @@ type winUI struct {
 	selecting     bool
 	statusUntil   time.Time // clear toast Status after this (zero = none)
 	showSplash    bool      // open first-run card after window is ready
+	// Startup rain: spawn until matrixIntroSpawnEnd, then wind-down until clear.
+	matrixIntroStart    time.Time
+	matrixIntroSpawnEnd time.Time
+	matrixIntroDone     bool      // true once wind-down drew nothing
+	matrixIntroClearAt  time.Time // when rain finished — watermark fade-in origin
 
 	// Reused double-buffer (recreated on resize) to avoid GDI thrash.
 	// memOldBmp is the object that was in memDC before memBmp — must be
@@ -138,6 +165,16 @@ type winUI struct {
 	memOldBmp win.HGDIOBJ
 	memW      int32
 	memH      int32
+
+	// User is dragging or resizing the frame (WM_ENTERSIZEMOVE … EXITSIZEMOVE).
+	// During this window we must not thrash ConPTY / GDI: every WM_SIZE used to
+	// resize all tabs + recreate the backbuffer, which hard-crashed mid-drag.
+	inSizeMove bool
+	// layoutSettlePosted coalesces deferred post-resize layout messages.
+	layoutSettlePosted bool
+	// saveFinishPosted / saveNeedFontLayout: deferred settings-save cleanup.
+	saveFinishPosted   bool
+	saveNeedFontLayout bool
 
 	// Chrome paint cache: RenderToTerm+Lip Gloss every WM_PAINT is expensive
 	// and stress-tests GDI when the window is reactivated after idle.
@@ -224,6 +261,7 @@ func (u *winUI) markChromeDirty() {
 
 // applyConfigLive updates fonts/theme/ANSI map from cfg without writing disk.
 // Safe to call from settings left/right preview (must not GDI-AV or thrash chrome).
+// Never ConPTY-resizes on the caller stack — posts layout settle when metrics change.
 func (u *winUI) applyConfigLive(cfg config.Config) {
 	defer applog.Recover("applyConfigLive", false)
 
@@ -238,7 +276,7 @@ func (u *winUI) applyConfigLive(cfg config.Config) {
 	u.chrome = u.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	u.markChromeDirty()
 
-	needFont := prev.FontFace != cfg.FontFace || prev.FontSizePx != cfg.FontSizePx
+	needFont := !strings.EqualFold(prev.FontFace, cfg.FontFace) || prev.FontSizePx != cfg.FontSizePx
 	if needFont {
 		// Create new fonts first; never DeleteObject a font still selected into
 		// the backbuffer DC (GDI AV / freeze when live-previewing settings).
@@ -247,26 +285,27 @@ func (u *winUI) applyConfigLive(cfg config.Config) {
 		if newFace == 0 {
 			log.Warn("font create failed; keeping previous", "face", cfg.FontFace)
 		} else {
+			// Drop backbuffer before deleting fonts that may be selected into it.
 			u.releaseBackbuffer()
-			oldFace, oldBold := u.font, u.fontBold
+			oldFace, oldBold, oldCJK := u.font, u.fontBold, u.cjkFont
 			u.font, u.fontBold = newFace, newBold
+			u.cjkFont = createCJKFont(cfg.FontSizePx)
 			if oldFace != 0 {
 				win.DeleteObject(win.HGDIOBJ(oldFace))
 			}
 			if oldBold != 0 {
 				win.DeleteObject(win.HGDIOBJ(oldBold))
 			}
+			if oldCJK != 0 {
+				win.DeleteObject(win.HGDIOBJ(oldCJK))
+			}
 			u.probeKeyGlyphs()
 			got := fontFaceName(u.font)
-			// Force remeasure + grid resize on next paint/size.
+			// Remeasure + ConPTY resize off this stack (click/key/preview).
 			u.metricW, u.metricH = 0, 0
-			if u.hwnd != 0 {
-				var rc win.RECT
-				if win.GetClientRect(u.hwnd, &rc) {
-					u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
-				}
-			}
-			log.Info("font applied", "face", cfg.FontFace, "px", cfg.FontSizePx, "got", got)
+			u.postLayoutSettle()
+			log.Info("font applied", "face", cfg.FontFace, "px", cfg.FontSizePx, "got", got,
+				"cjk", fontFaceName(u.cjkFont))
 			if got != "" && !strings.EqualFold(got, cfg.FontFace) {
 				u.toast("font fallback: " + got)
 			}
@@ -287,40 +326,125 @@ func (u *winUI) applyConfigSave(cfg config.Config) {
 	defer applog.Recover("applyConfigSave", false)
 
 	cfg = config.Normalize(cfg)
-	// Apply visuals first (settings dialog is already closed on the chrome model).
-	u.applyConfigLive(cfg)
+	fontChanged := !strings.EqualFold(u.cfg.FontFace, cfg.FontFace) || u.cfg.FontSizePx != cfg.FontSizePx
 
-	// Persist to disk (Windows-safe replace).
+	// Enter-stack work must stay light. Theme/ANSI globals only — no palette
+	// rebuild, GDI cache drop, ConPTY settle, or toast here (those hard-crashed
+	// after "config saved" on the keydown/paint path).
+	// Keep live window placement — settings edit snapshot may be stale.
+	cfg.Window = u.cfg.Window
+	u.cfg = cfg
+	chrome.ApplyTheme(cfg.Theme)
+	SetShellANSIMap(cfg.ShellANSIMap)
+	u.markChromeDirty()
+
 	if err := config.Save(cfg); err != nil {
 		log.Error("config save failed", "err", err)
+		// Fall back to full live apply so the UI isn't half-updated.
+		u.applyConfigLive(cfg)
 		u.toast("save failed")
 		return
 	}
-	log.Info("config saved", "path", config.Path())
+	log.Info("config saved", "path", config.Path(), "theme", cfg.Theme, "fontChanged", fontChanged)
+	applog.Sync()
 
-	// Post-save cleanup: drop cached overlay/chrome cells and backbuffer so the
-	// next paint cannot touch GDI objects from the live-preview churn.
+	u.saveNeedFontLayout = fontChanged
+	u.postSaveFinish()
+}
+
+// openPaletteSafe builds the command palette off the Ctrl+K keydown stack.
+func (u *winUI) openPaletteSafe() {
+	defer applog.Recover("openPaletteSafe", false)
+	if u == nil || !u.alive.Load() {
+		return
+	}
+	log.Info("open palette begin")
+	applog.Sync()
+	// Ensure lastCfg is sane before rebuildPalette (corrupt load → empty defaults).
+	if u.cfg.FontFace == "" {
+		u.cfg = config.Normalize(u.cfg)
+	}
+	r := u.chrome.UpdateChrome(chrome.OpenPaletteMsg{})
+	u.chrome = r.Model
+	// Warm the list View once here under recover — first paint then only composites.
+	func() {
+		defer applog.Recover("openPaletteSafe.view", false)
+		_ = u.chrome.OverlayView()
+	}()
+	u.markChromeDirty()
+	u.chromePx = u.chromePixelHeight()
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+	log.Info("open palette done", "open", u.chrome.PaletteOpen)
+	applog.Sync()
+}
+
+// postSaveFinish queues one UI-thread pass for post-save GDI/UI cleanup.
+func (u *winUI) postSaveFinish() {
+	if u == nil || u.hwnd == 0 || !u.alive.Load() {
+		return
+	}
+	if u.saveFinishPosted {
+		return
+	}
+	u.saveFinishPosted = true
+	if win.PostMessage(u.hwnd, wmSuzuriSaveFinish, 0, 0) == 0 {
+		u.saveFinishPosted = false
+		log.Warn("postSaveFinish PostMessage failed — running inline")
+		u.finishConfigSave()
+	}
+}
+
+// finishConfigSave drops paint caches, applies font if needed, toasts, repaints.
+// Runs on wmSuzuriSaveFinish (not Enter keydown).
+func (u *winUI) finishConfigSave() {
+	defer applog.Recover("finishConfigSave", false)
+	u.saveFinishPosted = false
+	if u == nil || !u.alive.Load() {
+		return
+	}
+	log.Info("settings save finish begin", "needFontLayout", u.saveNeedFontLayout, "intro", u.cfg.Intro)
+	applog.Sync()
+
+	// Never keep a mid-flight startup curtain after settings close — switching
+	// intro style mid-paint was a crash path (matrix → ripple thrash).
+	u.finishMatrixIntro()
+
+	// Drop caches from live-preview churn before the next full paint.
 	u.overlayCells = nil
 	u.overlayDirty = true
 	u.chromeCells = nil
 	u.chromeDirty = true
 	u.releaseBackbuffer()
-	u.metricW, u.metricH = 0, 0
 
-	// Rebuild palette now that settings is closed (SyncConfig may have skipped
-	// rebuild while the dialog was open during left/right previews).
-	u.chrome = u.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
-	u.markChromeDirty()
+	// Palette rebuild + lastCfg sync (skipped on Enter stack). Settings is closed.
+	func() {
+		defer applog.Recover("finishConfigSave.sync", false)
+		u.chrome = u.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: u.cfg}).Model
+	}()
 
+	// Font swap (if any) off the key stack.
+	if u.saveNeedFontLayout {
+		u.applyConfigLive(u.cfg)
+		u.metricW, u.metricH = 0, 0
+	}
+	u.saveNeedFontLayout = false
+	// Reflow for toast status row and any font metric change.
+	u.postLayoutSettle()
+
+	// Status line without a second nested invalidate storm.
+	func() {
+		defer applog.Recover("finishConfigSave.toast", false)
+		u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("settings saved")).Model
+		u.statusUntil = time.Now().Add(2500 * time.Millisecond)
+		u.markChromeDirty()
+	}()
 	if u.hwnd != 0 {
-		var rc win.RECT
-		if win.GetClientRect(u.hwnd, &rc) {
-			u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
-		}
 		win.InvalidateRect(u.hwnd, nil, false)
 	}
-	u.toast("settings saved")
 	log.Info("settings save complete")
+	applog.Sync()
 }
 
 // toast sets a short-lived status line under the tab strip.
@@ -453,16 +577,30 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		}
 	case chrome.ActionQuit:
 		if u.hwnd != 0 {
+			u.persistWindowPlacement(true)
 			win.DestroyWindow(u.hwnd)
 		}
 	case chrome.ActionOpenSettings:
-		u.applyConfigLive(r.Settings)
+		if r.Settings.FontFace != "" || r.Settings.FontSizePx > 0 {
+			u.applyConfigLive(r.Settings)
+		}
 	case chrome.ActionSettingsPreview:
 		u.applyConfigLive(r.Settings)
 	case chrome.ActionSettingsApply:
 		u.applyConfigSave(r.Settings)
 	case chrome.ActionSettingsCancel:
-		u.applyConfigLive(r.Settings)
+		// Dismiss/Esc restores snap. Skip no-op reapply (open → click off with
+		// no edits) — re-running font/theme apply on the click stack has AVed.
+		if !configVisualEqual(u.cfg, r.Settings) {
+			log.Info("settings cancel restore", "theme", r.Settings.Theme, "font", r.Settings.FontFace)
+			u.applyConfigLive(r.Settings)
+		} else {
+			log.Debug("settings cancel no-op (unchanged)")
+		}
+		// Drop modal paint cache either way.
+		u.overlayCells = nil
+		u.overlayDirty = true
+		u.chromeDirty = true
 	case chrome.ActionSplashDone:
 		u.cfg.FirstRunDone = true
 		if err := config.Save(u.cfg); err != nil {
@@ -470,8 +608,29 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		} else {
 			log.Info("first-run complete")
 		}
+	case chrome.ActionReplayIntro:
+		u.replayIntro()
+	case chrome.ActionCheckUpdates:
+		u.checkForUpdates()
 	}
 	u.syncChrome()
+}
+
+// replayIntro restarts the configured startup curtain (matrix / ripple / none).
+func (u *winUI) replayIntro() {
+	if u == nil {
+		return
+	}
+	now := time.Now()
+	u.matrixIntroStart = now
+	u.matrixIntroSpawnEnd = now.Add(matrixIntroSpawn)
+	u.matrixIntroDone = false
+	u.matrixIntroClearAt = time.Time{}
+	style := config.Normalize(u.cfg).Intro
+	log.Info("replay intro", "style", style)
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
 }
 
 func (u *winUI) loop() error {
@@ -502,14 +661,23 @@ func (u *winUI) loop() error {
 		}
 	}
 
+	// Restore last frame placement when valid and still on a visible monitor.
+	x, y := int32(win.CW_USEDEFAULT), int32(win.CW_USEDEFAULT)
 	cw, ch := int32(u.cols*cellW+24), int32(u.rows*cellH+48)
+	wantMax := false
+	if wp := u.cfg.Window; wp.Valid() && placementOnScreen(wp) {
+		x, y = int32(wp.X), int32(wp.Y)
+		cw, ch = int32(wp.Width), int32(wp.Height)
+		wantMax = wp.Maximized
+		log.Info("restoring window placement", "x", wp.X, "y", wp.Y, "w", wp.Width, "h", wp.Height, "max", wp.Maximized)
+	}
 	hwnd := win.CreateWindowEx(
 		0,
 		cname,
 		title,
-		win.WS_OVERLAPPEDWINDOW|win.WS_VISIBLE,
-		win.CW_USEDEFAULT,
-		win.CW_USEDEFAULT,
+		win.WS_OVERLAPPEDWINDOW, // show after create so maximize restore is clean
+		x,
+		y,
 		cw,
 		ch,
 		0,
@@ -523,9 +691,11 @@ func (u *winUI) loop() error {
 	u.hwnd = hwnd
 	u.font = createFontFor(u.cfg, false)
 	u.fontBold = createFontFor(u.cfg, true)
+	u.cjkFont = createCJKFont(u.cfg.FontSizePx)
 	u.probeKeyGlyphs()
 	face := fontFaceName(u.font)
-	log.Info("window created", "hwnd", uintptr(hwnd), "font", face, "want", u.cfg.FontFace)
+	log.Info("window created", "hwnd", uintptr(hwnd), "font", face, "want", u.cfg.FontFace,
+		"cjk", fontFaceName(u.cjkFont))
 	registerUI(hwnd, u)
 	// WM_SIZE during CreateWindow arrives before registerUI, so the real
 	// client size was never applied (logs showed w=0 h=0 forever). Sync now.
@@ -535,8 +705,25 @@ func (u *winUI) loop() error {
 		log.Info("initial client size", "w", u.width, "h", u.height, "cols", u.cols, "rows", u.rows)
 	}
 
-	win.ShowWindow(hwnd, win.SW_SHOW)
+	if wantMax {
+		win.ShowWindow(hwnd, win.SW_SHOWMAXIMIZED)
+	} else {
+		win.ShowWindow(hwnd, win.SW_SHOW)
+	}
 	win.UpdateWindow(hwnd)
+
+	// Startup curtain (matrix / ripple / none) — spawn window then wind-down.
+	now := time.Now()
+	u.matrixIntroStart = now
+	u.matrixIntroSpawnEnd = now.Add(matrixIntroSpawn)
+	u.matrixIntroDone = false
+	u.matrixIntroClearAt = time.Time{}
+	intro := config.Normalize(u.cfg).Intro
+	if intro == config.IntroNone {
+		// Still run a short delay so the center 硯 can fade in.
+		u.matrixIntroDone = false
+	}
+	log.Info("startup intro", "style", intro, "spawn", matrixIntroSpawn)
 
 	// Start I/O for the first tab; more tabs start in newTabUI.
 	if t := u.activeTab(); t != nil {
@@ -1017,7 +1204,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case wmSuzuriBlink:
-		if u.alive.Load() {
+		// Skip blink repaints during frame drag/resize — they fight WM_PAINT
+		// and amplify flicker (and GDI thrash with the neko underlay).
+		if u.alive.Load() && !u.inSizeMove {
 			u.clearToastIfDue()
 			win.InvalidateRect(hwnd, nil, false)
 		}
@@ -1038,6 +1227,23 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.drainMCPJobs()
 		return 0
 
+	case wmSuzuriLayoutSettle:
+		// Posted from EXITSIZEMOVE — safe stack for ConPTY/VT/GDI work.
+		u.layoutSettlePosted = false
+		if !u.alive.Load() || u.inSizeMove {
+			return 0
+		}
+		u.applyLayoutAfterSizeMove(hwnd)
+		return 0
+
+	case wmSuzuriSaveFinish:
+		u.finishConfigSave()
+		return 0
+
+	case wmSuzuriOpenPalette:
+		u.openPaletteSafe()
+		return 0
+
 	case win.WM_ERASEBKGND:
 		return 1
 
@@ -1048,12 +1254,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			"w", u.width, "h", u.height, "cols", u.cols, "rows", u.rows)
 		applog.Sync()
 		if active != win.WA_INACTIVE && u.alive.Load() {
-			// Refresh client size (may have changed while unfocused) but do
-			// NOT tear down the backbuffer here — destroy/recreate on every
-			// focus was a GDI AV source. Stale DCs fall back in paint().
+			// Refresh client size (may have changed while unfocused) via the
+			// deferred settle path — never ConPTY-resize on the activate stack.
 			var rc win.RECT
 			if win.GetClientRect(hwnd, &rc) {
-				u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
+				w, h := rc.Right-rc.Left, rc.Bottom-rc.Top
+				if w >= 2 && h >= 2 {
+					u.width, u.height = w, h
+					u.postLayoutSettle()
+				}
 			}
 		}
 		// Always repaint on focus change: blinkLoop only ticks while
@@ -1064,8 +1273,54 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		return 0
 
+	case win.WM_ENTERSIZEMOVE:
+		// Begin move or resize: defer ConPTY/tab resize until the gesture ends.
+		u.inSizeMove = true
+		log.Debug("WM_ENTERSIZEMOVE")
+		return 0
+
+	case win.WM_EXITSIZEMOVE:
+		// Do almost nothing here. applyClientSize / ConPTY / backbuffer work on
+		// the EXITSIZEMOVE stack hard-crashed (native AV, no Go panic). Post a
+		// settle message and return immediately so Windows finishes the gesture.
+		u.inSizeMove = false
+		var rc win.RECT
+		if win.GetClientRect(hwnd, &rc) {
+			w, h := rc.Right-rc.Left, rc.Bottom-rc.Top
+			if w >= 2 && h >= 2 {
+				u.width, u.height = w, h
+			}
+			log.Info("WM_EXITSIZEMOVE", "w", w, "h", h)
+			applog.Sync()
+		}
+		// Remember frame pos/size (and monitor) after the user finishes dragging.
+		u.persistWindowPlacement(false)
+		u.postLayoutSettle()
+		return 0
+
 	case win.WM_SIZE:
-		u.applyClientSize(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
+		// wParam: SIZE_RESTORED=0, SIZE_MINIMIZED=1, SIZE_MAXIMIZED=2, SIZE_MAXSHOW=3, SIZE_MAXHIDE=4
+		if wParam == 1 { // SIZE_MINIMIZED — zero/garbage client size; ignore.
+			return 0
+		}
+		w := int32(win.LOWORD(uint32(lParam)))
+		h := int32(win.HIWORD(uint32(lParam)))
+		if w < 2 || h < 2 {
+			return 0
+		}
+		if u.inSizeMove {
+			// Lightweight: remember pixels only. ConPTY + chrome layout wait for settle.
+			u.width, u.height = w, h
+			return 0
+		}
+		// Maximize / Aero snap / programmatic size often skip ENTERSIZEMOVE.
+		// Still defer heavy work off the WM_SIZE stack.
+		u.width, u.height = w, h
+		u.postLayoutSettle()
+		// Persist maximize / snap frame (no ENTERSIZEMOVE for the chrome button).
+		if wParam == 2 || wParam == 0 { // SIZE_MAXIMIZED / SIZE_RESTORED
+			u.persistWindowPlacement(false)
+		}
 		return 0
 
 	case win.WM_CHAR:
@@ -1150,11 +1405,12 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 		if ctrl && !shift && (wParam == 'K' || wParam == 'k' || wParam == 'P' || wParam == 'p') {
-			r := u.chrome.UpdateChrome(chrome.OpenPaletteMsg{})
-			u.chrome = r.Model
-			u.markChromeDirty()
-			u.chromePx = u.chromePixelHeight()
-			win.InvalidateRect(hwnd, nil, false)
+			// Defer list rebuild + first paint off this keydown (native AV trail).
+			log.Info("Ctrl+K/P — post open palette")
+			applog.Sync()
+			if u.hwnd != 0 {
+				win.PostMessage(u.hwnd, wmSuzuriOpenPalette, 0, 0)
+			}
 			return 0
 		}
 
@@ -1387,11 +1643,24 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 		// Click outside floating overlay (on shell) dismisses it.
 		if u.chrome.OverlayOpen() && py >= chromeH {
+			log.Info("dismiss overlay (click outside)")
+			applog.Sync()
+			// Clear overlay cells first so the next paint cannot draw a stale
+			// card while cancel restores theme/font.
+			u.overlayCells = nil
+			u.overlayDirty = true
 			r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
 			u.chrome = r.Model
 			u.markChromeDirty()
-			u.applyChromeAction(r)
-			u.syncChrome()
+			// applyChromeAction may restore settings snap; keep it light (no
+			// ConPTY on this stack — applyConfigLive posts layout settle).
+			func() {
+				defer applog.Recover("dismissOverlay", false)
+				u.applyChromeAction(r)
+				u.syncChrome()
+			}()
+			log.Info("dismiss overlay done")
+			applog.Sync()
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
@@ -1479,10 +1748,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_CLOSE:
 		log.Info("WM_CLOSE")
+		// Capture placement while the HWND is still valid.
+		u.persistWindowPlacement(true)
 		win.DestroyWindow(hwnd)
 		return 0
 
 	case win.WM_DESTROY:
+		// Best-effort if WM_CLOSE was skipped (e.g. DestroyWindow from quit).
+		u.persistWindowPlacement(true)
 		log.Info("WM_DESTROY — tearing down", "tabs", len(u.tabs))
 		u.alive.Store(false)
 		if u.bridge != nil {
@@ -1501,6 +1774,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if u.fontBold != 0 {
 			win.DeleteObject(win.HGDIOBJ(u.fontBold))
 			u.fontBold = 0
+		}
+		if u.cjkFont != 0 {
+			win.DeleteObject(win.HGDIOBJ(u.cjkFont))
+			u.cjkFont = 0
 		}
 		u.hwnd = 0
 		win.PostQuitMessage(0)
@@ -1543,6 +1820,20 @@ func (u *winUI) paint(hwnd win.HWND) {
 	if w < 2 || h < 2 {
 		return
 	}
+
+	// During frame drag/resize: solid fill only. Full paint (grid + neko field +
+	// chrome) every WM_PAINT while the mouse tracks caused severe flicker and
+	// GDI AVs on mouse-up. Real content returns on EXITSIZEMOVE.
+	if u.inSizeMove {
+		u.width, u.height = w, h
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.VoidR, chrome.VoidG, chrome.VoidB)}
+		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+			fillRect(hdc, rect, brush)
+			win.DeleteObject(win.HGDIOBJ(brush))
+		}
+		return
+	}
+
 	tab := u.activeTab()
 	if tab == nil {
 		fillRect(hdc, rect, win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)))
@@ -1567,11 +1858,12 @@ func (u *winUI) paint(hwnd win.HWND) {
 	metricsChanged := u.metricW != cw || u.metricH != ch
 	u.metricW, u.metricH = cw, ch
 
-	// Keep size fields honest; also re-layout when the bar hides (alt-screen)
-	// or font metrics change so we reclaim the bottom strip fully.
+	// Keep size fields honest; re-layout when bar hides (alt-screen) or metrics
+	// change. Never applyClientSize (ConPTY) on the WM_PAINT stack — post settle.
 	wantIn := u.inputBarPixelHeight()
 	if u.width != w || u.height != h || wantIn != u.inputPx || metricsChanged {
-		u.applyClientSize(w, h)
+		u.width, u.height = w, h
+		u.postLayoutSettle()
 	}
 
 	// Viewport = history + live screen (live cells carry FG/BG/bold).
@@ -1587,6 +1879,21 @@ func (u *winUI) paint(hwnd win.HWND) {
 		// Dim shell under floating overlay (palette / settings).
 		if u.chrome.OverlayOpen() {
 			u.paintDimShell(dest, rect)
+		} else if u.matrixIntroActive() {
+			// Startup curtain only — recover so a bad intro cannot kill the host.
+			func() {
+				defer applog.Recover("paint.intro", false)
+				switch strings.ToLower(strings.TrimSpace(u.cfg.Intro)) {
+				case config.IntroRipple:
+					u.paintRippleIntro(dest, rect)
+				case config.IntroNone:
+					if time.Now().After(u.matrixIntroSpawnEnd) {
+						u.finishMatrixIntro()
+					}
+				default:
+					u.paintMatrixIntro(dest, rect)
+				}
+			}()
 		}
 		// Chrome strip + Warp input + floating card into the same buffer.
 		if u.font == 0 {
@@ -1614,12 +1921,185 @@ func (u *winUI) paint(hwnd win.HWND) {
 	}
 }
 
+// configVisualEqual is true when live-previewable fields match (cancel no-op).
+func configVisualEqual(a, b config.Config) bool {
+	a, b = config.Normalize(a), config.Normalize(b)
+	return strings.EqualFold(a.FontFace, b.FontFace) &&
+		a.FontSizePx == b.FontSizePx &&
+		a.Theme == b.Theme &&
+		a.ShellANSIMap == b.ShellANSIMap &&
+		a.Cursor == b.Cursor &&
+		strings.EqualFold(a.Intro, b.Intro) &&
+		strings.EqualFold(a.ActiveProfile, b.ActiveProfile)
+}
+
+// SM_* virtual desktop metrics (multi-monitor).
+const (
+	smXVIRTUALSCREEN  = 76
+	smYVIRTUALSCREEN  = 77
+	smCXVIRTUALSCREEN = 78
+	smCYVIRTUALSCREEN = 79
+)
+
+// placementOnScreen is true when the outer rect intersects the virtual screen
+// (so we do not restore off-monitor after a display was unplugged).
+func placementOnScreen(p config.WindowPlacement) bool {
+	if !p.Valid() {
+		return false
+	}
+	vx := win.GetSystemMetrics(smXVIRTUALSCREEN)
+	vy := win.GetSystemMetrics(smYVIRTUALSCREEN)
+	vw := win.GetSystemMetrics(smCXVIRTUALSCREEN)
+	vh := win.GetSystemMetrics(smCYVIRTUALSCREEN)
+	if vw < 1 || vh < 1 {
+		return true // metrics unavailable — trust saved coords
+	}
+	left, top := int32(p.X), int32(p.Y)
+	right, bottom := left+int32(p.Width), top+int32(p.Height)
+	// Require at least a 80×40px sliver visible.
+	const pad int32 = 80
+	sl := left + pad
+	if sl > right {
+		sl = right
+	}
+	st := top + 40
+	if st > bottom {
+		st = bottom
+	}
+	return right > vx && bottom > vy && left < vx+vw && top < vy+vh &&
+		sl > vx && st > vy
+}
+
+// captureWindowPlacement reads the restored outer frame via GetWindowPlacement
+// (correct while maximized — GetWindowRect would return work-area bounds only).
+func (u *winUI) captureWindowPlacement() (config.WindowPlacement, bool) {
+	if u == nil || u.hwnd == 0 {
+		return config.WindowPlacement{}, false
+	}
+	var wp win.WINDOWPLACEMENT
+	wp.Length = uint32(unsafe.Sizeof(wp))
+	if !win.GetWindowPlacement(u.hwnd, &wp) {
+		return config.WindowPlacement{}, false
+	}
+	rc := wp.RcNormalPosition
+	w := int(rc.Right - rc.Left)
+	h := int(rc.Bottom - rc.Top)
+	if w < 320 || h < 200 {
+		return config.WindowPlacement{}, false
+	}
+	maxed := wp.ShowCmd == win.SW_SHOWMAXIMIZED ||
+		wp.ShowCmd == win.SW_MAXIMIZE ||
+		(wp.Flags&win.WPF_RESTORETOMAXIMIZED) != 0
+	// Minimized: still persist normal rect; do not treat as maximized unless flag set.
+	if wp.ShowCmd == win.SW_SHOWMINIMIZED || wp.ShowCmd == win.SW_MINIMIZE {
+		maxed = (wp.Flags & win.WPF_RESTORETOMAXIMIZED) != 0
+	}
+	return config.WindowPlacement{
+		X:         int(rc.Left),
+		Y:         int(rc.Top),
+		Width:     w,
+		Height:    h,
+		Maximized: maxed,
+	}, true
+}
+
+// persistWindowPlacement updates u.cfg.Window and optionally writes config.json.
+// sync=false for mid-session moves (still writes — cheap and survives crash).
+func (u *winUI) persistWindowPlacement(forceLog bool) {
+	defer applog.Recover("persistWindowPlacement", false)
+	if u == nil || u.hwnd == 0 {
+		return
+	}
+	p, ok := u.captureWindowPlacement()
+	if !ok || !p.Valid() {
+		return
+	}
+	if u.cfg.Window == p {
+		return
+	}
+	u.cfg.Window = p
+	if err := config.Save(u.cfg); err != nil {
+		log.Warn("window placement save failed", "err", err)
+		return
+	}
+	if forceLog {
+		log.Info("window placement saved", "x", p.X, "y", p.Y, "w", p.Width, "h", p.Height, "max", p.Maximized)
+	} else {
+		log.Debug("window placement saved", "x", p.X, "y", p.Y, "w", p.Width, "h", p.Height, "max", p.Maximized)
+	}
+}
+
+// postLayoutSettle queues one UI-thread layout pass (coalesced).
+func (u *winUI) postLayoutSettle() {
+	if u == nil || u.hwnd == 0 || !u.alive.Load() {
+		return
+	}
+	if u.layoutSettlePosted {
+		return
+	}
+	u.layoutSettlePosted = true
+	if win.PostMessage(u.hwnd, wmSuzuriLayoutSettle, 0, 0) == 0 {
+		u.layoutSettlePosted = false
+		log.Warn("postLayoutSettle PostMessage failed")
+	}
+}
+
+// applyLayoutAfterSizeMove runs off the size-move stack: measure, reflow chrome,
+// resize VT/ConPTY once, rebuild backbuffer on next paint.
+func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
+	defer applog.Recover("applyLayoutAfterSizeMove", false)
+	if u == nil || !u.alive.Load() {
+		return
+	}
+	var rc win.RECT
+	if !win.GetClientRect(hwnd, &rc) {
+		return
+	}
+	w, h := rc.Right-rc.Left, rc.Bottom-rc.Top
+	if w < 2 || h < 2 {
+		return
+	}
+	log.Info("layout settle begin", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
+	applog.Sync()
+
+	// Prefer last-known cell metrics; remeasure if we have a window DC.
+	if hdc := win.GetDC(hwnd); hdc != 0 {
+		if u.font != 0 {
+			old := win.SelectObject(hdc, win.HGDIOBJ(u.font))
+			cw, ch := measureCellSize(hdc)
+			win.SelectObject(hdc, old)
+			if cw > 0 {
+				u.metricW = cw
+			}
+			if ch > 0 {
+				u.metricH = ch
+			}
+		}
+		win.ReleaseDC(hwnd, hdc)
+	}
+
+	// Drop stale backbuffer so next paint allocates at the new size.
+	u.releaseBackbuffer()
+	u.overlayDirty = true
+	u.chromeDirty = true
+
+	u.applyClientSize(w, h)
+	log.Info("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
+	applog.Sync()
+
+	if u.alive.Load() {
+		win.InvalidateRect(hwnd, nil, false)
+	}
+}
+
 // applyClientSize updates cols/rows/chrome from a client pixel size.
-// Safe to call from WM_SIZE, first paint, and WM_ACTIVATE.
+// Safe to call from layout settle, first paint, and WM_ACTIVATE — not from the
+// raw WM_EXITSIZEMOVE stack (that hard-crashed).
 // Layout: [tab strip] [shell VT] [Warp input bar].
 // When the bar is hidden (alt-screen), shell uses all space under the tabs —
 // no reserved empty strip at the bottom.
 func (u *winUI) applyClientSize(w, h int32) {
+	defer applog.Recover("applyClientSize", false)
 	if w < 1 || h < 1 {
 		return
 	}
@@ -1635,6 +2115,9 @@ func (u *winUI) applyClientSize(w, h int32) {
 	cols := int((w - padX) / cw)
 	if cols < 20 {
 		cols = 20
+	}
+	if cols > maxTermCols {
+		cols = maxTermCols
 	}
 	u.chrome.Width = cols
 	u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: 24}).Model
@@ -1658,11 +2141,18 @@ func (u *winUI) applyClientSize(w, h int32) {
 	if u.inputPx > 0 && rows < 5 {
 		rows = 5
 	}
+	if rows > maxTermRows {
+		rows = maxTermRows
+	}
 	if rows != u.rows || cols != u.cols {
 		u.cols = cols
 		u.rows = rows
-		for _, t := range u.tabs {
-			t.resize(cols, rows)
+		// Copy tab pointers so a concurrent close cannot mutate the slice mid-loop.
+		tabs := append([]*tab(nil), u.tabs...)
+		for _, t := range tabs {
+			if t != nil {
+				t.resize(cols, rows)
+			}
 		}
 	} else {
 		u.cols = cols
@@ -1724,6 +2214,9 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
+
+	// Dim brand mark under shell cells (not the tab-strip 硯).
+	u.paintShellWatermark(hdc, rect, padY, shellBot)
 
 	selBrush := win.HBRUSH(0)
 	if tab.sel.active && !tab.sel.empty() {
@@ -1819,9 +2312,13 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 			if err != nil || len(s) < 2 {
 				continue
 			}
+			u.selectFontForRune(hdc, r, c.Bold)
 			win.SetTextColor(hdc, win.RGB(fr, fg, fb))
 			win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
 		}
+	}
+	if u.font != 0 {
+		win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	}
 
 	if curVis {
@@ -1921,15 +2418,18 @@ func displayRune(r rune) rune {
 	if r >= 0xF0000 {
 		return ' '
 	}
-	// v0: only draw scripts Cascadia Mono (and fallbacks) cover well.
-	// Everything else becomes a space so we never show missing-glyph tofu.
-	if r > 0x024F && // beyond Latin Extended-B
+	// CJK (Han / kana / fullwidth) — drawn with cjkFont when the mono face
+	// lacks the glyph. Needed for brand 硯 and Charm-style 猫 underlays.
+	if isEastAsianRune(r) {
+		return r
+	}
+	// Beyond Latin Extended-B: keep box-drawing / light punctuation; drop
+	// exotic scripts we cannot paint cleanly without per-script fallbacks.
+	if r > 0x024F &&
 		!(r >= 0x2500 && r <= 0x259F) && // box / block drawing
-		!(r >= 0x2000 && r <= 0x206F) { // general punctuation (keep sparse)
-		// Allow a few common prompt marks; drop the rest.
+		!(r >= 0x2000 && r <= 0x206F) { // general punctuation
 		switch r {
 		case '✓', '✗', '→', '←', '▶', '❯', 'λ', '•':
-			// still may miss in Consolas — prefer ASCII fallback
 			return ' '
 		default:
 			if !unicode.In(r, unicode.Latin, unicode.Common) {
@@ -1944,6 +2444,93 @@ func displayRune(r rune) rune {
 		return ' '
 	}
 	return r
+}
+
+// isEastAsianRune is true for scripts we paint via the CJK fallback face.
+func isEastAsianRune(r rune) bool {
+	switch {
+	case r >= 0x3040 && r <= 0x30FF: // Hiragana + Katakana
+		return true
+	case r >= 0x31F0 && r <= 0x31FF: // Katakana Phonetic Extensions
+		return true
+	case r >= 0x3400 && r <= 0x4DBF: // CJK Ext A
+		return true
+	case r >= 0x4E00 && r <= 0x9FFF: // CJK Unified Ideographs
+		return true
+	case r >= 0xF900 && r <= 0xFAFF: // CJK Compatibility Ideographs
+		return true
+	case r >= 0xFF00 && r <= 0xFFEF: // Halfwidth and Fullwidth Forms
+		return true
+	case r >= 0x3000 && r <= 0x303F: // CJK Symbols and Punctuation
+		return true
+	default:
+		return false
+	}
+}
+
+// selectFontForRune picks the primary mono face, or CJK fallback for Han/kana.
+func (u *winUI) selectFontForRune(hdc win.HDC, r rune, bold bool) {
+	if isEastAsianRune(r) && u.cjkFont != 0 {
+		win.SelectObject(hdc, win.HGDIOBJ(u.cjkFont))
+		return
+	}
+	if bold && u.fontBold != 0 {
+		win.SelectObject(hdc, win.HGDIOBJ(u.fontBold))
+		return
+	}
+	if u.font != 0 {
+		win.SelectObject(hdc, win.HGDIOBJ(u.font))
+	}
+}
+
+// createCJKFont picks a system monospaced CJK face at the UI point size.
+func createCJKFont(sizePx int) win.HFONT {
+	if sizePx < 10 {
+		sizePx = 14
+	}
+	// Prefer classic JP mono, then UI faces that still map 猫/硯.
+	for _, name := range []string{
+		"MS Gothic",
+		"ＭＳ ゴシック",
+		"Yu Gothic",
+		"Yu Gothic UI",
+		"Meiryo",
+		"Meiryo UI",
+		"Noto Sans Mono CJK JP",
+		"Noto Sans CJK JP",
+	} {
+		h := createNamedFont(name, -int32(sizePx), win.FW_NORMAL)
+		if h == 0 {
+			continue
+		}
+		got := fontFaceName(h)
+		if faceMatches(got, name) || (got != "" && strings.Contains(strings.ToLower(got), "gothic")) ||
+			strings.Contains(strings.ToLower(got), "meiryo") ||
+			strings.Contains(strings.ToLower(got), "noto") {
+			return h
+		}
+		// Accept any face that actually has 猫 (GDI sometimes renames).
+		if cjkFontHasNeko(h) {
+			return h
+		}
+		win.DeleteObject(win.HGDIOBJ(h))
+	}
+	return 0
+}
+
+func cjkFontHasNeko(h win.HFONT) bool {
+	if h == 0 {
+		return false
+	}
+	hdc := win.CreateCompatibleDC(0)
+	if hdc == 0 {
+		return false
+	}
+	defer win.DeleteDC(hdc)
+	old := win.SelectObject(hdc, win.HGDIOBJ(h))
+	ok := fontHasRunes(hdc, '猫')
+	win.SelectObject(hdc, old)
+	return ok
 }
 
 func utf8Encode(p []byte, r rune) int {
@@ -2244,6 +2831,13 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	if h < 1 {
 		h = 1
 	}
+	// Absurd sizes (minimized/corrupt lParam) — refuse rather than ask GDI for a
+	// multi-gigabit bitmap that fails or hard-faults.
+	const maxBackbufferPx int32 = 16384
+	if w > maxBackbufferPx || h > maxBackbufferPx {
+		log.Warn("ensureBackbuffer refused huge size", "w", w, "h", h)
+		return false
+	}
 	if u.memDC != 0 && u.memBmp != 0 && u.memW == w && u.memH == h {
 		return true
 	}
@@ -2262,19 +2856,207 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	}
 	// Keep the DC's previous object so we can deselect cleanly later.
 	u.memOldBmp = win.SelectObject(u.memDC, win.HGDIOBJ(u.memBmp))
+	if u.memOldBmp == 0 {
+		// Select failed — don't leave a half-set buffer.
+		log.Warn("SelectObject backbuffer failed")
+		win.DeleteObject(win.HGDIOBJ(u.memBmp))
+		u.memBmp = 0
+		win.DeleteDC(u.memDC)
+		u.memDC = 0
+		return false
+	}
 	u.memW, u.memH = w, h
 	return true
 }
 
+// matrixIntroActive is true while startup rain is spawning or winding down.
+func (u *winUI) matrixIntroActive() bool {
+	if u == nil || u.matrixIntroStart.IsZero() || u.matrixIntroDone {
+		return false
+	}
+	// Hard stop so we never paint forever if wind-down math misbehaves.
+	if time.Since(u.matrixIntroStart) > matrixIntroMaxTotal {
+		u.finishMatrixIntro()
+		return false
+	}
+	return true
+}
+
+// finishMatrixIntro ends the rain curtain and starts the watermark fade-in clock.
+func (u *winUI) finishMatrixIntro() {
+	if u.matrixIntroDone {
+		return
+	}
+	u.matrixIntroDone = true
+	if u.matrixIntroClearAt.IsZero() {
+		u.matrixIntroClearAt = time.Now()
+	}
+	log.Debug("matrix intro wind-down complete")
+}
+
+// watermarkFade is 0..1 opacity for the center 硯 during/after intro rain.
+// Stays hidden through most of the spawn window, then eases in while streams
+// are still winding down (not waiting until the last drop leaves).
+func (u *winUI) watermarkFade() float64 {
+	if u == nil {
+		return 1
+	}
+	// No intro scheduled: full mark.
+	if u.matrixIntroStart.IsZero() || u.matrixIntroSpawnEnd.IsZero() {
+		return 1
+	}
+	// Let drops start leaving first, then bring the mark up under them.
+	const (
+		afterSpawnDelay = 0.55 // seconds after spawn ends before fade begins
+		fadeIn          = 1.25 // seconds to full whisper opacity
+	)
+	fadeStart := u.matrixIntroSpawnEnd.Add(time.Duration(afterSpawnDelay * float64(time.Second)))
+	now := time.Now()
+	if now.Before(fadeStart) {
+		return 0
+	}
+	t := now.Sub(fadeStart).Seconds() / fadeIn
+	if t <= 0 {
+		return 0
+	}
+	if t >= 1 {
+		return 1
+	}
+	// Smoothstep ease-in so it doesn't pop at the start.
+	return t * t * (3 - 2*t)
+}
+
+// paintMatrixIntro is the startup rain over the shell viewport (not chrome/bar).
+// No dim matte — shell stays black so the center 硯 has no cutout; rain draws
+// over the logo. After spawn, streams wind down without wrapping.
+func (u *winUI) paintMatrixIntro(hdc win.HDC, rect win.RECT) {
+	padY := u.shellPadY()
+	bot := u.shellBottomY(rect.Bottom - rect.Top)
+	if bot <= padY {
+		return
+	}
+	mode := matrixSpawn
+	if time.Now().After(u.matrixIntroSpawnEnd) {
+		mode = matrixWindDown
+	}
+	// Rain only — logo is already in blitGrid underneath.
+	drew := u.paintDimMatrix(hdc, rect, padY, bot, mode, u.matrixIntroStart, matrixIntroSpawn)
+	if mode == matrixWindDown && !drew {
+		u.finishMatrixIntro()
+	}
+}
+
 // paintDimShell darkens the shell viewport under a floating overlay.
+// Settings: animated Matrix rain. Other modals: Charm-style 猫咪 field.
 func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 	padY := u.shellPadY()
 	bot := u.shellBottomY(rect.Bottom - rect.Top)
+	if bot <= padY {
+		return
+	}
+	if u.chrome.SettingsOpen {
+		// Continuous loop under settings (independent of intro).
+		u.paintMatrixMatteAndRain(hdc, rect, padY, bot, matrixLoop, u.blinkStart, 0)
+		return
+	}
+	// Non-settings overlays: theme dim + 猫咪 texture.
 	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.DimR, chrome.DimG, chrome.DimB)}
 	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
 		r := win.RECT{Left: 0, Top: padY, Right: rect.Right, Bottom: bot}
 		fillRect(hdc, r, brush)
 		win.DeleteObject(win.HGDIOBJ(brush))
+	}
+	u.paintDimNekoField(hdc, rect, padY, bot)
+}
+
+// paintMatrixMatteAndRain fills a dark theme-tinted matte then digital rain.
+func (u *winUI) paintMatrixMatteAndRain(hdc win.HDC, rect win.RECT, padY, bot int32, mode matrixPaintMode, t0 time.Time, spawnFor time.Duration) bool {
+	// Pull hard toward void/black, keep a whisper of primary (~5%) for brand.
+	baseR, baseG, baseB := blendRGB(0, 0, 0, chrome.DimR, chrome.DimG, chrome.DimB, 0.35)
+	matteR, matteG, matteB := blendRGB(baseR, baseG, baseB,
+		chrome.PrimR, chrome.PrimG, chrome.PrimB, 0.05)
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(matteR, matteG, matteB)}
+	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+		r := win.RECT{Left: 0, Top: padY, Right: rect.Right, Bottom: bot}
+		fillRect(hdc, r, brush)
+		win.DeleteObject(win.HGDIOBJ(brush))
+	}
+	return u.paintDimMatrix(hdc, rect, padY, bot, mode, t0, spawnFor)
+}
+
+// dimUnderlayChars is Charm's lipgloss Place whitespace fill: 猫 + 咪 ("kitty").
+// Cycled left-to-right so each fullwidth column stays one glyph down the page.
+var dimUnderlayChars = []string{"猫", "咪"}
+
+// paintDimNekoField draws a Charm-style 猫咪 pattern over the dim matte.
+// Fullwidth glyphs advance two mono cells. Very dim so the dialog stays dominant.
+// Uses a clip rect so a partial last row still fills leftover height (no blank band).
+func (u *winUI) paintDimNekoField(hdc win.HDC, rect win.RECT, top, bot int32) {
+	if hdc == 0 || bot <= top {
+		return
+	}
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	// Fullwidth glyph → two cell columns (terminal East-Asian width).
+	stepX := cw * 2
+	if stepX < 2 {
+		stepX = 2
+	}
+	font := u.cjkFont
+	if font == 0 {
+		font = u.font
+	}
+	if font == 0 {
+		return
+	}
+
+	// Clip so a partial bottom row still paints into leftover pixels
+	// when shell height is not an exact multiple of cell height.
+	saved := win.SaveDC(hdc)
+	if saved == 0 {
+		return
+	}
+	defer win.RestoreDC(hdc, saved)
+	_ = win.IntersectClipRect(hdc, 0, top, rect.Right, bot)
+
+	oldF := win.SelectObject(hdc, win.HGDIOBJ(font))
+	defer win.SelectObject(hdc, oldF)
+
+	// Barely above dim matte — texture only, not readable text.
+	// ~1/12 soft + 11/12 dim.
+	fr := byte((int(chrome.SoftR) + int(chrome.DimR)*11) / 12)
+	fg := byte((int(chrome.SoftG) + int(chrome.DimG)*11) / 12)
+	fb := byte((int(chrome.SoftB) + int(chrome.DimB)*11) / 12)
+	win.SetTextColor(hdc, win.RGB(fr, fg, fb))
+	win.SetBkMode(hdc, win.TRANSPARENT)
+
+	// Pre-encode 猫 / 咪 for TextOut (UTF-16, null-terminated).
+	glyphs := make([][]uint16, 0, len(dimUnderlayChars))
+	for _, chs := range dimUnderlayChars {
+		s, err := syscall.UTF16FromString(chs)
+		if err != nil || len(s) < 2 {
+			continue
+		}
+		glyphs = append(glyphs, s)
+	}
+	if len(glyphs) == 0 {
+		return
+	}
+
+	// Cycle like lipgloss.WithWhitespaceChars("猫咪"): column i uses glyph i%n.
+	// Continue past bot; clip discards overflow (fills leftover strip).
+	for y := top; y < bot; y += ch {
+		col := 0
+		for x := int32(0); x < rect.Right; x += stepX {
+			s := glyphs[col%len(glyphs)]
+			win.TextOut(hdc, x, y, &s[0], int32(len(s)-1))
+			col++
+		}
 	}
 }
 
@@ -2463,6 +3245,21 @@ func blendRGB(br, bg, bb, fr, fg, fb byte, a float64) (byte, byte, byte) {
 	return lerp(br, fr), lerp(bg, fg), lerp(bb, fb)
 }
 
+// isTransparentOverlayBG is true for cells that should not cover the dim+猫 underlay.
+func isTransparentOverlayBG(r, g, b byte) bool {
+	if r == 0 && g == 0 && b == 0 {
+		return true
+	}
+	// Theme void / dim matte (lipgloss gutters, clear-to-void).
+	if r == chrome.VoidR && g == chrome.VoidG && b == chrome.VoidB {
+		return true
+	}
+	if r == chrome.DimR && g == chrome.DimG && b == chrome.DimB {
+		return true
+	}
+	return false
+}
+
 // paintChromeCells paints a cached cell grid at pixel origin (ox, oy).
 // defaultBar=true: tab strip — empty cells use bar fill, edge runs span the window.
 // defaultBar=false: floating overlay — empty default-bg cells are transparent so the
@@ -2486,8 +3283,9 @@ func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, 
 			cell := row[x]
 			br, bg, bb := cell.BR, cell.BG, cell.BB
 			empty := cell.Ch == 0 || cell.Ch == ' '
-			// Overlay: skip empty default cells entirely (transparent).
-			if !defaultBar && empty && br == 0 && bg == 0 && bb == 0 {
+			// Overlay: transparent gutters so dim+猫 shows left/right of the card.
+			// Default black OR theme void (PlaceHorizontal used to fill sides with void).
+			if !defaultBar && empty && (isTransparentOverlayBG(br, bg, bb)) {
 				continue
 			}
 			if br == 0 && bg == 0 && bb == 0 {
@@ -2545,11 +3343,7 @@ func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, 
 			if err != nil || len(s) < 2 {
 				continue
 			}
-			if cell.Bold && u.fontBold != 0 {
-				win.SelectObject(hdc, win.HGDIOBJ(u.fontBold))
-			} else if u.font != 0 {
-				win.SelectObject(hdc, win.HGDIOBJ(u.font))
-			}
+			u.selectFontForRune(hdc, r, cell.Bold)
 			win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
 			win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
 		}
@@ -2628,37 +3422,50 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 	if cols < 20 {
 		cols = 20
 	}
-	orows := u.chrome.OverlayRowCount()
-	if orows < 2 {
-		orows = 2
-	}
-	if u.overlayDirty || len(u.overlayCells) != orows || u.chromeCols != cols {
-		ct := chrome.RenderOverlayToTerm(u.chrome, cols)
-		ccols, crows := ct.Size()
-		if crows > 20 {
-			crows = 20
-		}
-		cells := make([][]cellPix, crows)
-		for y := 0; y < crows; y++ {
-			row := make([]cellPix, cols)
-			for x := 0; x < cols && x < ccols; x++ {
-				row[x] = glyphToCell(ct.Cell(x, y))
+	// Rebuild when dirty or width changes. Do not key on a fixed row estimate —
+	// settings + help caption is taller than the old 20-row paint cap.
+	if u.overlayDirty || u.chromeCols != cols || len(u.overlayCells) == 0 {
+		func() {
+			defer applog.Recover("paintOverlay.render", false)
+			ct := chrome.RenderOverlayToTerm(u.chrome, cols)
+			ccols, crows := ct.Size()
+			const maxOverlayRows = 48
+			if crows > maxOverlayRows {
+				crows = maxOverlayRows
 			}
-			cells[y] = row
+			if crows < 1 {
+				crows = 1
+			}
+			cells := make([][]cellPix, crows)
+			for y := 0; y < crows; y++ {
+				row := make([]cellPix, cols)
+				for x := 0; x < cols && x < ccols; x++ {
+					row[x] = glyphToCell(ct.Cell(x, y))
+				}
+				cells[y] = row
+			}
+			u.overlayCells = cells
+			u.chromeCols = cols
+			u.overlayDirty = false
+		}()
+		if len(u.overlayCells) == 0 {
+			return
 		}
-		u.overlayCells = cells
-		u.overlayDirty = false
 	}
 	ch := u.metricH
 	if ch < 1 {
 		ch = cellH
 	}
-	// Center vertically in the shell region (between tab strip and input bar).
+	// Place in the shell region. Prefer slight top bias; if the stack is tall
+	// (settings + help), shift up so the bottom caption is not clipped.
 	padY := u.chromePx
 	bot := u.shellBottomY(rect.Bottom - rect.Top)
 	shellH := bot - padY
 	oh := int32(len(u.overlayCells)) * ch
-	oy := padY + (shellH-oh)/3
+	oy := padY + (shellH-oh)/4
+	if oy+oh > bot {
+		oy = bot - oh
+	}
 	if oy < padY {
 		oy = padY
 	}

@@ -18,6 +18,9 @@ import (
 type Session struct {
 	cpty *conpty.ConPty
 	once sync.Once
+	// resizeMu serializes ResizePseudoConsole — concurrent Resize while I/O is
+	// in flight has hard-crashed the host process (no Go panic trail).
+	resizeMu sync.Mutex
 }
 
 // DefaultShell returns a sensible Windows shell command line.
@@ -144,10 +147,23 @@ func (s *Session) Write(p []byte) (int, error) {
 }
 
 // Resize updates the ConPTY dimensions.
+// Serialized: never call ResizePseudoConsole from multiple goroutines at once.
 func (s *Session) Resize(cols, rows int) error {
+	if s == nil || s.cpty == nil {
+		return nil
+	}
 	if cols < 1 || rows < 1 {
 		return nil
 	}
+	// COORD is int16 in the ConPTY API.
+	if cols > 32767 {
+		cols = 32767
+	}
+	if rows > 32767 {
+		rows = 32767
+	}
+	s.resizeMu.Lock()
+	defer s.resizeMu.Unlock()
 	return s.cpty.Resize(cols, rows)
 }
 

@@ -185,8 +185,36 @@ func (t *tab) close() {
 }
 
 func (t *tab) resize(cols, rows int) {
-	t.term.Resize(cols, rows)
-	c, r := cols, rows
-	sess := t.sess
-	go func() { _ = sess.Resize(c, r) }()
+	if t == nil {
+		return
+	}
+	// Never let a bad size or VT panic take down the host (resize used to
+	// hard-crash with no trail when ConPTY Resize raced a PTY Read).
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("tab.resize panic", "tab", t.id, "err", fmt.Sprint(r))
+		}
+	}()
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	if cols > maxTermCols {
+		cols = maxTermCols
+	}
+	if rows > maxTermRows {
+		rows = maxTermRows
+	}
+	if t.term != nil {
+		t.term.Resize(cols, rows)
+	}
+	// Synchronous, serialized ConPTY resize (see Session.Resize mutex).
+	// A fire-and-forget goroutine raced Read and killed the process on mouse-up.
+	if t.sess != nil {
+		if err := t.sess.Resize(cols, rows); err != nil {
+			log.Warn("pty resize failed", "tab", t.id, "cols", cols, "rows", rows, "err", err)
+		}
+	}
 }

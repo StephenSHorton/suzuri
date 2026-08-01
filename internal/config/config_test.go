@@ -23,6 +23,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		Cursor:       CursorBar,
 		Theme:        ThemeCharmtone,
 		ShellANSIMap: ANSIMapFull,
+		Window: WindowPlacement{
+			X: 120, Y: 80, Width: 1000, Height: 700, Maximized: false,
+		},
 	}
 	if err := Save(want); err != nil {
 		t.Fatal(err)
@@ -41,8 +44,21 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if got.FontFace != want.FontFace || got.FontSizePx != want.FontSizePx ||
 		got.Cursor != want.Cursor || got.Theme != want.Theme ||
-		got.ShellANSIMap != want.ShellANSIMap {
+		got.ShellANSIMap != want.ShellANSIMap ||
+		got.Window != want.Window {
 		t.Fatalf("got %+v want %+v", got, want)
+	}
+}
+
+func TestWindowPlacementValid(t *testing.T) {
+	if (WindowPlacement{}).Valid() {
+		t.Fatal("zero placement should be invalid")
+	}
+	if !(WindowPlacement{X: 10, Y: 10, Width: 800, Height: 600}).Valid() {
+		t.Fatal("normal placement should be valid")
+	}
+	if (WindowPlacement{Width: 100, Height: 100}).Valid() {
+		t.Fatal("tiny placement should be invalid")
 	}
 }
 

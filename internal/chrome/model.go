@@ -93,6 +93,10 @@ const (
 	ActionSettingsCancel
 	// ActionSplashDone: mark first-run complete and persist.
 	ActionSplashDone
+	// ActionReplayIntro re-runs the configured startup curtain (matrix/ripple/none).
+	ActionReplayIntro
+	// ActionCheckUpdates queries GitHub Releases and installs if newer.
+	ActionCheckUpdates
 )
 
 // Result pairs the new model with an optional host action.
@@ -186,8 +190,9 @@ func newPaletteList(width int, cfg config.Config) list.Model {
 	l.Styles.FilterCursor = lipgloss.NewStyle().Foreground(colSecondary)
 	l.Styles.NoItems = lipgloss.NewStyle().Foreground(colMute).Padding(1, 1)
 	// Crush InputPrompt Margin(1,1) ≈ spaced filter
-	l.FilterInput.Prompt = "› "
-	l.FilterInput.Placeholder = "filter…"
+	// ASCII prompt/placeholder — avoids rare missing-glyph paths in host paint.
+	l.FilterInput.Prompt = "> "
+	l.FilterInput.Placeholder = "filter..."
 	l.FilterInput.PromptStyle = lipgloss.NewStyle().Foreground(colPrimary)
 	l.FilterInput.TextStyle = lipgloss.NewStyle().Foreground(colText)
 	l.FilterInput.PlaceholderStyle = lipgloss.NewStyle().Foreground(colMute)
@@ -199,9 +204,21 @@ func (m *Model) rebuildPalette() {
 	if w < 40 {
 		w = 40
 	}
+	cfg := config.Normalize(m.lastCfg)
+	m.lastCfg = cfg
 	// Always rebuild from a clean list model — never mutate in place while
 	// a filter/cursor might be mid-update (settings save closes dialog then syncs).
-	m.palette = newPaletteList(w, m.lastCfg)
+	m.palette = newPaletteList(w, cfg)
+}
+
+// safePaletteView guards bubbles list.View (has panicked on some filter states).
+func safePaletteView(l list.Model) (view string) {
+	defer func() {
+		if r := recover(); r != nil {
+			view = "(palette)"
+		}
+	}()
+	return l.View()
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -471,23 +488,28 @@ func (m Model) OverlayView() string {
 		// Crush commands: outer min(70, area), inner = outer − frame.
 		outer := clampDialogWidth(52, w)
 		innerW := dialogInnerWidth(outer)
+		if innerW < 16 {
+			innerW = 16
+		}
 		m.palette.SetWidth(innerW)
 		m.palette.SetHeight(10)
 		// Hide crowded key hints on narrow rows (Crush 25% rule).
 		// (bubbles list already stores desc; we trim at command build time for narrow.)
-		listView := m.palette.View()
+		listView := safePaletteView(m.palette)
 		// Crush: List.Margin(0,0,1,0) — space before help; title is list.Title.
 		body := []string{listView}
-		footer := styleDialogHintKey().Render("↑↓") + styleDialogHint().Render("  ") +
+		// Prefer plain arrows when fancy glyphs are unsupported (host probes).
+		footer := styleDialogHintKey().Render("up/down") + styleDialogHint().Render("  ") +
 			styleDialogHintKey().Render("enter") + styleDialogHint().Render(" run  ") +
 			styleDialogHintKey().Render("esc")
 		card = renderDialogCard(outer, "Commands", body, footer)
 	default:
 		return ""
 	}
-	return lipgloss.PlaceHorizontal(w, lipgloss.Center, card,
-		lipgloss.WithWhitespaceBackground(colVoid),
-		lipgloss.WithWhitespaceForeground(colMute))
+	// Center the card only — no whitespace background. Side gutters must stay
+	// default/transparent so paintDimShell's 猫 field shows left and right of
+	// the modal (void-colored padding used to paint opaque strips over it).
+	return lipgloss.PlaceHorizontal(w, lipgloss.Center, card)
 }
 
 // View is strip only (overlay is composited separately by the host).
@@ -500,7 +522,7 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int) {
 	var parts []string
 	var plusB [2]int
 
-	// Quiet brand — no bordered chip.
+	// Quiet brand — no bordered chip, no trailing gap before the first tab.
 	brand := styleBrand().Render("硯")
 	parts = append(parts, brand)
 	col := lipgloss.Width(brand)
@@ -509,11 +531,15 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int) {
 	gapW := lipgloss.Width(gap)
 
 	if len(m.Tabs) == 0 {
+		// Only pad when there is no real tab card to sit flush against 硯.
 		parts = append(parts, gap, styleInactiveTab().Render("no tabs"))
 	} else {
 		for i, t := range m.Tabs {
-			parts = append(parts, gap)
-			col += gapW
+			// Gaps between tabs only — first tab abuts the brand mark.
+			if i > 0 {
+				parts = append(parts, gap)
+				col += gapW
+			}
 			label := tabLabel(t, i)
 			var card string
 			if i == m.Active {
@@ -595,7 +621,8 @@ func (m Model) OverlayRowCount() int {
 	case m.ConfirmOpen:
 		return 10
 	case m.SettingsOpen:
-		return 15
+		// Main settings card + gap + help card under it.
+		return 26
 	case m.PaletteOpen:
 		return 14
 	default:

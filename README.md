@@ -1,104 +1,127 @@
 # suzuri（硯）
 
+[![CI](https://github.com/StephenSHorton/suzuri/actions/workflows/ci.yml/badge.svg)](https://github.com/StephenSHorton/suzuri/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-00e676.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/StephenSHorton/suzuri?color=0a5c32)](https://github.com/StephenSHorton/suzuri/releases/latest)
+
 **Suzuri** means *inkstone* — the stone where ink is ground before writing.
 
-A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a TUI inside someone else’s emulator, and not a Warp fork.
+A **real terminal host** for Windows: your window, ConPTY, VT cell grid, Charm chrome, Warp-style input bar. Not a TUI inside someone else’s emulator, and not a Warp fork.
 
-## Status (v0.5)
+**Site:** [stephenshorton.github.io/suzuri](https://stephenshorton.github.io/suzuri/) · **Download:** [latest release](https://github.com/StephenSHorton/suzuri/releases/latest)
 
-| Feature | State |
-|---------|--------|
-| Own Win32 window + ConPTY shell | ✅ |
-| VT cell emulator (`vt10x`) | ✅ |
-| Block caret (opacity pulse) | ✅ |
-| PowerShell-friendly Backspace (DEL) | ✅ |
-| Scrollback + mouse wheel / PgUp·PgDn | ✅ |
-| Multi-row scroll capture | ✅ |
-| Drag select + copy/paste | ✅ |
-| ANSI 16 / 256 / truecolor + bold | ✅ |
-| **Charm chrome** (tabs, status, palette) | ✅ |
-| **Settings** (`Ctrl+,` / palette) — font, size, cursor, theme, shell ANSI, profile | ✅ |
-| Themes: Inkstone / Charmtone / High contrast + soft/full ANSI remap | ✅ |
-| **Profiles** (Default / PowerShell / Cmd + custom in config.json) | ✅ |
-| **Help** `Ctrl+/` · first-run splash · command categories | ✅ |
-| Status toasts · click `+` · click-out dismiss · last-tab quit confirm | ✅ |
-| Config: `%LOCALAPPDATA%\suzuri\config.json` | ✅ |
-| Font: **GohuFont uni14 Nerd Font Mono** (bundled, WTFPL) · Cascadia/Consolas fallback | ✅ |
-| Seamless box-drawing / block glyphs (WT-style) | ✅ |
-| Splits / richer menus | soon |
+---
 
-### Keys
+## Why
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+Shift+T` | New tab |
-| `Ctrl+W` | Close tab |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
-| `Ctrl+1`…`Ctrl+9` | Jump to tab |
-| Click tab strip | Activate tab |
-| `Ctrl+K` / `Ctrl+P` | Command palette (Charm) |
-| `Ctrl+,` | Settings (font, size, cursor, theme, ANSI, profile) |
-| `Ctrl+/` | Keyboard shortcuts help |
-| `Ctrl+Shift+C` / `Ctrl+Insert` | Copy selection |
-| `Ctrl+Shift+V` / `Shift+Insert` / `Ctrl+V` | Paste |
-| `Ctrl+C` | Copy if selection; else `^C` to shell |
-| Right-click | Paste |
-| Mouse wheel / `PgUp` `PgDn` | Scroll history |
+Most “pretty terminals” are either:
 
-Shell defaults to `powershell -NoLogo -NoProfile` so themed prompts don’t inject missing-font glyphs.
+- a **full host** (Windows Terminal, WezTerm) with deep VT fidelity, or  
+- a **TUI app** that lives *inside* another terminal (Crush, many Charm demos).
 
-## Run
+**suzuri is a host.** It owns Win32 + ConPTY + paint. Charm (Bubble Tea + Lip Gloss) owns the chrome you notice — tabs, palette, settings — composited over a dimmed shell.
+
+## Features
+
+| Area | Highlights |
+|------|------------|
+| **Host** | Native Win32 window, ConPTY shells, scrollback, selection, copy/paste |
+| **Chrome** | Tabs, command palette (`Ctrl+K`), settings (`Ctrl+,`), help, themes |
+| **Input** | Warp-style bottom bar — local edit, multiline, history, echo filter |
+| **Look** | Inkstone / Charmtone / High contrast · bundled Gohu mono · box-drawing |
+| **Polish** | Window placement, matrix/ripple intros, center 硯 watermark |
+| **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
+| **Updates** | Checks GitHub Releases on startup; palette **Check for updates** |
+
+## Download
+
+1. Grab **`suzuri-*-windows-amd64.exe`** (or the `.zip`) from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
+2. Run it — no installer. Config lives in `%LOCALAPPDATA%\suzuri\`.  
+3. Optional: pin the exe or put it on your `PATH`.
+
+## Build from source
 
 ```powershell
-cd C:\Users\4step\projects\suzuri
-go run ./cmd/suzuri
-# or
+git clone https://github.com/StephenSHorton/suzuri.git
+cd suzuri
+go test ./...
+go build -ldflags "-s -w -X main.version=dev" -o suzuri.exe ./cmd/suzuri
 .\suzuri.exe
 ```
 
+Windows only (ConPTY). Go 1.26+ recommended (see `go.mod`).
+
+## Keys
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+K` / `Ctrl+P` | Command palette |
+| `Ctrl+,` | Settings |
+| `Ctrl+/` | Help |
+| `Ctrl+Shift+T` | New tab |
+| `Ctrl+W` | Close tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+1`…`9` | Jump to tab |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
+
+## Config
+
+`%LOCALAPPDATA%\suzuri\config.json` — font, theme, ANSI map, **intro** (`matrix` \| `ripple` \| `none`), profiles, window placement.
+
+Logs: `%LOCALAPPDATA%\suzuri\suzuri.log` · `SUZURI_LOG_LEVEL=info` to quiet debug.
+
 ## MCP (agent diagnostics)
 
-Spawn-on-demand **stdio** MCP — Grok starts `suzuri mcp` when needed; it attaches to the **running GUI** over loopback. No always-on daemon. See [`docs/mcp.md`](docs/mcp.md).
+Spawn-on-demand stdio MCP — attach to a running GUI over loopback. See [`docs/mcp.md`](docs/mcp.md).
 
 ```toml
 # ~/.grok/config.toml
 [mcp_servers.suzuri]
-command = 'C:\Users\4step\projects\suzuri\suzuri.exe'
+command = 'C:\path\to\suzuri.exe'
 args = ["mcp"]
 enabled = true
 ```
 
-Tools: `suzuri_status`, `suzuri_diag`, `suzuri_snapshot`, `suzuri_submit`, `suzuri_logs` (app log tail).
-
-## Logs
-
-Charm [`log`](https://github.com/charmbracelet/log) writes to:
-
-```
-%LOCALAPPDATA%\suzuri\suzuri.log
-```
-
-(usually `C:\Users\<you>\AppData\Local\suzuri\suzuri.log`). Level defaults to `debug`; set `SUZURI_LOG_LEVEL=info` (or `warn` / `error`) to quiet it. Panics in the UI thread are recovered and written with a stack trace.
-
 ## Architecture
-
-Charm owns **all UI chrome** (tab strip, status line, command palette) via Bubble Tea + Lip Gloss. The shell viewport stays a VT cell grid driven by ConPTY.
-
-**Direction:** make chrome feel more like [Crush](https://github.com/charmbracelet/crush) (dialogs, themes, settings) while remaining a real host — not an AI TUI inside another terminal. See [`docs/crush-inspired-plan.md`](docs/crush-inspired-plan.md).
 
 ```
 Win32 window  →  key/mouse
       │
-      ├─ Charm chrome (tabs / status / palette)  → View → mini VT → paint
+      ├─ Charm chrome (tabs / palette / settings)  → mini VT → GDI
       │
       └─ active tab
            write queue  →  ConPTY  →  shell
                 ↑                         ↓
            VT parse (UI thread)  ←  byte queue
                 ↓
-           cell grid + scrollback → paint
+           cell grid + scrollback → GDI
 ```
+
+Design notes: [`docs/crush-inspired-plan.md`](docs/crush-inspired-plan.md).
+
+## Releases & CI
+
+| Workflow | Purpose |
+|----------|---------|
+| **CI** | `go test` + build on PR/push |
+| **Release** | Tag `v*.*.*` → portable `.exe` + `.zip` + `SHA256SUMS` |
+| **Pages** | Deploys `docs/site` to GitHub Pages |
+
+```powershell
+git tag v0.6.0
+git push origin v0.6.0
+```
+
+## Auto-update
+
+Release builds embed a version via `-ldflags -X main.version=…`. On startup (and via palette **Check for updates**), suzuri queries GitHub Releases, downloads the windows-amd64 asset, verifies `SHA256SUMS` when present, renames the running image, writes the new exe, and relaunches. Dev builds (`version=dev`) never auto-update.
+
+## License
+
+[MIT](LICENSE) © Stephen S. Horton.
+
+Bundled **GohuFont uni14 Nerd Font Mono** is WTFPL — see [`assets/fonts`](assets/fonts).
 
 ## Name
 
-Romanization: `suzuri` · Japanese: 硯 · English: inkstone
+Romanization: `suzuri` · Japanese: **硯** · English: inkstone

@@ -14,7 +14,7 @@ func helpBody(windowCols int) string {
 	body = append(body, helpRow(inner, KeyCtrl("1-9"), "Jump"))
 	body = append(body, "")
 	body = append(body, styleDialogHint().Render("Chrome"))
-	body = append(body, helpRow(inner, KeyCtrl("K"), "Palette"))
+	body = append(body, helpRow(inner, KeyCtrl("K"), "Palette (commands, updates, intro)"))
 	body = append(body, helpRow(inner, KeyCtrl(","), "Settings"))
 	body = append(body, helpRow(inner, KeyCtrl("/"), "Help"))
 	body = append(body, helpRow(inner, "Esc", "Dismiss"))

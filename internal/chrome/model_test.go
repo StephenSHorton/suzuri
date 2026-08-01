@@ -96,11 +96,11 @@ func TestNewTabFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// 0 Settings, 1 Help, 2 New tab
-	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
-	m = r.Model
-	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
-	m = r.Model
+	// 0 Settings, 1 Replay intro, 2 Check for updates, 3 Help, 4 New tab
+	for i := 0; i < 4; i++ {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+		m = r.Model
+	}
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
 	if r.Action != ActionNewTab {
 		t.Fatalf("action=%v want NewTab", r.Action)

@@ -11,7 +11,15 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/mcpsrv"
 	"github.com/StephenSHorton/suzuri/internal/ui"
+	"github.com/StephenSHorton/suzuri/internal/update"
 )
+
+// version is injected at release build time:
+//
+//	go build -ldflags "-X main.version=0.6.0" ./cmd/suzuri
+//
+// Dev/local builds stay "dev" and never auto-update.
+var version = "dev"
 
 func main() {
 	// Subcommands before GUI init. `suzuri mcp` is spawn-on-demand stdio MCP
@@ -22,6 +30,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "suzuri mcp: %v\n", err)
 			os.Exit(1)
 		}
+		return
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "-version" || os.Args[1] == "--version") {
+		fmt.Println(version)
 		return
 	}
 
@@ -64,11 +76,20 @@ func main() {
 	}
 	defer ui.UnregisterBundledFonts()
 
+	// Leftover from a previous portable update (renamed running image).
+	update.CleanupOldBinary()
+
+	// Fire-and-forget auto-update (release builds only; never blocks UI start).
+	upd := update.New("StephenSHorton/suzuri", version)
+	go upd.AutoUpdate()
+	ui.SetUpdater(upd)
+
 	log.Info("starting",
 		"pid", os.Getpid(),
 		"goos", runtime.GOOS,
 		"goarch", runtime.GOARCH,
-		"version", runtime.Version(),
+		"version", version,
+		"go", runtime.Version(),
 	)
 
 	if err := ui.Run(); err != nil {
