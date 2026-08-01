@@ -296,15 +296,25 @@ func styleStatus() lipgloss.Style {
 		Padding(0, 1)
 }
 
-// Dialogs: quiet border, soft panel, breathing room.
+// Crush dialog pattern (quickstyle.go):
+//   View: RoundedBorder + BorderForeground(primary) + padding
+//   Title: Padding(0,1) + primary
+//   SelectedItem: Padding(0,1) + Background(primary) + Foreground(onPrimary)
+//   NormalItem: Padding(0,1) + fgBase
+//   Help: keys fgMoreSubtle, desc fgMostSubtle
+//   defaultDialogMaxWidth = 70 (we clamp lower for host width)
+
+// DialogMaxWidth is Crush's 70, clamped for suzuri's typical window.
+const DialogMaxWidth = 56
+
 func stylePaletteBorder() lipgloss.Style {
+	// Crush: s.Dialog.View + Quit.Frame ≈ Border(Rounded)+BorderForeground(primary)+Padding(1,2)
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colBorder).
+		BorderForeground(colAccent). // primary, not mute grey
 		BorderBackground(colPanel).
 		Background(colPanel).
-		Padding(1, 2).
-		Margin(0, 0)
+		Padding(1, 2)
 }
 
 func styleBrand() lipgloss.Style {
@@ -316,32 +326,68 @@ func styleBrand() lipgloss.Style {
 }
 
 func styleDialogTitle() lipgloss.Style {
+	// Crush: s.Dialog.Title = Padding(0,1).Foreground(primary)
 	return lipgloss.NewStyle().
-		Foreground(colText).
+		Foreground(colAccent).
 		Bold(true).
-		Padding(0, 0, 0, 0)
+		Padding(0, 1)
 }
 
 func styleDialogLabel() lipgloss.Style {
+	// meta / secondary
 	return lipgloss.NewStyle().Foreground(colDim)
 }
 
 func styleDialogValue() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(colSoft)
+	// fgBase body
+	return lipgloss.NewStyle().Foreground(colText)
 }
 
 func styleDialogActive() lipgloss.Style {
+	// Crush SelectedItem: primary fill + onPrimary text (full contrast)
 	return lipgloss.NewStyle().
-		Foreground(colText).
-		Background(colSel).
+		Foreground(colVoid). // onPrimary stand-in (dark on accent)
+		Background(colAccent).
 		Bold(true).
 		Padding(0, 1)
 }
 
 func styleDialogHint() lipgloss.Style {
+	// Crush Help: ShortDesc = fgMostSubtle
 	return lipgloss.NewStyle().Foreground(colMute)
 }
 
+func styleDialogHintKey() lipgloss.Style {
+	// Crush Help: ShortKey = fgMoreSubtle (slightly stronger than desc)
+	return lipgloss.NewStyle().Foreground(colDim)
+}
+
 func styleDialogRule() lipgloss.Style {
+	// separator role
 	return lipgloss.NewStyle().Foreground(colMute).Background(colPanel)
+}
+
+func styleDialogNormalItem() lipgloss.Style {
+	// Crush NormalItem
+	return lipgloss.NewStyle().
+		Foreground(colText).
+		Padding(0, 1)
+}
+
+// clampDialogWidth mirrors Crush min(max, window - chrome).
+func clampDialogWidth(want, window int) int {
+	if window < 20 {
+		window = 20
+	}
+	maxW := DialogMaxWidth
+	if window-4 < maxW {
+		maxW = window - 4
+	}
+	if want > maxW {
+		want = maxW
+	}
+	if want < 28 {
+		want = min(28, maxW)
+	}
+	return want
 }

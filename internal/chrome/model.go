@@ -164,19 +164,17 @@ func newPaletteList(width int, cfg config.Config) list.Model {
 	delegate.Styles.NormalDesc = lipgloss.NewStyle().
 		Foreground(colMute).
 		Padding(0, 1)
+	// Crush SelectedItem: primary fill + onPrimary (not thin side border).
 	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
-		Foreground(colText).
-		Background(colSel).
+		Foreground(colVoid).
+		Background(colAccent).
 		Bold(true).
-		Padding(0, 1).
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(colNeon)
+		Padding(0, 1)
 	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
-		Foreground(colViolet).
-		Background(colSel).
-		Padding(0, 1).
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(colNeon)
+		Foreground(colVoid).
+		Background(colAccent).
+		Faint(true).
+		Padding(0, 1)
 	delegate.Styles.DimmedTitle = lipgloss.NewStyle().Foreground(colMute).Padding(0, 1)
 	delegate.Styles.DimmedDesc = lipgloss.NewStyle().Foreground(colMute).Padding(0, 1)
 	delegate.Styles.FilterMatch = lipgloss.NewStyle().Foreground(colMatch).Underline(true)
@@ -458,20 +456,26 @@ func (m Model) OverlayView() string {
 	var card string
 	switch {
 	case m.SplashOpen:
-		pw := min(44, max(34, w-8))
+		pw := clampDialogWidth(42, w)
 		card = splashBody(pw)
 	case m.HelpOpen:
-		pw := min(48, max(34, w-8))
+		pw := clampDialogWidth(48, w)
 		card = helpBody(pw)
 	case m.ConfirmOpen:
-		pw := min(40, max(30, w-10))
+		pw := clampDialogWidth(40, w)
 		card = m.confirm.render(pw)
 	case m.SettingsOpen:
-		pw := min(44, max(32, w-8))
+		pw := clampDialogWidth(44, w)
 		card = m.settings.render(pw)
 	case m.PaletteOpen:
-		pw := min(52, max(30, w-8))
-		m.palette.SetWidth(pw - 4)
+		// Crush commands dialog ~70 max; we clamp. Inner width = total − frame.
+		pw := clampDialogWidth(52, w)
+		// Frame is border(2)+padding(4) ≈ 6 horizontal if Width is total box.
+		innerW := pw - 6
+		if innerW < 20 {
+			innerW = 20
+		}
+		m.palette.SetWidth(innerW)
 		m.palette.SetHeight(10)
 		inner := m.palette.View()
 		card = stylePaletteBorder().Width(pw).Render(inner)

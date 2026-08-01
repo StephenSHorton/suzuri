@@ -145,16 +145,16 @@ func (s settingsState) fieldLabel(f settingsField) string {
 }
 
 func (s settingsState) render(width int) string {
-	if width < 30 {
-		width = 30
-	}
-	inner := width - 6
+	// Crush: content sized to inner width; Width() on border style is total box.
+	width = clampDialogWidth(width, width+4)
+	inner := width - 6 // border 2 + padding 4 (approx)
 	if inner < 20 {
 		inner = 20
 	}
 
 	title := styleDialogTitle().Render("Settings")
-	rule := styleDialogRule().Render(strings.Repeat("─", inner))
+	// Separator role (not a second loud border).
+	rule := styleDialogRule().Render(strings.Repeat("─", max(8, inner-2)))
 
 	var rows []string
 	rows = append(rows, title)
@@ -163,7 +163,7 @@ func (s settingsState) render(width int) string {
 	for f := settingsField(0); f < settingsFieldCount; f++ {
 		label := s.fieldLabel(f)
 		val := s.valueLabel(f)
-		maxVal := inner - 14
+		maxVal := inner - 16
 		if maxVal < 6 {
 			maxVal = 6
 		}
@@ -172,22 +172,29 @@ func (s settingsState) render(width int) string {
 			val = string(rs[:maxVal-1]) + "…"
 		}
 		if f == s.field {
-			// Calm selected row: no neon side bar, soft fill + arrows.
-			line := fmt.Sprintf("%-8s  %s  %s  %s", label, "‹", val, "›")
+			// Crush selected: full primary row, onPrimary text, Padding(0,1).
+			line := fmt.Sprintf("%-8s  ‹ %s ›", label, val)
 			rows = append(rows, styleDialogActive().Width(inner).Render(line))
 		} else {
+			// Crush normal: Padding(0,1) fgBase / muted labels.
 			lab := styleDialogLabel().Width(10).Render(label)
 			v := styleDialogValue().Render(val)
 			pad := inner - lipgloss.Width(lab) - lipgloss.Width(v)
 			if pad < 1 {
 				pad = 1
 			}
-			rows = append(rows, lab+strings.Repeat(" ", pad)+v)
+			row := lab + strings.Repeat(" ", pad) + v
+			rows = append(rows, styleDialogNormalItem().Width(inner).Render(strings.TrimRight(row, " ")))
 		}
 	}
 
 	rows = append(rows, rule)
-	rows = append(rows, styleDialogHint().Render("↑↓  ·  ‹› change  ·  enter save  ·  esc"))
+	// Crush help: keys stronger than descriptions.
+	hint := styleDialogHintKey().Render("↑↓") + styleDialogHint().Render(" move  ") +
+		styleDialogHintKey().Render("‹›") + styleDialogHint().Render(" change  ") +
+		styleDialogHintKey().Render("enter") + styleDialogHint().Render(" save  ") +
+		styleDialogHintKey().Render("esc")
+	rows = append(rows, hint)
 	return stylePaletteBorder().Width(width).Render(strings.Join(rows, "\n"))
 }
 
