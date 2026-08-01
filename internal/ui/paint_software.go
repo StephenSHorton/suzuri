@@ -366,12 +366,21 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 	if p == nil {
 		return
 	}
-	// Try preferred face, then the other — never silently drop rain/CJK.
-	faces := [2]font.Face{p.faceForRune(r), nil}
-	if faces[0] == p.cjkFace {
-		faces[1] = p.face
+	// Never use Gohu for CJK/halfwidth — it paints .notdef tofu for Index==0.
+	// Prefer CJK face for those; primary mono for Latin/ASCII.
+	var faces []font.Face
+	if isEastAsianRune(r) || isHalfwidthKatakana(r) {
+		if p.cjkFace != nil && cjkHasRune(r) {
+			faces = append(faces, p.cjkFace)
+		}
+		// Do NOT fall back to primary for CJK — tofu boxes look worse than a bar.
 	} else {
-		faces[1] = p.cjkFace
+		if p.face != nil && primaryHasRune(r) {
+			faces = append(faces, p.face)
+		}
+		if p.cjkFace != nil && cjkHasRune(r) {
+			faces = append(faces, p.cjkFace)
+		}
 	}
 	for _, face := range faces {
 		if face == nil {
@@ -385,9 +394,9 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 		draw.DrawMask(dst, dr, col, image.Point{}, mask, maskp, draw.Over)
 		return
 	}
-	// Ultimate fallback for rain: a bright block so streams never go blank.
+	// Ultimate fallback for rain: a bright bar so streams never go blank/tofu.
 	if isHalfwidthKatakana(r) || isEastAsianRune(r) {
-		fillRectRGBA(dst, px+1, py+2, max(1, p.cellW-2), max(1, p.cellH-4), fr, fg, fb)
+		fillRectRGBA(dst, px+p.cellW/3, py+2, max(1, p.cellW/3), max(1, p.cellH-4), fr, fg, fb)
 	}
 }
 
@@ -396,28 +405,6 @@ func max(a, b int) int {
 		return a
 	}
 	return b
-}
-
-func (p *softwarePainter) faceForRune(r rune) font.Face {
-	if p == nil {
-		return nil
-	}
-	// Prefer CJK face for East Asian + half-width katakana (matrix rain).
-	if isEastAsianRune(r) || isHalfwidthKatakana(r) {
-		if p.cjkFace != nil {
-			return p.cjkFace
-		}
-	}
-	if p.face != nil {
-		// If primary lacks the glyph, fall through to CJK.
-		if _, ok := p.face.GlyphAdvance(r); ok {
-			return p.face
-		}
-	}
-	if p.cjkFace != nil {
-		return p.cjkFace
-	}
-	return p.face
 }
 
 func isHalfwidthKatakana(r rune) bool {

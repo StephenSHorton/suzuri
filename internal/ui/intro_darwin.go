@@ -12,32 +12,41 @@ import (
 
 // matrixRainRunes is the classic digital-rain glyph set (half-width katakana +
 // ASCII). Populated in initMatrixRainRunes after the CJK face is registered so
-// we only keep runes that actually paint (blank drops = Glyph miss).
+// we only keep runes that have a real glyph index (not .notdef tofu boxes).
 var matrixRainRunes []rune
 
-// Preferred rain alphabet — filtered at startup against the live CJK face.
+// Preferred rain alphabet — filtered at startup by ttf.Index != 0.
+// Half-width first (classic matrix look); fullwidth is the AppleGothic fallback
+// when the active CJK face lacks FF61–FF9F.
 const matrixRainAlphabet = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ" +
 	"0123456789" +
 	":.=*+-<>|" +
-	// Fullwidth katakana fallback if halfwidth is missing on a face.
 	"アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン"
 
-// initMatrixRainRunes keeps only glyphs the CJK (or primary) face can draw.
+// initMatrixRainRunes keeps only glyphs a loaded face can actually paint.
+// freetype's GlyphAdvance/Glyph return success for .notdef (index 0) and draw
+// hollow boxes — we must filter on Index != 0, not GlyphAdvance.
 func initMatrixRainRunes() {
 	if len(matrixRainRunes) > 0 {
 		return
 	}
-	face := cjkFaceForSize(14)
-	if face == nil {
-		face = faceForSize(14)
-	}
 	var kept []rune
+	seen := map[rune]bool{}
 	for _, r := range []rune(matrixRainAlphabet) {
-		if face != nil {
-			if _, ok := face.GlyphAdvance(r); !ok {
+		if seen[r] {
+			continue
+		}
+		// CJK / halfwidth / fullwidth: require the CJK face. Never trust Gohu —
+		// it maps every missing CJK code point to the same box glyph.
+		if isEastAsianRune(r) || isHalfwidthKatakana(r) {
+			if !cjkHasRune(r) {
 				continue
 			}
+		} else if !primaryHasRune(r) && !cjkHasRune(r) {
+			// ASCII punctuation/digits — primary mono first.
+			continue
 		}
+		seen[r] = true
 		kept = append(kept, r)
 	}
 	if len(kept) == 0 {
@@ -45,9 +54,6 @@ func initMatrixRainRunes() {
 		kept = []rune("0123456789:.=*+-<>|")
 	}
 	matrixRainRunes = kept
-	if face != nil {
-		_ = face.Close()
-	}
 }
 
 // matrixPaintMode controls whether streams loop (settings) or wind down (intro).
