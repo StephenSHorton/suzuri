@@ -269,17 +269,10 @@ func (u *winUI) chromePixelHeight() int32 {
 	return h
 }
 
-// chromeTopY is the pixel Y where the bottom tab strip begins.
-func (u *winUI) chromeTopY(clientH int32) int32 {
-	ch := u.chromePixelHeight()
-	if clientH > ch {
-		return clientH - ch
-	}
-	return 0
+// shellPadY is the top of the shell viewport (tabs stay at the top).
+func (u *winUI) shellPadY() int32 {
+	return u.chromePixelHeight()
 }
-
-// shellPadY is the top of the shell viewport (chrome is at the bottom).
-func (u *winUI) shellPadY() int32 { return 0 }
 
 func (u *winUI) applyChromeAction(r chrome.Result) {
 	switch r.Action {
@@ -948,12 +941,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.focus()
 		px := int32(win.LOWORD(uint32(lParam)))
 		py := int32(win.HIWORD(uint32(lParam)))
-		var crect win.RECT
-		win.GetClientRect(hwnd, &crect)
-		chromeTop := u.chromeTopY(crect.Bottom)
+		chH := u.metricH
+		if chH < 1 {
+			chH = cellH
+		}
+		tabStripH := int32(chrome.TabStripRows()) * chH
+		chromeH := u.chromePixelHeight()
 
-		// Click on shell (above bottom chrome) while overlay open → dismiss.
-		if u.chrome.OverlayOpen() && py < chromeTop {
+		// Click outside floating overlay (on shell) dismisses it.
+		if u.chrome.OverlayOpen() && py >= chromeH {
 			r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
 			u.chrome = r.Model
 			u.markChromeDirty()
@@ -963,21 +959,23 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 
-		// Bottom tab strip / + chip.
-		if py >= chromeTop {
-			if u.hitPlus(px) {
-				u.newTabUI("")
-				return 0
-			}
-			if i := u.hitTab(px); i >= 0 {
-				u.active = i
-				u.selecting = false
-				if t := u.activeTab(); t != nil {
-					t.sel.clear()
-					setWindowTitle(u.hwnd, "suzuri — "+t.title)
+		// Top tab strip / + chip.
+		if py < chromeH {
+			if py < tabStripH {
+				if u.hitPlus(px) {
+					u.newTabUI("")
+					return 0
 				}
-				u.syncChrome()
-				win.InvalidateRect(hwnd, nil, false)
+				if i := u.hitTab(px); i >= 0 {
+					u.active = i
+					u.selecting = false
+					if t := u.activeTab(); t != nil {
+						t.sel.clear()
+						setWindowTitle(u.hwnd, "suzuri — "+t.title)
+					}
+					u.syncChrome()
+					win.InvalidateRect(hwnd, nil, false)
+				}
 			}
 			return 0
 		}
@@ -1203,10 +1201,10 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 
 	cw, ch := measureCellSize(hdc)
 	const padX int32 = 4
-	// Shell fills the top; tab strip is painted at the bottom.
+	// Shell sits below the top tab strip.
 	padY := u.shellPadY()
 	u.metricW, u.metricH = cw, ch
-	u.chromePx = u.chromePixelHeight()
+	u.chromePx = padY
 
 	selBrush := win.HBRUSH(0)
 	if tab.sel.active && !tab.sel.empty() {
@@ -1721,11 +1719,10 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 
 // paintDimShell darkens the shell viewport under a floating overlay.
 func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
-	// Shell is the region above the bottom chrome strip.
-	chromeTop := u.chromeTopY(rect.Bottom)
+	padY := u.shellPadY()
 	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.DimR, chrome.DimG, chrome.DimB)}
 	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-		r := win.RECT{Left: 0, Top: 0, Right: rect.Right, Bottom: chromeTop}
+		r := win.RECT{Left: 0, Top: padY, Right: rect.Right, Bottom: rect.Bottom}
 		fillRect(hdc, r, brush)
 		win.DeleteObject(win.HGDIOBJ(brush))
 	}
@@ -1864,17 +1861,16 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 		chromeH = rect.Bottom - rect.Top
 	}
 
-	// Tab strip sits at the bottom of the client area.
-	oy := u.chromeTopY(rect.Bottom)
+	// Tab strip at the top of the client area.
 	{
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.BarR, chrome.BarG, chrome.BarB)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			r := win.RECT{Left: 0, Top: oy, Right: rect.Right, Bottom: rect.Bottom}
+			r := win.RECT{Left: 0, Top: 0, Right: rect.Right, Bottom: chromeH}
 			fillRect(hdc, r, brush)
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
-	u.paintChromeCells(hdc, rect, cells, 0, oy, true)
+	u.paintChromeCells(hdc, rect, cells, 0, 0, true)
 	u.chromePx = chromeH
 }
 
@@ -1912,19 +1908,13 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 	if ch < 1 {
 		ch = cellH
 	}
-	// Center in the shell region (above the bottom tab strip).
-	chromeTop := u.chromeTopY(rect.Bottom)
-	shellH := chromeTop
+	// Center vertically in the shell region under the tab strip.
+	padY := u.chromePx
+	shellH := rect.Bottom - padY
 	oh := int32(len(u.overlayCells)) * ch
-	oy := (shellH - oh) / 3
-	if oy < 0 {
-		oy = 0
-	}
-	if oy+oh > chromeTop {
-		oy = chromeTop - oh
-		if oy < 0 {
-			oy = 0
-		}
+	oy := padY + (shellH-oh)/3
+	if oy < padY {
+		oy = padY
 	}
 	u.paintChromeCells(hdc, rect, u.overlayCells, 0, oy, false)
 }
