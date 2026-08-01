@@ -48,8 +48,14 @@ const (
 // Chrome (tabs, status, palette) is a Charm Bubble Tea model; the shell is VT.
 func Run() error {
 	cols, rows := 100, 28
-	cfg := config.Default()
-	log.Info("ui.Run", "cols", cols, "rows", rows, "font", cfg.FontFace, "fontPx", cfg.FontSizePx)
+	cfg, err := config.Load()
+	if err != nil {
+		log.Warn("config load failed; using defaults", "err", err)
+		cfg = config.Default()
+	}
+	cfg = config.Normalize(cfg)
+	chrome.ApplyTheme(cfg.Theme)
+	log.Info("ui.Run", "cols", cols, "rows", rows, "font", cfg.FontFace, "fontPx", cfg.FontSizePx, "theme", cfg.Theme, "config", config.Path())
 	ui := &winUI{
 		cols:       cols,
 		rows:       rows,
@@ -58,6 +64,7 @@ func Run() error {
 		nextTabID:  0,
 		chrome:     chrome.New(cols),
 	}
+	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	ui.alive.Store(true)
 	t, err := newTab(ui.nextTabID, cols, rows)
 	if err != nil {
@@ -106,9 +113,11 @@ type winUI struct {
 
 	// Chrome paint cache: RenderToTerm+Lip Gloss every WM_PAINT is expensive
 	// and stress-tests GDI when the window is reactivated after idle.
-	chromeDirty bool
-	chromeCols  int
-	chromeCells [][]cellPix // [row][col]
+	chromeDirty   bool
+	chromeCols    int
+	chromeCells   [][]cellPix // strip [row][col]
+	overlayCells  [][]cellPix
+	overlayDirty  bool
 }
 
 func (u *winUI) activeTab() *tab {
@@ -151,6 +160,53 @@ func (u *winUI) syncChrome() {
 
 func (u *winUI) markChromeDirty() {
 	u.chromeDirty = true
+	u.overlayDirty = true
+}
+
+// applyConfigLive updates fonts/theme from cfg without writing disk.
+func (u *winUI) applyConfigLive(cfg config.Config) {
+	cfg = config.Normalize(cfg)
+	prev := u.cfg
+	u.cfg = cfg
+	chrome.ApplyTheme(cfg.Theme)
+	u.chrome = u.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
+	u.markChromeDirty()
+
+	needFont := prev.FontFace != cfg.FontFace || prev.FontSizePx != cfg.FontSizePx
+	if needFont {
+		if u.font != 0 {
+			win.DeleteObject(win.HGDIOBJ(u.font))
+		}
+		if u.fontBold != 0 {
+			win.DeleteObject(win.HGDIOBJ(u.fontBold))
+		}
+		u.font = createFontFor(cfg, false)
+		u.fontBold = createFontFor(cfg, true)
+		// Force remeasure + grid resize on next paint/size.
+		u.metricW, u.metricH = 0, 0
+		if u.hwnd != 0 {
+			var rc win.RECT
+			if win.GetClientRect(u.hwnd, &rc) {
+				u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
+			}
+		}
+		log.Info("font applied", "face", cfg.FontFace, "px", cfg.FontSizePx, "got", fontFaceName(u.font))
+	}
+	if prev.Theme != cfg.Theme {
+		log.Info("theme applied", "theme", cfg.Theme)
+	}
+}
+
+func (u *winUI) applyConfigSave(cfg config.Config) {
+	u.applyConfigLive(cfg)
+	if err := config.Save(cfg); err != nil {
+		log.Error("config save failed", "err", err)
+		u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("save failed")).Model
+	} else {
+		log.Info("config saved", "path", config.Path())
+		u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("settings saved")).Model
+	}
+	u.markChromeDirty()
 }
 
 func (u *winUI) chromePixelHeight() int32 {
@@ -162,8 +218,8 @@ func (u *winUI) chromePixelHeight() int32 {
 	return int32(rows) * ch
 }
 
-func (u *winUI) applyChromeAction(act chrome.HostAction, index int) {
-	switch act {
+func (u *winUI) applyChromeAction(r chrome.Result) {
+	switch r.Action {
 	case chrome.ActionNewTab:
 		u.newTabUI()
 	case chrome.ActionCloseTab:
@@ -175,8 +231,8 @@ func (u *winUI) applyChromeAction(act chrome.HostAction, index int) {
 	case chrome.ActionPrevTab:
 		u.switchTab(-1)
 	case chrome.ActionSelectTab:
-		if index >= 0 && index < len(u.tabs) {
-			u.active = index
+		if r.Index >= 0 && r.Index < len(u.tabs) {
+			u.active = r.Index
 			u.selecting = false
 			if t := u.activeTab(); t != nil {
 				t.sel.clear()
@@ -186,6 +242,15 @@ func (u *winUI) applyChromeAction(act chrome.HostAction, index int) {
 		if u.hwnd != 0 {
 			win.DestroyWindow(u.hwnd)
 		}
+	case chrome.ActionOpenSettings:
+		// Opened via palette enter — model already set SettingsOpen; preview.
+		u.applyConfigLive(r.Settings)
+	case chrome.ActionSettingsPreview:
+		u.applyConfigLive(r.Settings)
+	case chrome.ActionSettingsApply:
+		u.applyConfigSave(r.Settings)
+	case chrome.ActionSettingsCancel:
+		u.applyConfigLive(r.Settings)
 	}
 	u.syncChrome()
 }
@@ -554,18 +619,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_CHAR:
 		ch := rune(wParam)
-		// Charm palette filter: printable runes only (specials via KEYDOWN).
-		if u.chrome.PaletteOpen {
-			if ch >= 32 && ch != 0x7f {
+		// Charm overlay (palette filter) owns printable text while open.
+		if u.chrome.OverlayOpen() {
+			if u.chrome.PaletteOpen && ch >= 32 && ch != 0x7f {
 				km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 				r := u.chrome.UpdateChrome(km)
 				u.chrome = r.Model
 				u.markChromeDirty()
-				u.applyChromeAction(r.Action, r.Index)
+				u.applyChromeAction(r)
 				u.syncChrome()
 				u.chromePx = u.chromePixelHeight()
 				win.InvalidateRect(hwnd, nil, false)
 			}
+			// Settings ignores plain text; arrows via KEYDOWN.
 			return 0
 		}
 		switch ch {
@@ -597,17 +663,27 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		shift := win.GetKeyState(win.VK_SHIFT) < 0
 		tab := u.activeTab()
 
-		// Charm palette owns navigation keys while open (text via WM_CHAR).
-		if u.chrome.PaletteOpen {
+		// Charm palette / settings own keys while open (text via WM_CHAR).
+		if u.chrome.OverlayOpen() {
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
 				r := u.chrome.UpdateChrome(*km)
 				u.chrome = r.Model
 				u.markChromeDirty()
-				u.applyChromeAction(r.Action, r.Index)
+				u.applyChromeAction(r)
 				u.syncChrome()
 				u.chromePx = u.chromePixelHeight()
 				win.InvalidateRect(hwnd, nil, false)
 			}
+			return 0
+		}
+		// Ctrl+, — settings (VK_OEM_COMMA = 0xBC)
+		if ctrl && !shift && wParam == 0xBC {
+			r := u.chrome.UpdateChrome(chrome.OpenSettingsMsg{Config: u.cfg})
+			u.chrome = r.Model
+			u.markChromeDirty()
+			u.applyChromeAction(r)
+			u.chromePx = u.chromePixelHeight()
+			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
 		if ctrl && !shift && (wParam == 'K' || wParam == 'k' || wParam == 'P' || wParam == 'p') {
@@ -899,9 +975,16 @@ func (u *winUI) paint(hwnd win.HWND) {
 
 	draw := func(dest win.HDC) {
 		u.blitGrid(dest, rect, grid, cur.X, curY, curVis)
-		// Chrome into the same buffer so one BitBlt presents a full frame.
+		// Dim shell under floating overlay (palette / settings).
+		if u.chrome.OverlayOpen() {
+			u.paintDimShell(dest, rect)
+		}
+		// Chrome strip + floating card into the same buffer.
 		oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
 		u.paintChrome(dest, rect)
+		if u.chrome.OverlayOpen() {
+			u.paintOverlay(dest, rect)
+		}
 		win.SelectObject(dest, oldF)
 	}
 
@@ -1079,7 +1162,7 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		}
 	}
 
-	if u.cfg.Cursor == config.CursorBlock && curVis {
+	if curVis {
 		if curX < 0 {
 			curX = 0
 		}
@@ -1092,11 +1175,24 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		level := byte(50 + alpha*205)
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(level, level, level)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			r := win.RECT{
-				Left:   padX + int32(curX)*cw,
-				Top:    padY + int32(curY)*ch,
-				Right:  padX + int32(curX+1)*cw,
-				Bottom: padY + int32(curY+1)*ch,
+			cellL := padX + int32(curX)*cw
+			cellT := padY + int32(curY)*ch
+			var r win.RECT
+			switch u.cfg.Cursor {
+			case config.CursorUnderline:
+				th := ch / 8
+				if th < 2 {
+					th = 2
+				}
+				r = win.RECT{Left: cellL, Top: cellT + ch - th, Right: cellL + cw, Bottom: cellT + ch}
+			case config.CursorBar:
+				th := cw / 5
+				if th < 2 {
+					th = 2
+				}
+				r = win.RECT{Left: cellL, Top: cellT, Right: cellL + th, Bottom: cellT + ch}
+			default: // block
+				r = win.RECT{Left: cellL, Top: cellT, Right: cellL + cw, Bottom: cellT + ch}
 			}
 			fillRect(hdc, r, brush)
 			win.DeleteObject(win.HGDIOBJ(brush))
@@ -1481,8 +1577,117 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	return true
 }
 
-// paintChrome renders the Charm View() through a mini VT grid (Lip Gloss ANSI
-// → cells) so tabs/status/palette use the same paint path as the shell.
+// paintDimShell darkens the shell viewport under a floating overlay.
+func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
+	padY := u.chromePixelHeight()
+	if padY < 1 {
+		padY = int32(tabBarFallback)
+	}
+	// Semi-opaque matte via solid near-black (GDI has no easy alpha without
+	// AlphaBlend setup). Dark void matches Charm card backdrop.
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.VoidR/2, chrome.VoidG/2, chrome.VoidB/2)}
+	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+		r := win.RECT{Left: 0, Top: padY, Right: rect.Right, Bottom: rect.Bottom}
+		// Checker-style soft dim: paint every other 2px strip so shell remains
+		// faintly readable (cheap faux transparency).
+		for y := r.Top; y < r.Bottom; y += 2 {
+			band := win.RECT{Left: r.Left, Top: y, Right: r.Right, Bottom: y + 1}
+			if band.Bottom > r.Bottom {
+				band.Bottom = r.Bottom
+			}
+			fillRect(hdc, band, brush)
+		}
+		win.DeleteObject(win.HGDIOBJ(brush))
+	}
+}
+
+// paintChromeCells paints a cached cell grid at pixel origin (ox, oy).
+func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, ox, oy int32, defaultBar bool) {
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	type bgRun struct {
+		x0, x1  int
+		r, g, b byte
+	}
+	for y := 0; y < len(cells); y++ {
+		row := cells[y]
+		var runs []bgRun
+		for x := 0; x < len(row); x++ {
+			cell := row[x]
+			br, bg, bb := cell.BR, cell.BG, cell.BB
+			if br == 0 && bg == 0 && bb == 0 {
+				if defaultBar {
+					br, bg, bb = chrome.BarR, chrome.BarG, chrome.BarB
+				} else {
+					br, bg, bb = chrome.VoidR, chrome.VoidG, chrome.VoidB
+				}
+			}
+			if n := len(runs); n > 0 && runs[n-1].x1 == x-1 &&
+				runs[n-1].r == br && runs[n-1].g == bg && runs[n-1].b == bb {
+				runs[n-1].x1 = x
+				continue
+			}
+			runs = append(runs, bgRun{x0: x, x1: x, r: br, g: bg, b: bb})
+		}
+		for _, rn := range runs {
+			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(rn.r, rn.g, rn.b)}
+			if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+				r := win.RECT{
+					Left:   ox + 4 + int32(rn.x0)*cw,
+					Top:    oy + int32(y)*ch,
+					Right:  ox + 4 + int32(rn.x1+1)*cw,
+					Bottom: oy + int32(y+1)*ch,
+				}
+				if rn.x0 == 0 && defaultBar {
+					r.Left = 0
+				}
+				if rn.x1 >= len(row)-1 && defaultBar {
+					r.Right = rect.Right
+				}
+				fillRect(hdc, r, brush)
+				win.DeleteObject(win.HGDIOBJ(brush))
+			}
+		}
+		win.SetBkMode(hdc, win.TRANSPARENT)
+		for x := 0; x < len(row); x++ {
+			cell := row[x]
+			r := cell.Ch
+			if r == 0 || r == ' ' {
+				continue
+			}
+			cellRect := win.RECT{
+				Left:   ox + 4 + int32(x)*cw,
+				Top:    oy + int32(y)*ch,
+				Right:  ox + 4 + int32(x+1)*cw,
+				Bottom: oy + int32(y+1)*ch,
+			}
+			if drawCellGlyph(hdc, r, cellRect, cell.FR, cell.FG, cell.FB) {
+				continue
+			}
+			s, err := syscall.UTF16FromString(string(r))
+			if err != nil || len(s) < 2 {
+				continue
+			}
+			if cell.Bold && u.fontBold != 0 {
+				win.SelectObject(hdc, win.HGDIOBJ(u.fontBold))
+			} else if u.font != 0 {
+				win.SelectObject(hdc, win.HGDIOBJ(u.font))
+			}
+			win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
+			win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
+		}
+	}
+	if u.font != 0 {
+		win.SelectObject(hdc, win.HGDIOBJ(u.font))
+	}
+}
+
+// paintChrome renders the tab strip (not the floating overlay).
 func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	if hdc == 0 {
 		return
@@ -1492,7 +1697,6 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	if cols < 20 {
 		cols = 20
 	}
-	// Cap chrome rows so a stuck palette can't allocate a huge grid.
 	crowsWant := u.chrome.RowCount()
 	if crowsWant > 20 {
 		crowsWant = 20
@@ -1525,17 +1729,11 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	if ch < 1 {
 		ch = cellH
 	}
-	crows := len(cells)
-	chromeH := int32(crows) * ch
+	chromeH := int32(len(cells)) * ch
 	if chromeH > rect.Bottom-rect.Top {
-		// Don't paint past the client area (minimized / tiny windows).
 		chromeH = rect.Bottom - rect.Top
-		if ch > 0 {
-			crows = int(chromeH / ch)
-		}
 	}
 
-	// Full-bleed bar under the whole chrome (Charm void strip).
 	{
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.BarR, chrome.BarG, chrome.BarB)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
@@ -1544,79 +1742,53 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
-
-	type bgRun struct {
-		x0, x1  int
-		r, g, b byte
-	}
-	for y := 0; y < crows; y++ {
-		row := cells[y]
-		var runs []bgRun
-		for x := 0; x < len(row); x++ {
-			cell := row[x]
-			br, bg, bb := cell.BR, cell.BG, cell.BB
-			if br == 0 && bg == 0 && bb == 0 {
-				br, bg, bb = chrome.BarR, chrome.BarG, chrome.BarB
-			}
-			if n := len(runs); n > 0 && runs[n-1].x1 == x-1 &&
-				runs[n-1].r == br && runs[n-1].g == bg && runs[n-1].b == bb {
-				runs[n-1].x1 = x
-				continue
-			}
-			runs = append(runs, bgRun{x0: x, x1: x, r: br, g: bg, b: bb})
-		}
-		for _, rn := range runs {
-			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(rn.r, rn.g, rn.b)}
-			if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-				r := win.RECT{
-					Left:   4 + int32(rn.x0)*cw,
-					Top:    int32(y) * ch,
-					Right:  4 + int32(rn.x1+1)*cw,
-					Bottom: int32(y+1) * ch,
-				}
-				if rn.x0 == 0 {
-					r.Left = 0
-				}
-				if rn.x1 >= len(row)-1 {
-					r.Right = rect.Right
-				}
-				fillRect(hdc, r, brush)
-				win.DeleteObject(win.HGDIOBJ(brush))
-			}
-		}
-		win.SetBkMode(hdc, win.TRANSPARENT)
-		for x := 0; x < len(row); x++ {
-			cell := row[x]
-			r := cell.Ch
-			if r == 0 || r == ' ' {
-				continue
-			}
-			cellRect := win.RECT{
-				Left:   4 + int32(x)*cw,
-				Top:    int32(y) * ch,
-				Right:  4 + int32(x+1)*cw,
-				Bottom: int32(y+1) * ch,
-			}
-			if drawCellGlyph(hdc, r, cellRect, cell.FR, cell.FG, cell.FB) {
-				continue
-			}
-			s, err := syscall.UTF16FromString(string(r))
-			if err != nil || len(s) < 2 {
-				continue
-			}
-			if cell.Bold && u.fontBold != 0 {
-				win.SelectObject(hdc, win.HGDIOBJ(u.fontBold))
-			} else if u.font != 0 {
-				win.SelectObject(hdc, win.HGDIOBJ(u.font))
-			}
-			win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
-			win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
-		}
-	}
-	if u.font != 0 {
-		win.SelectObject(hdc, win.HGDIOBJ(u.font))
-	}
+	u.paintChromeCells(hdc, rect, cells, 0, 0, true)
 	u.chromePx = chromeH
+}
+
+// paintOverlay draws the floating settings/palette card over the shell.
+func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
+	if hdc == 0 || !u.chrome.OverlayOpen() {
+		return
+	}
+	cols := u.cols
+	if cols < 20 {
+		cols = 20
+	}
+	orows := u.chrome.OverlayRowCount()
+	if orows < 2 {
+		orows = 2
+	}
+	if u.overlayDirty || len(u.overlayCells) != orows || u.chromeCols != cols {
+		ct := chrome.RenderOverlayToTerm(u.chrome, cols)
+		ccols, crows := ct.Size()
+		if crows > 20 {
+			crows = 20
+		}
+		cells := make([][]cellPix, crows)
+		for y := 0; y < crows; y++ {
+			row := make([]cellPix, cols)
+			for x := 0; x < cols && x < ccols; x++ {
+				row[x] = glyphToCell(ct.Cell(x, y))
+			}
+			cells[y] = row
+		}
+		u.overlayCells = cells
+		u.overlayDirty = false
+	}
+	ch := u.metricH
+	if ch < 1 {
+		ch = cellH
+	}
+	// Center vertically in the shell region under the tab strip.
+	padY := u.chromePx
+	shellH := rect.Bottom - padY
+	oh := int32(len(u.overlayCells)) * ch
+	oy := padY + (shellH-oh)/3
+	if oy < padY {
+		oy = padY
+	}
+	u.paintChromeCells(hdc, rect, u.overlayCells, 0, oy, false)
 }
 
 // teaKeyFromWin maps Win32 navigation keys into Bubble Tea messages for the

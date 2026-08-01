@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
 func TestViewHasTabs(t *testing.T) {
@@ -56,13 +58,50 @@ func TestTabStripIsThreeRows(t *testing.T) {
 	}
 }
 
-func TestNewTabAction(t *testing.T) {
+func TestPaletteSettingsFirst(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
 	if !m.PaletteOpen {
 		t.Fatal("palette should open")
 	}
+	// First registry command is Settings.
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionSettingsPreview {
+		t.Fatalf("action=%v want SettingsPreview (open settings)", r.Action)
+	}
+	if !r.Model.SettingsOpen {
+		t.Fatal("settings should be open")
+	}
+}
+
+func TestSettingsNudgePreview(t *testing.T) {
+	m := New(80)
+	cfg := config.Default()
+	r := m.UpdateChrome(OpenSettingsMsg{Config: cfg})
+	m = r.Model
+	if !m.SettingsOpen {
+		t.Fatal("settings open")
+	}
+	// Move to font size and increase.
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+	m = r.Model
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRight})
+	if r.Action != ActionSettingsPreview {
+		t.Fatalf("action=%v", r.Action)
+	}
+	if r.Settings.FontSizePx != cfg.FontSizePx+1 {
+		t.Fatalf("size=%d want %d", r.Settings.FontSizePx, cfg.FontSizePx+1)
+	}
+}
+
+func TestNewTabFromPalette(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenPaletteMsg{})
+	m = r.Model
+	// Down to "New tab" (index 1).
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+	m = r.Model
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
 	if r.Action != ActionNewTab {
 		t.Fatalf("action=%v want NewTab", r.Action)

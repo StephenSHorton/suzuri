@@ -17,6 +17,8 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | Drag select + copy/paste | ✅ |
 | ANSI 16 / 256 / truecolor + bold | ✅ |
 | **Charm chrome** (tabs, status, palette) | ✅ |
+| **Settings** (`Ctrl+,` / palette) — font, size, cursor, theme | ✅ |
+| Config: `%LOCALAPPDATA%\suzuri\config.json` | ✅ |
 | Font: **Cascadia Mono** (fallback Consolas…) | ✅ |
 | Seamless box-drawing / block glyphs (WT-style) | ✅ |
 | Splits / richer menus | soon |
@@ -31,6 +33,7 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | `Ctrl+1`…`Ctrl+9` | Jump to tab |
 | Click tab strip | Activate tab |
 | `Ctrl+K` / `Ctrl+P` | Command palette (Charm) |
+| `Ctrl+,` | Settings (font, size, cursor, theme) |
 | `Ctrl+Shift+C` / `Ctrl+Insert` | Copy selection |
 | `Ctrl+Shift+V` / `Shift+Insert` / `Ctrl+V` | Paste |
 | `Ctrl+C` | Copy if selection; else `^C` to shell |
