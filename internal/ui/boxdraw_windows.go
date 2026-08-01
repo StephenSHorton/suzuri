@@ -229,16 +229,14 @@ func drawDoubleCorner(hdc win.HDC, cell win.RECT, a arm, fr, fg, fb byte) {
 	drawArms(hdc, cell, a, true, fr, fg, fb)
 }
 
-// drawRoundCorner paints Unicode light arcs ╭╮╯╰ as OUTER corners of a
-// rounded rectangle (Charm cards, Lip Gloss RoundedBorder).
+// drawRoundCorner paints Unicode light arcs ╭╮╯╰ the way fonts/Lip Gloss
+// intend: one continuous rounded-rect corner on the box midlines.
 //
-// Earlier we put the quarter-ellipse on the *interior* of the L (center of
-// cell, short SE arc for ╭). That bulges into the panel and reads as
-// “corners rotated inwards.” Correct geometry:
-//
-//   • Arc center sits at the *inside* corner of the cell (toward box content)
-//   • Radius spans the full cell so the arc runs through the *outer* corner
-//   • Short mid-line arms still meet ─/│ at cell centers
+// ─ and │ meet at cell centers, so the sharp corner of a box is at (cx,cy).
+// Rounding replaces that joint with a quarter-ellipse whose center sits
+// *inside* the box by radius r, and whose arc bulges *out* toward the
+// outer corner — not a second arc outside the cell, and not a square L
+// stacked on a full-cell sweep.
 //
 // Angle: 0=east, increasing clockwise (y grows downward).
 func drawRoundCorner(hdc win.HDC, cell win.RECT, which rune, fr, fg, fb byte) {
@@ -246,31 +244,48 @@ func drawRoundCorner(hdc win.HDC, cell win.RECT, which rune, fr, fg, fb byte) {
 	t := lineThick(cell, false)
 	cw := cell.Right - cell.Left
 	ch := cell.Bottom - cell.Top
-	if cw < 2 {
-		cw = 2
+
+	// Radius fills most of the cell so Charm neon cards look openly rounded,
+	// but stays inside the cell (leave a little room for stroke thickness).
+	r := cw
+	if ch < r {
+		r = ch
 	}
-	if ch < 2 {
-		ch = 2
+	r = r/2 - t
+	if r < 2 {
+		r = 2
+	}
+	// Cap so arms remain visible for joining to ─/│.
+	if maxArm := cw / 2; r > maxArm-1 && maxArm > 2 {
+		r = maxArm - 1
+	}
+	if maxArm := ch / 2; r > maxArm-1 && maxArm > 2 {
+		r = maxArm - 1
 	}
 
 	switch which {
-	case '╭': // top-left: curve through NW, open down+right
-		// Curvature center at SE (into the box); arc west→north (outer TL).
-		strokeEllipseCW(hdc, cell.Right, cell.Bottom, cw, ch, t, math.Pi, 3*math.Pi/2, fr, fg, fb)
-		hStroke(hdc, cx, cell.Right, cy, t, fr, fg, fb)
-		vStroke(hdc, cx, cy, cell.Bottom, t, fr, fg, fb)
-	case '╮': // top-right: curve through NE, open down+left
-		strokeEllipseCW(hdc, cell.Left, cell.Bottom, cw, ch, t, 3*math.Pi/2, 2*math.Pi, fr, fg, fb)
-		hStroke(hdc, cell.Left, cx, cy, t, fr, fg, fb)
-		vStroke(hdc, cx, cy, cell.Bottom, t, fr, fg, fb)
-	case '╯': // bottom-right: curve through SE, open up+left
-		strokeEllipseCW(hdc, cell.Left, cell.Top, cw, ch, t, 0, math.Pi/2, fr, fg, fb)
-		hStroke(hdc, cell.Left, cx, cy, t, fr, fg, fb)
-		vStroke(hdc, cx, cell.Top, cy, t, fr, fg, fb)
-	case '╰': // bottom-left: curve through SW, open up+right
-		strokeEllipseCW(hdc, cell.Right, cell.Top, cw, ch, t, math.Pi/2, math.Pi, fr, fg, fb)
-		hStroke(hdc, cx, cell.Right, cy, t, fr, fg, fb)
-		vStroke(hdc, cx, cell.Top, cy, t, fr, fg, fb)
+	case '╭': // top-left — open down + right
+		// Interior center; arc west→north (outer TL bulge).
+		acx, acy := cx+r, cy+r
+		strokeEllipseCW(hdc, acx, acy, r, r, t, math.Pi, 3*math.Pi/2, fr, fg, fb)
+		// Arms from arc ends to the far mid-edges (join ─ right, │ below).
+		hStroke(hdc, acx, cell.Right, cy, t, fr, fg, fb) // north end → right
+		vStroke(hdc, cx, acy, cell.Bottom, t, fr, fg, fb) // west end → bottom
+	case '╮': // top-right — open down + left
+		acx, acy := cx-r, cy+r
+		strokeEllipseCW(hdc, acx, acy, r, r, t, 3*math.Pi/2, 2*math.Pi, fr, fg, fb)
+		hStroke(hdc, cell.Left, acx, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, acy, cell.Bottom, t, fr, fg, fb)
+	case '╯': // bottom-right — open up + left
+		acx, acy := cx-r, cy-r
+		strokeEllipseCW(hdc, acx, acy, r, r, t, 0, math.Pi/2, fr, fg, fb)
+		hStroke(hdc, cell.Left, acx, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cell.Top, acy, t, fr, fg, fb)
+	case '╰': // bottom-left — open up + right
+		acx, acy := cx+r, cy-r
+		strokeEllipseCW(hdc, acx, acy, r, r, t, math.Pi/2, math.Pi, fr, fg, fb)
+		hStroke(hdc, acx, cell.Right, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cell.Top, acy, t, fr, fg, fb)
 	default:
 		return
 	}
