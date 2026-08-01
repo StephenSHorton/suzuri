@@ -72,6 +72,22 @@ func TestEchoFilterEmptyArm(t *testing.T) {
 	}
 }
 
+func TestEchoFilterPassesClearBeforeEcho(t *testing.T) {
+	// Unix clear often emits CSI before (or without) echoing the word "clear".
+	// Those sequences must reach the VT or the pane never blanks.
+	var f echoFilter
+	f.arm("clear")
+	// terminfo-style wipe, then optional echo, then output
+	raw := []byte("\x1b[H\x1b[2J\x1b[3Jclear\r\n")
+	got := f.feed(raw)
+	if !bytes.Contains(got, []byte("\x1b[2J")) {
+		t.Fatalf("clear CSI swallowed: %q", got)
+	}
+	if bytes.Contains(got, []byte("clear")) {
+		t.Fatalf("command leak: %q", got)
+	}
+}
+
 func TestEchoFilterNoFalseMatch(t *testing.T) {
 	var f echoFilter
 	f.arm("abc")

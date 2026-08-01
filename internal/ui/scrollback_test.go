@@ -93,9 +93,6 @@ func TestLiveExtentFromRows(t *testing.T) {
 	// Mirror liveExtent rules on a simple grid.
 	extent := func(rows []string, cursorY int) int {
 		last := -1
-		if cursorY >= 0 && cursorY < len(rows) {
-			last = cursorY
-		}
 		for y, row := range rows {
 			for _, ch := range row {
 				if ch != ' ' && ch != 0 {
@@ -107,7 +104,11 @@ func TestLiveExtentFromRows(t *testing.T) {
 			}
 		}
 		if last < 0 {
-			return 1
+			// Fully blank → full height (clear UX), cursor ignored.
+			return len(rows)
+		}
+		if cursorY > last && cursorY < len(rows) {
+			last = cursorY
 		}
 		return last + 1
 	}
@@ -117,12 +118,25 @@ func TestLiveExtentFromRows(t *testing.T) {
 	if n := extent([]string{"a", "b", "c", " ", " "}, 2); n != 3 {
 		t.Fatalf("got %d want 3", n)
 	}
-	if n := extent([]string{"     ", "     "}, 0); n != 1 {
-		// empty but cursor on 0 → last=0 → extent 1
-		t.Fatalf("empty with cursor: got %d want 1", n)
+	if n := extent([]string{"     ", "     "}, 0); n != 2 {
+		t.Fatalf("fully blank with cursor: got %d want 2", n)
 	}
-	if n := extent([]string{"     ", "     "}, -1); n != 1 {
-		t.Fatalf("fully empty: got %d want 1", n)
+	if n := extent([]string{"     ", "     "}, -1); n != 2 {
+		t.Fatalf("fully empty no cursor: got %d want 2", n)
+	}
+}
+
+func TestScreenWasCleared(t *testing.T) {
+	prev := []string{"hello", "world", "   "}
+	cur := []string{"   ", "   ", "   "}
+	if !screenWasCleared(prev, cur) {
+		t.Fatal("expected clear")
+	}
+	if screenWasCleared(cur, cur) {
+		t.Fatal("blank→blank is not a clear")
+	}
+	if screenWasCleared(prev, []string{"hello", "   ", "   "}) {
+		t.Fatal("partial content is not a clear")
 	}
 }
 

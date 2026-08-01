@@ -84,10 +84,24 @@ func (f *echoFilter) feed(in []byte) []byte {
 			break
 		}
 
-		// ESC / CSI / OSC: always suppress while armed (echo is wrapped in them).
+		// ESC / CSI / OSC handling while armed:
+		//
+		// PowerShell wraps local-echo in SGR color CSI — suppress those once we
+		// have started matching the command text (pos>0) or are draining the
+		// trailing newline (phase NL).
+		//
+		// BUT: when pos==0 (not yet matching), pass CSI through. Otherwise a
+		// Unix `clear` / terminfo wipe that arrives *before* the echoed command
+		// (or when echo is off) is swallowed and the VT never clears.
 		if f.escState != 0 || b == 0x1b {
+			passThrough := f.pos == 0 && f.phase == echoPhaseMatch
+			if passThrough {
+				out = append(out, b)
+				_ = f.consumeEsc(b) // keep parser in sync; bytes already emitted
+				continue
+			}
 			if f.consumeEsc(b) {
-				// still inside escape — drop
+				// still inside escape — drop (PS color / cursor hide around echo)
 				continue
 			}
 			// escape finished — drop the final byte too

@@ -78,9 +78,6 @@ func liveExtent(term vt10x.Terminal) int {
 		return rows
 	}
 	last := -1
-	if cur := term.Cursor(); cur.Y >= 0 && cur.Y < rows {
-		last = cur.Y
-	}
 	for y := 0; y < rows; y++ {
 		for x := 0; x < cols; x++ {
 			ch := displayRune(term.Cell(x, y).Char)
@@ -93,9 +90,14 @@ func liveExtent(term vt10x.Terminal) int {
 		}
 	}
 	if last < 0 {
-		// Empty screen: keep a single row so the viewport isn't history-only
-		// with no live anchor (prompt may be a space we treat as blank).
-		return 1
+		// Fully blank primary screen (after `clear` / Clear-Host, or a quiet
+		// space-only prompt): use the full PTY height so the viewport is empty
+		// rather than filled with scrollback. History is one scroll-up away.
+		return rows
+	}
+	// Include cursor row when it sits below the last non-blank content.
+	if cur := term.Cursor(); cur.Y > last && cur.Y < rows {
+		last = cur.Y
 	}
 	return last + 1
 }
@@ -121,8 +123,17 @@ func snapshotLiveText(term vt10x.Terminal) []string {
 func (s *scrollback) noteScreen(term vt10x.Terminal) {
 	cur := snapshotScreenText(term)
 	if len(s.prev) == len(cur) && len(cur) > 1 {
-		// Multi-line scroll: find largest n where prev[n:] == cur[:len-n]
-		if n := scrollAmount(s.prev, cur); n > 0 {
+		// Full clear (clear / Clear-Host): previous live content becomes history
+		// so the user can scroll up to recover it, and the live pane is empty.
+		if screenWasCleared(s.prev, cur) {
+			for _, line := range s.prev {
+				if strings.TrimSpace(line) != "" {
+					s.push(line)
+				}
+			}
+			s.stickBottom()
+		} else if n := scrollAmount(s.prev, cur); n > 0 {
+			// Multi-line scroll: find largest n where prev[n:] == cur[:len-n]
 			for i := 0; i < n; i++ {
 				s.push(s.prev[i])
 			}
@@ -132,6 +143,30 @@ func (s *scrollback) noteScreen(term vt10x.Terminal) {
 	if s.offset > len(s.lines) {
 		s.offset = len(s.lines)
 	}
+}
+
+// screenWasCleared is true when a non-empty screen becomes effectively blank
+// (CSI 2J / clear). Distinguishes from a normal scroll.
+func screenWasCleared(prev, cur []string) bool {
+	if len(prev) != len(cur) || len(cur) == 0 {
+		return false
+	}
+	prevHad := false
+	for _, line := range prev {
+		if strings.TrimSpace(line) != "" {
+			prevHad = true
+			break
+		}
+	}
+	if !prevHad {
+		return false
+	}
+	for _, line := range cur {
+		if strings.TrimSpace(line) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // scrollAmount returns how many rows the screen shifted up (0 if none).

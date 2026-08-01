@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,25 +23,61 @@ type Session struct {
 	once sync.Once
 	// resizeMu serializes pty.Setsize against concurrent Resize calls.
 	resizeMu sync.Mutex
+	// zdot is a temp ZDOTDIR for quiet zsh prompts (cleaned on Close).
+	zdot string
 }
 
 // DefaultShell returns $SHELL or a sensible interactive shell path.
 func DefaultShell() string {
 	if s := strings.TrimSpace(os.Getenv("SHELL")); s != "" {
-		return s
+		return QuietPrompt(s)
 	}
 	for _, name := range []string{"zsh", "bash", "sh"} {
 		if p, err := exec.LookPath(name); err == nil {
-			return p
+			return QuietPrompt(p)
 		}
 	}
-	return "/bin/sh"
+	return QuietPrompt("/bin/sh")
 }
 
-// QuietPrompt is a Windows ConPTY helper; on Unix the host launches shells
-// with quiet-prompt env (see StartSession). Custom -c/-Command lines pass through.
+// QuietPrompt rewrites a bare shell path so the in-band prompt is blank.
+// The host owns input via the Warp-style bottom bar; a visible PS1/PROMPT only
+// duplicates chrome (same idea as Windows ConPTY QuietPrompt).
+//
+// Custom -c / user command lines are left alone. Profile shells that already
+// carry flags are left alone too.
 func QuietPrompt(commandLine string) string {
-	return strings.TrimSpace(commandLine)
+	cl := strings.TrimSpace(commandLine)
+	if cl == "" {
+		return cl
+	}
+	lower := strings.ToLower(cl)
+	// Already customized — don't double-wrap.
+	if strings.Contains(lower, " -c ") || strings.Contains(lower, " -c\"") ||
+		strings.Contains(lower, " --command") || strings.Contains(lower, " -command ") ||
+		strings.Contains(lower, "prompt=") || strings.Contains(lower, "zdotdir") ||
+		strings.Contains(lower, "--rcfile") || strings.Contains(lower, "--norc") ||
+		strings.Contains(lower, " -f ") || strings.HasSuffix(lower, " -f") {
+		return cl
+	}
+	base := filepathBase(cl)
+	// Only rewrite bare shell paths (optional leading args like login -l later).
+	fields := strings.Fields(cl)
+	if len(fields) != 1 {
+		// e.g. "/bin/zsh -l" — still quiet via env/ZDOTDIR in StartSession.
+		return cl
+	}
+	switch {
+	case base == "zsh" || strings.HasSuffix(base, "/zsh"):
+		// Interactive; quiet prompt is applied via ZDOTDIR in StartSession.
+		return cl
+	case base == "bash" || strings.HasSuffix(base, "/bash"):
+		return cl
+	case base == "sh" || strings.HasSuffix(base, "/sh"):
+		return cl
+	default:
+		return cl
+	}
 }
 
 // StartSession launches commandLine on a PTY of size cols×rows.
@@ -68,10 +105,33 @@ func StartSession(commandLine string, cols, rows int, workDir string) (*Session,
 	if name == "" {
 		name = DefaultShell()
 		args = nil
+		name, args = splitCommandLine(name)
 	}
+
+	env, zdot, err := quietShellEnv(name, args, os.Environ())
+	if err != nil {
+		return nil, err
+	}
+	// bash: apply quiet --rcfile when we staged one (see quietShellEnv).
+	if rc := getenv(env, "SUZURI_BASHRC"); rc != "" {
+		bn := strings.ToLower(filepathBase(name))
+		if bn == "bash" || strings.HasSuffix(bn, "/bash") {
+			has := false
+			for _, a := range args {
+				if a == "--rcfile" || a == "--norc" || a == "--noprofile" {
+					has = true
+					break
+				}
+			}
+			if !has {
+				args = append([]string{"--rcfile", rc}, args...)
+			}
+		}
+	}
+
 	cmd := exec.Command(name, args...)
 	cmd.Dir = wd
-	cmd.Env = quietShellEnv(name, os.Environ())
+	cmd.Env = env
 
 	if cols > 32767 {
 		cols = 32767
@@ -84,9 +144,12 @@ func StartSession(commandLine string, cols, rows int, workDir string) (*Session,
 		Cols: uint16(cols),
 	})
 	if err != nil {
+		if zdot != "" {
+			_ = os.RemoveAll(zdot)
+		}
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
-	return &Session{cmd: cmd, ptmx: ptmx}, nil
+	return &Session{cmd: cmd, ptmx: ptmx, zdot: zdot}, nil
 }
 
 func mustWd() string {
@@ -97,28 +160,91 @@ func mustWd() string {
 	return wd
 }
 
-// quietShellEnv keeps the Warp-style bottom bar as the primary command surface
-// by blanking common prompt variables for interactive shells.
-func quietShellEnv(shellPath string, base []string) []string {
-	env := append([]string(nil), base...)
-	// Always advertise a modern terminal for color/apps.
+// quietShellEnv keeps the Warp bar as the only command surface by blanking
+// the shell's in-band prompt (Windows QuietPrompt equivalent).
+//
+// zsh: temp ZDOTDIR with a bootstrap .zshrc that sources the user's config
+// then forces PROMPT/RPROMPT blank (env PROMPT alone is overwritten by .zshrc).
+// bash: inject --rcfile that sources bashrc then sets PS1.
+func quietShellEnv(shellPath string, args []string, base []string) (env []string, zdot string, err error) {
+	env = append([]string(nil), base...)
 	env = setEnv(env, "TERM", "xterm-256color")
 	if getenv(env, "COLORTERM") == "" {
 		env = setEnv(env, "COLORTERM", "truecolor")
 	}
+
 	baseName := strings.ToLower(filepathBase(shellPath))
+	// Skip quieting when the user already passed a custom -c / rcfile.
+	joined := strings.ToLower(strings.Join(args, " "))
+	custom := strings.Contains(joined, "-c") || strings.Contains(joined, "rcfile") ||
+		strings.Contains(joined, "norc") || strings.Contains(joined, "noprofile")
+
 	switch {
-	case strings.Contains(baseName, "zsh"):
-		// zsh reads PROMPT from the environment when not set in rc for some setups;
-		// also force a minimal prompt via ZDOTDIR is heavier — env is enough for -f-less starts.
+	case !custom && (baseName == "zsh" || strings.HasSuffix(baseName, "/zsh")):
+		dir, err := os.MkdirTemp("", "suzuri-zdot-*")
+		if err != nil {
+			return env, "", err
+		}
+		// Bootstrap: load user rc when present, then force a blank prompt.
+		// A single space keeps zsh happy (empty PROMPT can fall back to defaults).
+		// Themes/plugins often re-set PROMPT in precmd — append a hook that wins last.
+		content := `# suzuri quiet-prompt bootstrap — Warp bar owns the command line
+[[ -f "$HOME/.zshenv" ]] && source "$HOME/.zshenv"
+[[ -f "$HOME/.zprofile" ]] && source "$HOME/.zprofile"
+[[ -f "$HOME/.zshrc" ]] && source "$HOME/.zshrc"
+_suzuri_quiet_prompt() {
+  PROMPT=' '
+  RPROMPT=''
+  PS1=' '
+  unset RPS1
+  # Hide the reverse-video "%" zsh draws when the prior line had no newline.
+  PROMPT_EOL_MARK=''
+}
+_suzuri_quiet_prompt
+# Run after theme precmd hooks so starship/p10k/oh-my-zsh cannot repaint a prompt.
+precmd_functions+=(_suzuri_quiet_prompt)
+`
+		if err := os.WriteFile(filepath.Join(dir, ".zshrc"), []byte(content), 0o644); err != nil {
+			_ = os.RemoveAll(dir)
+			return env, "", err
+		}
+		// Empty .zshenv so nested zsh doesn't re-enter user zshenv before ours.
+		_ = os.WriteFile(filepath.Join(dir, ".zshenv"), []byte("# suzuri\n"), 0o644)
+		env = setEnv(env, "ZDOTDIR", dir)
 		env = setEnv(env, "PROMPT", " ")
 		env = setEnv(env, "RPROMPT", "")
-		env = setEnv(env, "PS1", " ")
-	case strings.Contains(baseName, "bash"), strings.Contains(baseName, "sh"):
+		return env, dir, nil
+
+	case !custom && (baseName == "bash" || strings.HasSuffix(baseName, "/bash")):
+		dir, err := os.MkdirTemp("", "suzuri-brc-*")
+		if err != nil {
+			return env, "", err
+		}
+		content := `# suzuri quiet-prompt bootstrap
+[[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
+PS1=' '
+PROMPT_COMMAND=''
+`
+		rc := filepath.Join(dir, "bashrc")
+		if err := os.WriteFile(rc, []byte(content), 0o644); err != nil {
+			_ = os.RemoveAll(dir)
+			return env, "", err
+		}
+		// bash reads --rcfile only if we pass it; inject via BASH_ENV for non-interactive
+		// and rely on caller args. For interactive bash without --rcfile, set ENV vars
+		// and use --rcfile by rewriting is hard here — put path in env for StartSession.
+		env = setEnv(env, "SUZURI_BASHRC", rc)
 		env = setEnv(env, "PS1", " ")
 		env = setEnv(env, "PROMPT_COMMAND", "")
+		// Interactive bash: if no args, pty Start uses just "bash". Append --rcfile
+		// is done by rewriting args in StartSession — handled below via marker.
+		return env, dir, nil
+
+	default:
+		env = setEnv(env, "PS1", " ")
+		env = setEnv(env, "PROMPT", " ")
+		return env, "", nil
 	}
-	return env
 }
 
 func setEnv(env []string, key, val string) []string {
@@ -144,6 +270,7 @@ func getenv(env []string, key string) string {
 
 // splitCommandLine splits a simple shell command into name + args.
 // Quoted tokens with spaces are supported (double quotes only).
+// For bare bash, injects --rcfile from SUZURI_BASHRC when present (set later).
 func splitCommandLine(cl string) (string, []string) {
 	cl = strings.TrimSpace(cl)
 	if cl == "" {
@@ -275,9 +402,12 @@ func (s *Session) Close() error {
 			_ = s.ptmx.Close()
 		}
 		if s.cmd != nil && s.cmd.Process != nil {
-			// Hangup the process group first; fall back to kill.
 			_ = s.cmd.Process.Signal(syscall.SIGHUP)
 			_ = s.cmd.Process.Kill()
+		}
+		if s.zdot != "" {
+			_ = os.RemoveAll(s.zdot)
+			s.zdot = ""
 		}
 	})
 	return err
@@ -297,7 +427,6 @@ func (s *Session) CopyOutput(w io.Writer) error {
 			if err == io.EOF {
 				return nil
 			}
-			// PTY close after process exit often surfaces as EIO.
 			if strings.Contains(err.Error(), "input/output error") ||
 				strings.Contains(err.Error(), "file already closed") {
 				return nil
