@@ -1,24 +1,16 @@
 package chrome
 
-import "strings"
-
 // splashBody is the first-run welcome card.
-func splashBody(width int) string {
-	if width < 34 {
-		width = 34
+func splashBody(windowCols int) string {
+	outer := clampDialogWidth(42, windowCols)
+	body := []string{
+		styleDialogHint().Render("real terminal · charm chrome"),
+		"",
+		styleDialogValue().Render("Ctrl+K") + styleDialogLabel().Render("  commands"),
+		styleDialogValue().Render("Ctrl+,") + styleDialogLabel().Render("  settings"),
+		styleDialogValue().Render("Ctrl+/") + styleDialogLabel().Render("  shortcuts"),
+		styleDialogValue().Render("⌃⇧T") + styleDialogLabel().Render("    new tab"),
 	}
-	inner := width - 6
-	title := styleDialogTitle().Render("硯  suzuri")
-	sub := styleDialogHint().Render("real terminal · charm chrome")
-	rule := styleDialogRule().Render(strings.Repeat("─", inner))
-	body := styleDialogLabel().Render(
-		"Ctrl+K   commands\n" +
-			"Ctrl+,   settings\n" +
-			"Ctrl+/   shortcuts\n" +
-			"⌃⇧T     new tab",
-	)
-	hint := styleDialogHint().Render("enter to continue")
-	return stylePaletteBorder().Width(width).Render(
-		strings.Join([]string{title, sub, rule, body, "", hint}, "\n"),
-	)
+	footer := styleDialogHintKey().Render("enter") + styleDialogHint().Render(" continue")
+	return renderDialogCard(outer, "硯  suzuri", body, footer)
 }

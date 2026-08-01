@@ -1,42 +1,38 @@
 package chrome
 
-import "strings"
+// helpBody is the keybind reference card (Crush help contrast roles).
+func helpBody(windowCols int) string {
+	outer := clampDialogWidth(48, windowCols)
+	inner := dialogInnerWidth(outer)
 
-// helpBody is the keybind reference card.
-func helpBody(width int) string {
-	if width < 32 {
-		width = 32
-	}
-	inner := width - 6
-	title := styleDialogTitle().Render("Shortcuts")
-	rule := styleDialogRule().Render(strings.Repeat("─", inner))
-	lines := []string{
-		title,
-		rule,
-		styleDialogHint().Render("Tabs"),
-		helpRow("⌃⇧T", "New tab"),
-		helpRow("⌃W", "Close tab"),
-		helpRow("⌃Tab", "Next / prev"),
-		helpRow("⌃1–9", "Jump"),
-		"",
-		styleDialogHint().Render("Chrome"),
-		helpRow("⌃K", "Palette"),
-		helpRow("⌃,", "Settings"),
-		helpRow("⌃/", "Help"),
-		helpRow("Esc", "Dismiss"),
-		"",
-		styleDialogHint().Render("Terminal"),
-		helpRow("⌃⇧C/V", "Copy / paste"),
-		helpRow("Wheel", "Scrollback"),
-		rule,
-		styleDialogHintKey().Render("esc") + styleDialogHint().Render(" close"),
-	}
-	return stylePaletteBorder().Width(clampDialogWidth(width, width+4)).Render(strings.Join(lines, "\n"))
+	var body []string
+	body = append(body, styleDialogHint().Render("Tabs"))
+	body = append(body, helpRow(inner, "⌃⇧T", "New tab"))
+	body = append(body, helpRow(inner, "⌃W", "Close tab"))
+	body = append(body, helpRow(inner, "⌃Tab", "Next / prev"))
+	body = append(body, helpRow(inner, "⌃1–9", "Jump"))
+	body = append(body, "")
+	body = append(body, styleDialogHint().Render("Chrome"))
+	body = append(body, helpRow(inner, "⌃K", "Palette"))
+	body = append(body, helpRow(inner, "⌃,", "Settings"))
+	body = append(body, helpRow(inner, "⌃/", "Help"))
+	body = append(body, helpRow(inner, "Esc", "Dismiss"))
+	body = append(body, "")
+	body = append(body, styleDialogHint().Render("Terminal"))
+	body = append(body, helpRow(inner, "⌃⇧C/V", "Copy / paste"))
+	body = append(body, helpRow(inner, "Wheel", "Scrollback"))
+
+	footer := styleDialogHintKey().Render("esc") + styleDialogHint().Render(" close")
+	return renderDialogCard(outer, "Shortcuts", body, footer)
 }
 
-func helpRow(key, desc string) string {
-	// Crush Help: ShortKey = fgMoreSubtle, ShortDesc = fgMostSubtle
+func helpRow(inner int, key, desc string) string {
+	// Crush: ShortKey = fgMoreSubtle, ShortDesc = fgMostSubtle; Padding via spacing
+	info := hideInfoIfCrowded(desc, inner, commandInfoMaxPercent)
+	if info == "" {
+		info = desc
+	}
 	k := styleDialogHintKey().Width(8).Render(key)
-	d := styleDialogHint().Render(desc)
-	return k + "  " + d
+	d := styleDialogHint().Render(info)
+	return styleDialogNormalItem().Width(inner).Render(k + "  " + d)
 }

@@ -8,28 +8,30 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
-// Active palette (mutated by ApplyTheme). Tuned for calm, Crush-adjacent polish
-// rather than loud “neon marketing” chrome.
+// Active palette — Crush quickStyleOpts roles (mutated by ApplyTheme).
 var (
-	colVoid   lipgloss.Color
-	colBar    lipgloss.Color
-	colPanel  lipgloss.Color
-	colAccent lipgloss.Color // primary accent (was “neon”)
-	colSoftA  lipgloss.Color // secondary accent
-	colCyan   lipgloss.Color
-	colText   lipgloss.Color
-	colSoft   lipgloss.Color
-	colDim    lipgloss.Color
-	colMute   lipgloss.Color
-	colSel    lipgloss.Color
-	colMatch  lipgloss.Color
-	colBorder lipgloss.Color // dialog border — quiet, not screaming
+	colVoid      lipgloss.Color // bgBase-adjacent / dim
+	colBar       lipgloss.Color // chrome strip surface
+	colPanel     lipgloss.Color // dialog fill (bgLessVisible-ish)
+	colPrimary   lipgloss.Color // Crush primary — borders, titles, selection bg
+	colSecondary lipgloss.Color // Crush secondary
+	colOnPrimary lipgloss.Color // text ON primary fills (contrast pair)
+	colText      lipgloss.Color // fgBase
+	colSoft      lipgloss.Color // fgMoreSubtle
+	colDim       lipgloss.Color // between soft and mute
+	colMute      lipgloss.Color // fgMostSubtle
+	colSel       lipgloss.Color // softer selection (tabs)
+	colMatch     lipgloss.Color // filter match
+	colCyan      lipgloss.Color // info/success-ish accent
+	colBorder    lipgloss.Color // usually = primary for dialogs
 )
 
-// Aliases kept for call sites that still say “neon/violet”.
+// Aliases for older call sites.
 var (
+	colAccent lipgloss.Color
 	colNeon   lipgloss.Color
 	colViolet lipgloss.Color
+	colSoftA  lipgloss.Color
 )
 
 // Bar / void for GDI.
@@ -70,21 +72,22 @@ func init() {
 func ApplyTheme(id string) {
 	switch id {
 	case config.ThemeCharmtone:
-		// Crush Pantera–inspired: pepper base, soft purple primary.
+		// Crush Pantera roles: primary≈charple, onPrimary≈butter, bg pepper.
 		setPalette(
-			hex("#1a1418"), // void
+			hex("#1a1418"), // void / dim base
 			hex("#201a1e"), // bar
 			hex("#2a2228"), // panel
-			hex("#c4b5fd"), // accent soft violet
-			hex("#f0d9a8"), // secondary warm
-			hex("#7dd3c0"), // mint
-			hex("#f3e8ee"), // text
-			hex("#c9b8c0"),
-			hex("#8a7a84"),
-			hex("#5a4a54"),
-			hex("#3a2e40"),
-			hex("#ddd6fe"),
-			hex("#6b5a68"), // border
+			hex("#a78bfa"), // primary
+			hex("#f0d9a8"), // secondary
+			hex("#1a1418"), // onPrimary (dark on lavender)
+			hex("#f3e8ee"), // fgBase
+			hex("#c9b8c0"), // fgMoreSubtle
+			hex("#8a7a84"), // dim
+			hex("#5a4a54"), // fgMostSubtle
+			hex("#3a2e40"), // tab sel
+			hex("#c4b5fd"), // match
+			hex("#7dd3c0"), // cyan/info
+			hex("#a78bfa"), // border = primary
 			hex("#100c10"), // dim matte
 		)
 		ShellANSI16 = [16][3]byte{
@@ -110,16 +113,17 @@ func ApplyTheme(id string) {
 			hex("#000000"),
 			hex("#0a0a0a"),
 			hex("#141414"),
-			hex("#00e676"),
-			hex("#ffeb3b"),
-			hex("#00e5ff"),
+			hex("#00e676"), // primary
+			hex("#ffeb3b"), // secondary
+			hex("#000000"), // onPrimary
 			hex("#ffffff"),
 			hex("#e0e0e0"),
 			hex("#b0b0b0"),
 			hex("#707070"),
 			hex("#00331a"),
 			hex("#69f0ae"),
-			hex("#404040"),
+			hex("#00e5ff"),
+			hex("#00e676"), // border = primary
 			hex("#000000"),
 		)
 		ShellANSI16 = StockANSI16
@@ -128,22 +132,23 @@ func ApplyTheme(id string) {
 		ShellANSI16[2] = [3]byte{0, 230, 120}
 		ShellANSI16[4] = [3]byte{80, 160, 255}
 		ShellANSI16[15] = [3]byte{255, 255, 255}
-	default: // inkstone — calm ink dark, dusty mauve accent (not hot pink)
+	default: // inkstone — primary mauve, onPrimary dark ink
 		setPalette(
-			hex("#0c0c10"), // void almost black
-			hex("#141418"), // bar
-			hex("#1c1c22"), // panel
-			hex("#b8a0c8"), // soft mauve
-			hex("#9a9ab0"), // cool secondary
-			hex("#7a9a9a"), // muted teal
-			hex("#e8e6e3"), // warm white
-			hex("#b0aea8"),
+			hex("#0c0c10"),
+			hex("#141418"),
+			hex("#1c1c22"),
+			hex("#b8a0c8"), // primary
+			hex("#9a9ab0"), // secondary
+			hex("#0c0c10"), // onPrimary
+			hex("#e8e6e3"), // fgBase
+			hex("#b0aea8"), // more subtle
 			hex("#787870"),
-			hex("#484848"),
-			hex("#2a2430"), // selection
+			hex("#484848"), // most subtle
+			hex("#2a2430"), // soft tab sel
 			hex("#c8b0d8"),
-			hex("#3a3840"), // quiet border
-			hex("#08080a"), // dim
+			hex("#7a9a9a"), // cyan
+			hex("#b8a0c8"), // border = primary (Crush rule)
+			hex("#08080a"),
 		)
 		ShellANSI16 = [16][3]byte{
 			rgbArr(hex("#0c0c10")),
@@ -184,22 +189,26 @@ func RemapANSI16(mode string) [16][3]byte {
 	}
 }
 
-func setPalette(void, bar, panel, accent, softA, cyan, text, soft, dim, mute, sel, match, border, dimMatte color.Color) {
+func setPalette(void, bar, panel, primary, secondary, onPrimary, text, soft, dim, mute, sel, match, cyan, border, dimMatte color.Color) {
 	colVoid = toLG(void)
 	colBar = toLG(bar)
 	colPanel = toLG(panel)
-	colAccent = toLG(accent)
-	colSoftA = toLG(softA)
-	colCyan = toLG(cyan)
+	colPrimary = toLG(primary)
+	colSecondary = toLG(secondary)
+	colOnPrimary = toLG(onPrimary)
 	colText = toLG(text)
 	colSoft = toLG(soft)
 	colDim = toLG(dim)
 	colMute = toLG(mute)
 	colSel = toLG(sel)
 	colMatch = toLG(match)
+	colCyan = toLG(cyan)
 	colBorder = toLG(border)
-	colNeon = colAccent
-	colViolet = colSoftA
+
+	colAccent = colPrimary
+	colNeon = colPrimary
+	colViolet = colSecondary
+	colSoftA = colSecondary
 
 	BarR, BarG, BarB = rgb8(bar)
 	VoidR, VoidG, VoidB = rgb8(void)
@@ -256,24 +265,25 @@ func hexStr(r, g, b uint8) string {
 	return string([]byte{'#', h[r>>4], h[r&0xf], h[g>>4], h[g&0xf], h[b>>4], h[b&0xf]})
 }
 
-// --- Styles: quiet, dense, no chunky boxes on the tab strip ---
+// --- Styles (Crush quickstyle roles) ---
 
 func styleBar() lipgloss.Style {
 	return lipgloss.NewStyle().Background(colBar).Foreground(colDim)
 }
 
-// Active tab: soft pill, no rounded border (borders look broken at 1 cell).
+// Active tab: treat like Crush selected — primary fill + onPrimary.
 func styleActiveTab() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Foreground(colText).
-		Background(colSel).
+		Foreground(colOnPrimary).
+		Background(colPrimary).
 		Bold(true).
 		Padding(0, 2)
 }
 
+// Inactive: fgMoreSubtle on bar (Crush inactive tab text).
 func styleInactiveTab() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Foreground(colDim).
+		Foreground(colSoft).
 		Background(colBar).
 		Padding(0, 2)
 }
@@ -296,98 +306,69 @@ func styleStatus() lipgloss.Style {
 		Padding(0, 1)
 }
 
-// Crush dialog pattern (quickstyle.go):
-//   View: RoundedBorder + BorderForeground(primary) + padding
-//   Title: Padding(0,1) + primary
-//   SelectedItem: Padding(0,1) + Background(primary) + Foreground(onPrimary)
-//   NormalItem: Padding(0,1) + fgBase
-//   Help: keys fgMoreSubtle, desc fgMostSubtle
-//   defaultDialogMaxWidth = 70 (we clamp lower for host width)
-
-// DialogMaxWidth is Crush's 70, clamped for suzuri's typical window.
-const DialogMaxWidth = 56
-
-func stylePaletteBorder() lipgloss.Style {
-	// Crush: s.Dialog.View + Quit.Frame ≈ Border(Rounded)+BorderForeground(primary)+Padding(1,2)
+// styleDialogView = Crush s.Dialog.View + Quit.Frame padding.
+func styleDialogView() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colAccent). // primary, not mute grey
+		BorderForeground(colPrimary).
 		BorderBackground(colPanel).
 		Background(colPanel).
 		Padding(1, 2)
 }
 
+// stylePaletteBorder is an alias for dialog view (palette is a dialog).
+func stylePaletteBorder() lipgloss.Style {
+	return styleDialogView()
+}
+
 func styleBrand() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Foreground(colAccent).
+		Foreground(colPrimary).
 		Background(colBar).
 		Bold(true).
 		Padding(0, 1)
 }
 
 func styleDialogTitle() lipgloss.Style {
-	// Crush: s.Dialog.Title = Padding(0,1).Foreground(primary)
+	// Crush: Padding(0,1).Foreground(primary)
 	return lipgloss.NewStyle().
-		Foreground(colAccent).
+		Foreground(colPrimary).
 		Bold(true).
 		Padding(0, 1)
 }
 
 func styleDialogLabel() lipgloss.Style {
-	// meta / secondary
-	return lipgloss.NewStyle().Foreground(colDim)
+	return lipgloss.NewStyle().Foreground(colSoft) // fgMoreSubtle
 }
 
 func styleDialogValue() lipgloss.Style {
-	// fgBase body
-	return lipgloss.NewStyle().Foreground(colText)
+	return lipgloss.NewStyle().Foreground(colText) // fgBase
 }
 
 func styleDialogActive() lipgloss.Style {
-	// Crush SelectedItem: primary fill + onPrimary text (full contrast)
+	// Crush SelectedItem: Background(primary).Foreground(onPrimary).Padding(0,1)
 	return lipgloss.NewStyle().
-		Foreground(colVoid). // onPrimary stand-in (dark on accent)
-		Background(colAccent).
+		Foreground(colOnPrimary).
+		Background(colPrimary).
 		Bold(true).
 		Padding(0, 1)
 }
 
 func styleDialogHint() lipgloss.Style {
-	// Crush Help: ShortDesc = fgMostSubtle
-	return lipgloss.NewStyle().Foreground(colMute)
+	return lipgloss.NewStyle().Foreground(colMute) // fgMostSubtle
 }
 
 func styleDialogHintKey() lipgloss.Style {
-	// Crush Help: ShortKey = fgMoreSubtle (slightly stronger than desc)
-	return lipgloss.NewStyle().Foreground(colDim)
+	return lipgloss.NewStyle().Foreground(colSoft) // fgMoreSubtle
 }
 
 func styleDialogRule() lipgloss.Style {
-	// separator role
 	return lipgloss.NewStyle().Foreground(colMute).Background(colPanel)
 }
 
 func styleDialogNormalItem() lipgloss.Style {
-	// Crush NormalItem
+	// Crush NormalItem: Padding(0,1).Foreground(fgBase)
 	return lipgloss.NewStyle().
 		Foreground(colText).
 		Padding(0, 1)
-}
-
-// clampDialogWidth mirrors Crush min(max, window - chrome).
-func clampDialogWidth(want, window int) int {
-	if window < 20 {
-		window = 20
-	}
-	maxW := DialogMaxWidth
-	if window-4 < maxW {
-		maxW = window - 4
-	}
-	if want > maxW {
-		want = maxW
-	}
-	if want < 28 {
-		want = min(28, maxW)
-	}
-	return want
 }

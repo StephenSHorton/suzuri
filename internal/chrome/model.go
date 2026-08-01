@@ -156,23 +156,17 @@ func newPaletteList(width int, cfg config.Config) list.Model {
 		items[i] = paletteItem{title: c.Title, desc: c.Desc, action: c.Action, profile: c.ProfileName}
 	}
 
+	// Crush list rows: NormalItem / SelectedItem + info column contrast.
 	delegate := list.NewDefaultDelegate()
 	delegate.SetSpacing(0)
-	delegate.Styles.NormalTitle = lipgloss.NewStyle().
-		Foreground(colSoft).
-		Padding(0, 1)
+	delegate.Styles.NormalTitle = styleDialogNormalItem()
 	delegate.Styles.NormalDesc = lipgloss.NewStyle().
-		Foreground(colMute).
+		Foreground(colMute). // fgMostSubtle (Crush ListItem.InfoBlurred)
 		Padding(0, 1)
-	// Crush SelectedItem: primary fill + onPrimary (not thin side border).
-	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
-		Foreground(colVoid).
-		Background(colAccent).
-		Bold(true).
-		Padding(0, 1)
+	delegate.Styles.SelectedTitle = styleDialogActive()
 	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
-		Foreground(colVoid).
-		Background(colAccent).
+		Foreground(colOnPrimary).
+		Background(colPrimary).
 		Faint(true).
 		Padding(0, 1)
 	delegate.Styles.DimmedTitle = lipgloss.NewStyle().Foreground(colMute).Padding(0, 1)
@@ -180,22 +174,21 @@ func newPaletteList(width int, cfg config.Config) list.Model {
 	delegate.Styles.FilterMatch = lipgloss.NewStyle().Foreground(colMatch).Underline(true)
 
 	l := list.New(items, delegate, width, 10)
-	l.Title = "Commands"
+	l.Title = "" // outer dialog card owns the title (Crush-style frame)
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
 	l.SetShowHelp(false)
 	l.SetShowPagination(false)
 	l.DisableQuitKeybindings()
-	l.Styles.Title = lipgloss.NewStyle().
-		Foreground(colNeon).
-		Bold(true).
-		Padding(0, 1)
-	l.Styles.FilterPrompt = lipgloss.NewStyle().Foreground(colNeon)
-	l.Styles.FilterCursor = lipgloss.NewStyle().Foreground(colCyan)
-	l.Styles.NoItems = lipgloss.NewStyle().Foreground(colDim).Padding(1, 1)
+	// Crush Dialog.Title
+	l.Styles.Title = styleDialogTitle()
+	l.Styles.FilterPrompt = lipgloss.NewStyle().Foreground(colPrimary)
+	l.Styles.FilterCursor = lipgloss.NewStyle().Foreground(colSecondary)
+	l.Styles.NoItems = lipgloss.NewStyle().Foreground(colMute).Padding(1, 1)
+	// Crush InputPrompt Margin(1,1) ≈ spaced filter
 	l.FilterInput.Prompt = "› "
 	l.FilterInput.Placeholder = "filter…"
-	l.FilterInput.PromptStyle = lipgloss.NewStyle().Foreground(colNeon)
+	l.FilterInput.PromptStyle = lipgloss.NewStyle().Foreground(colPrimary)
 	l.FilterInput.TextStyle = lipgloss.NewStyle().Foreground(colText)
 	l.FilterInput.PlaceholderStyle = lipgloss.NewStyle().Foreground(colMute)
 	return l
@@ -456,29 +449,28 @@ func (m Model) OverlayView() string {
 	var card string
 	switch {
 	case m.SplashOpen:
-		pw := clampDialogWidth(42, w)
-		card = splashBody(pw)
+		card = splashBody(w)
 	case m.HelpOpen:
-		pw := clampDialogWidth(48, w)
-		card = helpBody(pw)
+		card = helpBody(w)
 	case m.ConfirmOpen:
-		pw := clampDialogWidth(40, w)
-		card = m.confirm.render(pw)
+		card = m.confirm.render(w)
 	case m.SettingsOpen:
-		pw := clampDialogWidth(44, w)
-		card = m.settings.render(pw)
+		card = m.settings.render(w)
 	case m.PaletteOpen:
-		// Crush commands dialog ~70 max; we clamp. Inner width = total − frame.
-		pw := clampDialogWidth(52, w)
-		// Frame is border(2)+padding(4) ≈ 6 horizontal if Width is total box.
-		innerW := pw - 6
-		if innerW < 20 {
-			innerW = 20
-		}
+		// Crush commands: outer min(70, area), inner = outer − frame.
+		outer := clampDialogWidth(52, w)
+		innerW := dialogInnerWidth(outer)
 		m.palette.SetWidth(innerW)
 		m.palette.SetHeight(10)
-		inner := m.palette.View()
-		card = stylePaletteBorder().Width(pw).Render(inner)
+		// Hide crowded key hints on narrow rows (Crush 25% rule).
+		// (bubbles list already stores desc; we trim at command build time for narrow.)
+		listView := m.palette.View()
+		// Crush: List.Margin(0,0,1,0) — space before help; title is list.Title.
+		body := []string{listView}
+		footer := styleDialogHintKey().Render("↑↓") + styleDialogHint().Render("  ") +
+			styleDialogHintKey().Render("enter") + styleDialogHint().Render(" run  ") +
+			styleDialogHintKey().Render("esc")
+		card = renderDialogCard(outer, "Commands", body, footer)
 	default:
 		return ""
 	}

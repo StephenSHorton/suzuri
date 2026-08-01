@@ -1,28 +1,16 @@
 package chrome
 
-import (
-	"strings"
-
-	"github.com/charmbracelet/lipgloss"
-)
-
-// confirmState is a simple yes/no modal.
+// confirmState is a simple yes/no modal (Crush quit dialog pattern).
 type confirmState struct {
-	title    string
-	body     string
-	yesLabel string
-	noLabel  string
+	title     string
+	body      string
+	yesLabel  string
+	noLabel   string
 	yesAction HostAction
 }
 
-func (c confirmState) render(width int) string {
-	if width < 28 {
-		width = 28
-	}
-	inner := width - 6
-	title := styleDialogTitle().Render(c.title)
-	rule := styleDialogRule().Render(strings.Repeat("─", inner))
-	body := styleDialogLabel().Width(inner).Render(c.body)
+func (c confirmState) render(windowCols int) string {
+	outer := clampDialogWidth(40, windowCols)
 	yes := c.yesLabel
 	if yes == "" {
 		yes = "Yes"
@@ -31,12 +19,14 @@ func (c confirmState) render(width int) string {
 	if no == "" {
 		no = "Cancel"
 	}
-	btns := styleDialogActive().Render(" "+yes+" ") +
-		styleDialogHint().Render("  enter") +
-		styleDialogHint().Render("   "+no+"  esc")
-	return stylePaletteBorder().Width(width).Render(
-		strings.Join([]string{title, rule, body, "", btns}, "\n"),
-	)
+	body := []string{
+		styleDialogValue().Width(dialogInnerWidth(outer)).Render(c.body),
+		"",
+		styleDialogActive().Render(" "+yes+" ") +
+			styleDialogHint().Render(" enter") +
+			styleDialogHint().Render("   ") +
+			styleDialogHintKey().Render(no) +
+			styleDialogHint().Render(" esc"),
+	}
+	return renderDialogCard(outer, c.title, body, "")
 }
-
-var _ = lipgloss.NewStyle

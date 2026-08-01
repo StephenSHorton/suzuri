@@ -144,22 +144,11 @@ func (s settingsState) fieldLabel(f settingsField) string {
 	}
 }
 
-func (s settingsState) render(width int) string {
-	// Crush: content sized to inner width; Width() on border style is total box.
-	width = clampDialogWidth(width, width+4)
-	inner := width - 6 // border 2 + padding 4 (approx)
-	if inner < 20 {
-		inner = 20
-	}
+func (s settingsState) render(windowCols int) string {
+	outer := clampDialogWidth(44, windowCols)
+	inner := dialogInnerWidth(outer)
 
-	title := styleDialogTitle().Render("Settings")
-	// Separator role (not a second loud border).
-	rule := styleDialogRule().Render(strings.Repeat("─", max(8, inner-2)))
-
-	var rows []string
-	rows = append(rows, title)
-	rows = append(rows, rule)
-
+	var body []string
 	for f := settingsField(0); f < settingsFieldCount; f++ {
 		label := s.fieldLabel(f)
 		val := s.valueLabel(f)
@@ -172,30 +161,28 @@ func (s settingsState) render(width int) string {
 			val = string(rs[:maxVal-1]) + "…"
 		}
 		if f == s.field {
-			// Crush selected: full primary row, onPrimary text, Padding(0,1).
+			// Crush SelectedItem: primary + onPrimary, Padding(0,1)
 			line := fmt.Sprintf("%-8s  ‹ %s ›", label, val)
-			rows = append(rows, styleDialogActive().Width(inner).Render(line))
+			body = append(body, styleDialogActive().Width(inner).Render(line))
 		} else {
-			// Crush normal: Padding(0,1) fgBase / muted labels.
+			// Crush NormalItem
 			lab := styleDialogLabel().Width(10).Render(label)
 			v := styleDialogValue().Render(val)
-			pad := inner - lipgloss.Width(lab) - lipgloss.Width(v)
+			pad := inner - lipgloss.Width(lab) - lipgloss.Width(v) - 2
 			if pad < 1 {
 				pad = 1
 			}
-			row := lab + strings.Repeat(" ", pad) + v
-			rows = append(rows, styleDialogNormalItem().Width(inner).Render(strings.TrimRight(row, " ")))
+			row := " " + lab + strings.Repeat(" ", pad) + v
+			body = append(body, styleDialogNormalItem().Width(inner).Render(strings.TrimRight(row, " ")))
 		}
 	}
 
-	rows = append(rows, rule)
-	// Crush help: keys stronger than descriptions.
-	hint := styleDialogHintKey().Render("↑↓") + styleDialogHint().Render(" move  ") +
+	footer := styleDialogHintKey().Render("↑↓") + styleDialogHint().Render("  ") +
 		styleDialogHintKey().Render("‹›") + styleDialogHint().Render(" change  ") +
 		styleDialogHintKey().Render("enter") + styleDialogHint().Render(" save  ") +
 		styleDialogHintKey().Render("esc")
-	rows = append(rows, hint)
-	return stylePaletteBorder().Width(width).Render(strings.Join(rows, "\n"))
+
+	return renderDialogCard(outer, "Settings", body, footer)
 }
 
 func indexFold(list []string, want string) int {
