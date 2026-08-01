@@ -26,21 +26,22 @@ func getUpdater() *update.Service {
 	return updater
 }
 
-// checkForUpdates runs a manual update check (palette / settings).
-// Toasts progress on the active UI when possible.
-func (u *winUI) checkForUpdates() {
+// runUpdateCheck is the shared manual update path (palette / settings).
+func runUpdateCheck(toast func(string)) {
 	s := getUpdater()
 	if s == nil {
-		u.toast("updates unavailable")
+		if toast != nil {
+			toast("updates unavailable")
+		}
 		return
 	}
-	u.toast("checking for updates…")
+	if toast != nil {
+		toast("checking for updates…")
+	}
 	go func() {
 		info, err := s.Check()
 		if err != nil {
 			log.Warn("manual update check failed", "err", err)
-			// Best-effort toast from UI thread via PostMessage would be ideal;
-			// log is enough if window is busy.
 			return
 		}
 		if info == nil {

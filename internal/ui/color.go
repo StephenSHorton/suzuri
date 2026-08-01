@@ -2,9 +2,9 @@ package ui
 
 import (
 	"sync"
+	"unicode"
 
 	"github.com/hinshun/vt10x"
-	"github.com/lxn/win"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
@@ -25,7 +25,7 @@ func SetShellANSIMap(mode string) {
 	ansi16 = chrome.RemapANSI16(mode)
 }
 
-// ANSI 0–15 (and xterm 256 cube/grayscale) → RGB for GDI.
+// ANSI 0–15 (and xterm 256 cube/grayscale) → RGB.
 // Truecolor from vt10x is packed as r<<16|g<<8|b with value often >255.
 
 func colorToRGB(c vt10x.Color, bold bool) (r, g, b byte) {
@@ -74,16 +74,12 @@ func cube6(v int) byte {
 	return byte(55 + v*40)
 }
 
-func rgbCOLORREF(r, g, b byte) win.COLORREF {
-	return win.RGB(r, g, b)
-}
-
 // cellPix is one painted cell (viewport).
 type cellPix struct {
-	Ch       rune
+	Ch         rune
 	FR, FG, FB byte // foreground
 	BR, BG, BB byte // background
-	Bold     bool
+	Bold       bool
 }
 
 func glyphToCell(g vt10x.Glyph) cellPix {
@@ -115,5 +111,69 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 		BG:   bg,
 		BB:   bb,
 		Bold: bold,
+	}
+}
+
+func displayRune(r rune) rune {
+	if r == 0 || r == 0xFFFD {
+		return ' '
+	}
+	// C0 / DEL / C1 controls
+	if r < 0x20 || (r >= 0x7f && r < 0xa0) {
+		return ' '
+	}
+	// Private Use (Nerd Fonts etc.) → empty, not a □ mystery box
+	if r >= 0xE000 && r <= 0xF8FF {
+		return ' '
+	}
+	if r >= 0xF0000 {
+		return ' '
+	}
+	// CJK (Han / kana / fullwidth) — drawn with fallback when mono lacks glyphs.
+	if isEastAsianRune(r) {
+		return r
+	}
+	// Beyond Latin Extended-B: keep box-drawing / light punctuation; drop
+	// exotic scripts we cannot paint cleanly without per-script fallbacks.
+	if r > 0x024F &&
+		!(r >= 0x2500 && r <= 0x259F) && // box / block drawing
+		!(r >= 0x2000 && r <= 0x206F) { // general punctuation
+		switch r {
+		case '✓', '✗', '→', '←', '▶', '❯', 'λ', '•':
+			return ' '
+		default:
+			if !unicode.In(r, unicode.Latin, unicode.Common) {
+				return ' '
+			}
+		}
+	}
+	if unicode.Is(unicode.Cf, r) {
+		return ' '
+	}
+	if !unicode.IsPrint(r) && r != ' ' {
+		return ' '
+	}
+	return r
+}
+
+// isEastAsianRune is true for scripts we paint via the CJK fallback face.
+func isEastAsianRune(r rune) bool {
+	switch {
+	case r >= 0x3040 && r <= 0x30FF: // Hiragana + Katakana
+		return true
+	case r >= 0x31F0 && r <= 0x31FF: // Katakana Phonetic Extensions
+		return true
+	case r >= 0x3400 && r <= 0x4DBF: // CJK Ext A
+		return true
+	case r >= 0x4E00 && r <= 0x9FFF: // CJK Unified Ideographs
+		return true
+	case r >= 0xF900 && r <= 0xFAFF: // CJK Compatibility Ideographs
+		return true
+	case r >= 0xFF00 && r <= 0xFFEF: // Halfwidth and Fullwidth Forms
+		return true
+	case r >= 0x3000 && r <= 0x303F: // CJK Symbols and Punctuation
+		return true
+	default:
+		return false
 	}
 }

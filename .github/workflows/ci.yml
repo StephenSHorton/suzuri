@@ -8,7 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,4 +25,10 @@ jobs:
         run: go test ./...
 
       - name: Build
-        run: go build -o suzuri.exe ./cmd/suzuri
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            go build -o suzuri.exe ./cmd/suzuri
+          else
+            go build -o suzuri ./cmd/suzuri
+          fi

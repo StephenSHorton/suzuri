@@ -1,14 +1,19 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package ui
 
-import (
-	"errors"
+import "errors"
 
-	"github.com/StephenSHorton/suzuri/internal/host"
-)
-
-// Run is Windows-only in v0.
-func Run(sess *host.Session) error {
-	return errors.New("suzuri v0 UI only supports Windows")
+// Run is only implemented on Windows and macOS.
+func Run() error {
+	return errors.New("suzuri UI supports Windows and macOS only")
 }
+
+// RegisterBundledFonts is a no-op off supported GUI platforms.
+func RegisterBundledFonts() bool { return false }
+
+// UnregisterBundledFonts is a no-op off supported GUI platforms.
+func UnregisterBundledFonts() {}
+
+// BundledFace is empty when no GUI host is built.
+const BundledFace = ""
