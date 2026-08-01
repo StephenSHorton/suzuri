@@ -32,6 +32,10 @@ func RenderToTerm(m Model, cols int) vt10x.Terminal {
 // borders no longer line up with the middle row (horizontal walls look like
 // they “float”).
 func writeView(t vt10x.Terminal, view string) {
+	// ansi.DecodeSequence has panicked on bad parser state in the past —
+	// never take down the host paint path for chrome.
+	defer func() { _ = recover() }()
+
 	view = strings.ReplaceAll(view, "\r\n", "\n")
 	view = strings.ReplaceAll(view, "\r", "\n")
 

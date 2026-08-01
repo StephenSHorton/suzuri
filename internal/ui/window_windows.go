@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -241,6 +242,13 @@ func (u *winUI) loop() error {
 	face := fontFaceName(u.font)
 	log.Info("window created", "hwnd", uintptr(hwnd), "font", face, "want", u.cfg.FontFace)
 	registerUI(hwnd, u)
+	// WM_SIZE during CreateWindow arrives before registerUI, so the real
+	// client size was never applied (logs showed w=0 h=0 forever). Sync now.
+	var rc win.RECT
+	if win.GetClientRect(hwnd, &rc) {
+		u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
+		log.Info("initial client size", "w", u.width, "h", u.height, "cols", u.cols, "rows", u.rows)
+	}
 
 	win.ShowWindow(hwnd, win.SW_SHOW)
 	win.UpdateWindow(hwnd)
@@ -527,46 +535,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			"w", u.width, "h", u.height, "cols", u.cols, "rows", u.rows)
 		applog.Sync()
 		if active != win.WA_INACTIVE && u.alive.Load() {
-			// After long suspend the backbuffer DC can be stale — rebuild on focus.
-			u.releaseBackbuffer()
+			// Refresh client size (may have changed while unfocused) but do
+			// NOT tear down the backbuffer here — destroy/recreate on every
+			// focus was a GDI AV source. Stale DCs fall back in paint().
+			var rc win.RECT
+			if win.GetClientRect(hwnd, &rc) {
+				u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
+			}
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
 
 	case win.WM_SIZE:
-		u.width = int32(win.LOWORD(uint32(lParam)))
-		u.height = int32(win.HIWORD(uint32(lParam)))
-		if u.width > 0 && u.height > 0 {
-			cw, ch := u.metricW, u.metricH
-			if cw < 1 {
-				cw = cellW
-			}
-			if ch < 1 {
-				ch = cellH
-			}
-			const padX int32 = 4
-			cols := int((u.width - padX) / cw)
-			if cols < 20 {
-				cols = 20
-			}
-			u.chrome.Width = cols
-			u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: 24}).Model
-			u.markChromeDirty()
-			u.chromePx = u.chromePixelHeight()
-			rows := int((u.height - u.chromePx) / ch)
-			if rows < 5 {
-				rows = 5
-			}
-			if rows != u.rows || cols != u.cols {
-				u.cols = cols
-				u.rows = rows
-				for _, t := range u.tabs {
-					t.resize(cols, rows)
-				}
-			} else {
-				u.cols = cols
-			}
-		}
+		u.applyClientSize(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
 		return 0
 
 	case win.WM_CHAR:
@@ -862,6 +843,18 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 }
 
 func (u *winUI) paint(hwnd win.HWND) {
+	// Native AVs still won't land here, but Go panics in chrome/VT must not
+	// kill the process with no trail (focus-after-idle was a common path).
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("paint panic",
+				"err", fmt.Sprint(r),
+				"stack", string(debug.Stack()),
+			)
+			applog.Sync()
+		}
+	}()
+
 	var ps win.PAINTSTRUCT
 	hdc := win.BeginPaint(hwnd, &ps)
 	defer win.EndPaint(hwnd, &ps)
@@ -877,6 +870,10 @@ func (u *winUI) paint(hwnd win.HWND) {
 	// Minimized / zero-size clients still get WM_PAINT — do nothing useful.
 	if w < 2 || h < 2 {
 		return
+	}
+	// Keep size fields honest even if WM_SIZE was missed.
+	if u.width != w || u.height != h {
+		u.applyClientSize(w, h)
 	}
 
 	tab := u.activeTab()
@@ -916,6 +913,44 @@ func (u *winUI) paint(hwnd win.HWND) {
 		log.Warn("BitBlt failed — direct paint fallback")
 		u.releaseBackbuffer()
 		draw(hdc)
+	}
+}
+
+// applyClientSize updates cols/rows/chrome from a client pixel size.
+// Safe to call from WM_SIZE, first paint, and WM_ACTIVATE.
+func (u *winUI) applyClientSize(w, h int32) {
+	if w < 1 || h < 1 {
+		return
+	}
+	u.width, u.height = w, h
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	const padX int32 = 4
+	cols := int((w - padX) / cw)
+	if cols < 20 {
+		cols = 20
+	}
+	u.chrome.Width = cols
+	u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: 24}).Model
+	u.markChromeDirty()
+	u.chromePx = u.chromePixelHeight()
+	rows := int((h - u.chromePx) / ch)
+	if rows < 5 {
+		rows = 5
+	}
+	if rows != u.rows || cols != u.cols {
+		u.cols = cols
+		u.rows = rows
+		for _, t := range u.tabs {
+			t.resize(cols, rows)
+		}
+	} else {
+		u.cols = cols
 	}
 }
 
@@ -1389,25 +1424,29 @@ func (u *winUI) drainQueuedBackspaces(hwnd win.HWND) {
 }
 
 func (u *winUI) releaseBackbuffer() {
-	if u.memDC != 0 {
-		// Deselect our bitmap before deleting it — deleting a selected HBITMAP
-		// is undefined and is a common source of delayed GDI AVs.
-		if u.memOldBmp != 0 {
-			win.SelectObject(u.memDC, u.memOldBmp)
-			u.memOldBmp = 0
-		} else if u.memBmp != 0 {
-			// Fall back to stock monochrome bitmap if we lost the original.
-			stock := win.GetStockObject(win.BLACK_BRUSH) // not a bitmap; use NULL via CreateCompatibleDC default
-			_ = stock
-			win.SelectObject(u.memDC, win.HGDIOBJ(0))
-		}
-		if u.memBmp != 0 {
-			win.DeleteObject(win.HGDIOBJ(u.memBmp))
-			u.memBmp = 0
-		}
-		win.DeleteDC(u.memDC)
-		u.memDC = 0
+	if u.memDC == 0 {
+		return
 	}
+	// Deselect our bitmap before deleting it — deleting a selected HBITMAP
+	// is undefined and is a common source of delayed GDI AVs.
+	deselected := false
+	if u.memOldBmp != 0 {
+		win.SelectObject(u.memDC, u.memOldBmp)
+		u.memOldBmp = 0
+		deselected = true
+	}
+	if u.memBmp != 0 {
+		if deselected {
+			win.DeleteObject(win.HGDIOBJ(u.memBmp))
+		} else {
+			// Still selected and we have no prior object — leak the bitmap
+			// rather than SelectObject(0) / DeleteObject-while-selected (AV).
+			log.Warn("backbuffer bitmap still selected; leaking to avoid GDI AV")
+		}
+		u.memBmp = 0
+	}
+	win.DeleteDC(u.memDC)
+	u.memDC = 0
 	u.memW, u.memH = 0, 0
 }
 
