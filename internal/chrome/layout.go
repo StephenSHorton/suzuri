@@ -63,40 +63,67 @@ func dialogInnerWidth(outerWidth int) int {
 
 // renderDialogCard builds a Crush-style card: rounded primary border,
 // title, optional rule, body lines, optional help footer.
+//
+// Every content line is forced to full inner width with panel background so
+// short titles/footers don't leave dark void gutters (VT clear color) to the
+// right of the text.
 func renderDialogCard(outerWidth int, title string, body []string, footer string) string {
 	outerWidth = clampDialogWidth(outerWidth, outerWidth+8)
 	inner := dialogInnerWidth(outerWidth)
 
 	var lines []string
 	if title != "" {
-		lines = append(lines, styleDialogTitle().Render(title))
+		lines = append(lines, styleDialogTitle().
+			Background(colPanel).
+			Width(inner).
+			MaxHeight(1).
+			Render(title))
 	}
 	// Subtle separator under title (separator role).
 	if title != "" && len(body) > 0 {
-		ruleW := inner - 2
-		if ruleW < 8 {
-			ruleW = 8
-		}
-		lines = append(lines, styleDialogRule().Render(stringsRepeat("─", ruleW)))
+		lines = append(lines, dialogRuleLine(inner))
 	}
 	for _, b := range body {
 		if b == "" {
-			lines = append(lines, "")
+			lines = append(lines, panelFillLine(inner, ""))
 			continue
 		}
-		lines = append(lines, b)
+		// Body rows may already be styled; re-pad with panel so short lines fill.
+		lines = append(lines, panelFillLine(inner, b))
 	}
 	if footer != "" {
-		ruleW := inner - 2
-		if ruleW < 8 {
-			ruleW = 8
-		}
-		lines = append(lines, styleDialogRule().Render(stringsRepeat("─", ruleW)))
-		lines = append(lines, footer)
+		lines = append(lines, dialogRuleLine(inner))
+		lines = append(lines, panelFillLine(inner, footer))
 	}
 
 	content := joinLines(lines)
 	return styleDialogView().Width(outerWidth).Render(content)
+}
+
+// panelFillLine ensures a content row spans inner columns on colPanel, so
+// unstyled trailing cells never show the dark shell/void behind the modal.
+func panelFillLine(inner int, content string) string {
+	if inner < 1 {
+		inner = 1
+	}
+	// Outer width + panel bg pads with spaces using panel background.
+	return lipgloss.NewStyle().
+		Background(colPanel).
+		Width(inner).
+		MaxHeight(1).
+		Render(content)
+}
+
+func dialogRuleLine(inner int) string {
+	ruleW := inner
+	if ruleW < 8 {
+		ruleW = 8
+	}
+	return styleDialogRule().
+		Background(colPanel).
+		Width(inner).
+		MaxHeight(1).
+		Render(stringsRepeat("─", ruleW))
 }
 
 func joinLines(lines []string) string {

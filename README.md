@@ -23,7 +23,7 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | **Help** `Ctrl+/` · first-run splash · command categories | ✅ |
 | Status toasts · click `+` · click-out dismiss · last-tab quit confirm | ✅ |
 | Config: `%LOCALAPPDATA%\suzuri\config.json` | ✅ |
-| Font: **Cascadia Mono** (fallback Consolas…) | ✅ |
+| Font: **GohuFont uni14 Nerd Font Mono** (bundled, WTFPL) · Cascadia/Consolas fallback | ✅ |
 | Seamless box-drawing / block glyphs (WT-style) | ✅ |
 | Splits / richer menus | soon |
 
@@ -55,6 +55,20 @@ go run ./cmd/suzuri
 # or
 .\suzuri.exe
 ```
+
+## MCP (agent diagnostics)
+
+Spawn-on-demand **stdio** MCP — Grok starts `suzuri mcp` when needed; it attaches to the **running GUI** over loopback. No always-on daemon. See [`docs/mcp.md`](docs/mcp.md).
+
+```toml
+# ~/.grok/config.toml
+[mcp_servers.suzuri]
+command = 'C:\Users\4step\projects\suzuri\suzuri.exe'
+args = ["mcp"]
+enabled = true
+```
+
+Tools: `suzuri_status`, `suzuri_diag`, `suzuri_snapshot`, `suzuri_submit`, `suzuri_logs` (app log tail).
 
 ## Logs
 

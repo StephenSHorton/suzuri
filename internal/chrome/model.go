@@ -195,7 +195,13 @@ func newPaletteList(width int, cfg config.Config) list.Model {
 }
 
 func (m *Model) rebuildPalette() {
-	m.palette = newPaletteList(m.Width, m.lastCfg)
+	w := m.Width
+	if w < 40 {
+		w = 40
+	}
+	// Always rebuild from a clean list model — never mutate in place while
+	// a filter/cursor might be mid-update (settings save closes dialog then syncs).
+	m.palette = newPaletteList(w, m.lastCfg)
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -226,7 +232,12 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.Status = string(msg)
 	case SyncConfigMsg:
 		m.lastCfg = config.Normalize(msg.Config)
-		m.rebuildPalette()
+		// Avoid rebuilding the palette list while settings is open — live
+		// preview sends SyncConfig on every left/right and was a source of
+		// freezes/crashes (list model thrash + GDI font churn mid-dialog).
+		if !m.SettingsOpen {
+			m.rebuildPalette()
+		}
 	case OpenPaletteMsg:
 		m.closeModalsExcept("")
 		m.rebuildPalette()
@@ -240,8 +251,8 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.SettingsOpen = true
 		m.settings = newSettingsState(msg.Config)
 		m.lastCfg = m.settings.snap
-		settings = m.settings.edit
-		act = ActionSettingsPreview
+		// Do not fire SettingsPreview on open — config is already live.
+		// Preview only when the user nudges a value (left/right).
 	case CloseSettingsMsg:
 		if m.SettingsOpen {
 			settings = m.settings.snap

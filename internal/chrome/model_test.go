@@ -61,9 +61,8 @@ func TestPaletteSettingsFirst(t *testing.T) {
 	}
 	// First registry command is Settings.
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
-	if r.Action != ActionSettingsPreview {
-		t.Fatalf("action=%v want SettingsPreview (open settings)", r.Action)
-	}
+	// Opening settings from palette may still return SettingsPreview (legacy)
+	// or None; require the dialog open either way.
 	if !r.Model.SettingsOpen {
 		t.Fatal("settings should be open")
 	}
@@ -76,6 +75,10 @@ func TestSettingsNudgePreview(t *testing.T) {
 	m = r.Model
 	if !m.SettingsOpen {
 		t.Fatal("settings open")
+	}
+	// Open no longer fires preview (config already live).
+	if r.Action != ActionNone {
+		t.Fatalf("open action=%v want None", r.Action)
 	}
 	// Move to font size and increase.
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})

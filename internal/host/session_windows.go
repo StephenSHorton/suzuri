@@ -57,8 +57,11 @@ func QuietPrompt(commandLine string) string {
 	switch {
 	case strings.EqualFold(base, "pwsh.exe") || strings.EqualFold(base, "pwsh") ||
 		strings.EqualFold(base, "powershell.exe") || strings.EqualFold(base, "powershell"):
-		// Empty prompt; Clear-Host wipes the leftover banner row after -NoLogo.
-		return cl + ` -NoExit -Command "function prompt { '' }; Clear-Host"`
+		// Quiet prompt: Windows PowerShell treats function prompt { '' } as
+		// invalid and falls back to "PS>". A single space keeps the in-band
+		// line effectively blank so the Warp bar is the only command surface.
+		// Clear-Host wipes the leftover banner row after -NoLogo.
+		return cl + ` -NoExit -Command "function global:prompt { ' ' }; Clear-Host"`
 	case strings.EqualFold(base, "cmd.exe") || strings.EqualFold(base, "cmd"):
 		// $S = space in cmd PROMPT syntax — effectively blank.
 		if strings.Contains(lower, "/k") || strings.Contains(lower, "/c") {

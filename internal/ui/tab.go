@@ -17,6 +17,7 @@ import (
 type tab struct {
 	id    int
 	title string
+	shell string // launch command line (for MCP diag)
 
 	sess *host.Session
 	term vt10x.Terminal // UI thread only for Write/Cell
@@ -24,15 +25,32 @@ type tab struct {
 	sel  cellSel
 	// Per-tab command line (draft + history) so switching tabs restores state.
 	input inputBar
+	// Suppress shell local-echo of the last bar submit (see echo_filter.go).
+	echo echoFilter
 
 	writeCh chan []byte
 	inMu    sync.Mutex
 	inBuf   []byte
+	// ptyTail keeps recent raw PTY bytes for MCP diagnostics (escaped in snapshot).
+	ptyTail []byte
 
 	alive    atomic.Bool
 	bytesMsg atomic.Bool
 	closed   bool
+	// wasAlt tracks ModeAltScreen across PTY drains so the host can resize
+	// when a full-screen app (Claude, Grok Build, vim…) enters/leaves.
+	wasAlt bool
 }
+
+// altScreen is true when the tab's VT is on the alternate screen buffer.
+func (t *tab) altScreen() bool {
+	if t == nil || t.term == nil {
+		return false
+	}
+	return t.term.Mode()&vt10x.ModeAltScreen != 0
+}
+
+const maxPtyTail = 8192
 
 // tabOpts optional launch recipe (profile).
 type tabOpts struct {
@@ -58,6 +76,7 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 	t := &tab{
 		id:      id,
 		title:   title,
+		shell:   shell,
 		sess:    sess,
 		term:    vt10x.New(vt10x.WithSize(cols, rows)),
 		sb:      newScrollback(),
@@ -105,6 +124,10 @@ func (t *tab) readLoop(u *winUI) {
 			if len(t.inBuf) > 1<<20 {
 				t.inBuf = t.inBuf[len(t.inBuf)-1<<19:]
 			}
+			t.ptyTail = append(t.ptyTail, chunk...)
+			if len(t.ptyTail) > maxPtyTail {
+				t.ptyTail = append([]byte(nil), t.ptyTail[len(t.ptyTail)-maxPtyTail:]...)
+			}
 			t.inMu.Unlock()
 			t.postBytes(u)
 		}
@@ -136,6 +159,15 @@ func (t *tab) takeInput() []byte {
 	t.inMu.Unlock()
 	t.bytesMsg.Store(false)
 	return data
+}
+
+func (t *tab) ptyTailCopy() []byte {
+	t.inMu.Lock()
+	defer t.inMu.Unlock()
+	if len(t.ptyTail) == 0 {
+		return nil
+	}
+	return append([]byte(nil), t.ptyTail...)
 }
 
 func (t *tab) close() {

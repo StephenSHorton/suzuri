@@ -74,6 +74,57 @@ func dataDir() (string, error) {
 	return dir, nil
 }
 
+// FilePath is the default suzuri.log location (even if Init has not run).
+func FilePath() string {
+	mu.Lock()
+	p := Path
+	mu.Unlock()
+	if p != "" {
+		return p
+	}
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "suzuri", "suzuri.log")
+}
+
+// Tail returns the last n lines of the log file (and flushes if this process owns it).
+// n is clamped to [1, 5000]. Works from the MCP process without Init.
+func Tail(n int) (path string, lines []string, err error) {
+	if n < 1 {
+		n = 100
+	}
+	if n > 5000 {
+		n = 5000
+	}
+	Sync()
+	path = FilePath()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return path, nil, err
+	}
+	// Split on \n; keep content without trailing empty from final newline.
+	text := string(b)
+	if text == "" {
+		return path, nil, nil
+	}
+	raw := strings.Split(text, "\n")
+	// Drop a single trailing empty segment from a final \n.
+	if len(raw) > 0 && raw[len(raw)-1] == "" {
+		raw = raw[:len(raw)-1]
+	}
+	if len(raw) > n {
+		raw = raw[len(raw)-n:]
+	}
+	// Strip trailing \r (Windows).
+	lines = make([]string, len(raw))
+	for i, ln := range raw {
+		lines[i] = strings.TrimRight(ln, "\r")
+	}
+	return path, lines, nil
+}
+
 func setup(w io.Writer, level log.Level) {
 	logger := log.NewWithOptions(w, log.Options{
 		ReportTimestamp: true,

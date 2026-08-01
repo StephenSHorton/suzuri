@@ -338,19 +338,24 @@ func styleBrand() lipgloss.Style {
 }
 
 func styleDialogTitle() lipgloss.Style {
-	// Crush: Padding(0,1).Foreground(primary)
+	// Crush: Padding(0,1).Foreground(primary) — panel bg so width-fill is seamless.
 	return lipgloss.NewStyle().
 		Foreground(colPrimary).
+		Background(colPanel).
 		Bold(true).
 		Padding(0, 1)
 }
 
 func styleDialogLabel() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(colSoft) // fgMoreSubtle
+	return lipgloss.NewStyle().
+		Foreground(colSoft). // fgMoreSubtle
+		Background(colPanel)
 }
 
 func styleDialogValue() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(colText) // fgBase
+	return lipgloss.NewStyle().
+		Foreground(colText). // fgBase
+		Background(colPanel)
 }
 
 func styleDialogActive() lipgloss.Style {
@@ -363,11 +368,15 @@ func styleDialogActive() lipgloss.Style {
 }
 
 func styleDialogHint() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(colMute) // fgMostSubtle
+	return lipgloss.NewStyle().
+		Foreground(colMute). // fgMostSubtle
+		Background(colPanel)
 }
 
 func styleDialogHintKey() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(colSoft) // fgMoreSubtle
+	return lipgloss.NewStyle().
+		Foreground(colSoft). // fgMoreSubtle
+		Background(colPanel)
 }
 
 func styleDialogRule() lipgloss.Style {
@@ -378,5 +387,6 @@ func styleDialogNormalItem() lipgloss.Style {
 	// Crush NormalItem: Padding(0,1).Foreground(fgBase)
 	return lipgloss.NewStyle().
 		Foreground(colText).
+		Background(colPanel).
 		Padding(0, 1)
 }

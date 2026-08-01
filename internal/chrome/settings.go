@@ -21,6 +21,9 @@ const (
 	settingsFieldCount
 )
 
+// Fixed label column so values sit on a clean right column.
+const settingsLabelCols = 10
+
 type settingsState struct {
 	snap  config.Config
 	edit  config.Config
@@ -145,44 +148,74 @@ func (s settingsState) fieldLabel(f settingsField) string {
 }
 
 func (s settingsState) render(windowCols int) string {
-	outer := clampDialogWidth(44, windowCols)
+	outer := clampDialogWidth(52, windowCols)
 	inner := dialogInnerWidth(outer)
+	if inner < 24 {
+		inner = 24
+	}
+
+	// Two columns: fixed label width, values start at a consistent column.
+	// Avoid nested Width()+space-pad math (that reflowed into staggered lines).
+	labW := settingsLabelCols
+	valW := inner - labW - 1
+	if valW < 8 {
+		valW = 8
+	}
 
 	var body []string
 	for f := settingsField(0); f < settingsFieldCount; f++ {
 		label := s.fieldLabel(f)
 		val := s.valueLabel(f)
-		maxVal := inner - 16
-		if maxVal < 6 {
-			maxVal = 6
-		}
-		if len([]rune(val)) > maxVal {
-			rs := []rune(val)
-			val = string(rs[:maxVal-1]) + "…"
-		}
-		if f == s.field {
-			// Crush SelectedItem: primary + onPrimary, Padding(0,1)
-			line := fmt.Sprintf("%-8s  ‹ %s ›", label, val)
-			body = append(body, styleDialogActive().Width(inner).Render(line))
-		} else {
-			// Crush NormalItem
-			lab := styleDialogLabel().Width(10).Render(label)
-			v := styleDialogValue().Render(val)
-			pad := inner - lipgloss.Width(lab) - lipgloss.Width(v) - 2
-			if pad < 1 {
-				pad = 1
-			}
-			row := " " + lab + strings.Repeat(" ", pad) + v
-			body = append(body, styleDialogNormalItem().Width(inner).Render(strings.TrimRight(row, " ")))
-		}
+		active := f == s.field
+		body = append(body, settingsRow(inner, labW, valW, label, val, active))
 	}
 
-	footer := styleDialogHintKey().Render("↑↓") + styleDialogHint().Render("  ") +
-		styleDialogHintKey().Render("‹›") + styleDialogHint().Render(" change  ") +
+	footer := styleDialogHintKey().Render("up/down") + styleDialogHint().Render("  ") +
+		styleDialogHintKey().Render("left/right") + styleDialogHint().Render(" change  ") +
 		styleDialogHintKey().Render("enter") + styleDialogHint().Render(" save  ") +
 		styleDialogHintKey().Render("esc")
 
 	return renderDialogCard(outer, "Settings", body, footer)
+}
+
+// settingsRow is one label | value line.
+// Built as a single plain string first (fixed columns), then styled once —
+// nested Width/JoinHorizontal reflowed into staggered stacks with some fonts.
+func settingsRow(inner, labW, valW int, label, val string, active bool) string {
+	_ = valW
+	lab := padFit(label, labW)
+	// Value starts immediately after label column.
+	plain := padFit(lab+val, inner)
+	if active {
+		// Whole-row selection; keep plain columns (no fancy ‹› glyphs).
+		return styleDialogActive().Width(inner).MaxHeight(1).Render(plain)
+	}
+	// Dim label, bright value — style segments of the same fixed layout.
+	labPart := styleDialogLabel().Render(lab)
+	valPart := styleDialogValue().Render(padFit(val, inner-labW))
+	row := labPart + valPart
+	if lipgloss.Width(row) > inner {
+		return styleDialogNormalItem().Width(inner).MaxHeight(1).Render(plain)
+	}
+	return row
+}
+
+// padFit truncates with ellipsis and right-pads with spaces to width n (runes).
+func padFit(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	rs := []rune(s)
+	if len(rs) > n {
+		if n == 1 {
+			return "…"
+		}
+		return string(rs[:n-1]) + "…"
+	}
+	if len(rs) < n {
+		return s + strings.Repeat(" ", n-len(rs))
+	}
+	return s
 }
 
 func indexFold(list []string, want string) int {
@@ -193,3 +226,4 @@ func indexFold(list []string, want string) int {
 	}
 	return -1
 }
+

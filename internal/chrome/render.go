@@ -29,7 +29,9 @@ func renderString(view string, cols, rows int) vt10x.Terminal {
 		rows = 1
 	}
 	t := vt10x.New(vt10x.WithSize(cols, rows))
-	_, _ = t.Write([]byte("\x1b[H\x1b[48;2;18;16;28m\x1b[2J\x1b[H\x1b[m"))
+	// Clear to default (black) — host treats default-bg empty cells as transparent
+	// so only the dialog card is painted; dimmed shell shows through around it.
+	_, _ = t.Write([]byte("\x1b[H\x1b[0m\x1b[2J\x1b[H"))
 	writeView(t, view)
 	return t
 }

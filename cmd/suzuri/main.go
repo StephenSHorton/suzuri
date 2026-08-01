@@ -9,10 +9,22 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
+	"github.com/StephenSHorton/suzuri/internal/mcpsrv"
 	"github.com/StephenSHorton/suzuri/internal/ui"
 )
 
 func main() {
+	// Subcommands before GUI init. `suzuri mcp` is spawn-on-demand stdio MCP
+	// (Grok starts it; no always-on daemon). See docs/mcp.md.
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		// MCP speaks on stdio — never send applog to stdout.
+		if err := mcpsrv.RunStdio(); err != nil {
+			fmt.Fprintf(os.Stderr, "suzuri mcp: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
 			// applog may or may not be up; best-effort.
@@ -43,6 +55,14 @@ func main() {
 	// Without this, the Go scheduler can migrate the UI goroutine after idle
 	// and the window stops processing messages ("Not Responding").
 	runtime.LockOSThread()
+
+	// Process-private Nerd Font (embedded TTF) — no system install required.
+	if ui.RegisterBundledFonts() {
+		log.Info("bundled font ready", "face", ui.BundledFace)
+	} else {
+		log.Warn("bundled font unavailable; using system monospaced fallbacks")
+	}
+	defer ui.UnregisterBundledFonts()
 
 	log.Info("starting",
 		"pid", os.Getpid(),

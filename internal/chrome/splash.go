@@ -6,10 +6,10 @@ func splashBody(windowCols int) string {
 	body := []string{
 		styleDialogHint().Render("real terminal · charm chrome"),
 		"",
-		styleDialogValue().Render("Ctrl+K") + styleDialogLabel().Render("  commands"),
-		styleDialogValue().Render("Ctrl+,") + styleDialogLabel().Render("  settings"),
-		styleDialogValue().Render("Ctrl+/") + styleDialogLabel().Render("  shortcuts"),
-		styleDialogValue().Render("⌃⇧T") + styleDialogLabel().Render("    new tab"),
+		styleDialogValue().Render(KeyCtrl("K")) + styleDialogLabel().Render("  commands"),
+		styleDialogValue().Render(KeyCtrl(",")) + styleDialogLabel().Render("  settings"),
+		styleDialogValue().Render(KeyCtrl("/")) + styleDialogLabel().Render("  shortcuts"),
+		styleDialogValue().Render(KeyCtrlShift("T")) + styleDialogLabel().Render("  new tab"),
 	}
 	footer := styleDialogHintKey().Render("enter") + styleDialogHint().Render(" continue")
 	return renderDialogCard(outer, "硯  suzuri", body, footer)

@@ -65,12 +65,20 @@ type fileDTO struct {
 	FirstRunDone  bool      `json:"first_run_done,omitempty"`
 }
 
+// DefaultFontFace is the shipping monospaced face (bundled GohuFont uni14 Mono).
+// The binary embeds the TTF and registers it process-privately at startup.
+// Gohu is a bitmap-rooted face designed for 14px cells — keep DefaultFontSizePx=14.
+const DefaultFontFace = "GohuFont uni14 Nerd Font Mono"
+
+// DefaultFontSizePx matches GohuFont uni14's design size.
+const DefaultFontSizePx = 14
+
 // Default returns shipping defaults.
 func Default() Config {
 	return Config{
 		Cursor:        CursorBlock,
-		FontFace:      "Cascadia Mono",
-		FontSizePx:    16,
+		FontFace:      DefaultFontFace,
+		FontSizePx:    DefaultFontSizePx,
 		Theme:         ThemeInkstone,
 		ShellANSIMap:  ANSIMapSoft,
 		Profiles:      DefaultProfiles(),
@@ -126,11 +134,20 @@ func Save(c Config) error {
 		return err
 	}
 	b = append(b, '\n')
-	tmp := Path() + ".tmp"
+	path := Path()
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, Path())
+	// On Windows, Rename may fail if the destination exists — replace explicitly.
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(path)
+		if err2 := os.Rename(tmp, path); err2 != nil {
+			_ = os.Remove(tmp)
+			return err2
+		}
+	}
+	return nil
 }
 
 // Normalize clamps fields to safe values.
@@ -266,8 +283,10 @@ func ANSIMapLabel(id string) string {
 }
 
 // MonoFontFaces are preferred faces for the settings cycle.
+// DefaultFontFace is first (bundled into the binary when available).
 func MonoFontFaces() []string {
 	return []string{
+		DefaultFontFace,
 		"Cascadia Mono",
 		"Cascadia Code",
 		"Consolas",

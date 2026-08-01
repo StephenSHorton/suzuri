@@ -62,6 +62,62 @@ func snapshotScreenCells(term vt10x.Terminal) [][]cellPix {
 	return out
 }
 
+// liveExtent returns how many leading live rows belong in the document.
+// Trailing blank PTY rows are omitted so host-injected command blocks (history
+// just above the live screen) stay visible at the bottom of the viewport
+// instead of sitting above a full screen of empty cells.
+//
+// On the alternate screen (full-screen TUI apps) the entire grid is used —
+// no clipping.
+func liveExtent(term vt10x.Terminal) int {
+	cols, rows := term.Size()
+	if rows < 1 {
+		return 0
+	}
+	if term.Mode()&vt10x.ModeAltScreen != 0 {
+		return rows
+	}
+	last := -1
+	if cur := term.Cursor(); cur.Y >= 0 && cur.Y < rows {
+		last = cur.Y
+	}
+	for y := 0; y < rows; y++ {
+		for x := 0; x < cols; x++ {
+			ch := displayRune(term.Cell(x, y).Char)
+			if ch != ' ' && ch != 0 {
+				if y > last {
+					last = y
+				}
+				break
+			}
+		}
+	}
+	if last < 0 {
+		// Empty screen: keep a single row so the viewport isn't history-only
+		// with no live anchor (prompt may be a space we treat as blank).
+		return 1
+	}
+	return last + 1
+}
+
+func snapshotLiveCells(term vt10x.Terminal) [][]cellPix {
+	live := snapshotScreenCells(term)
+	n := liveExtent(term)
+	if n > len(live) {
+		n = len(live)
+	}
+	return live[:n]
+}
+
+func snapshotLiveText(term vt10x.Terminal) []string {
+	live := snapshotScreenText(term)
+	n := liveExtent(term)
+	if n > len(live) {
+		n = len(live)
+	}
+	return live[:n]
+}
+
 func (s *scrollback) noteScreen(term vt10x.Terminal) {
 	cur := snapshotScreenText(term)
 	if len(s.prev) == len(cur) && len(cur) > 1 {
@@ -168,13 +224,90 @@ func (s *scrollback) atBottom() bool { return s.offset == 0 }
 
 func (s *scrollback) stickBottom() { s.offset = 0 }
 
+// historyTail returns the last n history lines for diagnostics.
+func (s *scrollback) historyTail(n int) []histLine {
+	if n < 1 || len(s.lines) == 0 {
+		return nil
+	}
+	if n > len(s.lines) {
+		n = len(s.lines)
+	}
+	out := make([]histLine, n)
+	copy(out, s.lines[len(s.lines)-n:])
+	return out
+}
+
+// recentBlocks returns recent host-injected command block texts (newest last).
+func (s *scrollback) recentBlocks(max int) []string {
+	if max < 1 {
+		return nil
+	}
+	var cmds []string
+	var cur []string
+	flush := func() {
+		if len(cur) == 0 {
+			return
+		}
+		cmds = append(cmds, strings.Join(cur, "\n"))
+		cur = nil
+	}
+	for _, hl := range s.lines {
+		switch hl.kind {
+		case histBlockCmd:
+			// Strip leading prompt on first line of a block.
+			t := hl.text
+			if strings.HasPrefix(t, inputBarPrompt) {
+				t = strings.TrimPrefix(t, inputBarPrompt)
+			} else {
+				t = strings.TrimLeft(t, " ")
+			}
+			cur = append(cur, t)
+		case histBlockRule:
+			flush()
+		default:
+			if len(cur) > 0 {
+				flush()
+			}
+		}
+	}
+	flush()
+	if len(cmds) > max {
+		cmds = cmds[len(cmds)-max:]
+	}
+	return cmds
+}
+
 // viewCells builds the viewport with color for live rows and styled history.
+// Live rows are clipped to liveExtent so trailing blank PTY cells don't push
+// recent history (command blocks) off the bottom of the screen.
+//
+// Alternate-screen apps own the whole viewport — history is not mixed in.
 func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPix {
-	live := snapshotScreenCells(term)
 	cols, _ := term.Size()
+	if cols < 1 {
+		cols = 1
+	}
 	if viewportRows < 1 {
 		viewportRows = 1
 	}
+
+	if term.Mode()&vt10x.ModeAltScreen != 0 {
+		live := snapshotScreenCells(term)
+		out := make([][]cellPix, viewportRows)
+		for i := 0; i < viewportRows; i++ {
+			row := make([]cellPix, cols)
+			for x := range row {
+				row[x] = cellPix{Ch: ' ', FR: 220, FG: 220, FB: 220}
+			}
+			if i < len(live) {
+				copy(row, live[i])
+			}
+			out[i] = row
+		}
+		return out
+	}
+
+	live := snapshotLiveCells(term)
 
 	// Document length in lines
 	docLen := len(s.lines) + len(live)
@@ -235,7 +368,12 @@ func (s *scrollback) view(term vt10x.Terminal, viewportRows int) [][]rune {
 	return out
 }
 
+// absLine maps a viewport row to a document line index. liveRows should be the
+// effective live height (liveExtent), not the full PTY row count.
 func (s *scrollback) absLine(viewY, viewportRows, liveRows int) int {
+	if liveRows < 1 {
+		liveRows = 1
+	}
 	docLen := len(s.lines) + liveRows
 	start := docLen - viewportRows - s.offset
 	if start < 0 {
@@ -251,7 +389,7 @@ func (s *scrollback) lineText(abs int, term vt10x.Terminal) string {
 	if abs < len(s.lines) {
 		return s.lines[abs].text
 	}
-	live := snapshotScreenText(term)
+	live := snapshotLiveText(term)
 	i := abs - len(s.lines)
 	if i >= 0 && i < len(live) {
 		return strings.TrimRight(live[i], " ")

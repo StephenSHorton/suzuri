@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
+	"github.com/StephenSHorton/suzuri/internal/bridge"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
@@ -33,9 +34,11 @@ const (
 	wmSuzuriBytes  = win.WM_APP + 1 // drain incoming PTY byte queue into vt10x
 	wmSuzuriBlink  = win.WM_APP + 2
 	wmSuzuriClosed = win.WM_APP + 3 // session read ended
+	wmSuzuriMCP    = win.WM_APP + 4 // MCP bridge submit jobs
 
+	// Smooth opacity pulse (sine), not a hard on/off blink.
 	cursorBlinkPeriod = 1200 * time.Millisecond
-	cursorBlinkTick   = 500 * time.Millisecond
+	cursorBlinkTick   = 40 * time.Millisecond // ~25 fps for soft fade
 
 	cellW = 9
 	cellH = 18
@@ -68,6 +71,9 @@ func Run() error {
 	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	ui.alive.Store(true)
+	ui.bridge = bridge.NewHost()
+	ui.mcpJobs = make(chan mcpJob, 8)
+	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
 	prof := config.FindProfile(cfg, cfg.ActiveProfile)
 	opts := tabOpts{}
 	if prof != nil {
@@ -88,6 +94,13 @@ func Run() error {
 	ui.syncChrome()
 	ui.showSplash = !cfg.FirstRunDone
 	return ui.loop()
+}
+
+// mcpJob is a submit request from the loopback MCP bridge (HTTP goroutine → UI thread).
+type mcpJob struct {
+	tabID int
+	line  string
+	done  chan error
 }
 
 type winUI struct {
@@ -133,6 +146,10 @@ type winUI struct {
 	chromeCells   [][]cellPix // strip [row][col]
 	overlayCells  [][]cellPix
 	overlayDirty  bool
+
+	// MCP bridge: loopback HTTP for spawn-on-demand stdio MCP (see internal/bridge).
+	bridge  *bridge.Host
+	mcpJobs chan mcpJob
 }
 
 func (u *winUI) activeTab() *tab {
@@ -206,37 +223,53 @@ func (u *winUI) markChromeDirty() {
 }
 
 // applyConfigLive updates fonts/theme/ANSI map from cfg without writing disk.
+// Safe to call from settings left/right preview (must not GDI-AV or thrash chrome).
 func (u *winUI) applyConfigLive(cfg config.Config) {
+	defer applog.Recover("applyConfigLive", false)
+
 	cfg = config.Normalize(cfg)
 	prev := u.cfg
 	u.cfg = cfg
 	chrome.ApplyTheme(cfg.Theme)
 	SetShellANSIMap(cfg.ShellANSIMap)
+
+	// Sync chrome model config; SyncConfigMsg skips palette rebuild while
+	// settings is open so profile left/right does not thrash list state.
 	u.chrome = u.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	u.markChromeDirty()
 
 	needFont := prev.FontFace != cfg.FontFace || prev.FontSizePx != cfg.FontSizePx
 	if needFont {
-		if u.font != 0 {
-			win.DeleteObject(win.HGDIOBJ(u.font))
-		}
-		if u.fontBold != 0 {
-			win.DeleteObject(win.HGDIOBJ(u.fontBold))
-		}
-		u.font = createFontFor(cfg, false)
-		u.fontBold = createFontFor(cfg, true)
-		got := fontFaceName(u.font)
-		// Force remeasure + grid resize on next paint/size.
-		u.metricW, u.metricH = 0, 0
-		if u.hwnd != 0 {
-			var rc win.RECT
-			if win.GetClientRect(u.hwnd, &rc) {
-				u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
+		// Create new fonts first; never DeleteObject a font still selected into
+		// the backbuffer DC (GDI AV / freeze when live-previewing settings).
+		newFace := createFontFor(cfg, false)
+		newBold := createFontFor(cfg, true)
+		if newFace == 0 {
+			log.Warn("font create failed; keeping previous", "face", cfg.FontFace)
+		} else {
+			u.releaseBackbuffer()
+			oldFace, oldBold := u.font, u.fontBold
+			u.font, u.fontBold = newFace, newBold
+			if oldFace != 0 {
+				win.DeleteObject(win.HGDIOBJ(oldFace))
 			}
-		}
-		log.Info("font applied", "face", cfg.FontFace, "px", cfg.FontSizePx, "got", got)
-		if got != "" && !strings.EqualFold(got, cfg.FontFace) {
-			u.toast("font fallback: " + got)
+			if oldBold != 0 {
+				win.DeleteObject(win.HGDIOBJ(oldBold))
+			}
+			u.probeKeyGlyphs()
+			got := fontFaceName(u.font)
+			// Force remeasure + grid resize on next paint/size.
+			u.metricW, u.metricH = 0, 0
+			if u.hwnd != 0 {
+				var rc win.RECT
+				if win.GetClientRect(u.hwnd, &rc) {
+					u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
+				}
+			}
+			log.Info("font applied", "face", cfg.FontFace, "px", cfg.FontSizePx, "got", got)
+			if got != "" && !strings.EqualFold(got, cfg.FontFace) {
+				u.toast("font fallback: " + got)
+			}
 		}
 	}
 	if prev.Theme != cfg.Theme {
@@ -245,18 +278,49 @@ func (u *winUI) applyConfigLive(cfg config.Config) {
 	if prev.ShellANSIMap != cfg.ShellANSIMap {
 		log.Info("shell ANSI map", "mode", cfg.ShellANSIMap)
 	}
+	if prev.ActiveProfile != cfg.ActiveProfile {
+		log.Info("active profile", "name", cfg.ActiveProfile)
+	}
 }
 
 func (u *winUI) applyConfigSave(cfg config.Config) {
+	defer applog.Recover("applyConfigSave", false)
+
+	cfg = config.Normalize(cfg)
+	// Apply visuals first (settings dialog is already closed on the chrome model).
 	u.applyConfigLive(cfg)
+
+	// Persist to disk (Windows-safe replace).
 	if err := config.Save(cfg); err != nil {
 		log.Error("config save failed", "err", err)
 		u.toast("save failed")
-	} else {
-		log.Info("config saved", "path", config.Path())
-		u.toast("settings saved")
+		return
 	}
+	log.Info("config saved", "path", config.Path())
+
+	// Post-save cleanup: drop cached overlay/chrome cells and backbuffer so the
+	// next paint cannot touch GDI objects from the live-preview churn.
+	u.overlayCells = nil
+	u.overlayDirty = true
+	u.chromeCells = nil
+	u.chromeDirty = true
+	u.releaseBackbuffer()
+	u.metricW, u.metricH = 0, 0
+
+	// Rebuild palette now that settings is closed (SyncConfig may have skipped
+	// rebuild while the dialog was open during left/right previews).
+	u.chrome = u.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	u.markChromeDirty()
+
+	if u.hwnd != 0 {
+		var rc win.RECT
+		if win.GetClientRect(u.hwnd, &rc) {
+			u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
+		}
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+	u.toast("settings saved")
+	log.Info("settings save complete")
 }
 
 // toast sets a short-lived status line under the tab strip.
@@ -303,7 +367,16 @@ func (u *winUI) shellPadY() int32 {
 }
 
 // inputBarPixelHeight grows with wrapped / multi-line content (capped).
+// Hidden (0) while the active tab is on the alternate screen — full-screen
+// apps (Claude, Grok Build, vim…) own the keyboard like Warp.
+//
+// Vertical budget is symmetric: hairline + top pad + N·cellH + bottom pad.
+// (Older code used min 2·cellH with only a light top inset, so single-line
+// bars looked bottom-heavy — not because of multi-line prep.)
 func (u *winUI) inputBarPixelHeight() int32 {
+	if t := u.activeTab(); t != nil && t.altScreen() {
+		return 0
+	}
 	ch := u.metricH
 	if ch < 1 {
 		ch = cellH
@@ -312,12 +385,32 @@ func (u *winUI) inputBarPixelHeight() int32 {
 	if in := u.activeInput(); in != nil {
 		rows = in.visualRows(u.inputContentCols())
 	}
-	// Top hairline padding + content rows + bottom pad.
-	h := int32(rows)*ch + ch/2 + 4
-	if h < ch*2 {
-		h = ch * 2
+	if rows < 1 {
+		rows = 1
 	}
-	return h
+	hair, topPad, botPad := inputBarVPads(ch)
+	return hair + topPad + int32(rows)*ch + botPad
+}
+
+// inputBarVPads returns hairline, top content inset, and bottom inset (symmetric).
+func inputBarVPads(ch int32) (hair, topPad, botPad int32) {
+	hair = ch / 10
+	if hair < 1 {
+		hair = 1
+	}
+	topPad = ch / 5
+	if topPad < 2 {
+		topPad = 2
+	}
+	botPad = topPad
+	return hair, topPad, botPad
+}
+
+// appOwnsKeyboard is true when the active tab's full-screen app should receive
+// raw keys (alt-screen). Host chrome shortcuts still win first.
+func (u *winUI) appOwnsKeyboard() bool {
+	t := u.activeTab()
+	return t != nil && t.altScreen()
 }
 
 // maybeResizeForInput recomputes shell rows when the bar height changes.
@@ -430,6 +523,7 @@ func (u *winUI) loop() error {
 	u.hwnd = hwnd
 	u.font = createFontFor(u.cfg, false)
 	u.fontBold = createFontFor(u.cfg, true)
+	u.probeKeyGlyphs()
 	face := fontFaceName(u.font)
 	log.Info("window created", "hwnd", uintptr(hwnd), "font", face, "want", u.cfg.FontFace)
 	registerUI(hwnd, u)
@@ -448,6 +542,14 @@ func (u *winUI) loop() error {
 	if t := u.activeTab(); t != nil {
 		t.startWorkers(u)
 		log.Info("tab started", "id", t.id, "pid", t.sess.Pid())
+	}
+	// Loopback MCP bridge (stdio MCP attaches here; not an always-on daemon).
+	if u.bridge != nil {
+		if _, err := u.bridge.Start(); err != nil {
+			log.Warn("mcp bridge start failed", "err", err)
+		} else {
+			u.publishBridgeSnapshot()
+		}
 	}
 	if u.showSplash {
 		r := u.chrome.UpdateChrome(chrome.OpenSplashMsg{})
@@ -557,6 +659,8 @@ func (u *winUI) drainAndParse(tabID int) {
 		return
 	}
 	data := t.takeInput()
+	// Drop shell local-echo of the bar-submitted command (ANSI-colored on PS).
+	data = t.echo.feed(data)
 	if len(data) == 0 {
 		// More may have been queued; re-arm if needed.
 		t.inMu.Lock()
@@ -575,6 +679,16 @@ func (u *winUI) drainAndParse(tabID int) {
 	if title := t.term.Title(); title != "" {
 		t.title = shortTitle(title)
 	}
+	// Alt-screen enter/leave: grow/shrink shell (hide Warp bar) like Warp.
+	nowAlt := t.altScreen()
+	if nowAlt != t.wasAlt {
+		t.wasAlt = nowAlt
+		log.Info("alt screen", "tab", t.id, "on", nowAlt)
+		if u.activeTab() == t {
+			u.maybeResizeForInput()
+		}
+	}
+	u.publishBridgeSnapshot()
 	// Only repaint if this is the visible tab.
 	if u.activeTab() == t {
 		if title := t.term.Title(); title != "" {
@@ -597,6 +711,148 @@ func (u *winUI) tabByID(id int) *tab {
 		}
 	}
 	return nil
+}
+
+// enqueueMCPSubmit is called from the bridge HTTP goroutine; work runs on the UI thread.
+func (u *winUI) enqueueMCPSubmit(tabID int, line string) error {
+	if u == nil || !u.alive.Load() || u.hwnd == 0 {
+		return fmt.Errorf("suzuri UI not ready")
+	}
+	job := mcpJob{
+		tabID: tabID,
+		line:  line,
+		done:  make(chan error, 1),
+	}
+	select {
+	case u.mcpJobs <- job:
+	default:
+		return fmt.Errorf("mcp submit queue full")
+	}
+	if win.PostMessage(u.hwnd, wmSuzuriMCP, 0, 0) == 0 {
+		return fmt.Errorf("post mcp job failed")
+	}
+	select {
+	case err := <-job.done:
+		return err
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("mcp submit timed out")
+	}
+}
+
+func (u *winUI) drainMCPJobs() {
+	for {
+		select {
+		case job := <-u.mcpJobs:
+			err := u.submitOnUIThread(job.tabID, job.line)
+			if job.done != nil {
+				job.done <- err
+			}
+		default:
+			return
+		}
+	}
+}
+
+// submitOnUIThread mirrors the Warp bar Enter path (block + echo arm + PTY write).
+func (u *winUI) submitOnUIThread(tabID int, line string) error {
+	t := u.tabByID(tabID)
+	if t == nil {
+		t = u.activeTab()
+	}
+	if t == nil {
+		return fmt.Errorf("no tab")
+	}
+	if !t.alive.Load() {
+		return fmt.Errorf("tab not alive")
+	}
+	// Prefer bar path so draft/history stay consistent when line matches.
+	if stringsTrimSpace(line) != "" {
+		t.sb.pushBlock(line, u.cols)
+		t.echo.arm(line)
+	}
+	payload := line
+	if strings.Contains(payload, "\n") {
+		payload = strings.ReplaceAll(payload, "\n", "\r\n")
+	}
+	t.sendKey([]byte(payload + "\r"))
+	t.sb.stickBottom()
+	u.publishBridgeSnapshot()
+	win.InvalidateRect(u.hwnd, nil, false)
+	return nil
+}
+
+func (u *winUI) publishBridgeSnapshot() {
+	if u.bridge == nil {
+		return
+	}
+	u.bridge.Publish(u.buildBridgeSnapshot())
+}
+
+func (u *winUI) buildBridgeSnapshot() bridge.Snapshot {
+	activeID := -1
+	if t := u.activeTab(); t != nil {
+		activeID = t.id
+	}
+	s := bridge.Snapshot{
+		Cols:      u.cols,
+		Rows:      u.rows,
+		ActiveTab: activeID,
+		Tabs:      make([]bridge.TabSnap, 0, len(u.tabs)),
+	}
+	for _, t := range u.tabs {
+		s.Tabs = append(s.Tabs, u.tabSnap(t))
+	}
+	return s
+}
+
+func (u *winUI) tabSnap(t *tab) bridge.TabSnap {
+	armed, cmd, phase := t.echo.status()
+	// Live text (effective extent).
+	liveText := snapshotLiveText(t.term)
+	// Viewport as the user sees it (rune grid → strings).
+	view := t.sb.view(t.term, u.rows)
+	viewLines := make([]string, len(view))
+	for i, row := range view {
+		viewLines[i] = strings.TrimRight(string(row), " ")
+	}
+	// History tail with kinds.
+	var hist []bridge.HLine
+	for _, hl := range t.sb.historyTail(40) {
+		kind := "normal"
+		switch hl.kind {
+		case histBlockRule:
+			kind = "rule"
+		case histBlockCmd:
+			kind = "cmd"
+		}
+		hist = append(hist, bridge.HLine{Text: hl.text, Kind: kind})
+	}
+	var blocks []bridge.Block
+	for _, c := range t.sb.recentBlocks(12) {
+		blocks = append(blocks, bridge.Block{Command: c})
+	}
+	return bridge.TabSnap{
+		ID:        t.id,
+		Title:     t.title,
+		Alive:     t.alive.Load(),
+		Shell:     t.shell,
+		Input:     t.input.text(),
+		AltScreen: t.altScreen(),
+		Echo:      bridge.EchoStat{Armed: armed, Cmd: cmd, Phase: phase},
+		LiveLines: trimLiveLines(liveText),
+		Viewport:  viewLines,
+		Blocks:    blocks,
+		History:   hist,
+		PtyTail:   fmt.Sprintf("%q", t.ptyTailCopy()),
+	}
+}
+
+func trimLiveLines(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = strings.TrimRight(l, " ")
+	}
+	return out
 }
 
 func shortTitle(s string) string {
@@ -778,6 +1034,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		return 0
 
+	case wmSuzuriMCP:
+		u.drainMCPJobs()
+		return 0
+
 	case win.WM_ERASEBKGND:
 		return 1
 
@@ -795,6 +1055,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if win.GetClientRect(hwnd, &rc) {
 				u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
 			}
+		}
+		// Always repaint on focus change: blinkLoop only ticks while
+		// foreground, so without this the caret freezes mid-frame instead
+		// of hiding when we lose focus (caretAlpha → 0).
+		if u.alive.Load() {
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
@@ -818,6 +1083,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				win.InvalidateRect(hwnd, nil, false)
 			}
 			// Settings ignores plain text; arrows via KEYDOWN.
+			return 0
+		}
+		// Full-screen app (alt-screen): printable keys go to ConPTY.
+		if u.appOwnsKeyboard() {
+			switch ch {
+			case 0x08, 0x09, 0x0a, 0x0d, 0x7f:
+				return 0 // KEYDOWN
+			case 0x03, 0x16:
+				return 0 // Ctrl+C / Ctrl+V — KEYDOWN
+			}
+			if b := ptyRuneUTF8(ch); len(b) > 0 {
+				u.sendKey(b)
+			}
 			return 0
 		}
 		// Warp input bar owns printable text (Enter handled in KEYDOWN).
@@ -844,6 +1122,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_KEYDOWN:
 		ctrl := win.GetKeyState(win.VK_CONTROL) < 0
 		shift := win.GetKeyState(win.VK_SHIFT) < 0
+		alt := win.GetKeyState(win.VK_MENU) < 0
 		tab := u.activeTab()
 
 		// Charm palette / settings own keys while open (text via WM_CHAR).
@@ -859,6 +1138,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 			return 0
 		}
+		// Host chrome shortcuts always win (even over full-screen apps).
 		// Ctrl+, — settings (VK_OEM_COMMA = 0xBC)
 		if ctrl && !shift && wParam == 0xBC {
 			r := u.chrome.UpdateChrome(chrome.OpenSettingsMsg{Config: u.cfg})
@@ -935,6 +1215,35 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.pasteClipboard()
 			return 0
 		}
+
+		// Full-screen app owns the keyboard (after host shortcuts).
+		if u.appOwnsKeyboard() && tab != nil {
+			// Ctrl+C with selection still copies; otherwise interrupt app.
+			if ctrl && !shift && (wParam == 'C' || wParam == 'c') {
+				if !tab.sel.empty() {
+					u.copySelection()
+				} else {
+					u.sendKey([]byte{0x03})
+				}
+				return 0
+			}
+			// Ctrl+V / Shift+Insert paste into the PTY, not the bar.
+			if (ctrl && !shift && (wParam == 'V' || wParam == 'v')) ||
+				(shift && !ctrl && wParam == win.VK_INSERT) {
+				if text, err := getClipboardText(hwnd); err == nil && text != "" {
+					// Normalize newlines for PTY paste.
+					payload := strings.ReplaceAll(text, "\r\n", "\n")
+					payload = strings.ReplaceAll(payload, "\n", "\r")
+					u.sendKey([]byte(payload))
+				}
+				return 0
+			}
+			if b := ptyKeyFromWin(tab.term, wParam, ctrl, shift, alt); len(b) > 0 {
+				u.sendKey(b)
+			}
+			return 0
+		}
+
 		// Ctrl+C: copy selection, else clear bar, else interrupt PTY.
 		if ctrl && !shift && (wParam == 'C' || wParam == 'c') {
 			in := u.activeInput()
@@ -978,8 +1287,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			line := in.submit()
 			u.maybeResizeForInput()
 			// Warp-style command block in scrollback, then send to PTY.
+			// Arm echo suppress so PS/cmd local-echo doesn't duplicate the block.
 			if stringsTrimSpace(line) != "" {
 				tab.sb.pushBlock(line, u.cols)
+				tab.echo.arm(line)
+				log.Debug("submit arm echo", "tab", tab.id, "line", line)
 			}
 			// Multi-line: send with real newlines; final CR executes.
 			payload := line
@@ -989,6 +1301,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 			u.sendKey([]byte(payload + "\r"))
 			tab.sb.stickBottom()
+			u.publishBridgeSnapshot()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_UP:
 			if !in.moveVisualUp(cols) {
@@ -1042,6 +1355,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_MOUSEWHEEL:
 		tab := u.activeTab()
 		if tab == nil {
+			return 0
+		}
+		// Full-screen apps own the surface — don't scroll host history under them.
+		if tab.altScreen() {
 			return 0
 		}
 		delta := int16(wParam >> 16)
@@ -1113,7 +1430,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 		x, y := u.pixelToCell(px, py)
-		absY := tab.sb.absLine(y, u.rows, u.rows)
+		absY := tab.sb.absLine(y, u.rows, liveExtent(tab.term))
 		tab.sel.active = true
 		tab.sel.x0, tab.sel.y0 = x, absY
 		tab.sel.x1, tab.sel.y1 = x, absY
@@ -1126,7 +1443,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		tab := u.activeTab()
 		if tab != nil && u.selecting && (wParam&win.MK_LBUTTON) != 0 {
 			x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
-			absY := tab.sb.absLine(y, u.rows, u.rows)
+			absY := tab.sb.absLine(y, u.rows, liveExtent(tab.term))
 			tab.sel.x1, tab.sel.y1 = x, absY
 			win.InvalidateRect(hwnd, nil, false)
 		}
@@ -1136,7 +1453,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		tab := u.activeTab()
 		if tab != nil && u.selecting {
 			x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
-			absY := tab.sb.absLine(y, u.rows, u.rows)
+			absY := tab.sb.absLine(y, u.rows, liveExtent(tab.term))
 			tab.sel.x1, tab.sel.y1 = x, absY
 			u.selecting = false
 			win.ReleaseCapture()
@@ -1168,6 +1485,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_DESTROY:
 		log.Info("WM_DESTROY — tearing down", "tabs", len(u.tabs))
 		u.alive.Store(false)
+		if u.bridge != nil {
+			u.bridge.Stop()
+		}
 		unregisterUI(hwnd)
 		for _, t := range u.tabs {
 			t.close()
@@ -1223,11 +1543,6 @@ func (u *winUI) paint(hwnd win.HWND) {
 	if w < 2 || h < 2 {
 		return
 	}
-	// Keep size fields honest even if WM_SIZE was missed.
-	if u.width != w || u.height != h {
-		u.applyClientSize(w, h)
-	}
-
 	tab := u.activeTab()
 	if tab == nil {
 		fillRect(hdc, rect, win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)))
@@ -1238,20 +1553,45 @@ func (u *winUI) paint(hwnd win.HWND) {
 		return
 	}
 
+	// Measure real cell metrics with the active font *before* layout so shell
+	// row count matches what we paint (avoids a dead band under the grid).
+	oldF := win.SelectObject(hdc, win.HGDIOBJ(u.font))
+	cw, ch := measureCellSize(hdc)
+	win.SelectObject(hdc, oldF)
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	metricsChanged := u.metricW != cw || u.metricH != ch
+	u.metricW, u.metricH = cw, ch
+
+	// Keep size fields honest; also re-layout when the bar hides (alt-screen)
+	// or font metrics change so we reclaim the bottom strip fully.
+	wantIn := u.inputBarPixelHeight()
+	if u.width != w || u.height != h || wantIn != u.inputPx || metricsChanged {
+		u.applyClientSize(w, h)
+	}
+
 	// Viewport = history + live screen (live cells carry FG/BG/bold).
-	// Shell PTY cursor is hidden: typing lives in the bottom Warp bar.
+	// Shell PTY cursor is hidden in Warp-bar mode; shown for alt-screen apps.
 	grid := tab.sb.viewCells(tab.term, u.rows)
 	cur := tab.term.Cursor()
-	curVis := false
+	curVis := tab.altScreen() && tab.term.CursorVisible()
 	curY := cur.Y
 
 	draw := func(dest win.HDC) {
+		defer applog.Recover("paint.draw", false)
 		u.blitGrid(dest, rect, grid, cur.X, curY, curVis)
 		// Dim shell under floating overlay (palette / settings).
 		if u.chrome.OverlayOpen() {
 			u.paintDimShell(dest, rect)
 		}
 		// Chrome strip + Warp input + floating card into the same buffer.
+		if u.font == 0 {
+			return
+		}
 		oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
 		u.paintChrome(dest, rect)
 		u.paintInputBar(dest, rect)
@@ -1277,6 +1617,8 @@ func (u *winUI) paint(hwnd win.HWND) {
 // applyClientSize updates cols/rows/chrome from a client pixel size.
 // Safe to call from WM_SIZE, first paint, and WM_ACTIVATE.
 // Layout: [tab strip] [shell VT] [Warp input bar].
+// When the bar is hidden (alt-screen), shell uses all space under the tabs —
+// no reserved empty strip at the bottom.
 func (u *winUI) applyClientSize(w, h int32) {
 	if w < 1 || h < 1 {
 		return
@@ -1299,16 +1641,21 @@ func (u *winUI) applyClientSize(w, h int32) {
 	u.markChromeDirty()
 	u.chromePx = u.chromePixelHeight()
 	u.inputPx = u.inputBarPixelHeight()
+	// Full remaining height under chrome (and under bar when shown).
 	shellH := h - u.chromePx - u.inputPx
-	if shellH < ch*5 {
-		// Prefer keeping a usable shell; shrink input floor already applied.
+	if u.inputPx > 0 && shellH < ch*5 {
+		// Bar mode only: keep a usable shell by compressing the bar floor.
 		shellH = h - u.chromePx - ch*2
 	}
 	if shellH < ch {
 		shellH = ch
 	}
 	rows := int(shellH / ch)
-	if rows < 5 {
+	if rows < 1 {
+		rows = 1
+	}
+	// In bar mode keep a modest minimum; on alt-screen use every full cell.
+	if u.inputPx > 0 && rows < 5 {
 		rows = 5
 	}
 	if rows != u.rows || cols != u.cols {
@@ -1344,6 +1691,39 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 	u.metricW, u.metricH = cw, ch
 	u.chromePx = padY
 	u.inputPx = u.inputBarPixelHeight()
+	// Same effective live height as viewCells (trailing blank PTY rows clipped).
+	liveRows := liveExtent(tab.term)
+	// Fill any sub-cell remainder under the grid down to the shell bottom so
+	// alt-screen (no bar) doesn't leave a thin empty band. Sample the last
+	// cell's BG so fullscreen apps blend instead of showing a black gutter.
+	shellBot := u.shellBottomY(rect.Bottom - rect.Top)
+	gridBot := padY + int32(len(grid))*ch
+	if gridBot < shellBot {
+		br, bg, bb := byte(12), byte(12), byte(14)
+		if n := len(grid); n > 0 {
+			last := grid[n-1]
+			if len(last) > 0 {
+				c := last[0]
+				// Prefer a non-default background if the app painted one.
+				if c.BR != 0 || c.BG != 0 || c.BB != 0 {
+					br, bg, bb = c.BR, c.BG, c.BB
+				} else {
+					// Scan for any BG on the last row.
+					for _, cell := range last {
+						if cell.BR != 0 || cell.BG != 0 || cell.BB != 0 {
+							br, bg, bb = cell.BR, cell.BG, cell.BB
+							break
+						}
+					}
+				}
+			}
+		}
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(br, bg, bb)}
+		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+			fillRect(hdc, win.RECT{Left: 0, Top: gridBot, Right: rect.Right, Bottom: shellBot}, brush)
+			win.DeleteObject(win.HGDIOBJ(brush))
+		}
+	}
 
 	selBrush := win.HBRUSH(0)
 	if tab.sel.active && !tab.sel.empty() {
@@ -1388,7 +1768,7 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 
 		// Selection: coalesce contiguous cells into one rect (no grid seams).
 		if selBrush != 0 {
-			absY := tab.sb.absLine(y, u.rows, u.rows)
+			absY := tab.sb.absLine(y, u.rows, liveRows)
 			run0 := -1
 			flushSel := func(x1 int) {
 				if run0 < 0 {
@@ -1424,7 +1804,7 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 			if r == 0 || r == ' ' {
 				continue
 			}
-			absY := tab.sb.absLine(y, u.rows, u.rows)
+			absY := tab.sb.absLine(y, u.rows, liveRows)
 			fr, fg, fb := c.FR, c.FG, c.FB
 			if tab.sel.containsAbs(x, absY) {
 				fr, fg, fb = 255, 255, 255
@@ -1451,33 +1831,41 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		if curY < 0 {
 			curY = 0
 		}
-		elapsed := time.Since(u.blinkStart).Seconds()
-		period := cursorBlinkPeriod.Seconds()
-		alpha := 0.5 + 0.5*math.Sin(2*math.Pi*(elapsed/period))
-		level := byte(50 + alpha*205)
-		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(level, level, level)}
-		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			cellL := padX + int32(curX)*cw
-			cellT := padY + int32(curY)*ch
-			var r win.RECT
-			switch u.cfg.Cursor {
-			case config.CursorUnderline:
-				th := ch / 8
-				if th < 2 {
-					th = 2
-				}
-				r = win.RECT{Left: cellL, Top: cellT + ch - th, Right: cellL + cw, Bottom: cellT + ch}
-			case config.CursorBar:
-				th := cw / 5
-				if th < 2 {
-					th = 2
-				}
-				r = win.RECT{Left: cellL, Top: cellT, Right: cellL + th, Bottom: cellT + ch}
-			default: // block
-				r = win.RECT{Left: cellL, Top: cellT, Right: cellL + cw, Bottom: cellT + ch}
+		// Blend caret into cell background (smooth alpha, not hard blink).
+		bgR, bgG, bgB := byte(12), byte(12), byte(14)
+		if curY < len(grid) && curX < len(grid[curY]) {
+			c := grid[curY][curX]
+			if c.BR != 0 || c.BG != 0 || c.BB != 0 {
+				bgR, bgG, bgB = c.BR, c.BG, c.BB
 			}
-			fillRect(hdc, r, brush)
-			win.DeleteObject(win.HGDIOBJ(brush))
+		}
+		a := u.caretAlpha()
+		if a > 0 {
+			cr, cg, cb := blendRGB(bgR, bgG, bgB, 220, 220, 220, a)
+			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(cr, cg, cb)}
+			if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+				cellL := padX + int32(curX)*cw
+				cellT := padY + int32(curY)*ch
+				var r win.RECT
+				switch u.cfg.Cursor {
+				case config.CursorUnderline:
+					th := ch / 8
+					if th < 2 {
+						th = 2
+					}
+					r = win.RECT{Left: cellL, Top: cellT + ch - th, Right: cellL + cw, Bottom: cellT + ch}
+				case config.CursorBar:
+					th := cw / 5
+					if th < 2 {
+						th = 2
+					}
+					r = win.RECT{Left: cellL, Top: cellT, Right: cellL + th, Bottom: cellT + ch}
+				default: // block
+					r = win.RECT{Left: cellL, Top: cellT, Right: cellL + cw, Bottom: cellT + ch}
+				}
+				fillRect(hdc, r, brush)
+				win.DeleteObject(win.HGDIOBJ(brush))
+			}
 		}
 	}
 }
@@ -1581,10 +1969,12 @@ func utf8Encode(p []byte, r rune) int {
 	}
 }
 
-// Preferred monospaced faces. Cascadia Mono is default (ships with Windows
-// Terminal / modern Windows); CreateFont always "succeeds" via substitution,
-// so we verify the face with GetTextFaceW and fall through if GDI faked it.
+// Preferred monospaced faces. Bundled FiraCode Nerd Font Mono is registered
+// process-privately at startup; Cascadia ships with modern Windows as fallback.
+// CreateFont always "succeeds" via substitution, so we verify the face with
+// GetTextFaceW and fall through if GDI faked it.
 var fontFallbacks = []string{
+	BundledFace,
 	"Cascadia Mono",
 	"Cascadia Code",
 	"Consolas",
@@ -1757,6 +2147,13 @@ func (u *winUI) pasteClipboard() {
 	if err != nil || text == "" {
 		return
 	}
+	// Full-screen app: paste straight into ConPTY.
+	if u.appOwnsKeyboard() {
+		payload := strings.ReplaceAll(text, "\r\n", "\n")
+		payload = strings.ReplaceAll(payload, "\n", "\r")
+		u.sendKey([]byte(payload))
+		return
+	}
 	in := u.activeInput()
 	if in == nil {
 		return
@@ -1883,8 +2280,12 @@ func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 
 // paintInputBar draws the Warp-style fixed command line at the bottom.
 // Grows with soft-wrap / Shift+Enter newlines (capped at maxInputVisualRows).
+// Skipped while a full-screen (alt-screen) app owns the keyboard.
 func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 	if hdc == 0 {
+		return
+	}
+	if u.appOwnsKeyboard() {
 		return
 	}
 	cw, ch := u.metricW, u.metricH
@@ -1911,25 +2312,20 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
+	hair, topPad, _ := inputBarVPads(ch)
 	// Top accent hairline (primary).
 	{
-		th := ch / 10
-		if th < 1 {
-			th = 1
-		}
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			r := win.RECT{Left: 0, Top: top, Right: rect.Right, Bottom: top + th}
+			r := win.RECT{Left: 0, Top: top, Right: rect.Right, Bottom: top + hair}
 			fillRect(hdc, r, brush)
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
 
 	const padX int32 = 8
-	padTop := top + ch/4
-	if padTop < top+2 {
-		padTop = top + 2
-	}
+	// Content starts after hairline + top pad (matches inputBarPixelHeight).
+	padTop := top + hair + topPad
 
 	oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	defer win.SelectObject(hdc, oldFont)
@@ -1950,10 +2346,12 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 			win.SetTextColor(hdc, win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB))
 			win.TextOut(hdc, padX, padTop, &pr[0], int32(len(pr)-1))
 		}
-		hint := "type a command — Enter to run · ⇧Enter newline"
+		// Fancy ⇧ when the active font has it; else ASCII (see refreshKeyGlyphs).
+		// Nudge 2 cells right of the prompt so it doesn't crowd the ❯.
+		hint := chrome.InputBarPlaceholder()
 		if s, err := syscall.UTF16FromString(hint); err == nil && len(s) >= 2 {
 			win.SetTextColor(hdc, win.RGB(chrome.SoftR, chrome.SoftG, chrome.SoftB))
-			win.TextOut(hdc, padX+promptW, padTop, &s[0], int32(len(s)-1))
+			win.TextOut(hdc, padX+promptW+2*cw, padTop, &s[0], int32(len(s)-1))
 		}
 		// Caret at start.
 		u.paintInputCaret(hdc, padX+promptW, padTop, cw, ch)
@@ -1998,29 +2396,77 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 }
 
 func (u *winUI) paintInputCaret(hdc win.HDC, x, y, cw, ch int32) {
-	showCaret := true
-	if win.GetForegroundWindow() == u.hwnd {
-		elapsed := time.Since(u.blinkStart).Seconds()
-		period := cursorBlinkPeriod.Seconds()
-		alpha := 0.5 + 0.5*math.Sin(2*math.Pi*(elapsed/period))
-		showCaret = alpha > 0.35
-	}
-	if !showCaret {
+	// Smooth opacity while focused; hidden when another window has focus.
+	// (GDI FillRect has no true alpha; lerping colors reads as transparency.)
+	a := u.caretAlpha()
+	if a <= 0 {
 		return
 	}
-	th := cw / 5
-	if th < 2 {
-		th = 2
+	cr, cg, cb := blendRGB(
+		chrome.PanelR, chrome.PanelG, chrome.PanelB,
+		chrome.PrimR, chrome.PrimG, chrome.PrimB,
+		a,
+	)
+	// Same shape as the shell cursor (settings: block / underline / bar).
+	var r win.RECT
+	switch u.cfg.Cursor {
+	case config.CursorUnderline:
+		th := ch / 8
+		if th < 2 {
+			th = 2
+		}
+		r = win.RECT{Left: x, Top: y + ch - th, Right: x + cw, Bottom: y + ch}
+	case config.CursorBar:
+		th := cw / 5
+		if th < 2 {
+			th = 2
+		}
+		r = win.RECT{Left: x, Top: y, Right: x + th, Bottom: y + ch}
+	default: // block — full cell (default and config "block")
+		r = win.RECT{Left: x, Top: y, Right: x + cw, Bottom: y + ch}
 	}
-	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB)}
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(cr, cg, cb)}
 	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-		r := win.RECT{Left: x, Top: y, Right: x + th, Bottom: y + ch}
 		fillRect(hdc, r, brush)
 		win.DeleteObject(win.HGDIOBJ(brush))
 	}
 }
 
+// caretAlpha is 0..1 for a smooth pulse while focused; 0 when unfocused
+// (hide caret — same convention as most terminals).
+func (u *winUI) caretAlpha() float64 {
+	if u.hwnd == 0 || win.GetForegroundWindow() != u.hwnd {
+		return 0
+	}
+	elapsed := time.Since(u.blinkStart).Seconds()
+	period := cursorBlinkPeriod.Seconds()
+	if period < 0.1 {
+		period = 0.1
+	}
+	// Sine in [0,1]; floor slightly above 0 so the caret never fully vanishes
+	// while focused.
+	s := 0.5 + 0.5*math.Sin(2*math.Pi*(elapsed/period))
+	return 0.12 + 0.88*s
+}
+
+// blendRGB interpolates from background → foreground by alpha in [0,1].
+func blendRGB(br, bg, bb, fr, fg, fb byte, a float64) (byte, byte, byte) {
+	if a < 0 {
+		a = 0
+	}
+	if a > 1 {
+		a = 1
+	}
+	lerp := func(b, f byte) byte {
+		return byte(float64(b)*(1-a) + float64(f)*a + 0.5)
+	}
+	return lerp(br, fr), lerp(bg, fg), lerp(bb, fb)
+}
+
 // paintChromeCells paints a cached cell grid at pixel origin (ox, oy).
+// defaultBar=true: tab strip — empty cells use bar fill, edge runs span the window.
+// defaultBar=false: floating overlay — empty default-bg cells are transparent so the
+// dimmed shell shows through around the dialog (no full-width panel/void stripes).
 func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, ox, oy int32, defaultBar bool) {
 	cw, ch := u.metricW, u.metricH
 	if cw < 1 {
@@ -2039,11 +2485,17 @@ func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, 
 		for x := 0; x < len(row); x++ {
 			cell := row[x]
 			br, bg, bb := cell.BR, cell.BG, cell.BB
+			empty := cell.Ch == 0 || cell.Ch == ' '
+			// Overlay: skip empty default cells entirely (transparent).
+			if !defaultBar && empty && br == 0 && bg == 0 && bb == 0 {
+				continue
+			}
 			if br == 0 && bg == 0 && bb == 0 {
 				if defaultBar {
 					br, bg, bb = chrome.BarR, chrome.BarG, chrome.BarB
 				} else {
-					br, bg, bb = chrome.VoidR, chrome.VoidG, chrome.VoidB
+					// Non-empty glyph with default bg (rare) — use panel so it stays readable.
+					br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
 				}
 			}
 			if n := len(runs); n > 0 && runs[n-1].x1 == x-1 &&
@@ -2051,6 +2503,7 @@ func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, 
 				runs[n-1].x1 = x
 				continue
 			}
+			// Starting a run after a transparent gap: do not merge across skip.
 			runs = append(runs, bgRun{x0: x, x1: x, r: br, g: bg, b: bb})
 		}
 		for _, rn := range runs {
