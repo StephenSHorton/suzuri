@@ -1,6 +1,6 @@
 // Package chrome is the Charm (Bubble Tea + Lip Gloss) UI layer for suzuri:
-// tab strip, status line, and (later) command palette. The shell viewport
-// stays a VT cell grid; everything around it is this model’s View().
+// tab strip, status line, and command palette. The shell viewport stays a
+// VT cell grid; everything around it is this model’s View().
 package chrome
 
 import (
@@ -72,12 +72,12 @@ type Result struct {
 
 // KeyMap for palette / chrome shortcuts when palette owns input.
 type KeyMap struct {
-	NewTab    key.Binding
-	CloseTab  key.Binding
-	NextTab   key.Binding
-	PrevTab   key.Binding
-	Palette   key.Binding
-	Quit      key.Binding
+	NewTab   key.Binding
+	CloseTab key.Binding
+	NextTab  key.Binding
+	PrevTab  key.Binding
+	Palette  key.Binding
+	Quit     key.Binding
 }
 
 var DefaultKeys = KeyMap{
@@ -105,17 +105,60 @@ func New(width int) Model {
 		paletteItem{title: "Next tab", desc: "Ctrl+Tab", action: ActionNextTab},
 		paletteItem{title: "Previous tab", desc: "Ctrl+Shift+Tab", action: ActionPrevTab},
 	}
-	l := list.New(items, list.NewDefaultDelegate(), width, 10)
+
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().
+		Foreground(colText).
+		Padding(0, 0, 0, 1)
+	delegate.Styles.NormalDesc = lipgloss.NewStyle().
+		Foreground(colDim).
+		Padding(0, 0, 0, 1)
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+		Foreground(colText).
+		Background(colSel).
+		Bold(true).
+		Padding(0, 0, 0, 1).
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(colAccent)
+	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
+		Foreground(colSoft).
+		Background(colSel).
+		Padding(0, 0, 0, 1).
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(colAccent)
+	delegate.Styles.DimmedTitle = lipgloss.NewStyle().
+		Foreground(colDim).
+		Padding(0, 0, 0, 1)
+	delegate.Styles.DimmedDesc = lipgloss.NewStyle().
+		Foreground(colMute).
+		Padding(0, 0, 0, 1)
+	delegate.Styles.FilterMatch = lipgloss.NewStyle().
+		Foreground(colMatch).
+		Underline(true)
+
+	l := list.New(items, delegate, width, 10)
 	l.Title = "Commands"
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
 	l.SetShowHelp(false)
 	l.DisableQuitKeybindings()
+	l.Styles.Title = lipgloss.NewStyle().
+		Foreground(colAccent).
+		Bold(true).
+		Padding(0, 1)
+	l.Styles.FilterPrompt = lipgloss.NewStyle().Foreground(colAccent)
+	l.Styles.FilterCursor = lipgloss.NewStyle().Foreground(colText)
+	l.Styles.NoItems = lipgloss.NewStyle().Foreground(colDim).Padding(0, 1)
+	l.FilterInput.Prompt = "› "
+	l.FilterInput.Placeholder = "filter…"
+	l.FilterInput.PromptStyle = lipgloss.NewStyle().Foreground(colAccent)
+	l.FilterInput.TextStyle = lipgloss.NewStyle().Foreground(colText)
+	l.FilterInput.PlaceholderStyle = lipgloss.NewStyle().Foreground(colDim)
 
 	return Model{
-		Width:   width,
-		Height:  2,
-		Status:  "ctrl+shift+t new tab · ctrl+k palette · ctrl+w close",
+		Width:  width,
+		Height: 2,
+		Status: "ready",
 		palette: l,
 	}
 }
@@ -190,6 +233,19 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 	return Result{Model: m, Action: act, Index: idx}
 }
 
+// tabLabel is the visible title for a tab (no index prefix).
+func tabLabel(t Tab, i int) string {
+	title := t.Title
+	if title == "" {
+		title = fmt.Sprintf("shell %d", i+1)
+	}
+	rs := []rune(title)
+	if len(rs) > 18 {
+		title = string(rs[:16]) + "…"
+	}
+	return title
+}
+
 // View renders tab strip + status (+ palette) with Lip Gloss.
 func (m Model) View() string {
 	w := m.Width
@@ -197,68 +253,146 @@ func (m Model) View() string {
 		w = 20
 	}
 
-	active := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("230")).
-		Background(lipgloss.Color("63")).
-		Bold(true).
-		Padding(0, 1)
-	inactive := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("252")).
-		Background(lipgloss.Color("236")).
-		Padding(0, 1)
-	bar := lipgloss.NewStyle().Background(lipgloss.Color("235")).Width(w)
-	status := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("245")).
-		Background(lipgloss.Color("235")).
-		Width(w).
-		Padding(0, 1)
-
-	var parts []string
-	if len(m.Tabs) == 0 {
-		parts = append(parts, inactive.Render("no tabs"))
-	} else {
-		for i, t := range m.Tabs {
-			title := t.Title
-			if title == "" {
-				title = fmt.Sprintf("shell %d", i+1)
-			}
-			// Truncate long titles
-			if len([]rune(title)) > 16 {
-				rs := []rune(title)
-				title = string(rs[:14]) + "…"
-			}
-			label := fmt.Sprintf("%d:%s", i+1, title)
-			if i == m.Active {
-				parts = append(parts, active.Render(label))
-			} else {
-				parts = append(parts, inactive.Render(label))
-			}
-		}
-	}
-	tabLine := bar.Render(lipgloss.JoinHorizontal(lipgloss.Top, parts...))
-	// Ensure full width (Join may be shorter)
-	if lipgloss.Width(tabLine) < w {
-		tabLine = bar.Render(tabLine + strings.Repeat(" ", w-lipgloss.Width(tabLine)))
-	}
-
-	st := m.Status
-	if st == "" {
-		st = " "
-	}
-	statusLine := status.Render(st)
+	tabLine := m.renderTabLine(w)
+	statusLine := m.renderStatusLine(w)
 
 	if !m.PaletteOpen {
 		return tabLine + "\n" + statusLine
 	}
 
-	// Palette overlays below chrome header.
-	m.palette.SetWidth(w)
-	body := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
-		Width(w - 2).
+	// Palette as a floating rounded card under the chrome header.
+	m.palette.SetWidth(max(24, w-4))
+	m.palette.SetHeight(10)
+	body := stylePaletteBorder().
+		Width(max(22, w-4)).
 		Render(m.palette.View())
+	// Center the card if the window is wider than the body.
+	body = lipgloss.PlaceHorizontal(w, lipgloss.Center, body,
+		lipgloss.WithWhitespaceBackground(colInk))
 	return tabLine + "\n" + statusLine + "\n" + body
+}
+
+func (m Model) renderTabLine(w int) string {
+	brand := styleBrand().Render("硯")
+	sep := styleSep().Render("│")
+
+	var parts []string
+	parts = append(parts, brand)
+
+	if len(m.Tabs) == 0 {
+		parts = append(parts, sep, styleInactiveTab().Render("no tabs"))
+	} else {
+		for i, t := range m.Tabs {
+			parts = append(parts, sep)
+			label := tabLabel(t, i)
+			if i == m.Active {
+				// Accent bar + title for the active tab.
+				mark := lipgloss.NewStyle().
+					Foreground(colAccent).
+					Background(colActive).
+					Bold(true).
+					Render("▌")
+				title := lipgloss.NewStyle().
+					Foreground(colText).
+					Background(colActive).
+					Bold(true).
+					Padding(0, 1, 0, 0).
+					Render(label)
+				parts = append(parts, mark+title)
+			} else {
+				parts = append(parts, styleInactiveTab().Render(label))
+			}
+		}
+	}
+	parts = append(parts, sep, stylePlus().Render("+"))
+
+	left := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	// Right-side brand wordmark (subtle).
+	right := lipgloss.NewStyle().
+		Foreground(colDim).
+		Background(colPaper).
+		Render("suzuri")
+
+	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		// Truncate: keep left, drop wordmark if needed.
+		line := left
+		if lipgloss.Width(line) > w {
+			line = lipgloss.NewStyle().MaxWidth(w).Render(line)
+		}
+		return styleTabBar().Width(w).Render(line)
+	}
+	mid := lipgloss.NewStyle().
+		Background(colPaper).
+		Render(strings.Repeat(" ", gap))
+	return styleTabBar().Width(w).Render(left + mid + right)
+}
+
+func (m Model) renderStatusLine(w int) string {
+	leftText := m.Status
+	if leftText == "" {
+		leftText = " "
+	}
+	// Show tab count when quiet.
+	if leftText == "ready" && len(m.Tabs) > 0 {
+		leftText = fmt.Sprintf("%d tab%s", len(m.Tabs), plural(len(m.Tabs)))
+	}
+
+	left := styleStatus().Render(leftText)
+
+	// Hint cluster: key in soft, rest dim — reads as chrome, not shell noise.
+	key := styleStatusKey().Render("ctrl+k")
+	hint := styleStatusHint().Render(" palette  ·  ")
+	key2 := styleStatusKey().Render("⌃⇧t")
+	hint2 := styleStatusHint().Render(" new tab")
+	right := key + hint + key2 + hint2
+
+	gap := w - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		return styleStatus().Width(w).Render(leftText)
+	}
+	mid := lipgloss.NewStyle().
+		Background(colStone).
+		Render(strings.Repeat(" ", gap))
+	return lipgloss.NewStyle().
+		Background(colStone).
+		Width(w).
+		Render(left + mid + right)
+}
+
+// TabBounds returns [startCol, endCol) for each tab label, matching View layout
+// (after brand + separators). Used for mouse hit-testing in the host.
+func (m Model) TabBounds() [][2]int {
+	// brand " 硯 " ≈ styleBrand padding
+	col := lipgloss.Width(styleBrand().Render("硯"))
+	sepW := lipgloss.Width(styleSep().Render("│"))
+
+	out := make([][2]int, len(m.Tabs))
+	for i, t := range m.Tabs {
+		col += sepW
+		label := tabLabel(t, i)
+		var w int
+		if i == m.Active {
+			// Matches renderTabLine: mark "▌" + title with Padding(0,1,0,0).
+			mark := lipgloss.NewStyle().
+				Foreground(colAccent).
+				Background(colActive).
+				Bold(true).
+				Render("▌")
+			title := lipgloss.NewStyle().
+				Foreground(colText).
+				Background(colActive).
+				Bold(true).
+				Padding(0, 1, 0, 0).
+				Render(label)
+			w = lipgloss.Width(mark + title)
+		} else {
+			w = lipgloss.Width(styleInactiveTab().Render(label))
+		}
+		out[i] = [2]int{col, col + w}
+		col += w
+	}
+	return out
 }
 
 // RowCount is how many terminal rows the chrome View occupies (approx).
@@ -269,8 +403,22 @@ func (m Model) RowCount() int {
 	return 2
 }
 
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b

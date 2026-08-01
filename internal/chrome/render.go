@@ -1,6 +1,8 @@
 package chrome
 
 import (
+	"strings"
+
 	"github.com/hinshun/vt10x"
 )
 
@@ -15,11 +17,12 @@ func RenderToTerm(m Model, cols int) vt10x.Terminal {
 		rows = 2
 	}
 	t := vt10x.New(vt10x.WithSize(cols, rows))
-	// Reset + home so each frame is clean.
-	_, _ = t.Write([]byte("\x1b[H\x1b[2J\x1b[m"))
+	// Reset + home; set default dark bg so unstyled cells aren't pure black gaps.
+	_, _ = t.Write([]byte("\x1b[H\x1b[2J\x1b[m\x1b[48;2;15;15;20m\x1b[2J"))
 	view := m.View()
-	// Bubble Tea views use \n; VT needs \r\n for consistent columns.
-	// Also ensure we don't exceed width wildly — lipgloss already wraps-ish.
+	// Bubble Tea / Lip Gloss use \n; convert to \r\n so columns stay aligned.
+	view = strings.ReplaceAll(view, "\r\n", "\n")
+	view = strings.ReplaceAll(view, "\n", "\r\n")
 	_, _ = t.Write([]byte(view))
 	return t
 }

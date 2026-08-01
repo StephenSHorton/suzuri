@@ -439,32 +439,25 @@ func (u *winUI) switchTab(delta int) {
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
-// hitTab maps an x pixel to a tab index using the same label layout as chrome.View
-// ("n:title" with Lip Gloss horizontal padding of 1).
+// hitTab maps an x pixel to a tab index using chrome.TabBounds (same layout as View).
 func (u *winUI) hitTab(px int32) int {
 	if len(u.tabs) == 0 {
 		return -1
 	}
+	u.syncChrome()
 	cw := u.metricW
 	if cw < 1 {
 		cw = cellW
 	}
-	x := int32(4) // same left pad as paintChrome / blitGrid
-	for i, t := range u.tabs {
-		title := t.title
-		if title == "" {
-			title = fmt.Sprintf("shell %d", i+1)
-		}
-		rs := []rune(title)
-		if len(rs) > 16 {
-			title = string(rs[:14]) + "…"
-		}
-		labelW := len([]rune(fmt.Sprintf("%d:%s", i+1, title))) + 2 // Padding(0,1)
-		w := int32(labelW) * cw
-		if px >= x && px < x+w {
+	const padX int32 = 4
+	cellX := int((px - padX) / cw)
+	if cellX < 0 {
+		return -1
+	}
+	for i, b := range u.chrome.TabBounds() {
+		if cellX >= b[0] && cellX < b[1] {
 			return i
 		}
-		x += w
 	}
 	return -1
 }
@@ -1368,8 +1361,9 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 		for x := 0; x < cols && x < ccols; x++ {
 			cell := glyphToCell(ct.Cell(x, y))
 			br, bg, bb := cell.BR, cell.BG, cell.BB
+			// Fallback to inkstone paper (#16161e) when vt leaves default black.
 			if br == 0 && bg == 0 && bb == 0 {
-				br, bg, bb = 35, 35, 40
+				br, bg, bb = 0x16, 0x16, 0x1e
 			}
 			if n := len(runs); n > 0 && runs[n-1].x1 == x-1 &&
 				runs[n-1].r == br && runs[n-1].g == bg && runs[n-1].b == bb {
