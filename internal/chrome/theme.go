@@ -36,9 +36,13 @@ var (
 
 // Bar / void for GDI.
 var (
-	BarR, BarG, BarB    byte
-	VoidR, VoidG, VoidB byte
-	DimR, DimG, DimB    byte // shell dim matte
+	BarR, BarG, BarB       byte
+	VoidR, VoidG, VoidB    byte
+	DimR, DimG, DimB       byte // shell dim matte
+	PanelR, PanelG, PanelB byte // input bar / panel surface
+	PrimR, PrimG, PrimB    byte // primary accent (prompt glyph, border)
+	TextR, TextG, TextB    byte // primary fg
+	SoftR, SoftG, SoftB    byte // muted fg (hints)
 )
 
 // ShellANSI16 theme remap for SGR 0–15.
@@ -213,6 +217,10 @@ func setPalette(void, bar, panel, primary, secondary, onPrimary, text, soft, dim
 	BarR, BarG, BarB = rgb8(bar)
 	VoidR, VoidG, VoidB = rgb8(void)
 	DimR, DimG, DimB = rgb8(dimMatte)
+	PanelR, PanelG, PanelB = rgb8(panel)
+	PrimR, PrimG, PrimB = rgb8(primary)
+	TextR, TextG, TextB = rgb8(text)
+	SoftR, SoftG, SoftB = rgb8(soft)
 }
 
 func rgbArr(c color.Color) [3]byte {
