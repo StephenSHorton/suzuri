@@ -229,11 +229,16 @@ func drawDoubleCorner(hdc win.HDC, cell win.RECT, a arm, fr, fg, fb byte) {
 	drawArms(hdc, cell, a, true, fr, fg, fb)
 }
 
-// drawRoundCorner paints Unicode light arcs ╭╮╯╰.
+// drawRoundCorner paints Unicode light arcs ╭╮╯╰ as OUTER corners of a
+// rounded rectangle (Charm cards, Lip Gloss RoundedBorder).
 //
-// Important: use a *quarter-ellipse* with rx=cw/2, ry=ch/2 so the curve spans
-// from mid-edge to mid-edge. A small circular fillet (r=min/2) in a tall cell
-// sits between long arms and reads as a diagonal miter — what we were doing.
+// Earlier we put the quarter-ellipse on the *interior* of the L (center of
+// cell, short SE arc for ╭). That bulges into the panel and reads as
+// “corners rotated inwards.” Correct geometry:
+//
+//   • Arc center sits at the *inside* corner of the cell (toward box content)
+//   • Radius spans the full cell so the arc runs through the *outer* corner
+//   • Short mid-line arms still meet ─/│ at cell centers
 //
 // Angle: 0=east, increasing clockwise (y grows downward).
 func drawRoundCorner(hdc win.HDC, cell win.RECT, which rune, fr, fg, fb byte) {
@@ -241,62 +246,34 @@ func drawRoundCorner(hdc win.HDC, cell win.RECT, which rune, fr, fg, fb byte) {
 	t := lineThick(cell, false)
 	cw := cell.Right - cell.Left
 	ch := cell.Bottom - cell.Top
-	rx := cw / 2
-	ry := ch / 2
-	if rx < 2 {
-		rx = 2
+	if cw < 2 {
+		cw = 2
 	}
-	if ry < 2 {
-		ry = 2
+	if ch < 2 {
+		ch = 2
 	}
 
-	var start, end float64
 	switch which {
-	case '╭': // down + right — SE quarter-ellipse
-		start, end = 0, math.Pi/2
-	case '╮': // down + left — SW
-		start, end = math.Pi/2, math.Pi
-	case '╯': // up + left — NW
-		start, end = math.Pi, 3*math.Pi/2
-	case '╰': // up + right — NE
-		start, end = 3*math.Pi/2, 2*math.Pi
+	case '╭': // top-left: curve through NW, open down+right
+		// Curvature center at SE (into the box); arc west→north (outer TL).
+		strokeEllipseCW(hdc, cell.Right, cell.Bottom, cw, ch, t, math.Pi, 3*math.Pi/2, fr, fg, fb)
+		hStroke(hdc, cx, cell.Right, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cy, cell.Bottom, t, fr, fg, fb)
+	case '╮': // top-right: curve through NE, open down+left
+		strokeEllipseCW(hdc, cell.Left, cell.Bottom, cw, ch, t, 3*math.Pi/2, 2*math.Pi, fr, fg, fb)
+		hStroke(hdc, cell.Left, cx, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cy, cell.Bottom, t, fr, fg, fb)
+	case '╯': // bottom-right: curve through SE, open up+left
+		strokeEllipseCW(hdc, cell.Left, cell.Top, cw, ch, t, 0, math.Pi/2, fr, fg, fb)
+		hStroke(hdc, cell.Left, cx, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cell.Top, cy, t, fr, fg, fb)
+	case '╰': // bottom-left: curve through SW, open up+right
+		strokeEllipseCW(hdc, cell.Right, cell.Top, cw, ch, t, math.Pi/2, math.Pi, fr, fg, fb)
+		hStroke(hdc, cx, cell.Right, cy, t, fr, fg, fb)
+		vStroke(hdc, cx, cell.Top, cy, t, fr, fg, fb)
 	default:
 		return
 	}
-	// Ellipse ends already sit on the cell mid-edges; short arms only if
-	// rounding left a gap (odd cell sizes).
-	switch which {
-	case '╭':
-		// east end (cx+rx, cy) → right; south end (cx, cy+ry) → bottom
-		if cx+rx < cell.Right {
-			hStroke(hdc, cx+rx, cell.Right, cy, t, fr, fg, fb)
-		}
-		if cy+ry < cell.Bottom {
-			vStroke(hdc, cx, cy+ry, cell.Bottom, t, fr, fg, fb)
-		}
-	case '╮':
-		if cell.Left < cx-rx {
-			hStroke(hdc, cell.Left, cx-rx, cy, t, fr, fg, fb)
-		}
-		if cy+ry < cell.Bottom {
-			vStroke(hdc, cx, cy+ry, cell.Bottom, t, fr, fg, fb)
-		}
-	case '╯':
-		if cell.Left < cx-rx {
-			hStroke(hdc, cell.Left, cx-rx, cy, t, fr, fg, fb)
-		}
-		if cell.Top < cy-ry {
-			vStroke(hdc, cx, cell.Top, cy-ry, t, fr, fg, fb)
-		}
-	case '╰':
-		if cx+rx < cell.Right {
-			hStroke(hdc, cx+rx, cell.Right, cy, t, fr, fg, fb)
-		}
-		if cell.Top < cy-ry {
-			vStroke(hdc, cx, cell.Top, cy-ry, t, fr, fg, fb)
-		}
-	}
-	strokeEllipseCW(hdc, cx, cy, rx, ry, t, start, end, fr, fg, fb)
 }
 
 // strokeEllipseCW stamps a thick elliptical arc.
