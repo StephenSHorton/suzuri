@@ -29,13 +29,14 @@ func helpBody(width int) string {
 		helpRow("⌃⇧C/V", "Copy / paste"),
 		helpRow("Wheel", "Scrollback"),
 		rule,
-		styleDialogHint().Render("esc"),
+		styleDialogHintKey().Render("esc") + styleDialogHint().Render(" close"),
 	}
-	return stylePaletteBorder().Width(width).Render(strings.Join(lines, "\n"))
+	return stylePaletteBorder().Width(clampDialogWidth(width, width+4)).Render(strings.Join(lines, "\n"))
 }
 
 func helpRow(key, desc string) string {
-	k := styleDialogValue().Width(8).Render(key)
-	d := styleDialogLabel().Render(desc)
+	// Crush Help: ShortKey = fgMoreSubtle, ShortDesc = fgMostSubtle
+	k := styleDialogHintKey().Width(8).Render(key)
+	d := styleDialogHint().Render(desc)
 	return k + "  " + d
 }
