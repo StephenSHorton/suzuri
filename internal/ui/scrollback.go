@@ -25,11 +25,15 @@ type histLine struct {
 // scrollback keeps rows that have scrolled off the live VT screen.
 // History stores plain text (color not preserved for v0.3); live rows keep full cells.
 // Command blocks are host-injected history lines with kind metadata for color.
+//
+// pin is a stick-bottom floor set on clear: history before pin stays in the
+// buffer for scroll-up, but does not reappear when following the bottom.
 type scrollback struct {
 	lines  []histLine
 	max    int
 	prev   []string
 	offset int
+	pin    int // first history index shown at stick-bottom (0 = no pin)
 }
 
 func newScrollback() *scrollback {
@@ -78,6 +82,9 @@ func liveExtent(term vt10x.Terminal) int {
 		return rows
 	}
 	last := -1
+	if cur := term.Cursor(); cur.Y >= 0 && cur.Y < rows {
+		last = cur.Y
+	}
 	for y := 0; y < rows; y++ {
 		for x := 0; x < cols; x++ {
 			ch := displayRune(term.Cell(x, y).Char)
@@ -90,14 +97,9 @@ func liveExtent(term vt10x.Terminal) int {
 		}
 	}
 	if last < 0 {
-		// Fully blank primary screen (after `clear` / Clear-Host, or a quiet
-		// space-only prompt): use the full PTY height so the viewport is empty
-		// rather than filled with scrollback. History is one scroll-up away.
-		return rows
-	}
-	// Include cursor row when it sits below the last non-blank content.
-	if cur := term.Cursor(); cur.Y > last && cur.Y < rows {
-		last = cur.Y
+		// Empty screen: keep a single row so the viewport isn't history-only
+		// with no live anchor (quiet space prompt counts as blank).
+		return 1
 	}
 	return last + 1
 }
@@ -124,13 +126,15 @@ func (s *scrollback) noteScreen(term vt10x.Terminal) {
 	cur := snapshotScreenText(term)
 	if len(s.prev) == len(cur) && len(cur) > 1 {
 		// Full clear (clear / Clear-Host): previous live content becomes history
-		// so the user can scroll up to recover it, and the live pane is empty.
+		// and pin stick-bottom so pre-clear history stays above (scroll up).
 		if screenWasCleared(s.prev, cur) {
 			for _, line := range s.prev {
 				if strings.TrimSpace(line) != "" {
 					s.push(line)
 				}
 			}
+			// Floor for stick-bottom: nothing before this index until user scrolls up.
+			s.pin = len(s.lines)
 			s.stickBottom()
 		} else if n := scrollAmount(s.prev, cur); n > 0 {
 			// Multi-line scroll: find largest n where prev[n:] == cur[:len-n]
@@ -207,6 +211,12 @@ func (s *scrollback) pushKind(line string, kind byte) {
 			s.offset -= drop
 			if s.offset < 0 {
 				s.offset = 0
+			}
+		}
+		if s.pin > 0 {
+			s.pin -= drop
+			if s.pin < 0 {
+				s.pin = 0
 			}
 		}
 	}
@@ -317,6 +327,9 @@ func (s *scrollback) recentBlocks(max int) []string {
 // recent history (command blocks) off the bottom of the screen.
 //
 // Alternate-screen apps own the whole viewport — history is not mixed in.
+//
+// Stick-bottom (offset==0) respects pin after clear: pre-pin history stays
+// above and only appears when the user scrolls up.
 func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPix {
 	cols, _ := term.Size()
 	if cols < 1 {
@@ -326,14 +339,19 @@ func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPi
 		viewportRows = 1
 	}
 
+	blankRow := func() []cellPix {
+		row := make([]cellPix, cols)
+		for x := range row {
+			row[x] = cellPix{Ch: ' ', FR: 220, FG: 220, FB: 220}
+		}
+		return row
+	}
+
 	if term.Mode()&vt10x.ModeAltScreen != 0 {
 		live := snapshotScreenCells(term)
 		out := make([][]cellPix, viewportRows)
 		for i := 0; i < viewportRows; i++ {
-			row := make([]cellPix, cols)
-			for x := range row {
-				row[x] = cellPix{Ch: ' ', FR: 220, FG: 220, FB: 220}
-			}
+			row := blankRow()
 			if i < len(live) {
 				copy(row, live[i])
 			}
@@ -343,37 +361,69 @@ func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPi
 	}
 
 	live := snapshotLiveCells(term)
+	histN := len(s.lines)
+	docLen := histN + len(live)
 
-	// Document length in lines
-	docLen := len(s.lines) + len(live)
+	out := make([][]cellPix, viewportRows)
+
+	// Stick-bottom with pin + short post-clear content: bottom-align so the
+	// pane stays empty above (history hidden) rather than pulling old lines in.
+	if s.offset == 0 && s.pin > 0 && s.pin <= histN {
+		contentLen := docLen - s.pin // history after pin + live
+		if contentLen < 0 {
+			contentLen = 0
+		}
+		if contentLen <= viewportRows {
+			pad := viewportRows - contentLen
+			for i := 0; i < viewportRows; i++ {
+				if i < pad {
+					out[i] = blankRow()
+					continue
+				}
+				idx := s.pin + (i - pad)
+				out[i] = s.rowAt(idx, histN, live, cols)
+			}
+			return out
+		}
+	}
+
 	start := docLen - viewportRows - s.offset
 	if start < 0 {
 		start = 0
 	}
+	// At stick-bottom, never start before pin (hide pre-clear history).
+	if s.offset == 0 && s.pin > 0 && start < s.pin {
+		start = s.pin
+	}
 
-	out := make([][]cellPix, viewportRows)
 	for i := 0; i < viewportRows; i++ {
-		row := make([]cellPix, cols)
-		for x := range row {
-			row[x] = cellPix{Ch: ' ', FR: 220, FG: 220, FB: 220}
-		}
-		idx := start + i
-		if idx < len(s.lines) {
-			hl := s.lines[idx]
-			rs := []rune(hl.text)
-			fr, fg, fb := histColor(hl.kind)
-			for x := 0; x < cols && x < len(rs); x++ {
-				row[x] = cellPix{Ch: rs[x], FR: fr, FG: fg, FB: fb}
-			}
-		} else {
-			li := idx - len(s.lines)
-			if li >= 0 && li < len(live) {
-				copy(row, live[li])
-			}
-		}
-		out[i] = row
+		out[i] = s.rowAt(start+i, histN, live, cols)
 	}
 	return out
+}
+
+func (s *scrollback) rowAt(idx, histN int, live [][]cellPix, cols int) []cellPix {
+	row := make([]cellPix, cols)
+	for x := range row {
+		row[x] = cellPix{Ch: ' ', FR: 220, FG: 220, FB: 220}
+	}
+	if idx < 0 {
+		return row
+	}
+	if idx < histN {
+		hl := s.lines[idx]
+		rs := []rune(hl.text)
+		fr, fg, fb := histColor(hl.kind)
+		for x := 0; x < cols && x < len(rs); x++ {
+			row[x] = cellPix{Ch: rs[x], FR: fr, FG: fg, FB: fb}
+		}
+		return row
+	}
+	li := idx - histN
+	if li >= 0 && li < len(live) {
+		copy(row, live[li])
+	}
+	return row
 }
 
 // histColor returns FG for a history line kind (theme-aware).
@@ -409,10 +459,29 @@ func (s *scrollback) absLine(viewY, viewportRows, liveRows int) int {
 	if liveRows < 1 {
 		liveRows = 1
 	}
-	docLen := len(s.lines) + liveRows
+	histN := len(s.lines)
+	docLen := histN + liveRows
+
+	if s.offset == 0 && s.pin > 0 && s.pin <= histN {
+		contentLen := docLen - s.pin
+		if contentLen < 0 {
+			contentLen = 0
+		}
+		if contentLen <= viewportRows {
+			pad := viewportRows - contentLen
+			if viewY < pad {
+				return s.pin // blank pad maps to pin
+			}
+			return s.pin + (viewY - pad)
+		}
+	}
+
 	start := docLen - viewportRows - s.offset
 	if start < 0 {
 		start = 0
+	}
+	if s.offset == 0 && s.pin > 0 && start < s.pin {
+		start = s.pin
 	}
 	return start + viewY
 }

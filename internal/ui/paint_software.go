@@ -128,7 +128,18 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		shellBot = h
 	}
 
-	// Shell grid
+	// Shell band base (black) — same as Windows BLACK_BRUSH before watermark.
+	if shellBot > padY {
+		fillRectRGBA(dst, 0, padY, w, shellBot-padY, 0, 0, 0)
+	}
+
+	// Center 硯 UNDER shell cells (Windows blitGrid order). Only ink pixels
+	// so we never stamp a black "card" over the field.
+	if o.WatermarkFade > 0.01 && !o.DimShell {
+		p.paintShellWatermark(dst, padY, shellBot, o.WatermarkFade)
+	}
+
+	// Shell grid on top of watermark (opaque cell BGs hide the mark).
 	for y, row := range o.Shell {
 		py := padY + y*ch
 		if py+ch > shellBot {
@@ -152,19 +163,17 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 				bg = blendByte(bg, cell.FG, a)
 				bb = blendByte(bb, cell.FB, a)
 			}
-			fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
+			// Default black BG: leave watermark visible (skip fill).
+			if br != 0 || bg != 0 || bb != 0 {
+				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
+			}
 			if cell.Ch != 0 && cell.Ch != ' ' {
 				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
 			}
 		}
 	}
 
-	// Center 硯 under rain (intro) / steady whisper after.
-	if o.WatermarkFade > 0.01 && !o.DimShell {
-		p.paintShellWatermark(dst, padY, shellBot, o.WatermarkFade)
-	}
-
-	// Matrix rain (intro or settings underlay).
+	// Matrix rain (intro or settings underlay) over the shell field.
 	if len(o.MatrixCells) > 0 {
 		if o.SettingsOpen || o.DimShell {
 			// Matte first for settings underlay.

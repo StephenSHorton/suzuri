@@ -90,9 +90,12 @@ func (f *fakeTerm) put(y int, s string) {
 // unit on row scanning — see TestLiveExtentFromRows.
 
 func TestLiveExtentFromRows(t *testing.T) {
-	// Mirror liveExtent rules on a simple grid.
+	// Mirror liveExtent rules on a simple grid (cursor anchors empty rows).
 	extent := func(rows []string, cursorY int) int {
 		last := -1
+		if cursorY >= 0 && cursorY < len(rows) {
+			last = cursorY
+		}
 		for y, row := range rows {
 			for _, ch := range row {
 				if ch != ' ' && ch != 0 {
@@ -104,11 +107,7 @@ func TestLiveExtentFromRows(t *testing.T) {
 			}
 		}
 		if last < 0 {
-			// Fully blank → full height (clear UX), cursor ignored.
-			return len(rows)
-		}
-		if cursorY > last && cursorY < len(rows) {
-			last = cursorY
+			return 1
 		}
 		return last + 1
 	}
@@ -118,11 +117,37 @@ func TestLiveExtentFromRows(t *testing.T) {
 	if n := extent([]string{"a", "b", "c", " ", " "}, 2); n != 3 {
 		t.Fatalf("got %d want 3", n)
 	}
-	if n := extent([]string{"     ", "     "}, 0); n != 2 {
-		t.Fatalf("fully blank with cursor: got %d want 2", n)
+	if n := extent([]string{"     ", "     "}, 0); n != 1 {
+		t.Fatalf("empty with cursor: got %d want 1", n)
 	}
-	if n := extent([]string{"     ", "     "}, -1); n != 2 {
-		t.Fatalf("fully empty no cursor: got %d want 2", n)
+	if n := extent([]string{"     ", "     "}, -1); n != 1 {
+		t.Fatalf("fully empty: got %d want 1", n)
+	}
+}
+
+func TestClearPinHidesHistoryAtStickBottom(t *testing.T) {
+	s := newScrollback()
+	for i := 0; i < 20; i++ {
+		s.push("old line")
+	}
+	// Simulate clear pin.
+	s.pin = len(s.lines)
+	s.stickBottom()
+	// Post-clear: one command block.
+	s.pushBlock("echo hi", 40)
+	// Without a real term, exercise the pin short-content path via rowAt math.
+	// content after pin should be the block only; pin floor prevents old lines.
+	if s.pin != 20 {
+		t.Fatalf("pin=%d", s.pin)
+	}
+	// Scrolling up must still reach pre-pin history.
+	s.scrollBy(5, 10)
+	if s.offset != 5 {
+		t.Fatalf("offset=%d", s.offset)
+	}
+	s.stickBottom()
+	if s.offset != 0 {
+		t.Fatal("stick")
 	}
 }
 

@@ -4,8 +4,12 @@ package ui
 
 import (
 	"image"
+	"image/color"
+	"image/draw"
 	"math"
 	"time"
+
+	"golang.org/x/image/math/fixed"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
@@ -185,8 +189,13 @@ func (p *softwarePainter) paintMatrixRain(dst *image.RGBA, padY, shellBot int, c
 }
 
 // paintShellWatermark draws a large faint 硯 centered in the shell band.
+// Callers must paint this UNDER shell cell glyphs (only ink is written).
 func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot int, fade float64) {
 	if p == nil || dst == nil || fade <= 0.01 {
+		return
+	}
+	// Need a real CJK face — never draw Gohu .notdef tofu at huge scale.
+	if !cjkHasRune(shellWatermarkRune) {
 		return
 	}
 	w := dst.Bounds().Dx()
@@ -195,7 +204,7 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 	if shellW < 80 || shellH < 60 {
 		return
 	}
-	// Whisper of primary, scaled by fade.
+	// Whisper of primary, scaled by fade (matches Windows watermark).
 	fr, fg, fb := blendRGB(0, 0, 0, chrome.PrimR, chrome.PrimG, chrome.PrimB, 0.055)
 	fr, fg, fb = blendRGB(fr, fg, fb, chrome.SoftR, chrome.SoftG, chrome.SoftB, 0.04)
 	fr, fg, fb = blendRGB(0, 0, 0, fr, fg, fb, fade)
@@ -210,9 +219,18 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 		return
 	}
 	src := image.NewRGBA(image.Rect(0, 0, srcW, srcH))
-	// Black under glyph so only ink shows when stretched.
-	fillRectRGBA(src, 0, 0, srcW, srcH, 0, 0, 0)
-	p.drawGlyph(src, 0, 0, shellWatermarkRune, fr, fg, fb)
+	// Transparent black underlay — only glyph ink is scaled (no grey card).
+	for i := 0; i < len(src.Pix); i += 4 {
+		src.Pix[i+3] = 0
+	}
+	// Draw with CJK face only (skip primary tofu).
+	if p.cjkFace != nil {
+		dr, mask, maskp, _, ok := p.cjkFace.Glyph(fixed.P(0, p.ascent), shellWatermarkRune)
+		if ok && mask != nil {
+			col := image.NewUniform(color.RGBA{R: fr, G: fg, B: fb, A: 255})
+			draw.DrawMask(src, dr, col, image.Point{}, mask, maskp, draw.Over)
+		}
+	}
 
 	side := shellH
 	if shellW < side {
@@ -228,24 +246,40 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 	destW := destH * srcW / srcH
 	if destW > shellW*85/100 {
 		destW = shellW * 85 / 100
-		destH = destW * srcH / srcW
+		if srcW > 0 {
+			destH = destW * srcH / srcW
+		}
 	}
 	if destW < 1 || destH < 1 {
 		return
 	}
 	dx := (shellW - destW) / 2
 	dy := padY + (shellH-destH)/2
-	// Nearest-neighbor scale (chunky mono look, not smooth).
+	// Nearest-neighbor scale — only non-transparent ink (no black card artifacts).
 	for y := 0; y < destH; y++ {
 		sy := y * srcH / destH
+		if sy >= srcH {
+			sy = srcH - 1
+		}
 		for x := 0; x < destW; x++ {
 			sx := x * srcW / destW
+			if sx >= srcW {
+				sx = srcW - 1
+			}
 			si := src.PixOffset(sx, sy)
-			// Skip pure black (underlay).
-			if src.Pix[si+0]|src.Pix[si+1]|src.Pix[si+2] == 0 {
+			if src.Pix[si+3] < 32 {
 				continue
 			}
-			setRGB(dst, dx+x, dy+y, src.Pix[si+0], src.Pix[si+1], src.Pix[si+2])
+			// Soft blend onto destination so we don't stamp hard edges.
+			a := float64(src.Pix[si+3]) / 255.0 * 0.9
+			di := dst.PixOffset(dx+x, dy+y)
+			if di < 0 || di+3 >= len(dst.Pix) {
+				continue
+			}
+			dst.Pix[di+0] = blendByte(dst.Pix[di+0], src.Pix[si+0], a)
+			dst.Pix[di+1] = blendByte(dst.Pix[di+1], src.Pix[si+1], a)
+			dst.Pix[di+2] = blendByte(dst.Pix[di+2], src.Pix[si+2], a)
+			dst.Pix[di+3] = 255
 		}
 	}
 }
