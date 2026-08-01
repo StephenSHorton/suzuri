@@ -18,10 +18,11 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	// Point LOCALAPPDATA at temp so Path() is isolated.
 	t.Setenv("LOCALAPPDATA", dir)
 	want := Config{
-		FontFace:   "Consolas",
-		FontSizePx: 18,
-		Cursor:     CursorBar,
-		Theme:      ThemeCharmtone,
+		FontFace:     "Consolas",
+		FontSizePx:   18,
+		Cursor:       CursorBar,
+		Theme:        ThemeCharmtone,
+		ShellANSIMap: ANSIMapFull,
 	}
 	if err := Save(want); err != nil {
 		t.Fatal(err)
@@ -39,7 +40,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.FontFace != want.FontFace || got.FontSizePx != want.FontSizePx ||
-		got.Cursor != want.Cursor || got.Theme != want.Theme {
+		got.Cursor != want.Cursor || got.Theme != want.Theme ||
+		got.ShellANSIMap != want.ShellANSIMap {
 		t.Fatalf("got %+v want %+v", got, want)
 	}
 }

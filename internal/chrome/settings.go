@@ -15,14 +15,15 @@ const (
 	fieldFontSize
 	fieldCursor
 	fieldTheme
+	fieldANSIMap
 	settingsFieldCount
 )
 
 type settingsState struct {
-	snap   config.Config // opened-with (Esc restores)
-	edit   config.Config // live edit
-	field  settingsField
-	fonts  []string
+	snap  config.Config // opened-with (Esc restores)
+	edit  config.Config // live edit
+	field settingsField
+	fonts []string
 }
 
 func newSettingsState(cfg config.Config) settingsState {
@@ -75,6 +76,14 @@ func (s *settingsState) nudge(delta int) {
 		}
 		i = (i + delta + len(ids)) % len(ids)
 		s.edit.Theme = ids[i]
+	case fieldANSIMap:
+		ids := config.ANSIMapIDs()
+		i := indexFold(ids, s.edit.ShellANSIMap)
+		if i < 0 {
+			i = 0
+		}
+		i = (i + delta + len(ids)) % len(ids)
+		s.edit.ShellANSIMap = ids[i]
 	}
 }
 
@@ -92,6 +101,8 @@ func (s settingsState) valueLabel(f settingsField) string {
 		return strings.ToUpper(cs[:1]) + cs[1:]
 	case fieldTheme:
 		return config.ThemeLabel(s.edit.Theme)
+	case fieldANSIMap:
+		return config.ANSIMapLabel(s.edit.ShellANSIMap)
 	default:
 		return ""
 	}
@@ -107,6 +118,8 @@ func (s settingsState) fieldLabel(f settingsField) string {
 		return "Cursor"
 	case fieldTheme:
 		return "Theme"
+	case fieldANSIMap:
+		return "Shell ANSI"
 	default:
 		return ""
 	}
@@ -132,10 +145,8 @@ func (s settingsState) render(width int) string {
 			rs := []rune(val)
 			val = string(rs[:maxVal-1]) + "…"
 		}
-		line := fmt.Sprintf("%-12s  %s", label, val)
 		if f == s.field {
-			// Active row: neon bar + arrows.
-			line = fmt.Sprintf("%-12s  ◂ %s ▸", label, val)
+			line := fmt.Sprintf("%-12s  ◂ %s ▸", label, val)
 			rows = append(rows, styleDialogActive().Width(width-4).Render(line))
 		} else {
 			lab := styleDialogLabel().Render(fmt.Sprintf("%-12s", label))

@@ -20,36 +20,46 @@ const (
 	CursorBar
 )
 
-// Theme IDs for chrome (+ optional shell ANSI later).
+// Theme IDs for chrome (+ shell ANSI remap).
 const (
-	ThemeInkstone      = "inkstone"
-	ThemeCharmtone     = "charmtone"
-	ThemeHighContrast  = "high_contrast"
+	ThemeInkstone     = "inkstone"
+	ThemeCharmtone    = "charmtone"
+	ThemeHighContrast = "high_contrast"
+)
+
+// Shell ANSI map modes: remap classic 16-color SGR onto theme-friendly hues.
+const (
+	ANSIMapNone = "none" // stock VT colors
+	ANSIMapSoft = "soft" // blend theme accents (default)
+	ANSIMapFull = "full" // strong on-brand remap (Crush-style)
 )
 
 // Config holds product settings.
 type Config struct {
-	Cursor     CursorStyle
-	FontFace   string
-	FontSizePx int
-	Theme      string
+	Cursor       CursorStyle
+	FontFace     string
+	FontSizePx   int
+	Theme        string
+	ShellANSIMap string
 }
 
 // fileDTO is the on-disk JSON shape (stable snake_case keys).
 type fileDTO struct {
-	FontFace   string `json:"font_face"`
-	FontSizePx int    `json:"font_size_px"`
-	Cursor     string `json:"cursor"`
-	Theme      string `json:"theme"`
+	FontFace     string `json:"font_face"`
+	FontSizePx   int    `json:"font_size_px"`
+	Cursor       string `json:"cursor"`
+	Theme        string `json:"theme"`
+	ShellANSIMap string `json:"shell_ansi_map"`
 }
 
 // Default returns shipping defaults.
 func Default() Config {
 	return Config{
-		Cursor:     CursorBlock,
-		FontFace:   "Cascadia Mono",
-		FontSizePx: 16,
-		Theme:      ThemeInkstone,
+		Cursor:       CursorBlock,
+		FontFace:     "Cascadia Mono",
+		FontSizePx:   16,
+		Theme:        ThemeInkstone,
+		ShellANSIMap: ANSIMapSoft,
 	}
 }
 
@@ -121,6 +131,14 @@ func Normalize(c Config) Config {
 	default:
 		c.Theme = ThemeInkstone
 	}
+	switch strings.ToLower(strings.TrimSpace(c.ShellANSIMap)) {
+	case ANSIMapNone, ANSIMapSoft, ANSIMapFull:
+		c.ShellANSIMap = strings.ToLower(strings.TrimSpace(c.ShellANSIMap))
+	case "":
+		c.ShellANSIMap = d.ShellANSIMap
+	default:
+		c.ShellANSIMap = ANSIMapSoft
+	}
 	return c
 }
 
@@ -165,6 +183,23 @@ func ThemeLabel(id string) string {
 	}
 }
 
+// ANSIMapIDs lists shell ANSI remap modes.
+func ANSIMapIDs() []string {
+	return []string{ANSIMapNone, ANSIMapSoft, ANSIMapFull}
+}
+
+// ANSIMapLabel is a human title for shell ANSI map mode.
+func ANSIMapLabel(id string) string {
+	switch id {
+	case ANSIMapNone:
+		return "Stock"
+	case ANSIMapFull:
+		return "Full theme"
+	default:
+		return "Soft Charm"
+	}
+}
+
 // MonoFontFaces are preferred faces for the settings cycle (host may fall back).
 func MonoFontFaces() []string {
 	return []string{
@@ -181,18 +216,20 @@ func MonoFontFaces() []string {
 
 func fromDTO(d fileDTO) Config {
 	return Config{
-		FontFace:   d.FontFace,
-		FontSizePx: d.FontSizePx,
-		Cursor:     ParseCursor(d.Cursor),
-		Theme:      d.Theme,
+		FontFace:     d.FontFace,
+		FontSizePx:   d.FontSizePx,
+		Cursor:       ParseCursor(d.Cursor),
+		Theme:        d.Theme,
+		ShellANSIMap: d.ShellANSIMap,
 	}
 }
 
 func toDTO(c Config) fileDTO {
 	return fileDTO{
-		FontFace:   c.FontFace,
-		FontSizePx: c.FontSizePx,
-		Cursor:     CursorString(c.Cursor),
-		Theme:      c.Theme,
+		FontFace:     c.FontFace,
+		FontSizePx:   c.FontSizePx,
+		Cursor:       CursorString(c.Cursor),
+		Theme:        c.Theme,
+		ShellANSIMap: c.ShellANSIMap,
 	}
 }

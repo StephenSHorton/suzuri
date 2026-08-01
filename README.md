@@ -17,7 +17,9 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | Drag select + copy/paste | ✅ |
 | ANSI 16 / 256 / truecolor + bold | ✅ |
 | **Charm chrome** (tabs, status, palette) | ✅ |
-| **Settings** (`Ctrl+,` / palette) — font, size, cursor, theme | ✅ |
+| **Settings** (`Ctrl+,` / palette) — font, size, cursor, theme, shell ANSI | ✅ |
+| Themes: Inkstone / Charmtone / High contrast + soft/full ANSI remap | ✅ |
+| Status toasts · click `+` · click-out dismiss · last-tab quit confirm | ✅ |
 | Config: `%LOCALAPPDATA%\suzuri\config.json` | ✅ |
 | Font: **Cascadia Mono** (fallback Consolas…) | ✅ |
 | Seamless box-drawing / block glyphs (WT-style) | ✅ |

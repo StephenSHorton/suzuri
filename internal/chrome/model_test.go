@@ -108,6 +108,38 @@ func TestNewTabFromPalette(t *testing.T) {
 	}
 }
 
+func TestConfirmQuit(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenConfirmQuitMsg{})
+	m = r.Model
+	if !m.ConfirmOpen || !m.OverlayOpen() {
+		t.Fatal("confirm should open")
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionQuit {
+		t.Fatalf("action=%v want Quit", r.Action)
+	}
+}
+
+func TestDismissOverlay(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenPaletteMsg{})
+	m = r.Model
+	r = m.UpdateChrome(DismissOverlayMsg{})
+	if r.Model.PaletteOpen {
+		t.Fatal("palette should close")
+	}
+}
+
+func TestPlusBounds(t *testing.T) {
+	m := New(80)
+	m.Tabs = []Tab{{ID: 0, Title: "a"}}
+	b := m.PlusBounds()
+	if b[1] <= b[0] {
+		t.Fatalf("plus bounds %v", b)
+	}
+}
+
 func TestRenderToTerm(t *testing.T) {
 	m := New(60)
 	m.Tabs = []Tab{{ID: 0, Title: "shell"}}

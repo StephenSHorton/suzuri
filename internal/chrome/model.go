@@ -33,8 +33,10 @@ type Model struct {
 
 	PaletteOpen  bool
 	SettingsOpen bool
+	ConfirmOpen  bool
 	palette      list.Model
 	settings     settingsState
+	confirm      confirmState
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
 }
@@ -56,6 +58,11 @@ type (
 	SyncConfigMsg struct {
 		Config config.Config
 	}
+	// OpenConfirmQuitMsg asks to quit the app (last tab closed).
+	OpenConfirmQuitMsg struct{}
+	// DismissOverlayMsg closes palette/settings/confirm without side effects
+	// (except settings cancel restores snap via ActionSettingsCancel).
+	DismissOverlayMsg struct{}
 )
 
 // HostAction is returned to the Win32 host after UpdateChrome.
@@ -181,9 +188,9 @@ func New(width int) Model {
 
 func (m Model) Init() tea.Cmd { return nil }
 
-// OverlayOpen is true when palette or settings owns keyboard focus.
+// OverlayOpen is true when palette, settings, or confirm owns keyboard focus.
 func (m Model) OverlayOpen() bool {
-	return m.PaletteOpen || m.SettingsOpen
+	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen
 }
 
 // UpdateChrome applies a message and returns host actions.
@@ -208,6 +215,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.lastCfg = config.Normalize(msg.Config)
 	case OpenPaletteMsg:
 		m.SettingsOpen = false
+		m.ConfirmOpen = false
 		m.PaletteOpen = true
 		m.palette.ResetFilter()
 		m.palette.ResetSelected()
@@ -215,10 +223,10 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.PaletteOpen = false
 	case OpenSettingsMsg:
 		m.PaletteOpen = false
+		m.ConfirmOpen = false
 		m.SettingsOpen = true
 		m.settings = newSettingsState(msg.Config)
 		m.lastCfg = m.settings.snap
-		// Live theme already matches snap; host will preview edit on open if needed.
 		settings = m.settings.edit
 		act = ActionSettingsPreview
 	case CloseSettingsMsg:
@@ -227,11 +235,40 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			act = ActionSettingsCancel
 		}
 		m.SettingsOpen = false
+	case OpenConfirmQuitMsg:
+		m.PaletteOpen = false
+		m.SettingsOpen = false
+		m.ConfirmOpen = true
+		m.confirm = confirmState{
+			title:     "Quit suzuri?",
+			body:      "This is the last tab. Close the window?",
+			yesLabel:  "Quit",
+			noLabel:   "Cancel",
+			yesAction: ActionQuit,
+		}
+	case DismissOverlayMsg:
+		if m.SettingsOpen {
+			settings = m.settings.snap
+			act = ActionSettingsCancel
+		}
+		m.PaletteOpen = false
+		m.SettingsOpen = false
+		m.ConfirmOpen = false
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.palette.SetWidth(min(56, msg.Width-4))
 		m.palette.SetHeight(min(10, msg.Height-2))
 	case tea.KeyMsg:
+		if m.ConfirmOpen {
+			switch msg.String() {
+			case "enter", "y":
+				act = m.confirm.yesAction
+				m.ConfirmOpen = false
+			case "esc", "n", "ctrl+c":
+				m.ConfirmOpen = false
+			}
+			return Result{Model: m, Action: act, Index: idx, Settings: settings}
+		}
 		if m.SettingsOpen {
 			return m.updateSettingsKey(msg)
 		}
@@ -334,37 +371,39 @@ func (m Model) StripView() string {
 	if w < 20 {
 		w = 20
 	}
-	tabs, _ := m.layoutTabCards(w)
+	tabs, _, _ := m.layoutTabCards(w)
 	if m.showStatus() {
 		return tabs + "\n" + m.renderStatus(w)
 	}
 	return tabs
 }
 
-// OverlayView is the floating palette or settings card (empty if closed).
+// OverlayView is the floating palette/settings/confirm card (empty if closed).
 func (m Model) OverlayView() string {
 	w := m.Width
 	if w < 20 {
 		w = 20
 	}
-	if m.SettingsOpen {
+	var card string
+	switch {
+	case m.ConfirmOpen:
+		pw := min(40, max(30, w-10))
+		card = m.confirm.render(pw)
+	case m.SettingsOpen:
 		pw := min(44, max(32, w-8))
-		card := m.settings.render(pw)
-		return lipgloss.PlaceHorizontal(w, lipgloss.Center, card,
-			lipgloss.WithWhitespaceBackground(colVoid),
-			lipgloss.WithWhitespaceForeground(colMute))
-	}
-	if m.PaletteOpen {
+		card = m.settings.render(pw)
+	case m.PaletteOpen:
 		pw := min(48, max(30, w-10))
 		m.palette.SetWidth(pw - 4)
 		m.palette.SetHeight(8)
 		inner := m.palette.View()
-		card := stylePaletteBorder().Width(pw).Render(inner)
-		return lipgloss.PlaceHorizontal(w, lipgloss.Center, card,
-			lipgloss.WithWhitespaceBackground(colVoid),
-			lipgloss.WithWhitespaceForeground(colMute))
+		card = stylePaletteBorder().Width(pw).Render(inner)
+	default:
+		return ""
 	}
-	return ""
+	return lipgloss.PlaceHorizontal(w, lipgloss.Center, card,
+		lipgloss.WithWhitespaceBackground(colVoid),
+		lipgloss.WithWhitespaceForeground(colMute))
 }
 
 // View is strip only (overlay is composited separately by the host).
@@ -372,9 +411,10 @@ func (m Model) View() string {
 	return m.StripView()
 }
 
-func (m Model) layoutTabCards(w int) (string, [][2]int) {
+func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int) {
 	bounds := make([][2]int, len(m.Tabs))
 	var parts []string
+	var plusB [2]int
 
 	brand := lipgloss.NewStyle().
 		Foreground(colViolet).
@@ -411,7 +451,12 @@ func (m Model) layoutTabCards(w int) (string, [][2]int) {
 		}
 	}
 
-	parts = append(parts, gap, stylePlus().Render("+"))
+	parts = append(parts, gap)
+	col += gapW
+	plus := stylePlus().Render("+")
+	pw := lipgloss.Width(plus)
+	plusB = [2]int{col, col + pw}
+	parts = append(parts, plus)
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 	strip := lipgloss.NewStyle().
@@ -429,7 +474,7 @@ func (m Model) layoutTabCards(w int) (string, [][2]int) {
 			lines[i] = lipgloss.NewStyle().MaxWidth(w).Render(ln)
 		}
 	}
-	return strings.Join(lines, "\n"), bounds
+	return strings.Join(lines, "\n"), bounds, plusB
 }
 
 func (m Model) showStatus() bool {
@@ -447,8 +492,18 @@ func (m Model) TabBounds() [][2]int {
 	if w < 20 {
 		w = 20
 	}
-	_, bounds := m.layoutTabCards(w)
+	_, bounds, _ := m.layoutTabCards(w)
 	return bounds
+}
+
+// PlusBounds is [startCol,endCol) of the "+" new-tab chip.
+func (m Model) PlusBounds() [2]int {
+	w := m.Width
+	if w < 20 {
+		w = 20
+	}
+	_, _, plus := m.layoutTabCards(w)
+	return plus
 }
 
 // RowCount is strip rows only (overlay floats over the shell).
@@ -462,8 +517,11 @@ func (m Model) RowCount() int {
 
 // OverlayRowCount estimates rows for the floating card paint.
 func (m Model) OverlayRowCount() int {
+	if m.ConfirmOpen {
+		return 10
+	}
 	if m.SettingsOpen {
-		return 12
+		return 14
 	}
 	if m.PaletteOpen {
 		return 12

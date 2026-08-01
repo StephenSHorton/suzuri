@@ -1,31 +1,32 @@
 package ui
 
 import (
+	"sync"
+
 	"github.com/hinshun/vt10x"
 	"github.com/lxn/win"
+
+	"github.com/StephenSHorton/suzuri/internal/chrome"
+	"github.com/StephenSHorton/suzuri/internal/config"
 )
+
+// Active shell ANSI-16 table (theme remapped). Protected for paint vs settings.
+var (
+	ansiMu   sync.RWMutex
+	ansi16   = chrome.StockANSI16
+	ansiMode = config.ANSIMapSoft
+)
+
+// SetShellANSIMap updates the live 16-color remap used by glyph paint.
+func SetShellANSIMap(mode string) {
+	ansiMu.Lock()
+	defer ansiMu.Unlock()
+	ansiMode = mode
+	ansi16 = chrome.RemapANSI16(mode)
+}
 
 // ANSI 0–15 (and xterm 256 cube/grayscale) → RGB for GDI.
 // Truecolor from vt10x is packed as r<<16|g<<8|b with value often >255.
-
-var ansi16 = [16][3]byte{
-	{0, 0, 0},       // black
-	{205, 49, 49},   // red
-	{13, 188, 121},  // green
-	{229, 229, 16},  // yellow
-	{36, 114, 200},  // blue
-	{188, 63, 188},  // magenta
-	{17, 168, 205},  // cyan
-	{204, 204, 204}, // light grey
-	{118, 118, 118}, // dark grey
-	{241, 76, 76},   // light red
-	{35, 209, 139},  // light green
-	{245, 245, 67},  // light yellow
-	{59, 142, 234},  // light blue
-	{214, 112, 214}, // light magenta
-	{41, 184, 219},  // light cyan
-	{229, 229, 229}, // white
-}
 
 func colorToRGB(c vt10x.Color, bold bool) (r, g, b byte) {
 	switch c {
@@ -47,7 +48,9 @@ func colorToRGB(c vt10x.Color, bold bool) (r, g, b byte) {
 		if bold && idx < 8 {
 			idx += 8
 		}
+		ansiMu.RLock()
 		rgb := ansi16[idx]
+		ansiMu.RUnlock()
 		return rgb[0], rgb[1], rgb[2]
 	}
 
@@ -87,7 +90,7 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 	// attrBold is unexported; Mode bit 1<<2 from vt10x state: attrBold = 1 << iota after reverse, underline
 	// From state.go: attrReverse, attrUnderline, attrBold, attrGfx, attrItalic, attrBlink, attrWrap
 	const (
-		attrReverse   = 1 << iota
+		attrReverse = 1 << iota
 		attrUnderline
 		attrBold
 		attrGfx

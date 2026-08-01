@@ -26,15 +26,39 @@ var (
 
 // BarRGB is the tab-strip fill for host GDI full-bleed (kept in sync by ApplyTheme).
 var (
-	BarR, BarG, BarB   byte
+	BarR, BarG, BarB    byte
 	VoidR, VoidG, VoidB byte
 )
+
+// ShellANSI16 is the active theme's 16-color remap for shell SGR 0–15
+// (Crush-style on-brand palette). Host blends with stock colors per config.
+var ShellANSI16 [16][3]byte
+
+// StockANSI16 is a conventional VT palette (Windows Terminal–ish).
+var StockANSI16 = [16][3]byte{
+	{0, 0, 0},
+	{205, 49, 49},
+	{13, 188, 121},
+	{229, 229, 16},
+	{36, 114, 200},
+	{188, 63, 188},
+	{17, 168, 205},
+	{204, 204, 204},
+	{118, 118, 118},
+	{241, 76, 76},
+	{35, 209, 139},
+	{245, 245, 67},
+	{59, 142, 234},
+	{214, 112, 214},
+	{41, 184, 219},
+	{229, 229, 229},
+}
 
 func init() {
 	ApplyTheme(config.ThemeInkstone)
 }
 
-// ApplyTheme sets chrome Lip Gloss colors and GDI bar/void bytes.
+// ApplyTheme sets chrome Lip Gloss colors, GDI bar/void bytes, and ShellANSI16.
 func ApplyTheme(id string) {
 	switch id {
 	case config.ThemeCharmtone:
@@ -53,6 +77,25 @@ func ApplyTheme(id string) {
 			hex("#3d2a48"),
 			hex("#cba6f7"),
 		)
+		// Crush Pantera-ish ANSI remap.
+		ShellANSI16 = [16][3]byte{
+			rgbArr(hex("#1a1216")), // black ≈ BBQ
+			rgbArr(hex("#f38ba8")), // red coral
+			rgbArr(hex("#a6e3a1")), // green guac
+			rgbArr(hex("#f9e2af")), // yellow mustard
+			rgbArr(hex("#a78bfa")), // blue charple
+			rgbArr(hex("#f5c2e7")), // magenta dolly
+			rgbArr(hex("#89dceb")), // cyan malibu
+			rgbArr(hex("#c9b8c4")), // white smoke
+			rgbArr(hex("#6c5a66")), // bright black
+			rgbArr(hex("#eba0ac")), // bright red
+			rgbArr(hex("#94e2d5")), // bright green
+			rgbArr(hex("#f5e0dc")), // bright yellow
+			rgbArr(hex("#b4befe")), // bright blue
+			rgbArr(hex("#cba6f7")), // bright magenta
+			rgbArr(hex("#89dceb")), // bright cyan
+			rgbArr(hex("#f5e0dc")), // bright white
+		}
 	case config.ThemeHighContrast:
 		setPalette(
 			hex("#000000"),
@@ -68,6 +111,24 @@ func ApplyTheme(id string) {
 			hex("#003322"),
 			hex("#00ff88"),
 		)
+		ShellANSI16 = [16][3]byte{
+			{0, 0, 0},
+			{255, 80, 80},
+			{0, 255, 120},
+			{255, 255, 0},
+			{80, 160, 255},
+			{255, 80, 255},
+			{0, 255, 255},
+			{255, 255, 255},
+			{120, 120, 120},
+			{255, 120, 120},
+			{80, 255, 160},
+			{255, 255, 120},
+			{120, 200, 255},
+			{255, 120, 255},
+			{120, 255, 255},
+			{255, 255, 255},
+		}
 	default: // inkstone
 		setPalette(
 			hex("#0d0b14"),
@@ -83,6 +144,44 @@ func ApplyTheme(id string) {
 			hex("#2a1830"),
 			hex("#ff6ac1"),
 		)
+		ShellANSI16 = [16][3]byte{
+			rgbArr(hex("#0d0b14")),
+			rgbArr(hex("#ff6b6b")),
+			rgbArr(hex("#69db7c")),
+			rgbArr(hex("#ffd43b")),
+			rgbArr(hex("#74c0fc")),
+			rgbArr(hex("#ff6ac1")),
+			rgbArr(hex("#80ffea")),
+			rgbArr(hex("#cfc9e0")),
+			rgbArr(hex("#5c5c72")),
+			rgbArr(hex("#ff8787")),
+			rgbArr(hex("#8ce99a")),
+			rgbArr(hex("#ffe066")),
+			rgbArr(hex("#91a7ff")),
+			rgbArr(hex("#e599f7")),
+			rgbArr(hex("#99e9f2")),
+			rgbArr(hex("#f8f8f2")),
+		}
+	}
+}
+
+// RemapANSI16 returns an effective 16-color table for shell paint.
+// mode: none → stock; full → theme table; soft → 55% theme + 45% stock.
+func RemapANSI16(mode string) [16][3]byte {
+	switch mode {
+	case config.ANSIMapNone:
+		return StockANSI16
+	case config.ANSIMapFull:
+		return ShellANSI16
+	default: // soft
+		var out [16][3]byte
+		for i := 0; i < 16; i++ {
+			for c := 0; c < 3; c++ {
+				// weighted average
+				out[i][c] = byte((int(ShellANSI16[i][c])*55 + int(StockANSI16[i][c])*45) / 100)
+			}
+		}
+		return out
 	}
 }
 
@@ -102,6 +201,11 @@ func setPalette(void, bar, panel, neon, violet, cyan, text, soft, dim, mute, sel
 
 	BarR, BarG, BarB = rgb8(bar)
 	VoidR, VoidG, VoidB = rgb8(void)
+}
+
+func rgbArr(c color.Color) [3]byte {
+	r, g, b := rgb8(c)
+	return [3]byte{r, g, b}
 }
 
 func toLG(c color.Color) lipgloss.Color {

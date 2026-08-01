@@ -216,11 +216,11 @@ Extend `internal/config` with load/save (atomic write). Theme id → palette fac
 
 ### Phase 2 — Crush-feel polish
 
-- [ ] Token theme system (`inkstone` / `charmtone`).  
-- [ ] Optional shell ANSI-16 map.  
-- [ ] Confirm dialogs (quit last tab optional message — product choice).  
-- [ ] Status toasts (font fallback, session ended).  
-- [ ] Click-outside dismiss; `+` tab clickable.
+- [x] Token theme system (`inkstone` / `charmtone` / `high_contrast`).  
+- [x] Optional shell ANSI-16 map (`none` / `soft` / `full`).  
+- [x] Confirm dialog on last-tab quit (Enter quits, Esc keeps tab).  
+- [x] Status toasts (settings saved, font fallback, session ended, …).  
+- [x] Click-outside dismiss; `+` tab clickable.
 
 ### Phase 3 — Stack upgrade (when needed)
 

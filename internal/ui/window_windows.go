@@ -55,7 +55,9 @@ func Run() error {
 	}
 	cfg = config.Normalize(cfg)
 	chrome.ApplyTheme(cfg.Theme)
-	log.Info("ui.Run", "cols", cols, "rows", rows, "font", cfg.FontFace, "fontPx", cfg.FontSizePx, "theme", cfg.Theme, "config", config.Path())
+	SetShellANSIMap(cfg.ShellANSIMap)
+	log.Info("ui.Run", "cols", cols, "rows", rows, "font", cfg.FontFace, "fontPx", cfg.FontSizePx,
+		"theme", cfg.Theme, "ansi", cfg.ShellANSIMap, "config", config.Path())
 	ui := &winUI{
 		cols:       cols,
 		rows:       rows,
@@ -101,6 +103,7 @@ type winUI struct {
 	alive         atomic.Bool
 	lastBackspace time.Time // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
 	selecting     bool
+	statusUntil   time.Time // clear toast Status after this (zero = none)
 
 	// Reused double-buffer (recreated on resize) to avoid GDI thrash.
 	// memOldBmp is the object that was in memDC before memBmp — must be
@@ -163,12 +166,13 @@ func (u *winUI) markChromeDirty() {
 	u.overlayDirty = true
 }
 
-// applyConfigLive updates fonts/theme from cfg without writing disk.
+// applyConfigLive updates fonts/theme/ANSI map from cfg without writing disk.
 func (u *winUI) applyConfigLive(cfg config.Config) {
 	cfg = config.Normalize(cfg)
 	prev := u.cfg
 	u.cfg = cfg
 	chrome.ApplyTheme(cfg.Theme)
+	SetShellANSIMap(cfg.ShellANSIMap)
 	u.chrome = u.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	u.markChromeDirty()
 
@@ -182,6 +186,7 @@ func (u *winUI) applyConfigLive(cfg config.Config) {
 		}
 		u.font = createFontFor(cfg, false)
 		u.fontBold = createFontFor(cfg, true)
+		got := fontFaceName(u.font)
 		// Force remeasure + grid resize on next paint/size.
 		u.metricW, u.metricH = 0, 0
 		if u.hwnd != 0 {
@@ -190,10 +195,16 @@ func (u *winUI) applyConfigLive(cfg config.Config) {
 				u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
 			}
 		}
-		log.Info("font applied", "face", cfg.FontFace, "px", cfg.FontSizePx, "got", fontFaceName(u.font))
+		log.Info("font applied", "face", cfg.FontFace, "px", cfg.FontSizePx, "got", got)
+		if got != "" && !strings.EqualFold(got, cfg.FontFace) {
+			u.toast("font fallback: " + got)
+		}
 	}
 	if prev.Theme != cfg.Theme {
 		log.Info("theme applied", "theme", cfg.Theme)
+	}
+	if prev.ShellANSIMap != cfg.ShellANSIMap {
+		log.Info("shell ANSI map", "mode", cfg.ShellANSIMap)
 	}
 }
 
@@ -201,12 +212,37 @@ func (u *winUI) applyConfigSave(cfg config.Config) {
 	u.applyConfigLive(cfg)
 	if err := config.Save(cfg); err != nil {
 		log.Error("config save failed", "err", err)
-		u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("save failed")).Model
+		u.toast("save failed")
 	} else {
 		log.Info("config saved", "path", config.Path())
-		u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("settings saved")).Model
+		u.toast("settings saved")
 	}
 	u.markChromeDirty()
+}
+
+// toast sets a short-lived status line under the tab strip.
+func (u *winUI) toast(msg string) {
+	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg(msg)).Model
+	u.statusUntil = time.Now().Add(2500 * time.Millisecond)
+	u.markChromeDirty()
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+}
+
+func (u *winUI) clearToastIfDue() {
+	if u.statusUntil.IsZero() {
+		return
+	}
+	if time.Now().Before(u.statusUntil) {
+		return
+	}
+	u.statusUntil = time.Time{}
+	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("")).Model
+	u.markChromeDirty()
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
 }
 
 func (u *winUI) chromePixelHeight() int32 {
@@ -512,14 +548,17 @@ func (u *winUI) closeTabUI(id int) {
 	if idx < 0 {
 		return
 	}
-	u.tabs[idx].close()
-	u.tabs = append(u.tabs[:idx], u.tabs[idx+1:]...)
-	// Last tab closed → quit the window (browser/terminal style).
-	if len(u.tabs) == 0 {
-		log.Info("last tab closed — quitting")
-		win.DestroyWindow(u.hwnd)
+	// Last tab → confirm quit (Enter quits; Esc keeps the tab).
+	if len(u.tabs) == 1 {
+		log.Info("last tab close — confirm quit")
+		r := u.chrome.UpdateChrome(chrome.OpenConfirmQuitMsg{})
+		u.chrome = r.Model
+		u.markChromeDirty()
+		win.InvalidateRect(u.hwnd, nil, false)
 		return
 	}
+	u.tabs[idx].close()
+	u.tabs = append(u.tabs[:idx], u.tabs[idx+1:]...)
 	if u.active >= len(u.tabs) {
 		u.active = len(u.tabs) - 1
 	} else if u.active > idx {
@@ -529,6 +568,11 @@ func (u *winUI) closeTabUI(id int) {
 		setWindowTitle(u.hwnd, "suzuri — "+t.title)
 	}
 	u.syncChrome()
+	msg := fmt.Sprintf("%d tabs", len(u.tabs))
+	if len(u.tabs) == 1 {
+		msg = "1 tab"
+	}
+	u.toast(msg)
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
@@ -552,12 +596,7 @@ func (u *winUI) hitTab(px int32) int {
 		return -1
 	}
 	u.syncChrome()
-	cw := u.metricW
-	if cw < 1 {
-		cw = cellW
-	}
-	const padX int32 = 4
-	cellX := int((px - padX) / cw)
+	cellX := u.pixelToChromeCol(px)
 	if cellX < 0 {
 		return -1
 	}
@@ -569,6 +608,29 @@ func (u *winUI) hitTab(px int32) int {
 	return -1
 }
 
+func (u *winUI) hitPlus(px int32) bool {
+	u.syncChrome()
+	cellX := u.pixelToChromeCol(px)
+	if cellX < 0 {
+		return false
+	}
+	b := u.chrome.PlusBounds()
+	return cellX >= b[0] && cellX < b[1]
+}
+
+func (u *winUI) pixelToChromeCol(px int32) int {
+	cw := u.metricW
+	if cw < 1 {
+		cw = cellW
+	}
+	const padX int32 = 4
+	cellX := int((px - padX) / cw)
+	if cellX < 0 {
+		return -1
+	}
+	return cellX
+}
+
 
 func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {
@@ -578,6 +640,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case wmSuzuriBlink:
 		if u.alive.Load() {
+			u.clearToastIfDue()
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
@@ -586,6 +649,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		id := int(wParam)
 		if t := u.tabByID(id); t != nil {
 			_, _ = t.term.Write([]byte("\r\n[suzuri] session ended\r\n"))
+			u.toast("session ended")
 			if u.activeTab() == t {
 				win.InvalidateRect(hwnd, nil, false)
 			}
@@ -812,15 +876,32 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.focus()
 		px := int32(win.LOWORD(uint32(lParam)))
 		py := int32(win.HIWORD(uint32(lParam)))
-		// Neon tab cards are 3 rows tall; clicks anywhere on a card switch tabs.
-		// Clicks in palette / status below the strip do not select text.
 		chH := u.metricH
 		if chH < 1 {
 			chH = cellH
 		}
 		tabStripH := int32(chrome.TabStripRows()) * chH
-		if py < u.chromePixelHeight() {
+		chromeH := u.chromePixelHeight()
+
+		// Click outside floating overlay (on shell) dismisses it.
+		if u.chrome.OverlayOpen() && py >= chromeH {
+			r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
+			u.chrome = r.Model
+			u.markChromeDirty()
+			u.applyChromeAction(r)
+			u.syncChrome()
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+
+		// Neon tab cards / + chip.
+		if py < chromeH {
 			if py < tabStripH {
+				if u.hitPlus(px) {
+					u.newTabUI()
+					u.toast("new tab")
+					return 0
+				}
 				if i := u.hitTab(px); i >= 0 {
 					u.active = i
 					u.selecting = false
