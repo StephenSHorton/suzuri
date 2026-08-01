@@ -95,10 +95,19 @@ type winUI struct {
 	selecting     bool
 
 	// Reused double-buffer (recreated on resize) to avoid GDI thrash.
-	memDC  win.HDC
-	memBmp win.HBITMAP
-	memW   int32
-	memH   int32
+	// memOldBmp is the object that was in memDC before memBmp — must be
+	// re-selected before DeleteObject(memBmp) or GDI can AV later.
+	memDC     win.HDC
+	memBmp    win.HBITMAP
+	memOldBmp win.HGDIOBJ
+	memW      int32
+	memH      int32
+
+	// Chrome paint cache: RenderToTerm+Lip Gloss every WM_PAINT is expensive
+	// and stress-tests GDI when the window is reactivated after idle.
+	chromeDirty bool
+	chromeCols  int
+	chromeCells [][]cellPix // [row][col]
 }
 
 func (u *winUI) activeTab() *tab {
@@ -117,9 +126,30 @@ func (u *winUI) syncChrome() {
 		}
 		tabs[i] = chrome.Tab{ID: t.id, Title: title}
 	}
+	// Only invalidate the chrome cell cache when something visible changed.
+	// (Calling this every paint used to force a full Lip Gloss re-render.)
+	dirty := u.chromeDirty ||
+		u.chrome.Width != u.cols ||
+		u.chrome.Active != u.active ||
+		len(u.chrome.Tabs) != len(tabs)
+	if !dirty {
+		for i := range tabs {
+			if u.chrome.Tabs[i].Title != tabs[i].Title || u.chrome.Tabs[i].ID != tabs[i].ID {
+				dirty = true
+				break
+			}
+		}
+	}
 	r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
 	u.chrome = r.Model
 	u.chrome.Width = u.cols
+	if dirty {
+		u.chromeDirty = true
+	}
+}
+
+func (u *winUI) markChromeDirty() {
+	u.chromeDirty = true
 }
 
 func (u *winUI) chromePixelHeight() int32 {
@@ -472,7 +502,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case wmSuzuriBlink:
-		win.InvalidateRect(hwnd, nil, false)
+		if u.alive.Load() {
+			win.InvalidateRect(hwnd, nil, false)
+		}
 		return 0
 
 	case wmSuzuriClosed:
@@ -487,6 +519,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_ERASEBKGND:
 		return 1
+
+	case win.WM_ACTIVATE:
+		// Log re-focus after idle — helps correlate "clicked back → gone".
+		active := win.LOWORD(uint32(wParam))
+		log.Info("WM_ACTIVATE", "active", active, "alive", u.alive.Load(),
+			"w", u.width, "h", u.height, "cols", u.cols, "rows", u.rows)
+		applog.Sync()
+		if active != win.WA_INACTIVE && u.alive.Load() {
+			// After long suspend the backbuffer DC can be stale — rebuild on focus.
+			u.releaseBackbuffer()
+			win.InvalidateRect(hwnd, nil, false)
+		}
+		return 0
 
 	case win.WM_SIZE:
 		u.width = int32(win.LOWORD(uint32(lParam)))
@@ -506,6 +551,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 			u.chrome.Width = cols
 			u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: 24}).Model
+			u.markChromeDirty()
 			u.chromePx = u.chromePixelHeight()
 			rows := int((u.height - u.chromePx) / ch)
 			if rows < 5 {
@@ -531,6 +577,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 				r := u.chrome.UpdateChrome(km)
 				u.chrome = r.Model
+				u.markChromeDirty()
 				u.applyChromeAction(r.Action, r.Index)
 				u.syncChrome()
 				u.chromePx = u.chromePixelHeight()
@@ -572,6 +619,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
 				r := u.chrome.UpdateChrome(*km)
 				u.chrome = r.Model
+				u.markChromeDirty()
 				u.applyChromeAction(r.Action, r.Index)
 				u.syncChrome()
 				u.chromePx = u.chromePixelHeight()
@@ -582,6 +630,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if ctrl && !shift && (wParam == 'K' || wParam == 'k' || wParam == 'P' || wParam == 'p') {
 			r := u.chrome.UpdateChrome(chrome.OpenPaletteMsg{})
 			u.chrome = r.Model
+			u.markChromeDirty()
 			u.chromePx = u.chromePixelHeight()
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
@@ -765,10 +814,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_PAINT:
-		u.paint(hwnd)
+		if u.alive.Load() {
+			u.paint(hwnd)
+		} else {
+			// Still must validate the update region or Windows repaints forever.
+			var ps win.PAINTSTRUCT
+			hdc := win.BeginPaint(hwnd, &ps)
+			_ = hdc
+			win.EndPaint(hwnd, &ps)
+		}
 		return 0
 
 	case win.WM_CLOSE:
+		log.Info("WM_CLOSE")
 		win.DestroyWindow(hwnd)
 		return 0
 
@@ -784,6 +842,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if u.font != 0 {
 			win.DeleteObject(win.HGDIOBJ(u.font))
 			u.font = 0
+		}
+		if u.fontBold != 0 {
+			win.DeleteObject(win.HGDIOBJ(u.fontBold))
+			u.fontBold = 0
 		}
 		u.hwnd = 0
 		win.PostQuitMessage(0)
@@ -801,14 +863,30 @@ func (u *winUI) paint(hwnd win.HWND) {
 	var ps win.PAINTSTRUCT
 	hdc := win.BeginPaint(hwnd, &ps)
 	defer win.EndPaint(hwnd, &ps)
+	if hdc == 0 {
+		log.Warn("BeginPaint returned null HDC")
+		return
+	}
 
 	var rect win.RECT
 	win.GetClientRect(hwnd, &rect)
+	w := rect.Right - rect.Left
+	h := rect.Bottom - rect.Top
+	// Minimized / zero-size clients still get WM_PAINT — do nothing useful.
+	if w < 2 || h < 2 {
+		return
+	}
 
 	tab := u.activeTab()
 	if tab == nil {
+		fillRect(hdc, rect, win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)))
 		return
 	}
+	if u.font == 0 {
+		log.Error("paint with null font — skipping draw")
+		return
+	}
+
 	// Viewport = history + live screen (live cells carry FG/BG/bold).
 	grid := tab.sb.viewCells(tab.term, u.rows)
 	cur := tab.term.Cursor()
@@ -818,18 +896,25 @@ func (u *winUI) paint(hwnd win.HWND) {
 		curVis = false
 	}
 
-	w := rect.Right - rect.Left
-	h := rect.Bottom - rect.Top
+	draw := func(dest win.HDC) {
+		u.blitGrid(dest, rect, grid, cur.X, curY, curVis)
+		// Chrome into the same buffer so one BitBlt presents a full frame.
+		oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
+		u.paintChrome(dest, rect)
+		win.SelectObject(dest, oldF)
+	}
+
 	if !u.ensureBackbuffer(hdc, w, h) {
-		u.blitGrid(hdc, rect, grid, cur.X, curY, curVis)
+		draw(hdc)
 		return
 	}
-	u.blitGrid(u.memDC, rect, grid, cur.X, curY, curVis)
-	win.BitBlt(hdc, 0, 0, w, h, u.memDC, 0, 0, win.SRCCOPY)
-	// Charm chrome (tabs/status/palette) composited on top.
-	oldF := win.SelectObject(hdc, win.HGDIOBJ(u.font))
-	u.paintChrome(hdc, rect)
-	win.SelectObject(hdc, oldF)
+	draw(u.memDC)
+	if !win.BitBlt(hdc, 0, 0, w, h, u.memDC, 0, 0, win.SRCCOPY) {
+		// Fallback if BitBlt fails (stale DC after long suspend).
+		log.Warn("BitBlt failed — direct paint fallback")
+		u.releaseBackbuffer()
+		draw(hdc)
+	}
 }
 
 // blitGrid paints colored cells at fixed pitch.
@@ -1303,6 +1388,17 @@ func (u *winUI) drainQueuedBackspaces(hwnd win.HWND) {
 
 func (u *winUI) releaseBackbuffer() {
 	if u.memDC != 0 {
+		// Deselect our bitmap before deleting it — deleting a selected HBITMAP
+		// is undefined and is a common source of delayed GDI AVs.
+		if u.memOldBmp != 0 {
+			win.SelectObject(u.memDC, u.memOldBmp)
+			u.memOldBmp = 0
+		} else if u.memBmp != 0 {
+			// Fall back to stock monochrome bitmap if we lost the original.
+			stock := win.GetStockObject(win.BLACK_BRUSH) // not a bitmap; use NULL via CreateCompatibleDC default
+			_ = stock
+			win.SelectObject(u.memDC, win.HGDIOBJ(0))
+		}
 		if u.memBmp != 0 {
 			win.DeleteObject(win.HGDIOBJ(u.memBmp))
 			u.memBmp = 0
@@ -1326,15 +1422,18 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	u.releaseBackbuffer()
 	u.memDC = win.CreateCompatibleDC(hdc)
 	if u.memDC == 0 {
+		log.Warn("CreateCompatibleDC failed")
 		return false
 	}
 	u.memBmp = win.CreateCompatibleBitmap(hdc, w, h)
 	if u.memBmp == 0 {
+		log.Warn("CreateCompatibleBitmap failed", "w", w, "h", h)
 		win.DeleteDC(u.memDC)
 		u.memDC = 0
 		return false
 	}
-	win.SelectObject(u.memDC, win.HGDIOBJ(u.memBmp))
+	// Keep the DC's previous object so we can deselect cleanly later.
+	u.memOldBmp = win.SelectObject(u.memDC, win.HGDIOBJ(u.memBmp))
 	u.memW, u.memH = w, h
 	return true
 }
@@ -1342,12 +1441,40 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 // paintChrome renders the Charm View() through a mini VT grid (Lip Gloss ANSI
 // → cells) so tabs/status/palette use the same paint path as the shell.
 func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
+	if hdc == 0 {
+		return
+	}
 	u.syncChrome()
 	cols := u.cols
 	if cols < 20 {
 		cols = 20
 	}
-	ct := chrome.RenderToTerm(u.chrome, cols)
+	// Cap chrome rows so a stuck palette can't allocate a huge grid.
+	crowsWant := u.chrome.RowCount()
+	if crowsWant > 20 {
+		crowsWant = 20
+	}
+
+	cells := u.chromeCells
+	if u.chromeDirty || u.chromeCols != cols || len(cells) != crowsWant {
+		ct := chrome.RenderToTerm(u.chrome, cols)
+		ccols, crows := ct.Size()
+		if crows > 20 {
+			crows = 20
+		}
+		cells = make([][]cellPix, crows)
+		for y := 0; y < crows; y++ {
+			row := make([]cellPix, cols)
+			for x := 0; x < cols && x < ccols; x++ {
+				row[x] = glyphToCell(ct.Cell(x, y))
+			}
+			cells[y] = row
+		}
+		u.chromeCells = cells
+		u.chromeCols = cols
+		u.chromeDirty = false
+	}
+
 	cw, ch := u.metricW, u.metricH
 	if cw < 1 {
 		cw = cellW
@@ -1355,12 +1482,17 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	if ch < 1 {
 		ch = cellH
 	}
-	// vt10x.Size returns (cols, rows).
-	ccols, crows := ct.Size()
+	crows := len(cells)
 	chromeH := int32(crows) * ch
+	if chromeH > rect.Bottom-rect.Top {
+		// Don't paint past the client area (minimized / tiny windows).
+		chromeH = rect.Bottom - rect.Top
+		if ch > 0 {
+			crows = int(chromeH / ch)
+		}
+	}
 
-	// Full-bleed bar under the whole chrome (including side padding) so the
-	// strip reads as one surface, not a grid of cells floating on black.
+	// Full-bleed bar under the whole chrome (including side padding).
 	{
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(0x1f, 0x1f, 0x1f)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
@@ -1370,17 +1502,16 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 		}
 	}
 
-	// Coalesce horizontal runs of identical BG.
 	type bgRun struct {
 		x0, x1  int
 		r, g, b byte
 	}
 	for y := 0; y < crows; y++ {
+		row := cells[y]
 		var runs []bgRun
-		for x := 0; x < cols && x < ccols; x++ {
-			cell := glyphToCell(ct.Cell(x, y))
+		for x := 0; x < len(row); x++ {
+			cell := row[x]
 			br, bg, bb := cell.BR, cell.BG, cell.BB
-			// Default black → bar grey (matches theme colBar).
 			if br == 0 && bg == 0 && bb == 0 {
 				br, bg, bb = 0x1f, 0x1f, 0x1f
 			}
@@ -1400,11 +1531,10 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 					Right:  4 + int32(rn.x1+1)*cw,
 					Bottom: int32(y+1) * ch,
 				}
-				// Extend first/last run to window edges for a seamless bar.
 				if rn.x0 == 0 {
 					r.Left = 0
 				}
-				if rn.x1 >= cols-1 || rn.x1 >= ccols-1 {
+				if rn.x1 >= len(row)-1 {
 					r.Right = rect.Right
 				}
 				fillRect(hdc, r, brush)
@@ -1412,8 +1542,8 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 			}
 		}
 		win.SetBkMode(hdc, win.TRANSPARENT)
-		for x := 0; x < cols && x < ccols; x++ {
-			cell := glyphToCell(ct.Cell(x, y))
+		for x := 0; x < len(row); x++ {
+			cell := row[x]
 			r := cell.Ch
 			if r == 0 || r == ' ' {
 				continue
@@ -1424,7 +1554,6 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 				Right:  4 + int32(x+1)*cw,
 				Bottom: int32(y+1) * ch,
 			}
-			// Hairline / accent / blocks: edge-to-edge geometry (no font padding).
 			if drawCellGlyph(hdc, r, cellRect, cell.FR, cell.FG, cell.FB) {
 				continue
 			}
@@ -1434,15 +1563,16 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 			}
 			if cell.Bold && u.fontBold != 0 {
 				win.SelectObject(hdc, win.HGDIOBJ(u.fontBold))
-			} else {
+			} else if u.font != 0 {
 				win.SelectObject(hdc, win.HGDIOBJ(u.font))
 			}
 			win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
 			win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
 		}
 	}
-	// Restore regular font for shell paint.
-	win.SelectObject(hdc, win.HGDIOBJ(u.font))
+	if u.font != 0 {
+		win.SelectObject(hdc, win.HGDIOBJ(u.font))
+	}
 	u.chromePx = chromeH
 }
 

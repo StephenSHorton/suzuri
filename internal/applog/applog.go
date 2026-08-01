@@ -85,6 +85,16 @@ func setup(w io.Writer, level log.Level) {
 	log.SetDefault(logger)
 }
 
+// Sync flushes the log file so a native crash shortly after still leaves
+// the last lines on disk.
+func Sync() {
+	mu.Lock()
+	defer mu.Unlock()
+	if file != nil {
+		_ = file.Sync()
+	}
+}
+
 // Close flushes and closes the log file.
 func Close() {
 	mu.Lock()
