@@ -4,14 +4,29 @@ import (
 	"strings"
 
 	"github.com/hinshun/vt10x"
+
+	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
 
 const defaultScrollbackMax = 5000
 
+// History line kinds for Warp-style command blocks.
+const (
+	histNormal byte = iota
+	histBlockRule  // horizontal rule above a command
+	histBlockCmd   // "❯ command" header
+)
+
+type histLine struct {
+	text string
+	kind byte
+}
+
 // scrollback keeps rows that have scrolled off the live VT screen.
 // History stores plain text (color not preserved for v0.3); live rows keep full cells.
+// Command blocks are host-injected history lines with kind metadata for color.
 type scrollback struct {
-	lines  []string
+	lines  []histLine
 	max    int
 	prev   []string
 	offset int
@@ -89,15 +104,51 @@ func screenShiftedUp(prev, cur []string) bool {
 }
 
 func (s *scrollback) push(line string) {
-	s.lines = append(s.lines, strings.TrimRight(line, " "))
+	s.pushKind(line, histNormal)
+}
+
+func (s *scrollback) pushKind(line string, kind byte) {
+	s.lines = append(s.lines, histLine{text: strings.TrimRight(line, " "), kind: kind})
 	if len(s.lines) > s.max {
 		drop := len(s.lines) - s.max
-		s.lines = append([]string(nil), s.lines[drop:]...)
+		s.lines = append([]histLine(nil), s.lines[drop:]...)
 		if s.offset > 0 {
 			s.offset -= drop
 			if s.offset < 0 {
 				s.offset = 0
 			}
+		}
+	}
+}
+
+// pushBlock injects a Warp-style command block into history (above live screen).
+// cols is used for the rule width; cmd may be multi-line.
+func (s *scrollback) pushBlock(cmd string, cols int) {
+	if stringsTrimSpace(cmd) == "" {
+		return
+	}
+	if cols < 12 {
+		cols = 12
+	}
+	ruleW := cols - 2
+	if ruleW < 8 {
+		ruleW = 8
+	}
+	if ruleW > 120 {
+		ruleW = 120
+	}
+	// Spacer + rule + command line(s).
+	s.pushKind("", histNormal)
+	s.pushKind(strings.Repeat("─", ruleW), histBlockRule)
+	// First line gets the prompt; continuation lines are indented.
+	prompt := inputBarPrompt
+	indent := strings.Repeat(" ", len([]rune(prompt)))
+	parts := strings.Split(cmd, "\n")
+	for i, p := range parts {
+		if i == 0 {
+			s.pushKind(prompt+p, histBlockCmd)
+		} else {
+			s.pushKind(indent+p, histBlockCmd)
 		}
 	}
 }
@@ -117,7 +168,7 @@ func (s *scrollback) atBottom() bool { return s.offset == 0 }
 
 func (s *scrollback) stickBottom() { s.offset = 0 }
 
-// viewCells builds the viewport with color for live rows and default colors for history.
+// viewCells builds the viewport with color for live rows and styled history.
 func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPix {
 	live := snapshotScreenCells(term)
 	cols, _ := term.Size()
@@ -140,10 +191,11 @@ func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPi
 		}
 		idx := start + i
 		if idx < len(s.lines) {
-			// history: monochrome
-			rs := []rune(s.lines[idx])
+			hl := s.lines[idx]
+			rs := []rune(hl.text)
+			fr, fg, fb := histColor(hl.kind)
 			for x := 0; x < cols && x < len(rs); x++ {
-				row[x] = cellPix{Ch: rs[x], FR: 180, FG: 180, FB: 180}
+				row[x] = cellPix{Ch: rs[x], FR: fr, FG: fg, FB: fb}
 			}
 		} else {
 			li := idx - len(s.lines)
@@ -154,6 +206,19 @@ func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPi
 		out[i] = row
 	}
 	return out
+}
+
+// histColor returns FG for a history line kind (theme-aware).
+func histColor(kind byte) (r, g, b byte) {
+	switch kind {
+	case histBlockRule:
+		// Soft primary for the rule.
+		return chrome.PrimR/2 + 40, chrome.PrimG/2 + 40, chrome.PrimB/2 + 40
+	case histBlockCmd:
+		return chrome.PrimR, chrome.PrimG, chrome.PrimB
+	default:
+		return chrome.SoftR, chrome.SoftG, chrome.SoftB
+	}
 }
 
 // view keeps rune-only API for tests / simple callers.
@@ -184,7 +249,7 @@ func (s *scrollback) lineText(abs int, term vt10x.Terminal) string {
 		return ""
 	}
 	if abs < len(s.lines) {
-		return s.lines[abs]
+		return s.lines[abs].text
 	}
 	live := snapshotScreenText(term)
 	i := abs - len(s.lines)

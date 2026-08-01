@@ -1,6 +1,8 @@
 package ui
 
 // inputBar is the Warp-style fixed bottom command line: local edit, Enter → PTY.
+// Supports soft-wrap + explicit newlines (Shift+Enter); history is per-bar
+// (each tab owns its own inputBar).
 type inputBar struct {
 	runes   []rune
 	cursor  int // 0..len(runes)
@@ -10,9 +12,10 @@ type inputBar struct {
 }
 
 const (
-	inputBarRows   = 2 // separator + content row (in cell heights)
-	inputBarPrompt = "❯ "
-	maxInputHist   = 200
+	inputBarPrompt       = "❯ "
+	maxInputHist         = 200
+	maxInputVisualRows   = 8
+	minInputContentWidth = 8
 )
 
 func (b *inputBar) text() string {
@@ -30,14 +33,14 @@ func (b *inputBar) insertRunes(rs []rune) {
 	if len(rs) == 0 {
 		return
 	}
-	// Flatten newlines for single-line bar.
+	// Keep newlines (multiline). Flatten CR; expand tabs.
 	clean := make([]rune, 0, len(rs))
 	for _, r := range rs {
 		switch r {
-		case '\r', '\n':
-			if len(clean) > 0 && clean[len(clean)-1] != ' ' {
-				clean = append(clean, ' ')
-			}
+		case '\r':
+			// ignore CR; \n is the line break
+		case '\n':
+			clean = append(clean, '\n')
 		case '\t':
 			clean = append(clean, ' ', ' ')
 		default:
@@ -50,12 +53,7 @@ func (b *inputBar) insertRunes(rs []rune) {
 		return
 	}
 	b.leaveHistoryBrowse()
-	if b.cursor < 0 {
-		b.cursor = 0
-	}
-	if b.cursor > len(b.runes) {
-		b.cursor = len(b.runes)
-	}
+	b.clampCursor()
 	out := make([]rune, 0, len(b.runes)+len(clean))
 	out = append(out, b.runes[:b.cursor]...)
 	out = append(out, clean...)
@@ -68,10 +66,23 @@ func (b *inputBar) insertRune(r rune) {
 	b.insertRunes([]rune{r})
 }
 
+func (b *inputBar) insertNewline() {
+	b.insertRune('\n')
+}
+
 func (b *inputBar) leaveHistoryBrowse() {
 	if b.histIdx >= 0 {
 		b.histIdx = -1
 		b.draft = ""
+	}
+}
+
+func (b *inputBar) clampCursor() {
+	if b.cursor < 0 {
+		b.cursor = 0
+	}
+	if b.cursor > len(b.runes) {
+		b.cursor = len(b.runes)
 	}
 }
 
@@ -105,11 +116,20 @@ func (b *inputBar) moveRight() {
 }
 
 func (b *inputBar) moveHome() {
-	b.cursor = 0
+	// Start of current logical line (after last \n), not whole buffer.
+	i := b.cursor
+	for i > 0 && b.runes[i-1] != '\n' {
+		i--
+	}
+	b.cursor = i
 }
 
 func (b *inputBar) moveEnd() {
-	b.cursor = len(b.runes)
+	i := b.cursor
+	for i < len(b.runes) && b.runes[i] != '\n' {
+		i++
+	}
+	b.cursor = i
 }
 
 // historyUp walks toward older commands.
@@ -150,8 +170,9 @@ func (b *inputBar) applyHistory() {
 	b.cursor = len(b.runes)
 }
 
-// submit returns the line to send to the PTY (without CR) and clears the bar.
-// Empty lines still submit (shell gets a bare Enter).
+// submit returns the line to send to the PTY (without trailing CR) and clears.
+// Empty lines still submit (shell gets a bare Enter). Newlines are kept so
+// multi-line scripts go through as-is.
 func (b *inputBar) submit() string {
 	line := string(b.runes)
 	if trimmed := stringsTrimSpace(line); trimmed != "" {
@@ -166,46 +187,159 @@ func (b *inputBar) submit() string {
 	return line
 }
 
-// viewSlice returns the visible portion of the line for a content width of
-// contentCols cells (excluding the prompt), and the caret column within that
-// slice (0..contentCols).
-func (b *inputBar) viewSlice(contentCols int) (visible string, caretCol int) {
-	if contentCols < 1 {
-		contentCols = 1
+// wrapLayout breaks the buffer into display rows of at most width columns.
+// Explicit '\n' always breaks. Returns display lines (without the '\n' char)
+// and the caret row/col within that layout.
+func (b *inputBar) wrapLayout(width int) (lines []string, caretRow, caretCol int) {
+	if width < 1 {
+		width = 1
 	}
-	// Horizontal scroll so the cursor stays in view.
-	start := 0
-	if b.cursor > contentCols {
-		start = b.cursor - contentCols
+	type pos struct{ row, col int }
+	// Map each rune index → display position; also index==len for caret at end.
+	at := make([]pos, len(b.runes)+1)
+	var (
+		row, col int
+		cur      []rune
+	)
+	flush := func() {
+		lines = append(lines, string(cur))
+		cur = cur[:0]
+		row++
+		col = 0
 	}
-	// Prefer keeping some left context when possible.
-	if b.cursor-start > contentCols {
-		start = b.cursor - contentCols
+	at[0] = pos{0, 0}
+	for i, r := range b.runes {
+		if r == '\n' {
+			flush()
+			at[i+1] = pos{row, col}
+			continue
+		}
+		if col >= width {
+			flush()
+		}
+		cur = append(cur, r)
+		col++
+		at[i+1] = pos{row, col}
 	}
-	end := start + contentCols
-	if end > len(b.runes) {
-		end = len(b.runes)
+	// Trailing partial line (or empty buffer → one empty line).
+	if len(cur) > 0 || len(lines) == 0 || (len(b.runes) > 0 && b.runes[len(b.runes)-1] == '\n') {
+		lines = append(lines, string(cur))
 	}
-	if start > end {
-		start = end
+	if len(lines) == 0 {
+		lines = []string{""}
 	}
-	visible = string(b.runes[start:end])
-	caretCol = b.cursor - start
-	if caretCol < 0 {
-		caretCol = 0
+	b.clampCursor()
+	p := at[b.cursor]
+	// If caret maps past last flushed empty after final \n, clamp.
+	if p.row >= len(lines) {
+		p.row = len(lines) - 1
+		p.col = len([]rune(lines[p.row]))
 	}
-	if caretCol > contentCols {
-		caretCol = contentCols
+	return lines, p.row, p.col
+}
+
+// visualRows is how many content rows the bar needs (capped).
+func (b *inputBar) visualRows(width int) int {
+	lines, _, _ := b.wrapLayout(width)
+	n := len(lines)
+	if n < 1 {
+		n = 1
 	}
-	return visible, caretCol
+	if n > maxInputVisualRows {
+		n = maxInputVisualRows
+	}
+	return n
+}
+
+// moveVisualUp moves the caret one display row up. Returns false if already
+// on the first row (caller may walk history).
+func (b *inputBar) moveVisualUp(width int) bool {
+	_, cr, cc := b.wrapLayout(width)
+	if cr <= 0 {
+		return false
+	}
+	b.cursor = indexFromLayout(b.runes, width, cr-1, cc)
+	return true
+}
+
+// moveVisualDown moves one display row down. Returns false if on last row.
+func (b *inputBar) moveVisualDown(width int) bool {
+	lines, cr, cc := b.wrapLayout(width)
+	if cr >= len(lines)-1 {
+		return false
+	}
+	b.cursor = indexFromLayout(b.runes, width, cr+1, cc)
+	return true
+}
+
+// indexFromLayout finds the rune index for a display (row, col).
+func indexFromLayout(runes []rune, width, wantRow, wantCol int) int {
+	if width < 1 {
+		width = 1
+	}
+	row, col := 0, 0
+	for i, r := range runes {
+		if row == wantRow && col >= wantCol {
+			return i
+		}
+		if r == '\n' {
+			if row == wantRow {
+				return i // end of that line
+			}
+			row++
+			col = 0
+			continue
+		}
+		if col >= width {
+			row++
+			col = 0
+			if row == wantRow && col >= wantCol {
+				return i
+			}
+		}
+		col++
+		if row == wantRow && col > wantCol {
+			// landed past wantCol on this rune
+			return i + 1
+		}
+	}
+	// End of buffer / last line.
+	return len(runes)
+}
+
+// visibleWindow returns a window of display lines when content exceeds max
+// visual rows, keeping the caret row in view. Also returns caret row/col
+// relative to the returned window.
+func (b *inputBar) visibleWindow(width, maxRows int) (view []string, caretRow, caretCol int) {
+	lines, cr, cc := b.wrapLayout(width)
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	if len(lines) <= maxRows {
+		return lines, cr, cc
+	}
+	start := cr - maxRows + 1
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxRows
+	if end > len(lines) {
+		end = len(lines)
+		start = end - maxRows
+		if start < 0 {
+			start = 0
+		}
+	}
+	view = lines[start:end]
+	return view, cr - start, cc
 }
 
 func stringsTrimSpace(s string) string {
 	i, j := 0, len(s)
-	for i < j && (s[i] == ' ' || s[i] == '\t') {
+	for i < j && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
 		i++
 	}
-	for j > i && (s[j-1] == ' ' || s[j-1] == '\t') {
+	for j > i && (s[j-1] == ' ' || s[j-1] == '\t' || s[j-1] == '\n' || s[j-1] == '\r') {
 		j--
 	}
 	return s[i:j]

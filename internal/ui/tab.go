@@ -13,7 +13,7 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/host"
 )
 
-// tab is one shell session: ConPTY + VT grid + scrollback.
+// tab is one shell session: ConPTY + VT grid + scrollback + Warp input bar.
 type tab struct {
 	id    int
 	title string
@@ -22,6 +22,8 @@ type tab struct {
 	term vt10x.Terminal // UI thread only for Write/Cell
 	sb   *scrollback
 	sel  cellSel
+	// Per-tab command line (draft + history) so switching tabs restores state.
+	input inputBar
 
 	writeCh chan []byte
 	inMu    sync.Mutex
@@ -59,6 +61,7 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 		sess:    sess,
 		term:    vt10x.New(vt10x.WithSize(cols, rows)),
 		sb:      newScrollback(),
+		input:   inputBar{histIdx: -1},
 		writeCh: make(chan []byte, 256),
 	}
 	t.alive.Store(true)

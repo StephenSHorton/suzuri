@@ -22,19 +22,73 @@ type Session struct {
 
 // DefaultShell returns a sensible Windows shell command line.
 //
-// -NoProfile keeps the prompt ASCII-simple for v0 (profile themes often inject
-// Nerd-Font / private-use glyphs that show as "unknown character" boxes).
+// -NoProfile keeps the prompt ASCII-simple (profile themes often inject
+// Nerd-Font glyphs). QuietPrompt strips the in-band PS/cmd prompt so the
+// Warp-style bottom bar is the only command line the user types into.
 func DefaultShell() string {
 	if ps, err := exec.LookPath("pwsh.exe"); err == nil {
-		return ps + " -NoLogo -NoProfile"
+		return QuietPrompt(ps + " -NoLogo -NoProfile")
 	}
 	if ps, err := exec.LookPath("powershell.exe"); err == nil {
-		return ps + " -NoLogo -NoProfile"
+		return QuietPrompt(ps + " -NoLogo -NoProfile")
 	}
 	if s := os.Getenv("COMSPEC"); s != "" {
-		return s
+		return QuietPrompt(s)
 	}
-	return `C:\Windows\System32\cmd.exe`
+	return QuietPrompt(`C:\Windows\System32\cmd.exe`)
+}
+
+// QuietPrompt rewrites a shell command line so the in-band prompt is empty.
+// The host owns input via the bottom bar; a visible PS/cmd prompt only
+// duplicates chrome. Custom -Command/-c user shells are left alone.
+func QuietPrompt(commandLine string) string {
+	cl := strings.TrimSpace(commandLine)
+	if cl == "" {
+		return cl
+	}
+	lower := strings.ToLower(cl)
+	// Already customized startup — don't double-wrap.
+	if strings.Contains(lower, " -command ") || strings.Contains(lower, " -command\"") ||
+		strings.Contains(lower, " -c ") || strings.Contains(lower, " /c ") ||
+		strings.Contains(lower, "function prompt") {
+		return cl
+	}
+	base := filepathBase(cl)
+	switch {
+	case strings.EqualFold(base, "pwsh.exe") || strings.EqualFold(base, "pwsh") ||
+		strings.EqualFold(base, "powershell.exe") || strings.EqualFold(base, "powershell"):
+		// Empty prompt; Clear-Host wipes the leftover banner row after -NoLogo.
+		return cl + ` -NoExit -Command "function prompt { '' }; Clear-Host"`
+	case strings.EqualFold(base, "cmd.exe") || strings.EqualFold(base, "cmd"):
+		// $S = space in cmd PROMPT syntax — effectively blank.
+		if strings.Contains(lower, "/k") || strings.Contains(lower, "/c") {
+			return cl
+		}
+		return cl + ` /k prompt $S`
+	default:
+		return cl
+	}
+}
+
+// filepathBase returns the executable name from a command line (first token).
+func filepathBase(commandLine string) string {
+	s := strings.TrimSpace(commandLine)
+	if s == "" {
+		return ""
+	}
+	// Quoted path.
+	if s[0] == '"' {
+		if i := strings.IndexByte(s[1:], '"'); i >= 0 {
+			s = s[1 : 1+i]
+		}
+	} else if i := strings.IndexAny(s, " \t"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.ReplaceAll(s, `/`, `\`)
+	if i := strings.LastIndexByte(s, '\\'); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
 }
 
 // StartSession launches commandLine (e.g. powershell) on a ConPTY of size cols×rows.
@@ -42,6 +96,8 @@ func DefaultShell() string {
 func StartSession(commandLine string, cols, rows int, workDir string) (*Session, error) {
 	if commandLine == "" {
 		commandLine = DefaultShell()
+	} else {
+		commandLine = QuietPrompt(commandLine)
 	}
 	if cols < 20 {
 		cols = 80

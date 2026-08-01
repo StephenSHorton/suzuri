@@ -65,7 +65,6 @@ func Run() error {
 		blinkStart: time.Now(),
 		nextTabID:  0,
 		chrome:     chrome.New(cols),
-		input:      inputBar{histIdx: -1},
 	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	ui.alive.Store(true)
@@ -111,9 +110,6 @@ type winUI struct {
 	chromePx int32 // pixel height of Charm chrome
 	inputPx  int32 // pixel height of Warp-style bottom input bar
 
-	// Warp-style command line (local edit; Enter sends line+\r to ConPTY).
-	input inputBar
-
 	blinkStart    time.Time
 	alive         atomic.Bool
 	lastBackspace time.Time // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
@@ -144,6 +140,33 @@ func (u *winUI) activeTab() *tab {
 		return nil
 	}
 	return u.tabs[u.active]
+}
+
+// activeInput returns the Warp bar for the active tab (nil if none).
+func (u *winUI) activeInput() *inputBar {
+	if t := u.activeTab(); t != nil {
+		return &t.input
+	}
+	return nil
+}
+
+// inputContentCols is the character width available for command text (excl. prompt).
+func (u *winUI) inputContentCols() int {
+	cw := u.metricW
+	if cw < 1 {
+		cw = cellW
+	}
+	w := u.width
+	if w < 1 {
+		w = int32(u.cols) * cw
+	}
+	const padX int32 = 8
+	promptW := int32(len([]rune(inputBarPrompt))) * cw
+	cols := int((w - padX - promptW - padX) / cw)
+	if cols < minInputContentWidth {
+		cols = minInputContentWidth
+	}
+	return cols
 }
 
 func (u *winUI) syncChrome() {
@@ -279,18 +302,29 @@ func (u *winUI) shellPadY() int32 {
 	return u.chromePixelHeight()
 }
 
-// inputBarPixelHeight is the fixed Warp-style bottom bar (separator + line).
+// inputBarPixelHeight grows with wrapped / multi-line content (capped).
 func (u *winUI) inputBarPixelHeight() int32 {
 	ch := u.metricH
 	if ch < 1 {
 		ch = cellH
 	}
-	// Extra padding so the bar feels like a docked prompt, not a single cell.
-	h := int32(inputBarRows)*ch + ch/2
+	rows := 1
+	if in := u.activeInput(); in != nil {
+		rows = in.visualRows(u.inputContentCols())
+	}
+	// Top hairline padding + content rows + bottom pad.
+	h := int32(rows)*ch + ch/2 + 4
 	if h < ch*2 {
 		h = ch * 2
 	}
 	return h
+}
+
+// maybeResizeForInput recomputes shell rows when the bar height changes.
+func (u *winUI) maybeResizeForInput() {
+	if u.width > 0 && u.height > 0 {
+		u.applyClientSize(u.width, u.height)
+	}
 }
 
 // shellBottomY is the exclusive bottom of the shell viewport (above input bar).
@@ -616,6 +650,7 @@ func (u *winUI) newTabUI(profileName string) {
 	u.selecting = false
 	setWindowTitle(u.hwnd, "suzuri — "+t.title)
 	u.syncChrome()
+	u.maybeResizeForInput()
 	if profileName != "" {
 		u.toast("tab: " + profileName)
 	}
@@ -653,6 +688,7 @@ func (u *winUI) closeTabUI(id int) {
 		setWindowTitle(u.hwnd, "suzuri — "+t.title)
 	}
 	u.syncChrome()
+	u.maybeResizeForInput()
 	msg := fmt.Sprintf("%d tabs", len(u.tabs))
 	if len(u.tabs) == 1 {
 		msg = "1 tab"
@@ -672,6 +708,7 @@ func (u *winUI) switchTab(delta int) {
 		setWindowTitle(u.hwnd, "suzuri — "+t.title)
 	}
 	u.syncChrome()
+	u.maybeResizeForInput()
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
@@ -793,7 +830,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 		if ch >= 32 && ch != 0x7f {
-			u.input.insertRune(ch)
+			if in := u.activeInput(); in != nil {
+				prevRows := in.visualRows(u.inputContentCols())
+				in.insertRune(ch)
+				if in.visualRows(u.inputContentCols()) != prevRows {
+					u.maybeResizeForInput()
+				}
+			}
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
@@ -871,6 +914,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					setWindowTitle(u.hwnd, "suzuri — "+t.title)
 				}
 				u.syncChrome()
+				u.maybeResizeForInput()
 				win.InvalidateRect(hwnd, nil, false)
 			}
 			return 0
@@ -893,10 +937,12 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		// Ctrl+C: copy selection, else clear bar, else interrupt PTY.
 		if ctrl && !shift && (wParam == 'C' || wParam == 'c') {
+			in := u.activeInput()
 			if tab != nil && !tab.sel.empty() {
 				u.copySelection()
-			} else if len(u.input.runes) > 0 {
-				u.input.clear()
+			} else if in != nil && len(in.runes) > 0 {
+				in.clear()
+				u.maybeResizeForInput()
 				win.InvalidateRect(hwnd, nil, false)
 			} else {
 				u.sendKey([]byte{0x03})
@@ -911,36 +957,66 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if tab == nil {
 			return 0
 		}
+		in := u.activeInput()
+		if in == nil {
+			return 0
+		}
+		cols := u.inputContentCols()
 		// Warp input bar editing + shell scroll.
 		switch wParam {
 		case win.VK_RETURN:
-			line := u.input.submit()
-			// Send command + CR so PowerShell/cmd executes it.
-			u.sendKey([]byte(line + "\r"))
-			if t := u.activeTab(); t != nil {
-				t.sb.stickBottom()
+			if shift {
+				// Shift+Enter — new line in the bar (multiline script).
+				prevRows := in.visualRows(cols)
+				in.insertNewline()
+				if in.visualRows(cols) != prevRows {
+					u.maybeResizeForInput()
+				}
+				win.InvalidateRect(hwnd, nil, false)
+				return 0
 			}
+			line := in.submit()
+			u.maybeResizeForInput()
+			// Warp-style command block in scrollback, then send to PTY.
+			if stringsTrimSpace(line) != "" {
+				tab.sb.pushBlock(line, u.cols)
+			}
+			// Multi-line: send with real newlines; final CR executes.
+			payload := line
+			if strings.Contains(payload, "\n") {
+				// PowerShell accepts multi-line paste ending in CR.
+				payload = strings.ReplaceAll(payload, "\n", "\r\n")
+			}
+			u.sendKey([]byte(payload + "\r"))
+			tab.sb.stickBottom()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_UP:
-			u.input.historyUp()
+			if !in.moveVisualUp(cols) {
+				in.historyUp()
+			}
+			u.maybeResizeForInput()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_DOWN:
-			u.input.historyDown()
+			if !in.moveVisualDown(cols) {
+				in.historyDown()
+			}
+			u.maybeResizeForInput()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_RIGHT:
-			u.input.moveRight()
+			in.moveRight()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_LEFT:
-			u.input.moveLeft()
+			in.moveLeft()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_DELETE:
-			u.input.deleteForward()
+			in.deleteForward()
+			u.maybeResizeForInput()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_HOME:
-			u.input.moveHome()
+			in.moveHome()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_END:
-			u.input.moveEnd()
+			in.moveEnd()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_PRIOR:
 			tab.sb.scrollBy(u.rows/2, u.rows)
@@ -949,15 +1025,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			tab.sb.scrollBy(-(u.rows / 2), u.rows)
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_ESCAPE:
-			if len(u.input.runes) > 0 || u.input.histIdx >= 0 {
-				u.input.clear()
+			if len(in.runes) > 0 || in.histIdx >= 0 {
+				in.clear()
+				u.maybeResizeForInput()
 				win.InvalidateRect(hwnd, nil, false)
 			}
 		case win.VK_BACK:
 			u.handleInputBackspace(hwnd, lParam)
 		case win.VK_TAB:
 			// No completion yet — insert two spaces for indent-ish typing.
-			u.input.insertRunes([]rune{' ', ' '})
+			in.insertRunes([]rune{' ', ' '})
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
@@ -1017,6 +1094,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 						setWindowTitle(u.hwnd, "suzuri — "+t.title)
 					}
 					u.syncChrome()
+					u.maybeResizeForInput()
 					win.InvalidateRect(hwnd, nil, false)
 				}
 			}
@@ -1679,8 +1757,16 @@ func (u *winUI) pasteClipboard() {
 	if err != nil || text == "" {
 		return
 	}
-	// Paste into the Warp input bar (newlines flatten to spaces).
-	u.input.insertRunes([]rune(text))
+	in := u.activeInput()
+	if in == nil {
+		return
+	}
+	// Paste into the Warp input bar (newlines kept for multiline).
+	prevRows := in.visualRows(u.inputContentCols())
+	in.insertRunes([]rune(text))
+	if in.visualRows(u.inputContentCols()) != prevRows {
+		u.maybeResizeForInput()
+	}
 	if u.hwnd != 0 {
 		win.InvalidateRect(u.hwnd, nil, false)
 	}
@@ -1695,7 +1781,13 @@ func (u *winUI) handleInputBackspace(hwnd win.HWND, lParam uintptr) {
 		return
 	}
 	u.lastBackspace = now
-	u.input.backspace()
+	if in := u.activeInput(); in != nil {
+		prevRows := in.visualRows(u.inputContentCols())
+		in.backspace()
+		if in.visualRows(u.inputContentCols()) != prevRows {
+			u.maybeResizeForInput()
+		}
+	}
 	win.InvalidateRect(hwnd, nil, false)
 	u.drainQueuedBackspaces(hwnd)
 }
@@ -1790,6 +1882,7 @@ func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 }
 
 // paintInputBar draws the Warp-style fixed command line at the bottom.
+// Grows with soft-wrap / Shift+Enter newlines (capped at maxInputVisualRows).
 func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 	if hdc == 0 {
 		return
@@ -1833,68 +1926,97 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 	}
 
 	const padX int32 = 8
-	// Vertically center the prompt line in the bar.
-	textTop := top + (barH-ch)/2
-	if textTop < top+2 {
-		textTop = top + 2
+	padTop := top + ch/4
+	if padTop < top+2 {
+		padTop = top + 2
 	}
 
 	oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	defer win.SelectObject(hdc, oldFont)
 	win.SetBkMode(hdc, win.TRANSPARENT)
 
-	// Prompt glyph.
 	prompt := inputBarPrompt
-	pr, err := syscall.UTF16FromString(prompt)
-	promptW := int32(len([]rune(prompt))) * cw
-	if err == nil && len(pr) >= 2 {
-		win.SetTextColor(hdc, win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB))
-		win.TextOut(hdc, padX, textTop, &pr[0], int32(len(pr)-1))
-	}
+	promptRunes := len([]rune(prompt))
+	promptW := int32(promptRunes) * cw
+	contentCols := u.inputContentCols()
 
-	// Content width in cells.
-	availPx := rect.Right - padX - promptW - padX
-	contentCols := int(availPx / cw)
-	if contentCols < 4 {
-		contentCols = 4
-	}
-	vis, caretCol := u.input.viewSlice(contentCols)
-	if vis != "" {
-		if s, err := syscall.UTF16FromString(vis); err == nil && len(s) >= 2 {
-			win.SetTextColor(hdc, win.RGB(chrome.TextR, chrome.TextG, chrome.TextB))
-			win.TextOut(hdc, padX+promptW, textTop, &s[0], int32(len(s)-1))
+	in := u.activeInput()
+	empty := in == nil || len(in.runes) == 0
+
+	// Placeholder when empty.
+	if empty {
+		pr, err := syscall.UTF16FromString(prompt)
+		if err == nil && len(pr) >= 2 {
+			win.SetTextColor(hdc, win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB))
+			win.TextOut(hdc, padX, padTop, &pr[0], int32(len(pr)-1))
 		}
-	} else {
-		// Placeholder when empty.
-		hint := "type a command — Enter to run"
+		hint := "type a command — Enter to run · ⇧Enter newline"
 		if s, err := syscall.UTF16FromString(hint); err == nil && len(s) >= 2 {
 			win.SetTextColor(hdc, win.RGB(chrome.SoftR, chrome.SoftG, chrome.SoftB))
-			win.TextOut(hdc, padX+promptW, textTop, &s[0], int32(len(s)-1))
+			win.TextOut(hdc, padX+promptW, padTop, &s[0], int32(len(s)-1))
+		}
+		// Caret at start.
+		u.paintInputCaret(hdc, padX+promptW, padTop, cw, ch)
+		return
+	}
+
+	view, caretRow, caretCol := in.visibleWindow(contentCols, maxInputVisualRows)
+	indentW := promptW // continuation lines align under content start
+
+	for i, line := range view {
+		y := padTop + int32(i)*ch
+		xText := padX + promptW
+		if i == 0 {
+			// Prompt only on first visible row when that row is the logical start.
+			// When scrolled, still show a dim continuation marker.
+			if caretRow == i && /* best effort: */ true {
+				pr, err := syscall.UTF16FromString(prompt)
+				if err == nil && len(pr) >= 2 {
+					win.SetTextColor(hdc, win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB))
+					win.TextOut(hdc, padX, y, &pr[0], int32(len(pr)-1))
+				}
+			}
+		} else {
+			xText = padX + indentW
+		}
+		// For row 0 we already reserved promptW; for others indent matches.
+		if i == 0 {
+			xText = padX + promptW
+		}
+		if line != "" {
+			if s, err := syscall.UTF16FromString(line); err == nil && len(s) >= 2 {
+				win.SetTextColor(hdc, win.RGB(chrome.TextR, chrome.TextG, chrome.TextB))
+				win.TextOut(hdc, xText, y, &s[0], int32(len(s)-1))
+			}
 		}
 	}
 
-	// Caret (blinks with the same clock as the old shell cursor).
+	// Caret on the caret row within the window.
+	caretY := padTop + int32(caretRow)*ch
+	caretX := padX + promptW + int32(caretCol)*cw
+	u.paintInputCaret(hdc, caretX, caretY, cw, ch)
+}
+
+func (u *winUI) paintInputCaret(hdc win.HDC, x, y, cw, ch int32) {
 	showCaret := true
 	if win.GetForegroundWindow() == u.hwnd {
 		elapsed := time.Since(u.blinkStart).Seconds()
 		period := cursorBlinkPeriod.Seconds()
-		// Visible half of the sine wave.
 		alpha := 0.5 + 0.5*math.Sin(2*math.Pi*(elapsed/period))
 		showCaret = alpha > 0.35
 	}
-	if showCaret {
-		cellL := padX + promptW + int32(caretCol)*cw
-		cellT := textTop
-		th := cw / 5
-		if th < 2 {
-			th = 2
-		}
-		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB)}
-		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			r := win.RECT{Left: cellL, Top: cellT, Right: cellL + th, Bottom: cellT + ch}
-			fillRect(hdc, r, brush)
-			win.DeleteObject(win.HGDIOBJ(brush))
-		}
+	if !showCaret {
+		return
+	}
+	th := cw / 5
+	if th < 2 {
+		th = 2
+	}
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB)}
+	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+		r := win.RECT{Left: x, Top: y, Right: x + th, Bottom: y + ch}
+		fillRect(hdc, r, brush)
+		win.DeleteObject(win.HGDIOBJ(brush))
 	}
 }
 
