@@ -753,13 +753,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.focus()
 		px := int32(win.LOWORD(uint32(lParam)))
 		py := int32(win.HIWORD(uint32(lParam)))
-		// Only the first chrome row is the tab strip (status/palette below).
+		// Neon tab cards are 3 rows tall; clicks anywhere on a card switch tabs.
+		// Clicks in palette / status below the strip do not select text.
 		chH := u.metricH
 		if chH < 1 {
 			chH = cellH
 		}
+		tabStripH := int32(chrome.TabStripRows()) * chH
 		if py < u.chromePixelHeight() {
-			if py < chH {
+			if py < tabStripH {
 				if i := u.hitTab(px); i >= 0 {
 					u.active = i
 					u.selecting = false
@@ -1492,9 +1494,9 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 		}
 	}
 
-	// Full-bleed bar under the whole chrome (including side padding).
+	// Full-bleed bar under the whole chrome (Charm void strip).
 	{
-		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(0x1f, 0x1f, 0x1f)}
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.BarR, chrome.BarG, chrome.BarB)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
 			r := win.RECT{Left: 0, Top: 0, Right: rect.Right, Bottom: chromeH}
 			fillRect(hdc, r, brush)
@@ -1513,7 +1515,7 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 			cell := row[x]
 			br, bg, bb := cell.BR, cell.BG, cell.BB
 			if br == 0 && bg == 0 && bb == 0 {
-				br, bg, bb = 0x1f, 0x1f, 0x1f
+				br, bg, bb = chrome.BarR, chrome.BarG, chrome.BarB
 			}
 			if n := len(runs); n > 0 && runs[n-1].x1 == x-1 &&
 				runs[n-1].r == br && runs[n-1].g == bg && runs[n-1].b == bb {

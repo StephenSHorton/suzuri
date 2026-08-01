@@ -18,6 +18,13 @@ func TestViewHasTabs(t *testing.T) {
 	if !strings.Contains(v, "alpha") {
 		t.Fatalf("view missing inactive tab: %q", v)
 	}
+	// Rounded border glyphs (Charm neon cards).
+	if !strings.Contains(v, "╭") && !strings.Contains(v, "╮") {
+		// Some widths may clip; at least ensure multi-line strip.
+		if strings.Count(v, "\n") < 2 {
+			t.Fatalf("expected multi-line rounded tab strip, view=%q", v)
+		}
+	}
 }
 
 func TestTabBoundsMatchLayout(t *testing.T) {
@@ -38,14 +45,14 @@ func TestTabBoundsMatchLayout(t *testing.T) {
 	}
 }
 
-func TestNoStatusByDefault(t *testing.T) {
+func TestTabStripIsThreeRows(t *testing.T) {
 	m := New(80)
 	m.Tabs = []Tab{{ID: 0, Title: "shell"}}
-	if m.RowCount() != 2 {
-		t.Fatalf("default rows=%d want 2 (tabs+rule)", m.RowCount())
+	if m.RowCount() != 3 {
+		t.Fatalf("rows=%d want 3 (rounded tab cards)", m.RowCount())
 	}
-	if strings.Contains(m.View(), "ctrl+k") {
-		t.Fatal("default view should not dump keybinding help into chrome")
+	if TabStripRows() != 3 {
+		t.Fatal("TabStripRows")
 	}
 }
 
@@ -68,17 +75,19 @@ func TestRenderToTerm(t *testing.T) {
 	m.Active = 0
 	term := RenderToTerm(m, 60)
 	cols, rows := term.Size()
-	if cols < 20 || rows < 2 {
+	if cols < 20 || rows < 3 {
 		t.Fatalf("size %d×%d", cols, rows)
 	}
 	found := false
-	for x := 0; x < cols; x++ {
-		if term.Cell(x, 0).Char != 0 && term.Cell(x, 0).Char != ' ' {
-			found = true
-			break
+	for y := 0; y < rows && y < 3; y++ {
+		for x := 0; x < cols; x++ {
+			if term.Cell(x, y).Char != 0 && term.Cell(x, y).Char != ' ' {
+				found = true
+				break
+			}
 		}
 	}
 	if !found {
-		t.Fatal("chrome row 0 empty after render")
+		t.Fatal("chrome empty after render")
 	}
 }

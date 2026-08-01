@@ -1,5 +1,5 @@
 // Package chrome is the Charm (Bubble Tea + Lip Gloss) UI layer for suzuri:
-// tab strip, hairline rule, and command palette. Shell content stays VT.
+// neon rounded tab cards, hairline, and command palette. Shell content stays VT.
 package chrome
 
 import (
@@ -103,47 +103,47 @@ func New(width int) Model {
 	delegate.Styles.NormalDesc = lipgloss.NewStyle().
 		Foreground(colMute).
 		Padding(0, 1)
+	// Selected: neon left edge + soft pink wash (card-list look).
 	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
 		Foreground(colText).
 		Background(colSel).
 		Bold(true).
 		Padding(0, 1).
 		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(colAccent)
+		BorderForeground(colNeon)
 	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
-		Foreground(colAccent).
+		Foreground(colViolet).
 		Background(colSel).
 		Padding(0, 1).
 		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(colAccent)
+		BorderForeground(colNeon)
 	delegate.Styles.DimmedTitle = lipgloss.NewStyle().Foreground(colMute).Padding(0, 1)
 	delegate.Styles.DimmedDesc = lipgloss.NewStyle().Foreground(colMute).Padding(0, 1)
 	delegate.Styles.FilterMatch = lipgloss.NewStyle().Foreground(colMatch).Underline(true)
 
 	l := list.New(items, delegate, width, 8)
-	l.Title = "Command palette"
+	l.Title = "Commands"
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
 	l.SetShowHelp(false)
 	l.SetShowPagination(false)
 	l.DisableQuitKeybindings()
 	l.Styles.Title = lipgloss.NewStyle().
-		Foreground(colAccent).
+		Foreground(colNeon).
 		Bold(true).
-		MarginBottom(0).
 		Padding(0, 1)
-	l.Styles.FilterPrompt = lipgloss.NewStyle().Foreground(colAccent)
-	l.Styles.FilterCursor = lipgloss.NewStyle().Foreground(colText)
+	l.Styles.FilterPrompt = lipgloss.NewStyle().Foreground(colNeon)
+	l.Styles.FilterCursor = lipgloss.NewStyle().Foreground(colCyan)
 	l.Styles.NoItems = lipgloss.NewStyle().Foreground(colDim).Padding(1, 1)
 	l.FilterInput.Prompt = "› "
-	l.FilterInput.Placeholder = "Type a command…"
-	l.FilterInput.PromptStyle = lipgloss.NewStyle().Foreground(colAccent)
+	l.FilterInput.Placeholder = "filter…"
+	l.FilterInput.PromptStyle = lipgloss.NewStyle().Foreground(colNeon)
 	l.FilterInput.TextStyle = lipgloss.NewStyle().Foreground(colText)
 	l.FilterInput.PlaceholderStyle = lipgloss.NewStyle().Foreground(colMute)
 
 	return Model{
 		Width:   width,
-		Height:  2,
+		Height:  TabStripRows(),
 		Status:  "",
 		palette: l,
 	}
@@ -220,26 +220,26 @@ func tabLabel(t Tab, i int) string {
 	if title == "" {
 		title = fmt.Sprintf("Shell %d", i+1)
 	}
-	// Strip common PowerShell noise for a calmer tab title.
 	title = strings.TrimPrefix(title, "Administrator: ")
 	rs := []rune(title)
-	if len(rs) > 20 {
-		title = string(rs[:18]) + "…"
+	if len(rs) > 18 {
+		title = string(rs[:16]) + "…"
 	}
 	return title
 }
 
-// View: tab strip + accent hairline (+ optional status / palette).
+// TabStripRows is the height of the neon tab-card strip (rounded border = 3 rows).
+func TabStripRows() int { return 3 }
+
+// View: neon rounded tab cards (+ optional status / palette card).
 func (m Model) View() string {
 	w := m.Width
 	if w < 20 {
 		w = 20
 	}
 
-	tabs, bounds := m.layoutTabs(w)
-	rule := m.renderRule(w, bounds)
-
-	out := tabs + "\n" + rule
+	tabs, _ := m.layoutTabCards(w)
+	out := tabs
 	if m.showStatus() {
 		out += "\n" + m.renderStatus(w)
 	}
@@ -247,87 +247,83 @@ func (m Model) View() string {
 		return out
 	}
 
-	pw := min(52, max(28, w-8))
-	m.palette.SetWidth(pw)
-	m.palette.SetHeight(9)
-	card := stylePaletteBorder().Width(pw).Render(m.palette.View())
-	// Dim the rest of the row so the card reads as a modal, not a full-width dump.
+	pw := min(48, max(30, w-10))
+	m.palette.SetWidth(pw - 4)
+	m.palette.SetHeight(8)
+	// Nested rounded neon card — the Charm “floating panel” look.
+	inner := m.palette.View()
+	card := stylePaletteBorder().Width(pw).Render(inner)
+	// Dim void around the card so it reads as floating over the shell.
 	card = lipgloss.PlaceHorizontal(w, lipgloss.Center, card,
-		lipgloss.WithWhitespaceBackground(colShell),
+		lipgloss.WithWhitespaceBackground(colVoid),
 		lipgloss.WithWhitespaceForeground(colMute))
 	return out + "\n" + card
 }
 
-// layoutTabs builds the tab row and returns per-tab [start,end) columns.
-func (m Model) layoutTabs(w int) (string, [][2]int) {
+// layoutTabCards builds Charm-style rounded neon tab cards in a horizontal row.
+// Returns the multi-line strip and [startCol,endCol) bounds for hit-testing.
+func (m Model) layoutTabCards(w int) (string, [][2]int) {
 	bounds := make([][2]int, len(m.Tabs))
 	var parts []string
-	col := 0
 
-	// Leading pad.
-	lead := styleGap().Render(" ")
-	parts = append(parts, lead)
-	col += lipgloss.Width(lead)
+	// Brand as a small rounded violet chip so it aligns with 3-row tab cards.
+	brand := lipgloss.NewStyle().
+		Foreground(colViolet).
+		Background(colBar).
+		Bold(true).
+		Padding(0, 1).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colViolet).
+		BorderBackground(colBar).
+		Render("硯")
+	parts = append(parts, brand)
+	col := lipgloss.Width(brand)
+
+	gap := styleGap().Render(" ")
+	gapW := lipgloss.Width(gap)
 
 	if len(m.Tabs) == 0 {
-		parts = append(parts, styleInactiveTab().Render("no tabs"))
+		parts = append(parts, gap, styleInactiveTab().Render("no tabs"))
 	} else {
 		for i, t := range m.Tabs {
+			parts = append(parts, gap)
+			col += gapW
 			label := tabLabel(t, i)
-			var seg string
+			var card string
 			if i == m.Active {
-				seg = styleActiveTab().Render(label)
+				card = styleActiveTab().Render(label)
 			} else {
-				seg = styleInactiveTab().Render(label)
+				card = styleInactiveTab().Render(label)
 			}
-			sw := lipgloss.Width(seg)
-			bounds[i] = [2]int{col, col + sw}
-			parts = append(parts, seg)
-			col += sw
-			// Gap between tabs (not after last).
-			if i < len(m.Tabs)-1 {
-				g := styleGap().Render(" ")
-				parts = append(parts, g)
-				col += lipgloss.Width(g)
-			}
+			cw := lipgloss.Width(card)
+			bounds[i] = [2]int{col, col + cw}
+			parts = append(parts, card)
+			col += cw
 		}
 	}
 
-	// New-tab affordance.
-	gap := styleGap().Render("  ")
-	parts = append(parts, gap)
-	col += lipgloss.Width(gap)
-	parts = append(parts, stylePlus().Render("+"))
+	// Neon-adjacent new-tab chip.
+	parts = append(parts, gap, stylePlus().Render("+"))
 
-	left := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
-	lw := lipgloss.Width(left)
-	if lw >= w {
-		return styleBar().Width(w).MaxWidth(w).Render(left), bounds
-	}
-	fill := styleGap().Render(strings.Repeat(" ", w-lw))
-	return left + fill, bounds
-}
+	row := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	// Place on full-width bar so rounded cards sit on a continuous void strip.
+	strip := lipgloss.NewStyle().
+		Background(colBar).
+		Width(w).
+		Padding(0, 0).
+		Render(row)
 
-// renderRule draws a hairline under the strip; accent under the active tab
-// (Windows Terminal “selected tab attaches to content” cue).
-func (m Model) renderRule(w int, bounds [][2]int) string {
-	if w < 1 {
-		return ""
-	}
-	cells := make([]string, w)
-	for i := 0; i < w; i++ {
-		cells[i] = styleRule().Render("─")
-	}
-	if m.Active >= 0 && m.Active < len(bounds) {
-		b := bounds[m.Active]
-		for x := b[0]; x < b[1] && x < w; x++ {
-			if x >= 0 {
-				// Active segment: solid accent on shell bg (opens into viewport).
-				cells[x] = styleRuleActive().Render("▀")
-			}
+	// If Join produced multi-line cards, ensure every line is full width with bar bg.
+	lines := strings.Split(strip, "\n")
+	for i, ln := range lines {
+		lw := lipgloss.Width(ln)
+		if lw < w {
+			lines[i] = ln + styleGap().Render(strings.Repeat(" ", w-lw))
+		} else if lw > w {
+			lines[i] = lipgloss.NewStyle().MaxWidth(w).Render(ln)
 		}
 	}
-	return strings.Join(cells, "")
+	return strings.Join(lines, "\n"), bounds
 }
 
 func (m Model) showStatus() bool {
@@ -339,23 +335,24 @@ func (m Model) renderStatus(w int) string {
 	return styleStatus().Width(w).Render(m.Status)
 }
 
-// TabBounds matches layoutTabs (for mouse hit-testing).
+// TabBounds matches layoutTabCards (column range of each card, including borders).
 func (m Model) TabBounds() [][2]int {
 	w := m.Width
 	if w < 20 {
 		w = 20
 	}
-	_, bounds := m.layoutTabs(w)
+	_, bounds := m.layoutTabCards(w)
 	return bounds
 }
 
 // RowCount is how many terminal rows the chrome View occupies.
 func (m Model) RowCount() int {
-	n := 2 // tabs + rule
+	n := TabStripRows()
 	if m.showStatus() {
 		n++
 	}
 	if m.PaletteOpen {
+		// rounded border card ~10 rows
 		n += 11
 	}
 	return n
