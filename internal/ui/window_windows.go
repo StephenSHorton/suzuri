@@ -778,7 +778,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_DESTROY:
-		log.Info("WM_DESTROY — tearing down")
+		log.Info("WM_DESTROY — tearing down", "tabs", len(u.tabs))
 		u.alive.Store(false)
 		unregisterUI(hwnd)
 		for _, t := range u.tabs {
@@ -792,6 +792,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		u.hwnd = 0
 		win.PostQuitMessage(0)
+		return 0
+
+	case win.WM_QUIT:
+		// DefWindowProc path — message loop also sees GetMessage==0.
+		log.Info("WM_QUIT")
 		return 0
 	}
 	return win.DefWindowProc(hwnd, msg, wParam, lParam)

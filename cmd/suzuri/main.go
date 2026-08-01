@@ -45,6 +45,7 @@ func main() {
 	runtime.LockOSThread()
 
 	log.Info("starting",
+		"pid", os.Getpid(),
 		"goos", runtime.GOOS,
 		"goarch", runtime.GOARCH,
 		"version", runtime.Version(),
@@ -58,5 +59,5 @@ func main() {
 		}
 		os.Exit(1)
 	}
-	log.Info("exiting cleanly")
+	log.Info("exiting cleanly", "pid", os.Getpid())
 }
