@@ -15,20 +15,29 @@ import (
 
 // softwarePainter rasterizes terminal cell grids into an RGBA buffer.
 type softwarePainter struct {
-	face   font.Face
-	cellW  int
-	cellH  int
-	ascent int
+	face    font.Face
+	cjkFace font.Face
+	cellW   int
+	cellH   int
+	ascent  int
+	sizePx  float64
 }
 
 func newSoftwarePainter(sizePx int) *softwarePainter {
-	face := faceForSize(float64(sizePx))
-	if face == nil {
-		return &softwarePainter{cellW: cellW, cellH: cellH, ascent: cellH - 4}
+	if sizePx < 10 {
+		sizePx = 14
 	}
-	m := face.Metrics()
-	// Fixed cell pitch: use advance of 'M' when available, else size estimate.
-	adv, ok := face.GlyphAdvance('M')
+	face := faceForSize(float64(sizePx))
+	cjk := cjkFaceForSize(float64(sizePx))
+	if face == nil && cjk == nil {
+		return &softwarePainter{cellW: cellW, cellH: cellH, ascent: cellH - 4, sizePx: float64(sizePx)}
+	}
+	mFace := face
+	if mFace == nil {
+		mFace = cjk
+	}
+	m := mFace.Metrics()
+	adv, ok := mFace.GlyphAdvance('M')
 	cw := sizePx*3/5 + 1
 	if ok && adv > 0 {
 		cw = adv.Round()
@@ -44,7 +53,14 @@ func newSoftwarePainter(sizePx int) *softwarePainter {
 	if ascent < 1 {
 		ascent = ch - 4
 	}
-	return &softwarePainter{face: face, cellW: cw, cellH: ch, ascent: ascent}
+	return &softwarePainter{
+		face:    face,
+		cjkFace: cjk,
+		cellW:   cw,
+		cellH:   ch,
+		ascent:  ascent,
+		sizePx:  float64(sizePx),
+	}
 }
 
 func (p *softwarePainter) metrics() (cw, ch int) {
@@ -55,37 +71,65 @@ func (p *softwarePainter) metrics() (cw, ch int) {
 }
 
 func (p *softwarePainter) close() {
-	if p != nil && p.face != nil {
+	if p == nil {
+		return
+	}
+	if p.face != nil {
 		_ = p.face.Close()
 		p.face = nil
 	}
+	if p.cjkFace != nil {
+		_ = p.cjkFace.Close()
+		p.cjkFace = nil
+	}
 }
 
-// paintFrame draws shell grid + chrome strips + input bar into dst.
-func (p *softwarePainter) paintFrame(
-	dst *image.RGBA,
-	shell [][]cellPix,
-	chromeCells [][]cellPix,
-	overlay [][]cellPix,
-	inputLines [][]cellPix,
-	padY, shellBot int,
-	curX, curY int,
-	curVis bool,
-	curAlpha float64,
-	dimShell bool,
-) {
+// paintOpts controls layered chrome/intro/shell paint.
+type paintOpts struct {
+	Shell        [][]cellPix
+	Chrome       [][]cellPix
+	Overlay      [][]cellPix
+	PadY         int
+	ShellBot     int
+	CurX, CurY   int
+	CurVis       bool
+	CurAlpha     float64
+	DimShell     bool
+	SettingsOpen bool
+	// Intro / underlay
+	MatrixCells  []rainCell
+	WatermarkFade float64
+	// Input bar (themed; drawn as solid panel + glyphs)
+	InputPrompt   string
+	InputLines    []string // visual lines of content (no prompt on row 0 — prompt separate)
+	InputCaretRow int
+	InputCaretCol int // content col (after prompt on row 0)
+	InputEmpty    bool
+	InputHint     string
+	ShowInput     bool
+	CursorStyle   int // config.CursorStyle as int to avoid import cycle issues — use values 0/1/2
+}
+
+// paintFrame draws shell + chrome + intro + input + overlay into dst.
+func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	if dst == nil || p == nil {
 		return
 	}
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
-	// Void background
-	draw.Draw(dst, dst.Bounds(), &image.Uniform{C: color.RGBA{R: chrome.VoidR, G: chrome.VoidG, B: chrome.VoidB, A: 255}}, image.Point{}, draw.Src)
+	// Theme void background (not hardcoded grey).
+	draw.Draw(dst, dst.Bounds(), &image.Uniform{C: color.RGBA{
+		R: chrome.VoidR, G: chrome.VoidG, B: chrome.VoidB, A: 255,
+	}}, image.Point{}, draw.Src)
 
 	cw, ch := p.cellW, p.cellH
 	const padX = 4
+	padY, shellBot := o.PadY, o.ShellBot
+	if shellBot > h {
+		shellBot = h
+	}
 
 	// Shell grid
-	for y, row := range shell {
+	for y, row := range o.Shell {
 		py := padY + y*ch
 		if py+ch > shellBot {
 			break
@@ -95,11 +139,9 @@ func (p *softwarePainter) paintFrame(
 			if px >= w {
 				break
 			}
-			// Selection / cursor handled by caller via cell colors.
 			br, bg, bb := cell.BR, cell.BG, cell.BB
-			if curVis && x == curX && y == curY {
-				// Soft cursor blend toward fg.
-				a := curAlpha
+			if o.CurVis && x == o.CurX && y == o.CurY {
+				a := o.CurAlpha
 				if a < 0.15 {
 					a = 0.15
 				}
@@ -117,8 +159,24 @@ func (p *softwarePainter) paintFrame(
 		}
 	}
 
-	if dimShell {
-		// Darken shell under overlay.
+	// Center 硯 under rain (intro) / steady whisper after.
+	if o.WatermarkFade > 0.01 && !o.DimShell {
+		p.paintShellWatermark(dst, padY, shellBot, o.WatermarkFade)
+	}
+
+	// Matrix rain (intro or settings underlay).
+	if len(o.MatrixCells) > 0 {
+		if o.SettingsOpen || o.DimShell {
+			// Matte first for settings underlay.
+			fillShellMatte(dst, padY, shellBot, true)
+		}
+		p.paintMatrixRain(dst, padY, shellBot, o.MatrixCells)
+	} else if o.DimShell && !o.SettingsOpen {
+		// Non-settings overlay: dim matte + 猫咪 texture.
+		fillShellMatte(dst, padY, shellBot, false)
+		p.paintDimNekoField(dst, padY, shellBot)
+	} else if o.DimShell {
+		// Generic dim.
 		for y := padY; y < shellBot && y < h; y++ {
 			for x := 0; x < w; x++ {
 				i := dst.PixOffset(x, y)
@@ -129,27 +187,24 @@ func (p *softwarePainter) paintFrame(
 		}
 	}
 
-	// Chrome strip at top
-	paintCellStrip(p, dst, chromeCells, 0, 0, padX)
-
-	// Input bar at bottom of shell
-	if len(inputLines) > 0 {
-		// Hairline
-		hairY := shellBot
-		if hairY < h {
-			for x := 0; x < w; x++ {
-				setRGB(dst, x, hairY, 40, 44, 52)
-			}
-		}
-		iy := shellBot + 1
-		paintCellStrip(p, dst, inputLines, padX, iy, 0)
+	// Chrome strip — bar fill first so empty cells show theme bar, not void.
+	chromeH := 0
+	if len(o.Chrome) > 0 {
+		chromeH = len(o.Chrome) * ch
+		fillRectRGBA(dst, 0, 0, w, chromeH, chrome.BarR, chrome.BarG, chrome.BarB)
+		paintCellStrip(p, dst, o.Chrome, padX, 0, true)
 	}
 
-	// Overlay card (centered-ish over shell)
-	if len(overlay) > 0 {
-		oh := len(overlay) * ch
+	// Themed Warp input bar.
+	if o.ShowInput {
+		p.paintInputBar(dst, o, shellBot, h)
+	}
+
+	// Overlay card
+	if len(o.Overlay) > 0 {
+		oh := len(o.Overlay) * ch
 		ow := 0
-		for _, row := range overlay {
+		for _, row := range o.Overlay {
 			if len(row) > ow {
 				ow = len(row)
 			}
@@ -163,13 +218,114 @@ func (p *softwarePainter) paintFrame(
 		if oy+oh > shellBot {
 			oy = padY
 		}
-		// Card background matte
-		fillRectRGBA(dst, ox-4, oy-4, ow+8, oh+8, 18, 18, 22)
-		paintCellStrip(p, dst, overlay, ox, oy, 0)
+		fillRectRGBA(dst, ox-4, oy-4, ow+8, oh+8, chrome.PanelR, chrome.PanelG, chrome.PanelB)
+		paintCellStrip(p, dst, o.Overlay, ox, oy, false)
 	}
 }
 
-func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, oy, _ int) {
+func (p *softwarePainter) paintInputBar(dst *image.RGBA, o paintOpts, shellBot, clientH int) {
+	w := dst.Bounds().Dx()
+	cw, ch := p.cellW, p.cellH
+	barH := clientH - shellBot
+	if barH < ch {
+		barH = ch + 4
+	}
+	top := shellBot
+	// Panel fill (theme).
+	fillRectRGBA(dst, 0, top, w, barH, chrome.PanelR, chrome.PanelG, chrome.PanelB)
+	// Primary accent hairline.
+	hair := ch / 10
+	if hair < 1 {
+		hair = 1
+	}
+	fillRectRGBA(dst, 0, top, w, hair, chrome.PrimR, chrome.PrimG, chrome.PrimB)
+	topPad := ch / 5
+	if topPad < 2 {
+		topPad = 2
+	}
+	padTop := top + hair + topPad
+	const padX = 8
+
+	prompt := o.InputPrompt
+	if prompt == "" {
+		prompt = inputBarPrompt
+	}
+	promptRunes := []rune(prompt)
+	promptW := len(promptRunes) * cw
+
+	if o.InputEmpty {
+		// Prompt in primary.
+		x := padX
+		for _, r := range promptRunes {
+			p.drawGlyph(dst, x, padTop, r, chrome.PrimR, chrome.PrimG, chrome.PrimB)
+			x += cw
+		}
+		// Placeholder hint in soft.
+		if o.InputHint != "" {
+			x = padX + promptW + 2*cw
+			for _, r := range []rune(o.InputHint) {
+				p.drawGlyph(dst, x, padTop, r, chrome.SoftR, chrome.SoftG, chrome.SoftB)
+				x += cw
+			}
+		}
+		p.paintInputCaret(dst, padX+promptW, padTop, o.CursorStyle, o.CurAlpha)
+		return
+	}
+
+	for i, line := range o.InputLines {
+		y := padTop + i*ch
+		xText := padX + promptW
+		if i == 0 {
+			x := padX
+			for _, r := range promptRunes {
+				p.drawGlyph(dst, x, y, r, chrome.PrimR, chrome.PrimG, chrome.PrimB)
+				x += cw
+			}
+		}
+		if line != "" {
+			x := xText
+			for _, r := range []rune(line) {
+				p.drawGlyph(dst, x, y, r, chrome.TextR, chrome.TextG, chrome.TextB)
+				x += cw
+			}
+		}
+	}
+	caretY := padTop + o.InputCaretRow*ch
+	caretX := padX + promptW + o.InputCaretCol*cw
+	p.paintInputCaret(dst, caretX, caretY, o.CursorStyle, o.CurAlpha)
+}
+
+func (p *softwarePainter) paintInputCaret(dst *image.RGBA, x, y, style int, alpha float64) {
+	if alpha <= 0 {
+		return
+	}
+	cw, ch := p.cellW, p.cellH
+	cr, cg, cb := blendRGB(
+		chrome.PanelR, chrome.PanelG, chrome.PanelB,
+		chrome.PrimR, chrome.PrimG, chrome.PrimB,
+		alpha,
+	)
+	switch style {
+	case 1: // underline
+		th := ch / 8
+		if th < 2 {
+			th = 2
+		}
+		fillRectRGBA(dst, x, y+ch-th, cw, th, cr, cg, cb)
+	case 2: // bar
+		th := cw / 5
+		if th < 1 {
+			th = 1
+		}
+		fillRectRGBA(dst, x, y, th, ch, cr, cg, cb)
+	default: // block
+		// Semi-opaque block via blend already applied to color.
+		fillRectRGBA(dst, x, y, cw, ch, cr, cg, cb)
+	}
+}
+
+// paintCellStrip paints a cell grid. barMode fills default-black empty cells as bar.
+func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, oy int, barMode bool) {
 	if p == nil || len(cells) == 0 {
 		return
 	}
@@ -185,15 +341,25 @@ func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, 
 			if px >= w {
 				break
 			}
-			// Transparent overlay BG → skip fill
-			if isTransparentOverlayBG(cell.BR, cell.BG, cell.BB) {
+			br, bg, bb := cell.BR, cell.BG, cell.BB
+			empty := cell.Ch == 0 || cell.Ch == ' '
+			if !barMode && empty && isTransparentOverlayBG(br, bg, bb) {
 				if cell.Ch != 0 && cell.Ch != ' ' {
 					p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
 				}
 				continue
 			}
-			fillRectRGBA(dst, px, py, cw, ch, cell.BR, cell.BG, cell.BB)
-			if cell.Ch != 0 && cell.Ch != ' ' {
+			if barMode && br == 0 && bg == 0 && bb == 0 {
+				// Leave bar underlay (already filled).
+				if !empty {
+					p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
+				}
+				continue
+			}
+			if !(barMode && empty && br == chrome.BarR && bg == chrome.BarG && bb == chrome.BarB) {
+				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
+			}
+			if !empty {
 				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
 			}
 		}
@@ -201,15 +367,57 @@ func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, 
 }
 
 func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg, fb byte) {
-	if p.face == nil {
+	if p == nil {
 		return
 	}
-	dr, mask, maskp, _, ok := p.face.Glyph(fixed.P(px, py+p.ascent), r)
-	if !ok {
+	face := p.faceForRune(r)
+	if face == nil {
 		return
+	}
+	dr, mask, maskp, _, ok := face.Glyph(fixed.P(px, py+p.ascent), r)
+	if !ok {
+		// Try the other face once more.
+		alt := p.face
+		if face == p.face {
+			alt = p.cjkFace
+		}
+		if alt == nil || alt == face {
+			return
+		}
+		dr, mask, maskp, _, ok = alt.Glyph(fixed.P(px, py+p.ascent), r)
+		if !ok {
+			return
+		}
 	}
 	col := image.NewUniform(color.RGBA{R: fr, G: fg, B: fb, A: 255})
 	draw.DrawMask(dst, dr, col, image.Point{}, mask, maskp, draw.Over)
+}
+
+func (p *softwarePainter) faceForRune(r rune) font.Face {
+	if p == nil {
+		return nil
+	}
+	// Prefer CJK face for East Asian + half-width katakana (matrix rain).
+	if isEastAsianRune(r) || isHalfwidthKatakana(r) {
+		if p.cjkFace != nil {
+			return p.cjkFace
+		}
+	}
+	if p.face != nil {
+		// If primary lacks the glyph, fall through to CJK.
+		if _, ok := p.face.GlyphAdvance(r); ok {
+			return p.face
+		}
+	}
+	if p.cjkFace != nil {
+		return p.cjkFace
+	}
+	return p.face
+}
+
+func isHalfwidthKatakana(r rune) bool {
+	// U+FF61–FF9F halfwidth forms (incl. ｱ-ﾝ used in matrix rain).
+	return r >= 0xFF61 && r <= 0xFF9F
 }
 
 func fillRectRGBA(dst *image.RGBA, x, y, w, h int, r, g, b byte) {
@@ -218,13 +426,12 @@ func fillRectRGBA(dst *image.RGBA, x, y, w, h int, r, g, b byte) {
 	if rect.Empty() {
 		return
 	}
-	col := color.RGBA{R: r, G: g, B: b, A: 255}
 	for py := rect.Min.Y; py < rect.Max.Y; py++ {
 		for px := rect.Min.X; px < rect.Max.X; px++ {
 			i := dst.PixOffset(px, py)
-			dst.Pix[i+0] = col.R
-			dst.Pix[i+1] = col.G
-			dst.Pix[i+2] = col.B
+			dst.Pix[i+0] = r
+			dst.Pix[i+1] = g
+			dst.Pix[i+2] = b
 			dst.Pix[i+3] = 255
 		}
 	}
@@ -264,5 +471,3 @@ func isTransparentOverlayBG(r, g, b byte) bool {
 	}
 	return false
 }
-
-

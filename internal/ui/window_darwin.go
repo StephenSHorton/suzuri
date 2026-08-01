@@ -115,6 +115,12 @@ type macUI struct {
 	showSplash    bool
 	quit          bool
 
+	// Startup curtain (matrix / ripple / none) — same lifecycle as Windows host.
+	matrixIntroStart    time.Time
+	matrixIntroSpawnEnd time.Time
+	matrixIntroDone     bool
+	matrixIntroClearAt  time.Time
+
 	// Deferred work from PTY/MCP goroutines → UI tick.
 	jobs    chan func()
 	mcpJobs chan mcpJob
@@ -353,6 +359,18 @@ func (u *macUI) loop() error {
 		u.markChromeDirty()
 		u.showSplash = false
 	}
+	// Startup intro curtain (matrix rain by default).
+	now := time.Now()
+	u.matrixIntroStart = now
+	u.matrixIntroSpawnEnd = now.Add(matrixIntroSpawn)
+	u.matrixIntroDone = false
+	u.matrixIntroClearAt = time.Time{}
+	intro := config.Normalize(u.cfg).Intro
+	if intro == config.IntroNone {
+		// Still run a short delay so the center 硯 can fade in.
+		u.matrixIntroDone = false
+	}
+	log.Info("startup intro", "style", intro, "spawn", matrixIntroSpawn)
 	u.heldKeys = make(map[ebiten.Key]time.Time)
 
 	log.Info("starting ebiten window", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
@@ -811,11 +829,74 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 			log.Warn("first-run flag save failed", "err", err)
 		}
 	case chrome.ActionReplayIntro:
-		u.toast("intro replay is Windows-only for now")
+		u.replayIntro()
 	case chrome.ActionCheckUpdates:
 		runUpdateCheck(u.toast)
 	}
 	u.syncChrome()
+}
+
+// replayIntro restarts the configured startup curtain.
+func (u *macUI) replayIntro() {
+	if u == nil {
+		return
+	}
+	now := time.Now()
+	u.matrixIntroStart = now
+	u.matrixIntroSpawnEnd = now.Add(matrixIntroSpawn)
+	u.matrixIntroDone = false
+	u.matrixIntroClearAt = time.Time{}
+	style := config.Normalize(u.cfg).Intro
+	log.Info("replay intro", "style", style)
+}
+
+func (u *macUI) matrixIntroActive() bool {
+	if u == nil || u.matrixIntroStart.IsZero() || u.matrixIntroDone {
+		return false
+	}
+	if time.Since(u.matrixIntroStart) > matrixIntroMaxTotal {
+		u.finishMatrixIntro()
+		return false
+	}
+	return true
+}
+
+func (u *macUI) finishMatrixIntro() {
+	if u.matrixIntroDone {
+		return
+	}
+	u.matrixIntroDone = true
+	if u.matrixIntroClearAt.IsZero() {
+		u.matrixIntroClearAt = time.Now()
+	}
+	log.Debug("matrix intro wind-down complete")
+}
+
+// watermarkFade is 0..1 opacity for the center 硯 during/after intro rain.
+func (u *macUI) watermarkFade() float64 {
+	if u == nil {
+		return 1
+	}
+	if u.matrixIntroStart.IsZero() || u.matrixIntroSpawnEnd.IsZero() {
+		return 1
+	}
+	const (
+		afterSpawnDelay = 0.55
+		fadeIn          = 1.25
+	)
+	fadeStart := u.matrixIntroSpawnEnd.Add(time.Duration(afterSpawnDelay * float64(time.Second)))
+	now := time.Now()
+	if now.Before(fadeStart) {
+		return 0
+	}
+	t := now.Sub(fadeStart).Seconds() / fadeIn
+	if t <= 0 {
+		return 0
+	}
+	if t >= 1 {
+		return 1
+	}
+	return t * t * (3 - 2*t)
 }
 
 func configVisualEqual(a, b config.Config) bool {
@@ -1392,7 +1473,7 @@ func (u *macUI) pasteClipboard() {
 func (u *macUI) paintTo(screen *ebiten.Image) {
 	tab := u.activeTab()
 	if tab == nil || u.painter == nil {
-		screen.Fill(color.RGBA{R: 12, G: 12, B: 14, A: 255})
+		screen.Fill(color.RGBA{R: chrome.VoidR, G: chrome.VoidG, B: chrome.VoidB, A: 255})
 		return
 	}
 	w, h := int(u.width), int(u.height)
@@ -1404,12 +1485,10 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		u.tex = ebiten.NewImage(w, h)
 	}
 
-	// Ensure chrome cells
 	u.ensureChromeCells()
 	overlay := u.ensureOverlayCells()
 
 	grid := tab.sb.viewCells(tab.term, u.rows)
-	// Apply selection highlight.
 	if !tab.sel.empty() {
 		applySelectionTint(grid, tab, u.rows)
 	}
@@ -1417,27 +1496,108 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	curVis := tab.altScreen() && tab.term.CursorVisible()
 	curAlpha := u.caretAlpha()
 
-	inputLines := u.inputBarCells()
 	padY := int(u.shellPadY())
 	shellBot := int(u.shellBottomY(u.height))
+	cw := int(u.metricW)
+	if cw < 1 {
+		cw = cellW
+	}
+	ch := int(u.metricH)
+	if ch < 1 {
+		ch = cellH
+	}
+	shellRows := (shellBot - padY) / ch
+	if shellRows < 1 {
+		shellRows = u.rows
+	}
+	shellCols := (w - 4) / cw
+	if shellCols < 1 {
+		shellCols = u.cols
+	}
 
-	u.painter.paintFrame(
-		u.fb,
-		grid,
-		u.chromeCells,
-		overlay,
-		inputLines,
-		padY,
-		shellBot,
-		cur.X, cur.Y,
-		curVis,
-		curAlpha,
-		u.chrome.OverlayOpen(),
-	)
+	// Matrix rain: intro curtain, or continuous under settings.
+	var rain []rainCell
+	introStyle := config.Normalize(u.cfg).Intro
+	now := time.Now()
+	if u.chrome.SettingsOpen {
+		rain = matrixRainCells(shellCols, shellRows, matrixLoop, u.blinkStart, 0, now)
+	} else if u.matrixIntroActive() && introStyle != config.IntroNone {
+		mode := matrixSpawn
+		if now.After(u.matrixIntroSpawnEnd) {
+			mode = matrixWindDown
+		}
+		// Ripple falls back to matrix on mac for now (katakana rain still brands).
+		rain = matrixRainCells(shellCols, shellRows, mode, u.matrixIntroStart, matrixIntroSpawn, now)
+		if mode == matrixWindDown && len(rain) == 0 {
+			u.finishMatrixIntro()
+		}
+	} else if introStyle == config.IntroNone && u.matrixIntroActive() {
+		// No rain — finish after spawn so watermark can fade in.
+		if now.After(u.matrixIntroSpawnEnd) {
+			u.finishMatrixIntro()
+		}
+	}
+
+	inOpts := u.inputBarPaint()
+	opts := paintOpts{
+		Shell:         grid,
+		Chrome:        u.chromeCells,
+		Overlay:       overlay,
+		PadY:          padY,
+		ShellBot:      shellBot,
+		CurX:          cur.X,
+		CurY:          cur.Y,
+		CurVis:        curVis,
+		CurAlpha:      curAlpha,
+		DimShell:      u.chrome.OverlayOpen(),
+		SettingsOpen:  u.chrome.SettingsOpen,
+		MatrixCells:   rain,
+		WatermarkFade: u.watermarkFade(),
+		ShowInput:     u.inputBarPixelHeight() > 0,
+		CursorStyle:   int(u.cfg.Cursor),
+	}
+	opts.InputPrompt = inOpts.prompt
+	opts.InputLines = inOpts.lines
+	opts.InputCaretRow = inOpts.caretRow
+	opts.InputCaretCol = inOpts.caretCol
+	opts.InputEmpty = inOpts.empty
+	opts.InputHint = inOpts.hint
+
+	u.painter.paintFrame(u.fb, opts)
 
 	u.tex.WritePixels(u.fb.Pix)
 	op := &ebiten.DrawImageOptions{}
 	screen.DrawImage(u.tex, op)
+}
+
+type inputBarPaint struct {
+	prompt             string
+	lines              []string
+	caretRow, caretCol int
+	empty              bool
+	hint               string
+}
+
+func (u *macUI) inputBarPaint() inputBarPaint {
+	out := inputBarPaint{
+		prompt: inputBarPrompt,
+		hint:   chrome.InputBarPlaceholder(),
+		empty:  true,
+	}
+	in := u.activeInput()
+	if in == nil {
+		return out
+	}
+	if len(in.runes) == 0 {
+		return out
+	}
+	out.empty = false
+	cols := u.inputContentCols()
+	view, caretRow, caretCol := in.visibleWindow(cols, maxInputVisualRows)
+	out.lines = view
+	out.caretRow = caretRow
+	out.caretCol = caretCol
+	return out
 }
 
 func (u *macUI) caretAlpha() float64 {
@@ -1482,74 +1642,6 @@ func termToCells(term vt10x.Terminal) [][]cellPix {
 			row[x] = glyphToCell(term.Cell(x, y))
 		}
 		out[y] = row
-	}
-	return out
-}
-
-func (u *macUI) inputBarCells() [][]cellPix {
-	if u.inputBarPixelHeight() == 0 {
-		return nil
-	}
-	in := u.activeInput()
-	if in == nil {
-		return nil
-	}
-	cols := u.cols
-	if cols < 8 {
-		cols = 8
-	}
-	// Build a simple one-or-more-row cell view for the prompt + text.
-	contentCols := u.inputContentCols()
-	text := inputBarPrompt + in.text()
-	// Cursor marker: invert cell under cursor in prompt-adjusted index.
-	promptLen := len([]rune(inputBarPrompt))
-	cur := promptLen + in.cursor
-	runes := []rune(text)
-	// Soft-wrap into visual rows.
-	var lines [][]rune
-	var line []rune
-	for i, r := range runes {
-		if r == '\n' {
-			lines = append(lines, line)
-			line = nil
-			continue
-		}
-		line = append(line, r)
-		if len(line) >= contentCols+promptLen && i >= promptLen {
-			// Only wrap content; keep simple: wrap whole line width cols.
-		}
-		if len(line) >= cols {
-			lines = append(lines, line)
-			line = nil
-		}
-	}
-	lines = append(lines, line)
-	if len(lines) > maxInputVisualRows {
-		lines = lines[len(lines)-maxInputVisualRows:]
-	}
-
-	fr, fg, fb := byte(220), byte(230), byte(220)
-	br, bg, bb := byte(16), byte(18), byte(22)
-	out := make([][]cellPix, len(lines))
-	idx := 0
-	for yi, ln := range lines {
-		row := make([]cellPix, cols)
-		for x := 0; x < cols; x++ {
-			ch := ' '
-			if x < len(ln) {
-				ch = ln[x]
-			}
-			cell := cellPix{Ch: ch, FR: fr, FG: fg, FB: fb, BR: br, BG: bg, BB: bb}
-			if idx == cur && x < len(ln) {
-				cell.FR, cell.BR = cell.BR, cell.FR
-				cell.FG, cell.BG = cell.BG, cell.FG
-				cell.FB, cell.BB = cell.BB, cell.FB
-			}
-			row[x] = cell
-			idx++
-		}
-		// Account for newline in cursor index roughly
-		out[yi] = row
 	}
 	return out
 }
