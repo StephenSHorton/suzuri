@@ -224,10 +224,10 @@ Extend `internal/config` with load/save (atomic write). Theme id → palette fac
 
 ### Phase 3 — Stack upgrade (when needed)
 
-- [ ] Migrate to `charm.land/*/v2`.  
-- [ ] Richer command categories; keybind help.  
-- [ ] Profiles (cwd + shell + theme).  
-- [ ] First-run splash card (once).
+- [ ] Migrate to `charm.land/*/v2` (deferred — UI still on stable Charm v1; host hybrid doesn’t need tea.Program yet).  
+- [x] Richer command categories; keybind help (`Ctrl+/`).  
+- [x] Profiles (cwd + shell + theme) + palette “New tab: …”.  
+- [x] First-run splash card (once).
 
 ### Non-goals
 

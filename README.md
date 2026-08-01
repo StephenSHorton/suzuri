@@ -17,8 +17,10 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | Drag select + copy/paste | ✅ |
 | ANSI 16 / 256 / truecolor + bold | ✅ |
 | **Charm chrome** (tabs, status, palette) | ✅ |
-| **Settings** (`Ctrl+,` / palette) — font, size, cursor, theme, shell ANSI | ✅ |
+| **Settings** (`Ctrl+,` / palette) — font, size, cursor, theme, shell ANSI, profile | ✅ |
 | Themes: Inkstone / Charmtone / High contrast + soft/full ANSI remap | ✅ |
+| **Profiles** (Default / PowerShell / Cmd + custom in config.json) | ✅ |
+| **Help** `Ctrl+/` · first-run splash · command categories | ✅ |
 | Status toasts · click `+` · click-out dismiss · last-tab quit confirm | ✅ |
 | Config: `%LOCALAPPDATA%\suzuri\config.json` | ✅ |
 | Font: **Cascadia Mono** (fallback Consolas…) | ✅ |
@@ -35,7 +37,8 @@ A **real terminal host** for Windows: your window, ConPTY, VT cell grid. Not a T
 | `Ctrl+1`…`Ctrl+9` | Jump to tab |
 | Click tab strip | Activate tab |
 | `Ctrl+K` / `Ctrl+P` | Command palette (Charm) |
-| `Ctrl+,` | Settings (font, size, cursor, theme) |
+| `Ctrl+,` | Settings (font, size, cursor, theme, ANSI, profile) |
+| `Ctrl+/` | Keyboard shortcuts help |
 | `Ctrl+Shift+C` / `Ctrl+Insert` | Copy selection |
 | `Ctrl+Shift+V` / `Shift+Insert` / `Ctrl+V` | Paste |
 | `Ctrl+C` | Copy if selection; else `^C` to shell |

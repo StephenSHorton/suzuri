@@ -2,19 +2,65 @@ package chrome
 
 // Command is a palette entry backed by a host action.
 type Command struct {
-	ID     string
-	Title  string
-	Desc   string
-	Action HostAction
+	ID       string
+	Title    string
+	Desc     string
+	Category string // Tabs · Appearance · Help
+	Action   HostAction
+	// ProfileName set for ActionNewTabProfile.
+	ProfileName string
 }
 
-// DefaultCommands is the command registry for the palette.
-func DefaultCommands() []Command {
-	return []Command{
-		{ID: "settings", Title: "Settings", Desc: "Ctrl+,", Action: ActionOpenSettings},
-		{ID: "new_tab", Title: "New tab", Desc: "Ctrl+Shift+T", Action: ActionNewTab},
-		{ID: "close_tab", Title: "Close tab", Desc: "Ctrl+W", Action: ActionCloseTab},
-		{ID: "next_tab", Title: "Next tab", Desc: "Ctrl+Tab", Action: ActionNextTab},
-		{ID: "prev_tab", Title: "Previous tab", Desc: "Ctrl+Shift+Tab", Action: ActionPrevTab},
+// DefaultCommands is the command registry (categories shown in descriptions).
+func DefaultCommands(activeProfile string, profileNames []string) []Command {
+	cmds := []Command{
+		{ID: "settings", Title: "Settings", Desc: "Ctrl+, · Appearance", Category: "Appearance", Action: ActionOpenSettings},
+		{ID: "help", Title: "Keyboard shortcuts", Desc: "Ctrl+/ · Help", Category: "Help", Action: ActionOpenHelp},
+		{ID: "new_tab", Title: "New tab", Desc: "Ctrl+Shift+T · Tabs", Category: "Tabs", Action: ActionNewTab},
 	}
+	for _, name := range profileNames {
+		if name == "" {
+			continue
+		}
+		label := "New tab: " + name
+		if activeProfile != "" && equalFold(name, activeProfile) {
+			label += " ★"
+		}
+		cmds = append(cmds, Command{
+			ID:          "profile:" + name,
+			Title:       label,
+			Desc:        "Tabs · profile",
+			Category:    "Tabs",
+			Action:      ActionNewTabProfile,
+			ProfileName: name,
+		})
+	}
+	cmds = append(cmds,
+		Command{ID: "close_tab", Title: "Close tab", Desc: "Ctrl+W · Tabs", Category: "Tabs", Action: ActionCloseTab},
+		Command{ID: "next_tab", Title: "Next tab", Desc: "Ctrl+Tab · Tabs", Category: "Tabs", Action: ActionNextTab},
+		Command{ID: "prev_tab", Title: "Previous tab", Desc: "Ctrl+Shift+Tab · Tabs", Category: "Tabs", Action: ActionPrevTab},
+	)
+	return cmds
+}
+
+func equalFold(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
 }

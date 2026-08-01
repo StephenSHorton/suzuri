@@ -38,7 +38,8 @@ func DefaultShell() string {
 }
 
 // StartSession launches commandLine (e.g. powershell) on a ConPTY of size cols×rows.
-func StartSession(commandLine string, cols, rows int) (*Session, error) {
+// workDir empty uses the process working directory.
+func StartSession(commandLine string, cols, rows int, workDir string) (*Session, error) {
 	if commandLine == "" {
 		commandLine = DefaultShell()
 	}
@@ -48,10 +49,16 @@ func StartSession(commandLine string, cols, rows int) (*Session, error) {
 	if rows < 5 {
 		rows = 24
 	}
+	wd := strings.TrimSpace(workDir)
+	if wd == "" {
+		wd = mustWd()
+	} else if st, err := os.Stat(wd); err != nil || !st.IsDir() {
+		wd = mustWd()
+	}
 	cpty, err := conpty.Start(
 		commandLine,
 		conpty.ConPtyDimensions(cols, rows),
-		conpty.ConPtyWorkDir(mustWd()),
+		conpty.ConPtyWorkDir(wd),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("conpty start: %w", err)

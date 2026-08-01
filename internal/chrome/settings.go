@@ -16,6 +16,7 @@ const (
 	fieldCursor
 	fieldTheme
 	fieldANSIMap
+	fieldProfile
 	settingsFieldCount
 )
 
@@ -84,6 +85,17 @@ func (s *settingsState) nudge(delta int) {
 		}
 		i = (i + delta + len(ids)) % len(ids)
 		s.edit.ShellANSIMap = ids[i]
+	case fieldProfile:
+		names := config.ProfileNames(s.edit)
+		if len(names) == 0 {
+			return
+		}
+		i := indexFold(names, s.edit.ActiveProfile)
+		if i < 0 {
+			i = 0
+		}
+		i = (i + delta + len(names)) % len(names)
+		s.edit.ActiveProfile = names[i]
 	}
 }
 
@@ -103,6 +115,11 @@ func (s settingsState) valueLabel(f settingsField) string {
 		return config.ThemeLabel(s.edit.Theme)
 	case fieldANSIMap:
 		return config.ANSIMapLabel(s.edit.ShellANSIMap)
+	case fieldProfile:
+		if s.edit.ActiveProfile == "" {
+			return "Default"
+		}
+		return s.edit.ActiveProfile
 	default:
 		return ""
 	}
@@ -120,6 +137,8 @@ func (s settingsState) fieldLabel(f settingsField) string {
 		return "Theme"
 	case fieldANSIMap:
 		return "Shell ANSI"
+	case fieldProfile:
+		return "Profile"
 	default:
 		return ""
 	}

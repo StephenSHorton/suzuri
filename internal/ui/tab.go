@@ -32,23 +32,37 @@ type tab struct {
 	closed   bool
 }
 
-func newTab(id, cols, rows int) (*tab, error) {
-	shell := host.DefaultShell()
-	sess, err := host.StartSession(shell, cols, rows)
+// tabOpts optional launch recipe (profile).
+type tabOpts struct {
+	shell string // empty → DefaultShell
+	cwd   string // empty → process cwd
+	title string // empty → shell N
+}
+
+func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
+	shell := opts.shell
+	if shell == "" {
+		shell = host.DefaultShell()
+	}
+	sess, err := host.StartSession(shell, cols, rows, opts.cwd)
 	if err != nil {
-		log.Error("conpty start failed", "tab", id, "shell", shell, "err", err)
+		log.Error("conpty start failed", "tab", id, "shell", shell, "cwd", opts.cwd, "err", err)
 		return nil, err
+	}
+	title := opts.title
+	if title == "" {
+		title = fmt.Sprintf("shell %d", id+1)
 	}
 	t := &tab{
 		id:      id,
-		title:   fmt.Sprintf("shell %d", id+1),
+		title:   title,
 		sess:    sess,
 		term:    vt10x.New(vt10x.WithSize(cols, rows)),
 		sb:      newScrollback(),
 		writeCh: make(chan []byte, 256),
 	}
 	t.alive.Store(true)
-	log.Info("tab created", "id", id, "shell", shell, "cols", cols, "rows", rows, "pid", sess.Pid())
+	log.Info("tab created", "id", id, "shell", shell, "cwd", opts.cwd, "cols", cols, "rows", rows, "pid", sess.Pid())
 	return t, nil
 }
 

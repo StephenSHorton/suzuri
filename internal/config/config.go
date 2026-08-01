@@ -1,5 +1,5 @@
-// Package config holds suzuri product settings (font, cursor, theme) with
-// JSON persistence under %LOCALAPPDATA%\suzuri\config.json.
+// Package config holds suzuri product settings with JSON persistence under
+// %LOCALAPPDATA%\suzuri\config.json.
 package config
 
 import (
@@ -27,39 +27,64 @@ const (
 	ThemeHighContrast = "high_contrast"
 )
 
-// Shell ANSI map modes: remap classic 16-color SGR onto theme-friendly hues.
+// Shell ANSI map modes.
 const (
-	ANSIMapNone = "none" // stock VT colors
-	ANSIMapSoft = "soft" // blend theme accents (default)
-	ANSIMapFull = "full" // strong on-brand remap (Crush-style)
+	ANSIMapNone = "none"
+	ANSIMapSoft = "soft"
+	ANSIMapFull = "full"
 )
+
+// Profile is a named shell launch recipe (cwd + command + optional theme).
+type Profile struct {
+	Name  string `json:"name"`
+	Shell string `json:"shell,omitempty"` // empty → DefaultShell
+	Cwd   string `json:"cwd,omitempty"`   // empty → process cwd
+	Theme string `json:"theme,omitempty"` // empty → keep current theme
+}
 
 // Config holds product settings.
 type Config struct {
-	Cursor       CursorStyle
-	FontFace     string
-	FontSizePx   int
-	Theme        string
-	ShellANSIMap string
+	Cursor        CursorStyle
+	FontFace      string
+	FontSizePx    int
+	Theme         string
+	ShellANSIMap  string
+	Profiles      []Profile
+	ActiveProfile string // name of default profile for new tabs
+	FirstRunDone  bool
 }
 
-// fileDTO is the on-disk JSON shape (stable snake_case keys).
 type fileDTO struct {
-	FontFace     string `json:"font_face"`
-	FontSizePx   int    `json:"font_size_px"`
-	Cursor       string `json:"cursor"`
-	Theme        string `json:"theme"`
-	ShellANSIMap string `json:"shell_ansi_map"`
+	FontFace      string    `json:"font_face"`
+	FontSizePx    int       `json:"font_size_px"`
+	Cursor        string    `json:"cursor"`
+	Theme         string    `json:"theme"`
+	ShellANSIMap  string    `json:"shell_ansi_map"`
+	Profiles      []Profile `json:"profiles,omitempty"`
+	ActiveProfile string    `json:"active_profile,omitempty"`
+	FirstRunDone  bool      `json:"first_run_done,omitempty"`
 }
 
 // Default returns shipping defaults.
 func Default() Config {
 	return Config{
-		Cursor:       CursorBlock,
-		FontFace:     "Cascadia Mono",
-		FontSizePx:   16,
-		Theme:        ThemeInkstone,
-		ShellANSIMap: ANSIMapSoft,
+		Cursor:        CursorBlock,
+		FontFace:      "Cascadia Mono",
+		FontSizePx:    16,
+		Theme:         ThemeInkstone,
+		ShellANSIMap:  ANSIMapSoft,
+		Profiles:      DefaultProfiles(),
+		ActiveProfile: "Default",
+		FirstRunDone:  false,
+	}
+}
+
+// DefaultProfiles are built-in launch recipes.
+func DefaultProfiles() []Profile {
+	return []Profile{
+		{Name: "Default", Shell: "", Cwd: ""},
+		{Name: "PowerShell", Shell: `powershell.exe -NoLogo -NoProfile`, Cwd: ""},
+		{Name: "Cmd", Shell: `cmd.exe`, Cwd: ""},
 	}
 }
 
@@ -139,7 +164,47 @@ func Normalize(c Config) Config {
 	default:
 		c.ShellANSIMap = ANSIMapSoft
 	}
+	if len(c.Profiles) == 0 {
+		c.Profiles = DefaultProfiles()
+	}
+	// Ensure unique non-empty names.
+	seen := map[string]bool{}
+	var cleaned []Profile
+	for _, p := range c.Profiles {
+		p.Name = strings.TrimSpace(p.Name)
+		if p.Name == "" || seen[strings.ToLower(p.Name)] {
+			continue
+		}
+		seen[strings.ToLower(p.Name)] = true
+		cleaned = append(cleaned, p)
+	}
+	if len(cleaned) == 0 {
+		cleaned = DefaultProfiles()
+	}
+	c.Profiles = cleaned
+	if c.ActiveProfile == "" || FindProfile(c, c.ActiveProfile) == nil {
+		c.ActiveProfile = c.Profiles[0].Name
+	}
 	return c
+}
+
+// FindProfile returns a pointer to a profile by name (case-insensitive), or nil.
+func FindProfile(c Config, name string) *Profile {
+	for i := range c.Profiles {
+		if strings.EqualFold(c.Profiles[i].Name, name) {
+			return &c.Profiles[i]
+		}
+	}
+	return nil
+}
+
+// ProfileNames lists profile names in order.
+func ProfileNames(c Config) []string {
+	out := make([]string, len(c.Profiles))
+	for i, p := range c.Profiles {
+		out[i] = p.Name
+	}
+	return out
 }
 
 // CursorString is the JSON/label form.
@@ -200,7 +265,7 @@ func ANSIMapLabel(id string) string {
 	}
 }
 
-// MonoFontFaces are preferred faces for the settings cycle (host may fall back).
+// MonoFontFaces are preferred faces for the settings cycle.
 func MonoFontFaces() []string {
 	return []string{
 		"Cascadia Mono",
@@ -216,20 +281,26 @@ func MonoFontFaces() []string {
 
 func fromDTO(d fileDTO) Config {
 	return Config{
-		FontFace:     d.FontFace,
-		FontSizePx:   d.FontSizePx,
-		Cursor:       ParseCursor(d.Cursor),
-		Theme:        d.Theme,
-		ShellANSIMap: d.ShellANSIMap,
+		FontFace:      d.FontFace,
+		FontSizePx:    d.FontSizePx,
+		Cursor:        ParseCursor(d.Cursor),
+		Theme:         d.Theme,
+		ShellANSIMap:  d.ShellANSIMap,
+		Profiles:      d.Profiles,
+		ActiveProfile: d.ActiveProfile,
+		FirstRunDone:  d.FirstRunDone,
 	}
 }
 
 func toDTO(c Config) fileDTO {
 	return fileDTO{
-		FontFace:     c.FontFace,
-		FontSizePx:   c.FontSizePx,
-		Cursor:       CursorString(c.Cursor),
-		Theme:        c.Theme,
-		ShellANSIMap: c.ShellANSIMap,
+		FontFace:      c.FontFace,
+		FontSizePx:    c.FontSizePx,
+		Cursor:        CursorString(c.Cursor),
+		Theme:         c.Theme,
+		ShellANSIMap:  c.ShellANSIMap,
+		Profiles:      c.Profiles,
+		ActiveProfile: c.ActiveProfile,
+		FirstRunDone:  c.FirstRunDone,
 	}
 }

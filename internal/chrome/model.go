@@ -34,6 +34,8 @@ type Model struct {
 	PaletteOpen  bool
 	SettingsOpen bool
 	ConfirmOpen  bool
+	HelpOpen     bool
+	SplashOpen   bool
 	palette      list.Model
 	settings     settingsState
 	confirm      confirmState
@@ -60,6 +62,10 @@ type (
 	}
 	// OpenConfirmQuitMsg asks to quit the app (last tab closed).
 	OpenConfirmQuitMsg struct{}
+	// OpenHelpMsg shows keyboard shortcuts.
+	OpenHelpMsg struct{}
+	// OpenSplashMsg shows first-run welcome (once).
+	OpenSplashMsg struct{}
 	// DismissOverlayMsg closes palette/settings/confirm without side effects
 	// (except settings cancel restores snap via ActionSettingsCancel).
 	DismissOverlayMsg struct{}
@@ -71,26 +77,31 @@ type HostAction int
 const (
 	ActionNone HostAction = iota
 	ActionNewTab
+	ActionNewTabProfile // Result.ProfileName set
 	ActionCloseTab
 	ActionSelectTab
 	ActionNextTab
 	ActionPrevTab
 	ActionQuit
 	ActionOpenSettings
+	ActionOpenHelp
 	// ActionSettingsPreview: live-apply Settings config (do not persist).
 	ActionSettingsPreview
 	// ActionSettingsApply: persist Settings and close dialog.
 	ActionSettingsApply
 	// ActionSettingsCancel: restore Settings.snap and close dialog.
 	ActionSettingsCancel
+	// ActionSplashDone: mark first-run complete and persist.
+	ActionSplashDone
 )
 
 // Result pairs the new model with an optional host action.
 type Result struct {
-	Model    Model
-	Action   HostAction
-	Index    int
-	Settings config.Config // set for preview/apply/cancel
+	Model       Model
+	Action      HostAction
+	Index       int
+	Settings    config.Config // set for preview/apply/cancel
+	ProfileName string        // ActionNewTabProfile
 }
 
 // KeyMap for chrome shortcuts the host may forward.
@@ -101,6 +112,7 @@ type KeyMap struct {
 	PrevTab  key.Binding
 	Palette  key.Binding
 	Settings key.Binding
+	Help     key.Binding
 	Quit     key.Binding
 }
 
@@ -112,12 +124,13 @@ var DefaultKeys = KeyMap{
 	PrevTab:  key.NewBinding(key.WithKeys("ctrl+shift+tab", "shift+tab"), key.WithHelp("ctrl+shift+tab", "prev tab")),
 	Palette:  key.NewBinding(key.WithKeys("ctrl+k", "ctrl+p"), key.WithHelp("ctrl+k", "palette")),
 	Settings: key.NewBinding(key.WithKeys("ctrl+,"), key.WithHelp("ctrl+,", "settings")),
+	Help:     key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "help")),
 	Quit:     key.NewBinding(key.WithKeys("ctrl+shift+q"), key.WithHelp("ctrl+shift+q", "quit")),
 }
 
 type paletteItem struct {
-	title, desc string
-	action      HostAction
+	title, desc, profile string
+	action               HostAction
 }
 
 func (i paletteItem) Title() string       { return i.title }
@@ -125,10 +138,22 @@ func (i paletteItem) Description() string { return i.desc }
 func (i paletteItem) FilterValue() string { return i.title + " " + i.desc }
 
 func New(width int) Model {
-	cmds := DefaultCommands()
+	cfg := config.Default()
+	l := newPaletteList(width, cfg)
+	return Model{
+		Width:   width,
+		Height:  TabStripRows(),
+		Status:  "",
+		palette: l,
+		lastCfg: cfg,
+	}
+}
+
+func newPaletteList(width int, cfg config.Config) list.Model {
+	cmds := DefaultCommands(cfg.ActiveProfile, config.ProfileNames(cfg))
 	items := make([]list.Item, len(cmds))
 	for i, c := range cmds {
-		items[i] = paletteItem{title: c.Title, desc: c.Desc, action: c.Action}
+		items[i] = paletteItem{title: c.Title, desc: c.Desc, action: c.Action, profile: c.ProfileName}
 	}
 
 	delegate := list.NewDefaultDelegate()
@@ -156,7 +181,7 @@ func New(width int) Model {
 	delegate.Styles.DimmedDesc = lipgloss.NewStyle().Foreground(colMute).Padding(0, 1)
 	delegate.Styles.FilterMatch = lipgloss.NewStyle().Foreground(colMatch).Underline(true)
 
-	l := list.New(items, delegate, width, 8)
+	l := list.New(items, delegate, width, 10)
 	l.Title = "Commands"
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
@@ -175,22 +200,18 @@ func New(width int) Model {
 	l.FilterInput.PromptStyle = lipgloss.NewStyle().Foreground(colNeon)
 	l.FilterInput.TextStyle = lipgloss.NewStyle().Foreground(colText)
 	l.FilterInput.PlaceholderStyle = lipgloss.NewStyle().Foreground(colMute)
+	return l
+}
 
-	cfg := config.Default()
-	return Model{
-		Width:   width,
-		Height:  TabStripRows(),
-		Status:  "",
-		palette: l,
-		lastCfg: cfg,
-	}
+func (m *Model) rebuildPalette() {
+	m.palette = newPaletteList(m.Width, m.lastCfg)
 }
 
 func (m Model) Init() tea.Cmd { return nil }
 
-// OverlayOpen is true when palette, settings, or confirm owns keyboard focus.
+// OverlayOpen is true when any modal owns keyboard focus.
 func (m Model) OverlayOpen() bool {
-	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen
+	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen || m.HelpOpen || m.SplashOpen
 }
 
 // UpdateChrome applies a message and returns host actions.
@@ -198,6 +219,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 	var act HostAction
 	var idx int
 	var settings config.Config
+	var profileName string
 
 	switch msg := msg.(type) {
 	case SyncTabsMsg:
@@ -213,17 +235,17 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.Status = string(msg)
 	case SyncConfigMsg:
 		m.lastCfg = config.Normalize(msg.Config)
+		m.rebuildPalette()
 	case OpenPaletteMsg:
-		m.SettingsOpen = false
-		m.ConfirmOpen = false
+		m.closeModalsExcept("")
+		m.rebuildPalette()
 		m.PaletteOpen = true
 		m.palette.ResetFilter()
 		m.palette.ResetSelected()
 	case ClosePaletteMsg:
 		m.PaletteOpen = false
 	case OpenSettingsMsg:
-		m.PaletteOpen = false
-		m.ConfirmOpen = false
+		m.closeModalsExcept("settings")
 		m.SettingsOpen = true
 		m.settings = newSettingsState(msg.Config)
 		m.lastCfg = m.settings.snap
@@ -236,8 +258,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		}
 		m.SettingsOpen = false
 	case OpenConfirmQuitMsg:
-		m.PaletteOpen = false
-		m.SettingsOpen = false
+		m.closeModalsExcept("confirm")
 		m.ConfirmOpen = true
 		m.confirm = confirmState{
 			title:     "Quit suzuri?",
@@ -246,25 +267,49 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			noLabel:   "Cancel",
 			yesAction: ActionQuit,
 		}
+	case OpenHelpMsg:
+		m.closeModalsExcept("help")
+		m.HelpOpen = true
+	case OpenSplashMsg:
+		m.closeModalsExcept("splash")
+		m.SplashOpen = true
 	case DismissOverlayMsg:
 		if m.SettingsOpen {
 			settings = m.settings.snap
 			act = ActionSettingsCancel
 		}
+		if m.SplashOpen {
+			act = ActionSplashDone
+		}
 		m.PaletteOpen = false
 		m.SettingsOpen = false
 		m.ConfirmOpen = false
+		m.HelpOpen = false
+		m.SplashOpen = false
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.palette.SetWidth(min(56, msg.Width-4))
-		m.palette.SetHeight(min(10, msg.Height-2))
+		m.palette.SetHeight(min(12, msg.Height-2))
 	case tea.KeyMsg:
+		if m.SplashOpen {
+			if keyDismiss(msg) || msg.String() == " " {
+				m.SplashOpen = false
+				act = ActionSplashDone
+			}
+			return Result{Model: m, Action: act, Settings: settings}
+		}
+		if m.HelpOpen {
+			if keyDismiss(msg) || msg.String() == "q" {
+				m.HelpOpen = false
+			}
+			return Result{Model: m, Action: act, Settings: settings}
+		}
 		if m.ConfirmOpen {
-			switch msg.String() {
-			case "enter", "y":
+			s := msg.String()
+			if s == "enter" || s == "y" || msg.Type == tea.KeyEnter {
 				act = m.confirm.yesAction
 				m.ConfirmOpen = false
-			case "esc", "n", "ctrl+c":
+			} else if s == "esc" || s == "n" || s == "ctrl+c" || msg.Type == tea.KeyEsc {
 				m.ConfirmOpen = false
 			}
 			return Result{Model: m, Action: act, Index: idx, Settings: settings}
@@ -279,12 +324,17 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			case "enter":
 				if it, ok := m.palette.SelectedItem().(paletteItem); ok {
 					act = it.action
+					profileName = it.profile
 					m.PaletteOpen = false
-					if act == ActionOpenSettings {
+					switch act {
+					case ActionOpenSettings:
 						m.SettingsOpen = true
 						m.settings = newSettingsState(m.lastCfg)
 						settings = m.settings.edit
 						act = ActionSettingsPreview
+					case ActionOpenHelp:
+						m.HelpOpen = true
+						act = ActionNone
 					}
 				}
 			default:
@@ -292,7 +342,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 				m.palette, cmd = m.palette.Update(msg)
 				_ = cmd
 			}
-			return Result{Model: m, Action: act, Index: idx, Settings: settings}
+			return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName}
 		}
 		switch {
 		case key.Matches(msg, DefaultKeys.NewTab):
@@ -304,6 +354,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		case key.Matches(msg, DefaultKeys.PrevTab):
 			act = ActionPrevTab
 		case key.Matches(msg, DefaultKeys.Palette):
+			m.rebuildPalette()
 			m.PaletteOpen = true
 			m.palette.ResetFilter()
 			m.palette.ResetSelected()
@@ -312,12 +363,32 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			m.settings = newSettingsState(m.lastCfg)
 			settings = m.settings.edit
 			act = ActionSettingsPreview
+		case key.Matches(msg, DefaultKeys.Help):
+			m.HelpOpen = true
 		case key.Matches(msg, DefaultKeys.Quit):
 			act = ActionQuit
 		}
 	}
 
-	return Result{Model: m, Action: act, Index: idx, Settings: settings}
+	return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName}
+}
+
+func (m *Model) closeModalsExcept(keep string) {
+	if keep != "palette" {
+		m.PaletteOpen = false
+	}
+	if keep != "settings" {
+		m.SettingsOpen = false
+	}
+	if keep != "confirm" {
+		m.ConfirmOpen = false
+	}
+	if keep != "help" {
+		m.HelpOpen = false
+	}
+	if keep != "splash" {
+		m.SplashOpen = false
+	}
 }
 
 func (m Model) updateSettingsKey(msg tea.KeyMsg) Result {
@@ -378,7 +449,7 @@ func (m Model) StripView() string {
 	return tabs
 }
 
-// OverlayView is the floating palette/settings/confirm card (empty if closed).
+// OverlayView is the floating card (empty if closed).
 func (m Model) OverlayView() string {
 	w := m.Width
 	if w < 20 {
@@ -386,6 +457,12 @@ func (m Model) OverlayView() string {
 	}
 	var card string
 	switch {
+	case m.SplashOpen:
+		pw := min(44, max(34, w-8))
+		card = splashBody(pw)
+	case m.HelpOpen:
+		pw := min(48, max(34, w-8))
+		card = helpBody(pw)
 	case m.ConfirmOpen:
 		pw := min(40, max(30, w-10))
 		card = m.confirm.render(pw)
@@ -393,9 +470,9 @@ func (m Model) OverlayView() string {
 		pw := min(44, max(32, w-8))
 		card = m.settings.render(pw)
 	case m.PaletteOpen:
-		pw := min(48, max(30, w-10))
+		pw := min(52, max(30, w-8))
 		m.palette.SetWidth(pw - 4)
-		m.palette.SetHeight(8)
+		m.palette.SetHeight(10)
 		inner := m.palette.View()
 		card = stylePaletteBorder().Width(pw).Render(inner)
 	default:
@@ -517,16 +594,26 @@ func (m Model) RowCount() int {
 
 // OverlayRowCount estimates rows for the floating card paint.
 func (m Model) OverlayRowCount() int {
-	if m.ConfirmOpen {
-		return 10
-	}
-	if m.SettingsOpen {
+	switch {
+	case m.SplashOpen:
 		return 14
+	case m.HelpOpen:
+		return 20
+	case m.ConfirmOpen:
+		return 10
+	case m.SettingsOpen:
+		return 15
+	case m.PaletteOpen:
+		return 14
+	default:
+		return 0
 	}
-	if m.PaletteOpen {
-		return 12
-	}
-	return 0
+}
+
+func keyDismiss(msg tea.KeyMsg) bool {
+	s := msg.String()
+	return s == "esc" || s == "enter" || s == "ctrl+c" ||
+		msg.Type == tea.KeyEsc || msg.Type == tea.KeyEnter
 }
 
 func min(a, b int) int {

@@ -99,12 +99,37 @@ func TestNewTabFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// Down to "New tab" (index 1).
+	// 0 Settings, 1 Help, 2 New tab
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+	m = r.Model
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
 	m = r.Model
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
 	if r.Action != ActionNewTab {
 		t.Fatalf("action=%v want NewTab", r.Action)
+	}
+}
+
+func TestHelpAndSplash(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenHelpMsg{})
+	m = r.Model
+	if !m.HelpOpen {
+		t.Fatal("help")
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
+	m = r.Model
+	if m.HelpOpen {
+		t.Fatal("help should close")
+	}
+	r = m.UpdateChrome(OpenSplashMsg{})
+	m = r.Model
+	if !m.SplashOpen {
+		t.Fatal("splash")
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionSplashDone || r.Model.SplashOpen {
+		t.Fatalf("splash done action=%v open=%v", r.Action, r.Model.SplashOpen)
 	}
 }
 

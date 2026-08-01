@@ -15,7 +15,7 @@ var errWindowsOnly = errors.New("suzuri v0 only supports Windows ConPTY")
 
 func DefaultShell() string { return "" }
 
-func StartSession(commandLine string, cols, rows int) (*Session, error) {
+func StartSession(commandLine string, cols, rows int, workDir string) (*Session, error) {
 	return nil, errWindowsOnly
 }
 

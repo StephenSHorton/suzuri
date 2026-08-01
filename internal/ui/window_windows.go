@@ -68,7 +68,16 @@ func Run() error {
 	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	ui.alive.Store(true)
-	t, err := newTab(ui.nextTabID, cols, rows)
+	prof := config.FindProfile(cfg, cfg.ActiveProfile)
+	opts := tabOpts{}
+	if prof != nil {
+		opts.shell = prof.Shell
+		opts.cwd = prof.Cwd
+		if prof.Name != "" && prof.Name != "Default" {
+			opts.title = prof.Name
+		}
+	}
+	t, err := newTab(ui.nextTabID, cols, rows, opts)
 	if err != nil {
 		log.Error("first tab failed", "err", err)
 		return err
@@ -77,6 +86,7 @@ func Run() error {
 	ui.tabs = []*tab{t}
 	ui.active = 0
 	ui.syncChrome()
+	ui.showSplash = !cfg.FirstRunDone
 	return ui.loop()
 }
 
@@ -104,6 +114,7 @@ type winUI struct {
 	lastBackspace time.Time // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
 	selecting     bool
 	statusUntil   time.Time // clear toast Status after this (zero = none)
+	showSplash    bool      // open first-run card after window is ready
 
 	// Reused double-buffer (recreated on resize) to avoid GDI thrash.
 	// memOldBmp is the object that was in memDC before memBmp — must be
@@ -257,7 +268,9 @@ func (u *winUI) chromePixelHeight() int32 {
 func (u *winUI) applyChromeAction(r chrome.Result) {
 	switch r.Action {
 	case chrome.ActionNewTab:
-		u.newTabUI()
+		u.newTabUI("")
+	case chrome.ActionNewTabProfile:
+		u.newTabUI(r.ProfileName)
 	case chrome.ActionCloseTab:
 		if t := u.activeTab(); t != nil {
 			u.closeTabUI(t.id)
@@ -279,7 +292,6 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 			win.DestroyWindow(u.hwnd)
 		}
 	case chrome.ActionOpenSettings:
-		// Opened via palette enter — model already set SettingsOpen; preview.
 		u.applyConfigLive(r.Settings)
 	case chrome.ActionSettingsPreview:
 		u.applyConfigLive(r.Settings)
@@ -287,6 +299,13 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.applyConfigSave(r.Settings)
 	case chrome.ActionSettingsCancel:
 		u.applyConfigLive(r.Settings)
+	case chrome.ActionSplashDone:
+		u.cfg.FirstRunDone = true
+		if err := config.Save(u.cfg); err != nil {
+			log.Warn("first-run flag save failed", "err", err)
+		} else {
+			log.Info("first-run complete")
+		}
 	}
 	u.syncChrome()
 }
@@ -358,6 +377,13 @@ func (u *winUI) loop() error {
 	if t := u.activeTab(); t != nil {
 		t.startWorkers(u)
 		log.Info("tab started", "id", t.id, "pid", t.sess.Pid())
+	}
+	if u.showSplash {
+		r := u.chrome.UpdateChrome(chrome.OpenSplashMsg{})
+		u.chrome = r.Model
+		u.markChromeDirty()
+		u.showSplash = false
+		win.InvalidateRect(hwnd, nil, false)
 	}
 	go u.blinkLoop()
 
@@ -517,14 +543,33 @@ func shortTitle(s string) string {
 	return s
 }
 
-func (u *winUI) newTabUI() {
+// newTabUI opens a tab. profileName empty uses ActiveProfile from config.
+func (u *winUI) newTabUI(profileName string) {
 	if len(u.tabs) >= maxTabs {
 		log.Warn("max tabs reached", "max", maxTabs)
+		u.toast("max tabs")
 		return
 	}
-	t, err := newTab(u.nextTabID, u.cols, u.rows)
+	if profileName == "" {
+		profileName = u.cfg.ActiveProfile
+	}
+	opts := tabOpts{}
+	if p := config.FindProfile(u.cfg, profileName); p != nil {
+		opts.shell = p.Shell
+		opts.cwd = p.Cwd
+		if p.Name != "" && !strings.EqualFold(p.Name, "Default") {
+			opts.title = p.Name
+		}
+		if p.Theme != "" {
+			u.cfg.Theme = p.Theme
+			chrome.ApplyTheme(p.Theme)
+			u.markChromeDirty()
+		}
+	}
+	t, err := newTab(u.nextTabID, u.cols, u.rows, opts)
 	if err != nil {
 		log.Error("new tab failed", "err", err)
+		u.toast("new tab failed")
 		return
 	}
 	u.nextTabID++
@@ -534,6 +579,9 @@ func (u *winUI) newTabUI() {
 	u.selecting = false
 	setWindowTitle(u.hwnd, "suzuri — "+t.title)
 	u.syncChrome()
+	if profileName != "" {
+		u.toast("tab: " + profileName)
+	}
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
@@ -759,8 +807,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 
+		// Ctrl+/ — help (VK_OEM_2 = 0xBF on US keyboards)
+		if ctrl && !shift && wParam == 0xBF {
+			r := u.chrome.UpdateChrome(chrome.OpenHelpMsg{})
+			u.chrome = r.Model
+			u.markChromeDirty()
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
 		if ctrl && shift && (wParam == 'T' || wParam == 't') {
-			u.newTabUI()
+			u.newTabUI("")
 			return 0
 		}
 		if ctrl && !shift && (wParam == 'W' || wParam == 'w') {
@@ -898,8 +954,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if py < chromeH {
 			if py < tabStripH {
 				if u.hitPlus(px) {
-					u.newTabUI()
-					u.toast("new tab")
+					u.newTabUI("")
 					return 0
 				}
 				if i := u.hitTab(px); i >= 0 {
