@@ -76,10 +76,11 @@ type winUI struct {
 	nextTabID int
 	chrome    chrome.Model // Charm UI: tabs, status, palette
 
-	hwnd   win.HWND
-	font   win.HFONT
-	width  int32
-	height int32
+	hwnd     win.HWND
+	font     win.HFONT
+	fontBold win.HFONT
+	width    int32
+	height   int32
 	cols   int
 	rows   int
 	cfg    config.Config
@@ -205,7 +206,8 @@ func (u *winUI) loop() error {
 		return lastErr("CreateWindowEx")
 	}
 	u.hwnd = hwnd
-	u.font = createFontFor(u.cfg)
+	u.font = createFontFor(u.cfg, false)
+	u.fontBold = createFontFor(u.cfg, true)
 	face := fontFaceName(u.font)
 	log.Info("window created", "hwnd", uintptr(hwnd), "font", face, "want", u.cfg.FontFace)
 	registerUI(hwnd, u)
@@ -1089,13 +1091,17 @@ var fontFallbacks = []string{
 }
 
 func createFont() win.HFONT {
-	return createFontFor(config.Default())
+	return createFontFor(config.Default(), false)
 }
 
-func createFontFor(cfg config.Config) win.HFONT {
+func createFontFor(cfg config.Config, bold bool) win.HFONT {
 	size := cfg.FontSizePx
 	if size < 10 {
 		size = 16
+	}
+	weight := int32(win.FW_NORMAL)
+	if bold {
+		weight = win.FW_BOLD
 	}
 	names := make([]string, 0, len(fontFallbacks)+1)
 	if cfg.FontFace != "" {
@@ -1108,7 +1114,7 @@ func createFontFor(cfg config.Config) win.HFONT {
 		names = append(names, n)
 	}
 	for _, name := range names {
-		h := createNamedFont(name, -int32(size))
+		h := createNamedFont(name, -int32(size), weight)
 		if h == 0 {
 			continue
 		}
@@ -1122,17 +1128,17 @@ func createFontFor(cfg config.Config) win.HFONT {
 	// Last resort: any FIXED_PITCH without a face claim.
 	var lf win.LOGFONT
 	lf.LfHeight = -int32(size)
-	lf.LfWeight = win.FW_NORMAL
+	lf.LfWeight = weight
 	lf.LfCharSet = win.DEFAULT_CHARSET
 	lf.LfQuality = win.CLEARTYPE_QUALITY
 	lf.LfPitchAndFamily = win.FIXED_PITCH | win.FF_MODERN
 	return win.CreateFontIndirect(&lf)
 }
 
-func createNamedFont(faceName string, height int32) win.HFONT {
+func createNamedFont(faceName string, height, weight int32) win.HFONT {
 	var lf win.LOGFONT
 	lf.LfHeight = height
-	lf.LfWeight = win.FW_NORMAL
+	lf.LfWeight = weight
 	lf.LfCharSet = win.DEFAULT_CHARSET
 	lf.LfOutPrecision = win.OUT_TT_ONLY_PRECIS
 	lf.LfClipPrecision = win.CLIP_DEFAULT_PRECIS
@@ -1351,19 +1357,32 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	}
 	// vt10x.Size returns (cols, rows).
 	ccols, crows := ct.Size()
-	// Coalesce horizontal runs of identical BG to avoid a per-cell grid.
+	chromeH := int32(crows) * ch
+
+	// Full-bleed bar under the whole chrome (including side padding) so the
+	// strip reads as one surface, not a grid of cells floating on black.
+	{
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(0x1f, 0x1f, 0x1f)}
+		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+			r := win.RECT{Left: 0, Top: 0, Right: rect.Right, Bottom: chromeH}
+			fillRect(hdc, r, brush)
+			win.DeleteObject(win.HGDIOBJ(brush))
+		}
+	}
+
+	// Coalesce horizontal runs of identical BG.
 	type bgRun struct {
-		x0, x1     int
-		r, g, b    byte
+		x0, x1  int
+		r, g, b byte
 	}
 	for y := 0; y < crows; y++ {
 		var runs []bgRun
 		for x := 0; x < cols && x < ccols; x++ {
 			cell := glyphToCell(ct.Cell(x, y))
 			br, bg, bb := cell.BR, cell.BG, cell.BB
-			// Fallback to inkstone paper (#16161e) when vt leaves default black.
+			// Default black → bar grey (matches theme colBar).
 			if br == 0 && bg == 0 && bb == 0 {
-				br, bg, bb = 0x16, 0x16, 0x1e
+				br, bg, bb = 0x1f, 0x1f, 0x1f
 			}
 			if n := len(runs); n > 0 && runs[n-1].x1 == x-1 &&
 				runs[n-1].r == br && runs[n-1].g == bg && runs[n-1].b == bb {
@@ -1381,6 +1400,13 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 					Right:  4 + int32(rn.x1+1)*cw,
 					Bottom: int32(y+1) * ch,
 				}
+				// Extend first/last run to window edges for a seamless bar.
+				if rn.x0 == 0 {
+					r.Left = 0
+				}
+				if rn.x1 >= cols-1 || rn.x1 >= ccols-1 {
+					r.Right = rect.Right
+				}
 				fillRect(hdc, r, brush)
 				win.DeleteObject(win.HGDIOBJ(brush))
 			}
@@ -1392,15 +1418,32 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 			if r == 0 || r == ' ' {
 				continue
 			}
+			cellRect := win.RECT{
+				Left:   4 + int32(x)*cw,
+				Top:    int32(y) * ch,
+				Right:  4 + int32(x+1)*cw,
+				Bottom: int32(y+1) * ch,
+			}
+			// Hairline / accent / blocks: edge-to-edge geometry (no font padding).
+			if drawCellGlyph(hdc, r, cellRect, cell.FR, cell.FG, cell.FB) {
+				continue
+			}
 			s, err := syscall.UTF16FromString(string(r))
 			if err != nil || len(s) < 2 {
 				continue
 			}
+			if cell.Bold && u.fontBold != 0 {
+				win.SelectObject(hdc, win.HGDIOBJ(u.fontBold))
+			} else {
+				win.SelectObject(hdc, win.HGDIOBJ(u.font))
+			}
 			win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
-			win.TextOut(hdc, 4+int32(x)*cw, int32(y)*ch, &s[0], int32(len(s)-1))
+			win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
 		}
 	}
-	u.chromePx = int32(crows) * ch
+	// Restore regular font for shell paint.
+	win.SelectObject(hdc, win.HGDIOBJ(u.font))
+	u.chromePx = chromeH
 }
 
 // teaKeyFromWin maps Win32 navigation keys into Bubble Tea messages for the

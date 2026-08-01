@@ -18,10 +18,6 @@ func TestViewHasTabs(t *testing.T) {
 	if !strings.Contains(v, "alpha") {
 		t.Fatalf("view missing inactive tab: %q", v)
 	}
-	// Brand mark should appear.
-	if !strings.Contains(v, "硯") {
-		t.Fatalf("view missing brand: %q", v)
-	}
 }
 
 func TestTabBoundsMatchLayout(t *testing.T) {
@@ -32,7 +28,6 @@ func TestTabBoundsMatchLayout(t *testing.T) {
 	if len(bounds) != 3 {
 		t.Fatalf("bounds len=%d", len(bounds))
 	}
-	// Bounds should be non-empty and non-overlapping in order.
 	for i, b := range bounds {
 		if b[1] <= b[0] {
 			t.Fatalf("tab %d empty bound %v", i, b)
@@ -40,6 +35,17 @@ func TestTabBoundsMatchLayout(t *testing.T) {
 		if i > 0 && b[0] < bounds[i-1][1] {
 			t.Fatalf("tab %d overlaps prev: %v vs %v", i, b, bounds[i-1])
 		}
+	}
+}
+
+func TestNoStatusByDefault(t *testing.T) {
+	m := New(80)
+	m.Tabs = []Tab{{ID: 0, Title: "shell"}}
+	if m.RowCount() != 2 {
+		t.Fatalf("default rows=%d want 2 (tabs+rule)", m.RowCount())
+	}
+	if strings.Contains(m.View(), "ctrl+k") {
+		t.Fatal("default view should not dump keybinding help into chrome")
 	}
 }
 
@@ -65,7 +71,6 @@ func TestRenderToTerm(t *testing.T) {
 	if cols < 20 || rows < 2 {
 		t.Fatalf("size %d×%d", cols, rows)
 	}
-	// First row should have some non-empty cell (brand or tab text).
 	found := false
 	for x := 0; x < cols; x++ {
 		if term.Cell(x, 0).Char != 0 && term.Cell(x, 0).Char != ' ' {
