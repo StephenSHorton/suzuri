@@ -449,8 +449,24 @@ func (u *winUI) closeTabUI(id int) {
 	}
 	u.tabs[idx].close()
 	u.tabs = append(u.tabs[:idx], u.tabs[idx+1:]...)
+	// Never quit the window on Ctrl+W of the last tab — open a fresh shell
+	// instead (window close is the title-bar / Alt+F4 path).
 	if len(u.tabs) == 0 {
-		win.DestroyWindow(u.hwnd)
+		log.Info("last tab closed — opening new shell")
+		t, err := newTab(u.nextTabID, u.cols, u.rows)
+		if err != nil {
+			log.Error("replacement tab failed", "err", err)
+			win.DestroyWindow(u.hwnd)
+			return
+		}
+		u.nextTabID++
+		u.tabs = []*tab{t}
+		u.active = 0
+		t.startWorkers(u)
+		u.selecting = false
+		setWindowTitle(u.hwnd, "suzuri — "+t.title)
+		u.syncChrome()
+		win.InvalidateRect(u.hwnd, nil, false)
 		return
 	}
 	if u.active >= len(u.tabs) {
