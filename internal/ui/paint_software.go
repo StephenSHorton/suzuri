@@ -200,26 +200,22 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		p.paintInputBar(dst, o, shellBot, h)
 	}
 
-	// Overlay card
+	// Overlay card — full-width cell grid with transparent gutters (same as
+	// Windows). Lip gloss PlaceHorizontal already centers the card; painting
+	// a solid matte over the full measured width blocked matrix rain on the
+	// left/right and made the dialog look off-center.
 	if len(o.Overlay) > 0 {
 		oh := len(o.Overlay) * ch
-		ow := 0
-		for _, row := range o.Overlay {
-			if len(row) > ow {
-				ow = len(row)
-			}
-		}
-		ow *= cw
-		ox := (w - ow) / 2
-		if ox < padX {
-			ox = padX
-		}
-		oy := padY + 8
+		shellH := shellBot - padY
+		oy := padY + (shellH-oh)/4
 		if oy+oh > shellBot {
+			oy = shellBot - oh
+		}
+		if oy < padY {
 			oy = padY
 		}
-		fillRectRGBA(dst, ox-4, oy-4, ow+8, oh+8, chrome.PanelR, chrome.PanelG, chrome.PanelB)
-		paintCellStrip(p, dst, o.Overlay, ox, oy, false)
+		// ox=0: gutter cells are transparent so rain/neko shows through.
+		paintCellStrip(p, dst, o.Overlay, 0, oy, false)
 	}
 }
 
@@ -370,27 +366,36 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 	if p == nil {
 		return
 	}
-	face := p.faceForRune(r)
-	if face == nil {
+	// Try preferred face, then the other — never silently drop rain/CJK.
+	faces := [2]font.Face{p.faceForRune(r), nil}
+	if faces[0] == p.cjkFace {
+		faces[1] = p.face
+	} else {
+		faces[1] = p.cjkFace
+	}
+	for _, face := range faces {
+		if face == nil {
+			continue
+		}
+		dr, mask, maskp, _, ok := face.Glyph(fixed.P(px, py+p.ascent), r)
+		if !ok {
+			continue
+		}
+		col := image.NewUniform(color.RGBA{R: fr, G: fg, B: fb, A: 255})
+		draw.DrawMask(dst, dr, col, image.Point{}, mask, maskp, draw.Over)
 		return
 	}
-	dr, mask, maskp, _, ok := face.Glyph(fixed.P(px, py+p.ascent), r)
-	if !ok {
-		// Try the other face once more.
-		alt := p.face
-		if face == p.face {
-			alt = p.cjkFace
-		}
-		if alt == nil || alt == face {
-			return
-		}
-		dr, mask, maskp, _, ok = alt.Glyph(fixed.P(px, py+p.ascent), r)
-		if !ok {
-			return
-		}
+	// Ultimate fallback for rain: a bright block so streams never go blank.
+	if isHalfwidthKatakana(r) || isEastAsianRune(r) {
+		fillRectRGBA(dst, px+1, py+2, max(1, p.cellW-2), max(1, p.cellH-4), fr, fg, fb)
 	}
-	col := image.NewUniform(color.RGBA{R: fr, G: fg, B: fb, A: 255})
-	draw.DrawMask(dst, dr, col, image.Point{}, mask, maskp, draw.Over)
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (p *softwarePainter) faceForRune(r rune) font.Face {

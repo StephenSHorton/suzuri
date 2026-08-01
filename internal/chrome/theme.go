@@ -4,6 +4,7 @@ import (
 	"image/color"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
@@ -69,11 +70,17 @@ var StockANSI16 = [16][3]byte{
 }
 
 func init() {
+	// Host paints Lip Gloss → mini VT (no real TTY). Without an explicit
+	// truecolor profile, lipgloss downgrades to monochrome and every tab /
+	// dialog loses its theme fill (active tab, settings selection, etc.).
+	lipgloss.SetColorProfile(termenv.TrueColor)
 	ApplyTheme(config.ThemeHighContrast)
 }
 
 // ApplyTheme sets chrome colors, GDI bytes, and ShellANSI16.
 func ApplyTheme(id string) {
+	// Re-assert on every theme change (some lipgloss paths re-detect).
+	lipgloss.SetColorProfile(termenv.TrueColor)
 	switch id {
 	case config.ThemeCharmtone:
 		// Crush Pantera roles: primary≈charple, onPrimary≈butter, bg pepper.

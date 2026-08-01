@@ -1371,39 +1371,48 @@ func (u *macUI) handleMouse() {
 	}
 }
 
+// hitTab maps an x pixel to a tab index using chrome.TabBounds (same layout as View).
 func (u *macUI) hitTab(px int32) int {
-	// Approximate: equal-width tabs in the strip (matches chrome layout loosely).
 	if len(u.tabs) == 0 {
 		return -1
 	}
-	cw := u.metricW
-	if cw < 1 {
-		cw = cellW
-	}
-	// Leave room for + chip (~3 cells).
-	usable := u.width - cw*4
-	if usable < cw {
+	u.syncChrome()
+	cellX := u.pixelToChromeCol(px)
+	if cellX < 0 {
 		return -1
 	}
-	tabW := usable / int32(len(u.tabs))
-	if tabW < cw*4 {
-		tabW = cw * 8
-	}
-	for i := range u.tabs {
-		left := int32(i) * tabW
-		if px >= left && px < left+tabW {
+	for i, b := range u.chrome.TabBounds() {
+		if cellX >= b[0] && cellX < b[1] {
 			return i
 		}
 	}
 	return -1
 }
 
+// hitPlus is true when the pixel x hits the "+" new-tab chip.
 func (u *macUI) hitPlus(px int32) bool {
+	u.syncChrome()
+	cellX := u.pixelToChromeCol(px)
+	if cellX < 0 {
+		return false
+	}
+	b := u.chrome.PlusBounds()
+	return cellX >= b[0] && cellX < b[1]
+}
+
+// pixelToChromeCol maps a client-x pixel to a chrome cell column
+// (matches paint padX of 4 and cell pitch).
+func (u *macUI) pixelToChromeCol(px int32) int {
 	cw := u.metricW
 	if cw < 1 {
 		cw = cellW
 	}
-	return px > u.width-cw*4
+	const padX int32 = 4
+	cellX := int((px - padX) / cw)
+	if cellX < 0 {
+		return -1
+	}
+	return cellX
 }
 
 func (u *macUI) pixelToCell(px, py int32) (x, y int) {

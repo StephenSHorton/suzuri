@@ -10,13 +10,45 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
 
-// Half-width katakana + digits/symbols — classic “digital rain” glyph set.
-// Requires the CJK fallback face (AppleGothic) — Gohu has no coverage.
-var matrixRainRunes = []rune(
-	"ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ" +
-		"0123456789" +
-		":.=*+-<>|",
-)
+// matrixRainRunes is the classic digital-rain glyph set (half-width katakana +
+// ASCII). Populated in initMatrixRainRunes after the CJK face is registered so
+// we only keep runes that actually paint (blank drops = Glyph miss).
+var matrixRainRunes []rune
+
+// Preferred rain alphabet — filtered at startup against the live CJK face.
+const matrixRainAlphabet = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ" +
+	"0123456789" +
+	":.=*+-<>|" +
+	// Fullwidth katakana fallback if halfwidth is missing on a face.
+	"アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン"
+
+// initMatrixRainRunes keeps only glyphs the CJK (or primary) face can draw.
+func initMatrixRainRunes() {
+	if len(matrixRainRunes) > 0 {
+		return
+	}
+	face := cjkFaceForSize(14)
+	if face == nil {
+		face = faceForSize(14)
+	}
+	var kept []rune
+	for _, r := range []rune(matrixRainAlphabet) {
+		if face != nil {
+			if _, ok := face.GlyphAdvance(r); !ok {
+				continue
+			}
+		}
+		kept = append(kept, r)
+	}
+	if len(kept) == 0 {
+		// Last resort — pure ASCII so rain still animates.
+		kept = []rune("0123456789:.=*+-<>|")
+	}
+	matrixRainRunes = kept
+	if face != nil {
+		_ = face.Close()
+	}
+}
 
 // matrixPaintMode controls whether streams loop (settings) or wind down (intro).
 type matrixPaintMode int
@@ -38,6 +70,7 @@ type rainCell struct {
 
 // matrixRainCells computes a frame of digital rain for the shell band.
 func matrixRainCells(cols, rows int, mode matrixPaintMode, t0 time.Time, spawnFor time.Duration, now time.Time) []rainCell {
+	initMatrixRainRunes()
 	if cols < 1 || rows < 1 || len(matrixRainRunes) == 0 {
 		return nil
 	}

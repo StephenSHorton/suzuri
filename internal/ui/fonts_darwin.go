@@ -81,6 +81,9 @@ func RegisterBundledFonts() bool {
 	if cjkTTF == nil {
 		log.Warn("no system CJK font found — Japanese glyphs will be blank")
 	}
+	// Filter matrix rain alphabet to glyphs this face can actually paint.
+	initMatrixRainRunes()
+	log.Info("matrix rain glyphs", "count", len(matrixRainRunes))
 	return true
 }
 
