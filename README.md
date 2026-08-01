@@ -62,6 +62,8 @@ Charm [`log`](https://github.com/charmbracelet/log) writes to:
 
 Charm owns **all UI chrome** (tab strip, status line, command palette) via Bubble Tea + Lip Gloss. The shell viewport stays a VT cell grid driven by ConPTY.
 
+**Direction:** make chrome feel more like [Crush](https://github.com/charmbracelet/crush) (dialogs, themes, settings) while remaining a real host — not an AI TUI inside another terminal. See [`docs/crush-inspired-plan.md`](docs/crush-inspired-plan.md).
+
 ```
 Win32 window  →  key/mouse
       │
