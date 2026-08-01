@@ -8,13 +8,14 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
-// Active palette colors (mutated by ApplyTheme for live settings preview).
+// Active palette (mutated by ApplyTheme). Tuned for calm, Crush-adjacent polish
+// rather than loud “neon marketing” chrome.
 var (
 	colVoid   lipgloss.Color
 	colBar    lipgloss.Color
 	colPanel  lipgloss.Color
-	colNeon   lipgloss.Color
-	colViolet lipgloss.Color
+	colAccent lipgloss.Color // primary accent (was “neon”)
+	colSoftA  lipgloss.Color // secondary accent
 	colCyan   lipgloss.Color
 	colText   lipgloss.Color
 	colSoft   lipgloss.Color
@@ -22,175 +23,173 @@ var (
 	colMute   lipgloss.Color
 	colSel    lipgloss.Color
 	colMatch  lipgloss.Color
+	colBorder lipgloss.Color // dialog border — quiet, not screaming
 )
 
-// BarRGB is the tab-strip fill for host GDI full-bleed (kept in sync by ApplyTheme).
+// Aliases kept for call sites that still say “neon/violet”.
+var (
+	colNeon   lipgloss.Color
+	colViolet lipgloss.Color
+)
+
+// Bar / void for GDI.
 var (
 	BarR, BarG, BarB    byte
 	VoidR, VoidG, VoidB byte
+	DimR, DimG, DimB    byte // shell dim matte
 )
 
-// ShellANSI16 is the active theme's 16-color remap for shell SGR 0–15
-// (Crush-style on-brand palette). Host blends with stock colors per config.
+// ShellANSI16 theme remap for SGR 0–15.
 var ShellANSI16 [16][3]byte
 
-// StockANSI16 is a conventional VT palette (Windows Terminal–ish).
+// StockANSI16 conventional VT palette.
 var StockANSI16 = [16][3]byte{
-	{0, 0, 0},
-	{205, 49, 49},
-	{13, 188, 121},
-	{229, 229, 16},
-	{36, 114, 200},
-	{188, 63, 188},
-	{17, 168, 205},
-	{204, 204, 204},
-	{118, 118, 118},
-	{241, 76, 76},
-	{35, 209, 139},
-	{245, 245, 67},
-	{59, 142, 234},
-	{214, 112, 214},
-	{41, 184, 219},
-	{229, 229, 229},
+	{12, 12, 12},
+	{205, 89, 89},
+	{80, 180, 120},
+	{210, 180, 70},
+	{90, 140, 210},
+	{180, 100, 180},
+	{70, 170, 190},
+	{200, 200, 200},
+	{100, 100, 100},
+	{230, 110, 110},
+	{100, 210, 150},
+	{230, 210, 100},
+	{120, 170, 240},
+	{210, 140, 210},
+	{100, 200, 210},
+	{240, 240, 240},
 }
 
 func init() {
 	ApplyTheme(config.ThemeInkstone)
 }
 
-// ApplyTheme sets chrome Lip Gloss colors, GDI bar/void bytes, and ShellANSI16.
+// ApplyTheme sets chrome colors, GDI bytes, and ShellANSI16.
 func ApplyTheme(id string) {
 	switch id {
 	case config.ThemeCharmtone:
-		// Crush-adjacent: deep pepper / charple / dolly-ish.
+		// Crush Pantera–inspired: pepper base, soft purple primary.
 		setPalette(
-			hex("#1b1216"), // void
-			hex("#24181f"), // bar
-			hex("#2a1e28"), // panel
-			hex("#a78bfa"), // neon ≈ charple
-			hex("#f9e2af"), // violet → dolly gold/cream for secondary
-			hex("#89dceb"), // cyan
-			hex("#f5e0dc"), // text
-			hex("#c9b8c4"),
-			hex("#7a6a74"),
-			hex("#4a3a44"),
-			hex("#3d2a48"),
-			hex("#cba6f7"),
+			hex("#1a1418"), // void
+			hex("#201a1e"), // bar
+			hex("#2a2228"), // panel
+			hex("#c4b5fd"), // accent soft violet
+			hex("#f0d9a8"), // secondary warm
+			hex("#7dd3c0"), // mint
+			hex("#f3e8ee"), // text
+			hex("#c9b8c0"),
+			hex("#8a7a84"),
+			hex("#5a4a54"),
+			hex("#3a2e40"),
+			hex("#ddd6fe"),
+			hex("#6b5a68"), // border
+			hex("#100c10"), // dim matte
 		)
-		// Crush Pantera-ish ANSI remap.
 		ShellANSI16 = [16][3]byte{
-			rgbArr(hex("#1a1216")), // black ≈ BBQ
-			rgbArr(hex("#f38ba8")), // red coral
-			rgbArr(hex("#a6e3a1")), // green guac
-			rgbArr(hex("#f9e2af")), // yellow mustard
-			rgbArr(hex("#a78bfa")), // blue charple
-			rgbArr(hex("#f5c2e7")), // magenta dolly
-			rgbArr(hex("#89dceb")), // cyan malibu
-			rgbArr(hex("#c9b8c4")), // white smoke
-			rgbArr(hex("#6c5a66")), // bright black
-			rgbArr(hex("#eba0ac")), // bright red
-			rgbArr(hex("#94e2d5")), // bright green
-			rgbArr(hex("#f5e0dc")), // bright yellow
-			rgbArr(hex("#b4befe")), // bright blue
-			rgbArr(hex("#cba6f7")), // bright magenta
-			rgbArr(hex("#89dceb")), // bright cyan
-			rgbArr(hex("#f5e0dc")), // bright white
+			rgbArr(hex("#1a1418")),
+			rgbArr(hex("#e8a0a8")),
+			rgbArr(hex("#a6d5a0")),
+			rgbArr(hex("#e8d5a0")),
+			rgbArr(hex("#b0a0e8")),
+			rgbArr(hex("#e0b0d0")),
+			rgbArr(hex("#90d0c8")),
+			rgbArr(hex("#d0c4cc")),
+			rgbArr(hex("#6a5a64")),
+			rgbArr(hex("#f0b0b8")),
+			rgbArr(hex("#b8e0b0")),
+			rgbArr(hex("#f0e0b8")),
+			rgbArr(hex("#c0b0f0")),
+			rgbArr(hex("#e8c0e0")),
+			rgbArr(hex("#a8e0d8")),
+			rgbArr(hex("#f8f0f4")),
 		}
 	case config.ThemeHighContrast:
 		setPalette(
 			hex("#000000"),
-			hex("#111111"),
-			hex("#1a1a1a"),
-			hex("#00ff88"),
-			hex("#ffff00"),
-			hex("#00ffff"),
+			hex("#0a0a0a"),
+			hex("#141414"),
+			hex("#00e676"),
+			hex("#ffeb3b"),
+			hex("#00e5ff"),
 			hex("#ffffff"),
-			hex("#dddddd"),
-			hex("#aaaaaa"),
-			hex("#666666"),
-			hex("#003322"),
-			hex("#00ff88"),
+			hex("#e0e0e0"),
+			hex("#b0b0b0"),
+			hex("#707070"),
+			hex("#00331a"),
+			hex("#69f0ae"),
+			hex("#404040"),
+			hex("#000000"),
 		)
-		ShellANSI16 = [16][3]byte{
-			{0, 0, 0},
-			{255, 80, 80},
-			{0, 255, 120},
-			{255, 255, 0},
-			{80, 160, 255},
-			{255, 80, 255},
-			{0, 255, 255},
-			{255, 255, 255},
-			{120, 120, 120},
-			{255, 120, 120},
-			{80, 255, 160},
-			{255, 255, 120},
-			{120, 200, 255},
-			{255, 120, 255},
-			{120, 255, 255},
-			{255, 255, 255},
-		}
-	default: // inkstone
+		ShellANSI16 = StockANSI16
+		// Punch up a few for HC.
+		ShellANSI16[1] = [3]byte{255, 80, 80}
+		ShellANSI16[2] = [3]byte{0, 230, 120}
+		ShellANSI16[4] = [3]byte{80, 160, 255}
+		ShellANSI16[15] = [3]byte{255, 255, 255}
+	default: // inkstone — calm ink dark, dusty mauve accent (not hot pink)
 		setPalette(
-			hex("#0d0b14"),
-			hex("#12101c"),
-			hex("#161422"),
-			hex("#ff6ac1"),
-			hex("#c792ea"),
-			hex("#80ffea"),
-			hex("#f8f8f2"),
-			hex("#cfc9e0"),
-			hex("#6e6a86"),
-			hex("#3e3a50"),
-			hex("#2a1830"),
-			hex("#ff6ac1"),
+			hex("#0c0c10"), // void almost black
+			hex("#141418"), // bar
+			hex("#1c1c22"), // panel
+			hex("#b8a0c8"), // soft mauve
+			hex("#9a9ab0"), // cool secondary
+			hex("#7a9a9a"), // muted teal
+			hex("#e8e6e3"), // warm white
+			hex("#b0aea8"),
+			hex("#787870"),
+			hex("#484848"),
+			hex("#2a2430"), // selection
+			hex("#c8b0d8"),
+			hex("#3a3840"), // quiet border
+			hex("#08080a"), // dim
 		)
 		ShellANSI16 = [16][3]byte{
-			rgbArr(hex("#0d0b14")),
-			rgbArr(hex("#ff6b6b")),
-			rgbArr(hex("#69db7c")),
-			rgbArr(hex("#ffd43b")),
-			rgbArr(hex("#74c0fc")),
-			rgbArr(hex("#ff6ac1")),
-			rgbArr(hex("#80ffea")),
-			rgbArr(hex("#cfc9e0")),
-			rgbArr(hex("#5c5c72")),
-			rgbArr(hex("#ff8787")),
-			rgbArr(hex("#8ce99a")),
-			rgbArr(hex("#ffe066")),
-			rgbArr(hex("#91a7ff")),
-			rgbArr(hex("#e599f7")),
-			rgbArr(hex("#99e9f2")),
-			rgbArr(hex("#f8f8f2")),
+			rgbArr(hex("#0c0c10")),
+			rgbArr(hex("#c07070")),
+			rgbArr(hex("#70a078")),
+			rgbArr(hex("#c0a860")),
+			rgbArr(hex("#7090b8")),
+			rgbArr(hex("#a080a8")),
+			rgbArr(hex("#60a0a0")),
+			rgbArr(hex("#b8b6b0")),
+			rgbArr(hex("#585858")),
+			rgbArr(hex("#d88888")),
+			rgbArr(hex("#90c098")),
+			rgbArr(hex("#d8c880")),
+			rgbArr(hex("#90b0d0")),
+			rgbArr(hex("#c0a0c8")),
+			rgbArr(hex("#88c0c0")),
+			rgbArr(hex("#e8e6e3")),
 		}
 	}
 }
 
-// RemapANSI16 returns an effective 16-color table for shell paint.
-// mode: none → stock; full → theme table; soft → 55% theme + 45% stock.
+// RemapANSI16 returns shell 16-color table for mode.
 func RemapANSI16(mode string) [16][3]byte {
 	switch mode {
 	case config.ANSIMapNone:
 		return StockANSI16
 	case config.ANSIMapFull:
 		return ShellANSI16
-	default: // soft
+	default:
 		var out [16][3]byte
 		for i := 0; i < 16; i++ {
 			for c := 0; c < 3; c++ {
-				// weighted average
-				out[i][c] = byte((int(ShellANSI16[i][c])*55 + int(StockANSI16[i][c])*45) / 100)
+				out[i][c] = byte((int(ShellANSI16[i][c])*50 + int(StockANSI16[i][c])*50) / 100)
 			}
 		}
 		return out
 	}
 }
 
-func setPalette(void, bar, panel, neon, violet, cyan, text, soft, dim, mute, sel, match color.Color) {
+func setPalette(void, bar, panel, accent, softA, cyan, text, soft, dim, mute, sel, match, border, dimMatte color.Color) {
 	colVoid = toLG(void)
 	colBar = toLG(bar)
 	colPanel = toLG(panel)
-	colNeon = toLG(neon)
-	colViolet = toLG(violet)
+	colAccent = toLG(accent)
+	colSoftA = toLG(softA)
 	colCyan = toLG(cyan)
 	colText = toLG(text)
 	colSoft = toLG(soft)
@@ -198,9 +197,13 @@ func setPalette(void, bar, panel, neon, violet, cyan, text, soft, dim, mute, sel
 	colMute = toLG(mute)
 	colSel = toLG(sel)
 	colMatch = toLG(match)
+	colBorder = toLG(border)
+	colNeon = colAccent
+	colViolet = colSoftA
 
 	BarR, BarG, BarB = rgb8(bar)
 	VoidR, VoidG, VoidB = rgb8(void)
+	DimR, DimG, DimB = rgb8(dimMatte)
 }
 
 func rgbArr(c color.Color) [3]byte {
@@ -219,9 +222,8 @@ func rgb8(c color.Color) (byte, byte, byte) {
 }
 
 func hex(s string) color.Color {
-	// #RRGGBB
 	if len(s) != 7 || s[0] != '#' {
-		return color.RGBA{R: 0, G: 0, B: 0, A: 255}
+		return color.RGBA{A: 255}
 	}
 	var r, g, b uint8
 	_, _ = parseHexByte(s[1:3], &r)
@@ -251,49 +253,36 @@ func parseHexByte(s string, out *uint8) (int, error) {
 
 func hexStr(r, g, b uint8) string {
 	const h = "0123456789abcdef"
-	return string([]byte{
-		'#',
-		h[r>>4], h[r&0xf],
-		h[g>>4], h[g&0xf],
-		h[b>>4], h[b&0xf],
-	})
+	return string([]byte{'#', h[r>>4], h[r&0xf], h[g>>4], h[g&0xf], h[b>>4], h[b&0xf]})
 }
+
+// --- Styles: quiet, dense, no chunky boxes on the tab strip ---
 
 func styleBar() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Background(colBar).
-		Foreground(colDim)
+	return lipgloss.NewStyle().Background(colBar).Foreground(colDim)
 }
 
+// Active tab: soft pill, no rounded border (borders look broken at 1 cell).
 func styleActiveTab() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(colText).
-		Background(colPanel).
+		Background(colSel).
 		Bold(true).
-		Padding(0, 1).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colNeon).
-		BorderBackground(colBar)
+		Padding(0, 2)
 }
 
 func styleInactiveTab() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(colDim).
 		Background(colBar).
-		Padding(0, 1).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colMute).
-		BorderBackground(colBar)
+		Padding(0, 2)
 }
 
 func stylePlus() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Foreground(colCyan).
+		Foreground(colMute).
 		Background(colBar).
-		Padding(0, 1).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colMute).
-		BorderBackground(colBar)
+		Padding(0, 1)
 }
 
 func styleGap() lipgloss.Style {
@@ -307,19 +296,20 @@ func styleStatus() lipgloss.Style {
 		Padding(0, 1)
 }
 
+// Dialogs: quiet border, soft panel, breathing room.
 func stylePaletteBorder() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colNeon).
-		BorderBackground(colVoid).
+		BorderForeground(colBorder).
+		BorderBackground(colPanel).
 		Background(colPanel).
-		Padding(0, 1).
+		Padding(1, 2).
 		Margin(0, 0)
 }
 
 func styleBrand() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Foreground(colViolet).
+		Foreground(colAccent).
 		Background(colBar).
 		Bold(true).
 		Padding(0, 1)
@@ -327,9 +317,9 @@ func styleBrand() lipgloss.Style {
 
 func styleDialogTitle() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Foreground(colNeon).
+		Foreground(colText).
 		Bold(true).
-		Padding(0, 1)
+		Padding(0, 0, 0, 0)
 }
 
 func styleDialogLabel() lipgloss.Style {
@@ -337,7 +327,7 @@ func styleDialogLabel() lipgloss.Style {
 }
 
 func styleDialogValue() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(colText).Bold(true)
+	return lipgloss.NewStyle().Foreground(colSoft)
 }
 
 func styleDialogActive() lipgloss.Style {
@@ -345,11 +335,13 @@ func styleDialogActive() lipgloss.Style {
 		Foreground(colText).
 		Background(colSel).
 		Bold(true).
-		Padding(0, 1).
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(colNeon)
+		Padding(0, 1)
 }
 
 func styleDialogHint() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(colMute)
+}
+
+func styleDialogRule() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(colMute).Background(colPanel)
 }

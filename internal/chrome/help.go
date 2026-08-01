@@ -4,39 +4,38 @@ import "strings"
 
 // helpBody is the keybind reference card.
 func helpBody(width int) string {
-	if width < 28 {
-		width = 28
+	if width < 32 {
+		width = 32
 	}
-	title := styleDialogTitle().Render("Keyboard shortcuts")
+	inner := width - 6
+	title := styleDialogTitle().Render("Shortcuts")
+	rule := styleDialogRule().Render(strings.Repeat("─", inner))
 	lines := []string{
 		title,
+		rule,
+		styleDialogHint().Render("Tabs"),
+		helpRow("⌃⇧T", "New tab"),
+		helpRow("⌃W", "Close tab"),
+		helpRow("⌃Tab", "Next / prev"),
+		helpRow("⌃1–9", "Jump"),
 		"",
-		styleDialogLabel().Render("Tabs"),
-		helpRow("Ctrl+Shift+T", "New tab"),
-		helpRow("Ctrl+W", "Close tab"),
-		helpRow("Ctrl+Tab", "Next tab"),
-		helpRow("Ctrl+Shift+Tab", "Previous tab"),
-		helpRow("Ctrl+1…9", "Jump to tab"),
-		helpRow("Click +", "New tab"),
+		styleDialogHint().Render("Chrome"),
+		helpRow("⌃K", "Palette"),
+		helpRow("⌃,", "Settings"),
+		helpRow("⌃/", "Help"),
+		helpRow("Esc", "Dismiss"),
 		"",
-		styleDialogLabel().Render("Chrome"),
-		helpRow("Ctrl+K / Ctrl+P", "Command palette"),
-		helpRow("Ctrl+,", "Settings"),
-		helpRow("Ctrl+/", "This help"),
-		helpRow("Esc", "Dismiss overlay"),
-		"",
-		styleDialogLabel().Render("Terminal"),
-		helpRow("Ctrl+Shift+C", "Copy"),
-		helpRow("Ctrl+Shift+V", "Paste"),
-		helpRow("Wheel / PgUp·Dn", "Scrollback"),
-		"",
-		styleDialogHint().Render("esc close"),
+		styleDialogHint().Render("Terminal"),
+		helpRow("⌃⇧C/V", "Copy / paste"),
+		helpRow("Wheel", "Scrollback"),
+		rule,
+		styleDialogHint().Render("esc"),
 	}
 	return stylePaletteBorder().Width(width).Render(strings.Join(lines, "\n"))
 }
 
 func helpRow(key, desc string) string {
-	k := styleDialogValue().Render(key)
-	d := styleDialogLabel().Render("  " + desc)
-	return k + d
+	k := styleDialogValue().Width(8).Render(key)
+	d := styleDialogLabel().Render(desc)
+	return k + "  " + d
 }

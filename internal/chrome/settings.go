@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // settingsField is one row in the settings dialog.
@@ -21,8 +22,8 @@ const (
 )
 
 type settingsState struct {
-	snap  config.Config // opened-with (Esc restores)
-	edit  config.Config // live edit
+	snap  config.Config
+	edit  config.Config
 	field settingsField
 	fonts []string
 }
@@ -30,7 +31,6 @@ type settingsState struct {
 func newSettingsState(cfg config.Config) settingsState {
 	cfg = config.Normalize(cfg)
 	fonts := config.MonoFontFaces()
-	// Ensure current face is in the cycle list.
 	found := false
 	for _, f := range fonts {
 		if strings.EqualFold(f, cfg.FontFace) {
@@ -104,7 +104,7 @@ func (s settingsState) valueLabel(f settingsField) string {
 	case fieldFontFace:
 		return s.edit.FontFace
 	case fieldFontSize:
-		return fmt.Sprintf("%d px", s.edit.FontSizePx)
+		return fmt.Sprintf("%d", s.edit.FontSizePx)
 	case fieldCursor:
 		cs := config.CursorString(s.edit.Cursor)
 		if cs == "" {
@@ -128,15 +128,15 @@ func (s settingsState) valueLabel(f settingsField) string {
 func (s settingsState) fieldLabel(f settingsField) string {
 	switch f {
 	case fieldFontFace:
-		return "Font face"
+		return "Font"
 	case fieldFontSize:
-		return "Font size"
+		return "Size"
 	case fieldCursor:
 		return "Cursor"
 	case fieldTheme:
 		return "Theme"
 	case fieldANSIMap:
-		return "Shell ANSI"
+		return "ANSI"
 	case fieldProfile:
 		return "Profile"
 	default:
@@ -145,38 +145,50 @@ func (s settingsState) fieldLabel(f settingsField) string {
 }
 
 func (s settingsState) render(width int) string {
-	if width < 28 {
-		width = 28
+	if width < 30 {
+		width = 30
 	}
+	inner := width - 6
+	if inner < 20 {
+		inner = 20
+	}
+
 	title := styleDialogTitle().Render("Settings")
+	rule := styleDialogRule().Render(strings.Repeat("─", inner))
+
 	var rows []string
 	rows = append(rows, title)
-	rows = append(rows, "")
+	rows = append(rows, rule)
+
 	for f := settingsField(0); f < settingsFieldCount; f++ {
 		label := s.fieldLabel(f)
 		val := s.valueLabel(f)
-		// Truncate long font names.
-		maxVal := width - 18
-		if maxVal < 8 {
-			maxVal = 8
+		maxVal := inner - 14
+		if maxVal < 6 {
+			maxVal = 6
 		}
 		if len([]rune(val)) > maxVal {
 			rs := []rune(val)
 			val = string(rs[:maxVal-1]) + "…"
 		}
 		if f == s.field {
-			line := fmt.Sprintf("%-12s  ◂ %s ▸", label, val)
-			rows = append(rows, styleDialogActive().Width(width-4).Render(line))
+			// Calm selected row: no neon side bar, soft fill + arrows.
+			line := fmt.Sprintf("%-8s  %s  %s  %s", label, "‹", val, "›")
+			rows = append(rows, styleDialogActive().Width(inner).Render(line))
 		} else {
-			lab := styleDialogLabel().Render(fmt.Sprintf("%-12s", label))
-			v := styleDialogValue().Render("  " + val)
-			rows = append(rows, lab+v)
+			lab := styleDialogLabel().Width(10).Render(label)
+			v := styleDialogValue().Render(val)
+			pad := inner - lipgloss.Width(lab) - lipgloss.Width(v)
+			if pad < 1 {
+				pad = 1
+			}
+			rows = append(rows, lab+strings.Repeat(" ", pad)+v)
 		}
 	}
-	rows = append(rows, "")
-	rows = append(rows, styleDialogHint().Render("↑↓ field  ←→ change  enter save  esc cancel"))
-	body := strings.Join(rows, "\n")
-	return stylePaletteBorder().Width(width).Render(body)
+
+	rows = append(rows, rule)
+	rows = append(rows, styleDialogHint().Render("↑↓  ·  ‹› change  ·  enter save  ·  esc"))
+	return stylePaletteBorder().Width(width).Render(strings.Join(rows, "\n"))
 }
 
 func indexFold(list []string, want string) int {

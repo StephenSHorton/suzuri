@@ -20,13 +20,7 @@ func TestViewHasTabs(t *testing.T) {
 	if !strings.Contains(v, "alpha") {
 		t.Fatalf("view missing inactive tab: %q", v)
 	}
-	// Rounded border glyphs (Charm neon cards).
-	if !strings.Contains(v, "╭") && !strings.Contains(v, "╮") {
-		// Some widths may clip; at least ensure multi-line strip.
-		if strings.Count(v, "\n") < 2 {
-			t.Fatalf("expected multi-line rounded tab strip, view=%q", v)
-		}
-	}
+	// Single-row strip — both titles present is enough.
 }
 
 func TestTabBoundsMatchLayout(t *testing.T) {
@@ -47,13 +41,13 @@ func TestTabBoundsMatchLayout(t *testing.T) {
 	}
 }
 
-func TestTabStripIsThreeRows(t *testing.T) {
+func TestTabStripIsOneRow(t *testing.T) {
 	m := New(80)
 	m.Tabs = []Tab{{ID: 0, Title: "shell"}}
-	if m.RowCount() != 3 {
-		t.Fatalf("rows=%d want 3 (rounded tab cards)", m.RowCount())
+	if m.RowCount() != 1 {
+		t.Fatalf("rows=%d want 1 (calm strip)", m.RowCount())
 	}
-	if TabStripRows() != 3 {
+	if TabStripRows() != 1 {
 		t.Fatal("TabStripRows")
 	}
 }
@@ -171,11 +165,11 @@ func TestRenderToTerm(t *testing.T) {
 	m.Active = 0
 	term := RenderToTerm(m, 60)
 	cols, rows := term.Size()
-	if cols < 20 || rows < 3 {
+	if cols < 20 || rows < 1 {
 		t.Fatalf("size %d×%d", cols, rows)
 	}
 	found := false
-	for y := 0; y < rows && y < 3; y++ {
+	for y := 0; y < rows && y < 2; y++ {
 		for x := 0; x < cols; x++ {
 			if term.Cell(x, y).Char != 0 && term.Cell(x, y).Char != ' ' {
 				found = true
@@ -188,42 +182,21 @@ func TestRenderToTerm(t *testing.T) {
 	}
 }
 
-// Wide brand 硯 must not shift the middle row left under the top border.
+// Wide brand 硯 must still leave room for tab titles on the strip.
 func TestWideRuneAlignment(t *testing.T) {
 	m := New(50)
 	m.Tabs = []Tab{{ID: 0, Title: "PowerShell"}, {ID: 1, Title: "sh"}}
 	m.Active = 0
 	term := RenderToTerm(m, 50)
-
-	// Second card is PowerShell — find top-left ╭ of that card and mid │.
-	// Brand card is first; PowerShell is second ╭ on row 0.
-	var topCorners []int
-	for x := 0; x < 50; x++ {
-		if term.Cell(x, 0).Char == '╭' {
-			topCorners = append(topCorners, x)
-		}
-	}
-	if len(topCorners) < 2 {
-		t.Fatalf("expected ≥2 tab cards on top row, got %v", topCorners)
-	}
-	psTop := topCorners[1] // PowerShell card
-
-	var midBars []int
-	for x := 0; x < 50; x++ {
-		if term.Cell(x, 1).Char == '│' {
-			midBars = append(midBars, x)
-		}
-	}
-	// Left │ of PowerShell card should share the same column as its ╭.
+	// Find 'P' of PowerShell somewhere on row 0 after brand.
 	found := false
-	for _, x := range midBars {
-		if x == psTop {
+	for x := 0; x < 50; x++ {
+		if term.Cell(x, 0).Char == 'P' {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("PowerShell mid-row │ not under top ╭ at x=%d; mid bars=%v top corners=%v",
-			psTop, midBars, topCorners)
+		t.Fatal("PowerShell title missing from strip after wide brand")
 	}
 }

@@ -1719,20 +1719,12 @@ func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 	if padY < 1 {
 		padY = int32(tabBarFallback)
 	}
-	// Semi-opaque matte via solid near-black (GDI has no easy alpha without
-	// AlphaBlend setup). Dark void matches Charm card backdrop.
-	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.VoidR/2, chrome.VoidG/2, chrome.VoidB/2)}
+	// Solid near-black matte (no stripe pattern — that looked cheap).
+	// Shell content is fully covered; dialog sits on top.
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.DimR, chrome.DimG, chrome.DimB)}
 	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
 		r := win.RECT{Left: 0, Top: padY, Right: rect.Right, Bottom: rect.Bottom}
-		// Checker-style soft dim: paint every other 2px strip so shell remains
-		// faintly readable (cheap faux transparency).
-		for y := r.Top; y < r.Bottom; y += 2 {
-			band := win.RECT{Left: r.Left, Top: y, Right: r.Right, Bottom: y + 1}
-			if band.Bottom > r.Bottom {
-				band.Bottom = r.Bottom
-			}
-			fillRect(hdc, band, brush)
-		}
+		fillRect(hdc, r, brush)
 		win.DeleteObject(win.HGDIOBJ(brush))
 	}
 }

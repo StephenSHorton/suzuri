@@ -433,8 +433,8 @@ func tabLabel(t Tab, i int) string {
 	return title
 }
 
-// TabStripRows is the height of the neon tab-card strip only.
-func TabStripRows() int { return 3 }
+// TabStripRows is a single calm row (no 3-line rounded tab boxes).
+func TabStripRows() int { return 1 }
 
 // StripView is tab strip (+ optional status) — always used for chrome strip paint.
 func (m Model) StripView() string {
@@ -493,15 +493,8 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int) {
 	var parts []string
 	var plusB [2]int
 
-	brand := lipgloss.NewStyle().
-		Foreground(colViolet).
-		Background(colBar).
-		Bold(true).
-		Padding(0, 1).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colViolet).
-		BorderBackground(colBar).
-		Render("硯")
+	// Quiet brand — no bordered chip.
+	brand := styleBrand().Render("硯")
 	parts = append(parts, brand)
 	col := lipgloss.Width(brand)
 
@@ -517,6 +510,7 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int) {
 			label := tabLabel(t, i)
 			var card string
 			if i == m.Active {
+				// Soft active marker without box-drawing corners.
 				card = styleActiveTab().Render(label)
 			} else {
 				card = styleInactiveTab().Render(label)
@@ -536,22 +530,14 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int) {
 	parts = append(parts, plus)
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
-	strip := lipgloss.NewStyle().
-		Background(colBar).
-		Width(w).
-		Padding(0, 0).
-		Render(row)
-
-	lines := strings.Split(strip, "\n")
-	for i, ln := range lines {
-		lw := lipgloss.Width(ln)
-		if lw < w {
-			lines[i] = ln + styleGap().Render(strings.Repeat(" ", w-lw))
-		} else if lw > w {
-			lines[i] = lipgloss.NewStyle().MaxWidth(w).Render(ln)
-		}
+	// Fill remaining width with bar bg so the strip is one continuous surface.
+	lw := lipgloss.Width(row)
+	if lw < w {
+		row = row + styleGap().Render(strings.Repeat(" ", w-lw))
+	} else if lw > w {
+		row = lipgloss.NewStyle().MaxWidth(w).Background(colBar).Render(row)
 	}
-	return strings.Join(lines, "\n"), bounds, plusB
+	return styleBar().Width(w).Render(row), bounds, plusB
 }
 
 func (m Model) showStatus() bool {

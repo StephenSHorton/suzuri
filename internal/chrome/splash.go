@@ -4,20 +4,21 @@ import "strings"
 
 // splashBody is the first-run welcome card.
 func splashBody(width int) string {
-	if width < 32 {
-		width = 32
+	if width < 34 {
+		width = 34
 	}
+	inner := width - 6
 	title := styleDialogTitle().Render("硯  suzuri")
+	sub := styleDialogHint().Render("real terminal · charm chrome")
+	rule := styleDialogRule().Render(strings.Repeat("─", inner))
 	body := styleDialogLabel().Render(
-		"A real Windows terminal host —\n" +
-			"ConPTY shell, Charm chrome.\n\n" +
-			"Ctrl+K  command palette\n" +
-			"Ctrl+,  settings\n" +
-			"Ctrl+/  keyboard shortcuts\n" +
-			"Ctrl+Shift+T  new tab",
+		"Ctrl+K   commands\n" +
+			"Ctrl+,   settings\n" +
+			"Ctrl+/   shortcuts\n" +
+			"⌃⇧T     new tab",
 	)
-	hint := styleDialogHint().Render("enter or esc · don't show again")
+	hint := styleDialogHint().Render("enter to continue")
 	return stylePaletteBorder().Width(width).Render(
-		strings.Join([]string{title, "", body, "", hint}, "\n"),
+		strings.Join([]string{title, sub, rule, body, "", hint}, "\n"),
 	)
 }
