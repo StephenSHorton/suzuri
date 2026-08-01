@@ -91,3 +91,43 @@ func TestRenderToTerm(t *testing.T) {
 		t.Fatal("chrome empty after render")
 	}
 }
+
+// Wide brand 硯 must not shift the middle row left under the top border.
+func TestWideRuneAlignment(t *testing.T) {
+	m := New(50)
+	m.Tabs = []Tab{{ID: 0, Title: "PowerShell"}, {ID: 1, Title: "sh"}}
+	m.Active = 0
+	term := RenderToTerm(m, 50)
+
+	// Second card is PowerShell — find top-left ╭ of that card and mid │.
+	// Brand card is first; PowerShell is second ╭ on row 0.
+	var topCorners []int
+	for x := 0; x < 50; x++ {
+		if term.Cell(x, 0).Char == '╭' {
+			topCorners = append(topCorners, x)
+		}
+	}
+	if len(topCorners) < 2 {
+		t.Fatalf("expected ≥2 tab cards on top row, got %v", topCorners)
+	}
+	psTop := topCorners[1] // PowerShell card
+
+	var midBars []int
+	for x := 0; x < 50; x++ {
+		if term.Cell(x, 1).Char == '│' {
+			midBars = append(midBars, x)
+		}
+	}
+	// Left │ of PowerShell card should share the same column as its ╭.
+	found := false
+	for _, x := range midBars {
+		if x == psTop {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("PowerShell mid-row │ not under top ╭ at x=%d; mid bars=%v top corners=%v",
+			psTop, midBars, topCorners)
+	}
+}
