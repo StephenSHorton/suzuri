@@ -9,6 +9,10 @@ type inputBar struct {
 	history []string
 	histIdx int    // -1 = editing live buffer; else index into history
 	draft   string // saved live line when browsing history
+	comp    completeSession
+	// ghostKey/ghostCache avoid ReadDir on every paint/caret blink.
+	ghostKey   string
+	ghostCache string
 }
 
 const (
@@ -27,6 +31,7 @@ func (b *inputBar) clear() {
 	b.cursor = 0
 	b.histIdx = -1
 	b.draft = ""
+	b.clearComplete()
 }
 
 func (b *inputBar) insertRunes(rs []rune) {
@@ -42,6 +47,7 @@ func (b *inputBar) insertRunes(rs []rune) {
 		case '\n':
 			clean = append(clean, '\n')
 		case '\t':
+			// Tab is completion at the host; pasted tabs become spaces.
 			clean = append(clean, ' ', ' ')
 		default:
 			if r >= 32 {
@@ -53,6 +59,7 @@ func (b *inputBar) insertRunes(rs []rune) {
 		return
 	}
 	b.leaveHistoryBrowse()
+	b.clearComplete()
 	b.clampCursor()
 	out := make([]rune, 0, len(b.runes)+len(clean))
 	out = append(out, b.runes[:b.cursor]...)
@@ -88,6 +95,7 @@ func (b *inputBar) clampCursor() {
 
 func (b *inputBar) backspace() {
 	b.leaveHistoryBrowse()
+	b.clearComplete()
 	if b.cursor <= 0 {
 		return
 	}
@@ -97,6 +105,7 @@ func (b *inputBar) backspace() {
 
 func (b *inputBar) deleteForward() {
 	b.leaveHistoryBrowse()
+	b.clearComplete()
 	if b.cursor >= len(b.runes) {
 		return
 	}
@@ -104,18 +113,21 @@ func (b *inputBar) deleteForward() {
 }
 
 func (b *inputBar) moveLeft() {
+	b.clearComplete()
 	if b.cursor > 0 {
 		b.cursor--
 	}
 }
 
 func (b *inputBar) moveRight() {
+	b.clearComplete()
 	if b.cursor < len(b.runes) {
 		b.cursor++
 	}
 }
 
 func (b *inputBar) moveHome() {
+	b.clearComplete()
 	// Start of current logical line (after last \n), not whole buffer.
 	i := b.cursor
 	for i > 0 && b.runes[i-1] != '\n' {
@@ -125,6 +137,7 @@ func (b *inputBar) moveHome() {
 }
 
 func (b *inputBar) moveEnd() {
+	b.clearComplete()
 	i := b.cursor
 	for i < len(b.runes) && b.runes[i] != '\n' {
 		i++
@@ -134,6 +147,7 @@ func (b *inputBar) moveEnd() {
 
 // historyUp walks toward older commands.
 func (b *inputBar) historyUp() {
+	b.clearComplete()
 	if len(b.history) == 0 {
 		return
 	}
@@ -148,6 +162,7 @@ func (b *inputBar) historyUp() {
 
 // historyDown walks toward newer / draft.
 func (b *inputBar) historyDown() {
+	b.clearComplete()
 	if b.histIdx < 0 {
 		return
 	}
@@ -254,6 +269,7 @@ func (b *inputBar) visualRows(width int) int {
 // moveVisualUp moves the caret one display row up. Returns false if already
 // on the first row (caller may walk history).
 func (b *inputBar) moveVisualUp(width int) bool {
+	b.clearComplete()
 	_, cr, cc := b.wrapLayout(width)
 	if cr <= 0 {
 		return false
@@ -264,6 +280,7 @@ func (b *inputBar) moveVisualUp(width int) bool {
 
 // moveVisualDown moves one display row down. Returns false if on last row.
 func (b *inputBar) moveVisualDown(width int) bool {
+	b.clearComplete()
 	lines, cr, cc := b.wrapLayout(width)
 	if cr >= len(lines)-1 {
 		return false

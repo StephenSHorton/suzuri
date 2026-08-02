@@ -82,7 +82,8 @@ func QuietPrompt(commandLine string) string {
 
 // StartSession launches commandLine on a PTY of size cols×rows.
 // workDir empty uses the process working directory.
-func StartSession(commandLine string, cols, rows int, workDir string) (*Session, error) {
+// extraEnv is KEY=VAL entries merged into the process environment.
+func StartSession(commandLine string, cols, rows int, workDir string, extraEnv ...string) (*Session, error) {
 	if commandLine == "" {
 		commandLine = DefaultShell()
 	} else {
@@ -108,7 +109,11 @@ func StartSession(commandLine string, cols, rows int, workDir string) (*Session,
 		name, args = splitCommandLine(name)
 	}
 
-	env, zdot, err := quietShellEnv(name, args, os.Environ())
+	base := os.Environ()
+	if len(extraEnv) > 0 {
+		base = append(append([]string{}, base...), extraEnv...)
+	}
+	env, zdot, err := quietShellEnv(name, args, base)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +197,10 @@ func quietShellEnv(shellPath string, args []string, base []string) (env []string
 [[ -f "$HOME/.zshenv" ]] && source "$HOME/.zshenv"
 [[ -f "$HOME/.zprofile" ]] && source "$HOME/.zprofile"
 [[ -f "$HOME/.zshrc" ]] && source "$HOME/.zshrc"
+_suzuri_emit_cwd() {
+  # ESC]7878;cwd=<pwd>BEL — host strips and shows in Warp bar / blocks.
+  printf '\033]7878;cwd=%s\007' "$PWD"
+}
 _suzuri_quiet_prompt() {
   PROMPT=' '
   RPROMPT=''
@@ -199,6 +208,7 @@ _suzuri_quiet_prompt() {
   unset RPS1
   # Hide the reverse-video "%" zsh draws when the prior line had no newline.
   PROMPT_EOL_MARK=''
+  _suzuri_emit_cwd
 }
 _suzuri_quiet_prompt
 # Run after theme precmd hooks so starship/p10k/oh-my-zsh cannot repaint a prompt.
@@ -223,7 +233,9 @@ precmd_functions+=(_suzuri_quiet_prompt)
 		content := `# suzuri quiet-prompt bootstrap
 [[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
 PS1=' '
-PROMPT_COMMAND=''
+_suzuri_emit_cwd() { printf '\033]7878;cwd=%s\007' "$PWD"; }
+PROMPT_COMMAND='_suzuri_emit_cwd'
+_suzuri_emit_cwd
 `
 		rc := filepath.Join(dir, "bashrc")
 		if err := os.WriteFile(rc, []byte(content), 0o644); err != nil {
@@ -235,7 +247,7 @@ PROMPT_COMMAND=''
 		// and use --rcfile by rewriting is hard here — put path in env for StartSession.
 		env = setEnv(env, "SUZURI_BASHRC", rc)
 		env = setEnv(env, "PS1", " ")
-		env = setEnv(env, "PROMPT_COMMAND", "")
+		// PROMPT_COMMAND set in rcfile (cwd OSC); do not blank it here.
 		// Interactive bash: if no args, pty Start uses just "bash". Append --rcfile
 		// is done by rewriting args in StartSession — handled below via marker.
 		return env, dir, nil

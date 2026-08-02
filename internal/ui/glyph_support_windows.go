@@ -62,19 +62,54 @@ func fontHasRunes(hdc win.HDC, runes ...rune) bool {
 func (u *winUI) probeKeyGlyphs() {
 	if u == nil || u.font == 0 {
 		chrome.SetKeyGlyphSupport(false, false)
+		chrome.SetTabStateGlyphs(chrome.TabGlyphsASCII)
+		u.primaryHasGeo = false
+		u.primaryHasBraille = false
 		return
 	}
 	hwnd := u.hwnd
 	hdc := win.GetDC(hwnd)
 	if hdc == 0 {
 		chrome.SetKeyGlyphSupport(false, false)
+		chrome.SetTabStateGlyphs(chrome.TabGlyphsASCII)
+		u.primaryHasGeo = false
+		u.primaryHasBraille = false
 		return
 	}
 	old := win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	fancy := fontHasRunes(hdc, '⇧', '⌃')
 	arrows := fontHasRunes(hdc, '↑', '↓')
+	// Prefer primary face for status marks so advance width matches the cell grid.
+	u.primaryHasGeo = fontHasRunes(hdc, chrome.TabGlyphRunes(chrome.TabGlyphsGeometric)...)
+	u.primaryHasBraille = fontHasRunes(hdc, chrome.TabGlyphRunes(chrome.TabGlyphsBraille)...)
+	brailleOK := u.primaryHasBraille
+	if !brailleOK && u.symFont != 0 {
+		win.SelectObject(hdc, win.HGDIOBJ(u.symFont))
+		brailleOK = fontHasRunes(hdc, chrome.TabGlyphRunes(chrome.TabGlyphsBraille)...)
+		win.SelectObject(hdc, win.HGDIOBJ(u.font))
+	}
+	// Braille is the product choice for tab activity (same family as CLI spinners).
+	// Cascadia symbol fallback paints it when FiraCode Nerd lacks the block.
+	tabSet, tabName := chrome.TabGlyphsASCII, "ascii"
+	switch {
+	case brailleOK:
+		tabSet, tabName = chrome.TabGlyphsBraille, "braille"
+	case u.primaryHasGeo:
+		tabSet, tabName = chrome.TabGlyphsGeometric, "geometric"
+	default:
+		if u.symFont != 0 {
+			win.SelectObject(hdc, win.HGDIOBJ(u.symFont))
+			if fontHasRunes(hdc, chrome.TabGlyphRunes(chrome.TabGlyphsGeometric)...) {
+				tabSet, tabName = chrome.TabGlyphsGeometric, "geometric"
+			}
+			win.SelectObject(hdc, win.HGDIOBJ(u.font))
+		}
+	}
 	win.SelectObject(hdc, old)
 	win.ReleaseDC(hwnd, hdc)
 	chrome.SetKeyGlyphSupport(fancy, arrows)
-	log.Debug("key glyph support", "fancy", fancy, "arrows", arrows, "face", fontFaceName(u.font))
+	chrome.SetTabStateGlyphs(tabSet)
+	log.Debug("key glyph support", "fancy", fancy, "arrows", arrows, "tabs", tabName,
+		"face", fontFaceName(u.font), "sym", fontFaceName(u.symFont),
+		"primaryGeo", u.primaryHasGeo, "primaryBraille", u.primaryHasBraille)
 }

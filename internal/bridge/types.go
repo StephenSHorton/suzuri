@@ -81,6 +81,7 @@ type Status struct {
 	Message string `json:"message,omitempty"`
 }
 
+
 // LogsResult is a tail of %LOCALAPPDATA%\suzuri\suzuri.log.
 type LogsResult struct {
 	OK    bool     `json:"ok"`

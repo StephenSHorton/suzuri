@@ -39,7 +39,7 @@ func TestScrollByClamp(t *testing.T) {
 
 func TestPushBlock(t *testing.T) {
 	s := newScrollback()
-	s.pushBlock("echo hi", 40)
+	s.pushBlock("echo hi", 40, "")
 	if len(s.lines) < 3 {
 		t.Fatalf("expected block lines, got %d", len(s.lines))
 	}
@@ -141,7 +141,7 @@ func TestIsClearCommand(t *testing.T) {
 func TestClearCommandPinsAfterBlock(t *testing.T) {
 	s := newScrollback()
 	s.push("old output")
-	s.pushBlock("clear", 40)
+	s.pushBlock("clear", 40, "")
 	s.pinHere()
 	if s.pin != len(s.lines) {
 		t.Fatalf("pin=%d len=%d", s.pin, len(s.lines))
@@ -186,10 +186,10 @@ func TestCommitLiveThenPushBlockOrder(t *testing.T) {
 	// commitLive must place prior output in history before the next block header
 	// so blocks and outputs stay associated (not all outputs in a live stack).
 	s := newScrollback()
-	s.pushBlock("echo one", 40)
+	s.pushBlock("echo one", 40, "")
 	// Simulate committed output of first command (as commitLive would push).
 	s.push("one")
-	s.pushBlock("echo two", 40)
+	s.pushBlock("echo two", 40, "")
 	// Expect order: block1 … "one" … block2
 	var sawOne, sawBlock2 bool
 	oneIdx, block2Idx := -1, -1
@@ -220,7 +220,7 @@ func TestClearPinHidesHistoryAtStickBottom(t *testing.T) {
 	s.pin = len(s.lines)
 	s.stickBottom()
 	// Post-clear: one command block.
-	s.pushBlock("echo hi", 40)
+	s.pushBlock("echo hi", 40, "")
 	// Without a real term, exercise the pin short-content path via rowAt math.
 	// content after pin should be the block only; pin floor prevents old lines.
 	if s.pin != 20 {
@@ -254,7 +254,7 @@ func TestScreenWasCleared(t *testing.T) {
 func TestViewCellsShowsBlockWithSparseLive(t *testing.T) {
 	// Document model: history block + short live should appear together at bottom.
 	s := newScrollback()
-	s.pushBlock("Write-Output hello", 40)
+	s.pushBlock("Write-Output hello", 40, "")
 	// Simulate effective live height of 2 (output + prompt) without a real PTY.
 	// viewCells needs vt10x.Terminal — verify the composition math instead.
 	hist := len(s.lines)

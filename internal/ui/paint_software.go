@@ -122,6 +122,8 @@ type paintOpts struct {
 	InputCaretCol int // content col (after prompt on row 0)
 	InputEmpty    bool
 	InputHint     string
+	InputCwd      string // shortened path above the command line
+	InputGhost    string // soft Tab-completion preview after caret
 	ShowInput     bool
 	CursorStyle   int // config.CursorStyle as int to avoid import cycle issues — use values 0/1/2
 }
@@ -300,6 +302,20 @@ func (p *softwarePainter) paintInputBar(dst *image.RGBA, o paintOpts, shellBot, 
 	padTop := top + hair + topPad
 	const padX = 8
 
+	if cwd := stringsTrimSpace(o.InputCwd); cwd != "" {
+		maxCols := (w - padX - 8) / cw
+		if maxCols < 8 {
+			maxCols = 8
+		}
+		label := truncateRunes(cwd, maxCols)
+		x := padX
+		for _, r := range []rune(label) {
+			p.drawGlyph(dst, x, padTop, r, chrome.SoftR, chrome.SoftG, chrome.SoftB)
+			x += cw
+		}
+		padTop += ch
+	}
+
 	prompt := o.InputPrompt
 	if prompt == "" {
 		prompt = inputBarPrompt
@@ -346,6 +362,13 @@ func (p *softwarePainter) paintInputBar(dst *image.RGBA, o paintOpts, shellBot, 
 	}
 	caretY := padTop + o.InputCaretRow*ch
 	caretX := padX + promptW + o.InputCaretCol*cw
+	if o.InputGhost != "" {
+		x := caretX
+		for _, r := range []rune(o.InputGhost) {
+			p.drawGlyph(dst, x, caretY, r, chrome.MuteR, chrome.MuteG, chrome.MuteB)
+			x += cw
+		}
+	}
 	p.paintInputCaret(dst, caretX, caretY, o.CursorStyle, o.CurAlpha)
 }
 

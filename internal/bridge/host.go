@@ -38,6 +38,7 @@ func (h *Host) BindSubmit(fn func(tabID int, line string) error) {
 	h.submit = fn
 }
 
+
 // Publish replaces the latest snapshot (call from UI thread after meaningful updates).
 func (h *Host) Publish(s Snapshot) {
 	s.PID = os.Getpid()

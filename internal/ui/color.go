@@ -133,6 +133,15 @@ func displayRune(r rune) rune {
 	if isEastAsianRune(r) {
 		return r
 	}
+	// Status / spinner glyphs used by chrome (tab activity) and TUIs.
+	// Braille Patterns = the classic 6-dot cells (⠿ ⠋ …) every CLI uses.
+	if r >= 0x2800 && r <= 0x28FF {
+		return r
+	}
+	// Geometric Shapes: ● ○ ◉ ◆ ◎ ◐ …
+	if r >= 0x25A0 && r <= 0x25FF {
+		return r
+	}
 	// Beyond Latin Extended-B: keep box-drawing / light punctuation; drop
 	// exotic scripts we cannot paint cleanly without per-script fallbacks.
 	if r > 0x024F &&

@@ -15,7 +15,7 @@ const defaultScrollbackMax = 5000
 const (
 	histNormal byte = iota
 	histBlockRule  // horizontal rule above a command
-	histBlockCmd   // "❯ command" header
+	histBlockCmd   // path + "❯ command" (primary); path is optional prefix
 )
 
 type histLine struct {
@@ -261,32 +261,46 @@ func (s *scrollback) commitLive(term vt10x.Terminal) {
 
 // pushBlock injects a Warp-style command block into history (above live screen).
 // cols is used for the rule width; cmd may be multi-line.
+// cwd when non-empty is shown on the same line as the command (primary color),
+// e.g.  ~\projects  ❯ echo hi
 // Callers should commitLive(term) first so the previous command's output is
 // already in history under its block.
-func (s *scrollback) pushBlock(cmd string, cols int) {
+func (s *scrollback) pushBlock(cmd string, cols int, cwd string) {
 	if stringsTrimSpace(cmd) == "" {
 		return
 	}
 	if cols < 12 {
 		cols = 12
 	}
-	ruleW := cols - 2
+	// Full terminal width (no artificial cap) so the rule matches the pane.
+	ruleW := cols
 	if ruleW < 8 {
 		ruleW = 8
-	}
-	if ruleW > 120 {
-		ruleW = 120
 	}
 	// Spacer + rule + command line(s).
 	s.pushKind("", histNormal)
 	s.pushKind(strings.Repeat("─", ruleW), histBlockRule)
-	// First line gets the prompt; continuation lines are indented.
+	// First line: optional path + one space + prompt + command (all primary).
+	// e.g. ~\projects ❯ echo hi
 	prompt := inputBarPrompt
 	indent := strings.Repeat(" ", len([]rune(prompt)))
+	path := displayPath(cwd)
 	parts := strings.Split(cmd, "\n")
 	for i, p := range parts {
 		if i == 0 {
-			s.pushKind(prompt+p, histBlockCmd)
+			line := prompt + p
+			if path != "" {
+				cmdRunes := len([]rune(prompt + p))
+				pathBudget := cols - cmdRunes - 1 // room for the space before ❯
+				if pathBudget < 6 {
+					pathBudget = 6
+				}
+				if pathBudget > cols/2 {
+					pathBudget = cols / 2
+				}
+				line = truncateRunes(path, pathBudget) + " " + prompt + p
+			}
+			s.pushKind(truncateRunes(line, cols), histBlockCmd)
 		} else {
 			s.pushKind(indent+p, histBlockCmd)
 		}

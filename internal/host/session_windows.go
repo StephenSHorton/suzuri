@@ -60,17 +60,21 @@ func QuietPrompt(commandLine string) string {
 	switch {
 	case strings.EqualFold(base, "pwsh.exe") || strings.EqualFold(base, "pwsh") ||
 		strings.EqualFold(base, "powershell.exe") || strings.EqualFold(base, "powershell"):
-		// Quiet prompt: Windows PowerShell treats function prompt { '' } as
-		// invalid and falls back to "PS>". A single space keeps the in-band
-		// line effectively blank so the Warp bar is the only command surface.
+		// Quiet visual prompt (single space) + OSC cwd report for the Warp bar
+		// and command blocks. ESC]7878;cwd=<path>BEL — parsed by the host.
 		// Clear-Host wipes the leftover banner row after -NoLogo.
-		return cl + ` -NoExit -Command "function global:prompt { ' ' }; Clear-Host"`
+		// Emit cwd once at startup and on every subsequent prompt.
+		ps := `function global:prompt { try { $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}; ' ' }; Clear-Host; try { $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}`
+		return cl + ` -NoExit -Command "` + ps + `"`
 	case strings.EqualFold(base, "cmd.exe") || strings.EqualFold(base, "cmd"):
-		// $S = space in cmd PROMPT syntax — effectively blank.
+		// $S = space in cmd PROMPT; $E = ESC. Emit OSC cwd + blank visual.
+		// $P = current path. BEL is ASCII 7 — use prompt $E]7878;cwd=$P$G style
+		// is wrong ($G is '>'). Use $E]7878;cwd=$P$E\$S via ST terminator.
 		if strings.Contains(lower, "/k") || strings.Contains(lower, "/c") {
 			return cl
 		}
-		return cl + ` /k prompt $S`
+		// ESC]7878;cwd=$P ESC\ then a space. cmd $E = ESC, $_ not available for BEL.
+		return cl + ` /k prompt $E]7878;cwd=$P$E\$S`
 	default:
 		return cl
 	}
@@ -99,7 +103,8 @@ func filepathBase(commandLine string) string {
 
 // StartSession launches commandLine (e.g. powershell) on a ConPTY of size cols×rows.
 // workDir empty uses the process working directory.
-func StartSession(commandLine string, cols, rows int, workDir string) (*Session, error) {
+// extraEnv is KEY=VAL entries merged into the process environment (e.g. SUZURI_TAB_ID).
+func StartSession(commandLine string, cols, rows int, workDir string, extraEnv ...string) (*Session, error) {
 	if commandLine == "" {
 		commandLine = DefaultShell()
 	} else {
@@ -117,15 +122,53 @@ func StartSession(commandLine string, cols, rows int, workDir string) (*Session,
 	} else if st, err := os.Stat(wd); err != nil || !st.IsDir() {
 		wd = mustWd()
 	}
-	cpty, err := conpty.Start(
-		commandLine,
+	opts := []conpty.ConPtyOption{
 		conpty.ConPtyDimensions(cols, rows),
 		conpty.ConPtyWorkDir(wd),
-	)
+	}
+	if len(extraEnv) > 0 {
+		env := mergeEnv(os.Environ(), extraEnv)
+		opts = append(opts, conpty.ConPtyEnv(env))
+	}
+	cpty, err := conpty.Start(commandLine, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("conpty start: %w", err)
 	}
 	return &Session{cpty: cpty}, nil
+}
+
+// mergeEnv overlays KEY=VAL pairs onto a base environment block.
+func mergeEnv(base, extra []string) []string {
+	type kv struct{ k, v string }
+	m := map[string]string{}
+	order := make([]string, 0, len(base)+len(extra))
+	put := func(e string) {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok || k == "" {
+			return
+		}
+		// Windows env keys are case-insensitive; normalize lookup by upper.
+		key := strings.ToUpper(k)
+		if _, exists := m[key]; !exists {
+			order = append(order, key)
+		}
+		m[key] = k + "=" + v // preserve original key casing from last write
+		// Prefer the extra entry's key spelling.
+		if strings.Contains(e, "=") {
+			m[key] = e
+		}
+	}
+	for _, e := range base {
+		put(e)
+	}
+	for _, e := range extra {
+		put(e)
+	}
+	out := make([]string, 0, len(order))
+	for _, key := range order {
+		out = append(out, m[key])
+	}
+	return out
 }
 
 func mustWd() string {

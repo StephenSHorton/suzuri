@@ -214,7 +214,13 @@ func (u *macUI) syncChrome() {
 		if title == "" {
 			title = fmt.Sprintf("shell %d", i+1)
 		}
-		tabs[i] = chrome.Tab{ID: t.id, Title: title}
+		tabs[i] = chrome.Tab{
+			ID:        t.id,
+			Title:     title,
+			Alive:     t.alive.Load(),
+			AltScreen: t.altScreen(),
+			Busy:      t.busy(),
+		}
 	}
 	dirty := u.chromeDirty ||
 		u.chrome.Width != u.cols ||
@@ -222,7 +228,10 @@ func (u *macUI) syncChrome() {
 		len(u.chrome.Tabs) != len(tabs)
 	if !dirty {
 		for i := range tabs {
-			if u.chrome.Tabs[i].Title != tabs[i].Title || u.chrome.Tabs[i].ID != tabs[i].ID {
+			prev, next := u.chrome.Tabs[i], tabs[i]
+			if prev.Title != next.Title || prev.ID != next.ID ||
+				prev.Alive != next.Alive || prev.AltScreen != next.AltScreen ||
+				prev.Busy != next.Busy {
 				dirty = true
 				break
 			}
@@ -286,8 +295,20 @@ func (u *macUI) inputBarPixelHeight() int32 {
 	if rows < 1 {
 		rows = 1
 	}
+	cwdRows := int32(0)
+	if u.inputBarCwd() != "" {
+		cwdRows = 1
+	}
 	hair, topPad, botPad := inputBarVPads(ch)
-	return hair + topPad + int32(rows)*ch + botPad
+	return hair + topPad + cwdRows*ch + int32(rows)*ch + botPad
+}
+
+func (u *macUI) inputBarCwd() string {
+	t := u.activeTab()
+	if t == nil {
+		return ""
+	}
+	return displayPath(t.cwd)
 }
 
 func inputBarVPads(ch int32) (hair, topPad, botPad int32) {
@@ -546,6 +567,15 @@ func (u *macUI) drainAndParse(tabID int) {
 		return
 	}
 	data = t.echo.feed(data)
+	if clean, path, ok := stripAndTakeCwd(data); ok {
+		t.setCwd(path)
+		data = clean
+		if u.activeTab() == t && !t.altScreen() {
+			u.maybeResizeForInput()
+		}
+	} else {
+		data = clean
+	}
 	if len(data) == 0 {
 		// Still re-arm if more buffered.
 		t.inMu.Lock()
@@ -562,7 +592,7 @@ func (u *macUI) drainAndParse(tabID int) {
 		t.sb.stickBottom()
 	}
 	if title := t.term.Title(); title != "" {
-		t.title = shortTitle(title)
+		t.applyTitle(title)
 		if u.activeTab() == t {
 			ebiten.SetWindowTitle("suzuri — " + t.title)
 		}
@@ -627,14 +657,17 @@ func (u *macUI) submitOnUIThread(tabID int, line string, done chan error) {
 	if line == "" {
 		return
 	}
+	display, payload := expandBarSubmit(line, t.shell)
 	// Fold previous live output into history so this block owns the next output.
 	t.sb.commitLive(t.term)
-	t.sb.pushBlock(line, u.cols)
-	t.echo.arm(line)
-	if isClearCommand(line) {
+	t.sb.pushBlock(display, u.cols, t.cwd)
+	if next, ok := cwdAfterCommand(t.cwd, payload); ok {
+		t.setCwd(next)
+	}
+	t.echo.arm(payload)
+	if isClearCommand(payload) {
 		t.sb.pinHere()
 	}
-	payload := line
 	if strings.Contains(payload, "\n") {
 		payload = strings.ReplaceAll(payload, "\n", "\r")
 	}
@@ -712,20 +745,6 @@ func trimLiveLines(lines []string) []string {
 		out[i] = strings.TrimRight(l, " ")
 	}
 	return out
-}
-
-func shortTitle(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "shell"
-	}
-	if i := strings.LastIndexAny(s, `/\`); i >= 0 && i+1 < len(s) {
-		s = s[i+1:]
-	}
-	if len(s) > 18 {
-		return s[:16] + "…"
-	}
-	return s
 }
 
 func (u *macUI) newTabUI(profileName string) {
@@ -1176,18 +1195,21 @@ func (u *macUI) handleKeys() {
 		}
 		line := in.submit()
 		u.maybeResizeForInput()
-		if stringsTrimSpace(line) != "" {
+		display, payload := expandBarSubmit(line, tab.shell)
+		if stringsTrimSpace(display) != "" {
 			// Previous command's output → history, then this block header.
 			tab.sb.commitLive(tab.term)
-			tab.sb.pushBlock(line, u.cols)
-			tab.echo.arm(line)
+			tab.sb.pushBlock(display, u.cols, tab.cwd)
+			if next, ok := cwdAfterCommand(tab.cwd, payload); ok {
+				tab.setCwd(next)
+			}
+			tab.echo.arm(payload)
 			// clear/cls: commitLive already blanked the host VT, so noteScreen
 			// never sees a clear transition — pin here so history stays above.
-			if isClearCommand(line) {
+			if isClearCommand(payload) {
 				tab.sb.pinHere()
 			}
 		}
-		payload := line
 		if strings.Contains(payload, "\n") {
 			payload = strings.ReplaceAll(payload, "\n", "\r")
 		}
@@ -1260,7 +1282,13 @@ func (u *macUI) handleKeys() {
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
-		in.insertRunes([]rune{' ', ' '})
+		prevRows := in.visualRows(cols)
+		shift := ebiten.IsKeyPressed(ebiten.KeyShift)
+		if in.complete(tab.cwd, shift) {
+			if in.visualRows(cols) != prevRows {
+				u.maybeResizeForInput()
+			}
+		}
 		return
 	}
 }
@@ -1702,6 +1730,8 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	opts.InputCaretCol = inOpts.caretCol
 	opts.InputEmpty = inOpts.empty
 	opts.InputHint = inOpts.hint
+	opts.InputCwd = inOpts.cwd
+	opts.InputGhost = inOpts.ghost
 
 	u.painter.paintFrame(u.fb, opts)
 
@@ -1716,6 +1746,8 @@ type inputBarPaint struct {
 	caretRow, caretCol int
 	empty              bool
 	hint               string
+	cwd                string
+	ghost              string
 }
 
 func (u *macUI) inputBarPaint() inputBarPaint {
@@ -1723,6 +1755,7 @@ func (u *macUI) inputBarPaint() inputBarPaint {
 		prompt: inputBarPrompt,
 		hint:   chrome.InputBarPlaceholder(),
 		empty:  true,
+		cwd:    u.inputBarCwd(),
 	}
 	in := u.activeInput()
 	if in == nil {
@@ -1737,6 +1770,9 @@ func (u *macUI) inputBarPaint() inputBarPaint {
 	out.lines = view
 	out.caretRow = caretRow
 	out.caretCol = caretCol
+	if t := u.activeTab(); t != nil {
+		out.ghost = in.ghostSuffix(t.cwd)
+	}
 	return out
 }
 

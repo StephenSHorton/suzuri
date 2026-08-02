@@ -44,6 +44,7 @@ var (
 	PrimR, PrimG, PrimB    byte // primary accent (prompt glyph, border)
 	TextR, TextG, TextB    byte // primary fg
 	SoftR, SoftG, SoftB    byte // muted fg (hints)
+	MuteR, MuteG, MuteB    byte // most subtle fg (ghost completion, etc.)
 )
 
 // ShellANSI16 theme remap for SGR 0–15.
@@ -232,6 +233,7 @@ func setPalette(void, bar, panel, primary, secondary, onPrimary, text, soft, dim
 	PrimR, PrimG, PrimB = rgb8(border)
 	TextR, TextG, TextB = rgb8(text)
 	SoftR, SoftG, SoftB = rgb8(soft)
+	MuteR, MuteG, MuteB = rgb8(mute)
 }
 
 func rgbArr(c color.Color) [3]byte {
@@ -306,6 +308,7 @@ func styleInactiveTab() lipgloss.Style {
 		Background(colBar).
 		Padding(0, 2)
 }
+
 
 func stylePlus() lipgloss.Style {
 	return lipgloss.NewStyle().

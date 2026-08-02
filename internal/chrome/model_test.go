@@ -11,7 +11,7 @@ import (
 
 func TestViewHasTabs(t *testing.T) {
 	m := New(80)
-	m.Tabs = []Tab{{ID: 0, Title: "alpha"}, {ID: 1, Title: "beta"}}
+	m.Tabs = []Tab{{ID: 0, Title: "alpha", Alive: true}, {ID: 1, Title: "beta", Alive: true}}
 	m.Active = 1
 	v := m.View()
 	if !strings.Contains(v, "beta") {
@@ -188,7 +188,7 @@ func TestRenderToTerm(t *testing.T) {
 // Wide brand 硯 must still leave room for tab titles on the strip.
 func TestWideRuneAlignment(t *testing.T) {
 	m := New(50)
-	m.Tabs = []Tab{{ID: 0, Title: "PowerShell"}, {ID: 1, Title: "sh"}}
+	m.Tabs = []Tab{{ID: 0, Title: "PowerShell", Alive: true}, {ID: 1, Title: "sh", Alive: true}}
 	m.Active = 0
 	term := RenderToTerm(m, 50)
 	// Find 'P' of PowerShell somewhere on row 0 after brand.
@@ -201,5 +201,60 @@ func TestWideRuneAlignment(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("PowerShell title missing from strip after wide brand")
+	}
+}
+
+func TestTabStateGlyphs(t *testing.T) {
+	SetTabStateGlyphs(TabGlyphsBraille)
+	t.Cleanup(func() { SetTabStateGlyphs(TabGlyphsASCII) })
+	// Reset spin to a known frame.
+	for spinFrame.Load()%uint64(len(brailleSpinFrames)) != 0 {
+		AdvanceTabSpinner()
+	}
+	cases := []struct {
+		name string
+		tab  Tab
+		want string
+	}{
+		{"dead", Tab{Alive: false}, "⠁ "},
+		{"idle shell", Tab{Alive: true}, ""},
+		{"busy shell", Tab{Alive: true, Busy: true}, "⠋ "}, // first spin frame
+		{"alt idle", Tab{Alive: true, AltScreen: true}, "⠿ "},
+		{"alt busy", Tab{Alive: true, AltScreen: true, Busy: true}, "⠋ "},
+	}
+	for _, tc := range cases {
+		if g := tabStateGlyph(tc.tab); g != tc.want {
+			t.Fatalf("%s: got %q want %q", tc.name, g, tc.want)
+		}
+	}
+	// Animation advances.
+	AdvanceTabSpinner()
+	if g := tabStateGlyph(Tab{Alive: true, Busy: true}); g != "⠙ " {
+		t.Fatalf("after advance: %q", g)
+	}
+}
+
+func TestSingleTabUsesWideTitleBudget(t *testing.T) {
+	SetTabStateGlyphs(TabGlyphsBraille)
+	t.Cleanup(func() { SetTabStateGlyphs(TabGlyphsASCII) })
+	// Old code hard-clipped at 18 runes; a single tab on a wide strip should keep more.
+	long := "Grok Build — suzuri polish session with a long title"
+	m := New(100)
+	m.Tabs = []Tab{{ID: 0, Title: long, Alive: true, AltScreen: true, Busy: true}}
+	m.Active = 0
+	v := m.View()
+	// Busy-alt uses spin frames (braille dots), not a static ⣿.
+	if !strings.Contains(v, "⠋") && !strings.ContainsAny(v, "⠙⠹⠸⠼⠴⠦⠧⠇⠏⣷⣿") {
+		t.Fatalf("missing busy spin glyph in %q", v)
+	}
+	if !strings.Contains(v, "Grok Build") {
+		t.Fatalf("title over-truncated in single-tab strip: %q", v)
+	}
+	// Budget for 1 tab on width 100 should be well above the old 18.
+	if b := titleBudget(100, 1); b < 40 {
+		t.Fatalf("titleBudget(100,1)=%d want >= 40", b)
+	}
+	if b := titleBudget(80, 4); b > titleBudget(80, 1) {
+		t.Fatalf("more tabs should not get a larger per-tab budget")
 	}
 }

@@ -15,7 +15,7 @@ var errUnsupported = errors.New("suzuri does not support this operating system")
 
 func DefaultShell() string { return "" }
 
-func StartSession(commandLine string, cols, rows int, workDir string) (*Session, error) {
+func StartSession(commandLine string, cols, rows int, workDir string, extraEnv ...string) (*Session, error) {
 	return nil, errUnsupported
 }
 

@@ -19,6 +19,10 @@ import (
 type Tab struct {
 	ID    int
 	Title string
+	// Session state for the strip glyph (host fills these on SyncTabs).
+	Alive     bool // PTY still live
+	AltScreen bool // fullscreen TUI (Grok, vim, less, …)
+	Busy      bool // activity spinner (PTY I/O and/or OSC title spinner)
 }
 
 // Model is the Bubble Tea model for host chrome.
@@ -439,17 +443,80 @@ func (m Model) updateSettingsKey(msg tea.KeyMsg) Result {
 	return Result{Model: m, Action: act, Settings: settings}
 }
 
-func tabLabel(t Tab, i int) string {
+// tabStateGlyph is a compact activity / mode marker before the title.
+// Glyphs are chosen at runtime from the active font (see SetTabStateGlyphs):
+// braille preferred, else geometric, else ASCII.
+// Busy / alt-busy use an animated Spin cycle when the pack provides one.
+func tabStateGlyph(t Tab) string {
+	g := tabGlyphs()
+	if !t.Alive {
+		return g.Dead
+	}
+	if t.AltScreen {
+		if t.Busy {
+			return busyGlyph(g, true)
+		}
+		return g.AltIdle
+	}
+	if t.Busy {
+		return busyGlyph(g, false)
+	}
+	return ""
+}
+
+// titleBudget is max title runes per tab given strip width and tab count.
+// One tab may use most of the row; many tabs share the space.
+func titleBudget(stripW, nTabs int) int {
+	if nTabs < 1 {
+		nTabs = 1
+	}
+	// Approximate fixed strip chrome in cells: brand 硯 (2) + plus chip + gaps.
+	const brandW = 2
+	const plusW = 3
+	const stateW = 2 // glyph + space (worst case)
+	const padW = 4   // lipgloss Padding(0, 2) each side
+	gaps := nTabs + 1
+	fixed := brandW + plusW + gaps + 2
+	remain := stripW - fixed
+	if remain < nTabs*(stateW+padW+6) {
+		remain = nTabs * (stateW + padW + 6)
+	}
+	per := remain/nTabs - stateW - padW
+	if nTabs == 1 {
+		// Single tab: allow a long title instead of the old hard 18-char clip.
+		per = stripW - brandW - plusW - gaps - stateW - padW - 2
+	}
+	if per < 8 {
+		per = 8
+	}
+	if per > 72 {
+		per = 72
+	}
+	return per
+}
+
+func tabLabel(t Tab, i int, maxRunes int) string {
 	title := strings.TrimSpace(t.Title)
 	if title == "" {
-		title = fmt.Sprintf("Shell %d", i+1)
+		if t.AltScreen {
+			title = fmt.Sprintf("app %d", i+1)
+		} else {
+			title = fmt.Sprintf("shell %d", i+1)
+		}
 	}
 	title = strings.TrimPrefix(title, "Administrator: ")
-	rs := []rune(title)
-	if len(rs) > 18 {
-		title = string(rs[:16]) + "…"
+	if maxRunes < 4 {
+		maxRunes = 4
 	}
-	return title
+	rs := []rune(title)
+	if len(rs) > maxRunes {
+		if maxRunes <= 1 {
+			title = "…"
+		} else {
+			title = string(rs[:maxRunes-1]) + "…"
+		}
+	}
+	return tabStateGlyph(t) + title
 }
 
 // TabStripRows is a single calm row (no 3-line rounded tab boxes).
@@ -534,16 +601,16 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int) {
 		// Only pad when there is no real tab card to sit flush against 硯.
 		parts = append(parts, gap, styleInactiveTab().Render("no tabs"))
 	} else {
+		budget := titleBudget(w, len(m.Tabs))
 		for i, t := range m.Tabs {
 			// Gaps between tabs only — first tab abuts the brand mark.
 			if i > 0 {
 				parts = append(parts, gap)
 				col += gapW
 			}
-			label := tabLabel(t, i)
+			label := tabLabel(t, i, budget)
 			var card string
 			if i == m.Active {
-				// Soft active marker without box-drawing corners.
 				card = styleActiveTab().Render(label)
 			} else {
 				card = styleInactiveTab().Render(label)

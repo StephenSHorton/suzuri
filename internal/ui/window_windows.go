@@ -101,6 +101,7 @@ type mcpJob struct {
 	done  chan error
 }
 
+
 type winUI struct {
 	tabs      []*tab
 	active    int
@@ -113,6 +114,12 @@ type winUI struct {
 	// CJK-capable mono fallback (MS Gothic, etc.) for 硯 / 猫 / shell JP text.
 	// Primary UI fonts (Gohu, Cascadia) typically lack Han glyphs.
 	cjkFont win.HFONT
+	// Symbol fallback (Cascadia / Segoe UI Symbol) for status shapes when the
+	// primary mono face lacks them. Prefer primary when it has the glyphs so
+	// advance width matches the cell grid (avoids tab overflow).
+	symFont           win.HFONT
+	primaryHasGeo     bool // ●○◉◎ present in primary face
+	primaryHasBraille bool
 	width   int32
 	height  int32
 	cols    int
@@ -130,6 +137,7 @@ type winUI struct {
 	selecting     bool
 	statusUntil   time.Time // clear toast Status after this (zero = none)
 	showSplash    bool      // open first-run card after window is ready
+	spinTick      uint64    // blink-loop counter for tab braille spinner
 	// Startup rain: spawn until matrixIntroSpawnEnd, then wind-down until clear.
 	matrixIntroStart    time.Time
 	matrixIntroSpawnEnd time.Time
@@ -207,6 +215,16 @@ func (u *winUI) inputContentCols() int {
 	return cols
 }
 
+// anyTabBusy is true when at least one tab should show a spinning activity mark.
+func (u *winUI) anyTabBusy() bool {
+	for _, t := range u.tabs {
+		if t != nil && t.busy() {
+			return true
+		}
+	}
+	return false
+}
+
 func (u *winUI) syncChrome() {
 	tabs := make([]chrome.Tab, len(u.tabs))
 	for i, t := range u.tabs {
@@ -214,7 +232,13 @@ func (u *winUI) syncChrome() {
 		if title == "" {
 			title = fmt.Sprintf("shell %d", i+1)
 		}
-		tabs[i] = chrome.Tab{ID: t.id, Title: title}
+		tabs[i] = chrome.Tab{
+			ID:        t.id,
+			Title:     title,
+			Alive:     t.alive.Load(),
+			AltScreen: t.altScreen(),
+			Busy:      t.busy(),
+		}
 	}
 	// Only invalidate the chrome cell cache when something visible changed.
 	// (Calling this every paint used to force a full Lip Gloss re-render.)
@@ -224,7 +248,10 @@ func (u *winUI) syncChrome() {
 		len(u.chrome.Tabs) != len(tabs)
 	if !dirty {
 		for i := range tabs {
-			if u.chrome.Tabs[i].Title != tabs[i].Title || u.chrome.Tabs[i].ID != tabs[i].ID {
+			prev, next := u.chrome.Tabs[i], tabs[i]
+			if prev.Title != next.Title || prev.ID != next.ID ||
+				prev.Alive != next.Alive || prev.AltScreen != next.AltScreen ||
+				prev.Busy != next.Busy {
 				dirty = true
 				break
 			}
@@ -271,9 +298,10 @@ func (u *winUI) applyConfigLive(cfg config.Config) {
 		} else {
 			// Drop backbuffer before deleting fonts that may be selected into it.
 			u.releaseBackbuffer()
-			oldFace, oldBold, oldCJK := u.font, u.fontBold, u.cjkFont
+			oldFace, oldBold, oldCJK, oldSym := u.font, u.fontBold, u.cjkFont, u.symFont
 			u.font, u.fontBold = newFace, newBold
 			u.cjkFont = createCJKFont(cfg.FontSizePx)
+			u.symFont = createSymbolFont(cfg.FontSizePx)
 			if oldFace != 0 {
 				win.DeleteObject(win.HGDIOBJ(oldFace))
 			}
@@ -283,13 +311,16 @@ func (u *winUI) applyConfigLive(cfg config.Config) {
 			if oldCJK != 0 {
 				win.DeleteObject(win.HGDIOBJ(oldCJK))
 			}
+			if oldSym != 0 {
+				win.DeleteObject(win.HGDIOBJ(oldSym))
+			}
 			u.probeKeyGlyphs()
 			got := fontFaceName(u.font)
 			// Remeasure + ConPTY resize off this stack (click/key/preview).
 			u.metricW, u.metricH = 0, 0
 			u.postLayoutSettle()
 			log.Info("font applied", "face", cfg.FontFace, "px", cfg.FontSizePx, "got", got,
-				"cjk", fontFaceName(u.cjkFont))
+				"cjk", fontFaceName(u.cjkFont), "sym", fontFaceName(u.symFont))
 			if got != "" && !strings.EqualFold(got, cfg.FontFace) {
 				u.toast("font fallback: " + got)
 			}
@@ -478,9 +509,7 @@ func (u *winUI) shellPadY() int32 {
 // Hidden (0) while the active tab is on the alternate screen — full-screen
 // apps (Claude, Grok Build, vim…) own the keyboard like Warp.
 //
-// Vertical budget is symmetric: hairline + top pad + N·cellH + bottom pad.
-// (Older code used min 2·cellH with only a light top inset, so single-line
-// bars looked bottom-heavy — not because of multi-line prep.)
+// Layout: hairline + top pad + [cwd row] + N·content rows + bottom pad.
 func (u *winUI) inputBarPixelHeight() int32 {
 	if t := u.activeTab(); t != nil && t.altScreen() {
 		return 0
@@ -496,8 +525,21 @@ func (u *winUI) inputBarPixelHeight() int32 {
 	if rows < 1 {
 		rows = 1
 	}
+	cwdRows := int32(0)
+	if u.inputBarCwd() != "" {
+		cwdRows = 1
+	}
 	hair, topPad, botPad := inputBarVPads(ch)
-	return hair + topPad + int32(rows)*ch + botPad
+	return hair + topPad + cwdRows*ch + int32(rows)*ch + botPad
+}
+
+// inputBarCwd is the shortened path shown above the command line (empty if unknown).
+func (u *winUI) inputBarCwd() string {
+	t := u.activeTab()
+	if t == nil {
+		return ""
+	}
+	return displayPath(t.cwd)
 }
 
 // inputBarVPads returns hairline, top content inset, and bottom inset (symmetric).
@@ -557,7 +599,10 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 			u.selecting = false
 			if t := u.activeTab(); t != nil {
 				t.sel.clear()
+				setWindowTitle(u.hwnd, "suzuri — "+t.title)
 			}
+			u.syncChrome()
+			u.postLayoutSettle()
 		}
 	case chrome.ActionQuit:
 		if u.hwnd != 0 {
@@ -676,10 +721,11 @@ func (u *winUI) loop() error {
 	u.font = createFontFor(u.cfg, false)
 	u.fontBold = createFontFor(u.cfg, true)
 	u.cjkFont = createCJKFont(u.cfg.FontSizePx)
+	u.symFont = createSymbolFont(u.cfg.FontSizePx)
 	u.probeKeyGlyphs()
 	face := fontFaceName(u.font)
 	log.Info("window created", "hwnd", uintptr(hwnd), "font", face, "want", u.cfg.FontFace,
-		"cjk", fontFaceName(u.cjkFont))
+		"cjk", fontFaceName(u.cjkFont), "sym", fontFaceName(u.symFont))
 	registerUI(hwnd, u)
 	// WM_SIZE during CreateWindow arrives before registerUI, so the real
 	// client size was never applied (logs showed w=0 h=0 forever). Sync now.
@@ -795,10 +841,16 @@ func postBytes(u *winUI, tabID int) {
 }
 
 func postClosed(u *winUI, tabID int) {
-	if u.hwnd == 0 {
+	if u == nil || u.hwnd == 0 {
+		log.Warn("postClosed skipped", "tab", tabID, "reason", "no hwnd")
 		return
 	}
-	win.PostMessage(u.hwnd, wmSuzuriClosed, uintptr(tabID), 0)
+	// Flush before PostMessage so a native crash on the close path still leaves a trail.
+	log.Info("postClosed", "tab", tabID)
+	applog.Sync()
+	if win.PostMessage(u.hwnd, wmSuzuriClosed, uintptr(tabID), 0) == 0 {
+		log.Warn("postClosed PostMessage failed", "tab", tabID)
+	}
 }
 
 func (u *winUI) sendKey(b []byte) {
@@ -832,6 +884,17 @@ func (u *winUI) drainAndParse(tabID int) {
 	data := t.takeInput()
 	// Drop shell local-echo of the bar-submitted command (ANSI-colored on PS).
 	data = t.echo.feed(data)
+	// Host cwd OSC from quiet prompt (strip before VT so it never paints).
+	if clean, path, ok := stripAndTakeCwd(data); ok {
+		t.setCwd(path)
+		data = clean
+		// Path above the input bar — reflow when bar is visible.
+		if u.activeTab() == t && !t.altScreen() {
+			u.postLayoutSettle()
+		}
+	} else {
+		data = clean
+	}
 	if len(data) == 0 {
 		// More may have been queued; re-arm if needed.
 		t.inMu.Lock()
@@ -840,6 +903,9 @@ func (u *winUI) drainAndParse(tabID int) {
 		if more {
 			t.postBytes(u)
 		}
+		if u.activeTab() == t {
+			win.InvalidateRect(u.hwnd, nil, false)
+		}
 		return
 	}
 	_, _ = t.term.Write(data)
@@ -847,16 +913,25 @@ func (u *winUI) drainAndParse(tabID int) {
 	if t.sb.atBottom() {
 		t.sb.stickBottom()
 	}
+	// Grok (and others) set OSC 0/2 window title with a braille spinner while
+	// working; strip for display, keep titleBusy for the tab strip spinner.
 	if title := t.term.Title(); title != "" {
-		t.title = shortTitle(title)
+		prevBusy := t.busy()
+		t.applyTitle(title)
+		if t.busy() != prevBusy {
+			u.chromeDirty = true
+			u.syncChrome()
+		}
 	}
 	// Alt-screen enter/leave: grow/shrink shell (hide Warp bar) like Warp.
+	// Defer ConPTY resize off this PTY-drain stack — sync resize while I/O is
+	// in flight has hard-crashed the host (no Go panic trail).
 	nowAlt := t.altScreen()
 	if nowAlt != t.wasAlt {
 		t.wasAlt = nowAlt
 		log.Info("alt screen", "tab", t.id, "on", nowAlt)
 		if u.activeTab() == t {
-			u.maybeResizeForInput()
+			u.postLayoutSettle()
 		}
 	}
 	u.publishBridgeSnapshot()
@@ -936,17 +1011,20 @@ func (u *winUI) submitOnUIThread(tabID int, line string) error {
 	if !t.alive.Load() {
 		return fmt.Errorf("tab not alive")
 	}
+	display, payload := expandBarSubmit(line, t.shell)
 	// Prefer bar path so draft/history stay consistent when line matches.
-	if stringsTrimSpace(line) != "" {
+	if stringsTrimSpace(display) != "" {
 		// Fold previous live output into history so this block owns the next run.
 		t.sb.commitLive(t.term)
-		t.sb.pushBlock(line, u.cols)
-		t.echo.arm(line)
-		if isClearCommand(line) {
+		t.sb.pushBlock(display, u.cols, t.cwd)
+		if next, ok := cwdAfterCommand(t.cwd, payload); ok {
+			t.setCwd(next)
+		}
+		t.echo.arm(payload)
+		if isClearCommand(payload) {
 			t.sb.pinHere()
 		}
 	}
-	payload := line
 	if strings.Contains(payload, "\n") {
 		payload = strings.ReplaceAll(payload, "\n", "\r\n")
 	}
@@ -1031,21 +1109,6 @@ func trimLiveLines(lines []string) []string {
 	return out
 }
 
-func shortTitle(s string) string {
-	// basename-ish for tab strip
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return "shell"
-	}
-	if i := strings.LastIndexAny(s, `/\`); i >= 0 && i+1 < len(s) {
-		s = s[i+1:]
-	}
-	if len(s) > 18 {
-		return s[:16] + "…"
-	}
-	return s
-}
-
 // newTabUI opens a tab. profileName empty uses ActiveProfile from config.
 func (u *winUI) newTabUI(profileName string) {
 	if len(u.tabs) >= maxTabs {
@@ -1117,6 +1180,7 @@ func (u *winUI) closeTabUI(id int) {
 // Unlike Ctrl+W on the last tab, this quits the app immediately when it is
 // the final tab — matches expected shell semantics.
 func (u *winUI) sessionEndedCloseTab(id int) {
+	defer applog.Recover("sessionEndedCloseTab", false)
 	idx := -1
 	for i, t := range u.tabs {
 		if t.id == id {
@@ -1129,6 +1193,7 @@ func (u *winUI) sessionEndedCloseTab(id int) {
 	}
 	if len(u.tabs) == 1 {
 		log.Info("last shell exited — quitting")
+		applog.Sync()
 		u.persistWindowPlacement(true)
 		if u.hwnd != 0 {
 			win.DestroyWindow(u.hwnd)
@@ -1139,27 +1204,47 @@ func (u *winUI) sessionEndedCloseTab(id int) {
 }
 
 func (u *winUI) removeTabAt(idx int) {
+	defer applog.Recover("removeTabAt", false)
 	if idx < 0 || idx >= len(u.tabs) {
 		return
 	}
-	u.tabs[idx].close()
+	t := u.tabs[idx]
+	// Detach first so paint/drain never see this tab while ConPTY tears down.
 	u.tabs = append(u.tabs[:idx], u.tabs[idx+1:]...)
 	if u.active >= len(u.tabs) {
 		u.active = len(u.tabs) - 1
 	} else if u.active > idx {
 		u.active--
 	}
-	if t := u.activeTab(); t != nil {
-		setWindowTitle(u.hwnd, "suzuri — "+t.title)
+	if u.active < 0 {
+		u.active = 0
+	}
+	if t != nil {
+		func() {
+			defer applog.Recover("tab.close", false)
+			t.close()
+		}()
+	}
+	if at := u.activeTab(); at != nil {
+		at.sel.clear()
+		setWindowTitle(u.hwnd, "suzuri — "+at.title)
 	}
 	u.syncChrome()
-	u.maybeResizeForInput()
+	// Do NOT call maybeResizeForInput here. Closing a bar tab while another is
+	// alt-screen (e.g. Grok) used to ResizePseudoConsole on a live session on
+	// this stack and hard-crashed the process with no Go panic trail.
+	// postLayoutSettle runs ConPTY/VT reflow on a later message.
+	u.postLayoutSettle()
 	msg := fmt.Sprintf("%d tabs", len(u.tabs))
 	if len(u.tabs) == 1 {
 		msg = "1 tab"
 	}
 	u.toast(msg)
-	win.InvalidateRect(u.hwnd, nil, false)
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+	u.publishBridgeSnapshot()
+	applog.Sync()
 }
 
 func (u *winUI) switchTab(delta int) {
@@ -1173,7 +1258,8 @@ func (u *winUI) switchTab(delta int) {
 		setWindowTitle(u.hwnd, "suzuri — "+t.title)
 	}
 	u.syncChrome()
-	u.maybeResizeForInput()
+	// Defer reflow when switching bar ↔ alt-screen (same ConPTY race as removeTabAt).
+	u.postLayoutSettle()
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
@@ -1230,6 +1316,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
 			u.clearToastIfDue()
+			// Animate braille (or geometric) busy marks on the tab strip.
+			u.spinTick++
+			if u.anyTabBusy() && u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
+				chrome.AdvanceTabSpinner()
+				u.chromeDirty = true
+				u.syncChrome()
+			}
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
@@ -1237,8 +1330,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case wmSuzuriClosed:
 		// Shell exited (e.g. `exit`) — close tab; last tab quits (no confirm).
 		id := int(wParam)
+		log.Info("wmSuzuriClosed", "tab", id, "tabs", len(u.tabs))
+		applog.Sync()
 		if u.tabByID(id) != nil {
 			log.Info("shell session ended — closing tab", "tab", id, "tabs", len(u.tabs))
+			applog.Sync()
 			u.sessionEndedCloseTab(id)
 		}
 		return 0
@@ -1318,6 +1414,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.postLayoutSettle()
 		return 0
 
+	case win.WM_MOVE:
+		// Win+Shift+←/→ (move monitor) and some snap paths move without a useful
+		// SIZE_RESTORED pair. Skip during interactive drag (EXITSIZEMOVE saves).
+		if !u.inSizeMove && u.alive.Load() {
+			u.persistWindowPlacement(false)
+		}
+		return 0
+
 	case win.WM_SIZE:
 		// wParam: SIZE_RESTORED=0, SIZE_MINIMIZED=1, SIZE_MAXIMIZED=2, SIZE_MAXSHOW=3, SIZE_MAXHIDE=4
 		if wParam == 1 { // SIZE_MINIMIZED — zero/garbage client size; ignore.
@@ -1333,14 +1437,12 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.width, u.height = w, h
 			return 0
 		}
-		// Maximize / Aero snap / programmatic size often skip ENTERSIZEMOVE.
+		// Maximize / Aero snap / Win+Arrow / programmatic size often skip ENTERSIZEMOVE.
 		// Still defer heavy work off the WM_SIZE stack.
 		u.width, u.height = w, h
 		u.postLayoutSettle()
-		// Persist maximize / snap frame (no ENTERSIZEMOVE for the chrome button).
-		if wParam == 2 || wParam == 0 { // SIZE_MAXIMIZED / SIZE_RESTORED
-			u.persistWindowPlacement(false)
-		}
+		// Persist every non-minimized size change (snap, maximize, restore).
+		u.persistWindowPlacement(false)
 		return 0
 
 	case win.WM_CHAR:
@@ -1564,18 +1666,23 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.maybeResizeForInput()
 			// Warp-style command block in scrollback, then send to PTY.
 			// Arm echo suppress so PS/cmd local-echo doesn't duplicate the block.
-			if stringsTrimSpace(line) != "" {
+			// Bare `cd` → home (PowerShell/cmd don't match bash bare-cd by default).
+			display, payload := expandBarSubmit(line, tab.shell)
+			if stringsTrimSpace(display) != "" {
 				// Previous command's output → history under its block first.
 				tab.sb.commitLive(tab.term)
-				tab.sb.pushBlock(line, u.cols)
-				tab.echo.arm(line)
-				if isClearCommand(line) {
+				tab.sb.pushBlock(display, u.cols, tab.cwd)
+				// Best-effort cwd until the next prompt OSC arrives.
+				if next, ok := cwdAfterCommand(tab.cwd, payload); ok {
+					tab.setCwd(next)
+				}
+				tab.echo.arm(payload)
+				if isClearCommand(payload) {
 					tab.sb.pinHere()
 				}
-				log.Debug("submit arm echo", "tab", tab.id, "line", line)
+				log.Debug("submit arm echo", "tab", tab.id, "line", display, "payload", payload, "cwd", tab.cwd)
 			}
 			// Multi-line: send with real newlines; final CR executes.
-			payload := line
 			if strings.Contains(payload, "\n") {
 				// PowerShell accepts multi-line paste ending in CR.
 				payload = strings.ReplaceAll(payload, "\n", "\r\n")
@@ -1627,9 +1734,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		case win.VK_BACK:
 			u.handleInputBackspace(hwnd, lParam)
 		case win.VK_TAB:
-			// No completion yet — insert two spaces for indent-ish typing.
-			in.insertRunes([]rune{' ', ' '})
-			win.InvalidateRect(hwnd, nil, false)
+			// Host path + history completion (Warp bar never forwards Tab to PTY).
+			prevRows := in.visualRows(cols)
+			if in.complete(tab.cwd, shift) {
+				if in.visualRows(cols) != prevRows {
+					u.maybeResizeForInput()
+				}
+				win.InvalidateRect(hwnd, nil, false)
+			}
 		}
 		return 0
 
@@ -1803,6 +1915,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if u.cjkFont != 0 {
 			win.DeleteObject(win.HGDIOBJ(u.cjkFont))
 			u.cjkFont = 0
+		}
+		if u.symFont != 0 {
+			win.DeleteObject(win.HGDIOBJ(u.symFont))
+			u.symFont = 0
 		}
 		u.hwnd = 0
 		win.PostQuitMessage(0)
@@ -1995,36 +2111,57 @@ func placementOnScreen(p config.WindowPlacement) bool {
 		sl > vx && st > vy
 }
 
-// captureWindowPlacement reads the restored outer frame via GetWindowPlacement
-// (correct while maximized — GetWindowRect would return work-area bounds only).
+// captureWindowPlacement reads the outer frame for reopen-on-same-place.
+//
+// Maximized: use GetWindowPlacement's restore rect + Maximized (GetWindowRect is
+// only the work area while zoomed).
+//
+// Restored / Win+Arrow snap / half-screen: use GetWindowRect for the *actual*
+// frame. GetWindowPlacement.RcNormalPosition stays at the pre-snap restore size,
+// so keyboard snap never updated the saved layout when we only used placement.
 func (u *winUI) captureWindowPlacement() (config.WindowPlacement, bool) {
 	if u == nil || u.hwnd == 0 {
 		return config.WindowPlacement{}, false
 	}
-	var wp win.WINDOWPLACEMENT
-	wp.Length = uint32(unsafe.Sizeof(wp))
-	if !win.GetWindowPlacement(u.hwnd, &wp) {
+	// Iconic: skip (tray coords are useless).
+	if win.IsIconic(u.hwnd) {
 		return config.WindowPlacement{}, false
 	}
-	rc := wp.RcNormalPosition
+	if win.IsZoomed(u.hwnd) {
+		var wp win.WINDOWPLACEMENT
+		wp.Length = uint32(unsafe.Sizeof(wp))
+		if !win.GetWindowPlacement(u.hwnd, &wp) {
+			return config.WindowPlacement{}, false
+		}
+		rc := wp.RcNormalPosition
+		w := int(rc.Right - rc.Left)
+		h := int(rc.Bottom - rc.Top)
+		if w < 320 || h < 200 {
+			return config.WindowPlacement{}, false
+		}
+		return config.WindowPlacement{
+			X:         int(rc.Left),
+			Y:         int(rc.Top),
+			Width:     w,
+			Height:    h,
+			Maximized: true,
+		}, true
+	}
+	var rc win.RECT
+	if !win.GetWindowRect(u.hwnd, &rc) {
+		return config.WindowPlacement{}, false
+	}
 	w := int(rc.Right - rc.Left)
 	h := int(rc.Bottom - rc.Top)
 	if w < 320 || h < 200 {
 		return config.WindowPlacement{}, false
-	}
-	maxed := wp.ShowCmd == win.SW_SHOWMAXIMIZED ||
-		wp.ShowCmd == win.SW_MAXIMIZE ||
-		(wp.Flags&win.WPF_RESTORETOMAXIMIZED) != 0
-	// Minimized: still persist normal rect; do not treat as maximized unless flag set.
-	if wp.ShowCmd == win.SW_SHOWMINIMIZED || wp.ShowCmd == win.SW_MINIMIZE {
-		maxed = (wp.Flags & win.WPF_RESTORETOMAXIMIZED) != 0
 	}
 	return config.WindowPlacement{
 		X:         int(rc.Left),
 		Y:         int(rc.Top),
 		Width:     w,
 		Height:    h,
-		Maximized: maxed,
+		Maximized: false,
 	}, true
 }
 
@@ -2175,9 +2312,10 @@ func (u *winUI) applyClientSize(w, h int32) {
 		// Copy tab pointers so a concurrent close cannot mutate the slice mid-loop.
 		tabs := append([]*tab(nil), u.tabs...)
 		for _, t := range tabs {
-			if t != nil {
-				t.resize(cols, rows)
+			if t == nil || !t.alive.Load() {
+				continue
 			}
+			t.resize(cols, rows)
 		}
 	} else {
 		u.cols = cols
@@ -2434,6 +2572,22 @@ func (u *winUI) selectFontForRune(hdc win.HDC, r rune, bold bool) {
 		win.SelectObject(hdc, win.HGDIOBJ(u.cjkFont))
 		return
 	}
+	// Status marks: keep primary metrics when possible. Only fall back to the
+	// symbol face when the primary mono lacks the code point (avoids Cascadia
+	// glyphs overflowing FiraCode-sized cells in the tab strip).
+	if isStatusGlyphRune(r) && u.symFont != 0 {
+		needSym := false
+		switch {
+		case r >= 0x2800 && r <= 0x28FF:
+			needSym = !u.primaryHasBraille
+		case r >= 0x25A0 && r <= 0x25FF:
+			needSym = !u.primaryHasGeo
+		}
+		if needSym {
+			win.SelectObject(hdc, win.HGDIOBJ(u.symFont))
+			return
+		}
+	}
 	if bold && u.fontBold != 0 {
 		win.SelectObject(hdc, win.HGDIOBJ(u.fontBold))
 		return
@@ -2441,6 +2595,50 @@ func (u *winUI) selectFontForRune(hdc win.HDC, r rune, bold bool) {
 	if u.font != 0 {
 		win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	}
+}
+
+func isStatusGlyphRune(r rune) bool {
+	// Braille Patterns (6-dot CLI spinners / tab state).
+	if r >= 0x2800 && r <= 0x28FF {
+		return true
+	}
+	// Geometric Shapes (●○◉◆◎…).
+	if r >= 0x25A0 && r <= 0x25FF {
+		return true
+	}
+	return false
+}
+
+// createSymbolFont picks a face known for braille + geometric status glyphs.
+func createSymbolFont(sizePx int) win.HFONT {
+	if sizePx < 10 {
+		sizePx = 14
+	}
+	for _, name := range []string{
+		"Cascadia Mono",
+		"Cascadia Code",
+		"Segoe UI Symbol",
+	} {
+		h := createNamedFont(name, -int32(sizePx), win.FW_NORMAL)
+		if h == 0 {
+			continue
+		}
+		// Must actually map the classic 6-dot cell (GDI substitutes freely).
+		hdc := win.CreateCompatibleDC(0)
+		if hdc == 0 {
+			win.DeleteObject(win.HGDIOBJ(h))
+			continue
+		}
+		old := win.SelectObject(hdc, win.HGDIOBJ(h))
+		ok := fontHasRunes(hdc, '⠿', '⣿', '⣷', '⠁')
+		win.SelectObject(hdc, old)
+		win.DeleteDC(hdc)
+		if ok {
+			return h
+		}
+		win.DeleteObject(win.HGDIOBJ(h))
+	}
+	return 0
 }
 
 // createCJKFont picks a system monospaced CJK face at the UI point size.
@@ -2634,7 +2832,28 @@ var (
 	procSetWindowText = modUser32.NewProc("SetWindowTextW")
 	procFillRect      = modUser32.NewProc("FillRect")
 	procGetTextFace   = modGdi32.NewProc("GetTextFaceW")
+	procExtTextOut    = modGdi32.NewProc("ExtTextOutW")
 )
+
+// ETO_CLIPPED — clip text to the rect (gdi32 ExtTextOutW).
+const etoClipped = 0x0004
+
+func extTextOutClipped(hdc win.HDC, x, y int32, clip *win.RECT, s *uint16, n uint32) {
+	if procExtTextOut.Find() != nil || clip == nil || s == nil || n == 0 {
+		win.TextOut(hdc, x, y, s, int32(n))
+		return
+	}
+	_, _, _ = procExtTextOut.Call(
+		uintptr(hdc),
+		uintptr(x),
+		uintptr(y),
+		uintptr(etoClipped),
+		uintptr(unsafe.Pointer(clip)),
+		uintptr(unsafe.Pointer(s)),
+		uintptr(n),
+		0,
+	)
+}
 
 func setWindowTitle(hwnd win.HWND, title string) {
 	p, err := syscall.UTF16PtrFromString(title)
@@ -3073,6 +3292,21 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 	defer win.SelectObject(hdc, oldFont)
 	win.SetBkMode(hdc, win.TRANSPARENT)
 
+	// Working directory row above the command line (when known).
+	cwdY := padTop
+	if p := u.inputBarCwd(); p != "" {
+		maxCols := int((rect.Right - padX - 8) / cw)
+		if maxCols < 8 {
+			maxCols = 8
+		}
+		label := truncateRunes(p, maxCols)
+		if s, err := syscall.UTF16FromString(label); err == nil && len(s) >= 2 {
+			win.SetTextColor(hdc, win.RGB(chrome.SoftR, chrome.SoftG, chrome.SoftB))
+			win.TextOut(hdc, padX, cwdY, &s[0], int32(len(s)-1))
+		}
+		padTop += ch
+	}
+
 	prompt := inputBarPrompt
 	promptRunes := len([]rune(prompt))
 	promptW := int32(promptRunes) * cw
@@ -3134,6 +3368,17 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 	// Caret on the caret row within the window.
 	caretY := padTop + int32(caretRow)*ch
 	caretX := padX + promptW + int32(caretCol)*cw
+
+	// Fish-style ghost: remainder of the first Tab completion (soft color).
+	if tab := u.activeTab(); tab != nil {
+		if ghost := in.ghostSuffix(tab.cwd); ghost != "" {
+			if s, err := syscall.UTF16FromString(ghost); err == nil && len(s) >= 2 {
+				win.SetTextColor(hdc, win.RGB(chrome.MuteR, chrome.MuteG, chrome.MuteB))
+				win.TextOut(hdc, caretX, caretY, &s[0], int32(len(s)-1))
+			}
+		}
+	}
+
 	u.paintInputCaret(hdc, caretX, caretY, cw, ch)
 }
 
@@ -3291,7 +3536,13 @@ func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, 
 			}
 			u.selectFontForRune(hdc, r, cell.Bold)
 			win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
-			win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
+			// Clip status / any wide fallback glyphs to the cell so tab chips
+			// never spill into the title or past the pad edge.
+			if isStatusGlyphRune(r) {
+				extTextOutClipped(hdc, cellRect.Left, cellRect.Top, &cellRect, &s[0], uint32(len(s)-1))
+			} else {
+				win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
+			}
 		}
 	}
 	if u.font != 0 {

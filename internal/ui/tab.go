@@ -4,8 +4,11 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/charmbracelet/log"
 	"github.com/hinshun/vt10x"
@@ -26,6 +29,9 @@ type tab struct {
 	id    int
 	title string
 	shell string // launch command line (for MCP diag)
+	// cwd is the shell working directory (OSC from quiet prompt + best-effort
+	// cd tracking). UI-thread for reads/writes after start.
+	cwd string
 
 	sess *host.Session
 	term vt10x.Terminal // UI thread only for Write/Cell
@@ -45,9 +51,62 @@ type tab struct {
 	alive    atomic.Bool
 	bytesMsg atomic.Bool
 	closed   bool
+	// lastIOUnixNano is updated on every PTY read chunk (activity indicator).
+	lastIOUnixNano atomic.Int64
+	// titleBusy: OSC window title has a CLI spinner prefix (e.g. Grok while working).
+	// Cleared when the title is rewritten without a spinner frame.
+	titleBusy atomic.Bool
 	// wasAlt tracks ModeAltScreen across PTY drains so the host can resize
 	// when a full-screen app (Claude, Grok Build, vim…) enters/leaves.
 	wasAlt bool
+}
+
+// busy is true when this tab should show an activity spinner:
+//   - OSC title has a braille/spinner prefix (Grok and similar TUIs), or
+//   - recent PTY output (shell commands / short jobs).
+func (t *tab) busy() bool {
+	if t == nil || !t.alive.Load() {
+		return false
+	}
+	if t.titleBusy.Load() {
+		return true
+	}
+	ns := t.lastIOUnixNano.Load()
+	if ns == 0 {
+		return false
+	}
+	window := tabBusyWindow
+	if t.altScreen() {
+		window = tabBusyWindowAlt
+	}
+	return time.Since(time.Unix(0, ns)) < window
+}
+
+// applyTitle updates the display title and busy flag from a raw OSC title.
+// Grok (and other tools) put braille spinner frames in the window title while
+// working; we strip those for the tab label but keep titleBusy for the strip.
+func (t *tab) applyTitle(raw string) {
+	if t == nil {
+		return
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	busy := titleReportsBusy(raw)
+	t.titleBusy.Store(busy)
+	t.title = shortTitle(raw)
+	if busy {
+		log.Debug("title spinner busy", "tab", t.id, "raw", truncateRunes(raw, 48))
+	}
+}
+
+// noteIO marks recent PTY activity for the tab strip glyph.
+func (t *tab) noteIO() {
+	if t == nil {
+		return
+	}
+	t.lastIOUnixNano.Store(time.Now().UnixNano())
 }
 
 // altScreen is true when the tab's VT is on the alternate screen buffer.
@@ -81,10 +140,17 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 	if title == "" {
 		title = fmt.Sprintf("shell %d", id+1)
 	}
+	cwd := opts.cwd
+	if cwd == "" {
+		if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		}
+	}
 	t := &tab{
 		id:      id,
 		title:   title,
 		shell:   shell,
+		cwd:     cwd,
 		sess:    sess,
 		term:    vt10x.New(vt10x.WithSize(cols, rows)),
 		sb:      newScrollback(),
@@ -92,8 +158,20 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 		writeCh: make(chan []byte, 256),
 	}
 	t.alive.Store(true)
-	log.Info("tab created", "id", id, "shell", shell, "cwd", opts.cwd, "cols", cols, "rows", rows, "pid", sess.Pid())
+	log.Info("tab created", "id", id, "shell", shell, "cwd", cwd, "cols", cols, "rows", rows, "pid", sess.Pid())
 	return t, nil
+}
+
+// setCwd updates the tab working directory (from OSC or cd tracking).
+func (t *tab) setCwd(path string) {
+	if t == nil {
+		return
+	}
+	path = stringsTrimSpace(path)
+	if path == "" || path == t.cwd {
+		return
+	}
+	t.cwd = path
 }
 
 func (t *tab) startWorkers(u tabHost) {
@@ -127,6 +205,7 @@ func (t *tab) readLoop(u tabHost) {
 		n, err := t.sess.Read(buf)
 		if n > 0 {
 			chunk := append([]byte(nil), buf[:n]...)
+			t.noteIO()
 			t.inMu.Lock()
 			t.inBuf = append(t.inBuf, chunk...)
 			if len(t.inBuf) > 1<<20 {
@@ -178,7 +257,7 @@ func (t *tab) ptyTailCopy() []byte {
 }
 
 func (t *tab) close() {
-	if t.closed {
+	if t == nil || t.closed {
 		return
 	}
 	t.closed = true
@@ -186,9 +265,21 @@ func (t *tab) close() {
 	// Unblock writer
 	func() {
 		defer func() { _ = recover() }()
-		close(t.writeCh)
+		if t.writeCh != nil {
+			close(t.writeCh)
+		}
 	}()
-	_ = t.sess.Close()
+	// ConPTY Close after shell exit is usually a no-op; still isolate native faults.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("sess.Close panic", "tab", t.id, "err", fmt.Sprint(r))
+			}
+		}()
+		if t.sess != nil {
+			_ = t.sess.Close()
+		}
+	}()
 }
 
 func (t *tab) resize(cols, rows int) {
