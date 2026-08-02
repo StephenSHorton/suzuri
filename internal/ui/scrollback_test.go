@@ -125,6 +125,33 @@ func TestLiveExtentFromRows(t *testing.T) {
 	}
 }
 
+func TestIsClearCommand(t *testing.T) {
+	for _, s := range []string{"clear", "CLEAR", "  cls  ", "Clear-Host", "/usr/bin/clear"} {
+		if !isClearCommand(s) {
+			t.Fatalf("want clear: %q", s)
+		}
+	}
+	for _, s := range []string{"echo clear", "clearly", "ls", ""} {
+		if isClearCommand(s) {
+			t.Fatalf("want not clear: %q", s)
+		}
+	}
+}
+
+func TestClearCommandPinsAfterBlock(t *testing.T) {
+	s := newScrollback()
+	s.push("old output")
+	s.pushBlock("clear", 40)
+	s.pinHere()
+	if s.pin != len(s.lines) {
+		t.Fatalf("pin=%d len=%d", s.pin, len(s.lines))
+	}
+	// Stick-bottom short path: no post-pin content → empty-looking pane.
+	if s.pin == 0 {
+		t.Fatal("pin should be set")
+	}
+}
+
 func TestCommitLiveThenPushBlockOrder(t *testing.T) {
 	// commitLive must place prior output in history before the next block header
 	// so blocks and outputs stay associated (not all outputs in a live stack).

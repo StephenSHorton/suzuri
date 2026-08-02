@@ -303,6 +303,42 @@ func (s *scrollback) atBottom() bool { return s.offset == 0 }
 
 func (s *scrollback) stickBottom() { s.offset = 0 }
 
+// pinHere floors stick-bottom at the current history length. Pre-pin lines
+// remain reachable by scrolling up (used after clear).
+func (s *scrollback) pinHere() {
+	if s == nil {
+		return
+	}
+	s.pin = len(s.lines)
+	s.stickBottom()
+}
+
+// isClearCommand reports shell wipes that should pin scrollback (empty pane,
+// history only via scroll-up). Matches common clear spellings on Win/mac/Linux.
+func isClearCommand(line string) bool {
+	s := strings.TrimSpace(line)
+	if s == "" {
+		return false
+	}
+	// First token only (ignore args like `clear -x` if any).
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return false
+	}
+	cmd := strings.ToLower(fields[0])
+	// Strip path: /usr/bin/clear → clear
+	if i := strings.LastIndexAny(cmd, `/\`); i >= 0 {
+		cmd = cmd[i+1:]
+	}
+	// PowerShell: Clear-Host / clear-host
+	switch cmd {
+	case "clear", "cls", "clear-host":
+		return true
+	default:
+		return false
+	}
+}
+
 // historyTail returns the last n history lines for diagnostics.
 func (s *scrollback) historyTail(n int) []histLine {
 	if n < 1 || len(s.lines) == 0 {

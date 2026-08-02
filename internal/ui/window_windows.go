@@ -942,6 +942,9 @@ func (u *winUI) submitOnUIThread(tabID int, line string) error {
 		t.sb.commitLive(t.term)
 		t.sb.pushBlock(line, u.cols)
 		t.echo.arm(line)
+		if isClearCommand(line) {
+			t.sb.pinHere()
+		}
 	}
 	payload := line
 	if strings.Contains(payload, "\n") {
@@ -1535,6 +1538,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				tab.sb.commitLive(tab.term)
 				tab.sb.pushBlock(line, u.cols)
 				tab.echo.arm(line)
+				if isClearCommand(line) {
+					tab.sb.pinHere()
+				}
 				log.Debug("submit arm echo", "tab", tab.id, "line", line)
 			}
 			// Multi-line: send with real newlines; final CR executes.

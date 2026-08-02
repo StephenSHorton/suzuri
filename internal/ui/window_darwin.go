@@ -614,6 +614,9 @@ func (u *macUI) submitOnUIThread(tabID int, line string, done chan error) {
 	t.sb.commitLive(t.term)
 	t.sb.pushBlock(line, u.cols)
 	t.echo.arm(line)
+	if isClearCommand(line) {
+		t.sb.pinHere()
+	}
 	payload := line
 	if strings.Contains(payload, "\n") {
 		payload = strings.ReplaceAll(payload, "\n", "\r")
@@ -1123,6 +1126,11 @@ func (u *macUI) handleKeys() {
 			tab.sb.commitLive(tab.term)
 			tab.sb.pushBlock(line, u.cols)
 			tab.echo.arm(line)
+			// clear/cls: commitLive already blanked the host VT, so noteScreen
+			// never sees a clear transition — pin here so history stays above.
+			if isClearCommand(line) {
+				tab.sb.pinHere()
+			}
 		}
 		payload := line
 		if strings.Contains(payload, "\n") {
