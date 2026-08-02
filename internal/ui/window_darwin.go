@@ -311,19 +311,6 @@ func (u *macUI) inputBarCwd() string {
 	return displayPath(t.cwd)
 }
 
-func inputBarVPads(ch int32) (hair, topPad, botPad int32) {
-	hair = ch / 10
-	if hair < 1 {
-		hair = 1
-	}
-	topPad = ch / 5
-	if topPad < 2 {
-		topPad = 2
-	}
-	botPad = topPad
-	return hair, topPad, botPad
-}
-
 func (u *macUI) appOwnsKeyboard() bool {
 	t := u.activeTab()
 	return t != nil && t.altScreen()
