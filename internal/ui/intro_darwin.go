@@ -164,7 +164,8 @@ func matrixRainCells(cols, rows int, mode matrixPaintMode, t0 time.Time, spawnFo
 }
 
 // settingsIntroGap is idle time between full intro plays under Settings.
-const settingsIntroGap = 3 * time.Second
+// Keep this short — the play itself already includes spawn + wind-down.
+const settingsIntroGap = 800 * time.Millisecond
 
 // rippleGlyphRunes are fullwidth 猫/咪 for expanding rings (CJK face required).
 var rippleGlyphRunes = []rune{'猫', '咪'}
