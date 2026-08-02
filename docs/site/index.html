@@ -3,15 +3,17 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>suzuri（硯）— Windows terminal host</title>
-  <meta name="description" content="suzuri is a native Win32 terminal host: ConPTY, VT grid, Charm chrome, Warp-style input bar. Not a TUI inside someone else's emulator." />
+  <title>suzuri（硯）— terminal host for Windows &amp; macOS</title>
+  <meta name="description" content="suzuri is a real terminal host for Windows and macOS: native window, PTY, VT grid, Charm chrome, Warp-style input bar. Not a TUI inside someone else's emulator." />
   <link rel="stylesheet" href="styles.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Shippori+Mincho:wght@500;700&display=swap" rel="stylesheet" />
 </head>
 <body>
+  <canvas id="matrix" aria-hidden="true"></canvas>
   <div class="bg" aria-hidden="true"></div>
+
   <header class="wrap">
     <p class="brand"><span class="kanji">硯</span> suzuri</p>
     <nav>
@@ -23,27 +25,32 @@
 
   <main class="wrap">
     <section class="hero">
-      <h1>Your window.<br />Your ConPTY.<br /><em>Real terminal host.</em></h1>
+      <h1>Your window.<br />Your PTY.<br /><em>Real terminal host.</em></h1>
       <p class="lede">
         <strong>suzuri（硯）</strong> means <em>inkstone</em> — where ink is ground before writing.
-        A native Windows terminal: Win32 + ConPTY + VT cells + Charm chrome.
+        A native terminal host for <strong>Windows</strong> and <strong>macOS (Apple Silicon)</strong>:
+        your window, ConPTY / POSIX PTY, VT cells, Charm chrome, Warp-style input.
         Not a TUI inside someone else’s emulator. Not a Warp fork.
       </p>
       <div class="cta">
-        <a class="btn primary" id="download" href="https://github.com/StephenSHorton/suzuri/releases/latest">
+        <a class="btn primary" id="download-win" href="https://github.com/StephenSHorton/suzuri/releases/latest">
           Download for Windows
+        </a>
+        <a class="btn primary" id="download-mac" href="https://github.com/StephenSHorton/suzuri/releases/latest">
+          Download for macOS
         </a>
         <a class="btn ghost" href="https://github.com/StephenSHorton/suzuri">
           Source on GitHub
         </a>
       </div>
-      <p class="meta" id="release-meta">Portable <code>.exe</code> · MIT License · amd64</p>
+      <p class="meta" id="release-meta">Windows amd64 · macOS arm64 · MIT License</p>
+      <p class="meta fine-inline">Linux not yet supported as a host build.</p>
     </section>
 
     <section class="grid">
       <article>
         <h2>Host, not guest</h2>
-        <p>Owns the window, the PTY, selection, scrollback, and fonts. Shells run for real — PowerShell, cmd, pwsh — not a fake pipe.</p>
+        <p>Owns the window, the PTY, selection, scrollback, and fonts. Shells run for real — PowerShell, cmd, zsh, bash — not a fake pipe.</p>
       </article>
       <article>
         <h2>Charm chrome</h2>
@@ -76,19 +83,94 @@
   </footer>
 
   <script>
-    // Best-effort: surface latest release tag on the page.
+    // --- Latest release links ---
     fetch('https://api.github.com/repos/StephenSHorton/suzuri/releases/latest')
       .then(r => r.ok ? r.json() : null)
       .then(rel => {
         if (!rel || !rel.tag_name) return;
         const meta = document.getElementById('release-meta');
-        meta.innerHTML = `Latest <strong>${rel.tag_name}</strong> · portable <code>.exe</code> · MIT · amd64`;
-        const a = document.getElementById('download');
-        a.href = rel.html_url;
-        const exe = (rel.assets || []).find(x => /windows-amd64\.exe$/i.test(x.name));
-        if (exe) a.href = exe.browser_download_url;
+        meta.innerHTML = `Latest <strong>${rel.tag_name}</strong> · Windows amd64 · macOS arm64 · MIT`;
+        const assets = rel.assets || [];
+        const win = assets.find(x => /windows-amd64(\.exe|\.zip)?$/i.test(x.name) && x.name.endsWith('.exe'))
+          || assets.find(x => /windows-amd64/i.test(x.name));
+        const mac = assets.find(x => /darwin-arm64(\.zip)?$/i.test(x.name) && !x.name.endsWith('.zip'))
+          || assets.find(x => /darwin-arm64\.zip$/i.test(x.name))
+          || assets.find(x => /darwin-arm64/i.test(x.name));
+        const winA = document.getElementById('download-win');
+        const macA = document.getElementById('download-mac');
+        if (win) winA.href = win.browser_download_url;
+        else winA.href = rel.html_url;
+        if (mac) macA.href = mac.browser_download_url;
+        else macA.href = rel.html_url;
       })
       .catch(() => {});
+
+    // --- Matrix rain (suzuri intro vibe) ---
+    (function () {
+      const canvas = document.getElementById('matrix');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      // Half-width katakana + digits — same spirit as the app intro.
+      const glyphs = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789:.=*+-<>|';
+      const fontSize = 14;
+      let cols = 0;
+      let drops = [];
+      let speeds = [];
+      let dpr = 1;
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        canvas.width = Math.floor(w * dpr);
+        canvas.height = Math.floor(h * dpr);
+        canvas.style.width = w + 'px';
+        canvas.style.height = h + 'px';
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        cols = Math.ceil(w / fontSize);
+        drops = new Array(cols);
+        speeds = new Array(cols);
+        for (let i = 0; i < cols; i++) {
+          drops[i] = Math.random() * -40;
+          speeds[i] = 0.35 + Math.random() * 0.55;
+        }
+      }
+
+      function frame() {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        // Soft trail (fade) — dark green-black wash.
+        ctx.fillStyle = 'rgba(5, 8, 6, 0.08)';
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.font = fontSize + 'px "IBM Plex Mono", ui-monospace, monospace';
+        for (let i = 0; i < cols; i++) {
+          const ch = glyphs[(Math.random() * glyphs.length) | 0];
+          const x = i * fontSize;
+          const y = drops[i] * fontSize;
+          // Head brighter accent, body primary green.
+          const head = Math.random() > 0.92;
+          ctx.fillStyle = head ? '#e8fff0' : (Math.random() > 0.6 ? '#00e676' : '#0a5c32');
+          ctx.globalAlpha = head ? 0.55 : 0.22 + Math.random() * 0.18;
+          ctx.fillText(ch, x, y);
+          ctx.globalAlpha = 1;
+
+          if (y > h && Math.random() > 0.975) {
+            drops[i] = Math.random() * -20;
+            speeds[i] = 0.35 + Math.random() * 0.55;
+          }
+          drops[i] += speeds[i];
+        }
+        requestAnimationFrame(frame);
+      }
+
+      resize();
+      // Initial clear so first frame isn't transparent junk.
+      ctx.fillStyle = '#050806';
+      ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+      window.addEventListener('resize', resize);
+      requestAnimationFrame(frame);
+    })();
   </script>
 </body>
 </html>

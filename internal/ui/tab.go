@@ -1,4 +1,4 @@
-//go:build windows
+//go:build windows || darwin
 
 package ui
 
@@ -13,7 +13,15 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/host"
 )
 
-// tab is one shell session: ConPTY + VT grid + scrollback + Warp input bar.
+// tabHost is the UI surface a tab posts I/O events to (Win32 or AppKit host).
+type tabHost interface {
+	queueBytes(tabID int)
+	queueClosed(tabID int)
+	isAlive() bool
+	windowReady() bool
+}
+
+// tab is one shell session: PTY + VT grid + scrollback + Warp input bar.
 type tab struct {
 	id    int
 	title string
@@ -66,7 +74,7 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 	}
 	sess, err := host.StartSession(shell, cols, rows, opts.cwd)
 	if err != nil {
-		log.Error("conpty start failed", "tab", id, "shell", shell, "cwd", opts.cwd, "err", err)
+		log.Error("pty start failed", "tab", id, "shell", shell, "cwd", opts.cwd, "err", err)
 		return nil, err
 	}
 	title := opts.title
@@ -88,7 +96,7 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 	return t, nil
 }
 
-func (t *tab) startWorkers(u *winUI) {
+func (t *tab) startWorkers(u tabHost) {
 	go t.writeLoop()
 	go t.readLoop(u)
 }
@@ -113,7 +121,7 @@ func (t *tab) sendKey(b []byte) {
 	}
 }
 
-func (t *tab) readLoop(u *winUI) {
+func (t *tab) readLoop(u tabHost) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := t.sess.Read(buf)
@@ -134,21 +142,20 @@ func (t *tab) readLoop(u *winUI) {
 		if err != nil {
 			t.alive.Store(false)
 			log.Info("pty read ended", "tab", t.id, "err", err)
-			if u != nil && u.hwnd != 0 && u.alive.Load() {
-				// wParam carries tab id for UI thread cleanup.
-				postClosed(u, t.id)
+			if u != nil && u.windowReady() && u.isAlive() {
+				u.queueClosed(t.id)
 			}
 			return
 		}
 	}
 }
 
-func (t *tab) postBytes(u *winUI) {
-	if u == nil || u.hwnd == 0 || !u.alive.Load() {
+func (t *tab) postBytes(u tabHost) {
+	if u == nil || !u.windowReady() || !u.isAlive() {
 		return
 	}
 	if t.bytesMsg.CompareAndSwap(false, true) {
-		postBytes(u, t.id)
+		u.queueBytes(t.id)
 	}
 }
 
@@ -188,8 +195,7 @@ func (t *tab) resize(cols, rows int) {
 	if t == nil {
 		return
 	}
-	// Never let a bad size or VT panic take down the host (resize used to
-	// hard-crash with no trail when ConPTY Resize raced a PTY Read).
+	// Never let a bad size or VT panic take down the host.
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("tab.resize panic", "tab", t.id, "err", fmt.Sprint(r))
@@ -210,8 +216,6 @@ func (t *tab) resize(cols, rows int) {
 	if t.term != nil {
 		t.term.Resize(cols, rows)
 	}
-	// Synchronous, serialized ConPTY resize (see Session.Resize mutex).
-	// A fire-and-forget goroutine raced Read and killed the process on mouse-up.
 	if t.sess != nil {
 		if err := t.sess.Resize(cols, rows); err != nil {
 			log.Warn("pty resize failed", "tab", t.id, "cols", cols, "rows", rows, "err", err)

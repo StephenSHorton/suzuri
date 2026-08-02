@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -96,26 +97,9 @@ func (s *Service) Check() (*Info, error) {
 		return nil, nil
 	}
 
-	var asset ghAsset
-	var sumsURL string
-	for _, a := range rel.Assets {
-		n := strings.ToLower(a.Name)
-		if strings.HasSuffix(n, "-windows-amd64.exe") ||
-			(strings.HasSuffix(n, ".exe") && strings.Contains(n, "suzuri") && !strings.Contains(n, "installer")) {
-			if asset.URL == "" || strings.HasSuffix(n, "-windows-amd64.exe") {
-				asset = a
-			}
-		}
-		if n == "sha256sums" {
-			sumsURL = a.URL
-		}
-		// Prefer zip if that's all we have.
-		if asset.URL == "" && strings.HasSuffix(n, "-windows-amd64.zip") {
-			asset = a
-		}
-	}
+	asset, sumsURL := pickReleaseAsset(rel.Assets)
 	if asset.URL == "" {
-		return nil, fmt.Errorf("release %s has no windows-amd64 asset", rel.TagName)
+		return nil, fmt.Errorf("release %s has no asset for this platform", rel.TagName)
 	}
 
 	var sum string
@@ -322,6 +306,50 @@ func (s *Service) download(ctx context.Context, url, dst string) (err error) {
 	return err
 }
 
+// pickReleaseAsset chooses the portable binary for the running GOOS/GOARCH.
+func pickReleaseAsset(assets []ghAsset) (ghAsset, string) {
+	var asset ghAsset
+	var sumsURL string
+	goos, goarch := runtime.GOOS, runtime.GOARCH
+	// Prefer fully qualified names: suzuri-<ver>-<goos>-<goarch>(.exe|.zip)
+	wantSuffix := fmt.Sprintf("-%s-%s", goos, goarch)
+	for _, a := range assets {
+		n := strings.ToLower(a.Name)
+		if n == "sha256sums" {
+			sumsURL = a.URL
+			continue
+		}
+		switch goos {
+		case "windows":
+			if strings.Contains(n, wantSuffix) && (strings.HasSuffix(n, ".exe") || strings.HasSuffix(n, ".zip")) {
+				// Prefer .exe over .zip when both exist.
+				if asset.URL == "" || strings.HasSuffix(n, ".exe") {
+					asset = a
+				}
+			}
+			if asset.URL == "" && strings.HasSuffix(n, "-windows-amd64.exe") {
+				asset = a
+			}
+			if asset.URL == "" && strings.HasSuffix(n, "-windows-amd64.zip") {
+				asset = a
+			}
+		case "darwin":
+			if strings.Contains(n, wantSuffix) && (strings.HasSuffix(n, ".zip") || !strings.Contains(n, ".")) {
+				asset = a
+			}
+			// Also accept bare binary names like suzuri-0.1.0-darwin-arm64
+			if asset.URL == "" && strings.Contains(n, "darwin") && strings.Contains(n, goarch) {
+				asset = a
+			}
+		default:
+			if strings.Contains(n, wantSuffix) {
+				asset = a
+			}
+		}
+	}
+	return asset, sumsURL
+}
+
 func extractExeFromZip(zipPath, dir string) (string, error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -330,15 +358,29 @@ func extractExeFromZip(zipPath, dir string) (string, error) {
 	defer func() { _ = r.Close() }()
 	for _, f := range r.File {
 		base := filepath.Base(f.Name)
-		if !strings.EqualFold(base, "suzuri.exe") && !strings.HasSuffix(strings.ToLower(base), ".exe") {
+		lower := strings.ToLower(base)
+		// Skip directories and checksums.
+		if strings.HasSuffix(f.Name, "/") || lower == "sha256sums" {
 			continue
+		}
+		isWin := strings.EqualFold(base, "suzuri.exe") || strings.HasSuffix(lower, ".exe")
+		isUnix := lower == "suzuri" || (strings.HasPrefix(lower, "suzuri") && !strings.Contains(lower, "."))
+		if !isWin && !isUnix {
+			// darwin-arm64 style artifact inside zip
+			if !strings.Contains(lower, "suzuri") {
+				continue
+			}
 		}
 		rc, err := f.Open()
 		if err != nil {
 			return "", err
 		}
-		out := filepath.Join(dir, "suzuri-new.exe")
-		w, err := os.Create(out)
+		outName := "suzuri-new"
+		if isWin {
+			outName = "suzuri-new.exe"
+		}
+		out := filepath.Join(dir, outName)
+		w, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
 			_ = rc.Close()
 			return "", err
@@ -351,7 +393,7 @@ func extractExeFromZip(zipPath, dir string) (string, error) {
 		}
 		return out, nil
 	}
-	return "", fmt.Errorf("zip has no .exe")
+	return "", fmt.Errorf("zip has no suzuri binary")
 }
 
 func copyFile(src, dst string) error {

@@ -90,7 +90,7 @@ func (f *fakeTerm) put(y int, s string) {
 // unit on row scanning — see TestLiveExtentFromRows.
 
 func TestLiveExtentFromRows(t *testing.T) {
-	// Mirror liveExtent rules on a simple grid.
+	// Mirror liveExtent rules on a simple grid (cursor anchors empty rows).
 	extent := func(rows []string, cursorY int) int {
 		last := -1
 		if cursorY >= 0 && cursorY < len(rows) {
@@ -118,11 +118,136 @@ func TestLiveExtentFromRows(t *testing.T) {
 		t.Fatalf("got %d want 3", n)
 	}
 	if n := extent([]string{"     ", "     "}, 0); n != 1 {
-		// empty but cursor on 0 → last=0 → extent 1
 		t.Fatalf("empty with cursor: got %d want 1", n)
 	}
 	if n := extent([]string{"     ", "     "}, -1); n != 1 {
 		t.Fatalf("fully empty: got %d want 1", n)
+	}
+}
+
+func TestIsClearCommand(t *testing.T) {
+	for _, s := range []string{"clear", "CLEAR", "  cls  ", "Clear-Host", "/usr/bin/clear"} {
+		if !isClearCommand(s) {
+			t.Fatalf("want clear: %q", s)
+		}
+	}
+	for _, s := range []string{"echo clear", "clearly", "ls", ""} {
+		if isClearCommand(s) {
+			t.Fatalf("want not clear: %q", s)
+		}
+	}
+}
+
+func TestClearCommandPinsAfterBlock(t *testing.T) {
+	s := newScrollback()
+	s.push("old output")
+	s.pushBlock("clear", 40)
+	s.pinHere()
+	if s.pin != len(s.lines) {
+		t.Fatalf("pin=%d len=%d", s.pin, len(s.lines))
+	}
+	// Stick-bottom short path: no post-pin content → empty-looking pane.
+	if s.pin == 0 {
+		t.Fatal("pin should be set")
+	}
+}
+
+func TestPinScrollRevealsHistoryFromTop(t *testing.T) {
+	s := newScrollback()
+	for i := 0; i < 50; i++ {
+		s.push("line")
+	}
+	s.pinHere() // pin = 50
+	s.visual = 0
+	// Empty post-pin: offset 0 starts at pin, top-aligned (no top pad).
+	start, pad := s.viewWindow(20, 1)
+	if start != 50 {
+		t.Fatalf("offset0 start=%d want 50", start)
+	}
+	if pad != 0 {
+		t.Fatalf("want top-align pad=0, got %d", pad)
+	}
+	// One notch up: history line enters from top (start = pin-1).
+	s.scrollBy(1, 20)
+	s.visual = float64(s.offset) // snap for unit test
+	start, pad = s.viewWindow(20, 1)
+	if start != 49 || pad != 0 {
+		t.Fatalf("offset1 start=%d pad=%d want 49,0", start, pad)
+	}
+	s.scrollBy(2, 20)
+	s.visual = float64(s.offset)
+	start, _ = s.viewWindow(20, 1)
+	if start != 47 {
+		t.Fatalf("offset3 start=%d want 47", start)
+	}
+}
+
+func TestCommitLiveThenPushBlockOrder(t *testing.T) {
+	// commitLive must place prior output in history before the next block header
+	// so blocks and outputs stay associated (not all outputs in a live stack).
+	s := newScrollback()
+	s.pushBlock("echo one", 40)
+	// Simulate committed output of first command (as commitLive would push).
+	s.push("one")
+	s.pushBlock("echo two", 40)
+	// Expect order: block1 … "one" … block2
+	var sawOne, sawBlock2 bool
+	oneIdx, block2Idx := -1, -1
+	for i, hl := range s.lines {
+		if hl.kind == histNormal && hl.text == "one" {
+			sawOne = true
+			oneIdx = i
+		}
+		if hl.kind == histBlockCmd && stringsContains(hl.text, "echo two") {
+			sawBlock2 = true
+			block2Idx = i
+		}
+	}
+	if !sawOne || !sawBlock2 {
+		t.Fatalf("missing pieces: %+v", s.lines)
+	}
+	if oneIdx > block2Idx {
+		t.Fatalf("output should precede next block: one@%d block2@%d", oneIdx, block2Idx)
+	}
+}
+
+func TestClearPinHidesHistoryAtStickBottom(t *testing.T) {
+	s := newScrollback()
+	for i := 0; i < 20; i++ {
+		s.push("old line")
+	}
+	// Simulate clear pin.
+	s.pin = len(s.lines)
+	s.stickBottom()
+	// Post-clear: one command block.
+	s.pushBlock("echo hi", 40)
+	// Without a real term, exercise the pin short-content path via rowAt math.
+	// content after pin should be the block only; pin floor prevents old lines.
+	if s.pin != 20 {
+		t.Fatalf("pin=%d", s.pin)
+	}
+	// Scrolling up must still reach pre-pin history.
+	s.scrollBy(5, 10)
+	if s.offset != 5 {
+		t.Fatalf("offset=%d", s.offset)
+	}
+	s.stickBottom()
+	if s.offset != 0 {
+		t.Fatal("stick")
+	}
+}
+
+func TestScreenWasCleared(t *testing.T) {
+	prev := []string{"hello", "world", "   "}
+	cur := []string{"   ", "   ", "   "}
+	if !screenWasCleared(prev, cur) {
+		t.Fatal("expected clear")
+	}
+	if screenWasCleared(cur, cur) {
+		t.Fatal("blank→blank is not a clear")
+	}
+	if screenWasCleared(prev, []string{"hello", "   ", "   "}) {
+		t.Fatal("partial content is not a clear")
 	}
 }
 

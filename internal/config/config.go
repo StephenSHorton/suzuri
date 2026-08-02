@@ -1,5 +1,7 @@
 // Package config holds suzuri product settings with JSON persistence under
-// %LOCALAPPDATA%\suzuri\config.json.
+// the OS config directory (Windows: %LOCALAPPDATA%\suzuri\,
+// macOS: ~/Library/Application Support/suzuri/,
+// Linux: ~/.config/suzuri/).
 package config
 
 import (
@@ -8,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -128,20 +131,35 @@ func Default() Config {
 
 // DefaultProfiles are built-in launch recipes.
 func DefaultProfiles() []Profile {
+	if runtime.GOOS == "windows" {
+		return []Profile{
+			{Name: "Default", Shell: "", Cwd: ""},
+			{Name: "PowerShell", Shell: `powershell.exe -NoLogo -NoProfile`, Cwd: ""},
+			{Name: "Cmd", Shell: `cmd.exe`, Cwd: ""},
+		}
+	}
 	return []Profile{
 		{Name: "Default", Shell: "", Cwd: ""},
-		{Name: "PowerShell", Shell: `powershell.exe -NoLogo -NoProfile`, Cwd: ""},
-		{Name: "Cmd", Shell: `cmd.exe`, Cwd: ""},
+		{Name: "Zsh", Shell: "/bin/zsh", Cwd: ""},
+		{Name: "Bash", Shell: "/bin/bash", Cwd: ""},
 	}
 }
 
-// Path is %LOCALAPPDATA%\suzuri\config.json (or temp fallback).
-func Path() string {
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
-		base = os.TempDir()
+// Dir is the suzuri config/data directory for this OS.
+func Dir() string {
+	// Windows portable layout prefers LOCALAPPDATA when set.
+	if base := os.Getenv("LOCALAPPDATA"); base != "" {
+		return filepath.Join(base, "suzuri")
 	}
-	return filepath.Join(base, "suzuri", "config.json")
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "suzuri")
+	}
+	return filepath.Join(os.TempDir(), "suzuri")
+}
+
+// Path is the config.json location under Dir().
+func Path() string {
+	return filepath.Join(Dir(), "config.json")
 }
 
 // Load reads config from disk, or returns Default if missing/invalid.
@@ -349,6 +367,18 @@ func IntroLabel(id string) string {
 // MonoFontFaces are preferred faces for the settings cycle.
 // DefaultFontFace is first (bundled into the binary when available).
 func MonoFontFaces() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{
+			DefaultFontFace,
+			"Menlo",
+			"SF Mono",
+			"Monaco",
+			"JetBrains Mono",
+			"Fira Code",
+			"Source Code Pro",
+			"Courier New",
+		}
+	}
 	return []string{
 		DefaultFontFace,
 		"Cascadia Mono",

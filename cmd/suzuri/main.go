@@ -57,13 +57,15 @@ func main() {
 		log.Info("logging to file", "path", path)
 	}
 
-	if runtime.GOOS != "windows" {
+	switch runtime.GOOS {
+	case "windows", "darwin":
+	default:
 		log.Error("unsupported OS", "goos", runtime.GOOS)
-		fmt.Fprintln(os.Stderr, "suzuri v0 only runs on Windows (ConPTY).")
+		fmt.Fprintln(os.Stderr, "suzuri supports Windows and macOS.")
 		os.Exit(1)
 	}
 
-	// Win32 requires CreateWindow + GetMessage + WndProc on one OS thread.
+	// Win32/AppKit UI loops must stay on one OS thread.
 	// Without this, the Go scheduler can migrate the UI goroutine after idle
 	// and the window stops processing messages ("Not Responding").
 	runtime.LockOSThread()

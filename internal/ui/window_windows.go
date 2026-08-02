@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unicode"
 	"unsafe"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -28,7 +27,6 @@ import (
 
 const (
 	className = "SuzuriTerminalClass"
-	appTitle  = "suzuri（硯）"
 
 	// UI-thread work items (never do ConPTY/VT work from foreign threads).
 	wmSuzuriBytes  = win.WM_APP + 1 // drain incoming PTY byte queue into vt10x
@@ -45,25 +43,6 @@ const (
 	// wmSuzuriOpenPalette rebuilds the bubbles list off the Ctrl+K keydown stack
 	// (rebuild + first View on KEYDOWN hard-crashed for some users).
 	wmSuzuriOpenPalette = win.WM_APP + 7
-
-	// Hard caps so a bad metric cannot ask ConPTY/VT for a multi-megagrid.
-	maxTermCols = 400
-	maxTermRows = 200
-
-	// Smooth opacity pulse (sine), not a hard on/off blink.
-	cursorBlinkPeriod = 1200 * time.Millisecond
-	cursorBlinkTick   = 40 * time.Millisecond // ~25 fps for soft fade
-
-	// Startup rain: spawn new streams for this long, then let them fall off.
-	matrixIntroSpawn = 2 * time.Second
-	// Safety cap so wind-down cannot run forever on a stuck paint path.
-	matrixIntroMaxTotal = 12 * time.Second
-
-	cellW = 9
-	cellH = 18
-
-	maxTabs         = 16
-	tabBarFallback  = 36 // used before first paint measures font
 )
 
 // Run opens a native Win32 window with one shell tab (more via Ctrl+Shift+T).
@@ -188,6 +167,11 @@ type winUI struct {
 	bridge  *bridge.Host
 	mcpJobs chan mcpJob
 }
+
+func (u *winUI) queueBytes(tabID int)  { postBytes(u, tabID) }
+func (u *winUI) queueClosed(tabID int) { postClosed(u, tabID) }
+func (u *winUI) isAlive() bool         { return u != nil && u.alive.Load() }
+func (u *winUI) windowReady() bool     { return u != nil && u.hwnd != 0 }
 
 func (u *winUI) activeTab() *tab {
 	if u.active < 0 || u.active >= len(u.tabs) {
@@ -611,7 +595,7 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
-		u.checkForUpdates()
+		runUpdateCheck(u.toast)
 	}
 	u.syncChrome()
 }
@@ -954,8 +938,13 @@ func (u *winUI) submitOnUIThread(tabID int, line string) error {
 	}
 	// Prefer bar path so draft/history stay consistent when line matches.
 	if stringsTrimSpace(line) != "" {
+		// Fold previous live output into history so this block owns the next run.
+		t.sb.commitLive(t.term)
 		t.sb.pushBlock(line, u.cols)
 		t.echo.arm(line)
+		if isClearCommand(line) {
+			t.sb.pinHere()
+		}
 	}
 	payload := line
 	if strings.Contains(payload, "\n") {
@@ -1112,12 +1101,45 @@ func (u *winUI) closeTabUI(id int) {
 		return
 	}
 	// Last tab → confirm quit (Enter quits; Esc keeps the tab).
+	// (Shell `exit` uses sessionEndedCloseTab — no confirm.)
 	if len(u.tabs) == 1 {
 		log.Info("last tab close — confirm quit")
 		r := u.chrome.UpdateChrome(chrome.OpenConfirmQuitMsg{})
 		u.chrome = r.Model
 		u.markChromeDirty()
 		win.InvalidateRect(u.hwnd, nil, false)
+		return
+	}
+	u.removeTabAt(idx)
+}
+
+// sessionEndedCloseTab closes a tab whose shell process exited (exit/EOF).
+// Unlike Ctrl+W on the last tab, this quits the app immediately when it is
+// the final tab — matches expected shell semantics.
+func (u *winUI) sessionEndedCloseTab(id int) {
+	idx := -1
+	for i, t := range u.tabs {
+		if t.id == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	if len(u.tabs) == 1 {
+		log.Info("last shell exited — quitting")
+		u.persistWindowPlacement(true)
+		if u.hwnd != 0 {
+			win.DestroyWindow(u.hwnd)
+		}
+		return
+	}
+	u.removeTabAt(idx)
+}
+
+func (u *winUI) removeTabAt(idx int) {
+	if idx < 0 || idx >= len(u.tabs) {
 		return
 	}
 	u.tabs[idx].close()
@@ -1213,13 +1235,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case wmSuzuriClosed:
+		// Shell exited (e.g. `exit`) — close tab; last tab quits (no confirm).
 		id := int(wParam)
-		if t := u.tabByID(id); t != nil {
-			_, _ = t.term.Write([]byte("\r\n[suzuri] session ended\r\n"))
-			u.toast("session ended")
-			if u.activeTab() == t {
-				win.InvalidateRect(hwnd, nil, false)
-			}
+		if u.tabByID(id) != nil {
+			log.Info("shell session ended — closing tab", "tab", id, "tabs", len(u.tabs))
+			u.sessionEndedCloseTab(id)
 		}
 		return 0
 
@@ -1545,8 +1565,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			// Warp-style command block in scrollback, then send to PTY.
 			// Arm echo suppress so PS/cmd local-echo doesn't duplicate the block.
 			if stringsTrimSpace(line) != "" {
+				// Previous command's output → history under its block first.
+				tab.sb.commitLive(tab.term)
 				tab.sb.pushBlock(line, u.cols)
 				tab.echo.arm(line)
+				if isClearCommand(line) {
+					tab.sb.pinHere()
+				}
 				log.Debug("submit arm echo", "tab", tab.id, "line", line)
 			}
 			// Multi-line: send with real newlines; final CR executes.
@@ -2403,71 +2428,6 @@ func fillRect(hdc win.HDC, r win.RECT, brush win.HBRUSH) {
 	_, _, _ = procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&r)), uintptr(brush))
 }
 
-func displayRune(r rune) rune {
-	if r == 0 || r == 0xFFFD {
-		return ' '
-	}
-	// C0 / DEL / C1 controls
-	if r < 0x20 || (r >= 0x7f && r < 0xa0) {
-		return ' '
-	}
-	// Private Use (Nerd Fonts etc.) → empty, not a □ mystery box
-	if r >= 0xE000 && r <= 0xF8FF {
-		return ' '
-	}
-	if r >= 0xF0000 {
-		return ' '
-	}
-	// CJK (Han / kana / fullwidth) — drawn with cjkFont when the mono face
-	// lacks the glyph. Needed for brand 硯 and Charm-style 猫 underlays.
-	if isEastAsianRune(r) {
-		return r
-	}
-	// Beyond Latin Extended-B: keep box-drawing / light punctuation; drop
-	// exotic scripts we cannot paint cleanly without per-script fallbacks.
-	if r > 0x024F &&
-		!(r >= 0x2500 && r <= 0x259F) && // box / block drawing
-		!(r >= 0x2000 && r <= 0x206F) { // general punctuation
-		switch r {
-		case '✓', '✗', '→', '←', '▶', '❯', 'λ', '•':
-			return ' '
-		default:
-			if !unicode.In(r, unicode.Latin, unicode.Common) {
-				return ' '
-			}
-		}
-	}
-	if unicode.Is(unicode.Cf, r) {
-		return ' '
-	}
-	if !unicode.IsPrint(r) && r != ' ' {
-		return ' '
-	}
-	return r
-}
-
-// isEastAsianRune is true for scripts we paint via the CJK fallback face.
-func isEastAsianRune(r rune) bool {
-	switch {
-	case r >= 0x3040 && r <= 0x30FF: // Hiragana + Katakana
-		return true
-	case r >= 0x31F0 && r <= 0x31FF: // Katakana Phonetic Extensions
-		return true
-	case r >= 0x3400 && r <= 0x4DBF: // CJK Ext A
-		return true
-	case r >= 0x4E00 && r <= 0x9FFF: // CJK Unified Ideographs
-		return true
-	case r >= 0xF900 && r <= 0xFAFF: // CJK Compatibility Ideographs
-		return true
-	case r >= 0xFF00 && r <= 0xFFEF: // Halfwidth and Fullwidth Forms
-		return true
-	case r >= 0x3000 && r <= 0x303F: // CJK Symbols and Punctuation
-		return true
-	default:
-		return false
-	}
-}
-
 // selectFontForRune picks the primary mono face, or CJK fallback for Han/kana.
 func (u *winUI) selectFontForRune(hdc win.HDC, r rune, bold bool) {
 	if isEastAsianRune(r) && u.cjkFont != 0 {
@@ -3229,20 +3189,6 @@ func (u *winUI) caretAlpha() float64 {
 	// while focused.
 	s := 0.5 + 0.5*math.Sin(2*math.Pi*(elapsed/period))
 	return 0.12 + 0.88*s
-}
-
-// blendRGB interpolates from background → foreground by alpha in [0,1].
-func blendRGB(br, bg, bb, fr, fg, fb byte, a float64) (byte, byte, byte) {
-	if a < 0 {
-		a = 0
-	}
-	if a > 1 {
-		a = 1
-	}
-	lerp := func(b, f byte) byte {
-		return byte(float64(b)*(1-a) + float64(f)*a + 0.5)
-	}
-	return lerp(br, fr), lerp(bg, fg), lerp(bb, fb)
 }
 
 // isTransparentOverlayBG is true for cells that should not cover the dim+猫 underlay.

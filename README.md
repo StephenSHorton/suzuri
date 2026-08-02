@@ -6,7 +6,7 @@
 
 **Suzuri** means *inkstone* — the stone where ink is ground before writing.
 
-A **real terminal host** for Windows: your window, ConPTY, VT cell grid, Charm chrome, Warp-style input bar. Not a TUI inside someone else’s emulator, and not a Warp fork.
+A **real terminal host** for Windows and macOS: your window, PTY, VT cell grid, Charm chrome, Warp-style input bar. Not a TUI inside someone else’s emulator, and not a Warp fork.
 
 **Site:** [stephenshorton.github.io/suzuri](https://stephenshorton.github.io/suzuri/) · **Download:** [latest release](https://github.com/StephenSHorton/suzuri/releases/latest)
 
@@ -19,27 +19,38 @@ Most “pretty terminals” are either:
 - a **full host** (Windows Terminal, WezTerm) with deep VT fidelity, or  
 - a **TUI app** that lives *inside* another terminal (Crush, many Charm demos).
 
-**suzuri is a host.** It owns Win32 + ConPTY + paint. Charm (Bubble Tea + Lip Gloss) owns the chrome you notice — tabs, palette, settings — composited over a dimmed shell.
+**suzuri is a host.** It owns the native window + PTY + paint. Charm (Bubble Tea + Lip Gloss) owns the chrome you notice — tabs, palette, settings — composited over a dimmed shell.
 
 ## Features
 
 | Area | Highlights |
 |------|------------|
-| **Host** | Native Win32 window, ConPTY shells, scrollback, selection, copy/paste |
+| **Host** | Native window (Win32 / macOS), ConPTY or POSIX PTY shells, scrollback, selection, copy/paste |
 | **Chrome** | Tabs, command palette (`Ctrl+K`), settings (`Ctrl+,`), help, themes |
 | **Input** | Warp-style bottom bar — local edit, multiline, history, echo filter |
 | **Look** | Inkstone / Charmtone / High contrast · bundled Gohu mono · box-drawing |
-| **Polish** | Window placement, matrix/ripple intros, center 硯 watermark |
+| **Polish** | Window placement, matrix/ripple intros (Windows), center 硯 watermark |
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
 | **Updates** | Checks GitHub Releases on startup; palette **Check for updates** |
 
 ## Download
 
+**Windows**
+
 1. Grab **`suzuri-*-windows-amd64.exe`** (or the `.zip`) from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
 2. Run it — no installer. Config lives in `%LOCALAPPDATA%\suzuri\`.  
 3. Optional: pin the exe or put it on your `PATH`.
 
+**macOS (Apple Silicon)**
+
+1. Grab **`suzuri-*-darwin-arm64`** (or the `.zip`) from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
+2. `chmod +x suzuri-*-darwin-arm64 && ./suzuri-*-darwin-arm64`  
+3. Config lives in `~/Library/Application Support/suzuri/`.  
+4. First launch may need **System Settings → Privacy & Security** if Gatekeeper blocks an unsigned binary.
+
 ## Build from source
+
+**Windows**
 
 ```powershell
 git clone https://github.com/StephenSHorton/suzuri.git
@@ -49,7 +60,18 @@ go build -ldflags "-s -w -X main.version=dev" -o suzuri.exe ./cmd/suzuri
 .\suzuri.exe
 ```
 
-Windows only (ConPTY). Go 1.26+ recommended (see `go.mod`).
+**macOS**
+
+```bash
+git clone https://github.com/StephenSHorton/suzuri.git
+cd suzuri
+go test ./...
+# CGO required (ebiten window host)
+CGO_ENABLED=1 go build -ldflags "-s -w -X main.version=dev" -o suzuri ./cmd/suzuri
+./suzuri
+```
+
+Go 1.26+ recommended (see `go.mod`). Supported hosts: **Windows** (ConPTY) and **macOS** (POSIX PTY).
 
 ## Keys
 
@@ -66,9 +88,14 @@ Windows only (ConPTY). Go 1.26+ recommended (see `go.mod`).
 
 ## Config
 
-`%LOCALAPPDATA%\suzuri\config.json` — font, theme, ANSI map, **intro** (`matrix` \| `ripple` \| `none`), profiles, window placement.
+| OS | Config | Logs |
+|----|--------|------|
+| Windows | `%LOCALAPPDATA%\suzuri\config.json` | `%LOCALAPPDATA%\suzuri\suzuri.log` |
+| macOS | `~/Library/Application Support/suzuri/config.json` | same dir `suzuri.log` |
 
-Logs: `%LOCALAPPDATA%\suzuri\suzuri.log` · `SUZURI_LOG_LEVEL=info` to quiet debug.
+Fields: font, theme, ANSI map, **intro** (`matrix` \| `ripple` \| `none`), profiles, window placement.
+
+`SUZURI_LOG_LEVEL=info` to quiet debug.
 
 ## MCP (agent diagnostics)
 
@@ -77,7 +104,7 @@ Spawn-on-demand stdio MCP — attach to a running GUI over loopback. See [`docs/
 ```toml
 # ~/.grok/config.toml
 [mcp_servers.suzuri]
-command = 'C:\path\to\suzuri.exe'
+command = '/path/to/suzuri'   # or C:\path\to\suzuri.exe on Windows
 args = ["mcp"]
 enabled = true
 ```
@@ -85,16 +112,16 @@ enabled = true
 ## Architecture
 
 ```
-Win32 window  →  key/mouse
+Native window  →  key/mouse
       │
-      ├─ Charm chrome (tabs / palette / settings)  → mini VT → GDI
+      ├─ Charm chrome (tabs / palette / settings)  → mini VT → paint
       │
       └─ active tab
-           write queue  →  ConPTY  →  shell
-                ↑                         ↓
+           write queue  →  PTY (ConPTY / POSIX)  →  shell
+                ↑                                    ↓
            VT parse (UI thread)  ←  byte queue
                 ↓
-           cell grid + scrollback → GDI
+           cell grid + scrollback → paint (GDI / software+Metal)
 ```
 
 Design notes: [`docs/crush-inspired-plan.md`](docs/crush-inspired-plan.md).
@@ -103,18 +130,18 @@ Design notes: [`docs/crush-inspired-plan.md`](docs/crush-inspired-plan.md).
 
 | Workflow | Purpose |
 |----------|---------|
-| **CI** | `go test` + build on PR/push |
-| **Release** | Tag `v*.*.*` → portable `.exe` + `.zip` + `SHA256SUMS` |
+| **CI** | `go test` + build on Windows and macOS |
+| **Release** | Tag `v*.*.*` → windows-amd64 + darwin-arm64 assets + `SHA256SUMS` |
 | **Pages** | Deploys `docs/site` to GitHub Pages |
 
-```powershell
+```bash
 git tag v0.6.0
 git push origin v0.6.0
 ```
 
 ## Auto-update
 
-Release builds embed a version via `-ldflags -X main.version=…`. On startup (and via palette **Check for updates**), suzuri queries GitHub Releases, downloads the windows-amd64 asset, verifies `SHA256SUMS` when present, renames the running image, writes the new exe, and relaunches. Dev builds (`version=dev`) never auto-update.
+Release builds embed a version via `-ldflags -X main.version=…`. On startup (and via palette **Check for updates**), suzuri queries GitHub Releases, downloads the asset for the running OS/arch, verifies `SHA256SUMS` when present, replaces the running binary, and relaunches. Dev builds (`version=dev`) never auto-update.
 
 ## License
 

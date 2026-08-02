@@ -1,6 +1,7 @@
 // Package applog configures Charm's logger (github.com/charmbracelet/log)
 // for suzuri. GUI hosts often have no useful console, so we always append to
-// a file under %LOCALAPPDATA%\suzuri\ and mirror to stderr when present.
+// a file under the OS config dir (…/suzuri/suzuri.log) and mirror to stderr
+// when present.
 package applog
 
 import (
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+
+	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
 var (
@@ -63,11 +66,7 @@ func Init() (string, error) {
 }
 
 func dataDir() (string, error) {
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
-		base = os.TempDir()
-	}
-	dir := filepath.Join(base, "suzuri")
+	dir := config.Dir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -82,11 +81,7 @@ func FilePath() string {
 	if p != "" {
 		return p
 	}
-	base := os.Getenv("LOCALAPPDATA")
-	if base == "" {
-		base = os.TempDir()
-	}
-	return filepath.Join(base, "suzuri", "suzuri.log")
+	return filepath.Join(config.Dir(), "suzuri.log")
 }
 
 // Tail returns the last n lines of the log file (and flushes if this process owns it).
