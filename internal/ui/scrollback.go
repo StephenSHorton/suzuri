@@ -289,7 +289,15 @@ func (s *scrollback) pushBlock(cmd string, cols int) {
 }
 
 func (s *scrollback) scrollBy(delta, viewportRows int) {
+	// Max offset: enough to bring the first history line to the top of the view.
+	// With a pin, offset counts lines revealed *before* the pin (smooth after clear).
 	maxOff := len(s.lines)
+	if viewportRows > 0 && maxOff > 0 {
+		// Keep at least one line of context; don't overscroll past doc start.
+		if m := maxOff; m > maxOff {
+			maxOff = m
+		}
+	}
 	s.offset += delta
 	if s.offset < 0 {
 		s.offset = 0
@@ -304,13 +312,75 @@ func (s *scrollback) atBottom() bool { return s.offset == 0 }
 func (s *scrollback) stickBottom() { s.offset = 0 }
 
 // pinHere floors stick-bottom at the current history length. Pre-pin lines
-// remain reachable by scrolling up (used after clear).
+// remain reachable by scrolling up one line at a time (used after clear).
 func (s *scrollback) pinHere() {
 	if s == nil {
 		return
 	}
 	s.pin = len(s.lines)
 	s.stickBottom()
+}
+
+// viewWindow returns absolute document start index and top pad for the viewport.
+//
+// offset is lines scrolled up from stick-bottom. With pin set after clear,
+// offset 0 shows only post-pin content (padded); each +1 offset reveals one
+// more pre-pin history line — no full-history flash on first wheel notch.
+func (s *scrollback) viewWindow(viewportRows, liveRows int) (start, pad int) {
+	if viewportRows < 1 {
+		viewportRows = 1
+	}
+	if liveRows < 0 {
+		liveRows = 0
+	}
+	histN := len(s.lines)
+	docLen := histN + liveRows
+	pin := s.pin
+	if pin < 0 {
+		pin = 0
+	}
+	if pin > histN {
+		pin = histN
+	}
+	off := s.offset
+	if off < 0 {
+		off = 0
+	}
+
+	// Post-pin content length (history after pin + live).
+	post := docLen - pin
+	if post < 0 {
+		post = 0
+	}
+
+	// After clear, post is usually tiny (empty live). Reveal pre-pin gradually:
+	// start = pin - offset (clamped), pad top so content stays bottom-aligned.
+	if pin > 0 && post <= viewportRows {
+		start = pin - off
+		if start < 0 {
+			start = 0
+		}
+		content := docLen - start // pre-pin slice + post-pin + live
+		if content < viewportRows {
+			pad = viewportRows - content
+		}
+		return start, pad
+	}
+
+	// Normal document scroll (no pin, or enough post-pin content to fill view).
+	start = docLen - viewportRows - off
+	if start < 0 {
+		start = 0
+	}
+	// Stick-bottom only: don't peek above pin when fully at bottom.
+	if off == 0 && pin > 0 && start < pin {
+		start = pin
+		content := docLen - start
+		if content < viewportRows {
+			pad = viewportRows - content
+		}
+	}
+	return start, pad
 }
 
 // isClearCommand reports shell wipes that should pin scrollback (empty pane,
@@ -432,42 +502,15 @@ func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPi
 
 	live := snapshotLiveCells(term)
 	histN := len(s.lines)
-	docLen := histN + len(live)
+	start, pad := s.viewWindow(viewportRows, len(live))
 
 	out := make([][]cellPix, viewportRows)
-
-	// Stick-bottom with pin + short post-clear content: bottom-align so the
-	// pane stays empty above (history hidden) rather than pulling old lines in.
-	if s.offset == 0 && s.pin > 0 && s.pin <= histN {
-		contentLen := docLen - s.pin // history after pin + live
-		if contentLen < 0 {
-			contentLen = 0
-		}
-		if contentLen <= viewportRows {
-			pad := viewportRows - contentLen
-			for i := 0; i < viewportRows; i++ {
-				if i < pad {
-					out[i] = blankRow()
-					continue
-				}
-				idx := s.pin + (i - pad)
-				out[i] = s.rowAt(idx, histN, live, cols)
-			}
-			return out
-		}
-	}
-
-	start := docLen - viewportRows - s.offset
-	if start < 0 {
-		start = 0
-	}
-	// At stick-bottom, never start before pin (hide pre-clear history).
-	if s.offset == 0 && s.pin > 0 && start < s.pin {
-		start = s.pin
-	}
-
 	for i := 0; i < viewportRows; i++ {
-		out[i] = s.rowAt(start+i, histN, live, cols)
+		if i < pad {
+			out[i] = blankRow()
+			continue
+		}
+		out[i] = s.rowAt(start+(i-pad), histN, live, cols)
 	}
 	return out
 }
@@ -529,31 +572,11 @@ func (s *scrollback) absLine(viewY, viewportRows, liveRows int) int {
 	if liveRows < 1 {
 		liveRows = 1
 	}
-	histN := len(s.lines)
-	docLen := histN + liveRows
-
-	if s.offset == 0 && s.pin > 0 && s.pin <= histN {
-		contentLen := docLen - s.pin
-		if contentLen < 0 {
-			contentLen = 0
-		}
-		if contentLen <= viewportRows {
-			pad := viewportRows - contentLen
-			if viewY < pad {
-				return s.pin // blank pad maps to pin
-			}
-			return s.pin + (viewY - pad)
-		}
+	start, pad := s.viewWindow(viewportRows, liveRows)
+	if viewY < pad {
+		return start
 	}
-
-	start := docLen - viewportRows - s.offset
-	if start < 0 {
-		start = 0
-	}
-	if s.offset == 0 && s.pin > 0 && start < s.pin {
-		start = s.pin
-	}
-	return start + viewY
+	return start + (viewY - pad)
 }
 
 func (s *scrollback) lineText(abs int, term vt10x.Terminal) string {

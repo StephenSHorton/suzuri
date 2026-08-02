@@ -152,6 +152,34 @@ func TestClearCommandPinsAfterBlock(t *testing.T) {
 	}
 }
 
+func TestPinScrollRevealsHistoryGradually(t *testing.T) {
+	s := newScrollback()
+	for i := 0; i < 50; i++ {
+		s.push("line")
+	}
+	s.pinHere() // pin = 50
+	// Empty post-pin (no live): offset 0 starts at pin.
+	start, pad := s.viewWindow(20, 1)
+	if start != 50 {
+		t.Fatalf("offset0 start=%d want 50", start)
+	}
+	if pad < 1 {
+		t.Fatalf("expected top pad on empty clear, pad=%d", pad)
+	}
+	// One notch up: start moves to pin-1 (not pin-20).
+	s.scrollBy(1, 20)
+	start, _ = s.viewWindow(20, 1)
+	if start != 49 {
+		t.Fatalf("offset1 start=%d want 49 (gradual)", start)
+	}
+	// Three notches: pin-3.
+	s.scrollBy(2, 20)
+	start, _ = s.viewWindow(20, 1)
+	if start != 47 {
+		t.Fatalf("offset3 start=%d want 47", start)
+	}
+}
+
 func TestCommitLiveThenPushBlockOrder(t *testing.T) {
 	// commitLive must place prior output in history before the next block header
 	// so blocks and outputs stay associated (not all outputs in a live stack).

@@ -1299,7 +1299,9 @@ func (u *macUI) handleMouse() {
 	_, wheelY := ebiten.Wheel()
 	if wheelY != 0 {
 		if t := u.activeTab(); t != nil && !t.altScreen() {
-			steps := int(wheelY)
+			// One notch ≈ a few lines; keep it small so pin-reveal after clear
+			// is progressive (not a full-history flash).
+			steps := int(wheelY * 3)
 			if steps == 0 {
 				if wheelY > 0 {
 					steps = 1
@@ -1308,7 +1310,7 @@ func (u *macUI) handleMouse() {
 				}
 			}
 			// ebiten: positive wheel is away from user → scroll history up.
-			t.sb.scrollBy(steps*3, u.rows)
+			t.sb.scrollBy(steps, u.rows)
 		}
 	}
 
