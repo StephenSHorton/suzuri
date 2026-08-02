@@ -222,8 +222,42 @@ func (s *scrollback) pushKind(line string, kind byte) {
 	}
 }
 
+// commitLive folds the current primary-screen VT content into history and
+// clears the local VT model so the next command's output is not stacked on top
+// of the previous run in the live region.
+//
+// Without this, pushBlock only inserts the command header while shell output
+// stays on the live surface — so blocks pile up in history and all outputs
+// appear as one live stack at the bottom of the viewport.
+//
+// The PTY/shell is not cleared (only the host's vt10x view). For line-oriented
+// shells this is fine: new output is stream text that repaints cleanly.
+// Alternate-screen apps are left alone.
+func (s *scrollback) commitLive(term vt10x.Terminal) {
+	if s == nil || term == nil {
+		return
+	}
+	if term.Mode()&vt10x.ModeAltScreen != 0 {
+		return
+	}
+	lines := snapshotScreenText(term)
+	for _, line := range lines {
+		t := strings.TrimRight(line, " \t")
+		if strings.TrimSpace(t) == "" {
+			continue
+		}
+		s.push(t)
+	}
+	// Reset host-side VT so viewCells doesn't duplicate committed lines as live.
+	_, _ = term.Write([]byte("\x1b[H\x1b[2J"))
+	s.prev = snapshotScreenText(term)
+	s.stickBottom()
+}
+
 // pushBlock injects a Warp-style command block into history (above live screen).
 // cols is used for the rule width; cmd may be multi-line.
+// Callers should commitLive(term) first so the previous command's output is
+// already in history under its block.
 func (s *scrollback) pushBlock(cmd string, cols int) {
 	if stringsTrimSpace(cmd) == "" {
 		return

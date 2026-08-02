@@ -125,6 +125,35 @@ func TestLiveExtentFromRows(t *testing.T) {
 	}
 }
 
+func TestCommitLiveThenPushBlockOrder(t *testing.T) {
+	// commitLive must place prior output in history before the next block header
+	// so blocks and outputs stay associated (not all outputs in a live stack).
+	s := newScrollback()
+	s.pushBlock("echo one", 40)
+	// Simulate committed output of first command (as commitLive would push).
+	s.push("one")
+	s.pushBlock("echo two", 40)
+	// Expect order: block1 … "one" … block2
+	var sawOne, sawBlock2 bool
+	oneIdx, block2Idx := -1, -1
+	for i, hl := range s.lines {
+		if hl.kind == histNormal && hl.text == "one" {
+			sawOne = true
+			oneIdx = i
+		}
+		if hl.kind == histBlockCmd && stringsContains(hl.text, "echo two") {
+			sawBlock2 = true
+			block2Idx = i
+		}
+	}
+	if !sawOne || !sawBlock2 {
+		t.Fatalf("missing pieces: %+v", s.lines)
+	}
+	if oneIdx > block2Idx {
+		t.Fatalf("output should precede next block: one@%d block2@%d", oneIdx, block2Idx)
+	}
+}
+
 func TestClearPinHidesHistoryAtStickBottom(t *testing.T) {
 	s := newScrollback()
 	for i := 0; i < 20; i++ {

@@ -610,6 +610,8 @@ func (u *macUI) submitOnUIThread(tabID int, line string, done chan error) {
 	if line == "" {
 		return
 	}
+	// Fold previous live output into history so this block owns the next output.
+	t.sb.commitLive(t.term)
 	t.sb.pushBlock(line, u.cols)
 	t.echo.arm(line)
 	payload := line
@@ -1117,6 +1119,8 @@ func (u *macUI) handleKeys() {
 		line := in.submit()
 		u.maybeResizeForInput()
 		if stringsTrimSpace(line) != "" {
+			// Previous command's output → history, then this block header.
+			tab.sb.commitLive(tab.term)
 			tab.sb.pushBlock(line, u.cols)
 			tab.echo.arm(line)
 		}

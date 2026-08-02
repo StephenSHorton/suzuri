@@ -938,6 +938,8 @@ func (u *winUI) submitOnUIThread(tabID int, line string) error {
 	}
 	// Prefer bar path so draft/history stay consistent when line matches.
 	if stringsTrimSpace(line) != "" {
+		// Fold previous live output into history so this block owns the next run.
+		t.sb.commitLive(t.term)
 		t.sb.pushBlock(line, u.cols)
 		t.echo.arm(line)
 	}
@@ -1529,6 +1531,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			// Warp-style command block in scrollback, then send to PTY.
 			// Arm echo suppress so PS/cmd local-echo doesn't duplicate the block.
 			if stringsTrimSpace(line) != "" {
+				// Previous command's output → history under its block first.
+				tab.sb.commitLive(tab.term)
 				tab.sb.pushBlock(line, u.cols)
 				tab.echo.arm(line)
 				log.Debug("submit arm echo", "tab", tab.id, "line", line)
