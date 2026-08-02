@@ -113,10 +113,18 @@
       // Half-width katakana + digits — same spirit as the app intro.
       const glyphs = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789:.=*+-<>|';
       const fontSize = 14;
+      // Fall speed in cells/frame — keep this low; 60fps makes even 0.3 feel frantic.
+      const speedMin = 0.06;
+      const speedRange = 0.10; // → ~0.06–0.16 cells/frame
       let cols = 0;
       let drops = [];
       let speeds = [];
       let dpr = 1;
+      let lastTs = 0;
+
+      function randSpeed() {
+        return speedMin + Math.random() * speedRange;
+      }
 
       function resize() {
         dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -132,15 +140,22 @@
         speeds = new Array(cols);
         for (let i = 0; i < cols; i++) {
           drops[i] = Math.random() * -40;
-          speeds[i] = 0.35 + Math.random() * 0.55;
+          speeds[i] = randSpeed();
         }
       }
 
-      function frame() {
+      function frame(ts) {
+        // Cap effective rate so high-refresh displays don't race.
+        if (lastTs && ts - lastTs < 32) {
+          requestAnimationFrame(frame);
+          return;
+        }
+        lastTs = ts || 0;
+
         const w = window.innerWidth;
         const h = window.innerHeight;
-        // Soft trail (fade) — dark green-black wash.
-        ctx.fillStyle = 'rgba(5, 8, 6, 0.08)';
+        // Longer trails (slower wash) — calmer matrix feel.
+        ctx.fillStyle = 'rgba(5, 8, 6, 0.045)';
         ctx.fillRect(0, 0, w, h);
 
         ctx.font = fontSize + 'px "IBM Plex Mono", ui-monospace, monospace';
@@ -149,15 +164,15 @@
           const x = i * fontSize;
           const y = drops[i] * fontSize;
           // Head brighter accent, body primary green.
-          const head = Math.random() > 0.92;
+          const head = Math.random() > 0.94;
           ctx.fillStyle = head ? '#e8fff0' : (Math.random() > 0.6 ? '#00e676' : '#0a5c32');
-          ctx.globalAlpha = head ? 0.55 : 0.22 + Math.random() * 0.18;
+          ctx.globalAlpha = head ? 0.5 : 0.18 + Math.random() * 0.14;
           ctx.fillText(ch, x, y);
           ctx.globalAlpha = 1;
 
-          if (y > h && Math.random() > 0.975) {
-            drops[i] = Math.random() * -20;
-            speeds[i] = 0.35 + Math.random() * 0.55;
+          if (y > h && Math.random() > 0.985) {
+            drops[i] = Math.random() * -24;
+            speeds[i] = randSpeed();
           }
           drops[i] += speeds[i];
         }
