@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"image"
 	"math"
 	"time"
 
