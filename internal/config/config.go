@@ -64,6 +64,11 @@ type Config struct {
 	FirstRunDone  bool
 	// Intro is the post-launch shell curtain (matrix | ripple | none).
 	Intro string
+	// ShellMatrix draws quiet digital rain under the shell viewport (always-on).
+	ShellMatrix bool
+	// AnimateUnfocused keeps the paint clock running when another app has focus
+	// (matrix rain, tab spinner, caret). Off freezes chrome animation in background.
+	AnimateUnfocused bool
 	// Window is last outer frame placement (multi-monitor). Zero = use default.
 	Window WindowPlacement
 }
@@ -103,7 +108,10 @@ type fileDTO struct {
 	ActiveProfile string           `json:"active_profile,omitempty"`
 	FirstRunDone  bool            `json:"first_run_done,omitempty"`
 	Intro         string          `json:"intro,omitempty"`
-	Window        WindowPlacement `json:"window,omitempty"`
+	// Ptr fields distinguish "missing" from false when loading JSON.
+	ShellMatrixPtr       *bool           `json:"shell_matrix,omitempty"`
+	AnimateUnfocusedPtr  *bool           `json:"animate_unfocused,omitempty"`
+	Window               WindowPlacement `json:"window,omitempty"`
 }
 
 // DefaultFontFace is the shipping monospaced face (bundled GohuFont uni14 Mono).
@@ -122,10 +130,12 @@ func Default() Config {
 		FontSizePx:    DefaultFontSizePx,
 		Theme:         ThemeHighContrast,
 		ShellANSIMap:  ANSIMapSoft,
-		Intro:         IntroMatrix,
-		Profiles:      DefaultProfiles(),
-		ActiveProfile: "Default",
-		FirstRunDone:  false,
+		Intro:              IntroMatrix,
+		ShellMatrix:        true, // quiet always-on rain under shell cells
+		AnimateUnfocused:   true, // keep rain/spinners smooth in the background
+		Profiles:           DefaultProfiles(),
+		ActiveProfile:      "Default",
+		FirstRunDone:       false,
 	}
 }
 
@@ -393,7 +403,7 @@ func MonoFontFaces() []string {
 }
 
 func fromDTO(d fileDTO) Config {
-	return Config{
+	c := Config{
 		FontFace:      d.FontFace,
 		FontSizePx:    d.FontSizePx,
 		Cursor:        ParseCursor(d.Cursor),
@@ -405,19 +415,35 @@ func fromDTO(d fileDTO) Config {
 		Intro:         d.Intro,
 		Window:        d.Window,
 	}
+	dflt := Default()
+	if d.ShellMatrixPtr != nil {
+		c.ShellMatrix = *d.ShellMatrixPtr
+	} else {
+		c.ShellMatrix = dflt.ShellMatrix
+	}
+	if d.AnimateUnfocusedPtr != nil {
+		c.AnimateUnfocused = *d.AnimateUnfocusedPtr
+	} else {
+		c.AnimateUnfocused = dflt.AnimateUnfocused
+	}
+	return c
 }
 
 func toDTO(c Config) fileDTO {
+	sm := c.ShellMatrix
+	au := c.AnimateUnfocused
 	return fileDTO{
-		FontFace:      c.FontFace,
-		FontSizePx:    c.FontSizePx,
-		Cursor:        CursorString(c.Cursor),
-		Theme:         c.Theme,
-		ShellANSIMap:  c.ShellANSIMap,
-		Profiles:      c.Profiles,
-		ActiveProfile: c.ActiveProfile,
-		FirstRunDone:  c.FirstRunDone,
-		Intro:         c.Intro,
-		Window:        c.Window,
+		FontFace:             c.FontFace,
+		FontSizePx:           c.FontSizePx,
+		Cursor:               CursorString(c.Cursor),
+		Theme:                c.Theme,
+		ShellANSIMap:         c.ShellANSIMap,
+		Profiles:             c.Profiles,
+		ActiveProfile:        c.ActiveProfile,
+		FirstRunDone:         c.FirstRunDone,
+		Intro:                c.Intro,
+		ShellMatrixPtr:       &sm,
+		AnimateUnfocusedPtr:  &au,
+		Window:               c.Window,
 	}
 }

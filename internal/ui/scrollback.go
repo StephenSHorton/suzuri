@@ -16,11 +16,25 @@ const (
 	histNormal byte = iota
 	histBlockRule  // horizontal rule above a command
 	histBlockCmd   // path + "❯ command" (primary); path is optional prefix
+	histImage      // host-rendered image (occupies span document rows)
 )
 
 type histLine struct {
 	text string
 	kind byte
+	// Image block (kind == histImage): decoded bitmap + vertical span in cells.
+	img  *tabImage
+	span int // document rows reserved (≥1); only used for histImage
+}
+
+func (hl histLine) docRows() int {
+	if hl.kind == histImage {
+		if hl.span < 1 {
+			return 1
+		}
+		return hl.span
+	}
+	return 1
 }
 
 // scrollback keeps rows that have scrolled off the live VT screen.
@@ -39,6 +53,10 @@ type scrollback struct {
 	offset int
 	visual float64 // smoothed lines-from-bottom; drives paint
 	pin    int     // first history index shown at stick-bottom (0 = no pin)
+	// skipNoteCapture: after commitLive / host clear, ignore noteScreen scroll
+	// capture for a few frames. Spam-submit otherwise double-ingests the same
+	// lines (commitLive + false multi-line scrollAmount) and the history thrashs.
+	skipNoteCapture int
 }
 
 func newScrollback() *scrollback {
@@ -129,6 +147,11 @@ func snapshotLiveText(term vt10x.Terminal) []string {
 
 func (s *scrollback) noteScreen(term vt10x.Terminal) {
 	cur := snapshotScreenText(term)
+	if s.skipNoteCapture > 0 {
+		s.skipNoteCapture--
+		s.prev = cur
+		return
+	}
 	if len(s.prev) == len(cur) && len(cur) > 1 {
 		// Full clear (clear / Clear-Host): previous live content becomes history
 		// and pin stick-bottom so pre-clear history stays above (scroll up).
@@ -141,16 +164,20 @@ func (s *scrollback) noteScreen(term vt10x.Terminal) {
 			// Floor for stick-bottom: nothing before this index until user scrolls up.
 			s.pin = len(s.lines)
 			s.stickBottom()
+			// Host/PTY wipe — next frames are repaint noise, not scrolls.
+			s.skipNoteCapture = 4
 		} else if n := scrollAmount(s.prev, cur); n > 0 {
 			// Multi-line scroll: find largest n where prev[n:] == cur[:len-n]
 			for i := 0; i < n; i++ {
-				s.push(s.prev[i])
+				// Dedup only for noteScreen captures (spam / double-ingest).
+				s.pushDedup(s.prev[i], histNormal)
 			}
 		}
 	}
 	s.prev = cur
-	if s.offset > len(s.lines) {
-		s.offset = len(s.lines)
+	// Clamp with a generous ceiling; precise max uses viewport in scrollBy.
+	if max := s.docLen(); s.offset > max {
+		s.offset = max
 	}
 }
 
@@ -178,12 +205,20 @@ func screenWasCleared(prev, cur []string) bool {
 	return true
 }
 
+// maxScrollDetect caps how many rows noteScreen will promote to history in one
+// PTY frame. Spam-submit / partial VT updates used to false-match large n
+// (O(rows) coincidence) and dump half the screen into history every tick.
+const maxScrollDetect = 3
+
 // scrollAmount returns how many rows the screen shifted up (0 if none).
 func scrollAmount(prev, cur []string) int {
 	if len(prev) != len(cur) || len(cur) < 2 {
 		return 0
 	}
 	maxN := len(cur) - 1
+	if maxN > maxScrollDetect {
+		maxN = maxScrollDetect
+	}
 	for n := maxN; n >= 1; n-- {
 		ok := true
 		for i := 0; i < len(cur)-n; i++ {
@@ -192,9 +227,26 @@ func scrollAmount(prev, cur []string) int {
 				break
 			}
 		}
-		if ok && (prev[0] != cur[0] || prev[len(prev)-1] != cur[len(cur)-1]) {
-			return n
+		if !ok {
+			continue
 		}
+		// Require a real change at the seam (not an identical screen).
+		if prev[0] == cur[0] && prev[len(prev)-1] == cur[len(cur)-1] {
+			continue
+		}
+		// Prefer matches where the scrolled-off rows had content (blank spam
+		// from clear/repaint should not inflate history).
+		had := false
+		for i := 0; i < n; i++ {
+			if strings.TrimSpace(prev[i]) != "" {
+				had = true
+				break
+			}
+		}
+		if !had {
+			continue
+		}
+		return n
 	}
 	return 0
 }
@@ -204,27 +256,11 @@ func screenShiftedUp(prev, cur []string) bool {
 }
 
 func (s *scrollback) push(line string) {
-	s.pushKind(line, histNormal)
+	s.pushKindImg(line, histNormal, nil, 0)
 }
 
 func (s *scrollback) pushKind(line string, kind byte) {
-	s.lines = append(s.lines, histLine{text: strings.TrimRight(line, " "), kind: kind})
-	if len(s.lines) > s.max {
-		drop := len(s.lines) - s.max
-		s.lines = append([]histLine(nil), s.lines[drop:]...)
-		if s.offset > 0 {
-			s.offset -= drop
-			if s.offset < 0 {
-				s.offset = 0
-			}
-		}
-		if s.pin > 0 {
-			s.pin -= drop
-			if s.pin < 0 {
-				s.pin = 0
-			}
-		}
-	}
+	s.pushKindImg(line, kind, nil, 0)
 }
 
 // commitLive folds the current primary-screen VT content into history and
@@ -234,6 +270,10 @@ func (s *scrollback) pushKind(line string, kind byte) {
 // Without this, pushBlock only inserts the command header while shell output
 // stays on the live surface — so blocks pile up in history and all outputs
 // appear as one live stack at the bottom of the viewport.
+//
+// Only the live extent is committed (not trailing blank PTY rows). Using the
+// full grid on small split panes duplicated empty-ish rows and made history
+// thrash as blocks accumulated.
 //
 // The PTY/shell is not cleared (only the host's vt10x view). For line-oriented
 // shells this is fine: new output is stream text that repaints cleanly.
@@ -245,7 +285,8 @@ func (s *scrollback) commitLive(term vt10x.Terminal) {
 	if term.Mode()&vt10x.ModeAltScreen != 0 {
 		return
 	}
-	lines := snapshotScreenText(term)
+	// Prefer live-extent lines so we don't re-ingest the whole PTY grid.
+	lines := snapshotLiveText(term)
 	for _, line := range lines {
 		t := strings.TrimRight(line, " \t")
 		if strings.TrimSpace(t) == "" {
@@ -257,6 +298,9 @@ func (s *scrollback) commitLive(term vt10x.Terminal) {
 	_, _ = term.Write([]byte("\x1b[H\x1b[2J"))
 	s.prev = snapshotScreenText(term)
 	s.stickBottom()
+	// Incoming PTY will repaint / echo; don't also noteScreen-capture that as
+	// scrolled history (spam-submit reproduction).
+	s.skipNoteCapture = 6
 }
 
 // pushBlock injects a Warp-style command block into history (above live screen).
@@ -307,15 +351,112 @@ func (s *scrollback) pushBlock(cmd string, cols int, cwd string) {
 	}
 }
 
-func (s *scrollback) maxOffset() int {
+// docLen is history length in document rows (image blocks span multiple rows).
+func (s *scrollback) docLen() int {
 	if s == nil {
 		return 0
 	}
-	return len(s.lines)
+	n := 0
+	for _, hl := range s.lines {
+		n += hl.docRows()
+	}
+	return n
+}
+
+// pinDoc is the document-row index of pin (sum of docRows for lines[:pin]).
+func (s *scrollback) pinDoc() int {
+	if s == nil || s.pin <= 0 {
+		return 0
+	}
+	n := 0
+	lim := s.pin
+	if lim > len(s.lines) {
+		lim = len(s.lines)
+	}
+	for i := 0; i < lim; i++ {
+		n += s.lines[i].docRows()
+	}
+	return n
+}
+
+// maxOffset is how far from the bottom the user can scroll (document rows).
+// liveRows should match the live extent used by viewCells (0 if unknown).
+func (s *scrollback) maxOffset(viewportRows, liveRows int) int {
+	if s == nil {
+		return 0
+	}
+	if viewportRows < 1 {
+		viewportRows = 1
+	}
+	if liveRows < 0 {
+		liveRows = 0
+	}
+	histDoc := s.docLen()
+	docLen := histDoc + liveRows
+	pin := s.pinDoc()
+	post := docLen - pin
+	if post < 0 {
+		post = 0
+	}
+	// After clear with short post-pin content: can walk through pre-pin history.
+	if pin > 0 && post <= viewportRows {
+		return pin
+	}
+	// Normal: stop once the oldest document row is at the top of the viewport.
+	m := docLen - viewportRows
+	if m < 0 {
+		m = 0
+	}
+	return m
+}
+
+// pushImage appends a multi-row image block under the current history (after
+// the latest command output). span is height in cells.
+func (s *scrollback) pushImage(im *tabImage, span int) {
+	if s == nil || im == nil {
+		return
+	}
+	if span < 3 {
+		span = 3
+	}
+	if span > 40 {
+		span = 40
+	}
+	label := im.path
+	if label == "" {
+		label = im.key
+	}
+	s.pushKindImg(label, histImage, im, span)
+}
+
+func (s *scrollback) pushKindImg(line string, kind byte, im *tabImage, span int) {
+	s.lines = append(s.lines, histLine{text: strings.TrimRight(line, " "), kind: kind, img: im, span: span})
+	if len(s.lines) > s.max {
+		drop := len(s.lines) - s.max
+		droppedRows := 0
+		for i := 0; i < drop; i++ {
+			droppedRows += s.lines[i].docRows()
+		}
+		s.lines = append([]histLine(nil), s.lines[drop:]...)
+		if s.offset > 0 {
+			s.offset -= droppedRows
+			if s.offset < 0 {
+				s.offset = 0
+			}
+		}
+		if s.pin > 0 {
+			s.pin -= drop // pin is still a line index
+			if s.pin < 0 {
+				s.pin = 0
+			}
+		}
+	}
 }
 
 func (s *scrollback) scrollBy(delta, viewportRows int) {
-	maxOff := s.maxOffset()
+	// liveRows unknown here — use 0 (slightly conservative max). Callers that
+	// know live extent can clamp again; viewWindow still floors start at 0.
+	maxOff := s.maxOffset(viewportRows, 0)
 	s.offset += delta
 	if s.offset < 0 {
 		s.offset = 0
@@ -323,8 +464,19 @@ func (s *scrollback) scrollBy(delta, viewportRows int) {
 	if s.offset > maxOff {
 		s.offset = maxOff
 	}
-	// visual catches up in tickSmooth
-	_ = viewportRows
+	// Snap visual most of the way so wheel works even if tickSmooth is delayed;
+	// remaining ease is applied by tickSmooth on the blink/frame loop.
+	target := float64(s.offset)
+	if absFloat(target-s.visual) > 8 {
+		// Big jump (page up/down): snap.
+		s.visual = target
+	} else {
+		// Small wheel steps: keep smooth feel but stay responsive.
+		s.visual += (target - s.visual) * 0.55
+		if absFloat(target-s.visual) < 0.15 {
+			s.visual = target
+		}
+	}
 }
 
 func (s *scrollback) atBottom() bool { return s.offset == 0 && s.visual < 0.05 }
@@ -342,6 +494,23 @@ func (s *scrollback) pinHere() {
 	}
 	s.pin = len(s.lines)
 	s.stickBottom()
+	s.skipNoteCapture = 4
+}
+
+// pushDedup appends a normal history line unless it duplicates the last row.
+// Used only for noteScreen scroll capture (not pushBlock / intentional pushes).
+func (s *scrollback) pushDedup(line string, kind byte) {
+	line = strings.TrimRight(line, " ")
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	if n := len(s.lines); n > 0 {
+		last := s.lines[n-1]
+		if last.kind == kind && last.text == line {
+			return
+		}
+	}
+	s.pushKindImg(line, kind, nil, 0)
 }
 
 // tickSmooth eases visual toward offset. Call once per frame (dt in seconds).
@@ -383,15 +552,9 @@ func (s *scrollback) viewWindow(viewportRows, liveRows int) (start, pad int) {
 	if liveRows < 0 {
 		liveRows = 0
 	}
-	histN := len(s.lines)
-	docLen := histN + liveRows
-	pin := s.pin
-	if pin < 0 {
-		pin = 0
-	}
-	if pin > histN {
-		pin = histN
-	}
+	histDoc := s.docLen()
+	docLen := histDoc + liveRows
+	pin := s.pinDoc()
 	// Use floor of visual so partial smooth steps don't skip lines oddly.
 	off := int(s.visual + 1e-6)
 	if off < 0 {
@@ -447,11 +610,11 @@ func (s *scrollback) Scrollbar(viewportRows, liveRows, trackH int) (thumbY, thum
 	if s == nil || trackH < 8 || viewportRows < 1 {
 		return 0, 0, false
 	}
-	histN := len(s.lines)
-	docLen := histN + liveRows
-	maxOff := s.maxOffset()
+	histDoc := s.docLen()
+	docLen := histDoc + liveRows
+	maxOff := s.maxOffset(viewportRows, liveRows)
 	// Show bar if we have history beyond one viewport, or a pin with history above.
-	if maxOff < 1 && (s.pin == 0 || histN == 0) {
+	if maxOff < 1 && (s.pin == 0 || histDoc == 0) {
 		return 0, 0, false
 	}
 	if docLen <= 1 && maxOff < 1 {
@@ -611,7 +774,7 @@ func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPi
 	}
 
 	live := snapshotLiveCells(term)
-	histN := len(s.lines)
+	histDoc := s.docLen()
 	start, pad := s.viewWindow(viewportRows, len(live))
 
 	out := make([][]cellPix, viewportRows)
@@ -620,12 +783,13 @@ func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPi
 			out[i] = blankRow()
 			continue
 		}
-		out[i] = s.rowAt(start+(i-pad), histN, live, cols)
+		out[i] = s.rowAtDoc(start+(i-pad), histDoc, live, cols)
 	}
 	return out
 }
 
-func (s *scrollback) rowAt(idx, histN int, live [][]cellPix, cols int) []cellPix {
+// rowAtDoc maps a flattened document row index (history spans + live) to cells.
+func (s *scrollback) rowAtDoc(idx, histDoc int, live [][]cellPix, cols int) []cellPix {
 	row := make([]cellPix, cols)
 	for x := range row {
 		row[x] = cellPix{Ch: ' ', FR: 220, FG: 220, FB: 220}
@@ -633,8 +797,20 @@ func (s *scrollback) rowAt(idx, histN int, live [][]cellPix, cols int) []cellPix
 	if idx < 0 {
 		return row
 	}
-	if idx < histN {
-		hl := s.lines[idx]
+	if idx < histDoc {
+		hl, sub := s.histAtDoc(idx)
+		if hl.kind == histImage {
+			// Leave cells empty — host paints the bitmap over this span.
+			// Tiny caption on first sub-row only (muted).
+			if sub == 0 && hl.text != "" {
+				rs := []rune("img " + hl.text)
+				fr, fg, fb := chrome.SoftR, chrome.SoftG, chrome.SoftB
+				for x := 0; x < cols && x < len(rs); x++ {
+					row[x] = cellPix{Ch: rs[x], FR: fr, FG: fg, FB: fb}
+				}
+			}
+			return row
+		}
 		rs := []rune(hl.text)
 		fr, fg, fb := histColor(hl.kind)
 		for x := 0; x < cols && x < len(rs); x++ {
@@ -642,11 +818,64 @@ func (s *scrollback) rowAt(idx, histN int, live [][]cellPix, cols int) []cellPix
 		}
 		return row
 	}
-	li := idx - histN
+	li := idx - histDoc
 	if li >= 0 && li < len(live) {
 		copy(row, live[li])
 	}
 	return row
+}
+
+// histAtDoc returns the history line and sub-row within its span for doc index idx.
+func (s *scrollback) histAtDoc(idx int) (histLine, int) {
+	if idx < 0 || s == nil {
+		return histLine{}, 0
+	}
+	at := 0
+	for _, hl := range s.lines {
+		n := hl.docRows()
+		if idx < at+n {
+			return hl, idx - at
+		}
+		at += n
+	}
+	return histLine{}, 0
+}
+
+// visibleImages returns images that intersect the current viewport, with the
+// viewport row of the top of each image block (for pixel placement).
+func (s *scrollback) visibleImages(term vt10x.Terminal, viewportRows int) []visImage {
+	if s == nil || term == nil || term.Mode()&vt10x.ModeAltScreen != 0 {
+		return nil
+	}
+	liveN := liveExtent(term)
+	// Prefer live cell count used by viewCells
+	live := snapshotLiveCells(term)
+	liveN = len(live)
+	histDoc := s.docLen()
+	start, pad := s.viewWindow(viewportRows, liveN)
+	var out []visImage
+	at := 0
+	for _, hl := range s.lines {
+		n := hl.docRows()
+		if hl.kind == histImage && hl.img != nil {
+			// First doc row of this image in absolute coords = at
+			// Viewport row = at - start + pad
+			vr := at - start + pad
+			// Visible if any of the span overlaps [0, viewportRows)
+			if vr+n > 0 && vr < viewportRows {
+				out = append(out, visImage{img: hl.img, viewRow: vr, span: n})
+			}
+		}
+		at += n
+	}
+	_ = histDoc
+	return out
+}
+
+type visImage struct {
+	img     *tabImage
+	viewRow int // top row in viewport (may be negative if partially scrolled off)
+	span    int
 }
 
 // histColor returns FG for a history line kind (theme-aware).
@@ -657,6 +886,8 @@ func histColor(kind byte) (r, g, b byte) {
 		return chrome.PrimR/2 + 40, chrome.PrimG/2 + 40, chrome.PrimB/2 + 40
 	case histBlockCmd:
 		return chrome.PrimR, chrome.PrimG, chrome.PrimB
+	case histImage:
+		return chrome.SoftR, chrome.SoftG, chrome.SoftB
 	default:
 		return chrome.SoftR, chrome.SoftG, chrome.SoftB
 	}

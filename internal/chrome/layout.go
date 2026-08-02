@@ -1,6 +1,10 @@
 package chrome
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // Layout constants from Crush (dialog/common.go, commands.go, quickstyle.go).
 const (
@@ -86,6 +90,15 @@ func renderDialogCard(outerWidth int, title string, body []string, footer string
 	for _, b := range body {
 		if b == "" {
 			lines = append(lines, panelFillLine(inner, ""))
+			continue
+		}
+		// Multi-line blocks (e.g. bubbles list View) must not pass through
+		// panelFillLine as one blob — MaxHeight(1) used to crush the whole
+		// command list into a single dark empty row.
+		if strings.Contains(b, "\n") {
+			for _, line := range strings.Split(b, "\n") {
+				lines = append(lines, panelFillLine(inner, line))
+			}
 			continue
 		}
 		// Body rows may already be styled; re-pad with panel so short lines fill.

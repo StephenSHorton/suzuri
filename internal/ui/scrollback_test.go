@@ -22,18 +22,59 @@ func TestScrollAmountMulti(t *testing.T) {
 	if n := scrollAmount(prev, cur); n != 2 {
 		t.Fatalf("got %d want 2", n)
 	}
+	// Cap: huge false-match candidates must not dump half the screen.
+	prev2 := make([]string, 40)
+	cur2 := make([]string, 40)
+	for i := 0; i < 40; i++ {
+		prev2[i] = "row"
+		cur2[i] = "row"
+	}
+	prev2[0] = "old"
+	cur2[39] = "new"
+	// Identical middle → would match large n under old algorithm; now capped/strict.
+	if n := scrollAmount(prev2, cur2); n > maxScrollDetect {
+		t.Fatalf("scrollAmount too large: %d", n)
+	}
+}
+
+func TestPushDedupAndSkipNote(t *testing.T) {
+	s := newScrollback()
+	s.pushDedup("same", histNormal)
+	s.pushDedup("same", histNormal)
+	if len(s.lines) != 1 {
+		t.Fatalf("dedup failed: %d lines", len(s.lines))
+	}
+	// Explicit push still allows duplicates (real output may repeat).
+	s.push("same")
+	if len(s.lines) != 2 {
+		t.Fatalf("push should not dedup: %d", len(s.lines))
+	}
+	s.skipNoteCapture = 6
+	if s.skipNoteCapture != 6 {
+		t.Fatal("skipNoteCapture field")
+	}
 }
 
 func TestScrollByClamp(t *testing.T) {
 	s := newScrollback()
-	s.lines = []histLine{{text: "1"}, {text: "2"}, {text: "3"}}
+	// 20 history lines, viewport 10 → max offset 10 (doc - viewport).
+	for i := 0; i < 20; i++ {
+		s.lines = append(s.lines, histLine{text: "x"})
+	}
 	s.scrollBy(100, 10)
-	if s.offset != 3 {
-		t.Fatalf("offset=%d", s.offset)
+	if s.offset != 10 {
+		t.Fatalf("offset=%d want 10", s.offset)
 	}
 	s.scrollBy(-100, 10)
 	if s.offset != 0 {
 		t.Fatalf("offset=%d", s.offset)
+	}
+	// History shorter than viewport: nothing to scroll.
+	s2 := newScrollback()
+	s2.lines = []histLine{{text: "1"}, {text: "2"}, {text: "3"}}
+	s2.scrollBy(100, 10)
+	if s2.offset != 0 {
+		t.Fatalf("short hist offset=%d want 0", s2.offset)
 	}
 }
 

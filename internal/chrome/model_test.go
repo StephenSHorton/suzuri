@@ -107,6 +107,39 @@ func TestNewTabFromPalette(t *testing.T) {
 	}
 }
 
+func TestPaletteFilterNarrowsItems(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenPaletteMsg{})
+	m = r.Model
+	if !m.PaletteOpen {
+		t.Fatal("palette open")
+	}
+	before := len(m.palView)
+	if before < 2 {
+		t.Fatalf("expected several commands, got %d", before)
+	}
+	// Type "split" — should leave only pane split commands (sync substring filter).
+	for _, ch := range "split" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	after := len(m.palView)
+	if after == 0 {
+		t.Fatal("filter matched nothing")
+	}
+	if after >= before {
+		t.Fatalf("filter did not narrow: before=%d after=%d val=%q", before, after, m.palFilter)
+	}
+	if m.palFilter != "split" {
+		t.Fatalf("filter=%q want split", m.palFilter)
+	}
+	// Enter should run the selected (highlighted) match.
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionSplitRight && r.Action != ActionSplitDown {
+		t.Fatalf("action=%v want a split action", r.Action)
+	}
+}
+
 func TestHelpAndSplash(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenHelpMsg{})

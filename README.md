@@ -27,11 +27,12 @@ Most “pretty terminals” are either:
 |------|------------|
 | **Host** | Native window (Win32 / macOS), ConPTY or POSIX PTY shells, scrollback, selection, copy/paste |
 | **Chrome** | Tabs, command palette (`Ctrl+K`), settings (`Ctrl+,`), help, themes |
+| **Panes** | Split right/down, shared sashes, per-pane Warp bars, focus with Alt+arrows |
 | **Input** | Warp-style bottom bar — local edit, multiline, history, echo filter |
-| **Look** | Inkstone / Charmtone / High contrast · bundled Gohu mono · box-drawing |
-| **Polish** | Window placement, matrix/ripple intros (Windows), center 硯 watermark |
+| **Look** | Inkstone / Charmtone / High contrast · bundled Gohu mono · app icon · box-drawing |
+| **Polish** | Window placement, matrix/ripple intros (Windows), 猫咪 dim under settings, floating palette/help over live shell |
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
-| **Updates** | Checks GitHub Releases on startup; palette **Check for updates** |
+| **Updates** | Portable auto-update from GitHub Releases on startup; palette **Check for updates** (no MSI) |
 
 ## Download
 

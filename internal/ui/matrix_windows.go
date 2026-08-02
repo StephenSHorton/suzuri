@@ -51,9 +51,20 @@ const (
 //
 // t0 is the clock origin for motion (blinkStart for settings, intro start for boot).
 // spawnFor is how long streams may wrap before wind-down (intro only).
+// intensity scales glyph brightness (1 = full intro/settings, ~0.2 = shell backdrop).
 func (u *winUI) paintDimMatrix(hdc win.HDC, rect win.RECT, top, bot int32, mode matrixPaintMode, t0 time.Time, spawnFor time.Duration) (drew bool) {
+	return u.paintDimMatrixIntensity(hdc, rect, top, bot, mode, t0, spawnFor, 1)
+}
+
+func (u *winUI) paintDimMatrixIntensity(hdc win.HDC, rect win.RECT, top, bot int32, mode matrixPaintMode, t0 time.Time, spawnFor time.Duration, intensity float64) (drew bool) {
 	if hdc == 0 || bot <= top || len(matrixRainGlyphs) == 0 {
 		return false
+	}
+	if intensity <= 0 {
+		return false
+	}
+	if intensity > 1 {
+		intensity = 1
 	}
 	if t0.IsZero() {
 		t0 = u.blinkStart
@@ -170,6 +181,13 @@ func (u *winUI) paintDimMatrix(hdc win.HDC, rect win.RECT, top, bot int32, mode 
 					continue
 				}
 			}
+			if intensity < 1 {
+				fr, fg, fb = blendRGB(0, 0, 0, fr, fg, fb, intensity)
+				// Drop near-black tail cells so shell rain stays a whisper.
+				if int(fr)+int(fg)+int(fb) < 18 {
+					continue
+				}
+			}
 			gi := int(seed>>3) + yCell*3 + int(t*12) + i*7
 			if gi < 0 {
 				gi = -gi
@@ -183,3 +201,6 @@ func (u *winUI) paintDimMatrix(hdc win.HDC, rect win.RECT, top, bot int32, mode 
 	}
 	return drew
 }
+
+// shellMatrixIntensity is how bright persistent shell rain is vs settings/intro.
+const shellMatrixIntensity = 0.20

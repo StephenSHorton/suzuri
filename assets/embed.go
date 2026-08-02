@@ -13,3 +13,10 @@ const FontFaceBundled = "GohuFont uni14 Nerd Font Mono"
 
 //go:embed fonts/GohuFontuni14NerdFontMono-Regular.ttf
 var BundledFontRegular []byte
+
+// AppIconICO is the multi-size glowy 硯 application icon (PNG-in-ICO).
+// PE builds also link cmd/suzuri/rsrc_windows_*.syso so Explorer shows it on the .exe.
+// Runtime LoadImage falls back to these bytes when the PE resource is missing.
+//
+//go:embed icon/suzuri.ico
+var AppIconICO []byte

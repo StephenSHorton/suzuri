@@ -41,6 +41,13 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		Command{ID: "close_tab", Title: "Close tab", Desc: "Ctrl+W · Tabs", Category: "Tabs", Action: ActionCloseTab},
 		Command{ID: "next_tab", Title: "Next tab", Desc: "Ctrl+Tab · Tabs", Category: "Tabs", Action: ActionNextTab},
 		Command{ID: "prev_tab", Title: "Previous tab", Desc: "Ctrl+Shift+Tab · Tabs", Category: "Tabs", Action: ActionPrevTab},
+		Command{ID: "split_right", Title: "Split right", Desc: "Alt+Shift+= · Ctrl+Shift+D · Panes", Category: "Panes", Action: ActionSplitRight},
+		Command{ID: "split_down", Title: "Split down", Desc: "Alt+Shift+- · Ctrl+Shift+E · Panes", Category: "Panes", Action: ActionSplitDown},
+		Command{ID: "close_pane", Title: "Close pane", Desc: "Ctrl+Shift+W · Panes", Category: "Panes", Action: ActionClosePane},
+		Command{ID: "focus_left", Title: "Focus pane left", Desc: "Alt+← · Panes", Category: "Panes", Action: ActionFocusPaneLeft},
+		Command{ID: "focus_right", Title: "Focus pane right", Desc: "Alt+→ · Panes", Category: "Panes", Action: ActionFocusPaneRight},
+		Command{ID: "focus_up", Title: "Focus pane up", Desc: "Alt+↑ · Panes", Category: "Panes", Action: ActionFocusPaneUp},
+		Command{ID: "focus_down", Title: "Focus pane down", Desc: "Alt+↓ · Panes", Category: "Panes", Action: ActionFocusPaneDown},
 	)
 	return cmds
 }

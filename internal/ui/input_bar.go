@@ -1,8 +1,9 @@
 package ui
 
-// inputBar is the Warp-style fixed bottom command line: local edit, Enter → PTY.
+// inputBar is the Warp-style command line: local edit, Enter → PTY.
 // Supports soft-wrap + explicit newlines (Shift+Enter); history is per-bar
-// (each tab owns its own inputBar).
+// (each pane owns its own inputBar). When split, each leaf paints its bar
+// at the bottom of that pane.
 type inputBar struct {
 	runes   []rune
 	cursor  int // 0..len(runes)
@@ -20,7 +21,60 @@ const (
 	maxInputHist         = 200
 	maxInputVisualRows   = 8
 	minInputContentWidth = 8
+	// Horizontal pad inside a pane bar (left + right).
+	inputBarPadX = 8
 )
+
+// inputBarVPads returns hairline, top content inset, and bottom inset (symmetric).
+func inputBarVPads(ch int32) (hair, topPad, botPad int32) {
+	hair = ch / 10
+	if hair < 1 {
+		hair = 1
+	}
+	topPad = ch / 5
+	if topPad < 2 {
+		topPad = 2
+	}
+	botPad = topPad
+	return hair, topPad, botPad
+}
+
+// paneInputContentCols is wrap width for a bar of the given pixel width.
+func paneInputContentCols(paneW, cw int32) int {
+	if cw < 1 {
+		cw = cellW
+	}
+	promptW := int32(len([]rune(inputBarPrompt))) * cw
+	cols := int((paneW - inputBarPadX - promptW - inputBarPadX) / cw)
+	if cols < minInputContentWidth {
+		cols = minInputContentWidth
+	}
+	return cols
+}
+
+// paneInputBarPixelHeight is the bar height for one pane (0 on alt-screen).
+// ch/cw are cell metrics; paneW is the leaf width in pixels.
+func paneInputBarPixelHeight(t *tab, paneW, cw, ch int32) int32 {
+	if t == nil || t.altScreen() {
+		return 0
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	if cw < 1 {
+		cw = cellW
+	}
+	rows := t.input.visualRows(paneInputContentCols(paneW, cw))
+	if rows < 1 {
+		rows = 1
+	}
+	cwdRows := int32(0)
+	if displayPath(t.cwd) != "" {
+		cwdRows = 1
+	}
+	hair, topPad, botPad := inputBarVPads(ch)
+	return hair + topPad + cwdRows*ch + int32(rows)*ch + botPad
+}
 
 func (b *inputBar) text() string {
 	return string(b.runes)

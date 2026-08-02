@@ -18,6 +18,8 @@ const (
 	fieldTheme
 	fieldANSIMap
 	fieldIntro
+	fieldShellMatrix
+	fieldAnimateUnfocused
 	fieldProfile
 	settingsFieldCount
 )
@@ -97,6 +99,10 @@ func (s *settingsState) nudge(delta int) {
 		}
 		i = (i + delta + len(ids)) % len(ids)
 		s.edit.Intro = ids[i]
+	case fieldShellMatrix:
+		s.edit.ShellMatrix = !s.edit.ShellMatrix
+	case fieldAnimateUnfocused:
+		s.edit.AnimateUnfocused = !s.edit.AnimateUnfocused
 	case fieldProfile:
 		names := config.ProfileNames(s.edit)
 		if len(names) == 0 {
@@ -129,6 +135,16 @@ func (s settingsState) valueLabel(f settingsField) string {
 		return config.ANSIMapLabel(s.edit.ShellANSIMap)
 	case fieldIntro:
 		return config.IntroLabel(s.edit.Intro)
+	case fieldShellMatrix:
+		if s.edit.ShellMatrix {
+			return "On"
+		}
+		return "Off"
+	case fieldAnimateUnfocused:
+		if s.edit.AnimateUnfocused {
+			return "On"
+		}
+		return "Off"
 	case fieldProfile:
 		if s.edit.ActiveProfile == "" {
 			return "Default"
@@ -153,6 +169,10 @@ func (s settingsState) fieldLabel(f settingsField) string {
 		return "ANSI"
 	case fieldIntro:
 		return "Intro"
+	case fieldShellMatrix:
+		return "Rain"
+	case fieldAnimateUnfocused:
+		return "Bg anim"
 	case fieldProfile:
 		return "Profile"
 	default:
@@ -306,7 +326,28 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		default:
 			paras = []string{
 				"Digital rain (Matrix-style) over the shell for ~2s, then streams fall off.",
-				"Default. Save & relaunch to preview.",
+				"Skipped automatically when Rain (always-on shell matrix) is On — no double curtain.",
+			}
+		}
+	case fieldShellMatrix:
+		title = "Rain · " + val
+		if s.edit.ShellMatrix {
+			paras = []string{
+				"Always-on digital rain under empty shell cells — very dim so text stays readable.",
+				"Hides under full-screen apps and while the startup intro is playing.",
+			}
+		} else {
+			paras = []string{"No background rain in the shell. Intro and Settings rain are unchanged."}
+		}
+	case fieldAnimateUnfocused:
+		title = "Bg anim · " + val
+		if s.edit.AnimateUnfocused {
+			paras = []string{
+				"Keep repainting when suzuri is not the focused window — rain, tab spinners, and caret stay smooth in the background.",
+			}
+		} else {
+			paras = []string{
+				"Pause animation clocks when another app has focus. Saves a bit of CPU; rain and spinners freeze until you return.",
 			}
 		}
 	case fieldProfile:

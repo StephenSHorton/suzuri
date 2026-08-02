@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -50,7 +51,10 @@ type tab struct {
 
 	alive    atomic.Bool
 	bytesMsg atomic.Bool
-	closed   bool
+	// closedMsg ensures we only PostMessage session-ended once (read EOF and
+	// Wait can both fire; UI close must be idempotent).
+	closedMsg atomic.Bool
+	closed    bool
 	// lastIOUnixNano is updated on every PTY read chunk (activity indicator).
 	lastIOUnixNano atomic.Int64
 	// titleBusy: OSC window title has a CLI spinner prefix (e.g. Grok while working).
@@ -59,6 +63,9 @@ type tab struct {
 	// wasAlt tracks ModeAltScreen across PTY drains so the host can resize
 	// when a full-screen app (Claude, Grok Build, vim…) enters/leaves.
 	wasAlt bool
+	// lastCols/lastRows: last ConPTY/VT size applied (skip no-op Resize — rapid
+	// focus/layout thrash was hard-crashing the host via ResizePseudoConsole).
+	lastCols, lastRows int
 }
 
 // busy is true when this tab should show an activity spinner:
@@ -80,6 +87,66 @@ func (t *tab) busy() bool {
 		window = tabBusyWindowAlt
 	}
 	return time.Since(time.Unix(0, ns)) < window
+}
+
+// ingestImages attaches images into scrollback under the current shell stream
+// (primary buffer only). Alt-screen apps (Grok) are left alone — click
+// "[Open Image]" to open a host modal instead of painting over the TUI.
+func (t *tab) ingestImages(paths []string, blobs []imageBlob, cellW, cellH, cols int) {
+	if t == nil || t.altScreen() {
+		return
+	}
+	if cellH < 1 {
+		cellH = 18
+	}
+	if cellW < 1 {
+		cellW = 9
+	}
+	if cols < 20 {
+		cols = 80
+	}
+	maxW := cols * cellW
+	if maxW > 2400 {
+		maxW = 2400
+	}
+	maxH := 64 * cellH
+	add := func(im *tabImage) {
+		if im == nil {
+			return
+		}
+		_, dh := fitPreferNative(im.pxW, im.pxH, maxW, maxH)
+		span := (dh + cellH - 1) / cellH
+		if span < 2 {
+			span = 2
+		}
+		if span > 64 {
+			span = 64
+		}
+		span++ // caption row
+		t.sb.pushImage(im, span)
+		t.sb.stickBottom()
+	}
+	for _, blob := range blobs {
+		im, err := loadImageBytes(blob.name, blob.data)
+		if err != nil {
+			log.Debug("inline blob decode failed", "name", blob.name, "err", err)
+			continue
+		}
+		add(im)
+	}
+	for _, ref := range paths {
+		abs := resolveImagePath(t.cwd, ref)
+		if abs == "" {
+			log.Debug("inline path unresolved", "ref", ref, "cwd", t.cwd)
+			continue
+		}
+		im, err := loadImageFile(abs)
+		if err != nil {
+			log.Debug("inline path load failed", "path", abs, "err", err)
+			continue
+		}
+		add(im)
+	}
 }
 
 // applyTitle updates the display title and busy flag from a raw OSC title.
@@ -147,15 +214,17 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 		}
 	}
 	t := &tab{
-		id:      id,
-		title:   title,
-		shell:   shell,
-		cwd:     cwd,
-		sess:    sess,
-		term:    vt10x.New(vt10x.WithSize(cols, rows)),
-		sb:      newScrollback(),
-		input:   inputBar{histIdx: -1},
-		writeCh: make(chan []byte, 256),
+		id:       id,
+		title:    title,
+		shell:    shell,
+		cwd:      cwd,
+		sess:     sess,
+		term:     vt10x.New(vt10x.WithSize(cols, rows)),
+		sb:       newScrollback(),
+		input:    inputBar{histIdx: -1},
+		writeCh:  make(chan []byte, 256),
+		lastCols: cols,
+		lastRows: rows,
 	}
 	t.alive.Store(true)
 	log.Info("tab created", "id", id, "shell", shell, "cwd", cwd, "cols", cols, "rows", rows, "pid", sess.Pid())
@@ -177,6 +246,8 @@ func (t *tab) setCwd(path string) {
 func (t *tab) startWorkers(u tabHost) {
 	go t.writeLoop()
 	go t.readLoop(u)
+	// ConPTY Read often does not return when the shell exits; Wait is reliable.
+	go t.waitLoop(u)
 }
 
 func (t *tab) writeLoop() {
@@ -221,11 +292,39 @@ func (t *tab) readLoop(u tabHost) {
 		if err != nil {
 			t.alive.Store(false)
 			log.Info("pty read ended", "tab", t.id, "err", err)
-			if u != nil && u.windowReady() && u.isAlive() {
-				u.queueClosed(t.id)
-			}
+			t.notifyClosed(u)
 			return
 		}
+	}
+}
+
+// waitLoop closes the pane when the shell process exits (e.g. user typed `exit`).
+// ConPTY Read may hang after process death; Wait + Close unblocks teardown.
+func (t *tab) waitLoop(u tabHost) {
+	if t == nil || t.sess == nil {
+		return
+	}
+	code, err := t.sess.Wait(context.Background())
+	log.Info("shell process exited", "tab", t.id, "code", code, "err", err)
+	t.alive.Store(false)
+	// Unblock a stuck Read so readLoop can exit.
+	func() {
+		defer func() { _ = recover() }()
+		_ = t.sess.Close()
+	}()
+	t.notifyClosed(u)
+}
+
+// notifyClosed posts one session-ended message to the UI host.
+func (t *tab) notifyClosed(u tabHost) {
+	if t == nil {
+		return
+	}
+	if !t.closedMsg.CompareAndSwap(false, true) {
+		return
+	}
+	if u != nil && u.windowReady() && u.isAlive() {
+		u.queueClosed(t.id)
 	}
 }
 
@@ -304,6 +403,10 @@ func (t *tab) resize(cols, rows int) {
 	if rows > maxTermRows {
 		rows = maxTermRows
 	}
+	// Identical size → no VT/ConPTY work (focus switches used to re-Resize every time).
+	if cols == t.lastCols && rows == t.lastRows && t.lastCols > 0 {
+		return
+	}
 	if t.term != nil {
 		t.term.Resize(cols, rows)
 	}
@@ -312,4 +415,5 @@ func (t *tab) resize(cols, rows int) {
 			log.Warn("pty resize failed", "tab", t.id, "cols", cols, "rows", rows, "err", err)
 		}
 	}
+	t.lastCols, t.lastRows = cols, rows
 }

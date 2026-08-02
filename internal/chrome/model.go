@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -40,9 +39,13 @@ type Model struct {
 	ConfirmOpen  bool
 	HelpOpen     bool
 	SplashOpen   bool
-	palette      list.Model
-	settings     settingsState
-	confirm      confirmState
+	// Sync palette (no bubbles list / tea.Cmd — host key path must stay non-blocking).
+	palAll    []paletteItem
+	palView   []paletteItem
+	palFilter string
+	palIndex  int
+	settings  settingsState
+	confirm   confirmState
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
 }
@@ -101,6 +104,14 @@ const (
 	ActionReplayIntro
 	// ActionCheckUpdates queries GitHub Releases and installs if newer.
 	ActionCheckUpdates
+	// Split panes (host implements layout).
+	ActionSplitRight
+	ActionSplitDown
+	ActionClosePane
+	ActionFocusPaneLeft
+	ActionFocusPaneRight
+	ActionFocusPaneUp
+	ActionFocusPaneDown
 )
 
 // Result pairs the new model with an optional host action.
@@ -147,82 +158,14 @@ func (i paletteItem) FilterValue() string { return i.title + " " + i.desc }
 
 func New(width int) Model {
 	cfg := config.Default()
-	l := newPaletteList(width, cfg)
-	return Model{
-		Width:   width,
-		Height:  TabStripRows(),
-		Status:  "",
-		palette: l,
+	m := Model{
+		Width:  width,
+		Height: TabStripRows(),
+		Status: "",
 		lastCfg: cfg,
 	}
-}
-
-func newPaletteList(width int, cfg config.Config) list.Model {
-	cmds := DefaultCommands(cfg.ActiveProfile, config.ProfileNames(cfg))
-	items := make([]list.Item, len(cmds))
-	for i, c := range cmds {
-		items[i] = paletteItem{title: c.Title, desc: c.Desc, action: c.Action, profile: c.ProfileName}
-	}
-
-	// Crush list rows: NormalItem / SelectedItem + info column contrast.
-	delegate := list.NewDefaultDelegate()
-	delegate.SetSpacing(0)
-	delegate.Styles.NormalTitle = styleDialogNormalItem()
-	delegate.Styles.NormalDesc = lipgloss.NewStyle().
-		Foreground(colMute). // fgMostSubtle (Crush ListItem.InfoBlurred)
-		Padding(0, 1)
-	delegate.Styles.SelectedTitle = styleDialogActive()
-	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
-		Foreground(colOnPrimary).
-		Background(colPrimary).
-		Faint(true).
-		Padding(0, 1)
-	delegate.Styles.DimmedTitle = lipgloss.NewStyle().Foreground(colMute).Padding(0, 1)
-	delegate.Styles.DimmedDesc = lipgloss.NewStyle().Foreground(colMute).Padding(0, 1)
-	delegate.Styles.FilterMatch = lipgloss.NewStyle().Foreground(colMatch).Underline(true)
-
-	l := list.New(items, delegate, width, 10)
-	l.Title = "" // outer dialog card owns the title (Crush-style frame)
-	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(true)
-	l.SetShowHelp(false)
-	l.SetShowPagination(false)
-	l.DisableQuitKeybindings()
-	// Crush Dialog.Title
-	l.Styles.Title = styleDialogTitle()
-	l.Styles.FilterPrompt = lipgloss.NewStyle().Foreground(colPrimary)
-	l.Styles.FilterCursor = lipgloss.NewStyle().Foreground(colSecondary)
-	l.Styles.NoItems = lipgloss.NewStyle().Foreground(colMute).Padding(1, 1)
-	// Crush InputPrompt Margin(1,1) ≈ spaced filter
-	// ASCII prompt/placeholder — avoids rare missing-glyph paths in host paint.
-	l.FilterInput.Prompt = "> "
-	l.FilterInput.Placeholder = "filter..."
-	l.FilterInput.PromptStyle = lipgloss.NewStyle().Foreground(colPrimary)
-	l.FilterInput.TextStyle = lipgloss.NewStyle().Foreground(colText)
-	l.FilterInput.PlaceholderStyle = lipgloss.NewStyle().Foreground(colMute)
-	return l
-}
-
-func (m *Model) rebuildPalette() {
-	w := m.Width
-	if w < 40 {
-		w = 40
-	}
-	cfg := config.Normalize(m.lastCfg)
-	m.lastCfg = cfg
-	// Always rebuild from a clean list model — never mutate in place while
-	// a filter/cursor might be mid-update (settings save closes dialog then syncs).
-	m.palette = newPaletteList(w, cfg)
-}
-
-// safePaletteView guards bubbles list.View (has panicked on some filter states).
-func safePaletteView(l list.Model) (view string) {
-	defer func() {
-		if r := recover(); r != nil {
-			view = "(palette)"
-		}
-	}()
-	return l.View()
+	m.rebuildPalette()
+	return m
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -261,10 +204,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		}
 	case OpenPaletteMsg:
 		m.closeModalsExcept("")
-		m.rebuildPalette()
-		m.PaletteOpen = true
-		m.palette.ResetFilter()
-		m.palette.ResetSelected()
+		m.activatePalette()
 	case ClosePaletteMsg:
 		m.PaletteOpen = false
 	case OpenSettingsMsg:
@@ -311,8 +251,6 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.SplashOpen = false
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
-		m.palette.SetWidth(min(56, msg.Width-4))
-		m.palette.SetHeight(min(12, msg.Height-2))
 	case tea.KeyMsg:
 		if m.SplashOpen {
 			if keyDismiss(msg) || msg.String() == " " {
@@ -341,29 +279,10 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			return m.updateSettingsKey(msg)
 		}
 		if m.PaletteOpen {
-			switch msg.String() {
-			case "esc", "ctrl+c":
-				m.PaletteOpen = false
-			case "enter":
-				if it, ok := m.palette.SelectedItem().(paletteItem); ok {
-					act = it.action
-					profileName = it.profile
-					m.PaletteOpen = false
-					switch act {
-					case ActionOpenSettings:
-						m.SettingsOpen = true
-						m.settings = newSettingsState(m.lastCfg)
-						settings = m.settings.edit
-						act = ActionSettingsPreview
-					case ActionOpenHelp:
-						m.HelpOpen = true
-						act = ActionNone
-					}
-				}
-			default:
-				var cmd tea.Cmd
-				m.palette, cmd = m.palette.Update(msg)
-				_ = cmd
+			// Sync filter/nav — never tea.Cmd (Win32 key path must not block).
+			act, profileName = m.handlePaletteKey(msg)
+			if act == ActionOpenSettings && m.SettingsOpen {
+				settings = m.settings.edit
 			}
 			return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName}
 		}
@@ -377,10 +296,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		case key.Matches(msg, DefaultKeys.PrevTab):
 			act = ActionPrevTab
 		case key.Matches(msg, DefaultKeys.Palette):
-			m.rebuildPalette()
-			m.PaletteOpen = true
-			m.palette.ResetFilter()
-			m.palette.ResetSelected()
+			m.activatePalette()
 		case key.Matches(msg, DefaultKeys.Settings):
 			m.SettingsOpen = true
 			m.settings = newSettingsState(m.lastCfg)
@@ -553,29 +469,23 @@ func (m Model) OverlayView() string {
 		card = m.settings.render(w)
 	case m.PaletteOpen:
 		// Crush commands: outer min(70, area), inner = outer − frame.
+		// Sync render — no bubbles list layout/filter on the key path.
 		outer := clampDialogWidth(52, w)
 		innerW := dialogInnerWidth(outer)
 		if innerW < 16 {
 			innerW = 16
 		}
-		m.palette.SetWidth(innerW)
-		m.palette.SetHeight(10)
-		// Hide crowded key hints on narrow rows (Crush 25% rule).
-		// (bubbles list already stores desc; we trim at command build time for narrow.)
-		listView := safePaletteView(m.palette)
-		// Crush: List.Margin(0,0,1,0) — space before help; title is list.Title.
-		body := []string{listView}
-		// Prefer plain arrows when fancy glyphs are unsupported (host probes).
-		footer := styleDialogHintKey().Render("up/down") + styleDialogHint().Render("  ") +
-			styleDialogHintKey().Render("enter") + styleDialogHint().Render(" run  ") +
+		body := []string{m.renderPalette(innerW)}
+		footer := styleDialogHintKey().Render("up/down  ") +
+			styleDialogHint().Render("enter run  ") +
 			styleDialogHintKey().Render("esc")
 		card = renderDialogCard(outer, "Commands", body, footer)
 	default:
 		return ""
 	}
-	// Center the card only — no whitespace background. Side gutters must stay
-	// default/transparent so paintDimShell's 猫 field shows left and right of
-	// the modal (void-colored padding used to paint opaque strips over it).
+	// Center the card only — no whitespace background. Side gutters stay
+	// transparent so the live shell (palette) or dim matte (settings/help)
+	// shows left and right of the card.
 	return lipgloss.PlaceHorizontal(w, lipgloss.Center, card)
 }
 

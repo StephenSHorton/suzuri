@@ -88,6 +88,7 @@ func Run() error {
 	}
 	ui.nextTabID++
 	ui.tabs = []*tab{t}
+	ui.pages = []*page{newPage(t)}
 	ui.active = 0
 	ui.syncChrome()
 	ui.showSplash = !cfg.FirstRunDone
@@ -103,8 +104,17 @@ type mcpJob struct {
 
 
 type winUI struct {
-	tabs      []*tab
-	active    int
+	// pages are chrome-strip tabs; each may hold a split tree of panes.
+	// tabs is the flat list of all pane sessions (I/O by id, bridge, teardown).
+	pages  []*page
+	tabs   []*tab
+	active int // active page index (chrome strip)
+	// lastPaneLayout / lastSashes: active page geometry (paint/hit/focus/drag).
+	lastPaneLayout []paneGeom
+	lastSashes     []sashGeom
+	lastShell      struct{ x, y, w, h int32 }
+	// sashDrag is non-nil while the user is dragging a shared pane divider.
+	sashDrag *sashGeom
 	nextTabID int
 	chrome    chrome.Model // Charm UI: tabs, status, palette
 
@@ -138,6 +148,8 @@ type winUI struct {
 	statusUntil   time.Time // clear toast Status after this (zero = none)
 	showSplash    bool      // open first-run card after window is ready
 	spinTick      uint64    // blink-loop counter for tab braille spinner
+	// modalImage: full-window image viewer (click path / Open Image / image block).
+	modalImage *tabImage
 	// Startup rain: spawn until matrixIntroSpawnEnd, then wind-down until clear.
 	matrixIntroStart    time.Time
 	matrixIntroSpawnEnd time.Time
@@ -171,6 +183,12 @@ type winUI struct {
 	overlayCells  [][]cellPix
 	overlayDirty  bool
 
+	// overlaySceneReady: memDC already holds a static dim underlay (splash/
+	// confirm) so later paints only re-draw the floating card. Palette and
+	// help float over a live shell and full-repaint. Cleared on resize / open /
+	// close. (A dual CompatibleBitmap underlay hard-crashed.)
+	overlaySceneReady bool
+
 	// MCP bridge: loopback HTTP for spawn-on-demand stdio MCP (see internal/bridge).
 	bridge  *bridge.Host
 	mcpJobs chan mcpJob
@@ -182,6 +200,10 @@ func (u *winUI) isAlive() bool         { return u != nil && u.alive.Load() }
 func (u *winUI) windowReady() bool     { return u != nil && u.hwnd != 0 }
 
 func (u *winUI) activeTab() *tab {
+	if p := u.activePage(); p != nil {
+		return p.focused()
+	}
+	// Legacy fallback during init before pages are set.
 	if u.active < 0 || u.active >= len(u.tabs) {
 		return nil
 	}
@@ -198,6 +220,16 @@ func (u *winUI) activeInput() *inputBar {
 
 // inputContentCols is the character width available for command text (excl. prompt).
 func (u *winUI) inputContentCols() int {
+	if g := u.focusedGeom(); g != nil {
+		if g.barCols > 0 {
+			return g.barCols
+		}
+		cw := u.metricW
+		if cw < 1 {
+			cw = cellW
+		}
+		return paneInputContentCols(g.w, cw)
+	}
 	cw := u.metricW
 	if cw < 1 {
 		cw = cellW
@@ -206,18 +238,12 @@ func (u *winUI) inputContentCols() int {
 	if w < 1 {
 		w = int32(u.cols) * cw
 	}
-	const padX int32 = 8
-	promptW := int32(len([]rune(inputBarPrompt))) * cw
-	cols := int((w - padX - promptW - padX) / cw)
-	if cols < minInputContentWidth {
-		cols = minInputContentWidth
-	}
-	return cols
+	return paneInputContentCols(w, cw)
 }
 
-// anyTabBusy is true when at least one tab should show a spinning activity mark.
+// anyTabBusy is true when at least one pane should show a spinning activity mark.
 func (u *winUI) anyTabBusy() bool {
-	for _, t := range u.tabs {
+	for _, t := range u.allPanes() {
 		if t != nil && t.busy() {
 			return true
 		}
@@ -226,18 +252,51 @@ func (u *winUI) anyTabBusy() bool {
 }
 
 func (u *winUI) syncChrome() {
-	tabs := make([]chrome.Tab, len(u.tabs))
-	for i, t := range u.tabs {
-		title := t.title
+	// One chrome strip entry per page (split panes share a strip tab).
+	src := u.pages
+	if len(src) == 0 {
+		// Fallback: flat tabs as pages of one.
+		tabs := make([]chrome.Tab, len(u.tabs))
+		for i, t := range u.tabs {
+			if t == nil {
+				continue
+			}
+			title := t.title
+			if title == "" {
+				title = fmt.Sprintf("shell %d", i+1)
+			}
+			tabs[i] = chrome.Tab{
+				ID: t.id, Title: title, Alive: t.alive.Load(),
+				AltScreen: t.altScreen(), Busy: t.busy(),
+			}
+		}
+		r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
+		u.chrome = r.Model
+		u.chrome.Width = u.cols
+		return
+	}
+	tabs := make([]chrome.Tab, len(src))
+	for i, p := range src {
+		if p == nil {
+			continue
+		}
+		title := p.title()
 		if title == "" {
 			title = fmt.Sprintf("shell %d", i+1)
 		}
+		focus := p.focused()
+		alive := p.anyAlive()
+		alt := false
+		busy := p.anyBusy()
+		if focus != nil {
+			alt = focus.altScreen()
+		}
 		tabs[i] = chrome.Tab{
-			ID:        t.id,
+			ID:        p.id,
 			Title:     title,
-			Alive:     t.alive.Load(),
-			AltScreen: t.altScreen(),
-			Busy:      t.busy(),
+			Alive:     alive,
+			AltScreen: alt,
+			Busy:      busy,
 		}
 	}
 	// Only invalidate the chrome cell cache when something visible changed.
@@ -379,9 +438,14 @@ func (u *winUI) openPaletteSafe() {
 	if u.cfg.FontFace == "" {
 		u.cfg = config.Normalize(u.cfg)
 	}
+	// Drop any previous modal cell cache before rebuild (help ↔ palette thrash).
+	u.overlayCells = nil
+	u.overlayDirty = true
+	u.overlaySceneReady = false // first paint rebuilds dim+neko into memDC
+	u.sashDrag = nil
 	r := u.chrome.UpdateChrome(chrome.OpenPaletteMsg{})
 	u.chrome = r.Model
-	// Warm the list View once here under recover — first paint then only composites.
+	// Warm OverlayView once here under recover — first paint then only composites.
 	func() {
 		defer applog.Recover("openPaletteSafe.view", false)
 		_ = u.chrome.OverlayView()
@@ -393,6 +457,29 @@ func (u *winUI) openPaletteSafe() {
 	}
 	log.Info("open palette done", "open", u.chrome.PaletteOpen)
 	applog.Sync()
+}
+
+// openHelpSafe opens the shortcuts card (same cache-clear discipline as palette).
+func (u *winUI) openHelpSafe() {
+	defer applog.Recover("openHelpSafe", false)
+	if u == nil || !u.alive.Load() {
+		return
+	}
+	u.overlayCells = nil
+	u.overlayDirty = true
+	u.overlaySceneReady = false
+	u.sashDrag = nil
+	r := u.chrome.UpdateChrome(chrome.OpenHelpMsg{})
+	u.chrome = r.Model
+	func() {
+		defer applog.Recover("openHelpSafe.view", false)
+		_ = u.chrome.OverlayView()
+	}()
+	u.markChromeDirty()
+	u.chromePx = u.chromePixelHeight()
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
 }
 
 // postSaveFinish queues one UI-thread pass for post-save GDI/UI cleanup.
@@ -505,32 +592,40 @@ func (u *winUI) shellPadY() int32 {
 	return u.chromePixelHeight()
 }
 
-// inputBarPixelHeight grows with wrapped / multi-line content (capped).
-// Hidden (0) while the active tab is on the alternate screen — full-screen
-// apps (Claude, Grok Build, vim…) own the keyboard like Warp.
-//
-// Layout: hairline + top pad + [cwd row] + N·content rows + bottom pad.
+// inputBarPixelHeight is kept as a layout signature (sum of active-page pane
+// bars). Bars themselves live inside each leaf — shell uses the full height
+// under the chrome strip.
 func (u *winUI) inputBarPixelHeight() int32 {
-	if t := u.activeTab(); t != nil && t.altScreen() {
-		return 0
+	return u.sumActivePaneBarHeights()
+}
+
+// sumActivePaneBarHeights totals per-pane bar heights for settle detection.
+func (u *winUI) sumActivePaneBarHeights() int32 {
+	layouts := u.lastPaneLayout
+	if len(layouts) == 0 {
+		// Before first layout: estimate focused pane only (solo).
+		t := u.activeTab()
+		if t == nil {
+			return 0
+		}
+		cw, ch := u.metricW, u.metricH
+		if cw < 1 {
+			cw = cellW
+		}
+		if ch < 1 {
+			ch = cellH
+		}
+		w := u.width
+		if w < 1 {
+			w = int32(u.cols) * cw
+		}
+		return paneInputBarPixelHeight(t, w, cw, ch)
 	}
-	ch := u.metricH
-	if ch < 1 {
-		ch = cellH
+	var sum int32
+	for _, g := range layouts {
+		sum += g.barH
 	}
-	rows := 1
-	if in := u.activeInput(); in != nil {
-		rows = in.visualRows(u.inputContentCols())
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	cwdRows := int32(0)
-	if u.inputBarCwd() != "" {
-		cwdRows = 1
-	}
-	hair, topPad, botPad := inputBarVPads(ch)
-	return hair + topPad + cwdRows*ch + int32(rows)*ch + botPad
+	return sum
 }
 
 // inputBarCwd is the shortened path shown above the command line (empty if unknown).
@@ -542,20 +637,6 @@ func (u *winUI) inputBarCwd() string {
 	return displayPath(t.cwd)
 }
 
-// inputBarVPads returns hairline, top content inset, and bottom inset (symmetric).
-func inputBarVPads(ch int32) (hair, topPad, botPad int32) {
-	hair = ch / 10
-	if hair < 1 {
-		hair = 1
-	}
-	topPad = ch / 5
-	if topPad < 2 {
-		topPad = 2
-	}
-	botPad = topPad
-	return hair, topPad, botPad
-}
-
 // appOwnsKeyboard is true when the active tab's full-screen app should receive
 // raw keys (alt-screen). Host chrome shortcuts still win first.
 func (u *winUI) appOwnsKeyboard() bool {
@@ -563,20 +644,46 @@ func (u *winUI) appOwnsKeyboard() bool {
 	return t != nil && t.altScreen()
 }
 
-// maybeResizeForInput recomputes shell rows when the bar height changes.
+// maybeResizeForInput recomputes shell rows when a pane bar height changes.
+// No-ops when geometry is unchanged (avoids ConPTY resize thrash on every Enter).
 func (u *winUI) maybeResizeForInput() {
-	if u.width > 0 && u.height > 0 {
-		u.applyClientSize(u.width, u.height)
+	if u == nil || u.width < 1 || u.height < 1 {
+		return
 	}
+	// Probe layout with current input state; only settle if VT sizes move.
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	sx, sy, sw, sh := u.shellRect(u.width, u.height)
+	need := false
+	if p := u.activePage(); p != nil && p.root != nil {
+		geoms := layoutPage(p.root, sx, sy, sw, sh, cw, ch, p.focusID).leaves
+		for _, g := range geoms {
+			if g.pane != nil && (g.pane.lastCols != g.cols || g.pane.lastRows != g.rows) {
+				need = true
+				break
+			}
+		}
+	} else {
+		need = true
+	}
+	if !need {
+		return
+	}
+	u.applyClientSize(u.width, u.height)
 }
 
-// shellBottomY is the exclusive bottom of the shell viewport (above input bar).
+// shellBottomY is the exclusive bottom of the shell region (client bottom).
+// Input bars are painted inside each pane, not as a global strip.
 func (u *winUI) shellBottomY(clientH int32) int32 {
-	bot := clientH - u.inputBarPixelHeight()
-	if bot < u.shellPadY()+int32(cellH) {
-		bot = clientH
+	if clientH < u.shellPadY()+int32(cellH) {
+		return clientH
 	}
-	return bot
+	return clientH
 }
 
 func (u *winUI) applyChromeAction(r chrome.Result) {
@@ -586,15 +693,37 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionNewTabProfile:
 		u.newTabUI(r.ProfileName)
 	case chrome.ActionCloseTab:
-		if t := u.activeTab(); t != nil {
+		if p := u.activePage(); p != nil {
+			u.closePageAt(u.active, true)
+		} else if t := u.activeTab(); t != nil {
 			u.closeTabUI(t.id)
 		}
+	case chrome.ActionClosePane:
+		if t := u.activeTab(); t != nil {
+			u.closePaneUI(t.id, true)
+		}
+	case chrome.ActionSplitRight:
+		u.splitActive(splitVert)
+	case chrome.ActionSplitDown:
+		u.splitActive(splitHoriz)
+	case chrome.ActionFocusPaneLeft:
+		u.focusPaneDir(0)
+	case chrome.ActionFocusPaneRight:
+		u.focusPaneDir(1)
+	case chrome.ActionFocusPaneUp:
+		u.focusPaneDir(2)
+	case chrome.ActionFocusPaneDown:
+		u.focusPaneDir(3)
 	case chrome.ActionNextTab:
 		u.switchTab(1)
 	case chrome.ActionPrevTab:
 		u.switchTab(-1)
 	case chrome.ActionSelectTab:
-		if r.Index >= 0 && r.Index < len(u.tabs) {
+		n := len(u.pages)
+		if n == 0 {
+			n = len(u.tabs)
+		}
+		if r.Index >= 0 && r.Index < n {
 			u.active = r.Index
 			u.selecting = false
 			if t := u.activeTab(); t != nil {
@@ -650,15 +779,45 @@ func (u *winUI) replayIntro() {
 	if u == nil {
 		return
 	}
+	u.beginIntro(true)
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+}
+
+// beginIntro arms the startup curtain. When shell background rain is already
+// on, matrix intro is skipped (redundant with always-on rain).
+func (u *winUI) beginIntro(replay bool) {
+	if u == nil {
+		return
+	}
 	now := time.Now()
+	style := config.Normalize(u.cfg).Intro
+	// Persistent shell rain + matrix intro would play the same effect twice.
+	if style == config.IntroMatrix && u.cfg.ShellMatrix {
+		u.matrixIntroStart = now
+		u.matrixIntroSpawnEnd = now
+		u.matrixIntroDone = true
+		u.matrixIntroClearAt = now // watermark at full opacity immediately
+		if replay {
+			log.Info("replay intro skipped", "reason", "shell matrix on", "style", style)
+		} else {
+			log.Info("startup intro skipped", "reason", "shell matrix on", "style", style)
+		}
+		return
+	}
 	u.matrixIntroStart = now
 	u.matrixIntroSpawnEnd = now.Add(matrixIntroSpawn)
 	u.matrixIntroDone = false
 	u.matrixIntroClearAt = time.Time{}
-	style := config.Normalize(u.cfg).Intro
-	log.Info("replay intro", "style", style)
-	if u.hwnd != 0 {
-		win.InvalidateRect(u.hwnd, nil, false)
+	if style == config.IntroNone {
+		// Short delay path for 硯 fade still uses spawn end clock.
+		u.matrixIntroDone = false
+	}
+	if replay {
+		log.Info("replay intro", "style", style)
+	} else {
+		log.Info("startup intro", "style", style, "spawn", matrixIntroSpawn)
 	}
 }
 
@@ -674,6 +833,9 @@ func (u *winUI) loop() error {
 	cname, _ := syscall.UTF16PtrFromString(className)
 	title, _ := syscall.UTF16PtrFromString(appTitle)
 
+	// Glowy 硯 app icon (PE resource via rsrc_windows_*.syso, or embedded .ico).
+	iconBig, iconSm := loadAppIcons(hInst)
+
 	// Stable callback: keep ui pinned via global map so GC never collects it
 	// while Win32 still has the WndProc pointer.
 	wc := win.WNDCLASSEX{
@@ -681,6 +843,8 @@ func (u *winUI) loop() error {
 		LpfnWndProc:   wndProcCallback,
 		HInstance:     hInst,
 		LpszClassName: cname,
+		HIcon:         iconBig,
+		HIconSm:       iconSm,
 		HCursor:       win.LoadCursor(0, win.MAKEINTRESOURCE(win.IDC_IBEAM)),
 		HbrBackground: win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)),
 	}
@@ -718,6 +882,8 @@ func (u *winUI) loop() error {
 		return lastErr("CreateWindowEx")
 	}
 	u.hwnd = hwnd
+	// Ensure title bar / taskbar pick up the icon even if class was re-registered.
+	applyWindowIcons(hwnd, iconBig, iconSm)
 	u.font = createFontFor(u.cfg, false)
 	u.fontBold = createFontFor(u.cfg, true)
 	u.cjkFont = createCJKFont(u.cfg.FontSizePx)
@@ -742,18 +908,8 @@ func (u *winUI) loop() error {
 	}
 	win.UpdateWindow(hwnd)
 
-	// Startup curtain (matrix / ripple / none) — spawn window then wind-down.
-	now := time.Now()
-	u.matrixIntroStart = now
-	u.matrixIntroSpawnEnd = now.Add(matrixIntroSpawn)
-	u.matrixIntroDone = false
-	u.matrixIntroClearAt = time.Time{}
-	intro := config.Normalize(u.cfg).Intro
-	if intro == config.IntroNone {
-		// Still run a short delay so the center 硯 can fade in.
-		u.matrixIntroDone = false
-	}
-	log.Info("startup intro", "style", intro, "spawn", matrixIntroSpawn)
+	// Startup curtain (matrix / ripple / none). Matrix skipped if shell rain is on.
+	u.beginIntro(false)
 
 	// Start I/O for the first tab; more tabs start in newTabUI.
 	if t := u.activeTab(); t != nil {
@@ -862,13 +1018,13 @@ func (u *winUI) sendKey(b []byte) {
 func (u *winUI) blinkLoop() {
 	t := time.NewTicker(cursorBlinkTick)
 	defer t.Stop()
+	// Full-rate ticks when focused (or when AnimateUnfocused is on). Skipping
+	// entirely while backgrounded freezes rain/spinners — optional for low CPU.
 	for range t.C {
 		if !u.alive.Load() || u.hwnd == 0 {
 			return
 		}
-		// Only blink when we are the foreground window — idle background
-		// invalidates were a major source of "sit for a bit → frozen".
-		if win.GetForegroundWindow() != u.hwnd {
+		if !u.cfg.AnimateUnfocused && win.GetForegroundWindow() != u.hwnd {
 			continue
 		}
 		win.PostMessage(u.hwnd, wmSuzuriBlink, 0, 0)
@@ -886,15 +1042,43 @@ func (u *winUI) drainAndParse(tabID int) {
 	data = t.echo.feed(data)
 	// Host cwd OSC from quiet prompt (strip before VT so it never paints).
 	if clean, path, ok := stripAndTakeCwd(data); ok {
+		prevPath := t.cwd
 		t.setCwd(path)
 		data = clean
-		// Path above the input bar — reflow when bar is visible.
+		// Path above the input bar — reflow only if cwd row presence changes
+		// (empty ↔ non-empty). Spammed prompts used to post settle every OSC.
 		if u.activeTab() == t && !t.altScreen() {
-			u.postLayoutSettle()
+			was := displayPath(prevPath) != ""
+			now := displayPath(t.cwd) != ""
+			if was != now {
+				u.maybeResizeForInput()
+			}
 		}
 	} else {
 		data = clean
 	}
+	// Inline images: iTerm OSC 1337, suzuri OSC 7879, and path heuristics.
+	// Attached into scrollback under the current stream (not a sticky overlay).
+	{
+		clean, paths, blobs := stripAndTakeImages(data)
+		data = clean
+		if len(paths) > 0 || len(blobs) > 0 {
+			cw, ch := int(u.metricW), int(u.metricH)
+			if cw < 1 {
+				cw = cellW
+			}
+			if ch < 1 {
+				ch = cellH
+			}
+			paneCols := u.cols
+			if g := u.paneGeomFor(t.id); g != nil && g.cols > 0 {
+				paneCols = g.cols
+			}
+			t.ingestImages(paths, blobs, cw, ch, paneCols)
+		}
+	}
+	// Visible if this pane is on the active page (any leaf, not only focused).
+	visible := u.paneVisible(t.id)
 	if len(data) == 0 {
 		// More may have been queued; re-arm if needed.
 		t.inMu.Lock()
@@ -903,13 +1087,14 @@ func (u *winUI) drainAndParse(tabID int) {
 		if more {
 			t.postBytes(u)
 		}
-		if u.activeTab() == t {
+		if visible {
 			win.InvalidateRect(u.hwnd, nil, false)
 		}
 		return
 	}
 	_, _ = t.term.Write(data)
 	t.sb.noteScreen(t.term)
+	// No host image injection on alt-screen (Grok) — use click → modal instead.
 	if t.sb.atBottom() {
 		t.sb.stickBottom()
 	}
@@ -934,11 +1119,21 @@ func (u *winUI) drainAndParse(tabID int) {
 			u.postLayoutSettle()
 		}
 	}
-	u.publishBridgeSnapshot()
-	// Only repaint if this is the visible tab.
-	if u.activeTab() == t {
-		if title := t.term.Title(); title != "" {
-			setWindowTitle(u.hwnd, "suzuri — "+title)
+	// Bridge snapshot is relatively expensive — skip on pure spam frames.
+	// (MCP clients still get updates on submit / tab change.)
+	if u.bridge != nil && len(data) > 0 {
+		// Coalesce: at most ~10/s via existing invalidate path is enough;
+		// full snapshot every PTY chunk under spam flooded layout work.
+		if u.spinTick%8 == 0 {
+			u.publishBridgeSnapshot()
+		}
+	}
+	// Only repaint if this pane is on the visible page.
+	if visible {
+		if u.activeTab() == t {
+			if title := t.term.Title(); title != "" {
+				setWindowTitle(u.hwnd, "suzuri — "+title)
+			}
 		}
 		win.InvalidateRect(u.hwnd, nil, false)
 	}
@@ -951,12 +1146,21 @@ func (u *winUI) drainAndParse(tabID int) {
 }
 
 func (u *winUI) tabByID(id int) *tab {
-	for _, t := range u.tabs {
-		if t.id == id {
+	for _, t := range u.allPanes() {
+		if t != nil && t.id == id {
 			return t
 		}
 	}
 	return nil
+}
+
+// paneVisible is true when pane id is a leaf on the active chrome page.
+func (u *winUI) paneVisible(id int) bool {
+	p := u.activePage()
+	if p == nil {
+		return u.activeTab() != nil && u.activeTab().id == id
+	}
+	return findPane(p.root, id) != nil
 }
 
 // enqueueMCPSubmit is called from the bridge HTTP goroutine; work runs on the UI thread.
@@ -1016,7 +1220,11 @@ func (u *winUI) submitOnUIThread(tabID int, line string) error {
 	if stringsTrimSpace(display) != "" {
 		// Fold previous live output into history so this block owns the next run.
 		t.sb.commitLive(t.term)
-		t.sb.pushBlock(display, u.cols, t.cwd)
+		blockCols := u.cols
+		if g := u.paneGeomFor(t.id); g != nil && g.cols > 0 {
+			blockCols = g.cols
+		}
+		t.sb.pushBlock(display, blockCols, t.cwd)
 		if next, ok := cwdAfterCommand(t.cwd, payload); ok {
 			t.setCwd(next)
 		}
@@ -1047,13 +1255,14 @@ func (u *winUI) buildBridgeSnapshot() bridge.Snapshot {
 	if t := u.activeTab(); t != nil {
 		activeID = t.id
 	}
+	panes := u.allPanes()
 	s := bridge.Snapshot{
 		Cols:      u.cols,
 		Rows:      u.rows,
 		ActiveTab: activeID,
-		Tabs:      make([]bridge.TabSnap, 0, len(u.tabs)),
+		Tabs:      make([]bridge.TabSnap, 0, len(panes)),
 	}
-	for _, t := range u.tabs {
+	for _, t := range panes {
 		s.Tabs = append(s.Tabs, u.tabSnap(t))
 	}
 	return s
@@ -1064,7 +1273,11 @@ func (u *winUI) tabSnap(t *tab) bridge.TabSnap {
 	// Live text (effective extent).
 	liveText := snapshotLiveText(t.term)
 	// Viewport as the user sees it (rune grid → strings).
-	view := t.sb.view(t.term, u.rows)
+	viewRows := u.rows
+	if g := u.paneGeomFor(t.id); g != nil && g.rows > 0 {
+		viewRows = g.rows
+	}
+	view := t.sb.view(t.term, viewRows)
 	viewLines := make([]string, len(view))
 	for i, row := range view {
 		viewLines[i] = strings.TrimRight(string(row), " ")
@@ -1109,11 +1322,15 @@ func trimLiveLines(lines []string) []string {
 	return out
 }
 
-// newTabUI opens a tab. profileName empty uses ActiveProfile from config.
+// newTabUI opens a chrome tab (single pane). profileName empty uses ActiveProfile.
 func (u *winUI) newTabUI(profileName string) {
-	if len(u.tabs) >= maxTabs {
+	if len(u.pages) >= maxTabs {
 		log.Warn("max tabs reached", "max", maxTabs)
 		u.toast("max tabs")
+		return
+	}
+	if u.paneCount() >= maxPanesTotal {
+		u.toast("max panes")
 		return
 	}
 	if profileName == "" {
@@ -1139,8 +1356,7 @@ func (u *winUI) newTabUI(profileName string) {
 		return
 	}
 	u.nextTabID++
-	u.tabs = append(u.tabs, t)
-	u.active = len(u.tabs) - 1
+	u.addPageWithTab(t)
 	t.startWorkers(u)
 	u.selecting = false
 	setWindowTitle(u.hwnd, "suzuri — "+t.title)
@@ -1152,106 +1368,52 @@ func (u *winUI) newTabUI(profileName string) {
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
+// closeTabUI closes the chrome tab that owns pane/page id.
+// id may be a page id or a pane id (Ctrl+W from focused pane).
 func (u *winUI) closeTabUI(id int) {
-	idx := -1
-	for i, t := range u.tabs {
-		if t.id == id {
-			idx = i
-			break
+	// Prefer page id match (chrome strip).
+	for i, p := range u.pages {
+		if p != nil && p.id == id {
+			u.closePageAt(i, true)
+			return
 		}
 	}
-	if idx < 0 {
+	// Pane id → close whole page that contains it.
+	if pi, _ := u.pageByPaneID(id); pi >= 0 {
+		u.closePageAt(pi, true)
 		return
 	}
-	// Last tab → confirm quit (Enter quits; Esc keeps the tab).
-	// (Shell `exit` uses sessionEndedCloseTab — no confirm.)
-	if len(u.tabs) == 1 {
-		log.Info("last tab close — confirm quit")
-		r := u.chrome.UpdateChrome(chrome.OpenConfirmQuitMsg{})
-		u.chrome = r.Model
-		u.markChromeDirty()
-		win.InvalidateRect(u.hwnd, nil, false)
-		return
-	}
-	u.removeTabAt(idx)
 }
 
-// sessionEndedCloseTab closes a tab whose shell process exited (exit/EOF).
-// Unlike Ctrl+W on the last tab, this quits the app immediately when it is
-// the final tab — matches expected shell semantics.
+// sessionEndedCloseTab closes a pane whose shell process exited (exit/EOF).
+// Last pane of last page quits immediately (no confirm) — shell semantics.
 func (u *winUI) sessionEndedCloseTab(id int) {
 	defer applog.Recover("sessionEndedCloseTab", false)
-	idx := -1
-	for i, t := range u.tabs {
-		if t.id == id {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return
-	}
-	if len(u.tabs) == 1 {
-		log.Info("last shell exited — quitting")
-		applog.Sync()
-		u.persistWindowPlacement(true)
-		if u.hwnd != 0 {
-			win.DestroyWindow(u.hwnd)
-		}
-		return
-	}
-	u.removeTabAt(idx)
+	u.closePaneUI(id, false)
 }
 
+// removeTabAt is retained for compatibility; removes a flat-list pane by index.
+// Prefer closePaneUI / removePageAt for page-aware close.
 func (u *winUI) removeTabAt(idx int) {
 	defer applog.Recover("removeTabAt", false)
 	if idx < 0 || idx >= len(u.tabs) {
 		return
 	}
 	t := u.tabs[idx]
-	// Detach first so paint/drain never see this tab while ConPTY tears down.
-	u.tabs = append(u.tabs[:idx], u.tabs[idx+1:]...)
-	if u.active >= len(u.tabs) {
-		u.active = len(u.tabs) - 1
-	} else if u.active > idx {
-		u.active--
-	}
-	if u.active < 0 {
-		u.active = 0
-	}
 	if t != nil {
-		func() {
-			defer applog.Recover("tab.close", false)
-			t.close()
-		}()
+		u.closePaneUI(t.id, true)
 	}
-	if at := u.activeTab(); at != nil {
-		at.sel.clear()
-		setWindowTitle(u.hwnd, "suzuri — "+at.title)
-	}
-	u.syncChrome()
-	// Do NOT call maybeResizeForInput here. Closing a bar tab while another is
-	// alt-screen (e.g. Grok) used to ResizePseudoConsole on a live session on
-	// this stack and hard-crashed the process with no Go panic trail.
-	// postLayoutSettle runs ConPTY/VT reflow on a later message.
-	u.postLayoutSettle()
-	msg := fmt.Sprintf("%d tabs", len(u.tabs))
-	if len(u.tabs) == 1 {
-		msg = "1 tab"
-	}
-	u.toast(msg)
-	if u.hwnd != 0 {
-		win.InvalidateRect(u.hwnd, nil, false)
-	}
-	u.publishBridgeSnapshot()
-	applog.Sync()
 }
 
 func (u *winUI) switchTab(delta int) {
-	if len(u.tabs) == 0 {
+	n := len(u.pages)
+	if n == 0 {
+		n = len(u.tabs)
+	}
+	if n == 0 {
 		return
 	}
-	u.active = (u.active + delta + len(u.tabs)) % len(u.tabs)
+	u.active = (u.active + delta + n) % n
 	u.selecting = false
 	if t := u.activeTab(); t != nil {
 		t.sel.clear()
@@ -1265,7 +1427,7 @@ func (u *winUI) switchTab(delta int) {
 
 // hitTab maps an x pixel to a tab index using chrome.TabBounds (same layout as View).
 func (u *winUI) hitTab(px int32) int {
-	if len(u.tabs) == 0 {
+	if len(u.pages) == 0 && len(u.tabs) == 0 {
 		return -1
 	}
 	u.syncChrome()
@@ -1316,6 +1478,23 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
 			u.clearToastIfDue()
+			// Ease scrollback visual → offset (macOS does this in ebiten Update;
+			// without it, wheel only moves offset and the view stays stuck).
+			// Dim modals hide the shell; palette keeps a live shell underneath.
+			const dt = float64(cursorBlinkTick) / float64(time.Second)
+			needScrollPaint := false
+			if !u.dimShellModal() {
+				for _, t := range u.allPanes() {
+					if t == nil || t.sb == nil {
+						continue
+					}
+					prev := t.sb.visual
+					t.sb.tickSmooth(dt)
+					if absFloat(t.sb.visual-prev) > 0.01 || absFloat(t.sb.visual-float64(t.sb.offset)) > 0.01 {
+						needScrollPaint = true
+					}
+				}
+			}
 			// Animate braille (or geometric) busy marks on the tab strip.
 			u.spinTick++
 			if u.anyTabBusy() && u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
@@ -1323,7 +1502,21 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.chromeDirty = true
 				u.syncChrome()
 			}
-			win.InvalidateRect(hwnd, nil, false)
+			// Dim modals: throttle (settings rain) or chrome-dirty only.
+			// Palette floats over live shell — keep full-rate repaints so PTY
+			// output and cursor blink still update under the card.
+			if u.dimShellModal() {
+				if u.chrome.SettingsOpen {
+					if u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
+						win.InvalidateRect(hwnd, nil, false)
+					}
+				} else if u.chromeDirty {
+					win.InvalidateRect(hwnd, nil, false)
+				}
+			} else {
+				win.InvalidateRect(hwnd, nil, false)
+			}
+			_ = needScrollPaint
 		}
 		return 0
 
@@ -1453,10 +1646,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 				r := u.chrome.UpdateChrome(km)
 				u.chrome = r.Model
-				u.markChromeDirty()
-				u.applyChromeAction(r)
-				u.syncChrome()
-				u.chromePx = u.chromePixelHeight()
+				// Filter typing: only dirty the overlay (not full tab strip /
+				// syncChrome) so keystrokes stay snappy.
+				u.overlayDirty = true
+				u.overlayCells = nil
 				win.InvalidateRect(hwnd, nil, false)
 			}
 			// Settings ignores plain text; arrows via KEYDOWN.
@@ -1507,10 +1700,17 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
 				r := u.chrome.UpdateChrome(*km)
 				u.chrome = r.Model
-				u.markChromeDirty()
 				u.applyChromeAction(r)
-				u.syncChrome()
-				u.chromePx = u.chromePixelHeight()
+				// Palette filter/nav: only dirty overlay. Full syncChrome was
+				// redoing the tab strip every backspace/arrow.
+				if u.chrome.PaletteOpen {
+					u.overlayDirty = true
+					u.overlayCells = nil
+				} else {
+					u.markChromeDirty()
+					u.syncChrome()
+					u.chromePx = u.chromePixelHeight()
+				}
 				win.InvalidateRect(hwnd, nil, false)
 			}
 			return 0
@@ -1538,18 +1738,61 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 		// Ctrl+/ — help (VK_OEM_2 = 0xBF on US keyboards)
 		if ctrl && !shift && wParam == 0xBF {
-			r := u.chrome.UpdateChrome(chrome.OpenHelpMsg{})
-			u.chrome = r.Model
-			u.markChromeDirty()
-			win.InvalidateRect(hwnd, nil, false)
+			u.openHelpSafe()
 			return 0
 		}
 		if ctrl && shift && (wParam == 'T' || wParam == 't') {
 			u.newTabUI("")
 			return 0
 		}
+		// Split panes (Windows Terminal-ish: Alt+Shift+± / Alt+arrows).
+		// Also Ctrl+Shift+D (right) / Ctrl+Shift+E (down) as mnemonic backups.
+		if alt && shift && !ctrl {
+			switch wParam {
+			case win.VK_OEM_PLUS: // = / +
+				u.splitActive(splitVert)
+				return 0
+			case win.VK_OEM_MINUS: // -
+				u.splitActive(splitHoriz)
+				return 0
+			}
+		}
+		if ctrl && shift && !alt {
+			switch wParam {
+			case 'D', 'd':
+				u.splitActive(splitVert)
+				return 0
+			case 'E', 'e':
+				u.splitActive(splitHoriz)
+				return 0
+			case 'W', 'w':
+				if tab != nil {
+					u.closePaneUI(tab.id, true)
+				}
+				return 0
+			}
+		}
+		if alt && !ctrl && !shift {
+			switch wParam {
+			case win.VK_LEFT:
+				u.focusPaneDir(0)
+				return 0
+			case win.VK_RIGHT:
+				u.focusPaneDir(1)
+				return 0
+			case win.VK_UP:
+				u.focusPaneDir(2)
+				return 0
+			case win.VK_DOWN:
+				u.focusPaneDir(3)
+				return 0
+			}
+		}
 		if ctrl && !shift && (wParam == 'W' || wParam == 'w') {
-			if tab != nil {
+			// Close whole chrome tab (all panes in page).
+			if p := u.activePage(); p != nil {
+				u.closePageAt(u.active, true)
+			} else if tab != nil {
 				u.closeTabUI(tab.id)
 			}
 			return 0
@@ -1564,7 +1807,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		if ctrl && wParam >= '1' && wParam <= '9' {
 			i := int(wParam - '1')
-			if i >= 0 && i < len(u.tabs) {
+			n := len(u.pages)
+			if n == 0 {
+				n = len(u.tabs)
+			}
+			if i >= 0 && i < n {
 				u.active = i
 				u.selecting = false
 				if t := u.activeTab(); t != nil {
@@ -1591,6 +1838,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		if shift && !ctrl && wParam == win.VK_INSERT {
 			u.pasteClipboard()
+			return 0
+		}
+
+		// Image lightbox owns Esc before alt-screen apps.
+		if wParam == win.VK_ESCAPE && u.modalImage != nil {
+			u.modalImage = nil
+			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
 
@@ -1671,7 +1925,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if stringsTrimSpace(display) != "" {
 				// Previous command's output → history under its block first.
 				tab.sb.commitLive(tab.term)
-				tab.sb.pushBlock(display, u.cols, tab.cwd)
+				blockCols := u.cols
+				if g := u.paneGeomFor(tab.id); g != nil && g.cols > 0 {
+					blockCols = g.cols
+				}
+				tab.sb.pushBlock(display, blockCols, tab.cwd)
 				// Best-effort cwd until the next prompt OSC arrives.
 				if next, ok := cwdAfterCommand(tab.cwd, payload); ok {
 					tab.setCwd(next)
@@ -1720,12 +1978,25 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			in.moveEnd()
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_PRIOR:
-			tab.sb.scrollBy(u.rows/2, u.rows)
+			vr := u.rows
+			if g := u.focusedGeom(); g != nil && g.rows > 0 {
+				vr = g.rows
+			}
+			tab.sb.scrollBy(vr/2, vr)
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_NEXT:
-			tab.sb.scrollBy(-(u.rows / 2), u.rows)
+			vr := u.rows
+			if g := u.focusedGeom(); g != nil && g.rows > 0 {
+				vr = g.rows
+			}
+			tab.sb.scrollBy(-(vr / 2), vr)
 			win.InvalidateRect(hwnd, nil, false)
 		case win.VK_ESCAPE:
+			if u.modalImage != nil {
+				u.modalImage = nil
+				win.InvalidateRect(hwnd, nil, false)
+				return 0
+			}
 			if len(in.runes) > 0 || in.histIdx >= 0 {
 				in.clear()
 				u.maybeResizeForInput()
@@ -1763,7 +2034,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				steps = -1
 			}
 		}
-		tab.sb.scrollBy(steps*3, u.rows)
+		viewRows := u.rows
+		if g := u.focusedGeom(); g != nil && g.rows > 0 {
+			viewRows = g.rows
+		}
+		tab.sb.scrollBy(steps*3, viewRows)
 		win.InvalidateRect(hwnd, nil, false)
 		return 0
 
@@ -1771,6 +2046,12 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.focus()
 		px := int32(win.LOWORD(uint32(lParam)))
 		py := int32(win.HIWORD(uint32(lParam)))
+		// Image modal: any click closes (simple lightbox).
+		if u.modalImage != nil {
+			u.modalImage = nil
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
 		chH := u.metricH
 		if chH < 1 {
 			chH = cellH
@@ -1786,6 +2067,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			// card while cancel restores theme/font.
 			u.overlayCells = nil
 			u.overlayDirty = true
+			u.overlaySceneReady = false
 			r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
 			u.chrome = r.Model
 			u.markChromeDirty()
@@ -1823,20 +2105,51 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 			return 0
 		}
-		// Bottom Warp input bar — focus only (no text selection drag).
-		var client win.RECT
-		if win.GetClientRect(hwnd, &client) {
-			if py >= u.shellBottomY(client.Bottom-client.Top) {
+		// Sash drag starts before pane hit-test (shared divider between panes).
+		layouts := u.computeActiveLayout()
+		if si := hitSash(u.lastSashes, px, py); si >= 0 {
+			s := u.lastSashes[si]
+			u.sashDrag = &s
+			u.selecting = false
+			win.SetCapture(hwnd)
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+		// Click-to-focus a pane; click on a pane's input bar focuses without selection.
+		if hi := hitPane(layouts, px, py); hi >= 0 && layouts[hi].pane != nil {
+			g := layouts[hi]
+			if g.barH > 0 && py >= g.barY && py < g.barY+g.barH {
+				_ = u.focusPaneByID(g.pane.id)
 				u.focus()
+				win.InvalidateRect(hwnd, nil, false)
 				return 0
+			}
+			if u.focusPaneByID(g.pane.id) {
+				win.InvalidateRect(hwnd, nil, false)
+				// Fall through so a drag can still start selection on the new focus.
 			}
 		}
 		tab := u.activeTab()
 		if tab == nil {
 			return 0
 		}
-		x, y := u.pixelToCell(px, py)
-		absY := tab.sb.absLine(y, u.rows, liveExtent(tab.term))
+		// Don't start shell selection on the focused pane's bar region.
+		if g := u.focusedGeom(); g != nil && g.barH > 0 && py >= g.barY {
+			u.focus()
+			return 0
+		}
+		// Grok / alt-screen: click near "[Open Image]" or a path opens a modal.
+		// Primary shell: click an image block opens the same modal.
+		if u.tryOpenImageModalAt(px, py) {
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+		if tab.altScreen() {
+			// Let the app own the click (no host selection over Grok).
+			return 0
+		}
+		x, y, viewRows := u.pixelToCellInPane(px, py, tab)
+		absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
 		tab.sel.active = true
 		tab.sel.x0, tab.sel.y0 = x, absY
 		tab.sel.x1, tab.sel.y1 = x, absY
@@ -1846,20 +2159,54 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_MOUSEMOVE:
+		px := int32(win.LOWORD(uint32(lParam)))
+		py := int32(win.HIWORD(uint32(lParam)))
+		// Live sash resize: update ratio, reflow (no-op resize when size stable).
+		if u.sashDrag != nil && (wParam&win.MK_LBUTTON) != 0 {
+			applySashDrag(*u.sashDrag, px, py)
+			// Keep sash geom parent bounds from last layout; node.ratio is live.
+			if u.width > 0 && u.height > 0 {
+				u.applyClientSize(u.width, u.height)
+			}
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+		// Hover cursor on sash (when not dragging selection).
+		if !u.selecting && u.sashDrag == nil {
+			_ = u.computeActiveLayout()
+			if si := hitSash(u.lastSashes, px, py); si >= 0 {
+				s := u.lastSashes[si]
+				if s.dir == splitVert {
+					win.SetCursor(win.LoadCursor(0, win.MAKEINTRESOURCE(win.IDC_SIZEWE)))
+				} else {
+					win.SetCursor(win.LoadCursor(0, win.MAKEINTRESOURCE(win.IDC_SIZENS)))
+				}
+			}
+		}
 		tab := u.activeTab()
 		if tab != nil && u.selecting && (wParam&win.MK_LBUTTON) != 0 {
-			x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
-			absY := tab.sb.absLine(y, u.rows, liveExtent(tab.term))
+			x, y, viewRows := u.pixelToCellInPane(px, py, tab)
+			absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
 			tab.sel.x1, tab.sel.y1 = x, absY
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
 
 	case win.WM_LBUTTONUP:
+		if u.sashDrag != nil {
+			u.sashDrag = nil
+			win.ReleaseCapture()
+			// Final settle so ConPTY matches the dragged sizes cleanly.
+			u.postLayoutSettle()
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
 		tab := u.activeTab()
 		if tab != nil && u.selecting {
-			x, y := u.pixelToCell(int32(win.LOWORD(uint32(lParam))), int32(win.HIWORD(uint32(lParam))))
-			absY := tab.sb.absLine(y, u.rows, liveExtent(tab.term))
+			px := int32(win.LOWORD(uint32(lParam)))
+			py := int32(win.HIWORD(uint32(lParam)))
+			x, y, viewRows := u.pixelToCellInPane(px, py, tab)
+			absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
 			tab.sel.x1, tab.sel.y1 = x, absY
 			u.selecting = false
 			win.ReleaseCapture()
@@ -1920,6 +2267,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.DeleteObject(win.HGDIOBJ(u.symFont))
 			u.symFont = 0
 		}
+		releaseAppIcons()
 		u.hwnd = 0
 		win.PostQuitMessage(0)
 		return 0
@@ -1999,53 +2347,133 @@ func (u *winUI) paint(hwnd win.HWND) {
 	metricsChanged := u.metricW != cw || u.metricH != ch
 	u.metricW, u.metricH = cw, ch
 
-	// Keep size fields honest; re-layout when bar hides (alt-screen) or metrics
-	// change. Never applyClientSize (ConPTY) on the WM_PAINT stack — post settle.
-	wantIn := u.inputBarPixelHeight()
-	if u.width != w || u.height != h || wantIn != u.inputPx || metricsChanged {
-		u.width, u.height = w, h
+	// Keep size fields honest. Never applyClientSize (ConPTY) on the WM_PAINT
+	// stack — post settle only when client size/metrics change or a pane's VT
+	// size would change. Do NOT settle on bar-height bookkeeping alone: that
+	// used to thrash 88↔89 rows and make scrollback flicker/unusable.
+	sizeChanged := u.width != w || u.height != h
+	u.width, u.height = w, h
+
+	// Layout all panes on the active page (equal H/V splits).
+	layouts := u.computeActiveLayout()
+	if len(layouts) == 0 {
+		// Single-pane fallback geometry = full shell.
+		sx, sy, sw, sh := u.shellRect(w, h)
+		layouts = []paneGeom{{
+			pane: tab, x: sx, y: sy, w: sw, h: sh,
+			cols: u.cols, rows: u.rows, focused: true,
+		}}
+		u.lastPaneLayout = layouts
+	}
+	var barSum int32
+	needResize := false
+	for _, g := range layouts {
+		barSum += g.barH
+		if g.pane != nil && (g.pane.lastCols != g.cols || g.pane.lastRows != g.rows) {
+			needResize = true
+		}
+	}
+	u.inputPx = barSum
+	if sizeChanged || metricsChanged || needResize {
 		u.postLayoutSettle()
 	}
 
-	// Viewport = history + live screen (live cells carry FG/BG/bold).
-	// Shell PTY cursor is hidden in Warp-bar mode; shown for alt-screen apps.
-	grid := tab.sb.viewCells(tab.term, u.rows)
-	cur := tab.term.Cursor()
-	curVis := tab.altScreen() && tab.term.CursorVisible()
-	curY := cur.Y
-
 	draw := func(dest win.HDC) {
 		defer applog.Recover("paint.draw", false)
-		u.blitGrid(dest, rect, grid, cur.X, curY, curVis)
-		// Dim shell under floating overlay (palette / settings).
-		if u.chrome.OverlayOpen() {
+		overlay := u.chrome.OverlayOpen()
+		dimModal := u.dimShellModal()
+		// Fast path: static dim underlay (splash/confirm) already in memDC —
+		// only re-paint the card. Palette/help never use this (live shell).
+		if u.staticDimUnderlay() && u.overlaySceneReady &&
+			u.memDC != 0 && dest == u.memDC && u.font != 0 {
+			oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
+			u.paintOverlay(dest, rect)
+			u.paintImageModal(dest, rect)
+			win.SelectObject(dest, oldF)
+			return
+		}
+
+		// Void fill once; per-pane blit draws cells only.
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.VoidR, chrome.VoidG, chrome.VoidB)}
+		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+			fillRect(dest, rect, brush)
+			win.DeleteObject(win.HGDIOBJ(brush))
+		}
+		padY := u.shellPadY()
+		shellBot := u.shellBottomY(rect.Bottom - rect.Top)
+
+		// Settings/splash/confirm: dim matte replaces the live terminal.
+		// Palette + shortcuts: keep painting the live shell; card floats on top.
+		if dimModal {
 			u.paintDimShell(dest, rect)
-		} else if u.matrixIntroActive() {
-			// Startup curtain only — recover so a bad intro cannot kill the host.
-			func() {
-				defer applog.Recover("paint.intro", false)
-				switch strings.ToLower(strings.TrimSpace(u.cfg.Intro)) {
-				case config.IntroRipple:
-					u.paintRippleIntro(dest, rect)
-				case config.IntroNone:
-					if time.Now().After(u.matrixIntroSpawnEnd) {
-						u.finishMatrixIntro()
-					}
-				default:
-					u.paintMatrixIntro(dest, rect)
+		} else {
+			u.overlaySceneReady = false
+			// Shared dim rain under the whole shell region (not per-pane).
+			if u.shellMatrixOn() && !u.matrixIntroActive() {
+				u.paintShellMatrix(dest, rect, padY, shellBot)
+			}
+			u.paintShellWatermark(dest, rect, padY, shellBot)
+
+			for _, g := range layouts {
+				if g.pane == nil {
+					continue
 				}
-			}()
+				viewRows := g.rows
+				if viewRows < 1 {
+					viewRows = u.rows
+				}
+				grid := g.pane.sb.viewCells(g.pane.term, viewRows)
+				cur := g.pane.term.Cursor()
+				curVis := g.pane.altScreen() && g.pane.term.CursorVisible() && g.focused
+				u.blitGridPane(dest, rect, grid, cur.X, cur.Y, curVis, g)
+				if !g.pane.altScreen() {
+					u.paintPaneImages(dest, rect, g)
+				}
+			}
+			if len(layouts) > 1 {
+				u.paintPaneTitles(dest, layouts)
+			}
+			if u.matrixIntroActive() {
+				func() {
+					defer applog.Recover("paint.intro", false)
+					switch strings.ToLower(strings.TrimSpace(u.cfg.Intro)) {
+					case config.IntroRipple:
+						u.paintRippleIntro(dest, rect)
+					case config.IntroNone:
+						if time.Now().After(u.matrixIntroSpawnEnd) {
+							u.finishMatrixIntro()
+						}
+					default:
+						u.paintMatrixIntro(dest, rect)
+					}
+				}()
+			}
 		}
 		// Chrome strip + Warp input + floating card into the same buffer.
 		if u.font == 0 {
+			u.overlaySceneReady = false
 			return
 		}
 		oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
 		u.paintChrome(dest, rect)
-		u.paintInputBar(dest, rect)
-		if u.chrome.OverlayOpen() {
+		if !dimModal && len(layouts) > 1 {
+			u.paintPaneBorders(dest, layouts)
+		}
+		// Freeze static dim underlay for splash/confirm card-only redraws.
+		if u.staticDimUnderlay() && dest == u.memDC && u.memDC != 0 {
+			u.overlaySceneReady = true
+		} else if !u.staticDimUnderlay() {
+			u.overlaySceneReady = false
+		}
+		if overlay {
 			u.paintOverlay(dest, rect)
 		}
+		// Warp bars after the floating card so palette/help never cover inputs.
+		if !dimModal {
+			u.paintInputBar(dest, rect)
+		}
+		// Image lightbox on top of everything (Grok click / shell image block).
+		u.paintImageModal(dest, rect)
 		win.SelectObject(dest, oldF)
 	}
 
@@ -2257,9 +2685,7 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 // applyClientSize updates cols/rows/chrome from a client pixel size.
 // Safe to call from layout settle, first paint, and WM_ACTIVATE — not from the
 // raw WM_EXITSIZEMOVE stack (that hard-crashed).
-// Layout: [tab strip] [shell VT] [Warp input bar].
-// When the bar is hidden (alt-screen), shell uses all space under the tabs —
-// no reserved empty strip at the bottom.
+// Layout: [tab strip] [shell region]. Each leaf stacks [title?][VT][input bar?].
 func (u *winUI) applyClientSize(w, h int32) {
 	defer applog.Recover("applyClientSize", false)
 	if w < 1 || h < 1 {
@@ -2285,13 +2711,8 @@ func (u *winUI) applyClientSize(w, h int32) {
 	u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: 24}).Model
 	u.markChromeDirty()
 	u.chromePx = u.chromePixelHeight()
-	u.inputPx = u.inputBarPixelHeight()
-	// Full remaining height under chrome (and under bar when shown).
-	shellH := h - u.chromePx - u.inputPx
-	if u.inputPx > 0 && shellH < ch*5 {
-		// Bar mode only: keep a usable shell by compressing the bar floor.
-		shellH = h - u.chromePx - ch*2
-	}
+	// Full height under chrome — per-pane bars are inside each leaf.
+	shellH := h - u.chromePx
 	if shellH < ch {
 		shellH = ch
 	}
@@ -2299,17 +2720,37 @@ func (u *winUI) applyClientSize(w, h int32) {
 	if rows < 1 {
 		rows = 1
 	}
-	// In bar mode keep a modest minimum; on alt-screen use every full cell.
-	if u.inputPx > 0 && rows < 5 {
-		rows = 5
-	}
 	if rows > maxTermRows {
 		rows = maxTermRows
 	}
-	if rows != u.rows || cols != u.cols {
-		u.cols = cols
-		u.rows = rows
-		// Copy tab pointers so a concurrent close cannot mutate the slice mid-loop.
+	// u.cols / u.rows track the full shell grid (chrome width + primary geometry).
+	u.cols = cols
+	u.rows = rows
+
+	// Per-pane layout: each leaf gets its own cols/rows; ConPTY resize only when
+	// the assigned size changes.
+	sx, sy, sw, sh := u.shellRect(w, h)
+	for _, pg := range u.pages {
+		if pg == nil || pg.root == nil {
+			continue
+		}
+		res := layoutPage(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID)
+		if pg == u.activePage() {
+			u.lastPaneLayout = res.leaves
+			u.lastSashes = res.sashes
+			u.lastShell.x, u.lastShell.y = res.shellX, res.shellY
+			u.lastShell.w, u.lastShell.h = res.shellW, res.shellH
+			u.inputPx = u.sumActivePaneBarHeights()
+		}
+		for _, g := range res.leaves {
+			if g.pane == nil || !g.pane.alive.Load() {
+				continue
+			}
+			g.pane.resize(g.cols, g.rows)
+		}
+	}
+	// No pages yet: resize flat tabs to full size (init path).
+	if len(u.pages) == 0 {
 		tabs := append([]*tab(nil), u.tabs...)
 		for _, t := range tabs {
 			if t == nil || !t.alive.Load() {
@@ -2317,51 +2758,67 @@ func (u *winUI) applyClientSize(w, h int32) {
 			}
 			t.resize(cols, rows)
 		}
-	} else {
-		u.cols = cols
 	}
 }
 
-// blitGrid paints colored cells at fixed pitch.
-// Backgrounds/selection use FillRect (no pen hairlines) coalesced into runs so
-// selection never shows a per-cell grid. Glyphs are placed at x*cellW so the
-// font’s natural advance cannot drift off the grid.
+// blitGrid paints the active pane full-shell (legacy single-pane entry).
 func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, curY int, curVis bool) {
 	tab := u.activeTab()
 	if tab == nil {
 		return
 	}
-
+	const padX int32 = 4
+	padY := u.shellPadY()
+	g := paneGeom{
+		pane: tab, x: padX, y: padY,
+		w: rect.Right - padX, h: u.shellBottomY(rect.Bottom-rect.Top) - padY,
+		cols: u.cols, rows: u.rows, focused: true,
+	}
+	// Full-shell path still owns void fill + matrix (used only if something
+	// calls blitGrid directly).
 	fillRect(hdc, rect, win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)))
+	shellBot := u.shellBottomY(rect.Bottom - rect.Top)
+	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() {
+		u.paintShellMatrix(hdc, rect, padY, shellBot)
+	}
+	u.paintShellWatermark(hdc, rect, padY, shellBot)
+	u.blitGridPane(hdc, rect, grid, curX, curY, curVis, g)
+}
+
+// blitGridPane paints colored cells for one pane at a fixed pitch origin.
+// Backgrounds/selection use FillRect (no pen hairlines) coalesced into runs so
+// selection never shows a per-cell grid. Glyphs are placed at x*cellW so the
+// font’s natural advance cannot drift off the grid.
+// Caller paints void/matrix/watermark for the shell region.
+func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, curY int, curVis bool, g paneGeom) {
+	tab := g.pane
+	if tab == nil {
+		return
+	}
 
 	oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	defer win.SelectObject(hdc, oldFont)
 
 	cw, ch := measureCellSize(hdc)
-	const padX int32 = 4
-	// Shell sits below the top tab strip and above the Warp input bar.
-	padY := u.shellPadY()
-	u.metricW, u.metricH = cw, ch
-	u.chromePx = padY
-	u.inputPx = u.inputBarPixelHeight()
+	padX, padY := g.x, g.y
+	viewRows := g.rows
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
 	// Same effective live height as viewCells (trailing blank PTY rows clipped).
 	liveRows := liveExtent(tab.term)
-	// Fill any sub-cell remainder under the grid down to the shell bottom so
-	// alt-screen (no bar) doesn't leave a thin empty band. Sample the last
-	// cell's BG so fullscreen apps blend instead of showing a black gutter.
-	shellBot := u.shellBottomY(rect.Bottom - rect.Top)
+	// Fill any sub-cell remainder under the grid within this pane.
+	paneBot := g.y + g.h
 	gridBot := padY + int32(len(grid))*ch
-	if gridBot < shellBot {
+	if gridBot < paneBot {
 		br, bg, bb := byte(12), byte(12), byte(14)
 		if n := len(grid); n > 0 {
 			last := grid[n-1]
 			if len(last) > 0 {
 				c := last[0]
-				// Prefer a non-default background if the app painted one.
 				if c.BR != 0 || c.BG != 0 || c.BB != 0 {
 					br, bg, bb = c.BR, c.BG, c.BB
 				} else {
-					// Scan for any BG on the last row.
 					for _, cell := range last {
 						if cell.BR != 0 || cell.BG != 0 || cell.BB != 0 {
 							br, bg, bb = cell.BR, cell.BG, cell.BB
@@ -2373,13 +2830,10 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		}
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(br, bg, bb)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			fillRect(hdc, win.RECT{Left: 0, Top: gridBot, Right: rect.Right, Bottom: shellBot}, brush)
+			fillRect(hdc, win.RECT{Left: g.x, Top: gridBot, Right: g.x + g.w, Bottom: paneBot}, brush)
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
-
-	// Dim brand mark under shell cells (not the tab-strip 硯).
-	u.paintShellWatermark(hdc, rect, padY, shellBot)
 
 	selBrush := win.HBRUSH(0)
 	if tab.sel.active && !tab.sel.empty() {
@@ -2393,8 +2847,8 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 	for y, row := range grid {
 		// Non-default backgrounds: one FillRect per run of the same BG.
 		type bgRun struct {
-			x0, x1     int
-			r, g, b    byte
+			x0, x1  int
+			r, g, b byte
 		}
 		var bgs []bgRun
 		for x, c := range row {
@@ -2424,7 +2878,7 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 
 		// Selection: coalesce contiguous cells into one rect (no grid seams).
 		if selBrush != 0 {
-			absY := tab.sb.absLine(y, u.rows, liveRows)
+			absY := tab.sb.absLine(y, viewRows, liveRows)
 			run0 := -1
 			flushSel := func(x1 int) {
 				if run0 < 0 {
@@ -2451,16 +2905,14 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 			flushSel(len(row) - 1)
 		}
 
-		// Glyphs at fixed cell origins. Box-drawing / blocks are drawn as
-		// geometry that fills the cell (Windows Terminal-style seamless TUI
-		// chrome); normal text uses TextOut.
+		// Glyphs at fixed cell origins.
 		win.SetBkMode(hdc, win.TRANSPARENT)
 		for x, c := range row {
 			r := c.Ch
 			if r == 0 || r == ' ' {
 				continue
 			}
-			absY := tab.sb.absLine(y, u.rows, liveRows)
+			absY := tab.sb.absLine(y, viewRows, liveRows)
 			fr, fg, fb := c.FR, c.FG, c.FB
 			if tab.sel.containsAbs(x, absY) {
 				fr, fg, fb = 255, 255, 255
@@ -2491,7 +2943,6 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 		if curY < 0 {
 			curY = 0
 		}
-		// Blend caret into cell background (smooth alpha, not hard blink).
 		bgR, bgG, bgB := byte(12), byte(12), byte(14)
 		if curY < len(grid) && curX < len(grid[curY]) {
 			c := grid[curY][curX]
@@ -2528,6 +2979,213 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 			}
 		}
 	}
+}
+
+// paintPaneTitles draws the mini title strip on each multi-pane leaf.
+func (u *winUI) paintPaneTitles(hdc win.HDC, layouts []paneGeom) {
+	if len(layouts) < 2 {
+		return
+	}
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	for _, g := range layouts {
+		if g.titleH < 1 {
+			continue
+		}
+		br, bg, bb := chrome.BarR, chrome.BarG, chrome.BarB
+		if g.focused {
+			br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
+		}
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(br, bg, bb)}
+		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+			fillRect(hdc, win.RECT{Left: g.x, Top: g.titleY, Right: g.x + g.w, Bottom: g.titleY + g.titleH}, brush)
+			win.DeleteObject(win.HGDIOBJ(brush))
+		}
+		// Active accent underline under the mini tab.
+		if g.focused {
+			fr, fg, fb := chrome.PrimR, chrome.PrimG, chrome.PrimB
+			if fr == 0 && fg == 0 && fb == 0 {
+				fr, fg, fb = 0, 230, 118
+			}
+			ulb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(fr, fg, fb)}
+			if ub := win.CreateBrushIndirect(&ulb); ub != 0 {
+				th := int32(2)
+				if th > g.titleH {
+					th = 1
+				}
+				bot := g.titleY + g.titleH
+				fillRect(hdc, win.RECT{Left: g.x, Top: bot - th, Right: g.x + g.w, Bottom: bot}, ub)
+				win.DeleteObject(win.HGDIOBJ(ub))
+			}
+		}
+		title := "shell"
+		if g.pane != nil {
+			if g.pane.title != "" {
+				title = g.pane.title
+			} else {
+				title = fmt.Sprintf("shell %d", g.pane.id+1)
+			}
+			if g.pane.busy() {
+				title = "◌ " + title
+			}
+		}
+		maxChars := int(g.w/cw) - 2
+		if maxChars < 1 {
+			maxChars = 1
+		}
+		rs := []rune(title)
+		if len(rs) > maxChars {
+			if maxChars > 1 {
+				title = string(rs[:maxChars-1]) + "…"
+			} else {
+				title = string(rs[:maxChars])
+			}
+		}
+		tr, tg, tb := chrome.SoftR, chrome.SoftG, chrome.SoftB
+		if g.focused {
+			tr, tg, tb = chrome.TextR, chrome.TextG, chrome.TextB
+		}
+		if u.font != 0 {
+			oldF := win.SelectObject(hdc, win.HGDIOBJ(u.font))
+			win.SetBkMode(hdc, win.TRANSPARENT)
+			win.SetTextColor(hdc, win.RGB(tr, tg, tb))
+			if s, err := syscall.UTF16FromString(" " + title); err == nil && len(s) > 1 {
+				win.TextOut(hdc, g.x, g.titleY, &s[0], int32(len(s)-1))
+			}
+			win.SelectObject(hdc, oldF)
+		}
+	}
+}
+
+// paintPaneBorders draws a *shared* dim perimeter + internal sashes (no double
+// borders between siblings), then a primary highlight on the focused leaf.
+func (u *winUI) paintPaneBorders(hdc win.HDC, layouts []paneGeom) {
+	if len(layouts) < 2 || hdc == 0 {
+		return
+	}
+	dr, dg, db := chrome.MuteR, chrome.MuteG, chrome.MuteB
+	if dr == 0 && dg == 0 && db == 0 {
+		dr, dg, db = 70, 70, 80
+	}
+	pr, pg, pb := chrome.PrimR, chrome.PrimG, chrome.PrimB
+	if pr == 0 && pg == 0 && pb == 0 {
+		pr, pg, pb = 0, 230, 118
+	}
+	// Dim sash color: mute with a hint of primary.
+	dr = byte((int(dr)*3 + int(pr)) / 4)
+	dg = byte((int(dg)*3 + int(pg)) / 4)
+	db = byte((int(db)*3 + int(pb)) / 4)
+
+	dlb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(dr, dg, db)}
+	dbrush := win.CreateBrushIndirect(&dlb)
+	if dbrush == 0 {
+		return
+	}
+	defer win.DeleteObject(win.HGDIOBJ(dbrush))
+
+	plb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(pr, pg, pb)}
+	pbrush := win.CreateBrushIndirect(&plb)
+	if pbrush != 0 {
+		defer win.DeleteObject(win.HGDIOBJ(pbrush))
+	}
+
+	// Outer shell perimeter (once) — shared frame for the whole split group.
+	sx, sy, sw, sh := u.lastShell.x, u.lastShell.y, u.lastShell.w, u.lastShell.h
+	if sw < 1 || sh < 1 {
+		// Fallback: union of leaf outer rects.
+		sx, sy = layouts[0].x, layouts[0].outerY
+		if layouts[0].outerH < 1 {
+			sy = layouts[0].y
+		}
+		var maxR, maxB int32
+		for _, g := range layouts {
+			oy, oh := g.outerY, g.outerH
+			if oh < 1 {
+				oy, oh = g.y, g.h
+			}
+			if g.x < sx {
+				sx = g.x
+			}
+			if oy < sy {
+				sy = oy
+			}
+			if g.x+g.w > maxR {
+				maxR = g.x + g.w
+			}
+			if oy+oh > maxB {
+				maxB = oy + oh
+			}
+		}
+		sw, sh = maxR-sx, maxB-sy
+	}
+	const dimT int32 = 1
+	u.fillPaneBorder(hdc, sx, sy, sw, sh, dimT, dbrush)
+
+	// Internal sashes: single shared divider (fills the gap between siblings).
+	for _, s := range u.lastSashes {
+		if s.w < 1 || s.h < 1 {
+			continue
+		}
+		// Draw a 1px line centered in the sash strip for a clean hairline.
+		if s.dir == splitVert {
+			cx := s.x + s.w/2
+			if cx < s.x {
+				cx = s.x
+			}
+			fillRect(hdc, win.RECT{Left: cx, Top: s.y, Right: cx + 1, Bottom: s.y + s.h}, dbrush)
+		} else {
+			cy := s.y + s.h/2
+			if cy < s.y {
+				cy = s.y
+			}
+			fillRect(hdc, win.RECT{Left: s.x, Top: cy, Right: s.x + s.w, Bottom: cy + 1}, dbrush)
+		}
+	}
+
+	// Active pane: primary highlight on its outer edges (overlays shared sashes).
+	if pbrush == 0 {
+		return
+	}
+	const hotT int32 = 2
+	for _, g := range layouts {
+		if !g.focused {
+			continue
+		}
+		oy, oh := g.outerY, g.outerH
+		if oh < 1 {
+			oy, oh = g.y, g.h
+		}
+		if g.w < 2 || oh < 2 {
+			continue
+		}
+		u.fillPaneBorder(hdc, g.x, oy, g.w, oh, hotT, pbrush)
+	}
+}
+
+// fillPaneBorder paints a hollow rectangle frame of thickness t.
+func (u *winUI) fillPaneBorder(hdc win.HDC, x, y, w, h, t int32, brush win.HBRUSH) {
+	if brush == 0 || w < 1 || h < 1 || t < 1 {
+		return
+	}
+	if t*2 > w {
+		t = w / 2
+	}
+	if t*2 > h {
+		t = h / 2
+	}
+	if t < 1 {
+		return
+	}
+	// top, bottom, left, right
+	fillRect(hdc, win.RECT{Left: x, Top: y, Right: x + w, Bottom: y + t}, brush)
+	fillRect(hdc, win.RECT{Left: x, Top: y + h - t, Right: x + w, Bottom: y + h}, brush)
+	fillRect(hdc, win.RECT{Left: x, Top: y, Right: x + t, Bottom: y + h}, brush)
+	fillRect(hdc, win.RECT{Left: x + w - t, Top: y, Right: x + w, Bottom: y + h}, brush)
 }
 
 // measureCellSize returns the monospaced cell size for the font selected in hdc.
@@ -2870,6 +3528,13 @@ func (u *winUI) focus() {
 }
 
 func (u *winUI) pixelToCell(px, py int32) (x, y int) {
+	x, y, _ = u.pixelToCellInPane(px, py, u.activeTab())
+	return x, y
+}
+
+// pixelToCellInPane maps client pixels to cell coords within a pane's layout.
+// viewRows is the pane viewport height for scrollback absLine.
+func (u *winUI) pixelToCellInPane(px, py int32, tab *tab) (x, y, viewRows int) {
 	cw, ch := u.metricW, u.metricH
 	if cw < 1 {
 		cw = cellW
@@ -2877,8 +3542,21 @@ func (u *winUI) pixelToCell(px, py int32) (x, y int) {
 	if ch < 1 {
 		ch = cellH
 	}
-	const padX int32 = 4
+	viewRows = u.rows
+	cols := u.cols
+	padX := int32(4)
 	padY := u.shellPadY()
+	if tab != nil {
+		if g := u.paneGeomFor(tab.id); g != nil {
+			padX, padY = g.x, g.y
+			if g.rows > 0 {
+				viewRows = g.rows
+			}
+			if g.cols > 0 {
+				cols = g.cols
+			}
+		}
+	}
 	x = int((px - padX) / cw)
 	y = int((py - padY) / ch)
 	if x < 0 {
@@ -2887,13 +3565,13 @@ func (u *winUI) pixelToCell(px, py int32) (x, y int) {
 	if y < 0 {
 		y = 0
 	}
-	if x >= u.cols {
-		x = u.cols - 1
+	if cols > 0 && x >= cols {
+		x = cols - 1
 	}
-	if y >= u.rows {
-		y = u.rows - 1
+	if viewRows > 0 && y >= viewRows {
+		y = viewRows - 1
 	}
-	return
+	return x, y, viewRows
 }
 
 func (u *winUI) copySelection() {
@@ -2977,6 +3655,8 @@ func (u *winUI) drainQueuedBackspaces(hwnd win.HWND) {
 }
 
 func (u *winUI) releaseBackbuffer() {
+	// memDC contents are gone — next overlay paint must rebuild dim+neko.
+	u.overlaySceneReady = false
 	if u.memDC == 0 {
 		return
 	}
@@ -3001,6 +3681,34 @@ func (u *winUI) releaseBackbuffer() {
 	win.DeleteDC(u.memDC)
 	u.memDC = 0
 	u.memW, u.memH = 0, 0
+}
+
+// dimShellModal is true when a modal replaces the live terminal with a dim
+// matte (settings rain / splash / confirm). Palette and shortcuts (help) float
+// over the live shell instead — no dim 猫咪, Warp bars stay visible on top.
+func (u *winUI) dimShellModal() bool {
+	if u == nil {
+		return false
+	}
+	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
+}
+
+// staticDimUnderlay is true for dim modals that don't animate (splash/confirm).
+// Settings matrix rain always full-repaints. Palette/help never use this path.
+func (u *winUI) staticDimUnderlay() bool {
+	if u == nil || u.chrome.SettingsOpen {
+		return false
+	}
+	return u.chrome.ConfirmOpen || u.chrome.SplashOpen
+}
+
+// floatOverLiveShell is true when a card paints over the live terminal
+// (palette, shortcuts) rather than a dim modal matte.
+func (u *winUI) floatOverLiveShell() bool {
+	if u == nil || u.dimShellModal() {
+		return false
+	}
+	return u.chrome.PaletteOpen || u.chrome.HelpOpen
 }
 
 func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
@@ -3046,6 +3754,24 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	}
 	u.memW, u.memH = w, h
 	return true
+}
+
+// shellMatrixOn is true when settings ask for always-on shell rain.
+func (u *winUI) shellMatrixOn() bool {
+	return u != nil && u.cfg.ShellMatrix
+}
+
+// paintShellMatrix draws quiet looping rain under the shell (not over glyphs).
+func (u *winUI) paintShellMatrix(hdc win.HDC, rect win.RECT, padY, bot int32) {
+	if bot <= padY {
+		return
+	}
+	// Use blinkStart so rain keeps moving with the animation clock.
+	t0 := u.blinkStart
+	if t0.IsZero() {
+		t0 = time.Now()
+	}
+	u.paintDimMatrixIntensity(hdc, rect, padY, bot, matrixLoop, t0, 0, shellMatrixIntensity)
 }
 
 // matrixIntroActive is true while startup rain is spawning or winding down.
@@ -3127,7 +3853,9 @@ func (u *winUI) paintMatrixIntro(hdc win.HDC, rect win.RECT) {
 
 // paintDimShell darkens the shell viewport under a floating overlay.
 // Settings: animated Matrix rain. Other modals: Charm-style 猫咪 field.
+// Restored from b78e569 (pre-session dim formula + dense grid).
 func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
+	defer applog.Recover("paintDimShell", false)
 	padY := u.shellPadY()
 	bot := u.shellBottomY(rect.Bottom - rect.Top)
 	if bot <= padY {
@@ -3170,7 +3898,9 @@ var dimUnderlayChars = []string{"猫", "咪"}
 // paintDimNekoField draws a Charm-style 猫咪 pattern over the dim matte.
 // Fullwidth glyphs advance two mono cells. Very dim so the dialog stays dominant.
 // Uses a clip rect so a partial last row still fills leftover height (no blank band).
+// Restored from b78e569 (1/12 soft + 11/12 dim; every row, stepX = 2 cells).
 func (u *winUI) paintDimNekoField(hdc win.HDC, rect win.RECT, top, bot int32) {
+	defer applog.Recover("paintDimNekoField", false)
 	if hdc == 0 || bot <= top {
 		return
 	}
@@ -3242,11 +3972,49 @@ func (u *winUI) paintDimNekoField(hdc win.HDC, rect win.RECT, top, bot int32) {
 // paintInputBar draws the Warp-style fixed command line at the bottom.
 // Grows with soft-wrap / Shift+Enter newlines (capped at maxInputVisualRows).
 // Skipped while a full-screen (alt-screen) app owns the keyboard.
+// paintInputBar draws the Warp bar for every leaf on the active page
+// (each pane owns its bar at the bottom of its leaf).
 func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 	if hdc == 0 {
 		return
 	}
-	if u.appOwnsKeyboard() {
+	layouts := u.lastPaneLayout
+	if len(layouts) == 0 {
+		layouts = u.computeActiveLayout()
+	}
+	if len(layouts) == 0 {
+		// Solo fallback before layout exists.
+		if t := u.activeTab(); t != nil && !t.altScreen() {
+			cw, ch := u.metricW, u.metricH
+			if cw < 1 {
+				cw = cellW
+			}
+			if ch < 1 {
+				ch = cellH
+			}
+			w := rect.Right - rect.Left
+			barH := paneInputBarPixelHeight(t, w, cw, ch)
+			if barH > 0 {
+				g := paneGeom{
+					pane: t, x: 0, w: w, barY: rect.Bottom - barH, barH: barH,
+					barCols: paneInputContentCols(w, cw), focused: true,
+				}
+				u.paintPaneInputBar(hdc, g)
+			}
+		}
+		return
+	}
+	for _, g := range layouts {
+		if g.barH < 1 || g.pane == nil {
+			continue
+		}
+		u.paintPaneInputBar(hdc, g)
+	}
+}
+
+// paintPaneInputBar draws one pane's command line into g.barY/g.barH.
+func (u *winUI) paintPaneInputBar(hdc win.HDC, g paneGeom) {
+	if hdc == 0 || g.pane == nil || g.barH < 1 {
 		return
 	}
 	cw, ch := u.metricW, u.metricH
@@ -3256,129 +4024,122 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 	if ch < 1 {
 		ch = cellH
 	}
-	clientH := rect.Bottom - rect.Top
-	barH := u.inputBarPixelHeight()
-	u.inputPx = barH
-	top := clientH - barH
-	if top < 0 {
-		top = 0
-	}
+	top := g.barY
+	left := g.x
+	right := g.x + g.w
+	bot := g.barY + g.barH
 
-	// Panel fill.
+	// Panel fill (slightly dimmer when unfocused).
+	pr, pg, pb := chrome.PanelR, chrome.PanelG, chrome.PanelB
+	if !g.focused {
+		// Blend toward void so unfocused bars read as secondary.
+		pr = pr/2 + chrome.VoidR/2
+		pg = pg/2 + chrome.VoidG/2
+		pb = pb/2 + chrome.VoidB/2
+	}
 	{
-		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.PanelR, chrome.PanelG, chrome.PanelB)}
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(pr, pg, pb)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			r := win.RECT{Left: 0, Top: top, Right: rect.Right, Bottom: rect.Bottom}
-			fillRect(hdc, r, brush)
+			fillRect(hdc, win.RECT{Left: left, Top: top, Right: right, Bottom: bot}, brush)
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
 	hair, topPad, _ := inputBarVPads(ch)
-	// Top accent hairline (primary).
+	// Top hairline: primary when focused, mute otherwise.
+	hr, hg, hb := chrome.MuteR, chrome.MuteG, chrome.MuteB
+	if g.focused {
+		hr, hg, hb = chrome.PrimR, chrome.PrimG, chrome.PrimB
+	}
 	{
-		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB)}
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(hr, hg, hb)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			r := win.RECT{Left: 0, Top: top, Right: rect.Right, Bottom: top + hair}
-			fillRect(hdc, r, brush)
+			fillRect(hdc, win.RECT{Left: left, Top: top, Right: right, Bottom: top + hair}, brush)
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
 
-	const padX int32 = 8
-	// Content starts after hairline + top pad (matches inputBarPixelHeight).
+	padX := left + inputBarPadX
 	padTop := top + hair + topPad
 
 	oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	defer win.SelectObject(hdc, oldFont)
 	win.SetBkMode(hdc, win.TRANSPARENT)
 
-	// Working directory row above the command line (when known).
-	cwdY := padTop
-	if p := u.inputBarCwd(); p != "" {
-		maxCols := int((rect.Right - padX - 8) / cw)
+	// Working directory row.
+	if p := displayPath(g.pane.cwd); p != "" {
+		maxCols := int((g.w - inputBarPadX*2) / cw)
 		if maxCols < 8 {
 			maxCols = 8
 		}
 		label := truncateRunes(p, maxCols)
 		if s, err := syscall.UTF16FromString(label); err == nil && len(s) >= 2 {
 			win.SetTextColor(hdc, win.RGB(chrome.SoftR, chrome.SoftG, chrome.SoftB))
-			win.TextOut(hdc, padX, cwdY, &s[0], int32(len(s)-1))
+			win.TextOut(hdc, padX, padTop, &s[0], int32(len(s)-1))
 		}
 		padTop += ch
 	}
 
 	prompt := inputBarPrompt
-	promptRunes := len([]rune(prompt))
-	promptW := int32(promptRunes) * cw
-	contentCols := u.inputContentCols()
+	promptW := int32(len([]rune(prompt))) * cw
+	contentCols := g.barCols
+	if contentCols < 1 {
+		contentCols = paneInputContentCols(g.w, cw)
+	}
+	in := &g.pane.input
+	empty := len(in.runes) == 0
 
-	in := u.activeInput()
-	empty := in == nil || len(in.runes) == 0
+	textR, textG, textB := chrome.TextR, chrome.TextG, chrome.TextB
+	softR, softG, softB := chrome.SoftR, chrome.SoftG, chrome.SoftB
+	primR, primG, primB := chrome.PrimR, chrome.PrimG, chrome.PrimB
+	if !g.focused {
+		textR, textG, textB = softR, softG, softB
+	}
 
-	// Placeholder when empty.
 	if empty {
-		pr, err := syscall.UTF16FromString(prompt)
-		if err == nil && len(pr) >= 2 {
-			win.SetTextColor(hdc, win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB))
+		if pr, err := syscall.UTF16FromString(prompt); err == nil && len(pr) >= 2 {
+			win.SetTextColor(hdc, win.RGB(primR, primG, primB))
 			win.TextOut(hdc, padX, padTop, &pr[0], int32(len(pr)-1))
 		}
-		// Fancy ⇧ when the active font has it; else ASCII (see refreshKeyGlyphs).
-		// Nudge 2 cells right of the prompt so it doesn't crowd the ❯.
-		hint := chrome.InputBarPlaceholder()
-		if s, err := syscall.UTF16FromString(hint); err == nil && len(s) >= 2 {
-			win.SetTextColor(hdc, win.RGB(chrome.SoftR, chrome.SoftG, chrome.SoftB))
-			win.TextOut(hdc, padX+promptW+2*cw, padTop, &s[0], int32(len(s)-1))
+		if g.focused {
+			hint := chrome.InputBarPlaceholder()
+			if s, err := syscall.UTF16FromString(hint); err == nil && len(s) >= 2 {
+				win.SetTextColor(hdc, win.RGB(softR, softG, softB))
+				win.TextOut(hdc, padX+promptW+2*cw, padTop, &s[0], int32(len(s)-1))
+			}
+			u.paintInputCaret(hdc, padX+promptW, padTop, cw, ch)
 		}
-		// Caret at start.
-		u.paintInputCaret(hdc, padX+promptW, padTop, cw, ch)
 		return
 	}
 
 	view, caretRow, caretCol := in.visibleWindow(contentCols, maxInputVisualRows)
-	indentW := promptW // continuation lines align under content start
-
 	for i, line := range view {
 		y := padTop + int32(i)*ch
 		xText := padX + promptW
 		if i == 0 {
-			// Prompt only on first visible row when that row is the logical start.
-			// When scrolled, still show a dim continuation marker.
-			if caretRow == i && /* best effort: */ true {
-				pr, err := syscall.UTF16FromString(prompt)
-				if err == nil && len(pr) >= 2 {
-					win.SetTextColor(hdc, win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB))
-					win.TextOut(hdc, padX, y, &pr[0], int32(len(pr)-1))
-				}
+			if pr, err := syscall.UTF16FromString(prompt); err == nil && len(pr) >= 2 {
+				win.SetTextColor(hdc, win.RGB(primR, primG, primB))
+				win.TextOut(hdc, padX, y, &pr[0], int32(len(pr)-1))
 			}
-		} else {
-			xText = padX + indentW
-		}
-		// For row 0 we already reserved promptW; for others indent matches.
-		if i == 0 {
-			xText = padX + promptW
 		}
 		if line != "" {
 			if s, err := syscall.UTF16FromString(line); err == nil && len(s) >= 2 {
-				win.SetTextColor(hdc, win.RGB(chrome.TextR, chrome.TextG, chrome.TextB))
+				win.SetTextColor(hdc, win.RGB(textR, textG, textB))
 				win.TextOut(hdc, xText, y, &s[0], int32(len(s)-1))
 			}
 		}
 	}
 
-	// Caret on the caret row within the window.
+	if !g.focused {
+		return
+	}
 	caretY := padTop + int32(caretRow)*ch
 	caretX := padX + promptW + int32(caretCol)*cw
-
-	// Fish-style ghost: remainder of the first Tab completion (soft color).
-	if tab := u.activeTab(); tab != nil {
-		if ghost := in.ghostSuffix(tab.cwd); ghost != "" {
-			if s, err := syscall.UTF16FromString(ghost); err == nil && len(s) >= 2 {
-				win.SetTextColor(hdc, win.RGB(chrome.MuteR, chrome.MuteG, chrome.MuteB))
-				win.TextOut(hdc, caretX, caretY, &s[0], int32(len(s)-1))
-			}
+	if ghost := in.ghostSuffix(g.pane.cwd); ghost != "" {
+		if s, err := syscall.UTF16FromString(ghost); err == nil && len(s) >= 2 {
+			win.SetTextColor(hdc, win.RGB(chrome.MuteR, chrome.MuteG, chrome.MuteB))
+			win.TextOut(hdc, caretX, caretY, &s[0], int32(len(s)-1))
 		}
 	}
-
 	u.paintInputCaret(hdc, caretX, caretY, cw, ch)
 }
 
@@ -3612,6 +4373,7 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 
 // paintOverlay draws the floating settings/palette card over the shell.
 func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
+	defer applog.Recover("paintOverlay", false)
 	if hdc == 0 || !u.chrome.OverlayOpen() {
 		return
 	}
@@ -3625,6 +4387,10 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 		func() {
 			defer applog.Recover("paintOverlay.render", false)
 			ct := chrome.RenderOverlayToTerm(u.chrome, cols)
+			if ct == nil {
+				u.overlayCells = nil
+				return
+			}
 			ccols, crows := ct.Size()
 			const maxOverlayRows = 48
 			if crows > maxOverlayRows {
@@ -3632,6 +4398,9 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 			}
 			if crows < 1 {
 				crows = 1
+			}
+			if ccols < 1 {
+				ccols = 1
 			}
 			cells := make([][]cellPix, crows)
 			for y := 0; y < crows; y++ {
