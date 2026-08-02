@@ -20,16 +20,30 @@ body {
   line-height: 1.55;
   font-size: 15px;
 }
+#matrix {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.85;
+}
 .bg {
   position: fixed;
   inset: 0;
-  z-index: -1;
+  z-index: 1;
+  /* Soft vignette so text stays readable over the rain */
   background:
-    radial-gradient(ellipse 80% 50% at 50% -10%, #0a5c3233, transparent 55%),
-    radial-gradient(ellipse 60% 40% at 80% 80%, #00e67612, transparent 50%),
-    var(--bg);
+    radial-gradient(ellipse 90% 70% at 50% 40%, transparent 20%, #050806ee 75%),
+    linear-gradient(180deg, #050806cc 0%, transparent 18%, transparent 70%, #050806f0 100%);
   pointer-events: none;
 }
+.wrap {
+  position: relative;
+  z-index: 2;
+}
+/* .wrap positioning is set above with z-index */
 .wrap {
   width: min(920px, 92vw);
   margin: 0 auto;
@@ -105,11 +119,17 @@ nav a:hover { color: var(--accent); }
 }
 .btn.ghost:hover { color: var(--fg); border-color: var(--mute); }
 .meta { color: var(--mute); font-size: 0.82rem; margin: 0; }
+.meta.fine-inline { margin-top: 0.35rem; opacity: 0.8; font-size: 0.78rem; }
 .meta code {
   font-family: var(--mono);
   background: var(--panel);
   padding: 0.1rem 0.35rem;
   border-radius: 3px;
+}
+/* Cards slightly more opaque over rain */
+.grid article {
+  background: rgba(14, 20, 16, 0.92);
+  backdrop-filter: blur(4px);
 }
 
 .grid {
@@ -119,7 +139,6 @@ nav a:hover { color: var(--accent); }
   padding: 1rem 0 2.5rem;
 }
 .grid article {
-  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1.15rem 1.2rem;
