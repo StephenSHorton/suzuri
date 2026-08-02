@@ -58,7 +58,13 @@ jobs:
           CGO_ENABLED: "1"
         run: |
           v="${{ steps.ver.outputs.version }}"
+          # Windows: -H windowsgui so double-click launches the host without a
+          # spare console. CLI (`version`) reattaches via winconsole; `mcp` keeps
+          # inherited pipes. macOS: plain executable (no PE subsystem flag).
           ld="-s -w -X main.version=$v"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            ld="-H windowsgui $ld"
+          fi
           out="suzuri${{ matrix.ext }}"
           go build -ldflags "$ld" -o "$out" ./cmd/suzuri
           ls -la "$out"

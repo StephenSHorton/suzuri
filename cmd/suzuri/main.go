@@ -12,11 +12,15 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/mcpsrv"
 	"github.com/StephenSHorton/suzuri/internal/ui"
 	"github.com/StephenSHorton/suzuri/internal/update"
+	"github.com/StephenSHorton/suzuri/internal/winconsole"
 )
 
 // version is injected at release build time:
 //
 //	go build -ldflags "-X main.version=0.6.0" ./cmd/suzuri
+//
+// Windows release builds also use -H windowsgui so double-click does not open a
+// console. CLI subcommands reattach to the parent console when needed.
 //
 // Dev/local builds stay "dev" and never auto-update.
 var version = "dev"
@@ -25,7 +29,8 @@ func main() {
 	// Subcommands before GUI init. `suzuri mcp` is spawn-on-demand stdio MCP
 	// (Grok starts it; no always-on daemon). See docs/mcp.md.
 	if len(os.Args) > 1 && os.Args[1] == "mcp" {
-		// MCP speaks on stdio — never send applog to stdout.
+		// MCP speaks on inherited pipes — do not AttachConsole (would steal
+		// stdio from the host). Never send applog to stdout.
 		if err := mcpsrv.RunStdio(); err != nil {
 			fmt.Fprintf(os.Stderr, "suzuri mcp: %v\n", err)
 			os.Exit(1)
@@ -33,6 +38,8 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "-version" || os.Args[1] == "--version") {
+		// windowsgui builds have no console unless we reattach to the parent.
+		winconsole.AttachParent()
 		fmt.Println(version)
 		return
 	}

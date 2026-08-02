@@ -28,7 +28,8 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            go build -o suzuri.exe ./cmd/suzuri
+            # Match release: GUI subsystem, no console on double-click.
+            go build -ldflags "-H windowsgui -s -w" -o suzuri.exe ./cmd/suzuri
           else
             go build -o suzuri ./cmd/suzuri
           fi

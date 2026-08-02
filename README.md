@@ -38,7 +38,7 @@ Most “pretty terminals” are either:
 **Windows**
 
 1. Grab **`suzuri-*-windows-amd64.exe`** (or the `.zip`) from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
-2. Run it — no installer. Config lives in `%LOCALAPPDATA%\suzuri\`.  
+2. Double-click or run it — no installer, no spare console window (GUI subsystem). Config lives in `%LOCALAPPDATA%\suzuri\`.  
 3. Optional: pin the exe or put it on your `PATH`.
 
 **macOS (Apple Silicon)**
@@ -56,7 +56,10 @@ Most “pretty terminals” are either:
 git clone https://github.com/StephenSHorton/suzuri.git
 cd suzuri
 go test ./...
-go build -ldflags "-s -w -X main.version=dev" -o suzuri.exe ./cmd/suzuri
+# -H windowsgui: no spare console on double-click / Start Menu (GUI host only).
+# Logs still go to %LOCALAPPDATA%\suzuri\suzuri.log. `suzuri version` reattaches
+# to the parent console when run from a shell.
+go build -ldflags "-H windowsgui -s -w -X main.version=dev" -o suzuri.exe ./cmd/suzuri
 .\suzuri.exe
 ```
 
