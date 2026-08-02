@@ -228,22 +228,24 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 
 	// Rasterize at a moderate size for clean topology, then NN-scale up.
 	// Cell-sized source was too small — AA crumbs scaled into static.
-	const srcPx = 48
-	face := cjkFaceForSize(float64(srcPx) * 0.78)
+	const srcPx = 64
+	face := cjkFaceForSize(float64(srcPx) * 0.72)
 	if face == nil {
 		return
 	}
 	defer func() { _ = face.Close() }()
 	m := face.Metrics()
 	ascent := m.Ascent.Round()
-	// Center glyph in the square.
-	dr, mask, maskp, _, ok := face.Glyph(fixed.P(srcPx/8, ascent+srcPx/10), shellWatermarkRune)
+	// Baseline near optical middle of the square (not top-heavy).
+	dr, mask, maskp, _, ok := face.Glyph(fixed.P(srcPx/6, ascent+(srcPx-ascent)/3), shellWatermarkRune)
 	if !ok || mask == nil {
 		return
 	}
 	// Hard-threshold mask → solid 1-bit bitmap (no AA haze).
 	bin := make([]bool, srcPx*srcPx)
 	hasInk := false
+	minX, minY := srcPx, srcPx
+	maxX, maxY := -1, -1
 	for y := dr.Min.Y; y < dr.Max.Y; y++ {
 		for x := dr.Min.X; x < dr.Max.X; x++ {
 			if x < 0 || y < 0 || x >= srcPx || y >= srcPx {
@@ -254,10 +256,22 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 			if a >= 0x8000 {
 				bin[y*srcPx+x] = true
 				hasInk = true
+				if x < minX {
+					minX = x
+				}
+				if y < minY {
+					minY = y
+				}
+				if x > maxX {
+					maxX = x
+				}
+				if y > maxY {
+					maxY = y
+				}
 			}
 		}
 	}
-	if !hasInk {
+	if !hasInk || maxX < minX || maxY < minY {
 		return
 	}
 	// 1px close: fill single-pixel holes so strokes stay connected.
@@ -282,42 +296,78 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 			}
 			if n >= 3 {
 				bin[i] = true
+				if x < minX {
+					minX = x
+				}
+				if y < minY {
+					minY = y
+				}
+				if x > maxX {
+					maxX = x
+				}
+				if y > maxY {
+					maxY = y
+				}
 			}
 		}
+	}
+
+	// Crop to ink bounds so empty bitmap padding doesn't shift the visual center.
+	inkW := maxX - minX + 1
+	inkH := maxY - minY + 1
+	if inkW < 2 || inkH < 2 {
+		return
 	}
 
 	side := shellH
 	if shellW < side {
 		side = shellW
 	}
-	destH := side * 42 / 100
-	if destH < p.cellH*7 {
-		destH = p.cellH * 7
+	// Fit ink box into ~40% of the shorter shell axis (preserve aspect).
+	destSide := side * 40 / 100
+	if destSide < p.cellH*7 {
+		destSide = p.cellH * 7
 	}
-	if destH > 220 {
-		destH = 220
+	if destSide > 220 {
+		destSide = 220
 	}
-	destW := destH // square-ish fullwidth mark
+	var destW, destH int
+	if inkW >= inkH {
+		destW = destSide
+		destH = destSide * inkH / inkW
+	} else {
+		destH = destSide
+		destW = destSide * inkW / inkH
+	}
 	if destW > shellW*80/100 {
 		destW = shellW * 80 / 100
-		destH = destW
+		destH = destW * inkH / inkW
 	}
 	if destW < 1 || destH < 1 {
 		return
 	}
-	dx := (shellW - destW) / 2
-	dy := padY + (shellH-destH)/2
 
-	// Nearest-neighbor: each src bit becomes a solid dest block of ink.
+	// Geometric center of the shell band, then a small optical lift —
+	// CJK squares read low when purely geometric; ~6% of mark height up.
+	dx := (shellW - destW) / 2
+	dy := padY + (shellH-destH)/2 - destH/12
+	if dy < padY {
+		dy = padY
+	}
+	if dy+destH > shellBot {
+		dy = shellBot - destH
+	}
+
+	// Nearest-neighbor from cropped ink bounds only.
 	for y := 0; y < destH; y++ {
-		sy := y * srcPx / destH
-		if sy >= srcPx {
-			sy = srcPx - 1
+		sy := minY + y*inkH/destH
+		if sy > maxY {
+			sy = maxY
 		}
 		for x := 0; x < destW; x++ {
-			sx := x * srcPx / destW
-			if sx >= srcPx {
-				sx = srcPx - 1
+			sx := minX + x*inkW/destW
+			if sx > maxX {
+				sx = maxX
 			}
 			if !bin[sy*srcPx+sx] {
 				continue
