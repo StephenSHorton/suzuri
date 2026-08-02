@@ -121,6 +121,10 @@ type macUI struct {
 	matrixIntroDone     bool
 	matrixIntroClearAt  time.Time
 
+	// Settings underlay intro preview (loops with a gap between full plays).
+	settingsPreviewT0     time.Time
+	settingsIntroIdleUntil time.Time
+
 	// Deferred work from PTY/MCP goroutines → UI tick.
 	jobs    chan func()
 	mcpJobs chan mcpJob
@@ -825,6 +829,9 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionQuit:
 		u.quit = true
 	case chrome.ActionOpenSettings:
+		// Fresh underlay cycle each time settings opens.
+		u.settingsPreviewT0 = time.Now()
+		u.settingsIntroIdleUntil = time.Time{}
 		if r.Settings.FontFace != "" || r.Settings.FontSizePx > 0 {
 			u.applyConfigLive(r.Settings)
 		}
@@ -934,6 +941,11 @@ func (u *macUI) applyConfigLive(cfg config.Config) {
 	SetShellANSIMap(cfg.ShellANSIMap)
 	u.chrome = u.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	u.markChromeDirty()
+	// Restart settings underlay cycle when intro style changes (live preview).
+	if !strings.EqualFold(prev.Intro, cfg.Intro) {
+		u.settingsPreviewT0 = time.Now()
+		u.settingsIntroIdleUntil = time.Time{}
+	}
 	fontChanged := prev.FontSizePx != cfg.FontSizePx || !strings.EqualFold(prev.FontFace, cfg.FontFace)
 	if fontChanged {
 		if u.painter != nil {
@@ -951,6 +963,36 @@ func (u *macUI) applyConfigLive(cfg config.Config) {
 		u.fb = nil
 		u.tex = nil
 		u.applyClientSize(u.width, u.height)
+	}
+}
+
+// settingsUnderlayClock returns the animation origin for the settings preview
+// loop. When idle between plays, active is false (no rings/rain for the gap).
+func (u *macUI) settingsUnderlayClock(now time.Time) (t0 time.Time, active bool) {
+	if u == nil {
+		return now, false
+	}
+	if !u.settingsIntroIdleUntil.IsZero() {
+		if now.Before(u.settingsIntroIdleUntil) {
+			return u.settingsPreviewT0, false
+		}
+		// Gap elapsed — start a new full play.
+		u.settingsPreviewT0 = now
+		u.settingsIntroIdleUntil = time.Time{}
+	}
+	if u.settingsPreviewT0.IsZero() {
+		u.settingsPreviewT0 = now
+	}
+	return u.settingsPreviewT0, true
+}
+
+// settingsUnderlayFinished marks a full intro play done and starts the 3s gap.
+func (u *macUI) settingsUnderlayFinished(now time.Time) {
+	if u == nil {
+		return
+	}
+	if u.settingsIntroIdleUntil.IsZero() {
+		u.settingsIntroIdleUntil = now.Add(settingsIntroGap)
 	}
 }
 
@@ -1558,21 +1600,61 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		shellCols = u.cols
 	}
 
-	// Matrix rain: intro curtain, or continuous under settings.
+	// Intro underlay: startup curtain, or settings preview of the chosen style.
 	var rain []rainCell
 	introStyle := config.Normalize(u.cfg).Intro
 	now := time.Now()
+	cwPx, chPx := cw, ch
 	if u.chrome.SettingsOpen {
-		rain = matrixRainCells(shellCols, shellRows, matrixLoop, u.blinkStart, 0, now)
+		// Live-preview the selected intro behind the settings card.
+		t0, active := u.settingsUnderlayClock(now)
+		if active {
+			switch introStyle {
+			case config.IntroRipple:
+				// Fullwidth columns for 猫/咪 rings.
+				rCols := shellCols / 2
+				if rCols < 2 {
+					rCols = 2
+				}
+				var drew bool
+				rain, drew = rippleCells(rCols, shellRows, cwPx, chPx, t0, matrixIntroSpawn, now)
+				// Full play done when spawn elapsed and nothing left on screen.
+				if now.Sub(t0) > matrixIntroSpawn && !drew {
+					u.settingsUnderlayFinished(now)
+				}
+				// Safety: never loop longer than intro max + gap trigger.
+				if now.Sub(t0) > matrixIntroMaxTotal {
+					u.settingsUnderlayFinished(now)
+				}
+			case config.IntroNone:
+				// Quiet dim underlay only (no rain/ripple).
+			default:
+				// Matrix: continuous loop under settings (Windows parity).
+				rain = matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now)
+			}
+		}
+		// idle gap: rain stays nil → dim matte only
 	} else if u.matrixIntroActive() && introStyle != config.IntroNone {
 		mode := matrixSpawn
 		if now.After(u.matrixIntroSpawnEnd) {
 			mode = matrixWindDown
 		}
-		// Ripple falls back to matrix on mac for now (katakana rain still brands).
-		rain = matrixRainCells(shellCols, shellRows, mode, u.matrixIntroStart, matrixIntroSpawn, now)
-		if mode == matrixWindDown && len(rain) == 0 {
-			u.finishMatrixIntro()
+		switch introStyle {
+		case config.IntroRipple:
+			rCols := shellCols / 2
+			if rCols < 2 {
+				rCols = 2
+			}
+			var drew bool
+			rain, drew = rippleCells(rCols, shellRows, cwPx, chPx, u.matrixIntroStart, matrixIntroSpawn, now)
+			if mode == matrixWindDown && !drew {
+				u.finishMatrixIntro()
+			}
+		default:
+			rain = matrixRainCells(shellCols, shellRows, mode, u.matrixIntroStart, matrixIntroSpawn, now)
+			if mode == matrixWindDown && len(rain) == 0 {
+				u.finishMatrixIntro()
+			}
 		}
 	} else if introStyle == config.IntroNone && u.matrixIntroActive() {
 		// No rain — finish after spawn so watermark can fade in.

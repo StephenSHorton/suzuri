@@ -498,16 +498,6 @@ func setRGB(dst *image.RGBA, x, y int, r, g, b byte) {
 	dst.Pix[i+3] = 255
 }
 
-func blendByte(a, b byte, t float64) byte {
-	if t <= 0 {
-		return a
-	}
-	if t >= 1 {
-		return b
-	}
-	return byte(float64(a)*(1-t) + float64(b)*t)
-}
-
 // isTransparentOverlayBG is true for cells that should not cover the dim underlay.
 func isTransparentOverlayBG(r, g, b byte) bool {
 	if r == 0 && g == 0 && b == 0 {

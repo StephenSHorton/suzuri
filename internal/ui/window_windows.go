@@ -3160,20 +3160,6 @@ func (u *winUI) caretAlpha() float64 {
 	return 0.12 + 0.88*s
 }
 
-// blendRGB interpolates from background → foreground by alpha in [0,1].
-func blendRGB(br, bg, bb, fr, fg, fb byte, a float64) (byte, byte, byte) {
-	if a < 0 {
-		a = 0
-	}
-	if a > 1 {
-		a = 1
-	}
-	lerp := func(b, f byte) byte {
-		return byte(float64(b)*(1-a) + float64(f)*a + 0.5)
-	}
-	return lerp(br, fr), lerp(bg, fg), lerp(bb, fb)
-}
-
 // isTransparentOverlayBG is true for cells that should not cover the dim+猫 underlay.
 func isTransparentOverlayBG(r, g, b byte) bool {
 	if r == 0 && g == 0 && b == 0 {

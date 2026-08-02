@@ -163,8 +163,145 @@ func matrixRainCells(cols, rows int, mode matrixPaintMode, t0 time.Time, spawnFo
 	return out
 }
 
-func blendRGB(br, bg, bb, fr, fg, fb byte, a float64) (byte, byte, byte) {
-	return blendByte(br, fr, a), blendByte(bg, fg, a), blendByte(bb, fb, a)
+// settingsIntroGap is idle time between full intro plays under Settings.
+const settingsIntroGap = 3 * time.Second
+
+// rippleGlyphRunes are fullwidth 猫/咪 for expanding rings (CJK face required).
+var rippleGlyphRunes = []rune{'猫', '咪'}
+
+// rippleCells computes one frame of expanding 猫/咪 rings from shell center.
+// t0 is animation origin; spawnFor is how long new rings may birth (then wind-down).
+// drew is false when wind-down has nothing left on screen (cycle complete).
+func rippleCells(cols, rows, cellW, cellH int, t0 time.Time, spawnFor time.Duration, now time.Time) (cells []rainCell, drew bool) {
+	if cols < 2 || rows < 2 || cellW < 1 || cellH < 1 {
+		return nil, false
+	}
+	if t0.IsZero() {
+		t0 = now
+	}
+	t := now.Sub(t0).Seconds()
+	if t < 0 {
+		t = 0
+	}
+	spawnT := spawnFor.Seconds()
+	windDown := t > spawnT
+
+	stepX := cellW * 2
+	if stepX < 2 {
+		stepX = 2
+	}
+	cx := float64(cols-1) / 2
+	cy := float64(rows-1) / 2
+	maxR := math.Hypot(cx, cy*float64(cellH)/float64(cellW)) + 2
+	if maxR < 4 {
+		maxR = 4
+	}
+
+	const (
+		expandSpd = 9.5
+		maxRings  = 4
+		minGap    = 0.45
+		maxGap    = 1.15
+	)
+	rng := uint64(t0.UnixNano())
+	if rng == 0 {
+		rng = 0xC0FFEE1234ABCD
+	}
+	nextF := func() float64 {
+		rng ^= rng << 13
+		rng ^= rng >> 7
+		rng ^= rng << 17
+		return float64(rng%10000) / 10000.0
+	}
+	births := make([]float64, 0, maxRings)
+	bt := 0.0
+	for len(births) < maxRings && bt <= spawnT+0.001 {
+		births = append(births, bt)
+		gap := minGap + nextF()*(maxGap-minGap)
+		bt += gap
+	}
+
+	pr, pg, pb := chrome.PrimR, chrome.PrimG, chrome.PrimB
+	const wr, wg, wb byte = 245, 245, 250
+
+	type cellHit struct {
+		u     float64
+		str   float64
+		glyph int
+	}
+	hits := make([]cellHit, cols*rows)
+
+	for i, birth := range births {
+		if windDown && birth > spawnT {
+			continue
+		}
+		age := t - birth
+		if age < 0 {
+			continue
+		}
+		bandW := 2.15 + float64(i%3)*0.55
+		radius := age * expandSpd
+		if radius > maxR+bandW*2 {
+			continue
+		}
+		for gy := 0; gy < rows; gy++ {
+			for gx := 0; gx < cols; gx++ {
+				dx := float64(gx) - cx
+				dy := (float64(gy) - cy) * float64(cellH) / float64(stepX)
+				d := math.Hypot(dx, dy)
+				band := math.Abs(d - radius)
+				if band > bandW {
+					continue
+				}
+				uCrest := (band/bandW)*.5 + .5*(d-radius+bandW)/(2*bandW)
+				if uCrest < 0 {
+					uCrest = 0
+				}
+				if uCrest > 1 {
+					uCrest = 1
+				}
+				str := 1 - band/bandW
+				str = str * str
+				if radius > maxR*0.75 {
+					str *= 1 - (radius-maxR*0.75)/(maxR*0.35)
+					if str < 0 {
+						continue
+					}
+				}
+				idx := gy*cols + gx
+				if str > hits[idx].str {
+					hits[idx] = cellHit{
+						u:     uCrest,
+						str:   str,
+						glyph: (gx + gy + i) % len(rippleGlyphRunes),
+					}
+				}
+			}
+		}
+	}
+
+	out := make([]rainCell, 0, cols*2)
+	for gy := 0; gy < rows; gy++ {
+		for gx := 0; gx < cols; gx++ {
+			h := hits[gy*cols+gx]
+			if h.str < 0.08 {
+				continue
+			}
+			fr, fg, fb := rippleWaveColor(h.u, pr, pg, pb, wr, wg, wb)
+			fr, fg, fb = blendRGB(0, 0, 0, fr, fg, fb, h.str)
+			if int(fr)+int(fg)+int(fb) < 36 {
+				continue
+			}
+			out = append(out, rainCell{
+				X: gx * 2, // fullwidth columns → mono cell x
+				Y: gy,
+				Ch: rippleGlyphRunes[h.glyph%len(rippleGlyphRunes)],
+				FR: fr, FG: fg, FB: fb,
+			})
+			drew = true
+		}
+	}
+	return out, drew
 }
 
 // paintMatrixRain draws rain cells into the shell band.
