@@ -416,6 +416,17 @@ func (u *macUI) Update() error {
 	}
 drained:
 
+	// Smooth scroll ease toward wheel/key targets (all tabs; cheap).
+	dt := 1.0 / 60.0
+	if tps := ebiten.ActualTPS(); tps > 1 {
+		dt = 1.0 / tps
+	}
+	for _, t := range u.tabs {
+		if t != nil && t.sb != nil {
+			t.sb.tickSmooth(dt)
+		}
+	}
+
 	u.clearToastIfDue()
 	u.handleResize()
 	u.handleMouse()
@@ -1570,6 +1581,15 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		}
 	}
 
+	// Scrollbar metrics (hide on alt-screen / overlays).
+	liveRows := liveExtent(tab.term)
+	scrollTrack := !tab.altScreen() && !u.chrome.OverlayOpen()
+	var thumbY, thumbH int
+	if scrollTrack {
+		trackH := shellBot - padY - 4
+		thumbY, thumbH, scrollTrack = tab.sb.Scrollbar(u.rows, liveRows, trackH)
+	}
+
 	inOpts := u.inputBarPaint()
 	opts := paintOpts{
 		Shell:         grid,
@@ -1585,6 +1605,10 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		SettingsOpen:  u.chrome.SettingsOpen,
 		MatrixCells:   rain,
 		WatermarkFade: u.watermarkFade(),
+		ScrollFrac:    tab.sb.scrollFrac(),
+		ScrollThumbY:  thumbY,
+		ScrollThumbH:  thumbH,
+		ScrollTrack:   scrollTrack,
 		ShowInput:     u.inputBarPixelHeight() > 0,
 		CursorStyle:   int(u.cfg.Cursor),
 	}

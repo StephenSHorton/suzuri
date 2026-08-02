@@ -107,8 +107,14 @@ type paintOpts struct {
 	DimShell     bool
 	SettingsOpen bool
 	// Intro / underlay
-	MatrixCells  []rainCell
+	MatrixCells   []rainCell
 	WatermarkFade float64
+	// Sub-line smooth scroll (0..1): shift shell content up by frac*cellH.
+	ScrollFrac float64
+	// Scrollbar (host-drawn; Charm has no native host scrollbar).
+	ScrollThumbY int
+	ScrollThumbH int
+	ScrollTrack  bool // paint track when true
 	// Input bar (themed; drawn as solid panel + glyphs)
 	InputPrompt   string
 	InputLines    []string // visual lines of content (no prompt on row 0 — prompt separate)
@@ -149,15 +155,24 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		p.paintShellWatermark(dst, padY, shellBot, o.WatermarkFade)
 	}
 
+	// Sub-line smooth scroll: shift grid up by a fraction of a cell.
+	yShift := 0
+	if o.ScrollFrac > 0.001 && o.ScrollFrac < 1 {
+		yShift = int(float64(ch) * o.ScrollFrac)
+	}
+
 	// Shell grid on top of watermark (opaque cell BGs hide the mark).
+	// Leave a few px on the right for the scrollbar track.
+	const scrollGutter = 8
+	shellRight := w - scrollGutter
 	for y, row := range o.Shell {
-		py := padY + y*ch
-		if py+ch > shellBot {
-			break
+		py := padY + y*ch - yShift
+		if py+ch <= padY || py >= shellBot {
+			continue
 		}
 		for x, cell := range row {
 			px := padX + x*cw
-			if px >= w {
+			if px >= shellRight {
 				break
 			}
 			br, bg, bb := cell.BR, cell.BG, cell.BB
@@ -180,6 +195,30 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 			if cell.Ch != 0 && cell.Ch != ' ' {
 				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
 			}
+		}
+	}
+
+	// Scrollbar on the right edge of the shell band (not Charm — host paint).
+	if o.ScrollTrack && shellBot > padY+8 {
+		trackX := w - 6
+		trackTop := padY + 2
+		trackH := shellBot - padY - 4
+		// Dim track
+		fillRectRGBA(dst, trackX, trackTop, 4, trackH, 28, 28, 32)
+		if o.ScrollThumbH > 0 {
+			ty := trackTop + o.ScrollThumbY
+			th := o.ScrollThumbH
+			if ty < trackTop {
+				ty = trackTop
+			}
+			if ty+th > trackTop+trackH {
+				th = trackTop + trackH - ty
+			}
+			// Soft primary thumb
+			tr := blendByte(40, chrome.PrimR, 0.45)
+			tg := blendByte(40, chrome.PrimG, 0.45)
+			tb := blendByte(44, chrome.PrimB, 0.45)
+			fillRectRGBA(dst, trackX, ty, 4, th, tr, tg, tb)
 		}
 	}
 

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"math"
 	"strings"
 
 	"github.com/hinshun/vt10x"
@@ -28,12 +29,16 @@ type histLine struct {
 //
 // pin is a stick-bottom floor set on clear: history before pin stays in the
 // buffer for scroll-up, but does not reappear when following the bottom.
+//
+// offset is the integer scroll target (wheel/keys). visual is a smoothed
+// float that eases toward offset for animated scrolling.
 type scrollback struct {
 	lines  []histLine
 	max    int
 	prev   []string
 	offset int
-	pin    int // first history index shown at stick-bottom (0 = no pin)
+	visual float64 // smoothed lines-from-bottom; drives paint
+	pin    int     // first history index shown at stick-bottom (0 = no pin)
 }
 
 func newScrollback() *scrollback {
@@ -288,16 +293,15 @@ func (s *scrollback) pushBlock(cmd string, cols int) {
 	}
 }
 
-func (s *scrollback) scrollBy(delta, viewportRows int) {
-	// Max offset: enough to bring the first history line to the top of the view.
-	// With a pin, offset counts lines revealed *before* the pin (smooth after clear).
-	maxOff := len(s.lines)
-	if viewportRows > 0 && maxOff > 0 {
-		// Keep at least one line of context; don't overscroll past doc start.
-		if m := maxOff; m > maxOff {
-			maxOff = m
-		}
+func (s *scrollback) maxOffset() int {
+	if s == nil {
+		return 0
 	}
+	return len(s.lines)
+}
+
+func (s *scrollback) scrollBy(delta, viewportRows int) {
+	maxOff := s.maxOffset()
 	s.offset += delta
 	if s.offset < 0 {
 		s.offset = 0
@@ -305,14 +309,19 @@ func (s *scrollback) scrollBy(delta, viewportRows int) {
 	if s.offset > maxOff {
 		s.offset = maxOff
 	}
+	// visual catches up in tickSmooth
+	_ = viewportRows
 }
 
-func (s *scrollback) atBottom() bool { return s.offset == 0 }
+func (s *scrollback) atBottom() bool { return s.offset == 0 && s.visual < 0.05 }
 
-func (s *scrollback) stickBottom() { s.offset = 0 }
+func (s *scrollback) stickBottom() {
+	s.offset = 0
+	s.visual = 0
+}
 
 // pinHere floors stick-bottom at the current history length. Pre-pin lines
-// remain reachable by scrolling up one line at a time (used after clear).
+// remain reachable by scrolling up (used after clear).
 func (s *scrollback) pinHere() {
 	if s == nil {
 		return
@@ -321,11 +330,38 @@ func (s *scrollback) pinHere() {
 	s.stickBottom()
 }
 
+// tickSmooth eases visual toward offset. Call once per frame (dt in seconds).
+func (s *scrollback) tickSmooth(dt float64) {
+	if s == nil {
+		return
+	}
+	if dt <= 0 {
+		dt = 1.0 / 60
+	}
+	if dt > 0.05 {
+		dt = 0.05
+	}
+	target := float64(s.offset)
+	// Exponential ease — snappy but readable (~smooth scroll).
+	const k = 16.0
+	s.visual += (target - s.visual) * (1 - math.Exp(-k*dt))
+	if absFloat(target-s.visual) < 0.02 {
+		s.visual = target
+	}
+}
+
+func absFloat(x float64) float64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // viewWindow returns absolute document start index and top pad for the viewport.
 //
-// offset is lines scrolled up from stick-bottom. With pin set after clear,
-// offset 0 shows only post-pin content (padded); each +1 offset reveals one
-// more pre-pin history line — no full-history flash on first wheel notch.
+// Uses smoothed visual offset. After clear (pin set, short post-pin content),
+// history is revealed from the TOP of the shell (pad bottom), one line per
+// offset notch — not bottom-aligned growth.
 func (s *scrollback) viewWindow(viewportRows, liveRows int) (start, pad int) {
 	if viewportRows < 1 {
 		viewportRows = 1
@@ -342,7 +378,8 @@ func (s *scrollback) viewWindow(viewportRows, liveRows int) (start, pad int) {
 	if pin > histN {
 		pin = histN
 	}
-	off := s.offset
+	// Use floor of visual so partial smooth steps don't skip lines oddly.
+	off := int(s.visual + 1e-6)
 	if off < 0 {
 		off = 0
 	}
@@ -353,34 +390,93 @@ func (s *scrollback) viewWindow(viewportRows, liveRows int) (start, pad int) {
 		post = 0
 	}
 
-	// After clear, post is usually tiny (empty live). Reveal pre-pin gradually:
-	// start = pin - offset (clamped), pad top so content stays bottom-aligned.
+	// After clear: reveal pre-pin from the top of the viewport.
+	// offset 0 → start=pin (empty/short post at top, blanks below)
+	// offset k → start=pin-k (k history lines enter from the top)
 	if pin > 0 && post <= viewportRows {
 		start = pin - off
 		if start < 0 {
 			start = 0
 		}
-		content := docLen - start // pre-pin slice + post-pin + live
-		if content < viewportRows {
-			pad = viewportRows - content
-		}
-		return start, pad
+		// Top-align: no top pad; blanks fall out naturally past doc end.
+		return start, 0
 	}
 
-	// Normal document scroll (no pin, or enough post-pin content to fill view).
+	// Normal document scroll.
 	start = docLen - viewportRows - off
 	if start < 0 {
 		start = 0
 	}
 	// Stick-bottom only: don't peek above pin when fully at bottom.
-	if off == 0 && pin > 0 && start < pin {
+	if off == 0 && s.visual < 0.05 && pin > 0 && start < pin {
 		start = pin
-		content := docLen - start
-		if content < viewportRows {
-			pad = viewportRows - content
-		}
 	}
-	return start, pad
+	return start, 0
+}
+
+// scrollFrac is the fractional part of visual for sub-line pixel smooth scroll.
+func (s *scrollback) scrollFrac() float64 {
+	if s == nil {
+		return 0
+	}
+	f := s.visual - float64(int(s.visual+1e-6))
+	if f < 0 {
+		return 0
+	}
+	return f
+}
+
+// Scrollbar reports thumb placement for a track of the given pixel height.
+// atBottom → thumb near bottom; scrolled to oldest → thumb near top.
+// visible is false when there is nothing to scroll.
+func (s *scrollback) Scrollbar(viewportRows, liveRows, trackH int) (thumbY, thumbH int, visible bool) {
+	if s == nil || trackH < 8 || viewportRows < 1 {
+		return 0, 0, false
+	}
+	histN := len(s.lines)
+	docLen := histN + liveRows
+	maxOff := s.maxOffset()
+	// Show bar if we have history beyond one viewport, or a pin with history above.
+	if maxOff < 1 && (s.pin == 0 || histN == 0) {
+		return 0, 0, false
+	}
+	if docLen <= 1 && maxOff < 1 {
+		return 0, 0, false
+	}
+
+	// Thumb size ∝ viewport / document (min 18px).
+	den := docLen
+	if den < viewportRows+1 {
+		den = viewportRows + 1
+	}
+	ratio := float64(viewportRows) / float64(den)
+	if ratio > 1 {
+		ratio = 1
+	}
+	thumbH = int(float64(trackH) * ratio)
+	if thumbH < 18 {
+		thumbH = 18
+	}
+	if thumbH > trackH {
+		thumbH = trackH
+	}
+	travel := trackH - thumbH
+	if travel < 0 {
+		travel = 0
+	}
+	// visual 0 = bottom (newest) → thumb at bottom; visual max = top.
+	var t float64
+	if maxOff > 0 {
+		t = s.visual / float64(maxOff)
+	}
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
+	thumbY = int(float64(travel) * (1 - t))
+	return thumbY, thumbH, true
 }
 
 // isClearCommand reports shell wipes that should pin scrollback (empty pane,
