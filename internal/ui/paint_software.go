@@ -15,22 +15,31 @@ import (
 
 // softwarePainter rasterizes terminal cell grids into an RGBA buffer.
 type softwarePainter struct {
-	face    font.Face
-	cjkFace font.Face
-	cellW   int
-	cellH   int
-	ascent  int
-	sizePx  float64
+	face     font.Face
+	cjkFace  font.Face
+	cellW    int
+	cellH    int
+	ascent   int
+	sizePx   float64
+	faceName string
 }
 
-func newSoftwarePainter(sizePx int) *softwarePainter {
+// newSoftwarePainter builds a painter for the settings face name + size.
+// faceName empty or bundled → embedded Gohu; otherwise a system mono face.
+func newSoftwarePainter(faceName string, sizePx int) *softwarePainter {
 	if sizePx < 10 {
 		sizePx = 14
 	}
-	face := faceForSize(float64(sizePx))
+	if stringsTrimSpace(faceName) == "" {
+		faceName = BundledFace
+	}
+	face := faceForName(faceName, float64(sizePx))
 	cjk := cjkFaceForSize(float64(sizePx))
 	if face == nil && cjk == nil {
-		return &softwarePainter{cellW: cellW, cellH: cellH, ascent: cellH - 4, sizePx: float64(sizePx)}
+		return &softwarePainter{
+			cellW: cellW, cellH: cellH, ascent: cellH - 4,
+			sizePx: float64(sizePx), faceName: faceName,
+		}
 	}
 	mFace := face
 	if mFace == nil {
@@ -54,12 +63,13 @@ func newSoftwarePainter(sizePx int) *softwarePainter {
 		ascent = ch - 4
 	}
 	return &softwarePainter{
-		face:    face,
-		cjkFace: cjk,
-		cellW:   cw,
-		cellH:   ch,
-		ascent:  ascent,
-		sizePx:  float64(sizePx),
+		face:     face,
+		cjkFace:  cjk,
+		cellW:    cw,
+		cellH:    ch,
+		ascent:   ascent,
+		sizePx:   float64(sizePx),
+		faceName: faceName,
 	}
 }
 

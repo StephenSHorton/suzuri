@@ -50,7 +50,7 @@ func Run() error {
 		blinkStart: time.Now(),
 		nextTabID:  0,
 		chrome:     chrome.New(cols),
-		painter:    newSoftwarePainter(cfg.FontSizePx),
+		painter:    newSoftwarePainter(cfg.FontFace, cfg.FontSizePx),
 		jobs:       make(chan func(), 64),
 		mcpJobs:    make(chan mcpJob, 8),
 	}
@@ -918,14 +918,22 @@ func (u *macUI) applyConfigLive(cfg config.Config) {
 	SetShellANSIMap(cfg.ShellANSIMap)
 	u.chrome = u.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	u.markChromeDirty()
-	if prev.FontSizePx != cfg.FontSizePx || !strings.EqualFold(prev.FontFace, cfg.FontFace) {
+	fontChanged := prev.FontSizePx != cfg.FontSizePx || !strings.EqualFold(prev.FontFace, cfg.FontFace)
+	if fontChanged {
 		if u.painter != nil {
 			u.painter.close()
 		}
-		u.painter = newSoftwarePainter(cfg.FontSizePx)
+		u.painter = newSoftwarePainter(cfg.FontFace, cfg.FontSizePx)
 		if u.painter != nil {
 			u.metricW, u.metricH = int32(u.painter.cellW), int32(u.painter.cellH)
+			log.Info("font applied", "face", cfg.FontFace, "px", cfg.FontSizePx,
+				"cell", u.metricW, "x", u.metricH)
 		}
+		// Drop cached chrome cells so strip re-renders at new metrics.
+		u.chromeCells = nil
+		u.overlayCells = nil
+		u.fb = nil
+		u.tex = nil
 		u.applyClientSize(u.width, u.height)
 	}
 }
@@ -939,6 +947,7 @@ func (u *macUI) applyConfigSave(cfg config.Config) {
 		u.toast("save failed")
 		return
 	}
+	log.Info("config saved", "path", config.Path(), "font", cfg.FontFace, "px", cfg.FontSizePx)
 	u.toast("settings saved")
 }
 
