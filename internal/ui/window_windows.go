@@ -1235,13 +1235,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case wmSuzuriClosed:
+		// Shell exited (e.g. `exit`) — close tab; last tab quits (no confirm).
 		id := int(wParam)
-		if t := u.tabByID(id); t != nil {
-			_, _ = t.term.Write([]byte("\r\n[suzuri] session ended\r\n"))
-			u.toast("session ended")
-			if u.activeTab() == t {
-				win.InvalidateRect(hwnd, nil, false)
-			}
+		if u.tabByID(id) != nil {
+			log.Info("shell session ended — closing tab", "tab", id, "tabs", len(u.tabs))
+			u.sessionEndedCloseTab(id)
 		}
 		return 0
 
