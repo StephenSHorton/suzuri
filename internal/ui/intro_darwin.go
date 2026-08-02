@@ -3,9 +3,6 @@
 package ui
 
 import (
-	"image"
-	"image/color"
-	"image/draw"
 	"math"
 	"time"
 
@@ -190,12 +187,15 @@ func (p *softwarePainter) paintMatrixRain(dst *image.RGBA, padY, shellBot int, c
 
 // paintShellWatermark draws a large faint 硯 centered in the shell band.
 // Callers must paint this UNDER shell cell glyphs (only ink is written).
+//
+// Shape must read as one solid symbol: anti-aliased low-alpha edges looked
+// "fragmented in dimness". We binarize the glyph mask, nearest-neighbor scale
+// (chunky mono, like Windows StretchBlt), then stamp one uniform quiet color.
 func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot int, fade float64) {
 	if p == nil || dst == nil || fade <= 0.01 {
 		return
 	}
-	// Need a real CJK face — never draw Gohu .notdef tofu at huge scale.
-	if !cjkHasRune(shellWatermarkRune) {
+	if !cjkHasRune(shellWatermarkRune) || p.cjkFace == nil {
 		return
 	}
 	w := dst.Bounds().Dx()
@@ -204,31 +204,84 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 	if shellW < 80 || shellH < 60 {
 		return
 	}
-	// Whisper of primary, scaled by fade (matches Windows watermark).
-	fr, fg, fb := blendRGB(0, 0, 0, chrome.PrimR, chrome.PrimG, chrome.PrimB, 0.055)
-	fr, fg, fb = blendRGB(fr, fg, fb, chrome.SoftR, chrome.SoftG, chrome.SoftB, 0.04)
-	fr, fg, fb = blendRGB(0, 0, 0, fr, fg, fb, fade)
-	if int(fr)+int(fg)+int(fb) < 8 {
+
+	// Quiet but even ink — one solid shade (not brighter; just coherent).
+	// ~8–12% of primary so strokes read as a shape on black.
+	inkA := 0.10 * fade
+	if inkA < 0.03 {
 		return
+	}
+	fr := blendByte(0, chrome.PrimR, inkA)
+	fg := blendByte(0, chrome.PrimG, inkA)
+	fb := blendByte(0, chrome.PrimB, inkA)
+	// Floor so the mark never dissolves into single sparse pixels.
+	if fr < 10 && chrome.PrimR > 0 {
+		fr = 10
+	}
+	if fg < 10 && chrome.PrimG > 0 {
+		fg = 10
+	}
+	if fb < 10 && chrome.PrimB > 0 {
+		fb = 10
 	}
 
-	// Render one fullwidth cell into a small buffer, then nearest-neighbor scale.
-	srcW := p.cellW * 2
-	srcH := p.cellH
-	if srcW < 4 || srcH < 4 {
+	// Rasterize at a moderate size for clean topology, then NN-scale up.
+	// Cell-sized source was too small — AA crumbs scaled into static.
+	const srcPx = 48
+	face := cjkFaceForSize(float64(srcPx) * 0.78)
+	if face == nil {
 		return
 	}
-	src := image.NewRGBA(image.Rect(0, 0, srcW, srcH))
-	// Transparent black underlay — only glyph ink is scaled (no grey card).
-	for i := 0; i < len(src.Pix); i += 4 {
-		src.Pix[i+3] = 0
+	defer func() { _ = face.Close() }()
+	m := face.Metrics()
+	ascent := m.Ascent.Round()
+	// Center glyph in the square.
+	dr, mask, maskp, _, ok := face.Glyph(fixed.P(srcPx/8, ascent+srcPx/10), shellWatermarkRune)
+	if !ok || mask == nil {
+		return
 	}
-	// Draw with CJK face only (skip primary tofu).
-	if p.cjkFace != nil {
-		dr, mask, maskp, _, ok := p.cjkFace.Glyph(fixed.P(0, p.ascent), shellWatermarkRune)
-		if ok && mask != nil {
-			col := image.NewUniform(color.RGBA{R: fr, G: fg, B: fb, A: 255})
-			draw.DrawMask(src, dr, col, image.Point{}, mask, maskp, draw.Over)
+	// Hard-threshold mask → solid 1-bit bitmap (no AA haze).
+	bin := make([]bool, srcPx*srcPx)
+	hasInk := false
+	for y := dr.Min.Y; y < dr.Max.Y; y++ {
+		for x := dr.Min.X; x < dr.Max.X; x++ {
+			if x < 0 || y < 0 || x >= srcPx || y >= srcPx {
+				continue
+			}
+			_, _, _, a := mask.At(maskp.X+(x-dr.Min.X), maskp.Y+(y-dr.Min.Y)).RGBA()
+			// Mid threshold: keep body strokes, drop fringe dust.
+			if a >= 0x8000 {
+				bin[y*srcPx+x] = true
+				hasInk = true
+			}
+		}
+	}
+	if !hasInk {
+		return
+	}
+	// 1px close: fill single-pixel holes so strokes stay connected.
+	for y := 1; y < srcPx-1; y++ {
+		for x := 1; x < srcPx-1; x++ {
+			i := y*srcPx + x
+			if bin[i] {
+				continue
+			}
+			n := 0
+			if bin[i-1] {
+				n++
+			}
+			if bin[i+1] {
+				n++
+			}
+			if bin[i-srcPx] {
+				n++
+			}
+			if bin[i+srcPx] {
+				n++
+			}
+			if n >= 3 {
+				bin[i] = true
+			}
 		}
 	}
 
@@ -236,50 +289,39 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 	if shellW < side {
 		side = shellW
 	}
-	destH := side * 40 / 100
-	if destH < p.cellH*6 {
-		destH = p.cellH * 6
+	destH := side * 42 / 100
+	if destH < p.cellH*7 {
+		destH = p.cellH * 7
 	}
-	if destH > 200 {
-		destH = 200
+	if destH > 220 {
+		destH = 220
 	}
-	destW := destH * srcW / srcH
-	if destW > shellW*85/100 {
-		destW = shellW * 85 / 100
-		if srcW > 0 {
-			destH = destW * srcH / srcW
-		}
+	destW := destH // square-ish fullwidth mark
+	if destW > shellW*80/100 {
+		destW = shellW * 80 / 100
+		destH = destW
 	}
 	if destW < 1 || destH < 1 {
 		return
 	}
 	dx := (shellW - destW) / 2
 	dy := padY + (shellH-destH)/2
-	// Nearest-neighbor scale — only non-transparent ink (no black card artifacts).
+
+	// Nearest-neighbor: each src bit becomes a solid dest block of ink.
 	for y := 0; y < destH; y++ {
-		sy := y * srcH / destH
-		if sy >= srcH {
-			sy = srcH - 1
+		sy := y * srcPx / destH
+		if sy >= srcPx {
+			sy = srcPx - 1
 		}
 		for x := 0; x < destW; x++ {
-			sx := x * srcW / destW
-			if sx >= srcW {
-				sx = srcW - 1
+			sx := x * srcPx / destW
+			if sx >= srcPx {
+				sx = srcPx - 1
 			}
-			si := src.PixOffset(sx, sy)
-			if src.Pix[si+3] < 32 {
+			if !bin[sy*srcPx+sx] {
 				continue
 			}
-			// Soft blend onto destination so we don't stamp hard edges.
-			a := float64(src.Pix[si+3]) / 255.0 * 0.9
-			di := dst.PixOffset(dx+x, dy+y)
-			if di < 0 || di+3 >= len(dst.Pix) {
-				continue
-			}
-			dst.Pix[di+0] = blendByte(dst.Pix[di+0], src.Pix[si+0], a)
-			dst.Pix[di+1] = blendByte(dst.Pix[di+1], src.Pix[si+1], a)
-			dst.Pix[di+2] = blendByte(dst.Pix[di+2], src.Pix[si+2], a)
-			dst.Pix[di+3] = 255
+			setRGB(dst, dx+x, dy+y, fr, fg, fb)
 		}
 	}
 }
