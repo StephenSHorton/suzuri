@@ -152,11 +152,13 @@ func (u *macUI) queueBytes(tabID int) {
 	u.enqueue(func() { u.drainAndParse(tabID) })
 }
 func (u *macUI) queueClosed(tabID int) {
+	// Shell exited (e.g. user typed `exit`) — close that tab; last tab quits the app.
 	u.enqueue(func() {
-		if t := u.tabByID(tabID); t != nil {
-			_, _ = t.term.Write([]byte("\r\n[suzuri] session ended\r\n"))
-			u.toast("session ended")
+		if u.tabByID(tabID) == nil {
+			return
 		}
+		log.Info("shell session ended — closing tab", "tab", tabID, "tabs", len(u.tabs))
+		u.closeTabUI(tabID)
 	})
 }
 func (u *macUI) isAlive() bool     { return u != nil && u.alive.Load() }

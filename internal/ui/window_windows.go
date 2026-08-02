@@ -1101,12 +1101,45 @@ func (u *winUI) closeTabUI(id int) {
 		return
 	}
 	// Last tab → confirm quit (Enter quits; Esc keeps the tab).
+	// (Shell `exit` uses sessionEndedCloseTab — no confirm.)
 	if len(u.tabs) == 1 {
 		log.Info("last tab close — confirm quit")
 		r := u.chrome.UpdateChrome(chrome.OpenConfirmQuitMsg{})
 		u.chrome = r.Model
 		u.markChromeDirty()
 		win.InvalidateRect(u.hwnd, nil, false)
+		return
+	}
+	u.removeTabAt(idx)
+}
+
+// sessionEndedCloseTab closes a tab whose shell process exited (exit/EOF).
+// Unlike Ctrl+W on the last tab, this quits the app immediately when it is
+// the final tab — matches expected shell semantics.
+func (u *winUI) sessionEndedCloseTab(id int) {
+	idx := -1
+	for i, t := range u.tabs {
+		if t.id == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return
+	}
+	if len(u.tabs) == 1 {
+		log.Info("last shell exited — quitting")
+		u.persistWindowPlacement(true)
+		if u.hwnd != 0 {
+			win.DestroyWindow(u.hwnd)
+		}
+		return
+	}
+	u.removeTabAt(idx)
+}
+
+func (u *winUI) removeTabAt(idx int) {
+	if idx < 0 || idx >= len(u.tabs) {
 		return
 	}
 	u.tabs[idx].close()
