@@ -53,13 +53,14 @@ Most “pretty terminals” are either:
 
 1. Grab **`suzuri-*-darwin-arm64.dmg`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
 2. Open the DMG and drag **suzuri** into **Applications** (or `~/Applications`).  
-3. Builds are **not Apple-notarized** (no paid Developer ID). First launch: right-click → **Open**, or allow under **System Settings → Privacy & Security**. After that it opens normally.  
+3. Builds are **not Apple-notarized** (no paid Developer ID). First launch may show **“suzuri” Not Opened** — Apple could not verify it is free of malware. Click **Done** (not Move to Trash), then either **System Settings → Privacy & Security → Open Anyway**, or right-click the app → **Open** → **Open**. After the first allow, it opens normally.  
 4. Config and logs live in `~/Library/Application Support/suzuri/`. In-app updates replace the binary inside the `.app` (portable payload, not the DMG).
 
 **macOS (portable)**
 
 1. Grab **`suzuri-*-darwin-arm64`** (or the plain `.zip`, not `.app.zip`) if you prefer a single binary.  
-2. `chmod +x suzuri-*-darwin-arm64 && ./suzuri-*-darwin-arm64`
+2. `chmod +x suzuri-*-darwin-arm64 && ./suzuri-*-darwin-arm64`  
+3. Same Gatekeeper note as the `.app` above if the binary is quarantined from a browser download.
 
 ## Build from source
 
