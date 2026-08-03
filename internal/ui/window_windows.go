@@ -1353,6 +1353,35 @@ func (u *winUI) sendKey(b []byte) {
 	}
 }
 
+func (u *winUI) barCols(tab *tab) int {
+	cols := u.cols
+	if tab != nil {
+		if g := u.paneGeomFor(tab.id); g != nil && g.cols > 0 {
+			return g.cols
+		}
+	}
+	return cols
+}
+
+func (u *winUI) submitBarLine(tab *tab, line string) {
+	if u == nil || tab == nil {
+		return
+	}
+	submitBarLine(tab, line, u.barCols(tab), u.toast)
+	u.publishBridgeSnapshot()
+}
+
+func (u *winUI) tryFlushCmdQueue(tab *tab) {
+	if u == nil || tab == nil {
+		return
+	}
+	if tryFlushCmdQueue(tab, u.barCols(tab), u.toast) {
+		u.publishBridgeSnapshot()
+		u.markShellDirty()
+		u.requestPaint()
+	}
+}
+
 func (u *winUI) blinkLoop() {
 	t := time.NewTicker(cursorBlinkTick)
 	defer t.Stop()
@@ -1464,10 +1493,19 @@ func (u *winUI) drainAndParse(tabID int) {
 	// no panic after "layout settle"). Paint-only now; settle when idle.
 	nowAlt := t.altScreen()
 	if nowAlt != t.wasAlt {
+		if t.wasAlt {
+			resetHostAfterAltApp(t.term)
+			if t.kittyGfx != nil {
+				t.kittyGfx.clear()
+			}
+			t.markShellIdle()
+		}
 		t.wasAlt = nowAlt
 		log.Info("alt screen", "tab", t.id, "on", nowAlt)
 		u.onAltScreenToggled(t)
 	}
+	t.maybeReleaseBarAwaiting()
+	u.tryFlushCmdQueue(t)
 	// Bridge snapshot is relatively expensive — skip on pure spam frames.
 	// (MCP clients still get updates on submit / tab change.)
 	if u.bridge != nil && len(data) > 0 {
@@ -1598,30 +1636,7 @@ func (u *winUI) submitOnUIThread(tabID int, line string) error {
 	if !t.alive.Load() {
 		return fmt.Errorf("tab not alive")
 	}
-	display, payload := expandBarSubmit(line, t.shell)
-	// Prefer bar path so draft/history stay consistent when line matches.
-	if stringsTrimSpace(display) != "" {
-		// Fold previous live output into history so this block owns the next run.
-		t.sb.commitLive(t.term)
-		blockCols := u.cols
-		if g := u.paneGeomFor(t.id); g != nil && g.cols > 0 {
-			blockCols = g.cols
-		}
-		t.sb.pushBlock(display, blockCols, t.cwd)
-		if next, ok := cwdAfterCommand(t.cwd, payload); ok {
-			t.setCwd(next)
-		}
-		t.echo.arm(payload)
-		if isClearCommand(payload) {
-			t.sb.pinHere()
-		}
-	}
-	if strings.Contains(payload, "\n") {
-		payload = strings.ReplaceAll(payload, "\n", "\r\n")
-	}
-	t.sendKey([]byte(payload + "\r"))
-	t.sb.stickBottom()
-	u.publishBridgeSnapshot()
+	u.submitBarLine(t, line)
 	win.InvalidateRect(u.hwnd, nil, false)
 	return nil
 }
@@ -1885,6 +1900,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
 			u.clearToastIfDue()
+			for _, t := range u.allPanes() {
+				if t != nil && !t.altScreen() && t.queueLen() > 0 {
+					u.tryFlushCmdQueue(t)
+				}
+			}
 			if msg := caffeineTick(u.caffeine); msg != "" {
 				u.toast(msg)
 				u.markChromeDirty()
@@ -2466,7 +2486,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 
-		// Ctrl+C: copy selection, else clear bar, else interrupt PTY.
+		// Ctrl+C: copy selection, else clear bar, else interrupt PTY + drop queue.
 		if ctrl && !shift && (wParam == 'C' || wParam == 'c') {
 			in := u.activeInput()
 			if tab != nil && !tab.sel.empty() {
@@ -2477,6 +2497,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.markShellDirty()
 				u.requestPaint()
 			} else {
+				if tab != nil {
+					if n := tab.clearCmdQueue(); n > 0 {
+						u.toast(fmt.Sprintf("cleared %d queued", n))
+					}
+				}
 				u.sendKey([]byte{0x03})
 			}
 			return 0
@@ -2547,36 +2572,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 			line := in.submit()
 			u.maybeResizeForInput()
-			// Warp-style command block in scrollback, then send to PTY.
-			// Arm echo suppress so PS/cmd local-echo doesn't duplicate the block.
-			// Bare `cd` → home (PowerShell/cmd don't match bash bare-cd by default).
-			display, payload := expandBarSubmit(line, tab.shell)
-			if stringsTrimSpace(display) != "" {
-				// Previous command's output → history under its block first.
-				tab.sb.commitLive(tab.term)
-				blockCols := u.cols
-				if g := u.paneGeomFor(tab.id); g != nil && g.cols > 0 {
-					blockCols = g.cols
-				}
-				tab.sb.pushBlock(display, blockCols, tab.cwd)
-				// Best-effort cwd until the next prompt OSC arrives.
-				if next, ok := cwdAfterCommand(tab.cwd, payload); ok {
-					tab.setCwd(next)
-				}
-				tab.echo.arm(payload)
-				if isClearCommand(payload) {
-					tab.sb.pinHere()
-				}
-				log.Debug("submit arm echo", "tab", tab.id, "line", display, "payload", payload, "cwd", tab.cwd)
-			}
-			// Multi-line: send with real newlines; final CR executes.
-			if strings.Contains(payload, "\n") {
-				// PowerShell accepts multi-line paste ending in CR.
-				payload = strings.ReplaceAll(payload, "\n", "\r\n")
-			}
-			u.sendKey([]byte(payload + "\r"))
-			tab.sb.stickBottom()
-			u.publishBridgeSnapshot()
+			u.submitBarLine(tab, line)
 			u.markShellDirty()
 			u.requestPaint()
 		case win.VK_UP:

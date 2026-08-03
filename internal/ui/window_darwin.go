@@ -640,6 +640,12 @@ func (u *macUI) Update() error {
 drained:
 
 	u.drainPendingPaste()
+	// Flush Warp-bar queue once the shell has been quiet (no PTY chunk required).
+	for _, t := range u.allPanes() {
+		if t != nil && !t.altScreen() && t.queueLen() > 0 {
+			u.tryFlushCmdQueue(t)
+		}
+	}
 
 	// Track outer frame placement mid-session (survives crash better than exit-only).
 	u.maybePersistWindowPlacement(false)
@@ -814,6 +820,34 @@ func (u *macUI) sendKey(b []byte) {
 	}
 }
 
+func (u *macUI) barCols(tab *tab) int {
+	cols := u.cols
+	if tab != nil {
+		if g := u.paneGeomFor(tab.id); g != nil && g.cols > 0 {
+			return g.cols
+		}
+	}
+	return cols
+}
+
+func (u *macUI) submitBarLine(tab *tab, line string) {
+	if u == nil || tab == nil {
+		return
+	}
+	submitBarLine(tab, line, u.barCols(tab), u.toast)
+	u.publishBridgeSnapshot()
+}
+
+func (u *macUI) tryFlushCmdQueue(tab *tab) {
+	if u == nil || tab == nil {
+		return
+	}
+	if tryFlushCmdQueue(tab, u.barCols(tab), u.toast) {
+		u.publishBridgeSnapshot()
+		u.markShellDirty()
+	}
+}
+
 func (u *macUI) drainAndParse(tabID int) {
 	t := u.tabByID(tabID)
 	if t == nil || t.term == nil {
@@ -892,9 +926,14 @@ func (u *macUI) drainAndParse(tabID int) {
 	}
 	nowAlt := t.altScreen()
 	if nowAlt != t.wasAlt {
-		if t.wasAlt && t.kittyGfx != nil {
-			// Leaving alt-screen: drop GPU-style placements.
-			t.kittyGfx.clear()
+		if t.wasAlt {
+			// Leaving alt-screen (clean exit or hard kill): stop mouse inject
+			// and drop Kitty placements so the shell doesn't print SGR garbage.
+			resetHostAfterAltApp(t.term)
+			if t.kittyGfx != nil {
+				t.kittyGfx.clear()
+			}
+			t.markShellIdle()
 		}
 		t.wasAlt = nowAlt
 		log.Info("alt screen", "tab", t.id, "on", nowAlt)
@@ -902,6 +941,9 @@ func (u *macUI) drainAndParse(tabID int) {
 			u.maybeResizeForInput()
 		}
 	}
+	// Cwd OSC already called markShellIdle; also release on quiet PTY.
+	t.maybeReleaseBarAwaiting()
+	u.tryFlushCmdQueue(t)
 	u.publishBridgeSnapshot()
 	u.markShellDirty()
 	t.inMu.Lock()
@@ -1907,6 +1949,12 @@ func (u *macUI) handleKeys() {
 			in.clear()
 			u.maybeResizeForInput()
 		} else {
+			// Interrupt + drop queued bar lines so they don't fire after ^C.
+			if tab != nil {
+				if n := tab.clearCmdQueue(); n > 0 {
+					u.toast(fmt.Sprintf("cleared %d queued", n))
+				}
+			}
 			u.sendKey([]byte{0x03})
 		}
 		return
@@ -1933,27 +1981,7 @@ func (u *macUI) handleKeys() {
 		}
 		line := in.submit()
 		u.maybeResizeForInput()
-		display, payload := expandBarSubmit(line, tab.shell)
-		if stringsTrimSpace(display) != "" {
-			// Previous command's output → history, then this block header.
-			tab.sb.commitLive(tab.term)
-			tab.sb.pushBlock(display, u.cols, tab.cwd)
-			if next, ok := cwdAfterCommand(tab.cwd, payload); ok {
-				tab.setCwd(next)
-			}
-			tab.echo.arm(payload)
-			// clear/cls: commitLive already blanked the host VT, so noteScreen
-			// never sees a clear transition — pin here so history stays above.
-			if isClearCommand(payload) {
-				tab.sb.pinHere()
-			}
-		}
-		if strings.Contains(payload, "\n") {
-			payload = strings.ReplaceAll(payload, "\n", "\r")
-		}
-		u.sendKey([]byte(payload + "\r"))
-		tab.sb.stickBottom()
-		u.publishBridgeSnapshot()
+		u.submitBarLine(tab, line)
 		return
 	}
 	// Navigation with hold-to-repeat (IsKeyJustPressed alone never auto-repeats).
@@ -2555,6 +2583,11 @@ func (u *macUI) handleMouse() {
 			u.maybeSendAltMouseMotion(t, mx, my, left)
 		} else {
 			u.altMouseCol, u.altMouseRow = 0, 0
+			// Hard-killed TUIs leave mouse mode on; disarm so we don't inject
+			// SGR reports into the shell (prints as "35;c;rM…" garbage).
+			if t := u.activeTab(); t != nil && t.term != nil && mouseTracking(t.term) {
+				resetHostMouseModes(t.term)
+			}
 		}
 	}
 
