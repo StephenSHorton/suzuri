@@ -193,7 +193,7 @@ const maxPtyTail = 8192
 // tabOpts optional launch recipe (profile).
 type tabOpts struct {
 	shell string // empty → DefaultShell
-	cwd   string // empty → process cwd
+	cwd   string // empty → user home (not install/exe dir)
 	title string // empty → shell N
 }
 
@@ -202,20 +202,23 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 	if shell == "" {
 		shell = host.DefaultShell()
 	}
-	sess, err := host.StartSession(shell, cols, rows, opts.cwd)
+	// Resolve empty cwd to home before PTY start so ConPTY and the Warp bar match.
+	cwd := strings.TrimSpace(opts.cwd)
+	if cwd == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			cwd = home
+		} else if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		}
+	}
+	sess, err := host.StartSession(shell, cols, rows, cwd)
 	if err != nil {
-		log.Error("pty start failed", "tab", id, "shell", shell, "cwd", opts.cwd, "err", err)
+		log.Error("pty start failed", "tab", id, "shell", shell, "cwd", cwd, "err", err)
 		return nil, err
 	}
 	title := opts.title
 	if title == "" {
 		title = fmt.Sprintf("shell %d", id+1)
-	}
-	cwd := opts.cwd
-	if cwd == "" {
-		if wd, err := os.Getwd(); err == nil {
-			cwd = wd
-		}
 	}
 	t := &tab{
 		id:       id,

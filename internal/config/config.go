@@ -48,7 +48,7 @@ const (
 type Profile struct {
 	Name  string `json:"name"`
 	Shell string `json:"shell,omitempty"` // empty → DefaultShell
-	Cwd   string `json:"cwd,omitempty"`   // empty → process cwd
+	Cwd   string `json:"cwd,omitempty"`   // empty → user home directory
 	Theme string `json:"theme,omitempty"` // empty → keep current theme
 }
 

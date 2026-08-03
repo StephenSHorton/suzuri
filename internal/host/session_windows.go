@@ -102,7 +102,7 @@ func filepathBase(commandLine string) string {
 }
 
 // StartSession launches commandLine (e.g. powershell) on a ConPTY of size cols×rows.
-// workDir empty uses the process working directory.
+// workDir empty uses the user home directory (not the exe install path).
 // extraEnv is KEY=VAL entries merged into the process environment (e.g. SUZURI_TAB_ID).
 func StartSession(commandLine string, cols, rows int, workDir string, extraEnv ...string) (*Session, error) {
 	if commandLine == "" {
@@ -171,12 +171,18 @@ func mergeEnv(base, extra []string) []string {
 	return out
 }
 
+// mustWd is the default shell cwd. Prefer the user home (~) so Start Menu /
+// installed launches don't open in %LOCALAPPDATA%\Programs\suzuri.
 func mustWd() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		return ""
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if st, err := os.Stat(home); err == nil && st.IsDir() {
+			return home
+		}
 	}
-	return wd
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return ""
 }
 
 // Read implements io.Reader (PTY → host).

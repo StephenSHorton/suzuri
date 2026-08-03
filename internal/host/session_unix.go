@@ -81,7 +81,7 @@ func QuietPrompt(commandLine string) string {
 }
 
 // StartSession launches commandLine on a PTY of size cols×rows.
-// workDir empty uses the process working directory.
+// workDir empty uses the user home directory (not the process / install cwd).
 // extraEnv is KEY=VAL entries merged into the process environment.
 func StartSession(commandLine string, cols, rows int, workDir string, extraEnv ...string) (*Session, error) {
 	if commandLine == "" {
@@ -157,12 +157,17 @@ func StartSession(commandLine string, cols, rows int, workDir string, extraEnv .
 	return &Session{cmd: cmd, ptmx: ptmx, zdot: zdot}, nil
 }
 
+// mustWd prefers $HOME so app-bundle / Dock launches don't start in /Applications.
 func mustWd() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		return ""
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if st, err := os.Stat(home); err == nil && st.IsDir() {
+			return home
+		}
 	}
-	return wd
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return ""
 }
 
 // quietShellEnv keeps the Warp bar as the only command surface by blanking
