@@ -32,15 +32,21 @@ Most “pretty terminals” are either:
 | **Look** | Inkstone / Charmtone / High contrast · bundled Gohu mono · app icon · box-drawing |
 | **Polish** | Window placement, matrix/ripple intros (Windows), 猫咪 dim under settings, floating palette/help over live shell |
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
-| **Updates** | Portable auto-update from GitHub Releases on startup; palette **Check for updates** (no MSI) |
+| **Updates** | Auto-update from GitHub Releases on startup; palette **Check for updates** |
+| **Install** | Windows: user-scoped setup (`*-setup.exe`) → Start Menu + uninstall |
 
 ## Download
 
-**Windows**
+**Windows (recommended)**
 
-1. Grab **`suzuri-*-windows-amd64.exe`** (or the `.zip`) from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
-2. Double-click or run it — no installer, no spare console window (GUI subsystem). Config lives in `%LOCALAPPDATA%\suzuri\`.  
-3. Optional: pin the exe or put it on your `PATH`.
+1. Grab **`suzuri-*-windows-amd64-setup.exe`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
+2. Run the installer — **no administrator rights**. It installs to `%LOCALAPPDATA%\Programs\suzuri\`, adds **Start Menu** and desktop shortcuts, and an **Apps & features** uninstall entry.  
+3. Config and logs stay in `%LOCALAPPDATA%\suzuri\`. In-app updates still replace the installed exe in place.
+
+**Windows (portable)**
+
+1. Grab **`suzuri-*-windows-amd64.exe`** (or the `.zip`) if you prefer a single file with no shortcuts.  
+2. Double-click — GUI subsystem, no spare console window.
 
 **macOS (Apple Silicon)**
 
@@ -145,7 +151,17 @@ git push origin v0.6.0
 
 ## Auto-update
 
-Release builds embed a version via `-ldflags -X main.version=…`. On startup (and via palette **Check for updates**), suzuri queries GitHub Releases, downloads the asset for the running OS/arch, verifies `SHA256SUMS` when present, replaces the running binary, and relaunches. Dev builds (`version=dev`) never auto-update.
+Release builds embed a version via `-ldflags -X main.version=…`. On startup (and via palette **Check for updates**), suzuri queries GitHub Releases, downloads the **portable** asset for the running OS/arch (not the setup installer), verifies `SHA256SUMS` when present, replaces the running binary, and relaunches. That works for both the portable `.exe` and the installed copy under `%LOCALAPPDATA%\Programs\suzuri\`. Dev builds (`version=dev`) never auto-update.
+
+## Windows packaging
+
+| Artifact | Purpose |
+|----------|---------|
+| `*-setup.exe` | NSIS user installer (Start Menu, desktop, uninstall) |
+| `*-windows-amd64.exe` | Portable binary (also the in-app update payload) |
+| `*.zip` | Same portable binary, zipped |
+
+Installer sources: [`packaging/windows/suzuri.nsi`](packaging/windows/suzuri.nsi).
 
 ## License
 

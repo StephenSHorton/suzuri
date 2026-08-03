@@ -86,6 +86,30 @@ jobs:
           fi
           ls -la suzuri-*
 
+      # User-scoped NSIS installer: Start Menu, desktop shortcut, Add/Remove
+      # Programs. Installs under %LOCALAPPDATA%\Programs\suzuri (no admin) so
+      # the existing in-app updater can still replace the exe in place.
+      - name: Windows installer (NSIS)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          choco install nsis -y --no-progress
+          $makensis = @(
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+            "$env:ProgramFiles\NSIS\makensis.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $makensis) { throw "makensis.exe not found after choco install nsis" }
+          $out = "suzuri-$v-windows-amd64-setup.exe"
+          & $makensis `
+            "/DVERSION=$v" `
+            "/DOUTFILE=$out" `
+            "/DSOURCE_EXE=suzuri.exe" `
+            "/DICON=assets\icon\suzuri.ico" `
+            "packaging\windows\suzuri.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
+          Get-Item $out | Format-List Name, Length, FullName
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

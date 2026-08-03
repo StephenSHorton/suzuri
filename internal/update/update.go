@@ -307,6 +307,8 @@ func (s *Service) download(ctx context.Context, url, dst string) (err error) {
 }
 
 // pickReleaseAsset chooses the portable binary for the running GOOS/GOARCH.
+// Never picks installers (setup.exe) — those are for first install only;
+// in-app update swaps the already-installed portable exe in place.
 func pickReleaseAsset(assets []ghAsset) (ghAsset, string) {
 	var asset ghAsset
 	var sumsURL string
@@ -317,6 +319,10 @@ func pickReleaseAsset(assets []ghAsset) (ghAsset, string) {
 		n := strings.ToLower(a.Name)
 		if n == "sha256sums" {
 			sumsURL = a.URL
+			continue
+		}
+		// Installers / setup packages are not in-place update targets.
+		if strings.Contains(n, "setup") || strings.Contains(n, "installer") || strings.Contains(n, ".msi") {
 			continue
 		}
 		switch goos {
