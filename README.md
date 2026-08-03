@@ -41,18 +41,19 @@ Most “pretty terminals” are either:
 
 1. Grab **`suzuri-*-windows-amd64-setup.exe`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
 2. Run the installer — **no administrator rights**. It installs to `%LOCALAPPDATA%\Programs\suzuri\`, adds **Start Menu** and desktop shortcuts, and an **Apps & features** uninstall entry.  
-3. Config and logs stay in `%LOCALAPPDATA%\suzuri\`. In-app updates still replace the installed exe in place.
+3. Config and logs stay in `%LOCALAPPDATA%\suzuri\`. In-app updates still replace the installed exe in place.  
+4. Builds are **not Authenticode-signed**. SmartScreen may show “Windows protected your PC” — **More info → Run anyway**.
 
 **Windows (portable)**
 
 1. Grab **`suzuri-*-windows-amd64.exe`** (or the `.zip`) if you prefer a single file with no shortcuts.  
-2. Double-click — GUI subsystem, no spare console window.
+2. Double-click — GUI subsystem, no spare console window. Same SmartScreen note as above.
 
 **macOS (Apple Silicon, recommended)**
 
 1. Grab **`suzuri-*-darwin-arm64.dmg`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
 2. Open the DMG and drag **suzuri** into **Applications** (or `~/Applications`).  
-3. First launch: right-click → **Open** (or allow under **System Settings → Privacy & Security**) — builds are ad-hoc signed, not notarized yet.  
+3. Builds are **not Apple-notarized** (no paid Developer ID). First launch: right-click → **Open**, or allow under **System Settings → Privacy & Security**. After that it opens normally.  
 4. Config and logs live in `~/Library/Application Support/suzuri/`. In-app updates replace the binary inside the `.app` (portable payload, not the DMG).
 
 **macOS (portable)**

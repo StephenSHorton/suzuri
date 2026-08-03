@@ -126,6 +126,39 @@ nav a:hover { color: var(--accent); }
   padding: 0.1rem 0.35rem;
   border-radius: 3px;
 }
+
+/* First-launch / unsigned-build note under CTAs */
+.notice {
+  margin: 1.35rem 0 0;
+  max-width: 40rem;
+  padding: 0.95rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(14, 20, 16, 0.88);
+  backdrop-filter: blur(4px);
+}
+.notice h2 {
+  margin: 0 0 0.45rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+.notice p {
+  margin: 0 0 0.55rem;
+  color: var(--mute);
+  font-size: 0.82rem;
+}
+.notice p strong { color: var(--fg); font-weight: 600; }
+.notice ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--mute);
+  font-size: 0.82rem;
+}
+.notice li { margin: 0.35rem 0; }
+.notice li strong { color: var(--fg); font-weight: 600; }
+.notice em { font-style: normal; color: var(--fg); }
 /* Cards slightly more opaque over rain */
 .grid article {
   background: rgba(14, 20, 16, 0.92);
