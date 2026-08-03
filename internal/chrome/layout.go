@@ -73,12 +73,22 @@ func dialogInnerWidth(outerWidth int) int {
 // short titles/footers don't leave dark void gutters (VT clear color) to the
 // right of the text.
 func renderDialogCard(outerWidth int, title string, body []string, footer string) string {
+	return renderDialogCardEx(outerWidth, title, body, footer, false)
+}
+
+// renderDialogCardEx is renderDialogCard with optional active (selection-style) title,
+// used when the dialog chrome title is an editable field (notes rename).
+func renderDialogCardEx(outerWidth int, title string, body []string, footer string, titleActive bool) string {
 	outerWidth = clampDialogWidth(outerWidth, outerWidth+8)
 	inner := dialogInnerWidth(outerWidth)
 
 	var lines []string
 	if title != "" {
-		lines = append(lines, styleDialogTitle().
+		tStyle := styleDialogTitle()
+		if titleActive {
+			tStyle = styleDialogActive()
+		}
+		lines = append(lines, tStyle.
 			Background(colPanel).
 			Width(inner).
 			MaxHeight(1).

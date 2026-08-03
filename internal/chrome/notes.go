@@ -542,9 +542,9 @@ func (m *Model) handleNotesClick(cellX, cellY, cols int) {
 		return
 	}
 
-	// Editor screen: title row renames; body keeps/focuses editor.
+	// Editor screen: chrome title (above divider) renames; body focuses editor.
 	if !lay.ListMode {
-		if lay.NameY >= 0 && (cellY == lay.NameY || cellY == lay.TitleY) {
+		if lay.NameY >= 0 && cellY == lay.NameY {
 			m.beginNotesTitleEdit()
 			return
 		}
@@ -1019,8 +1019,8 @@ func (m Model) renderNotesContextKeys(mainWidth, windowCols int) string {
 		title = "Note editor"
 		rows = []struct{ key, desc string }{
 			{"Esc", "Back to list"},
-			{"↑ (top line) / F2", "Edit title"},
-			{"↓ from title", "Back to body"},
+			{"↑ (top) / F2 / click title", "Edit name (above divider)"},
+			{"↓ / Enter from title", "Back to body"},
 			{KeyCtrl("A"), "Select all"},
 			{KeyCtrl("C") + " / " + KeyCtrl("X") + " / " + KeyCtrl("V"), "Copy / cut / paste"},
 			{"Tab", "Insert tab"},
@@ -1091,9 +1091,9 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 		wrapW = 8
 	}
 
-	// Fixed chrome title "Note"; note name lives only on the title field row.
+	// Note name is the dialog chrome title (above the divider). Body is editor only.
 	// Caret is painted by the host (same block/underline/bar as the terminal).
-	nameLine := m.renderNotesNameRow(inner)
+	cardTitle, titleActive := m.notesChromeTitle(inner)
 	edLines := notesSoftLines(m.notesRunes, wrapW)
 	scroll := m.notesScroll
 	if scroll < 0 {
@@ -1112,7 +1112,6 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 	}
 
 	var body []string
-	body = append(body, nameLine)
 	for i := 0; i < notesListRows; i++ {
 		ei := scroll + i
 		if ei < len(edLines) {
@@ -1129,7 +1128,23 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 			Render(strings.Repeat(" ", inner)))
 	}
 
-	return renderDialogCard(outer, "Note", body, "")
+	return renderDialogCardEx(outer, cardTitle, body, "", titleActive)
+}
+
+// notesChromeTitle is the dialog title above the divider (note name / rename field).
+func (m Model) notesChromeTitle(inner int) (title string, active bool) {
+	if m.notesFocus == notesFocusTitle {
+		t := m.notesTitle
+		if t == "" {
+			t = "name…"
+		}
+		// Width clamp so the title row stays one line.
+		return truncateNoteTitle(t, inner-2), true
+	}
+	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
+		return NoteDisplayTitle(m.notesBank[m.notesActive]), false
+	}
+	return "Untitled", false
 }
 
 // NotesCaretCell returns the caret cell in the full-width overlay grid.
@@ -1162,16 +1177,15 @@ func (m Model) NotesCaretCell(cols int) (cellX, cellY int, ok bool) {
 		wrapW = 8
 	}
 
-	// Overlay rows for editor card (see computeNotesLayout).
-	const nameY = 3
-	const bodyY0 = 4
-
+	// Overlay rows for the notes dialog (lipgloss rounded + Padding(1,2)):
+	//   0 top border · 1 pad · 2 title (name) · 3 rule · 4+ body · pad · bottom.
+	ty, by0 := notesEditorOverlayRows()
 	if m.notesFocus == notesFocusTitle {
 		col := lipgloss.Width(m.notesTitle)
 		if col > wrapW {
 			col = wrapW
 		}
-		return textLeft + col, nameY, true
+		return textLeft + col, ty, true
 	}
 
 	lines := notesSoftLines(m.notesRunes, wrapW)
@@ -1183,7 +1197,13 @@ func (m Model) NotesCaretCell(cols int) (cellX, cellY int, ok bool) {
 	if visCol > wrapW {
 		visCol = wrapW
 	}
-	return textLeft + visCol, bodyY0 + screenRow, true
+	return textLeft + visCol, by0 + screenRow, true
+}
+
+// notesEditorOverlayRows is title Y and first body Y inside the notes dialog grid.
+func notesEditorOverlayRows() (titleY, bodyY0 int) {
+	// styleDialogView: border + vertical pad 1 before content.
+	return 2, 4
 }
 
 // computeNotesLayout fills m.notesLayout for click tests (list vs editor screen).
@@ -1202,24 +1222,20 @@ func (m *Model) computeNotesLayout(windowCols int) {
 		cardLeft = 0
 	}
 	listMode := m.notesFocus == notesFocusList
-	// Overlay y: border, title, rule, then body…
-	// List: body starts at y=3 (title, rule, items…)
-	// Editor: name at y=3, body at y=4
+	// List: same pad/border/title/rule, then items. Editor name is chrome title.
+	titleY, bodyY0 := notesEditorOverlayRows()
 	nameY := -1
-	bodyY0 := 3
-	bodyRows := notesListRows
 	if !listMode {
-		nameY = 3
-		bodyY0 = 4
+		nameY = titleY
 	}
 	m.notesLayout = notesLayout{
 		Cols:      windowCols,
 		Outer:     outer,
 		Inner:     inner,
-		TitleY:    1,
+		TitleY:    titleY,
 		NameY:     nameY,
 		BodyY0:    bodyY0,
-		BodyRows:  bodyRows,
+		BodyRows:  notesListRows,
 		CardLeft:  cardLeft,
 		CardRight: cardLeft + outer,
 		ListMode:  listMode,
@@ -1229,27 +1245,6 @@ func (m *Model) computeNotesLayout(windowCols int) {
 	if m.notesWrapW < 8 {
 		m.notesWrapW = 8
 	}
-}
-
-func (m Model) renderNotesNameRow(inner int) string {
-	// Title field only — host draws the caret when this row is focused.
-	if m.notesFocus == notesFocusTitle {
-		body := m.notesTitle
-		if body == "" {
-			return styleDialogHint().Width(inner).MaxHeight(1).Padding(0, 1).
-				Render(padFit("name…", inner-2))
-		}
-		// Active edit: selection-style fill so focus is obvious on this row only.
-		return styleDialogActive().Width(inner).MaxHeight(1).
-			Render(padFit(body, inner))
-	}
-	label := "Untitled"
-	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
-		label = NoteDisplayTitle(m.notesBank[m.notesActive])
-	}
-	// Idle title uses soft label color (not primary) so it doesn't twin the chrome title.
-	return styleDialogLabel().Width(inner).MaxHeight(1).Padding(0, 1).
-		Render(padFit(label, inner-2))
 }
 
 func (m Model) renderNotesEditorLine(ln notesLine, hasSel bool, selLo, selHi, inner, wrapW int) string {
