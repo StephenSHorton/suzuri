@@ -1552,8 +1552,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.syncChrome()
 			}
 			// Flush a deferred ConPTY settle only when no pane is streaming hard.
-			if u.layoutDeferred && !u.anyPaneConPtyBusy() && u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
-				u.layoutDeferred = false
+			// At most every N blink ticks so we don't thrash PostMessage.
+			if u.layoutDeferred && !u.anyPaneConPtyBusy() &&
+				u.spinTick%uint64(tabSpinEveryNTicks*4) == 0 {
 				u.postLayoutSettle()
 			}
 			// Dim modals: throttle (settings rain) or chrome-dirty only.
@@ -2441,7 +2442,12 @@ func (u *winUI) paint(hwnd win.HWND) {
 		}
 	}
 	u.inputPx = barSum
-	if sizeChanged || metricsChanged || needResize {
+	// ConPTY size mismatch after alt-screen paint-only relayout is expected
+	// while layoutDeferred — do NOT re-post settle every WM_PAINT (that
+	// flooded "layout settle deferred" and hard-crashed under dual Grok).
+	if sizeChanged || metricsChanged {
+		u.postLayoutSettle()
+	} else if needResize && !u.layoutDeferred {
 		u.postLayoutSettle()
 	}
 
@@ -2782,13 +2788,15 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 		return
 	}
 	// If panes are mid-stream (dual Grok), paint-only and try again later —
-	// never ResizePseudoConsole under load.
+	// never ResizePseudoConsole under load. Do not requestPaint here: the
+	// paint path used to re-post settle every frame → log flood → crash.
 	if u.anyPaneConPtyBusy() {
 		u.layoutDeferred = true
 		u.relayoutActivePaintOnly()
-		u.layoutSettlePosted = false
-		u.requestPaint()
-		log.Debug("layout settle deferred (pane busy)", "w", w, "h", h)
+		u.layoutSettlePosted = false // allow blink to re-post when idle
+		if u.spinTick%32 == 0 {
+			log.Debug("layout settle deferred (pane busy)", "w", w, "h", h)
+		}
 		return
 	}
 
