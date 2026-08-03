@@ -162,6 +162,12 @@ type macUI struct {
 
 	// Mouse
 	mouseDown bool
+
+	// Window placement: last captured frame (updated mid-session; flushed on exit).
+	// restoreMax is applied once after the ebiten loop creates the native window.
+	lastPlacement config.WindowPlacement
+	restoreMax    bool
+	maxApplied    bool
 }
 
 func (u *macUI) queueBytes(tabID int) {
@@ -408,9 +414,11 @@ func (u *macUI) shellBottomY(clientH int32) int32 {
 func (u *macUI) loop() error {
 	runtime.LockOSThread()
 
-	// Initial logical size from config or defaults.
+	// Initial size/position from last session (Windows placement parity).
 	w, h := u.cols*cellW+24, u.rows*cellH+48
-	if wp := u.cfg.Window; wp.Valid() {
+	restorePos := false
+	var rx, ry int
+	if wp := u.cfg.Window; wp.Valid() && placementOnScreenMac(wp) {
 		w, h = wp.Width, wp.Height
 		if w < 320 {
 			w = 900
@@ -418,6 +426,10 @@ func (u *macUI) loop() error {
 		if h < 200 {
 			h = 560
 		}
+		rx, ry = wp.X, wp.Y
+		restorePos = true
+		u.restoreMax = wp.Maximized
+		log.Info("restoring window placement", "x", wp.X, "y", wp.Y, "w", wp.Width, "h", wp.Height, "max", wp.Maximized)
 	}
 	u.width, u.height = int32(w), int32(h)
 	u.applyClientSize(u.width, u.height)
@@ -425,6 +437,10 @@ func (u *macUI) loop() error {
 	ebiten.SetWindowTitle(appTitle)
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetWindowSize(w, h)
+	// Set before RunGame so ebiten does not center the window itself.
+	if restorePos {
+		ebiten.SetWindowPosition(rx, ry)
+	}
 	ebiten.SetScreenClearedEveryFrame(false)
 	ebiten.SetVsyncEnabled(true)
 	ebiten.SetTPS(60)
@@ -498,6 +514,12 @@ func (u *macUI) Update() error {
 		return ebiten.Termination
 	}
 
+	// Maximize after the native window exists (Set before RunGame is a no-op).
+	if u.restoreMax && !u.maxApplied {
+		u.maxApplied = true
+		ebiten.MaximizeWindow()
+	}
+
 	// Drain deferred jobs (PTY/MCP).
 	for {
 		select {
@@ -512,6 +534,9 @@ func (u *macUI) Update() error {
 		}
 	}
 drained:
+
+	// Track outer frame placement mid-session (survives crash better than exit-only).
+	u.maybePersistWindowPlacement(false)
 
 	// Smooth scroll ease toward wheel/key targets (all tabs; cheap).
 	dt := 1.0 / 60.0
@@ -1248,23 +1273,118 @@ func (u *macUI) applyConfigSave(cfg config.Config) {
 	u.toast("settings saved")
 }
 
-func (u *macUI) persistWindowPlacement() {
+// captureWindowPlacement reads outer frame size/position via ebiten.
+// Position origin is the upper-left of the window's current monitor (GLFW).
+func (u *macUI) captureWindowPlacement() (config.WindowPlacement, bool) {
+	if u == nil || !u.ready.Load() {
+		return config.WindowPlacement{}, false
+	}
+	// After RunGame returns the window is gone — prefer last in-loop capture.
+	w, h := ebiten.WindowSize()
+	if w < 2 || h < 2 {
+		if u.lastPlacement.Valid() {
+			return u.lastPlacement, true
+		}
+		return config.WindowPlacement{}, false
+	}
+	x, y := ebiten.WindowPosition()
+	p := config.WindowPlacement{
+		X:         x,
+		Y:         y,
+		Width:     w,
+		Height:    h,
+		Maximized: ebiten.IsWindowMaximized(),
+	}
+	if !p.Valid() {
+		return config.WindowPlacement{}, false
+	}
+	u.lastPlacement = p
+	return p, true
+}
+
+// placementOnScreenMac is a soft visibility check so we don't restore a
+// frame that no longer intersects any connected display.
+func placementOnScreenMac(p config.WindowPlacement) bool {
+	if !p.Valid() {
+		return false
+	}
+	// Require at least an 80×40 sliver on some monitor.
+	const pad = 80
+	const padY = 40
+	left, top := p.X, p.Y
+	right, bottom := left+p.Width, top+p.Height
+	sl := left + pad
+	if sl > right {
+		sl = right
+	}
+	st := top + padY
+	if st > bottom {
+		st = bottom
+	}
+	mons := ebiten.AppendMonitors(nil)
+	if len(mons) == 0 {
+		// Monitors not ready yet (pre-RunGame) — trust saved coords.
+		return true
+	}
+	// ebiten positions are relative to the window's monitor, not the virtual
+	// desktop. Check against each monitor's size as if the rect lives there.
+	for _, m := range mons {
+		if m == nil {
+			continue
+		}
+		mw, mh := m.Size()
+		if mw < 1 || mh < 1 {
+			continue
+		}
+		// Intersection of placement with [0,mw)×[0,mh) in that monitor's space.
+		if right > 0 && bottom > 0 && left < mw && top < mh &&
+			sl > 0 && st > 0 && sl < mw && st < mh {
+			return true
+		}
+		// Also accept when the window mostly fits (e.g. negative X slightly off).
+		if p.Width <= mw+pad && p.Height <= mh+pad &&
+			left > -p.Width+pad && top > -p.Height+padY &&
+			left < mw && top < mh {
+			return true
+		}
+	}
+	return false
+}
+
+// maybePersistWindowPlacement updates config when the outer frame changes.
+// force=true logs at info (exit path).
+func (u *macUI) maybePersistWindowPlacement(force bool) {
 	if u == nil {
 		return
 	}
-	w, h := int(u.width), int(u.height)
-	if w < 320 || h < 200 {
+	p, ok := u.captureWindowPlacement()
+	if !ok {
+		// Exit after RunGame: fall back to last in-loop capture.
+		if force && u.lastPlacement.Valid() {
+			p = u.lastPlacement
+			ok = true
+		}
+	}
+	if !ok || !p.Valid() {
 		return
 	}
-	// ebiten does not expose window position portably — store size only.
-	p := config.WindowPlacement{X: 0, Y: 0, Width: w, Height: h}
 	if u.cfg.Window == p {
 		return
 	}
 	u.cfg.Window = p
 	if err := config.Save(u.cfg); err != nil {
 		log.Warn("window placement save failed", "err", err)
+		return
 	}
+	if force {
+		log.Info("window placement saved", "x", p.X, "y", p.Y, "w", p.Width, "h", p.Height, "max", p.Maximized)
+	} else {
+		log.Debug("window placement saved", "x", p.X, "y", p.Y, "w", p.Width, "h", p.Height, "max", p.Maximized)
+	}
+}
+
+func (u *macUI) persistWindowPlacement() {
+	u.maybePersistWindowPlacement(true)
 }
 
 // --- input ---
