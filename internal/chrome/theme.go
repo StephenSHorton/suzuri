@@ -324,8 +324,9 @@ func styleGap() lipgloss.Style {
 }
 
 func styleStatus() lipgloss.Style {
+	// Use soft (not dim) so toasts stay readable on high-contrast / dark bars.
 	return lipgloss.NewStyle().
-		Foreground(colDim).
+		Foreground(colSoft).
 		Background(colBar).
 		Padding(0, 1)
 }

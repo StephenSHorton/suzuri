@@ -689,18 +689,28 @@ func (u *winUI) finishConfigSave() {
 
 // toast sets a short-lived status line under the tab strip (UI thread only).
 func (u *winUI) toast(msg string) {
+	if u == nil {
+		return
+	}
+	msg = strings.TrimSpace(msg)
+	prevRows := u.chrome.RowCount()
 	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg(msg)).Model
 	// Update results need a bit longer to read than split toasts.
 	dur := 2500 * time.Millisecond
 	if strings.Contains(msg, "update") || strings.Contains(msg, "up to date") ||
-		strings.Contains(msg, "installing") {
+		strings.Contains(msg, "installing") || strings.Contains(msg, "opened") {
 		dur = 4 * time.Second
 	}
 	u.statusUntil = time.Now().Add(dur)
 	u.markChromeDirty()
+	// Extra strip row for status — settle layout so toast has its own band.
+	if u.chrome.RowCount() != prevRows && u.hwnd != 0 {
+		u.postLayoutSettle()
+	}
 	if u.hwnd != 0 {
 		win.InvalidateRect(u.hwnd, nil, false)
 	}
+	log.Debug("toast", "msg", msg, "rows", u.chrome.RowCount())
 }
 
 // postToast queues a toast for the UI thread (safe from background goroutines).

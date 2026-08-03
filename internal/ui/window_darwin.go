@@ -340,14 +340,28 @@ func (u *macUI) markInputDirty() {
 }
 
 func (u *macUI) toast(msg string) {
+	if u == nil {
+		return
+	}
+	msg = strings.TrimSpace(msg)
+	prevRows := u.chrome.RowCount()
 	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg(msg)).Model
 	dur := 2500 * time.Millisecond
 	if strings.Contains(msg, "update") || strings.Contains(msg, "up to date") ||
-		strings.Contains(msg, "installing") {
+		strings.Contains(msg, "installing") || strings.Contains(msg, "opened") {
 		dur = 4 * time.Second
 	}
 	u.statusUntil = time.Now().Add(dur)
 	u.markChromeDirty()
+	// Status adds a second strip row — reflow shell so the toast isn't painted
+	// over the top of the VT grid (and so clearing it restores height).
+	if u.chrome.RowCount() != prevRows {
+		u.chromePx = u.chromePixelHeight()
+		if u.width > 0 && u.height > 0 {
+			u.applyClientSize(u.width, u.height)
+		}
+	}
+	log.Debug("toast", "msg", msg, "rows", u.chrome.RowCount())
 }
 
 // postToast queues a toast onto the ebiten UI tick (safe from goroutines).
@@ -369,9 +383,16 @@ func (u *macUI) clearToastIfDue() {
 	if u.statusUntil.IsZero() || time.Now().Before(u.statusUntil) {
 		return
 	}
+	prevRows := u.chrome.RowCount()
 	u.statusUntil = time.Time{}
 	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("")).Model
 	u.markChromeDirty()
+	if u.chrome.RowCount() != prevRows {
+		u.chromePx = u.chromePixelHeight()
+		if u.width > 0 && u.height > 0 {
+			u.applyClientSize(u.width, u.height)
+		}
+	}
 }
 
 func (u *macUI) chromePixelHeight() int32 {
