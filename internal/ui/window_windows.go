@@ -2780,22 +2780,14 @@ func (u *winUI) postLayoutSettle() {
 	}
 }
 
-// anyPaneConPtyBusy is true when a ConPTY resize would race streaming I/O.
-// Dual alt-screen (Grok) + ResizePseudoConsole is a known hard-crash path.
+// anyPaneConPtyBusy is true when a full ConPTY settle should wait.
+// Dual alt-screen + ResizePseudoConsole mid-stream hard-crashes (no Go panic).
 func (u *winUI) anyPaneConPtyBusy() bool {
 	if u == nil {
 		return false
 	}
 	for _, t := range u.allPanes() {
-		if t == nil || !t.alive.Load() {
-			continue
-		}
-		if t.altScreen() && t.busy() {
-			return true
-		}
-		// Recent PTY bytes even without alt — still risky mid-resize.
-		ns := t.lastIOUnixNano.Load()
-		if ns != 0 && time.Since(time.Unix(0, ns)) < 200*time.Millisecond {
+		if t != nil && t.alive.Load() && !t.conPtyResizeOK() {
 			return true
 		}
 	}
@@ -2899,10 +2891,11 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 	}
 	u.overlayDirty = true
 	u.chromeDirty = true
-	u.layoutDeferred = false
 
 	u.applyClientSize(w, h)
-	log.Info("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
+	// applyClientSize may leave layoutDeferred if some panes are still alt-screen.
+	log.Info("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows,
+		"deferred", u.layoutDeferred)
 	applog.Sync()
 
 	if u.alive.Load() {
@@ -2970,19 +2963,22 @@ func (u *winUI) applyClientSize(w, h int32) {
 			u.lastShell.w, u.lastShell.h = res.shellW, res.shellH
 			u.inputPx = u.sumActivePaneBarHeights()
 		}
+		deferred := false
 		for _, g := range res.leaves {
 			if g.pane == nil || !g.pane.alive.Load() {
 				continue
 			}
-			// Skip ConPTY resize on busy alt-screen panes (caller should have
-			// deferred full settle; belt-and-suspenders).
-			if g.pane.altScreen() && g.pane.busy() &&
-				g.pane.lastCols > 0 && g.pane.lastRows > 0 &&
-				(g.cols != g.pane.lastCols || g.rows != g.pane.lastRows) {
-				u.layoutDeferred = true
+			// Never ResizePseudoConsole while unsafe (alt-screen / recent I/O).
+			if !g.pane.conPtyResizeOK() {
+				if g.pane.lastCols > 0 && (g.cols != g.pane.lastCols || g.rows != g.pane.lastRows) {
+					deferred = true
+				}
 				continue
 			}
 			g.pane.resize(g.cols, g.rows)
+		}
+		if deferred {
+			u.layoutDeferred = true
 		}
 	}
 	// No pages yet: resize flat tabs to full size (init path).
@@ -2990,6 +2986,10 @@ func (u *winUI) applyClientSize(w, h int32) {
 		tabs := append([]*tab(nil), u.tabs...)
 		for _, t := range tabs {
 			if t == nil || !t.alive.Load() {
+				continue
+			}
+			if !t.conPtyResizeOK() {
+				u.layoutDeferred = true
 				continue
 			}
 			t.resize(cols, rows)

@@ -206,6 +206,27 @@ func (t *tab) noteIO() {
 	t.lastIOUnixNano.Store(time.Now().UnixNano())
 }
 
+// conPtyResizeOK is false when ResizePseudoConsole would race the session.
+// Dual alt-screen Grok + resize mid-stream hard-crashes the host (no Go panic).
+// Policy: never resize while on the alternate screen; require a quiet primary
+// buffer before any size change.
+func (t *tab) conPtyResizeOK() bool {
+	if t == nil || !t.alive.Load() {
+		return true
+	}
+	// Alt-screen TUIs (Grok, vim, …): keep ConPTY size fixed until they exit.
+	// Paint may letterbox; stability beats a perfect fit under load.
+	if t.altScreen() {
+		return false
+	}
+	const quiet = 2 * time.Second
+	ns := t.lastIOUnixNano.Load()
+	if ns != 0 && time.Since(time.Unix(0, ns)) < quiet {
+		return false
+	}
+	return true
+}
+
 // altScreen is true when the tab's VT is on the alternate screen buffer.
 func (t *tab) altScreen() bool {
 	if t == nil || t.term == nil {

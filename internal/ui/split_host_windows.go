@@ -208,16 +208,23 @@ func (u *winUI) splitActive(dir splitDir) {
 	t.startWorkers(u)
 	u.selecting = false
 	focus.sel.clear()
-	setWindowTitle(u.hwnd, "suzuri — "+t.title)
+	setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
 	u.syncChrome()
-	u.postLayoutSettle()
+	// Prefer paint-only when a sibling is already on alt-screen (Grok) so we
+	// don't ResizePseudoConsole under load. Full settle when safe / later idle.
+	u.relayoutActivePaintOnly()
+	if u.anyPaneConPtyBusy() {
+		u.layoutDeferred = true
+	} else {
+		u.postLayoutSettle()
+	}
 	if dir == splitVert {
 		u.toast("split right")
 	} else {
 		u.toast("split down")
 	}
 	if u.hwnd != 0 {
-		win.InvalidateRect(u.hwnd, nil, false)
+		u.requestPaint()
 	}
 	log.Info("split pane", "dir", dir, "new", t.id, "page", pg.id, "leaves", pg.leafCount())
 }
