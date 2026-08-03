@@ -32,7 +32,7 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | `suzuri_notes_get` | Get one note by `id` (omit = active) |
 | `suzuri_notes_create` | Create a note (`title?`, `body?`); becomes active |
 | `suzuri_notes_update` | Partial update (`id?`, `title?`, `body?`, `set_active?`) |
-| `suzuri_notes_delete` | Delete by `id` (omit = active; last note is cleared, not removed) |
+| `suzuri_notes_delete` | Delete by `id` (omit = active; last note is cleared, not removed). **No UI confirm** — agents skip the interactive prompt. |
 
 **Shell output vs app log vs notes**
 
@@ -47,6 +47,7 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 ### Notes bank details
 
 - Live GUI path: flushes the open editor, mutates the bank, saves `notes.json`, reloads the notes UI if open.
+- Interactive **d / Delete** in the notes list asks for confirmation; MCP `suzuri_notes_delete` never prompts.
 - Offline path: reads/writes `notes.json` under the OS config dir when the GUI is not running.
   - Windows: `%LOCALAPPDATA%\suzuri\notes.json`
   - macOS: `~/Library/Application Support/suzuri/notes.json`

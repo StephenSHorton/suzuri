@@ -156,6 +156,9 @@ const (
 	ActionApplyRename
 	// ActionOpenNotes opens the scratch notes surface (host may also toggle).
 	ActionOpenNotes
+	// ActionDeleteNote is the confirm "yes" for interactive note delete.
+	// Handled inside chrome (notesDeleteActive); host only needs to persist dirty bank.
+	ActionDeleteNote
 	// Zoom adjusts UI font size (host applies FontSizePx + persists).
 	ActionZoomIn
 	ActionZoomOut
@@ -340,8 +343,11 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			m.notesDirty = false
 		}
 	case NotesDeleteMsg:
-		if m.NotesOpen {
+		// Force (MCP/agents): delete immediately. Interactive host: confirm first.
+		if msg.Force || !m.NotesOpen {
 			m.notesDeleteActive()
+		} else {
+			m.openConfirmDeleteNote()
 		}
 	case NotesClickMsg:
 		if m.NotesOpen {
@@ -402,6 +408,11 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			s := msg.String()
 			if s == "enter" || s == "y" || msg.Type == tea.KeyEnter {
 				act = m.confirm.yesAction
+				// Note delete is handled in-model so notes stay open; host only persists.
+				if m.confirm.yesAction == ActionDeleteNote {
+					m.notesDeleteActive()
+					act = ActionNone
+				}
 				m.ConfirmOpen = false
 			} else if s == "esc" || s == "n" || s == "ctrl+c" || msg.Type == tea.KeyEsc {
 				// Signal host that user deferred an update offer.

@@ -59,7 +59,10 @@ type LoadNotesMsg struct {
 }
 
 // NotesDeleteMsg deletes the active note (or clears the last one).
-type NotesDeleteMsg struct{}
+// Force skips the interactive confirm (MCP / agent tools use Force: true).
+type NotesDeleteMsg struct {
+	Force bool
+}
 
 // NotesClickMsg is a host mouse click on the notes overlay grid (cell coords).
 // Places the caret in the editor body (or handles list/title hits).
@@ -242,6 +245,41 @@ func (m Model) activeNoteIsBlank() bool {
 		return false
 	}
 	return true
+}
+
+// openConfirmDeleteNote asks before removing/clearing the active note.
+// Notes stay open underneath; MCP/agent deletes call notesDeleteActive directly.
+func (m *Model) openConfirmDeleteNote() {
+	if !m.NotesOpen || len(m.notesBank) == 0 {
+		return
+	}
+	// Keep notes open; only tuck other modals.
+	m.PaletteOpen = false
+	m.SettingsOpen = false
+	m.HelpOpen = false
+	m.RenameOpen = false
+	m.SplashOpen = false
+
+	label := "this note"
+	if m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
+		if t := NoteDisplayTitle(m.notesBank[m.notesActive]); t != "" {
+			label = t
+		}
+	}
+	body := fmt.Sprintf("Delete “%s”? This cannot be undone.", label)
+	yes := "Delete"
+	if len(m.notesBank) <= 1 {
+		body = fmt.Sprintf("Clear “%s”? The last note is emptied, not removed.", label)
+		yes = "Clear"
+	}
+	m.ConfirmOpen = true
+	m.confirm = confirmState{
+		title:     "Delete note?",
+		body:      body,
+		yesLabel:  yes,
+		noLabel:   "Cancel",
+		yesAction: ActionDeleteNote,
+	}
 }
 
 func (m *Model) notesDeleteActive() {
@@ -446,7 +484,8 @@ func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 			m.notesNew()
 			return
 		case "d", "delete", "backspace":
-			m.notesDeleteActive()
+			// Interactive path: confirm before delete (MCP uses Force).
+			m.openConfirmDeleteNote()
 			return
 		case "f2", "r":
 			m.beginNotesTitleEdit()
@@ -1177,7 +1216,7 @@ func (m Model) renderNotesContextKeys(mainWidth, windowCols int) string {
 			{KeyUpDown(), "Move selection"},
 			{"Enter / click", "Open note"},
 			{"n", "New note"},
-			{"d / Delete", "Delete note"},
+			{"d / Delete", "Delete (asks first)"},
 			{"Esc", "Close notes"},
 			{KeyCtrlShift("M"), "Hide notes"},
 		}

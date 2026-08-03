@@ -413,6 +413,27 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 	m = r.Model
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	m = r.Model
+	// Delete asks for confirmation first.
+	if !m.ConfirmOpen {
+		t.Fatal("d should open delete confirm")
+	}
+	if len(m.notesBank) != 2 {
+		t.Fatalf("before confirm len=%d", len(m.notesBank))
+	}
+	// Esc cancels
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
+	m = r.Model
+	if m.ConfirmOpen || len(m.notesBank) != 2 {
+		t.Fatalf("cancel: confirm=%v len=%d", m.ConfirmOpen, len(m.notesBank))
+	}
+	// d + Enter confirms
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = r.Model
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	m = r.Model
+	if m.ConfirmOpen {
+		t.Fatal("confirm should close after enter")
+	}
 	if len(m.notesBank) != 1 {
 		t.Fatalf("after delete len=%d", len(m.notesBank))
 	}
