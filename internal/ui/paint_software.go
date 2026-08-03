@@ -16,13 +16,14 @@ import (
 
 // softwarePainter rasterizes terminal cell grids into an RGBA buffer.
 type softwarePainter struct {
-	face     font.Face
-	cjkFace  font.Face
-	cellW    int
-	cellH    int
-	ascent   int
-	sizePx   float64
-	faceName string
+	face        font.Face
+	cjkFace     font.Face
+	symbolsFace font.Face // Apple Symbols — ☕ and other UI marks mono lacks
+	cellW       int
+	cellH       int
+	ascent      int
+	sizePx      float64
+	faceName    string
 }
 
 // newSoftwarePainter builds a painter for the settings face name + size.
@@ -36,10 +37,11 @@ func newSoftwarePainter(faceName string, sizePx int) *softwarePainter {
 	}
 	face := faceForName(faceName, float64(sizePx))
 	cjk := cjkFaceForSize(float64(sizePx))
+	sym := symbolsFaceForSize(float64(sizePx))
 	if face == nil && cjk == nil {
 		return &softwarePainter{
 			cellW: cellW, cellH: cellH, ascent: cellH - 4,
-			sizePx: float64(sizePx), faceName: faceName,
+			sizePx: float64(sizePx), faceName: faceName, symbolsFace: sym,
 		}
 	}
 	mFace := face
@@ -90,13 +92,14 @@ func newSoftwarePainter(faceName string, sizePx int) *softwarePainter {
 		}
 	}
 	return &softwarePainter{
-		face:     face,
-		cjkFace:  cjk,
-		cellW:    cw,
-		cellH:    ch,
-		ascent:   ascent,
-		sizePx:   float64(sizePx),
-		faceName: faceName,
+		face:        face,
+		cjkFace:     cjk,
+		symbolsFace: sym,
+		cellW:       cw,
+		cellH:       ch,
+		ascent:      ascent,
+		sizePx:      float64(sizePx),
+		faceName:    faceName,
 	}
 }
 
@@ -508,6 +511,10 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 		}
 		if p.cjkFace != nil && cjkHasRune(r) {
 			faces = append(faces, p.cjkFace)
+		}
+		// UI marks mono faces omit (caffeine ☕, dingbats, …).
+		if p.symbolsFace != nil && symbolsHasRune(r) {
+			faces = append(faces, p.symbolsFace)
 		}
 	}
 	for _, face := range faces {

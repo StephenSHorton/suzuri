@@ -78,12 +78,21 @@ var (
 
 	// Active primary mono (settings FontFace) for coverage checks.
 	activePrimaryTTF *truetype.Font
+	// symbolsTTF: Apple Symbols (or similar) for UI marks mono faces lack
+	// (☕ U+2615, etc.). Loaded best-effort; nil if unavailable.
+	symbolsTTF *truetype.Font
 	// Cache loaded named fonts (path → parsed TTF).
 	namedTTFCache = map[string]*truetype.Font{}
 	// Cache opentype faces for TTC/OTF that truetype can't own.
 	// We store raw file bytes path → collection index 0 face factory via bytes.
 	namedOTFCache = map[string]*opentype.Font{}
 )
+
+// System faces that carry Miscellaneous Symbols (☕) Gohu/Nerd mono omit.
+var symbolsFontPaths = []string{
+	"/System/Library/Fonts/Apple Symbols.ttf",
+	"/Library/Fonts/Apple Symbols.ttf",
+}
 
 // RegisterBundledFonts parses the embedded Gohu TTF and a system CJK face.
 func RegisterBundledFonts() bool {
@@ -148,6 +157,28 @@ func registerFonts() bool {
 	} else if cjkTTF.Index('ｱ') == 0 {
 		log.Warn("cjk face lacks half-width katakana; matrix rain will use fullwidth/ASCII only")
 	}
+
+	// UI symbols (caffeine ☕, etc.) — Apple Symbols covers U+2615; Gohu does not.
+	for _, path := range symbolsFontPaths {
+		b, err := os.ReadFile(path)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		ft, err := truetype.Parse(b)
+		if err != nil {
+			log.Debug("symbols font parse skip", "path", path, "err", err)
+			continue
+		}
+		if ft.Index('☕') == 0 {
+			continue
+		}
+		symbolsTTF = ft
+		log.Info("symbols fallback font ready", "path", path)
+		break
+	}
+	if symbolsTTF == nil {
+		log.Warn("no symbols font with ☕ — caffeine chip may paint blank")
+	}
 	return true
 }
 
@@ -158,6 +189,7 @@ func UnregisterBundledFonts() {
 	bundledTTF = nil
 	cjkTTF = nil
 	cjkPath = ""
+	symbolsTTF = nil
 	bundledOK = false
 	activePrimaryTTF = nil
 	namedTTFCache = map[string]*truetype.Font{}
@@ -381,6 +413,24 @@ func primaryHasRune(r rune) bool {
 func cjkHasRune(r rune) bool {
 	fontMu.Lock()
 	ft := cjkTTF
+	fontMu.Unlock()
+	return ttfHasRune(ft, r)
+}
+
+// symbolsFaceForSize returns the system symbols face (☕ etc.), or nil.
+func symbolsFaceForSize(sizePx float64) font.Face {
+	fontMu.Lock()
+	ttf := symbolsTTF
+	fontMu.Unlock()
+	if ttf == nil {
+		return nil
+	}
+	return faceFromTTF(ttf, sizePx)
+}
+
+func symbolsHasRune(r rune) bool {
+	fontMu.Lock()
+	ft := symbolsTTF
 	fontMu.Unlock()
 	return ttfHasRune(ft, r)
 }
