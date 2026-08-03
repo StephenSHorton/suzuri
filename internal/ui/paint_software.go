@@ -107,9 +107,11 @@ type paintOpts struct {
 	CurAlpha     float64
 	DimShell     bool
 	SettingsOpen bool
-	// Intro / underlay
+	// Intro / underlay (MatrixCells paint over the shell field after the grid).
 	MatrixCells   []rainCell
-	WatermarkFade float64
+	// ShellMatrixCells: quiet always-on rain UNDER shell glyphs (Windows ShellMatrix).
+	ShellMatrixCells []rainCell
+	WatermarkFade    float64
 	// Sub-line smooth scroll (0..1): shift shell content up by frac*cellH.
 	ScrollFrac float64
 	// Scrollbar (host-drawn; Charm has no native host scrollbar).
@@ -152,6 +154,12 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	// Shell band base (black) — same as Windows BLACK_BRUSH before watermark.
 	if shellBot > padY {
 		fillRectRGBA(dst, 0, padY, w, shellBot-padY, 0, 0, 0)
+	}
+
+	// Always-on shell rain under glyphs (Windows paintShellMatrix order).
+	// Skip when a dim modal matte will cover the field.
+	if len(o.ShellMatrixCells) > 0 && !o.DimShell {
+		p.paintMatrixRain(dst, padY, shellBot, o.ShellMatrixCells)
 	}
 
 	// Center 硯 UNDER shell cells (Windows blitGrid order). Only ink pixels
@@ -490,6 +498,8 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 }
 
 // paintPaneGrid draws a VT cell grid into a pane's content rect.
+// Does not stamp a solid black card — shell band / always-on rain already
+// filled the field (Windows blitGrid: default black BG leaves rain visible).
 func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64) {
 	if dst == nil || p == nil || g.w < 1 || g.h < 1 {
 		return
@@ -501,8 +511,6 @@ func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g pan
 	if ch < 1 {
 		ch = cellH
 	}
-	// Pane content background.
-	fillRectRGBA(dst, int(g.x), int(g.y), int(g.w), int(g.h), 0, 0, 0)
 	const padX = 2
 	shellRight := int(g.x) + int(g.w) - 2
 	for y, row := range grid {
@@ -528,6 +536,7 @@ func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g pan
 				bg = blendByte(bg, cell.FG, a)
 				bb = blendByte(bb, cell.FB, a)
 			}
+			// Default black BG: leave shell rain / watermark visible (skip fill).
 			if br != 0 || bg != 0 || bb != 0 {
 				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
 			}

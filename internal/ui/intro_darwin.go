@@ -67,7 +67,31 @@ const (
 	matrixWindDown
 )
 
+// shellMatrixIntensity is how bright persistent shell rain is vs settings/intro
+// (Windows paintDimMatrixIntensity parity — quiet backdrop, not a curtain).
+const shellMatrixIntensity = 0.20
+
 const shellWatermarkRune = '硯'
+
+// dimRainCells scales glyph RGB by intensity (always-on shell rain).
+func dimRainCells(cells []rainCell, intensity float64) []rainCell {
+	if intensity >= 1 || len(cells) == 0 {
+		return cells
+	}
+	if intensity <= 0 {
+		return nil
+	}
+	out := make([]rainCell, len(cells))
+	for i, c := range cells {
+		out[i] = rainCell{
+			X: c.X, Y: c.Y, Ch: c.Ch,
+			FR: byte(float64(c.FR) * intensity),
+			FG: byte(float64(c.FG) * intensity),
+			FB: byte(float64(c.FB) * intensity),
+		}
+	}
+	return out
+}
 
 // rainCell is one painted matrix glyph in cell coordinates.
 type rainCell struct {

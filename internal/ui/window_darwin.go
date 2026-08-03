@@ -448,18 +448,9 @@ func (u *macUI) loop() error {
 		u.markChromeDirty()
 		u.showSplash = false
 	}
-	// Startup intro curtain (matrix rain by default).
-	now := time.Now()
-	u.matrixIntroStart = now
-	u.matrixIntroSpawnEnd = now.Add(matrixIntroSpawn)
-	u.matrixIntroDone = false
-	u.matrixIntroClearAt = time.Time{}
-	intro := config.Normalize(u.cfg).Intro
-	if intro == config.IntroNone {
-		// Still run a short delay so the center 硯 can fade in.
-		u.matrixIntroDone = false
-	}
-	log.Info("startup intro", "style", intro, "spawn", matrixIntroSpawn)
+	// Startup intro curtain (matrix rain by default). Skipped when always-on
+	// shell rain is already on (Windows beginIntro parity — no double curtain).
+	u.beginIntro(false)
 	u.heldKeys = make(map[ebiten.Key]time.Time)
 
 	// Startup update check: toast + confirm before install (same as Windows).
@@ -1066,18 +1057,58 @@ func (u *macUI) applyRename(target chrome.RenameTarget, name string) {
 	u.toast("renamed")
 }
 
-// replayIntro restarts the configured startup curtain.
-func (u *macUI) replayIntro() {
+// beginIntro arms the startup curtain. When shell background rain is already
+// on, matrix intro is skipped (redundant with always-on rain).
+func (u *macUI) beginIntro(replay bool) {
 	if u == nil {
 		return
 	}
 	now := time.Now()
+	style := config.Normalize(u.cfg).Intro
+	// Persistent shell rain + matrix intro would play the same effect twice.
+	if style == config.IntroMatrix && u.cfg.ShellMatrix {
+		u.matrixIntroStart = now
+		u.matrixIntroSpawnEnd = now
+		u.matrixIntroDone = true
+		u.matrixIntroClearAt = now // watermark at full opacity immediately
+		if replay {
+			log.Info("replay intro skipped", "reason", "shell matrix on", "style", style)
+		} else {
+			log.Info("startup intro skipped", "reason", "shell matrix on", "style", style)
+		}
+		return
+	}
 	u.matrixIntroStart = now
 	u.matrixIntroSpawnEnd = now.Add(matrixIntroSpawn)
 	u.matrixIntroDone = false
 	u.matrixIntroClearAt = time.Time{}
-	style := config.Normalize(u.cfg).Intro
-	log.Info("replay intro", "style", style)
+	if style == config.IntroNone {
+		// Short delay path for 硯 fade still uses spawn end clock.
+		u.matrixIntroDone = false
+	}
+	if replay {
+		log.Info("replay intro", "style", style)
+	} else {
+		log.Info("startup intro", "style", style, "spawn", matrixIntroSpawn)
+	}
+}
+
+// replayIntro restarts the configured startup curtain.
+func (u *macUI) replayIntro() {
+	u.beginIntro(true)
+}
+
+// shellMatrixOn is true when settings ask for always-on shell rain.
+func (u *macUI) shellMatrixOn() bool {
+	return u != nil && u.cfg.ShellMatrix
+}
+
+// dimShellModal is true for overlays that replace the live shell (not palette/help).
+func (u *macUI) dimShellModal() bool {
+	if u == nil {
+		return false
+	}
+	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
 }
 
 func (u *macUI) matrixIntroActive() bool {
@@ -1928,7 +1959,9 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 
 	// Intro underlay: startup curtain, or settings preview of the chosen style.
+	// Always-on shell rain is separate (ShellMatrixCells, under glyphs).
 	var rain []rainCell
+	var shellRain []rainCell
 	introStyle := config.Normalize(u.cfg).Intro
 	now := time.Now()
 	cwPx, chPx := cw, ch
@@ -1981,6 +2014,18 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 			u.finishMatrixIntro()
 		}
 	}
+	// Quiet looping rain under the shell while sitting open (settings Rain = On).
+	// Not during intro curtain or settings/splash/confirm modals.
+	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() {
+		t0 := u.blinkStart
+		if t0.IsZero() {
+			t0 = now
+		}
+		shellRain = dimRainCells(
+			matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now),
+			shellMatrixIntensity,
+		)
+	}
 
 	// Paint focused pane as primary shell (watermark/intro/chrome/overlay via paintFrame).
 	// Additional panes are blitted after with paintPaneGrid.
@@ -2014,25 +2059,26 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	// focused geom's bar region via ShowInput=false + post paint.
 	inOpts := u.inputBarPaint()
 	opts := paintOpts{
-		Shell:         focusGrid,
-		Chrome:        u.chromeCells,
-		Overlay:       overlay,
-		PadY:          padY,
-		ShellBot:      shellBot,
-		CurX:          cur.X,
-		CurY:          cur.Y,
-		CurVis:        curVis,
-		CurAlpha:      curAlpha,
-		DimShell:      u.chrome.OverlayOpen(),
-		SettingsOpen:  u.chrome.SettingsOpen,
-		MatrixCells:   rain,
-		WatermarkFade: u.watermarkFade(),
-		ScrollFrac:    tab.sb.scrollFrac(),
-		ScrollThumbY:  thumbY,
-		ScrollThumbH:  thumbH,
-		ScrollTrack:   scrollTrack,
-		ShowInput:     false, // always paint bars via layout (per-pane or focused)
-		CursorStyle:   int(u.cfg.Cursor),
+		Shell:            focusGrid,
+		Chrome:           u.chromeCells,
+		Overlay:          overlay,
+		PadY:             padY,
+		ShellBot:         shellBot,
+		CurX:             cur.X,
+		CurY:             cur.Y,
+		CurVis:           curVis,
+		CurAlpha:         curAlpha,
+		DimShell:         u.chrome.OverlayOpen(),
+		SettingsOpen:     u.chrome.SettingsOpen,
+		MatrixCells:      rain,
+		ShellMatrixCells: shellRain,
+		WatermarkFade:    u.watermarkFade(),
+		ScrollFrac:       tab.sb.scrollFrac(),
+		ScrollThumbY:     thumbY,
+		ScrollThumbH:     thumbH,
+		ScrollTrack:      scrollTrack,
+		ShowInput:        false, // always paint bars via layout (per-pane or focused)
+		CursorStyle:      int(u.cfg.Cursor),
 	}
 	opts.InputPrompt = inOpts.prompt
 	opts.InputLines = inOpts.lines
@@ -2047,7 +2093,8 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 
 	// For multi-pane: don't paint the focused shell full-window — clear shell
-	// and draw each leaf into its rect.
+	// and draw each leaf into its rect. Keep ShellMatrixCells so rain shows
+	// through empty cells under all panes (shared backdrop).
 	if len(layouts) > 1 {
 		opts.Shell = nil
 		opts.Images = nil
