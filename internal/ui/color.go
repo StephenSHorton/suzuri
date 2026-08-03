@@ -141,23 +141,32 @@ func displayRune(r rune) rune {
 	if isEastAsianRune(r) {
 		return r
 	}
-	// Status / spinner glyphs used by chrome (tab activity) and TUIs.
-	// Braille Patterns = the classic 6-dot cells (⠿ ⠋ …) every CLI uses.
-	if r >= 0x2800 && r <= 0x28FF {
+	// Common terminal / chrome UI symbol blocks (Gohu Nerd Font covers these).
+	switch {
+	case r >= 0x2190 && r <= 0x21FF: // Arrows: ← → ↑ ↓ ⇒ …
+		return r
+	case r >= 0x2200 && r <= 0x22FF: // Math: ∞ ≈ ≠ ≤ ≥ …
+		return r
+	case r >= 0x2300 && r <= 0x23FF: // Technical: ⌘ ⌥ ⌫ ⏎ …
+		return r
+	case r >= 0x2500 && r <= 0x259F: // Box / block drawing
+		return r
+	case r >= 0x25A0 && r <= 0x25FF: // Geometric: ● ○ ◉ ◆ ▶ …
+		return r
+	case r >= 0x2600 && r <= 0x26FF: // Misc symbols: ☕ ☀ …
+		return r
+	case r >= 0x2700 && r <= 0x27BF: // Dingbats: ✓ ✗ ❯ ✂ …
+		return r
+	case r >= 0x2800 && r <= 0x28FF: // Braille spinners
+		return r
+	case r >= 0x2000 && r <= 0x206F: // General punctuation: • — …
 		return r
 	}
-	// Geometric Shapes: ● ○ ◉ ◆ ◎ ◐ …
-	if r >= 0x25A0 && r <= 0x25FF {
-		return r
-	}
-	// Beyond Latin Extended-B: keep box-drawing / light punctuation; drop
-	// exotic scripts we cannot paint cleanly without per-script fallbacks.
-	if r > 0x024F &&
-		!(r >= 0x2500 && r <= 0x259F) && // box / block drawing
-		!(r >= 0x2000 && r <= 0x206F) { // general punctuation
+	// Latin / Greek used in TUIs (λ); drop other exotic scripts without fallbacks.
+	if r > 0x024F {
 		switch r {
-		case '✓', '✗', '→', '←', '▶', '❯', 'λ', '•':
-			return ' '
+		case 'λ', 'μ', 'π', 'Σ', 'Ω':
+			return r
 		default:
 			if !unicode.In(r, unicode.Latin, unicode.Common) {
 				return ' '

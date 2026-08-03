@@ -33,6 +33,20 @@ func TestColorDefault(t *testing.T) {
 	}
 }
 
+func TestDisplayRuneKeepsArrowsAndUISymbols(t *testing.T) {
+	// These used to be blanked (looked like extra spaces in "dim → bright").
+	keep := []rune{'→', '←', '↑', '↓', '⇒', '▶', '❯', '✓', '✗', '•', '☕', '∞', '⌘', '⌥', '⌫', 'λ'}
+	for _, r := range keep {
+		if got := displayRune(r); got != r {
+			t.Fatalf("displayRune(%q U+%04X) = %q, want kept", r, r, got)
+		}
+	}
+	// Still blank tofu / controls / private use.
+	if displayRune(0) != ' ' || displayRune(0xE0A0) != ' ' {
+		t.Fatal("expected tofu/PUA blanked")
+	}
+}
+
 // Reverse video (SGR 7 / lipgloss Reverse) must produce a non-black background
 // so list selection highlights are visible when default-black BG is left transparent.
 func TestReverseVideoHighlightVisible(t *testing.T) {
