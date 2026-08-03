@@ -407,6 +407,22 @@ func (u *macUI) loop() error {
 	log.Info("startup intro", "style", intro, "spawn", matrixIntroSpawn)
 	u.heldKeys = make(map[ebiten.Key]time.Time)
 
+	// Startup update check: toast + confirm before install (same as Windows).
+	scheduleStartupUpdateCheck(u.postToast, func(ver string) {
+		if u.jobs != nil {
+			select {
+			case u.jobs <- func() {
+				r := u.chrome.UpdateChrome(chrome.OpenConfirmUpdateMsg{Version: ver})
+				u.chrome = r.Model
+				u.overlayCells = nil
+				u.overlayDirty = true
+				u.markChromeDirty()
+			}:
+			default:
+			}
+		}
+	})
+
 	log.Info("starting ebiten window", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
 	err := ebiten.RunGame(u)
 	u.alive.Store(false)
