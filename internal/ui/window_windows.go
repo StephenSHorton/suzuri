@@ -1970,6 +1970,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 						win.InvalidateRect(hwnd, nil, false)
 						return 0
 					case 'N', 'n':
+						// New note (works from list or editor).
 						km := tea.KeyMsg{Type: tea.KeyCtrlN}
 						r := u.chrome.UpdateChrome(km)
 						u.chrome = r.Model
@@ -1978,34 +1979,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 						win.InvalidateRect(hwnd, nil, false)
 						u.persistNotesIfDirty()
 						return 0
-					case win.VK_PRIOR: // Ctrl+PageUp — previous note
-						km := tea.KeyMsg{Type: tea.KeyCtrlPgUp}
-						r := u.chrome.UpdateChrome(km)
-						u.chrome = r.Model
-						u.overlayDirty = true
-						u.overlayCells = nil
-						win.InvalidateRect(hwnd, nil, false)
-						u.persistNotesIfDirty()
-						return 0
-					case win.VK_NEXT: // Ctrl+PageDown — next note
-						km := tea.KeyMsg{Type: tea.KeyCtrlPgDown}
-						r := u.chrome.UpdateChrome(km)
-						u.chrome = r.Model
-						u.overlayDirty = true
-						u.overlayCells = nil
-						win.InvalidateRect(hwnd, nil, false)
-						u.persistNotesIfDirty()
-						return 0
 					}
-				} else if wParam == win.VK_BACK {
-					// Ctrl+Shift+Backspace — delete current note
-					r := u.chrome.UpdateChrome(chrome.NotesDeleteMsg{})
-					u.chrome = r.Model
-					u.overlayDirty = true
-					u.overlayCells = nil
-					win.InvalidateRect(hwnd, nil, false)
-					u.persistNotesIfDirty()
-					return 0
 				}
 			}
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
@@ -2431,8 +2405,30 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Clicks on the card itself (including notes) must not put it away.
 		if u.chrome.OverlayOpen() && py >= chromeH {
 			if u.hitOverlayCard(px, py) {
-				// Keep focus / selection; card owns the click.
 				u.focus()
+				// Notes: route click into list / title / editor.
+				if u.chrome.NotesOpen {
+					cw, ch := u.metricW, u.metricH
+					if cw < 1 {
+						cw = cellW
+					}
+					if ch < 1 {
+						ch = cellH
+					}
+					var rect win.RECT
+					win.GetClientRect(hwnd, &rect)
+					oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
+					cx := int(px / cw)
+					cy := int((py - oy) / ch)
+					r := u.chrome.UpdateChrome(chrome.NotesClickMsg{
+						CellX: cx, CellY: cy, Cols: u.cols,
+					})
+					u.chrome = r.Model
+					u.overlayDirty = true
+					u.overlayCells = nil
+					u.persistNotesIfDirty()
+					win.InvalidateRect(hwnd, nil, false)
+				}
 				return 0
 			}
 			log.Info("dismiss overlay (click outside)")
@@ -5122,6 +5118,9 @@ func teaKeyFromWin(wParam uintptr, ctrl, shift bool) *tea.KeyMsg {
 			t = tea.KeyShiftEnd
 		}
 		km := tea.KeyMsg{Type: t}
+		return &km
+	case win.VK_F2:
+		km := tea.KeyMsg{Type: tea.KeyF2}
 		return &km
 	}
 	return nil

@@ -54,12 +54,16 @@ type Model struct {
 	// Notes bank (persisted to notes.json; editor mirrors active note).
 	notesBank   []NoteDoc
 	notesActive int // index into notesBank
+	notesFocus  notesFocus
+	notesTitle  string // buffer while renaming title
 	notesRunes  []rune
 	notesCursor int
 	notesSel    int // selection anchor; -1 = none (cursor is the other end)
 	notesScroll int
 	notesWrapW  int
 	notesDirty  bool
+	// notesLayout is filled by renderNotes for host click hit-testing.
+	notesLayout notesLayout
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
 }
@@ -308,6 +312,15 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		if m.NotesOpen {
 			m.notesDeleteActive()
 		}
+	case NotesClickMsg:
+		if m.NotesOpen {
+			cols := msg.Cols
+			if cols < 20 {
+				cols = m.Width
+			}
+			m.computeNotesLayout(cols)
+			m.handleNotesClick(msg.CellX, msg.CellY, cols)
+		}
 	case DismissOverlayMsg:
 		if m.SettingsOpen {
 			settings = m.settings.snap
@@ -368,12 +381,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			return Result{Model: m, Action: act, Name: renameName, RenameTarget: renameTarget}
 		}
 		if m.NotesOpen {
-			// Update wrap width for vertical motion from current model width.
-			inner := dialogInnerWidth(clampDialogWidth(56, m.Width))
-			m.notesWrapW = inner - 2
-			if m.notesWrapW < 8 {
-				m.notesWrapW = 8
-			}
+			m.computeNotesLayout(m.Width)
 			m.handleNotesKey(msg)
 			return Result{Model: m}
 		}
@@ -724,7 +732,7 @@ func (m Model) OverlayRowCount() int {
 	case m.RenameOpen:
 		return 8
 	case m.NotesOpen:
-		return notesVisRows + 6
+		return notesListRows + 10
 	case m.PaletteOpen:
 		return 14
 	default:

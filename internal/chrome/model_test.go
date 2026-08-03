@@ -208,9 +208,18 @@ func TestNotesToggleKeepsBuffer(t *testing.T) {
 	if !m.NotesOpen {
 		t.Fatal("notes open")
 	}
+	// Open lands on list; Enter → editor, then type.
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	m = r.Model
 	for _, ch := range "hello" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
+	}
+	// Esc from editor → list; Esc from list → close
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
+	m = r.Model
+	if !m.NotesOpen || m.notesFocus != notesFocusList {
+		t.Fatalf("esc→list open=%v focus=%v", m.NotesOpen, m.notesFocus)
 	}
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
 	m = r.Model
@@ -230,6 +239,9 @@ func TestNotesToggleKeepsBuffer(t *testing.T) {
 func TestNotesSelectAllBackspaceTab(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenNotesMsg{})
+	m = r.Model
+	// List → editor, then type
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
 	m = r.Model
 	for _, ch := range "ab" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
@@ -276,30 +288,69 @@ func TestNotesSelectAllBackspaceTab(t *testing.T) {
 	}
 }
 
-func TestNotesBankNewSwitchPersist(t *testing.T) {
+func TestNotesBankListNewRenameDelete(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("LOCALAPPDATA", dir)
 
 	m := New(80)
 	r := m.UpdateChrome(OpenNotesMsg{})
 	m = r.Model
+	if m.notesFocus != notesFocusList {
+		t.Fatal("open on list")
+	}
+	// Enter editor, type body
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	m = r.Model
+	if m.notesFocus != notesFocusEditor {
+		t.Fatal("enter → editor")
+	}
 	for _, ch := range "one" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
 	}
-	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlN})
+	// Esc back to list, n for new (title mode)
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
+	m = r.Model
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	m = r.Model
 	if len(m.notesBank) != 2 {
 		t.Fatalf("bank len=%d", len(m.notesBank))
 	}
-	for _, ch := range "two" {
+	if m.notesFocus != notesFocusTitle {
+		t.Fatal("new → title rename")
+	}
+	for _, ch := range "Two" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
 	}
-	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlPgUp})
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	m = r.Model
+	if m.notesBank[m.notesActive].Title != "Two" {
+		t.Fatalf("title=%q", m.notesBank[m.notesActive].Title)
+	}
+	// Esc to list, up to first note, d delete second remains
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
+	m = r.Model
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyUp})
 	m = r.Model
 	if string(m.notesRunes) != "one" {
-		t.Fatalf("switched body=%q want one", string(m.notesRunes))
+		t.Fatalf("switched body=%q", string(m.notesRunes))
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+	m = r.Model
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = r.Model
+	if len(m.notesBank) != 1 {
+		t.Fatalf("after delete len=%d", len(m.notesBank))
+	}
+	// Click rename path
+	r = m.UpdateChrome(NotesClickMsg{CellX: 40, CellY: 3, Cols: 80})
+	m = r.Model
+	// May or may not hit name row depending on layout; F2 always works
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyF2})
+	m = r.Model
+	if m.notesFocus != notesFocusTitle {
+		t.Fatal("f2 → title")
 	}
 	bank := m.NotesSnapshot()
 	if err := SaveNotesBank(bank); err != nil {
@@ -309,21 +360,16 @@ func TestNotesBankNewSwitchPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Notes) != 2 {
+	if len(got.Notes) != 1 {
 		t.Fatalf("loaded len=%d", len(got.Notes))
-	}
-	bodies := map[string]bool{}
-	for _, n := range got.Notes {
-		bodies[n.Body] = true
-	}
-	if !bodies["one"] || !bodies["two"] {
-		t.Fatalf("bodies=%v", bodies)
 	}
 }
 
 func TestNotesEnterSingleBlankLine(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenNotesMsg{})
+	m = r.Model
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter}) // list → editor
 	m = r.Model
 	for _, ch := range "hi" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})

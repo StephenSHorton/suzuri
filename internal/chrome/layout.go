@@ -10,7 +10,8 @@ import (
 const (
 	// Crush defaultDialogMaxWidth = 70; host windows are often narrower.
 	crushDialogMaxWidth = 70
-	suzuriDialogMaxWidth = 56
+	// Wide enough for notes list+editor split; other dialogs still pass smaller want.
+	suzuriDialogMaxWidth = 68
 
 	// Title / input content line heights in Crush sizeDialogList.
 	titleContentHeight = 1

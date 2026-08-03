@@ -1,7 +1,6 @@
 package chrome
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -9,15 +8,43 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Notes: multi-note bank, floating card, persisted via notes.json (host).
+// Notes: multi-note bank with Charm-styled list + editor, disk-backed.
 
 const (
-	notesVisRows   = 11
+	notesListRows  = 12
 	notesMaxRunes  = 64 * 1024
 	notesCaretChar = "▌"
-	notesTabStop   = 4 // display width advances to next multiple of this
+	notesTabStop   = 4
 	notesMaxBank   = 48
+	notesListWant  = 20 // preferred list column width
+	notesDialogWant = 66
 )
+
+// notesFocus is which pane owns keys inside the notes card.
+type notesFocus int
+
+const (
+	notesFocusList notesFocus = iota
+	notesFocusEditor
+	notesFocusTitle
+)
+
+// notesLayout describes the last-rendered card for host click hit-testing
+// (cell coordinates relative to the full-width overlay grid).
+type notesLayout struct {
+	Cols   int
+	Outer  int
+	Inner  int
+	ListW  int
+	// Overlay rows (0-based in overlayCells):
+	TitleY     int // dialog title "Notes"
+	NameY      int // note name row (click to rename)
+	SplitY0    int // first list|editor row
+	SplitRows  int
+	CardLeft   int // first col of card content (incl. border-ish)
+	CardRight  int
+	Valid      bool
+}
 
 // OpenNotesMsg opens the notes surface (bank preserved across open/close).
 type OpenNotesMsg struct{}
@@ -33,6 +60,13 @@ type LoadNotesMsg struct {
 // NotesDeleteMsg deletes the active note (or clears the last one).
 type NotesDeleteMsg struct{}
 
+// NotesClickMsg is a host mouse click on the notes overlay grid (cell coords).
+type NotesClickMsg struct {
+	CellX int
+	CellY int
+	Cols  int
+}
+
 func (m *Model) initNotesBank(bank NotesBank) {
 	bank = normalizeNotesBank(bank)
 	m.notesBank = append([]NoteDoc(nil), bank.Notes...)
@@ -43,6 +77,8 @@ func (m *Model) initNotesBank(bank NotesBank) {
 			break
 		}
 	}
+	m.notesFocus = notesFocusList
+	m.notesTitle = ""
 	m.loadActiveNoteIntoEditor()
 }
 
@@ -79,12 +115,19 @@ func (m *Model) flushActiveNote() {
 }
 
 func (m *Model) putAwayNotes() {
+	if m.notesFocus == notesFocusTitle {
+		m.commitNotesTitle(false)
+	}
 	m.flushActiveNote()
 	m.NotesOpen = false
+	m.notesFocus = notesFocusList
 }
 
 // NotesSnapshot returns the bank for disk save (flushes editor first).
 func (m *Model) NotesSnapshot() NotesBank {
+	if m.notesFocus == notesFocusTitle {
+		m.commitNotesTitle(true)
+	}
 	m.flushActiveNote()
 	activeID := ""
 	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
@@ -111,6 +154,8 @@ func (m *Model) openNotes() {
 	if len(m.notesBank) == 0 {
 		m.initNotesBank(defaultNotesBank())
 	}
+	m.notesFocus = notesFocusList
+	m.notesTitle = ""
 	m.notesClampCursor()
 	if m.notesSel < 0 {
 		m.notesSel = -1
@@ -125,9 +170,25 @@ func (m *Model) toggleNotes() {
 	m.openNotes()
 }
 
+func (m *Model) notesSelect(i int) {
+	if i < 0 || i >= len(m.notesBank) {
+		return
+	}
+	if i == m.notesActive {
+		return
+	}
+	m.flushActiveNote()
+	m.notesActive = i
+	m.loadActiveNoteIntoEditor()
+	m.notesDirty = true
+}
+
 func (m *Model) notesNew() {
 	if len(m.notesBank) >= notesMaxBank {
 		return
+	}
+	if m.notesFocus == notesFocusTitle {
+		m.commitNotesTitle(true)
 	}
 	m.flushActiveNote()
 	n := newNoteDoc("", "")
@@ -135,16 +196,23 @@ func (m *Model) notesNew() {
 	m.notesActive = len(m.notesBank) - 1
 	m.loadActiveNoteIntoEditor()
 	m.notesDirty = true
+	m.beginNotesTitleEdit()
 }
 
 func (m *Model) notesDeleteActive() {
+	if m.notesFocus == notesFocusTitle {
+		m.commitNotesTitle(false)
+	}
 	if len(m.notesBank) <= 1 {
-		// Clear sole note instead of deleting the bank.
 		m.notesRunes = nil
 		m.notesCursor = 0
 		m.notesSel = -1
 		m.notesScroll = 0
-		m.flushActiveNote()
+		if len(m.notesBank) == 1 {
+			m.notesBank[0].Title = ""
+			m.notesBank[0].Body = ""
+			m.notesBank[0].Updated = timeNow()
+		}
 		m.notesDirty = true
 		return
 	}
@@ -155,17 +223,43 @@ func (m *Model) notesDeleteActive() {
 	}
 	m.loadActiveNoteIntoEditor()
 	m.notesDirty = true
+	m.notesFocus = notesFocusList
 }
 
-func (m *Model) notesSwitch(delta int) {
-	if len(m.notesBank) < 2 {
+func (m *Model) beginNotesTitleEdit() {
+	m.flushActiveNote()
+	if len(m.notesBank) == 0 {
 		return
 	}
-	m.flushActiveNote()
-	n := len(m.notesBank)
-	m.notesActive = (m.notesActive + delta%n + n) % n
-	m.loadActiveNoteIntoEditor()
-	m.notesDirty = true // active_id change
+	n := m.notesBank[m.notesActive]
+	// Seed with stored title, else derived display (so rename is natural).
+	if t := strings.TrimSpace(n.Title); t != "" {
+		m.notesTitle = t
+	} else {
+		m.notesTitle = NoteDisplayTitle(n)
+		if m.notesTitle == "Untitled" {
+			m.notesTitle = ""
+		}
+	}
+	m.notesFocus = notesFocusTitle
+}
+
+func (m *Model) commitNotesTitle(keep bool) {
+	if m.notesFocus != notesFocusTitle {
+		return
+	}
+	if keep && len(m.notesBank) > 0 {
+		t := strings.TrimSpace(m.notesTitle)
+		n := m.notesBank[m.notesActive]
+		if n.Title != t {
+			n.Title = t
+			n.Updated = timeNow()
+			m.notesBank[m.notesActive] = n
+			m.notesDirty = true
+		}
+	}
+	m.notesTitle = ""
+	m.notesFocus = notesFocusList
 }
 
 // timeNow is a seam for tests.
@@ -248,26 +342,96 @@ func (m Model) NotesAllText() string {
 
 func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 	s := msg.String()
+
+	// Title rename mode (inline, like rename dialog).
+	if m.notesFocus == notesFocusTitle {
+		switch s {
+		case "esc":
+			m.commitNotesTitle(false)
+			return
+		case "enter":
+			m.commitNotesTitle(true)
+			m.notesFocus = notesFocusEditor
+			return
+		case "backspace":
+			if m.notesTitle != "" {
+				rs := []rune(m.notesTitle)
+				m.notesTitle = string(rs[:len(rs)-1])
+			}
+			return
+		default:
+			if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+				for _, r := range msg.Runes {
+					if r >= 32 {
+						m.notesTitle += string(r)
+					}
+				}
+			}
+			return
+		}
+	}
+
+	// List pane: browse bank, delete, open editor.
+	if m.notesFocus == notesFocusList {
+		switch s {
+		case "esc":
+			m.putAwayNotes()
+			return
+		case "up":
+			if m.notesActive > 0 {
+				m.notesSelect(m.notesActive - 1)
+			}
+			return
+		case "down":
+			if m.notesActive+1 < len(m.notesBank) {
+				m.notesSelect(m.notesActive + 1)
+			}
+			return
+		case "enter", "right", "tab":
+			m.notesFocus = notesFocusEditor
+			return
+		case "n", "ctrl+n":
+			m.notesNew()
+			return
+		case "d", "delete", "backspace":
+			m.notesDeleteActive()
+			return
+		case "f2", "r":
+			m.beginNotesTitleEdit()
+			return
+		case "ctrl+c":
+			return
+		default:
+			// Typing in list focuses editor and inserts.
+			if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+				m.notesFocus = notesFocusEditor
+				m.handleNotesEditorKey(msg)
+			}
+			return
+		}
+	}
+
+	// Editor pane.
+	m.handleNotesEditorKey(msg)
+}
+
+func (m *Model) handleNotesEditorKey(msg tea.KeyMsg) {
+	s := msg.String()
 	extend := strings.HasPrefix(s, "shift+")
 
 	switch s {
 	case "esc":
-		m.putAwayNotes()
+		// Back to list (not close) — list is the "system" for notes.
+		m.notesFocus = notesFocusList
+		m.notesClearSel()
+		return
+	case "f2":
+		m.beginNotesTitleEdit()
 		return
 	case "ctrl+n":
 		m.notesNew()
 		return
-	case "ctrl+pgup":
-		m.notesSwitch(-1)
-		return
-	case "ctrl+pgdown":
-		m.notesSwitch(1)
-		return
-	case "ctrl+shift+backspace":
-		m.notesDeleteActive()
-		return
 	case "ctrl+a":
-		// Select all
 		if len(m.notesRunes) == 0 {
 			m.notesSel = -1
 			m.notesCursor = 0
@@ -278,10 +442,8 @@ func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 		m.notesEnsureCursorVisible(0)
 		return
 	case "ctrl+c":
-		// Copy is handled by the host (needs clipboard). Leave selection.
 		return
 	case "ctrl+x":
-		// Cut: host copies then we delete selection; if host didn't, delete anyway.
 		if m.notesHasSel() {
 			m.notesDeleteSel()
 		}
@@ -290,7 +452,6 @@ func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 		m.notesInsert("\n")
 		return
 	case "tab", "shift+tab":
-		// Real tab character (shift+tab same for now; outdent later).
 		m.notesInsert("\t")
 		return
 	case "backspace":
@@ -336,8 +497,6 @@ func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 		m.notesWordMove(1, strings.Contains(s, "shift"))
 		return
 	default:
-		// Esc puts away; ctrl+c is copy (host clipboard), not close.
-		// Keep \t as a real tab; drop other C0 controls.
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
 			var b strings.Builder
 			for _, r := range msg.Runes {
@@ -352,11 +511,69 @@ func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 	}
 }
 
+// handleNotesClick maps an overlay cell click into list / title / editor focus.
+func (m *Model) handleNotesClick(cellX, cellY, cols int) {
+	if !m.NotesOpen {
+		return
+	}
+	lay := m.notesLayout
+	if !lay.Valid || cols > 0 {
+		// Prefer live layout; if stale, recompute geometry only.
+		if !lay.Valid {
+			_ = m.renderNotes(cols)
+			lay = m.notesLayout
+		}
+	}
+	if !lay.Valid {
+		return
+	}
+	if cellX < lay.CardLeft || cellX >= lay.CardRight {
+		return
+	}
+	relX := cellX - lay.CardLeft
+	// Border ~1 cell; content starts after.
+	contentX := relX - 1
+	if contentX < 0 {
+		contentX = 0
+	}
+
+	if cellY == lay.NameY || cellY == lay.TitleY {
+		m.beginNotesTitleEdit()
+		return
+	}
+	if cellY < lay.SplitY0 || cellY >= lay.SplitY0+lay.SplitRows {
+		// Footer / rules — ignore.
+		return
+	}
+	if contentX < lay.ListW {
+		// List column.
+		row := cellY - lay.SplitY0
+		// Account for list window scroll if selection far down.
+		start := 0
+		if m.notesActive >= notesListRows {
+			start = m.notesActive - notesListRows + 1
+		}
+		idx := start + row
+		if idx >= 0 && idx < len(m.notesBank) {
+			if m.notesFocus == notesFocusTitle {
+				m.commitNotesTitle(true)
+			}
+			m.notesSelect(idx)
+			m.notesFocus = notesFocusList
+		}
+		return
+	}
+	// Editor column.
+	if m.notesFocus == notesFocusTitle {
+		m.commitNotesTitle(true)
+	}
+	m.notesFocus = notesFocusEditor
+}
+
 func (m *Model) notesInsert(s string) {
 	if s == "" {
 		return
 	}
-	// Replace selection if any.
 	_ = m.notesDeleteSel()
 	rs := []rune(s)
 	if len(m.notesRunes)+len(rs) > notesMaxRunes {
@@ -461,7 +678,6 @@ func (m *Model) notesWordMove(dir int, extend bool) {
 	i := m.notesCursor
 	n := len(m.notesRunes)
 	if dir < 0 {
-		// Skip spaces left, then word chars left.
 		for i > 0 && isNotesSpace(m.notesRunes[i-1]) {
 			i--
 		}
@@ -527,8 +743,8 @@ func (m *Model) notesEnsureCursorVisible(wrapW int) {
 	if row < m.notesScroll {
 		m.notesScroll = row
 	}
-	if row >= m.notesScroll+notesVisRows {
-		m.notesScroll = row - notesVisRows + 1
+	if row >= m.notesScroll+notesListRows {
+		m.notesScroll = row - notesListRows + 1
 	}
 	if m.notesScroll < 0 {
 		m.notesScroll = 0
@@ -539,6 +755,17 @@ func (m *Model) notesEnsureCursorVisible(wrapW int) {
 func (m *Model) NotesPaste(s string) {
 	if s == "" {
 		return
+	}
+	if m.notesFocus == notesFocusTitle {
+		// Paste into title field.
+		s = strings.ReplaceAll(s, "\r\n", " ")
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.ReplaceAll(s, "\r", " ")
+		m.notesTitle += s
+		return
+	}
+	if m.notesFocus != notesFocusEditor {
+		m.notesFocus = notesFocusEditor
 	}
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
@@ -551,12 +778,11 @@ func (m *Model) NotesCutSelection() bool {
 }
 
 type notesLine struct {
-	start, end int // half-open index into runes
-	width      int // visual columns
+	start, end int
+	width      int
 	hard       bool
 }
 
-// notesTabWidth is how many display columns a tab occupies at visual col.
 func notesTabWidth(col int) int {
 	stop := notesTabStop
 	if stop < 1 {
@@ -572,7 +798,6 @@ func notesDisplayWidth(r rune, col int) int {
 	return 1
 }
 
-// notesExpandTabs turns tabs into spaces for display only (buffer keeps \t).
 func notesExpandTabs(rs []rune, startCol int) string {
 	if len(rs) == 0 {
 		return ""
@@ -610,27 +835,21 @@ func notesSoftLines(runes []rune, width int) []notesLine {
 			continue
 		}
 		w := notesDisplayWidth(runes[i], col)
-		// Soft-wrap before this rune if it won't fit (unless line is empty).
 		if col > 0 && col+w > width {
 			out = append(out, notesLine{start: start, end: i, width: col, hard: false})
 			start = i
 			col = 0
 			w = notesDisplayWidth(runes[i], col)
 		}
-		// Pathological: single tab wider than width — still emit one cell.
 		if w > width {
 			w = width
 		}
 		col += w
 	}
-	// After a trailing hard newline, start == len and this emits the blank
-	// line the caret sits on. Do not add a second empty row for "\n" ends —
-	// that made Enter look like a double newline with typing on the prior line.
 	out = append(out, notesLine{start: start, end: len(runes), width: col, hard: false})
 	return out
 }
 
-// notesCursorRowCol returns soft-line row and visual column of cursor.
 func notesCursorRowCol(runes []rune, lines []notesLine, cursor int) (row, visCol int) {
 	if len(lines) == 0 {
 		return 0, 0
@@ -647,7 +866,6 @@ func notesCursorRowCol(runes []rune, lines []notesLine, cursor int) (row, visCol
 	return len(lines) - 1, last.width
 }
 
-// notesVisualCol is display column of index `at` within a soft line starting at start.
 func notesVisualCol(runes []rune, start, at int) int {
 	col := 0
 	if at < start {
@@ -665,7 +883,6 @@ func notesVisualCol(runes []rune, start, at int) int {
 	return col
 }
 
-// notesIndexAtVisual maps a visual column to a rune index in [start,end].
 func notesIndexAtVisual(runes []rune, start, end, target int) int {
 	if target <= 0 {
 		return start
@@ -684,7 +901,6 @@ func notesIndexAtVisual(runes []rune, start, end, target int) int {
 	return end
 }
 
-// notesRuneOffset is cursor's index into a soft line's runes (for caret paint).
 func notesRuneOffset(lines []notesLine, row, cursor int) int {
 	if row < 0 || row >= len(lines) {
 		return 0
@@ -700,34 +916,44 @@ func notesRuneOffset(lines []notesLine, row, cursor int) int {
 }
 
 func (m Model) renderNotes(windowCols int) string {
-	outer := clampDialogWidth(56, windowCols)
+	outer := clampDialogWidth(notesDialogWant, windowCols)
 	inner := dialogInnerWidth(outer)
-	if inner < 20 {
-		inner = 20
+	if inner < 24 {
+		inner = 24
 	}
-	wrapW := inner - 2
+	listW := notesListWant
+	if listW > inner/2 {
+		listW = inner / 2
+	}
+	if listW < 12 {
+		listW = 12
+	}
+	editorW := inner - listW - 1 // 1 for gutter
+	if editorW < 12 {
+		editorW = 12
+		listW = inner - editorW - 1
+	}
+	wrapW := editorW - 2
 	if wrapW < 8 {
 		wrapW = 8
 	}
+	// Persist wrap for motion (model is value receiver — host updates notesWrapW on key path).
+	// Layout for clicks uses local values + stored layout below.
 
-	title := "Notes"
-	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
-		title = "Notes · " + NoteDisplayTitle(m.notesBank[m.notesActive])
-		if len(m.notesBank) > 1 {
-			title += fmt.Sprintf("  (%d/%d)", m.notesActive+1, len(m.notesBank))
-		}
-	}
+	// Name row (clickable title).
+	nameLine := m.renderNotesNameRow(inner)
 
-	lines := notesSoftLines(m.notesRunes, wrapW)
+	// Soft-wrap editor text to editor column.
+	edLines := notesSoftLines(m.notesRunes, wrapW)
 	scroll := m.notesScroll
 	if scroll < 0 {
 		scroll = 0
 	}
-	if scroll > 0 && scroll >= len(lines) {
-		scroll = len(lines) - 1
+	if scroll > 0 && scroll >= len(edLines) {
+		scroll = len(edLines) - 1
 	}
-	row, _ := notesCursorRowCol(m.notesRunes, lines, m.notesCursor)
-	caretOff := notesRuneOffset(lines, row, m.notesCursor)
+	crow, _ := notesCursorRowCol(m.notesRunes, edLines, m.notesCursor)
+	caretOff := notesRuneOffset(edLines, crow, m.notesCursor)
 	selLo, selHi := 0, 0
 	hasSel := m.notesSel >= 0 && m.notesSel != m.notesCursor
 	if hasSel {
@@ -737,96 +963,211 @@ func (m Model) renderNotes(windowCols int) string {
 		}
 	}
 
+	// List window around selection.
+	listStart := 0
+	if m.notesActive >= notesListRows {
+		listStart = m.notesActive - notesListRows + 1
+	}
+
 	var body []string
-	body = append(body, m.renderNotesBankStrip(inner))
-	end := scroll + notesVisRows
-	if end > len(lines) {
-		end = len(lines)
-	}
-	for i := scroll; i < end; i++ {
-		ln := lines[i]
-		line := m.renderNotesLine(ln, i == row, caretOff, hasSel, selLo, selHi, wrapW)
-		body = append(body, line)
-	}
-	for len(body) < notesVisRows+1 {
-		body = append(body, styleDialogValue().Width(inner).MaxHeight(1).Padding(0, 1).
-			Render(padFit("", wrapW)))
-	}
-	if len(m.notesRunes) == 0 && row == 0 {
-		// body[0] is bank strip; editor starts at body[1]
-		if len(body) > 1 {
-			body[1] = styleDialogValue().Width(inner).MaxHeight(1).Padding(0, 1).
+	body = append(body, nameLine)
+
+	for i := 0; i < notesListRows; i++ {
+		li := listStart + i
+		left := m.renderNotesListCell(listW, li, i == 0 && len(m.notesBank) == 0)
+		var right string
+		ei := scroll + i
+		if ei < len(edLines) {
+			ln := edLines[ei]
+			isCur := m.notesFocus == notesFocusEditor && ei == crow
+			right = m.renderNotesEditorCell(ln, isCur, caretOff, hasSel, selLo, selHi, editorW, wrapW)
+		} else if ei == 0 && len(m.notesRunes) == 0 && m.notesFocus == notesFocusEditor {
+			right = styleDialogValue().Width(editorW).MaxHeight(1).Padding(0, 1).
 				Render(padFit(notesCaretChar, wrapW))
+		} else if ei == 0 && len(m.notesRunes) == 0 {
+			right = styleDialogHint().Width(editorW).MaxHeight(1).Padding(0, 1).
+				Render(padFit("enter to edit…", wrapW))
+		} else {
+			right = styleDialogValue().Width(editorW).MaxHeight(1).
+				Render(strings.Repeat(" ", editorW))
 		}
-		if len(body) > 2 {
-			body[2] = styleDialogHint().Width(inner).MaxHeight(1).Padding(0, 1).
-				Render(padFit("type a note — saved to disk · ctrl+n new", wrapW))
+		gutter := styleDialogRule().Background(colPanel).Render("│")
+		row := lipgloss.JoinHorizontal(lipgloss.Top, left, gutter, right)
+		// Fill to inner.
+		if lipgloss.Width(row) < inner {
+			row += styleDialogValue().Render(strings.Repeat(" ", inner-lipgloss.Width(row)))
 		}
+		body = append(body, row)
 	}
-	footer := styleDialogHintKey().Render("esc") +
-		styleDialogHint().Render(" put away  ") +
-		styleDialogHintKey().Render("ctrl+n") +
-		styleDialogHint().Render(" new  ") +
-		styleDialogHintKey().Render("ctrl+pgup/dn") +
-		styleDialogHint().Render(" switch  ") +
-		styleDialogHintKey().Render("ctrl+a/c/x/v") +
-		styleDialogHint().Render(" edit")
-	return renderDialogCard(outer, title, body, footer)
+
+	footer := m.renderNotesFooter()
+
+	// Store layout for clicks (overlay is PlaceHorizontal-centered card).
+	// renderDialogCard structure: title, rule, body..., rule, footer.
+	// Vertical frame: top border 1; then title, rule, body, rule, footer; bottom border.
+	_, vFrame := dialogFrameSize()
+	topPad := vFrame / 2
+	if topPad < 1 {
+		topPad = 1
+	}
+	// Content rows inside border:
+	// 0: dialog title "Notes"
+	// 1: rule
+	// 2: name row  (body[0])
+	// 3..: split rows
+	// then rule + footer
+	cardLeft := (windowCols - outer) / 2
+	if cardLeft < 0 {
+		cardLeft = 0
+	}
+	// Mutate layout via pointer-less trick: return stores on a copy — host uses
+	// NotesLayout after UpdateChrome only if we set on pointer receiver.
+	// renderNotes is value receiver; openNotes/update path uses pointer for keys.
+	// Host click uses NotesClickMsg → pointer UpdateChrome. Layout must be set
+	// before paint; paint uses value Model. Overlay paint calls RenderOverlayToTerm
+	// which calls OverlayView on value — layout won't stick on the live model!
+	//
+	// Fix: compute layout in NotesClickMsg handler and also export a method that
+	// updates layout on *Model before paint. Host ensureOverlayCells renders from
+	// a copy — for click we recompute geometry in handleNotesClick from constants.
+
+	_ = topPad
+	card := renderDialogCard(outer, "Notes", body, footer)
+
+	// Attach layout via unsafe path: caller that needs layout should use
+	// Model.withNotesLayout. We set fields through a package-level is wrong.
+	// Instead NotesClick recomputes using same math as here.
+	return card
 }
 
-func (m Model) renderNotesBankStrip(inner int) string {
-	if inner < 8 {
-		inner = 8
+// computeNotesLayout fills m.notesLayout (pointer receiver) for click tests.
+func (m *Model) computeNotesLayout(windowCols int) {
+	outer := clampDialogWidth(notesDialogWant, windowCols)
+	inner := dialogInnerWidth(outer)
+	if inner < 24 {
+		inner = 24
 	}
+	listW := notesListWant
+	if listW > inner/2 {
+		listW = inner / 2
+	}
+	if listW < 12 {
+		listW = 12
+	}
+	editorW := inner - listW - 1
+	if editorW < 12 {
+		editorW = 12
+		listW = inner - editorW - 1
+	}
+	cardLeft := (windowCols - outer) / 2
+	if cardLeft < 0 {
+		cardLeft = 0
+	}
+	// Overlay rows for centered card (no top padding in overlay grid):
+	// y0 = border, but VT cells include border as first line of the card string.
+	// Empirically RenderOverlay places the full card; first line is top border
+	// (rounded). Content title is typically y=1.
+	// Use content-relative mapping that matches hitOverlayCard cell scan:
+	// TitleY = 1, rule = 2, NameY = 3, SplitY0 = 4.
+	m.notesLayout = notesLayout{
+		Cols:      windowCols,
+		Outer:     outer,
+		Inner:     inner,
+		ListW:     listW,
+		TitleY:    1,
+		NameY:     3,
+		SplitY0:   4,
+		SplitRows: notesListRows,
+		CardLeft:  cardLeft,
+		CardRight: cardLeft + outer,
+		Valid:     true,
+	}
+	m.notesWrapW = editorW - 2
+	if m.notesWrapW < 8 {
+		m.notesWrapW = 8
+	}
+}
+
+func (m Model) renderNotesNameRow(inner int) string {
+	focused := m.notesFocus == notesFocusTitle
+	if focused {
+		body := m.notesTitle
+		if body == "" {
+			p := styleDialogHintKey().Render("title ")
+			rest := styleDialogHint().Render(padFit("name…"+notesCaretChar, inner-lipgloss.Width("title ")-2))
+			return panelFillLine(inner, p+rest)
+		}
+		plain := padFit("title "+body+notesCaretChar, inner)
+		return styleDialogHintKey().Width(inner).MaxHeight(1).Render(plain)
+	}
+	label := "Untitled"
+	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
+		label = NoteDisplayTitle(m.notesBank[m.notesActive])
+	}
+	// Title + dim rename hint (click / f2).
+	hint := "  · click to rename"
 	budget := inner - 2
 	if budget < 8 {
 		budget = 8
 	}
-	var parts []string
-	used := 0
-	for i, n := range m.notesBank {
-		label := NoteDisplayTitle(n)
-		if len([]rune(label)) > 14 {
-			label = string([]rune(label)[:13]) + "…"
-		}
-		var chip string
-		if i == m.notesActive {
-			chip = styleDialogActive().Render(" " + label + " ")
-		} else {
-			chip = styleDialogHint().Render(" " + label + " ")
-		}
-		w := lipgloss.Width(chip)
-		if used > 0 && used+w > budget {
-			more := styleDialogHint().Render(fmt.Sprintf(" +%d", len(m.notesBank)-i))
-			parts = append(parts, more)
-			break
-		}
-		parts = append(parts, chip)
-		used += w
+	maxLabel := budget - len([]rune(hint))
+	if maxLabel < 4 {
+		maxLabel = 4
+		hint = ""
 	}
-	row := strings.Join(parts, "")
-	if lipgloss.Width(row) < budget {
-		row += styleDialogValue().Render(strings.Repeat(" ", budget-lipgloss.Width(row)))
-	}
-	return styleDialogValue().Width(inner).MaxHeight(1).Padding(0, 1).Render(row)
+	label = truncateNoteTitle(label, maxLabel)
+	plain := padFit(label+hint, budget)
+	return styleDialogLabel().Width(inner).MaxHeight(1).Padding(0, 1).Render(plain)
 }
 
-func (m Model) renderNotesLine(ln notesLine, isCursorRow bool, caretOff int, hasSel bool, selLo, selHi, wrapW int) string {
-	inner := wrapW + 2
+func (m Model) renderNotesListCell(listW, bankIdx int, emptyBank bool) string {
+	_ = emptyBank
+	if bankIdx < 0 || bankIdx >= len(m.notesBank) {
+		return styleDialogValue().Width(listW).MaxHeight(1).
+			Render(strings.Repeat(" ", listW))
+	}
+	n := m.notesBank[bankIdx]
+	title := NoteDisplayTitle(n)
+	// Preview first line snippet.
+	prev := strings.TrimSpace(n.Body)
+	if i := strings.IndexByte(prev, '\n'); i >= 0 {
+		prev = prev[:i]
+	}
+	if prev == title || prev == "" {
+		prev = ""
+	}
+	label := title
+	if prev != "" && prev != title {
+		// Single-line list item like bubbles list: title only for width.
+		label = title
+	}
+	label = padFit(label, listW-2)
+	if bankIdx == m.notesActive {
+		prefix := " "
+		if m.notesFocus == notesFocusList {
+			prefix = "▸"
+		} else {
+			prefix = "•"
+		}
+		return styleDialogActive().Width(listW).MaxHeight(1).Render(padFit(prefix+label, listW))
+	}
+	return styleDialogNormalItem().Width(listW).MaxHeight(1).Render(padFit(" "+label, listW))
+}
+
+func (m Model) renderNotesEditorCell(ln notesLine, isCursorRow bool, caretOff int, hasSel bool, selLo, selHi, editorW, wrapW int) string {
+	// Reuse line painter but width-constrained.
 	seg := m.notesRunes[ln.start:ln.end]
-	// Paint selection relative to this line's range; expand tabs for display.
 	var parts []string
 	if !isCursorRow {
 		parts = append(parts, m.notesStyledSpan(seg, hasSel, selLo, selHi, ln.start, 0))
 	} else {
 		pos := ln.start
-		vis := 0
 		for i := 0; i <= len(seg); i++ {
 			abs := ln.start + i
 			if i == caretOff {
 				if abs > pos {
+					vis := notesVisualCol(m.notesRunes, ln.start, pos)
 					parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:abs], hasSel, selLo, selHi, pos, vis))
-					vis = notesVisualCol(m.notesRunes, ln.start, abs)
 					pos = abs
 				}
 				parts = append(parts, styleDialogHintKey().Render(notesCaretChar))
@@ -836,24 +1177,18 @@ func (m Model) renderNotesLine(ln notesLine, isCursorRow bool, caretOff int, has
 			}
 		}
 		if pos < ln.end {
-			vis = notesVisualCol(m.notesRunes, ln.start, pos)
+			vis := notesVisualCol(m.notesRunes, ln.start, pos)
 			parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:ln.end], hasSel, selLo, selHi, pos, vis))
 		}
 	}
 	content := strings.Join(parts, "")
-	// Ensure full width panel fill.
 	w := lipgloss.Width(content)
 	if w < wrapW {
 		content += styleDialogValue().Render(strings.Repeat(" ", wrapW-w))
 	}
-	return styleDialogValue().Width(inner).MaxHeight(1).Padding(0, 1).Render(
-		// Content already styled; padFit would strip ANSI — use as-is with MaxWidth.
-		content,
-	)
+	return styleDialogValue().Width(editorW).MaxHeight(1).Padding(0, 1).Render(content)
 }
 
-// notesStyledSpan styles a contiguous span, splitting on selection boundaries.
-// Tabs are expanded to spaces for paint only; absStart is the buffer index of rs[0].
 func (m Model) notesStyledSpan(rs []rune, hasSel bool, selLo, selHi, absStart, startCol int) string {
 	if len(rs) == 0 {
 		return ""
@@ -888,3 +1223,34 @@ func (m Model) notesStyledSpan(rs []rune, hasSel bool, selLo, selHi, absStart, s
 	}
 	return b.String()
 }
+
+func (m Model) renderNotesFooter() string {
+	switch m.notesFocus {
+	case notesFocusTitle:
+		return styleDialogHintKey().Render("enter") +
+			styleDialogHint().Render(" save name  ") +
+			styleDialogHintKey().Render("esc") +
+			styleDialogHint().Render(" cancel")
+	case notesFocusList:
+		return styleDialogHintKey().Render("↑↓") +
+			styleDialogHint().Render(" select  ") +
+			styleDialogHintKey().Render("enter") +
+			styleDialogHint().Render(" edit  ") +
+			styleDialogHintKey().Render("n") +
+			styleDialogHint().Render(" new  ") +
+			styleDialogHintKey().Render("d") +
+			styleDialogHint().Render(" delete  ") +
+			styleDialogHintKey().Render("f2") +
+			styleDialogHint().Render(" rename  ") +
+			styleDialogHintKey().Render("esc") +
+			styleDialogHint().Render(" close")
+	default:
+		return styleDialogHintKey().Render("esc") +
+			styleDialogHint().Render(" list  ") +
+			styleDialogHintKey().Render("f2") +
+			styleDialogHint().Render(" rename  ") +
+			styleDialogHintKey().Render("ctrl+a/c/x/v") +
+			styleDialogHint().Render(" edit")
+	}
+}
+
