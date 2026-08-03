@@ -320,7 +320,10 @@ func pickReleaseAsset(assets []ghAsset) (ghAsset, string) {
 			continue
 		}
 		// Installers / setup packages are not in-place update targets.
-		if strings.Contains(n, "setup") || strings.Contains(n, "installer") || strings.Contains(n, ".msi") {
+		// macOS .app.zip / .dmg are first-install only (like Windows setup.exe).
+		if strings.Contains(n, "setup") || strings.Contains(n, "installer") ||
+			strings.Contains(n, ".msi") || strings.Contains(n, ".dmg") ||
+			strings.Contains(n, ".app.zip") || strings.Contains(n, ".app.") {
 			continue
 		}
 		switch goos {
@@ -338,11 +341,18 @@ func pickReleaseAsset(assets []ghAsset) (ghAsset, string) {
 				asset = a
 			}
 		case "darwin":
-			if strings.Contains(n, wantSuffix) && (strings.HasSuffix(n, ".zip") || !strings.Contains(n, ".")) {
-				asset = a
+			// Prefer bare portable binary; accept plain .zip of that binary.
+			// Never pick installer packages (filtered above).
+			if strings.Contains(n, wantSuffix) {
+				if !strings.Contains(n, ".") || strings.HasSuffix(n, ".zip") {
+					if asset.URL == "" || !strings.Contains(n, ".") {
+						asset = a
+					}
+				}
 			}
 			// Also accept bare binary names like suzuri-0.1.0-darwin-arm64
-			if asset.URL == "" && strings.Contains(n, "darwin") && strings.Contains(n, goarch) {
+			if asset.URL == "" && strings.Contains(n, "darwin") && strings.Contains(n, goarch) &&
+				!strings.Contains(n, ".app") && !strings.HasSuffix(n, ".dmg") {
 				asset = a
 			}
 		default:

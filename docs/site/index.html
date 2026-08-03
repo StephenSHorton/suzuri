@@ -5,6 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>suzuri（硯）— terminal host for Windows &amp; macOS</title>
   <meta name="description" content="suzuri is a real terminal host for Windows and macOS: native window, PTY, VT grid, Charm chrome, Warp-style input bar. Not a TUI inside someone else's emulator." />
+  <meta name="theme-color" content="#050806" />
+  <!-- App mark: same glowy 硯 as Windows .ico / macOS .icns -->
+  <link rel="icon" href="favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="48x48" href="icons/favicon-48.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png" />
+  <meta property="og:title" content="suzuri（硯）— terminal host for Windows &amp; macOS" />
+  <meta property="og:description" content="A real terminal host: native window, PTY, VT grid, Charm chrome, Warp-style input bar." />
+  <meta property="og:image" content="https://stephenshorton.github.io/suzuri/icons/icon-512.png" />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:image" content="https://stephenshorton.github.io/suzuri/icons/icon-512.png" />
   <link rel="stylesheet" href="styles.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -15,7 +28,10 @@
   <div class="bg" aria-hidden="true"></div>
 
   <header class="wrap">
-    <p class="brand"><span class="kanji">硯</span> suzuri</p>
+    <p class="brand">
+      <img class="brand-mark" src="icons/favicon-32.png" width="28" height="28" alt="" />
+      <span class="kanji">硯</span> suzuri
+    </p>
     <nav>
       <a href="https://github.com/StephenSHorton/suzuri">GitHub</a>
       <a href="https://github.com/StephenSHorton/suzuri/releases/latest">Download</a>
@@ -45,6 +61,24 @@
       </div>
       <p class="meta" id="release-meta">Windows amd64 · macOS arm64 · MIT License</p>
       <p class="meta fine-inline">Linux not yet supported as a host build.</p>
+      <aside class="notice" aria-label="First launch notes">
+        <h2>First launch</h2>
+        <p>
+          Release builds are <strong>not code-signed</strong> (no paid Apple or Microsoft certs).
+          That is expected for this open-source project — source is public, hashes ship with each release.
+        </p>
+        <ul>
+          <li>
+            <strong>Windows:</strong> SmartScreen may say “Windows protected your PC.”
+            Choose <em>More info</em> → <em>Run anyway</em> (or install the setup from GitHub Releases).
+          </li>
+          <li>
+            <strong>macOS:</strong> Gatekeeper may block an unidentified developer.
+            Right-click the app → <em>Open</em>, or allow under
+            <em>System Settings → Privacy &amp; Security</em>. After the first allow, it opens normally.
+          </li>
+        </ul>
+      </aside>
     </section>
 
     <section class="grid">
@@ -91,10 +125,14 @@
         const meta = document.getElementById('release-meta');
         meta.innerHTML = `Latest <strong>${rel.tag_name}</strong> · Windows amd64 · macOS arm64 · MIT`;
         const assets = rel.assets || [];
-        const win = assets.find(x => /windows-amd64(\.exe|\.zip)?$/i.test(x.name) && x.name.endsWith('.exe'))
+        const win = assets.find(x => /windows-amd64-setup\.exe$/i.test(x.name))
+          || assets.find(x => /windows-amd64(\.exe|\.zip)?$/i.test(x.name) && x.name.endsWith('.exe'))
           || assets.find(x => /windows-amd64/i.test(x.name));
-        const mac = assets.find(x => /darwin-arm64(\.zip)?$/i.test(x.name) && !x.name.endsWith('.zip'))
-          || assets.find(x => /darwin-arm64\.zip$/i.test(x.name))
+        // Prefer DMG installer, then .app.zip, then portable binary.
+        const mac = assets.find(x => /darwin-arm64\.dmg$/i.test(x.name))
+          || assets.find(x => /darwin-arm64\.app\.zip$/i.test(x.name))
+          || assets.find(x => /darwin-arm64(\.zip)?$/i.test(x.name) && !x.name.endsWith('.zip') && !/\.app/i.test(x.name))
+          || assets.find(x => /darwin-arm64\.zip$/i.test(x.name) && !/\.app/i.test(x.name))
           || assets.find(x => /darwin-arm64/i.test(x.name));
         const winA = document.getElementById('download-win');
         const macA = document.getElementById('download-mac');

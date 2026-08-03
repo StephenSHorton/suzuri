@@ -33,7 +33,7 @@ Most “pretty terminals” are either:
 | **Polish** | Window placement, matrix/ripple intros (Windows), 猫咪 dim under settings, floating palette/help over live shell |
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
 | **Updates** | Auto-update from GitHub Releases on startup; palette **Check for updates** |
-| **Install** | Windows: user-scoped setup (`*-setup.exe`) → Start Menu + uninstall |
+| **Install** | Windows: user-scoped setup (`*-setup.exe`) · macOS: `.dmg` / `.app.zip` → Applications |
 
 ## Download
 
@@ -41,19 +41,25 @@ Most “pretty terminals” are either:
 
 1. Grab **`suzuri-*-windows-amd64-setup.exe`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
 2. Run the installer — **no administrator rights**. It installs to `%LOCALAPPDATA%\Programs\suzuri\`, adds **Start Menu** and desktop shortcuts, and an **Apps & features** uninstall entry.  
-3. Config and logs stay in `%LOCALAPPDATA%\suzuri\`. In-app updates still replace the installed exe in place.
+3. Config and logs stay in `%LOCALAPPDATA%\suzuri\`. In-app updates still replace the installed exe in place.  
+4. Builds are **not Authenticode-signed**. SmartScreen may show “Windows protected your PC” — **More info → Run anyway**.
 
 **Windows (portable)**
 
 1. Grab **`suzuri-*-windows-amd64.exe`** (or the `.zip`) if you prefer a single file with no shortcuts.  
-2. Double-click — GUI subsystem, no spare console window.
+2. Double-click — GUI subsystem, no spare console window. Same SmartScreen note as above.
 
-**macOS (Apple Silicon)**
+**macOS (Apple Silicon, recommended)**
 
-1. Grab **`suzuri-*-darwin-arm64`** (or the `.zip`) from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
-2. `chmod +x suzuri-*-darwin-arm64 && ./suzuri-*-darwin-arm64`  
-3. Config lives in `~/Library/Application Support/suzuri/`.  
-4. First launch may need **System Settings → Privacy & Security** if Gatekeeper blocks an unsigned binary.
+1. Grab **`suzuri-*-darwin-arm64.dmg`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
+2. Open the DMG and drag **suzuri** into **Applications** (or `~/Applications`).  
+3. Builds are **not Apple-notarized** (no paid Developer ID). First launch: right-click → **Open**, or allow under **System Settings → Privacy & Security**. After that it opens normally.  
+4. Config and logs live in `~/Library/Application Support/suzuri/`. In-app updates replace the binary inside the `.app` (portable payload, not the DMG).
+
+**macOS (portable)**
+
+1. Grab **`suzuri-*-darwin-arm64`** (or the plain `.zip`, not `.app.zip`) if you prefer a single binary.  
+2. `chmod +x suzuri-*-darwin-arm64 && ./suzuri-*-darwin-arm64`
 
 ## Build from source
 
@@ -154,15 +160,18 @@ git push origin v0.6.0
 
 Release builds embed a version via `-ldflags -X main.version=…`. On startup (and via palette **Check for updates**), suzuri queries GitHub Releases and toasts progress. If a newer version exists, a **confirmation modal** asks before install; **Update** downloads the portable asset (not the setup installer), verifies `SHA256SUMS` when present, replaces the running binary, and relaunches. **Later** dismisses without installing. Works for portable `.exe` and the install under `%LOCALAPPDATA%\Programs\suzuri\`. Dev builds (`version=dev`) never offer updates.
 
-## Windows packaging
+## Packaging
 
 | Artifact | Purpose |
 |----------|---------|
-| `*-setup.exe` | NSIS user installer (Start Menu, desktop, uninstall) |
-| `*-windows-amd64.exe` | Portable binary (also the in-app update payload) |
-| `*.zip` | Same portable binary, zipped |
+| `*-windows-amd64-setup.exe` | NSIS user installer (Start Menu, desktop, uninstall) |
+| `*-windows-amd64.exe` | Portable Windows binary (also the in-app update payload) |
+| `*-darwin-arm64.dmg` | macOS disk image — drag `suzuri.app` to Applications |
+| `*-darwin-arm64.app.zip` | Same `.app` bundle, zipped |
+| `*-darwin-arm64` / `.zip` | Portable macOS binary (in-app update payload) |
+| `SHA256SUMS` | Checksums for all release assets |
 
-Installer sources: [`packaging/windows/suzuri.nsi`](packaging/windows/suzuri.nsi).
+Installer sources: [`packaging/windows/suzuri.nsi`](packaging/windows/suzuri.nsi), [`packaging/macos/`](packaging/macos/).
 
 ## License
 
