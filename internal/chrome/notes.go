@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Notes: two screens — full list, then full editor (Esc back to list).
@@ -1165,22 +1166,17 @@ func (m Model) NotesCaretCell(cols int) (cellX, cellY int, ok bool) {
 	if inner < 20 {
 		inner = 20
 	}
-	cardLeft := (cols - outer) / 2
-	if cardLeft < 0 {
-		cardLeft = 0
-	}
-	h, _ := dialogFrameSize()
-	// Content origin: left frame half (border+pad) + body line Padding(0,1).
-	textLeft := cardLeft + h/2 + 1
 	wrapW := inner - 2
 	if wrapW < 8 {
 		wrapW = 8
 	}
+	textLeft := notesBodyTextLeft(cols)
 
 	// Overlay rows for the notes dialog (lipgloss rounded + Padding(1,2)):
 	//   0 top border · 1 pad · 2 title (name) · 3 rule · 4+ body · pad · bottom.
 	ty, by0 := notesEditorOverlayRows()
 	if m.notesFocus == notesFocusTitle {
+		// Title uses styleDialogTitle Padding(0,1) — same left inset as body text.
 		col := lipgloss.Width(m.notesTitle)
 		if col > wrapW {
 			col = wrapW
@@ -1198,6 +1194,43 @@ func (m Model) NotesCaretCell(cols int) (cellX, cellY int, ok bool) {
 		visCol = wrapW
 	}
 	return textLeft + visCol, by0 + screenRow, true
+}
+
+// notesBodyTextLeft is the overlay column where editor/title text begins.
+// Measured from the placed card (not (cols-outer)/2) so it matches VT paint.
+func notesBodyTextLeft(cols int) int {
+	if cols < 20 {
+		cols = 20
+	}
+	// Same horizontal centering OverlayView uses for the notes stack.
+	// Use a minimal card so we only need left edge of the border.
+	outer := clampDialogWidth(notesDialogWant, cols)
+	probe := styleDialogView().Width(outer).Render("x")
+	placed := lipgloss.PlaceHorizontal(cols, lipgloss.Center, probe)
+	line0 := placed
+	if i := strings.IndexByte(placed, '\n'); i >= 0 {
+		line0 = placed[:i]
+	}
+	cardLeft := leadingDisplayCells(line0)
+	// Border │/╭ (1) + styleDialogView left pad (2) + body/title Padding(0,1) (1).
+	leftPad := styleDialogView().GetPaddingLeft()
+	if leftPad < 0 {
+		leftPad = 2
+	}
+	return cardLeft + 1 + leftPad + 1
+}
+
+func leadingDisplayCells(s string) int {
+	plain := ansi.Strip(s)
+	n := 0
+	for _, r := range plain {
+		if r == ' ' {
+			n++
+			continue
+		}
+		break
+	}
+	return n
 }
 
 // notesEditorOverlayRows is title Y and first body Y inside the notes dialog grid.

@@ -36,6 +36,11 @@ func TestNotesEditorLayoutLines(t *testing.T) {
 	if !ok || cy != wantBodyY0 {
 		t.Fatalf("caret y=%d want bodyY0=%d (first body line for \"ab\")", cy, wantBodyY0)
 	}
+	// Body line "ab" ends at cursor; caret should sit on the cell after 'b'.
+	wantX := notesBodyTextLeft(80) + 2 // after two runes
+	if cx != wantX {
+		t.Fatalf("caret x=%d want %d (textLeft=%d)", cx, wantX, notesBodyTextLeft(80))
+	}
 	// ↑ into title
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyUp})
 	m = r.Model
