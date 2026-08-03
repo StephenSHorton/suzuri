@@ -477,10 +477,10 @@ func notesSoftLines(runes []rune, width int) []notesLine {
 		}
 		col += w
 	}
+	// After a trailing hard newline, start == len and this emits the blank
+	// line the caret sits on. Do not add a second empty row for "\n" ends —
+	// that made Enter look like a double newline with typing on the prior line.
 	out = append(out, notesLine{start: start, end: len(runes), width: col, hard: false})
-	if runes[len(runes)-1] == '\n' {
-		out = append(out, notesLine{start: len(runes), end: len(runes), width: 0, hard: false})
-	}
 	return out
 }
 

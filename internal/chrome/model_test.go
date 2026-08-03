@@ -276,6 +276,47 @@ func TestNotesSelectAllBackspaceTab(t *testing.T) {
 	}
 }
 
+func TestNotesEnterSingleBlankLine(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenNotesMsg{})
+	m = r.Model
+	for _, ch := range "hi" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	m = r.Model
+	if string(m.notesRunes) != "hi\n" {
+		t.Fatalf("buf=%q", string(m.notesRunes))
+	}
+	// One hard line + one caret blank — not two blanks after Enter.
+	lines := notesSoftLines(m.notesRunes, 40)
+	if len(lines) != 2 {
+		t.Fatalf("soft lines=%d want 2: %+v", len(lines), lines)
+	}
+	if !lines[0].hard || lines[0].end-lines[0].start != 2 {
+		t.Fatalf("line0=%+v", lines[0])
+	}
+	if lines[1].start != 3 || lines[1].end != 3 {
+		t.Fatalf("line1 (blank)=%+v", lines[1])
+	}
+	row, _ := notesCursorRowCol(m.notesRunes, lines, m.notesCursor)
+	if row != 1 {
+		t.Fatalf("caret row=%d want 1 (new line)", row)
+	}
+	// Typing lands on the new line, not the previous.
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = r.Model
+	if string(m.notesRunes) != "hi\nx" {
+		t.Fatalf("after type buf=%q", string(m.notesRunes))
+	}
+	lines = notesSoftLines(m.notesRunes, 40)
+	row, _ = notesCursorRowCol(m.notesRunes, lines, m.notesCursor)
+	if row != 1 {
+		t.Fatalf("after type caret row=%d", row)
+	}
+}
+
 func TestConfirmUpdateModal(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenConfirmUpdateMsg{Version: "1.2.3"})
