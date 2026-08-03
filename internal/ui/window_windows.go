@@ -1910,7 +1910,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				return 0
 			}
 		}
-		if alt && !ctrl && !shift {
+		// Pane focus: Alt+arrows (WT-style) and Ctrl+Alt+arrows.
+		// Not Alt+Shift (reserved for split keys). Geometric neighbor pick.
+		if alt && !shift {
 			switch wParam {
 			case win.VK_LEFT:
 				u.focusPaneDir(0)

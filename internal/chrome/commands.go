@@ -47,10 +47,10 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		Command{ID: "split_down", Title: "Split down", Desc: "Alt+Shift+- · Ctrl+Shift+E · Panes", Category: "Panes", Action: ActionSplitDown},
 		Command{ID: "rename_pane", Title: "Rename pane", Desc: "F2 · Custom pane name · Panes", Category: "Panes", Action: ActionOpenRenamePane},
 		Command{ID: "close_pane", Title: "Close pane", Desc: "Ctrl+Shift+W · Panes", Category: "Panes", Action: ActionClosePane},
-		Command{ID: "focus_left", Title: "Focus pane left", Desc: "Alt+← · Panes", Category: "Panes", Action: ActionFocusPaneLeft},
-		Command{ID: "focus_right", Title: "Focus pane right", Desc: "Alt+→ · Panes", Category: "Panes", Action: ActionFocusPaneRight},
-		Command{ID: "focus_up", Title: "Focus pane up", Desc: "Alt+↑ · Panes", Category: "Panes", Action: ActionFocusPaneUp},
-		Command{ID: "focus_down", Title: "Focus pane down", Desc: "Alt+↓ · Panes", Category: "Panes", Action: ActionFocusPaneDown},
+		Command{ID: "focus_left", Title: "Focus pane left", Desc: "Alt+← · Ctrl+Alt+← · Panes", Category: "Panes", Action: ActionFocusPaneLeft},
+		Command{ID: "focus_right", Title: "Focus pane right", Desc: "Alt+→ · Ctrl+Alt+→ · Panes", Category: "Panes", Action: ActionFocusPaneRight},
+		Command{ID: "focus_up", Title: "Focus pane up", Desc: "Alt+↑ · Ctrl+Alt+↑ · Panes", Category: "Panes", Action: ActionFocusPaneUp},
+		Command{ID: "focus_down", Title: "Focus pane down", Desc: "Alt+↓ · Ctrl+Alt+↓ · Panes", Category: "Panes", Action: ActionFocusPaneDown},
 	)
 	return cmds
 }

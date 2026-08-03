@@ -25,6 +25,7 @@ func helpBody(windowCols int) string {
 	body = append(body, helpRow(inner, KeyCtrlShift("D"), "Split right"))
 	body = append(body, helpRow(inner, KeyCtrlShift("E"), "Split down"))
 	body = append(body, helpRow(inner, "Alt+arrows", "Focus pane"))
+	body = append(body, helpRow(inner, "Ctrl+Alt+arrows", "Focus pane (same)"))
 	body = append(body, helpRow(inner, "F2", "Rename pane"))
 	body = append(body, helpRow(inner, KeyCtrlShift("W"), "Close pane"))
 	body = append(body, "")

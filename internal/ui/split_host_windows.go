@@ -372,21 +372,25 @@ func (u *winUI) focusPaneDir(dir int) {
 	}
 	u.selecting = false
 	if t := u.activeTab(); t != nil {
-		setWindowTitle(u.hwnd, "suzuri — "+t.title)
+		setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
 	}
 	u.syncChrome()
-	// Only reflow ConPTY when the Warp bar height would change (alt-screen
-	// focus). Rapid focus thrash + full layout settle hard-crashed the host.
+	// Only reflow when Warp bar height would change (alt-screen focus).
+	// Never ResizePseudoConsole under dual Grok — paint-only if unsafe.
 	next := u.activeTab()
 	nextAlt := next != nil && next.altScreen()
 	if prevAlt != nextAlt {
-		u.postLayoutSettle()
+		if u.anyPaneConPtyBusy() {
+			u.layoutDeferred = true
+			u.relayoutActivePaintOnly()
+		} else {
+			u.postLayoutSettle()
+		}
 	} else {
-		// Refresh focus flags on cached layout without ResizePseudoConsole.
 		u.computeActiveLayout()
 	}
 	if u.hwnd != 0 {
-		win.InvalidateRect(u.hwnd, nil, false)
+		u.requestPaint()
 	}
 }
 
@@ -404,15 +408,23 @@ func (u *winUI) focusPaneByID(id int) bool {
 	}
 	u.selecting = false
 	if t := u.activeTab(); t != nil {
-		setWindowTitle(u.hwnd, "suzuri — "+t.title)
+		setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
 	}
 	u.syncChrome()
 	next := u.activeTab()
 	nextAlt := next != nil && next.altScreen()
 	if prevAlt != nextAlt {
-		u.postLayoutSettle()
+		if u.anyPaneConPtyBusy() {
+			u.layoutDeferred = true
+			u.relayoutActivePaintOnly()
+		} else {
+			u.postLayoutSettle()
+		}
 	} else {
 		u.computeActiveLayout()
+	}
+	if u.hwnd != 0 {
+		u.requestPaint()
 	}
 	return true
 }
