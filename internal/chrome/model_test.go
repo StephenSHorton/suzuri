@@ -238,6 +238,12 @@ func TestNotesToggleKeepsBuffer(t *testing.T) {
 	if m.notesFocus != notesFocusEditor {
 		t.Fatalf("reopen focus=%v want editor", m.notesFocus)
 	}
+	// Toggle again hides even from editor (Ctrl+Shift+M).
+	r = m.UpdateChrome(ToggleNotesMsg{})
+	m = r.Model
+	if m.NotesOpen {
+		t.Fatal("toggle should hide notes")
+	}
 }
 
 func TestNotesSelectAllBackspaceTab(t *testing.T) {

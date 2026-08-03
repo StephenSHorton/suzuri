@@ -121,7 +121,7 @@ func (m *Model) putAwayNotes() {
 	}
 	m.flushActiveNote()
 	m.NotesOpen = false
-	m.notesFocus = notesFocusList
+	// Keep active note; next openNotes() lands on editor again.
 }
 
 // NotesSnapshot returns the bank for disk save (flushes editor first).
@@ -949,7 +949,8 @@ func (m Model) renderNotesListScreen(windowCols int) string {
 	if n := len(m.notesBank); n > 0 {
 		title = fmt.Sprintf("Notes  (%d)", n)
 	}
-	return renderDialogCard(outer, title, body, m.renderNotesFooter())
+	// No shortcut footer on the note card — see Help (Ctrl+/).
+	return renderDialogCard(outer, title, body, "")
 }
 
 func (m Model) renderNotesListRow(inner, bankIdx int) string {
@@ -1047,7 +1048,8 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
 		cardTitle = NoteDisplayTitle(m.notesBank[m.notesActive])
 	}
-	return renderDialogCard(outer, cardTitle, body, m.renderNotesFooter())
+	// No shortcut footer on the note card — see Help (Ctrl+/).
+	return renderDialogCard(outer, cardTitle, body, "")
 }
 
 // computeNotesLayout fills m.notesLayout for click tests (list vs editor screen).
@@ -1194,31 +1196,4 @@ func (m Model) notesStyledSpan(rs []rune, hasSel bool, selLo, selHi, absStart, s
 	return b.String()
 }
 
-func (m Model) renderNotesFooter() string {
-	switch m.notesFocus {
-	case notesFocusTitle:
-		return styleDialogHintKey().Render("enter") +
-			styleDialogHint().Render(" save name  ") +
-			styleDialogHintKey().Render("esc") +
-			styleDialogHint().Render(" cancel")
-	case notesFocusList:
-		return styleDialogHintKey().Render("↑↓") +
-			styleDialogHint().Render(" move  ") +
-			styleDialogHintKey().Render("enter") +
-			styleDialogHint().Render(" open  ") +
-			styleDialogHintKey().Render("n") +
-			styleDialogHint().Render(" new  ") +
-			styleDialogHintKey().Render("d") +
-			styleDialogHint().Render(" delete  ") +
-			styleDialogHintKey().Render("esc") +
-			styleDialogHint().Render(" close")
-	default:
-		return styleDialogHintKey().Render("esc") +
-			styleDialogHint().Render(" back to list  ") +
-			styleDialogHintKey().Render("f2") +
-			styleDialogHint().Render(" rename  ") +
-			styleDialogHintKey().Render("ctrl+a/c/x/v") +
-			styleDialogHint().Render(" edit")
-	}
-}
 

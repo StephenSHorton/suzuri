@@ -1920,6 +1920,18 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		alt := win.GetKeyState(win.VK_MENU) < 0
 		tab := u.activeTab()
 
+		// Ctrl+Shift+M — toggle notes (works even while notes overlay is open).
+		if ctrl && shift && !alt && (wParam == 'M' || wParam == 'm') {
+			r := u.chrome.UpdateChrome(chrome.ToggleNotesMsg{})
+			u.chrome = r.Model
+			u.overlayCells = nil
+			u.overlayDirty = true
+			u.overlaySceneReady = false
+			u.markChromeDirty()
+			u.persistNotesIfDirty()
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
 		// Charm palette / settings own keys while open (text via WM_CHAR).
 		if u.chrome.OverlayOpen() {
 			// Notes clipboard + bank shortcuts need host (CF_UNICODETEXT / chords).
@@ -1998,18 +2010,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.persistNotesIfDirty()
 				win.InvalidateRect(hwnd, nil, false)
 			}
-			return 0
-		}
-		// Ctrl+Shift+M — toggle notes bank (persisted).
-		if ctrl && shift && !alt && (wParam == 'M' || wParam == 'm') {
-			r := u.chrome.UpdateChrome(chrome.ToggleNotesMsg{})
-			u.chrome = r.Model
-			u.overlayCells = nil
-			u.overlayDirty = true
-			u.overlaySceneReady = false
-			u.markChromeDirty()
-			u.persistNotesIfDirty()
-			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
 		// F2 — rename focused pane (custom title; empty clears).
