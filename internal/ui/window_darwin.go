@@ -2190,7 +2190,8 @@ func teaKeyFromEbiten(ctrl, shift, alt bool, rep *keyRepeat, now time.Time) *tea
 	up := func() bool { return just(ebiten.KeyArrowUp) || just(ebiten.KeyUp) }
 	down := func() bool { return just(ebiten.KeyArrowDown) || just(ebiten.KeyDown) }
 
-	// Option+arrows → alt+left/right (notes word jump on macOS).
+	// Option+Backspace/Delete and rare Option+arrows for overlay KeyMsg.Alt.
+	// Word jump in notes is Ctrl (handleNotesNavKeys); Option is pane focus outside.
 	if !shift && !ctrl && alt {
 		switch {
 		case left():
@@ -2929,9 +2930,13 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		if t0.IsZero() {
 			t0 = now
 		}
+		intensity := shellMatrixIntensity
+		if tab.altScreen() {
+			intensity = shellMatrixAltScreenIntensity
+		}
 		shellRain = dimRainCells(
 			matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now),
-			shellMatrixIntensity,
+			intensity,
 		)
 	}
 

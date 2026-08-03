@@ -518,7 +518,8 @@ func (m *Model) handleNotesEditorKey(msg tea.KeyMsg) {
 		m.notesDocEnd(strings.Contains(s, "shift"))
 		return
 	case "ctrl+left", "ctrl+shift+left", "alt+left", "alt+shift+left":
-		// Windows: Ctrl+←/→ · macOS: Option+←/→ (host may also send ctrl on Mac).
+		// Host sends Ctrl+←/→ for word jump (Windows parity on macOS too).
+		// alt+ variants kept for tea KeyMsg.Alt paths.
 		m.notesWordMove(-1, strings.Contains(s, "shift"))
 		return
 	case "ctrl+right", "ctrl+shift+right", "alt+right", "alt+shift+right":
@@ -1165,7 +1166,7 @@ func (m Model) renderNotesContextKeys(mainWidth, windowCols int) string {
 			{"Click · drag", "Place caret · select"},
 			{KeyCtrl("A"), "Select all"},
 			{KeyCtrl("C") + " / " + KeyCtrl("X") + " / " + KeyCtrl("V"), "Copy / cut / paste"},
-			{"⌥←→ / Ctrl+←→", "Word jump"},
+			{"Ctrl+←→", "Word jump"},
 			{"Tab", "Insert tab"},
 			{KeyCtrlShift("M"), "Hide notes"},
 		}

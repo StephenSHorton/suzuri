@@ -71,6 +71,11 @@ const (
 // (Windows paintDimMatrixIntensity parity — quiet backdrop, not a curtain).
 const shellMatrixIntensity = 0.20
 
+// shellMatrixAltScreenIntensity is used under alt-screen TUIs (Grok, vim, …).
+// Those apps fill most of the grid with glyphs, so 0.20 shell rain is almost
+// invisible through the few default-bg gaps. Bump so the underlay still reads.
+const shellMatrixAltScreenIntensity = 0.48
+
 const shellWatermarkRune = '硯'
 
 // dimRainCells scales glyph RGB by intensity (always-on shell rain).

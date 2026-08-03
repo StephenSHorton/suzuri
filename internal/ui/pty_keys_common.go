@@ -13,7 +13,7 @@ import (
 //
 // Bare arrows use app-cursor (SS3) when the app requested it. Modified arrows
 // always use CSI 1;mods X (xterm) or Kitty CSI-u when progressive keyboard
-// is active — Bubble Tea / Grok need Alt+Left for word motion.
+// is active — Bubble Tea / Grok use Ctrl+Left (and Alt+Left) for word motion.
 func encodeArrow(kk *kittyKeyboard, dir byte, appCursor, shift, alt, ctrl, super bool) []byte {
 	if dir != 'A' && dir != 'B' && dir != 'C' && dir != 'D' {
 		return nil
