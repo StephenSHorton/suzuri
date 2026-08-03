@@ -77,6 +77,8 @@ type tab struct {
 	lastCols, lastRows int
 	// kitty tracks progressive keyboard enhancement (Shift+Enter → CSI-u for Grok).
 	kitty kittyKeyboard
+	// kittyGfx: Kitty graphics protocol images (Grok prompt previews, inline media).
+	kittyGfx *kittyGfxState
 }
 
 // busy is true when this tab should show an activity spinner:
@@ -279,6 +281,7 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 		writeCh:  make(chan []byte, 256),
 		lastCols: cols,
 		lastRows: rows,
+		kittyGfx: newKittyGfx(),
 	}
 	// Feed VT replies (DSR/CPR) and host query answers back into the PTY so
 	// apps can probe Kitty keyboard support and cursor position.

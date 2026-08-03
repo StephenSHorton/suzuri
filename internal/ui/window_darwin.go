@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -200,6 +201,11 @@ type macUI struct {
 	caffeine *caffeine.Manager
 	// lastCaffeineHint drives chrome dirty when the timed label ticks down.
 	lastCaffeineHint string
+
+	// Async alt-screen paste (clipboard image dump must not block Draw/Update).
+	pasteBusy      atomic.Bool
+	pendingPasteMu sync.Mutex
+	pendingPaste   []pendingPaste
 }
 
 func (u *macUI) queueBytes(tabID int) {
@@ -633,6 +639,8 @@ func (u *macUI) Update() error {
 	}
 drained:
 
+	u.drainPendingPaste()
+
 	// Track outer frame placement mid-session (survives crash better than exit-only).
 	u.maybePersistWindowPlacement(false)
 
@@ -858,7 +866,20 @@ func (u *macUI) drainAndParse(tabID int) {
 	t.handleHostQueries(data)
 	// Unwrap OSC 8 hyperlinks so markdown link labels stay visible.
 	data = vt.StripOSC8Hyperlinks(data)
-	_, _ = t.term.Write(data)
+	// Kitty graphics APCs (Grok image previews): strip + apply against live
+	// cursor between VT segments so a=p places at the CSI-H position.
+	if t.kittyGfx == nil {
+		t.kittyGfx = newKittyGfx()
+	}
+	data = feedKittyAPCs(t.kittyGfx, data, func(b []byte) {
+		_, _ = t.term.Write(b)
+	}, func() (col, row int) {
+		c := t.term.Cursor()
+		return c.X, c.Y
+	})
+	if len(data) > 0 {
+		_, _ = t.term.Write(data)
+	}
 	t.sb.noteScreen(t.term)
 	if t.sb.atBottom() {
 		t.sb.stickBottom()
@@ -871,6 +892,10 @@ func (u *macUI) drainAndParse(tabID int) {
 	}
 	nowAlt := t.altScreen()
 	if nowAlt != t.wasAlt {
+		if t.wasAlt && t.kittyGfx != nil {
+			// Leaving alt-screen: drop GPU-style placements.
+			t.kittyGfx.clear()
+		}
 		t.wasAlt = nowAlt
 		log.Info("alt screen", "tab", t.id, "on", nowAlt)
 		if u.activeTab() == t {
@@ -2861,36 +2886,14 @@ func (u *macUI) copySelection() {
 }
 
 func (u *macUI) pasteClipboard() {
-	// Alt-screen (Grok, …): host must deliver images. Relying on Super+V so
-	// Grok re-reads NSPasteboard is unreliable under a custom host (Kitty
-	// event encoding, TCC, AppKit load). Instead: dump pasteboard raster to a
-	// temp PNG and inject the path as bracketed paste — Grok's drop classifier
-	// turns image paths into [Image #N] chips.
+	// Alt-screen (Grok, …): host delivers images. osascript PNG dump is slow
+	// (~300–800ms) — never block the ebiten UI thread; finish on a worker
+	// and inject bracketed paste when ready.
 	if u.appOwnsKeyboard() {
-		if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
-			log.Info("paste clipboard image", "path", imgPath)
-			u.sendKey(bracketedPaste(imgPath))
-			u.toast("image pasted")
-			return
-		} else if err != nil {
-			log.Debug("clipboard image read failed", "err", err)
+		if u.pasteBusy.Swap(true) {
+			return // already dumping a clipboard image
 		}
-		// Text (or empty): bracketed paste so multi-line lands as Event::Paste.
-		// When Kitty is active, also fire Super+V so Grok can probe for file
-		// URLs / rasters we failed to coerce — secondary path.
-		text, _ := clipboard.ReadAll()
-		if strings.TrimSpace(text) != "" {
-			u.sendKey(bracketedPaste(text))
-			return
-		}
-		if t := u.activeTab(); t != nil && t.kitty.active() {
-			// Super+V → unicode 'v' (118), mods 1+super(8)=9
-			t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
-			return
-		}
-		// Empty image-less pasteboard: still emit empty bracketed paste so
-		// Grok's attachment probe can run if it sees a raster we missed.
-		u.sendKey(bracketedPaste(""))
+		go u.pasteAltScreenAsync()
 		return
 	}
 	text, err := clipboard.ReadAll()
@@ -2909,6 +2912,64 @@ func (u *macUI) pasteClipboard() {
 		return
 	}
 	u.markInputDirty()
+}
+
+// pasteAltScreenAsync reads the pasteboard off-thread and queues PTY inject.
+func (u *macUI) pasteAltScreenAsync() {
+	defer u.pasteBusy.Store(false)
+	if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
+		log.Info("paste clipboard image", "path", imgPath)
+		u.pendingPasteMu.Lock()
+		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(imgPath), toast: "image pasted"})
+		u.pendingPasteMu.Unlock()
+		return
+	} else if err != nil {
+		log.Debug("clipboard image read failed", "err", err)
+	}
+	text, _ := clipboard.ReadAll()
+	var payload []byte
+	var toast string
+	if strings.TrimSpace(text) != "" {
+		payload = bracketedPaste(text)
+	} else {
+		// Empty board: Super+V so Grok can still probe, else empty bracketed.
+		payload = bracketedPaste("")
+		toast = ""
+	}
+	u.pendingPasteMu.Lock()
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: payload, toast: toast, preferSuperV: strings.TrimSpace(text) == ""})
+	u.pendingPasteMu.Unlock()
+}
+
+type pendingPaste struct {
+	payload      []byte
+	toast        string
+	preferSuperV bool // empty board: try Kitty Super+V first
+}
+
+// drainPendingPaste injects async paste results on the UI thread.
+func (u *macUI) drainPendingPaste() {
+	if u == nil {
+		return
+	}
+	u.pendingPasteMu.Lock()
+	batch := u.pendingPaste
+	u.pendingPaste = nil
+	u.pendingPasteMu.Unlock()
+	for _, p := range batch {
+		if p.preferSuperV {
+			if t := u.activeTab(); t != nil && t.kitty.active() {
+				t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
+				continue
+			}
+		}
+		if len(p.payload) > 0 {
+			u.sendKey(p.payload)
+		}
+		if p.toast != "" {
+			u.toast(p.toast)
+		}
+	}
 }
 
 // --- paint ---
@@ -3181,6 +3242,13 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 
 	u.painter.paintFrame(u.fb, opts)
+
+	// Grok prompt image previews (Kitty graphics APC) — over the cell grid.
+	if tab.kittyGfx != nil {
+		if places := tab.kittyGfx.snapshotPlacements(); len(places) > 0 {
+			u.painter.paintKittyPlacements(u.fb, places, tab.kittyGfx, padY, shellBot)
+		}
+	}
 
 	dimModal := u.chrome.OverlayOpen() && (u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen)
 	if !dimModal {

@@ -908,6 +908,70 @@ func (p *softwarePainter) paintShellImages(dst *image.RGBA, o paintOpts, padY, s
 	}
 }
 
+// paintKittyPlacements draws Grok/Kitty graphics protocol images over the
+// shell cell grid (prompt previews, inline media). Cell coords are 0-based.
+func (p *softwarePainter) paintKittyPlacements(dst *image.RGBA, places []kittyPlace, gfx *kittyGfxState, padY, shellBot int) {
+	if p == nil || dst == nil || gfx == nil || len(places) == 0 {
+		return
+	}
+	cw, ch := p.cellW, p.cellH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	const padX = 4
+	// Stable paint order: lower z first so higher z draws on top.
+	ordered := append([]kittyPlace(nil), places...)
+	for i := 0; i < len(ordered); i++ {
+		for j := i + 1; j < len(ordered); j++ {
+			if ordered[j].z < ordered[i].z {
+				ordered[i], ordered[j] = ordered[j], ordered[i]
+			}
+		}
+	}
+	for _, pl := range ordered {
+		img := gfx.image(pl.id)
+		if img == nil {
+			continue
+		}
+		sb := img.Bounds()
+		// Optional source crop (Kitty x,y,w,h in pixels).
+		if pl.srcW > 0 && pl.srcH > 0 {
+			r := image.Rect(pl.srcX, pl.srcY, pl.srcX+pl.srcW, pl.srcY+pl.srcH).Intersect(sb)
+			if !r.Empty() {
+				sb = r
+			}
+		}
+		sw, sh := sb.Dx(), sb.Dy()
+		if sw < 1 || sh < 1 {
+			continue
+		}
+		px := padX + pl.col*cw
+		py := padY + pl.row*ch
+		boxW := pl.cols * cw
+		boxH := pl.rows * ch
+		if boxW < 4 || boxH < 4 {
+			continue
+		}
+		dw, dh := fitPreferNative(sw, sh, boxW, boxH)
+		if dw < 1 || dh < 1 {
+			continue
+		}
+		// Center in placement box.
+		ox := px + (boxW-dw)/2
+		oy := py + (boxH-dh)/2
+		dr := image.Rect(ox, oy, ox+dw, oy+dh)
+		clip := image.Rect(0, padY, dst.Bounds().Dx(), shellBot)
+		dr = dr.Intersect(clip).Intersect(dst.Bounds())
+		if dr.Empty() {
+			continue
+		}
+		xdraw.CatmullRom.Scale(dst, dr, img, sb, xdraw.Over, nil)
+	}
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a
