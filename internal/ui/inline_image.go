@@ -120,8 +120,14 @@ func (s *imageStore) clear() {
 
 // reImagePath matches absolute or common relative image paths in text.
 // Note: Grok may print mangled paths with a second drive letter after
-// `.grok\sessions\` — still matched by the first absolute-path alternative.
-var reImagePath = regexp.MustCompile(`(?i)(?:[a-z]:[\\/][^\s"'<>|*?]+\.(?:png|jpe?g|gif|webp)|(?:images|\.grok)[\\/][^\s"'<>|*?]+\.(?:png|jpe?g|gif|webp)|[^\s"'<>|*?]+[\\/]images[\\/][^\s"'<>|*?]+\.(?:png|jpe?g|gif|webp))`)
+// `.grok\sessions\` — still matched by the Windows absolute-path alternative.
+// Unix absolute paths (/Users/…/file.png) are included for macOS parity.
+var reImagePath = regexp.MustCompile(`(?i)(?:` +
+	`[a-z]:[\\/][^\s"'<>|*?]+\.(?:png|jpe?g|gif|webp)|` + // Windows abs
+	`/[^\s"'<>|*?]+\.(?:png|jpe?g|gif|webp)|` + // Unix abs
+	`(?:images|\.grok)[\\/][^\s"'<>|*?]+\.(?:png|jpe?g|gif|webp)|` +
+	`[^\s"'<>|*?]+[\\/]images[\\/][^\s"'<>|*?]+\.(?:png|jpe?g|gif|webp)` +
+`)`)
 
 // reSessionImage captures …\<uuid>\images\<file> (Grok session layout).
 var reSessionImage = regexp.MustCompile(`(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})[\\/]+images[\\/]+([^\\/\s"'<>|*?]+)`)

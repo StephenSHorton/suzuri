@@ -173,6 +173,9 @@ type macUI struct {
 	hoverLinkOK  bool
 	linkCursorOn bool
 
+	// modalImage: full-window lightbox (click path / Open Image / image block).
+	modalImage *tabImage
+
 	// Window placement: last captured frame (updated mid-session; flushed on exit).
 	// restoreMax is applied once after the ebiten loop creates the native window.
 	lastPlacement config.WindowPlacement
@@ -1735,6 +1738,13 @@ func (u *macUI) handleKeys() {
 
 	tab := u.activeTab()
 
+	// Image lightbox owns Esc before alt-screen apps (and before bar clear).
+	if u.modalImage != nil && inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+		u.modalImage = nil
+		u.markShellDirty()
+		return
+	}
+
 	// Alt-screen: raw PTY keys (after host shortcuts).
 	if u.appOwnsKeyboard() && tab != nil {
 		// Ctrl alone for interrupt so Cmd+Enter can be Super+Enter.
@@ -1898,6 +1908,11 @@ func (u *macUI) handleKeys() {
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+		if u.modalImage != nil {
+			u.modalImage = nil
+			u.markShellDirty()
+			return
+		}
 		if len(in.runes) > 0 || in.histIdx >= 0 {
 			in.clear()
 			u.maybeResizeForInput()
@@ -2246,6 +2261,12 @@ func (u *macUI) handleMouse() {
 	tabStripH := int32(chrome.TabStripRows()) * chH
 
 	if justPressed {
+		// Image lightbox: any click closes.
+		if u.modalImage != nil {
+			u.modalImage = nil
+			u.markShellDirty()
+			return
+		}
 		// Cmd+click (or Ctrl+click) on a link → open in browser.
 		meta := ebiten.IsKeyPressed(ebiten.KeyMeta)
 		ctrlOnly := ebiten.IsKeyPressed(ebiten.KeyControl) && !meta
@@ -2333,6 +2354,11 @@ func (u *macUI) handleMouse() {
 		}
 		// Don't start shell selection on the focused pane's bar region.
 		if g := u.focusedGeom(); g != nil && g.barH > 0 && int32(my) >= g.barY {
+			return
+		}
+		// Grok / alt-screen: click path or "[Open Image]"; primary: image block.
+		if u.tryOpenImageModalAt(mx, my) {
+			u.markShellDirty()
 			return
 		}
 		// Alt-screen TUIs own the surface (no host selection over Grok).
@@ -2864,6 +2890,11 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	// Notes caret (block/underline/bar) over the overlay grid.
 	if u.chrome.NotesOpen && u.painter != nil && len(overlay) > 0 {
 		u.paintNotesCaret(u.fb, overlay, padY, shellBot)
+	}
+
+	// Image lightbox on top of everything.
+	if u.modalImage != nil {
+		u.paintImageModal(u.fb)
 	}
 
 	u.tex.WritePixels(u.fb.Pix)

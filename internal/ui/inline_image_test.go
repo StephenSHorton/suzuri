@@ -17,6 +17,23 @@ func TestFindImagePathsInText(t *testing.T) {
 	}
 }
 
+func TestFindImagePathsUnix(t *testing.T) {
+	s := `see /Users/stephen/.grok/sessions/abc/images/1.jpg and /tmp/shot.png`
+	got := findImagePathsInText(s)
+	if len(got) < 2 {
+		t.Fatalf("expected unix paths, got %#v", got)
+	}
+	found := false
+	for _, p := range got {
+		if p == "/tmp/shot.png" || filepath.Base(p) == "shot.png" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing /tmp/shot.png in %#v", got)
+	}
+}
+
 func TestFixGrokSessionDisplayPath(t *testing.T) {
 	// Grok paints a double-drive path; real folder uses URL-encoded workspace.
 	mangled := `C:\Users\4step\.grok\sessions\C:\Users\4step\projects\suzuri\019fc39e-feb8-7a41-a2fc-23298878c66e\images\1.jpg`
