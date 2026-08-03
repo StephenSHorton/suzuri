@@ -26,6 +26,7 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/bridge"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/vt"
 )
 
 // Run opens a native macOS window with one shell tab (more via Ctrl+Shift+T).
@@ -175,6 +176,8 @@ type macUI struct {
 
 	// modalImage: full-window lightbox (click path / Open Image / image block).
 	modalImage *tabImage
+	// altMouseDown: left button held while reporting clicks to an alt-screen app.
+	altMouseDown bool
 
 	// Window placement: last captured frame (updated mid-session; flushed on exit).
 	// restoreMax is applied once after the ebiten loop creates the native window.
@@ -800,6 +803,8 @@ func (u *macUI) drainAndParse(tabID int) {
 	}
 	// Answer Kitty keyboard / DA probes before VT parse (Grok Shift+Enter).
 	t.handleHostQueries(data)
+	// Unwrap OSC 8 hyperlinks so markdown link labels stay visible.
+	data = vt.StripOSC8Hyperlinks(data)
 	_, _ = t.term.Write(data)
 	t.sb.noteScreen(t.term)
 	if t.sb.atBottom() {
@@ -1742,8 +1747,10 @@ func (u *macUI) handleKeys() {
 	if u.appOwnsKeyboard() && tab != nil {
 		// Ctrl alone for interrupt so Cmd+Enter can be Super+Enter.
 		// Cmd+C/V match macOS paste/copy; Ctrl+C/V still work for Windows muscle memory.
-		realCtrl := ebiten.IsKeyPressed(ebiten.KeyControl)
-		super := ebiten.IsKeyPressed(ebiten.KeyMeta)
+		// Prefer explicit mod helpers so Option (AltLeft/Right) is detected.
+		realCtrl := modControl()
+		super := modMeta()
+		opt := modAlt()
 		if !shift && inpututil.IsKeyJustPressed(ebiten.KeyC) {
 			if realCtrl && !super {
 				if !tab.sel.empty() {
@@ -1768,9 +1775,16 @@ func (u *macUI) handleKeys() {
 				return
 			}
 		}
+		// Hold-to-repeat for arrows / backspace / delete (Grok text fields).
 		for _, key := range specialKeys {
-			if inpututil.IsKeyJustPressed(key) {
-				if b := ptyKeyFromEbiten(tab.term, &tab.kitty, key, realCtrl, shift, alt, super); len(b) > 0 {
+			if !u.keyRep.fire(key, now) {
+				continue
+			}
+			if b := ptyKeyFromEbiten(tab.term, &tab.kitty, key, realCtrl, shift, opt, super); len(b) > 0 {
+				// Prefer focused-pane write when splits (sendKey uses active).
+				if t := u.activeTab(); t != nil {
+					t.sendKey(b)
+				} else {
 					u.sendKey(b)
 				}
 			}
@@ -2511,8 +2525,11 @@ func (u *macUI) handleMouse() {
 			u.markShellDirty()
 			return
 		}
-		// Alt-screen TUIs own the surface (no host selection over Grok).
+		// Alt-screen TUIs: forward mouse clicks (buttons, lists) when tracking is on.
 		if tab.altScreen() {
+			if u.sendAltMouse(tab, mx, my, true) {
+				u.altMouseDown = true
+			}
 			return
 		}
 		x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
@@ -2552,6 +2569,13 @@ func (u *macUI) handleMouse() {
 	if justReleased && u.notesDragging {
 		u.notesDragging = false
 		u.persistNotesIfDirty()
+	}
+	// Alt-screen mouse release (SGR …m).
+	if justReleased && u.altMouseDown {
+		u.altMouseDown = false
+		if t := u.activeTab(); t != nil && t.altScreen() {
+			u.sendAltMouse(t, mx, my, false)
+		}
 	}
 
 	if pressed && u.selecting {
@@ -3381,6 +3405,21 @@ func (u *macUI) updateLinkHover(mx, my int) {
 	if changed {
 		u.markShellDirty()
 	}
+}
+
+// sendAltMouse forwards a left-button press/release to an alt-screen app
+// (Grok action buttons, list selection, …) when mouse tracking is enabled.
+func (u *macUI) sendAltMouse(t *tab, mx, my int, press bool) bool {
+	if t == nil || t.term == nil || !mouseTracking(t.term) {
+		return false
+	}
+	cx, cy, _ := u.pixelToCellInPane(int32(mx), int32(my), t)
+	b := encodeMouseButton(t.term, cx+1, cy+1, 0, press)
+	if len(b) == 0 {
+		return false
+	}
+	t.sendKey(b)
+	return true
 }
 
 // linkURLAt returns the URL under client pixels, or "".

@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"fmt"
 	"unicode/utf8"
 
 	"github.com/hinshun/vt10x"
@@ -14,8 +15,12 @@ import (
 // by the caller; this only covers app-bound keys.
 // kk is the tab's Kitty progressive-enhancement state (may be nil).
 func ptyKeyFromWin(term vt10x.Terminal, kk *kittyKeyboard, wParam uintptr, ctrl, shift, alt bool) []byte {
-	// Leave bare Alt+letter alone (menus). Alt+Enter is Grok's newline fallback.
-	if alt && !ctrl && wParam != win.VK_RETURN {
+	// Leave bare Alt+letter alone (menus). Alt+Enter / Alt+arrows are app keys
+	// (Grok newline / word jump).
+	if alt && !ctrl && wParam != win.VK_RETURN &&
+		wParam != win.VK_LEFT && wParam != win.VK_RIGHT &&
+		wParam != win.VK_UP && wParam != win.VK_DOWN &&
+		wParam != win.VK_BACK && wParam != win.VK_DELETE {
 		return nil
 	}
 	appCursor := term != nil && term.Mode()&vt10x.ModeAppCursor != 0
@@ -31,19 +36,34 @@ func ptyKeyFromWin(term vt10x.Terminal, kk *kittyKeyboard, wParam uintptr, ctrl,
 		}
 		return []byte{'\t'}
 	case win.VK_BACK:
+		if (alt || ctrl) && !shift {
+			return []byte{0x1b, 0x7f} // word-delete (Meta-BS / Ctrl-BS style)
+		}
 		return []byte{0x7f}
 	case win.VK_DELETE:
+		if shift || alt || ctrl {
+			mods := kittyMods(shift, alt, ctrl, false)
+			return []byte(fmt.Sprintf("\x1b[3;%d~", mods))
+		}
 		return []byte("\x1b[3~")
 	case win.VK_INSERT:
 		return []byte("\x1b[2~")
 	case win.VK_HOME:
-		if appCursor {
+		if appCursor && !shift && !alt && !ctrl {
 			return []byte("\x1bOH")
+		}
+		if shift || alt || ctrl {
+			mods := kittyMods(shift, alt, ctrl, false)
+			return []byte(fmt.Sprintf("\x1b[1;%dH", mods))
 		}
 		return []byte("\x1b[H")
 	case win.VK_END:
-		if appCursor {
+		if appCursor && !shift && !alt && !ctrl {
 			return []byte("\x1bOF")
+		}
+		if shift || alt || ctrl {
+			mods := kittyMods(shift, alt, ctrl, false)
+			return []byte(fmt.Sprintf("\x1b[1;%dF", mods))
 		}
 		return []byte("\x1b[F")
 	case win.VK_PRIOR: // Page Up
@@ -51,25 +71,13 @@ func ptyKeyFromWin(term vt10x.Terminal, kk *kittyKeyboard, wParam uintptr, ctrl,
 	case win.VK_NEXT: // Page Down
 		return []byte("\x1b[6~")
 	case win.VK_UP:
-		if appCursor {
-			return []byte("\x1bOA")
-		}
-		return []byte("\x1b[A")
+		return encodeArrow(kk, 'A', appCursor, shift, alt, ctrl, false)
 	case win.VK_DOWN:
-		if appCursor {
-			return []byte("\x1bOB")
-		}
-		return []byte("\x1b[B")
+		return encodeArrow(kk, 'B', appCursor, shift, alt, ctrl, false)
 	case win.VK_RIGHT:
-		if appCursor {
-			return []byte("\x1bOC")
-		}
-		return []byte("\x1b[C")
+		return encodeArrow(kk, 'C', appCursor, shift, alt, ctrl, false)
 	case win.VK_LEFT:
-		if appCursor {
-			return []byte("\x1bOD")
-		}
-		return []byte("\x1b[D")
+		return encodeArrow(kk, 'D', appCursor, shift, alt, ctrl, false)
 	case win.VK_F1:
 		return []byte("\x1bOP")
 	case win.VK_F2:

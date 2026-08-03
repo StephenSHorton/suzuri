@@ -23,6 +23,7 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/bridge"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/vt"
 )
 
 const (
@@ -181,6 +182,8 @@ type winUI struct {
 	hoverLink    linkSpan
 	hoverLinkOK  bool
 	linkCursorOn bool
+	// altMouseDown: left button held while reporting clicks to an alt-screen app.
+	altMouseDown bool
 
 	// User is dragging or resizing the frame (WM_ENTERSIZEMOVE … EXITSIZEMOVE).
 	// During this window we must not thrash ConPTY / GDI: every WM_SIZE used to
@@ -1398,6 +1401,7 @@ func (u *winUI) drainAndParse(tabID int) {
 	}
 	// Answer Kitty keyboard / DA probes before VT parse (Grok Shift+Enter).
 	t.handleHostQueries(data)
+	data = vt.StripOSC8Hyperlinks(data)
 	_, _ = t.term.Write(data)
 	t.sb.noteScreen(t.term)
 	u.markShellDirty()
@@ -2791,7 +2795,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 		if tab.altScreen() {
-			// Let the app own the click (no host selection over Grok).
+			// Forward left-click to the TUI when mouse tracking is on (buttons).
+			if mouseTracking(tab.term) {
+				cx, cy, _ := u.pixelToCellInPane(px, py, tab)
+				if b := encodeMouseButton(tab.term, cx+1, cy+1, 0, true); len(b) > 0 {
+					tab.sendKey(b)
+					u.altMouseDown = true
+					win.SetCapture(hwnd)
+				}
+			}
 			return 0
 		}
 		x, y, viewRows := u.pixelToCellInPane(px, py, tab)
@@ -2879,6 +2891,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.ReleaseCapture()
 			u.persistNotesIfDirty()
 			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+		if u.altMouseDown {
+			u.altMouseDown = false
+			px := int32(win.LOWORD(uint32(lParam)))
+			py := int32(win.HIWORD(uint32(lParam)))
+			if t := u.activeTab(); t != nil && t.altScreen() && mouseTracking(t.term) {
+				cx, cy, _ := u.pixelToCellInPane(px, py, t)
+				if b := encodeMouseButton(t.term, cx+1, cy+1, 0, false); len(b) > 0 {
+					t.sendKey(b)
+				}
+			}
+			win.ReleaseCapture()
 			return 0
 		}
 		tab := u.activeTab()
