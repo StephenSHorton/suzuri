@@ -55,13 +55,39 @@ func newSoftwarePainter(faceName string, sizePx int) *softwarePainter {
 	if cw < 6 {
 		cw = 6
 	}
+	// Prefer font Height, but always reserve room for full ink (ascent+descent).
+	// Gohu @14 needs ~12 ascent + ~3 descent; a rounded Height of 14 left only
+	// 2px under the baseline and clipped j/g/y/p/q (and the next cell's BG
+	// fill covers any overflow).
+	ascent := m.Ascent.Round()
+	descent := m.Descent.Round()
+	if descent < 0 {
+		descent = -descent
+	}
 	ch := m.Height.Round()
+	minInk := ascent + descent
+	if minInk < 1 {
+		minInk = sizePx
+	}
+	// +1 so descenders never share a pixel row with the next cell's top edge.
+	if ch < minInk+1 {
+		ch = minInk + 1
+	}
 	if ch < sizePx {
 		ch = sizePx + 2
 	}
-	ascent := m.Ascent.Round()
 	if ascent < 1 {
-		ascent = ch - 4
+		ascent = ch - descent
+		if ascent < 1 {
+			ascent = ch - 4
+		}
+	}
+	// Keep baseline high enough that descent fits inside the cell.
+	if ascent+descent > ch {
+		ascent = ch - descent
+		if ascent < 1 {
+			ascent = 1
+		}
 	}
 	return &softwarePainter{
 		face:     face,

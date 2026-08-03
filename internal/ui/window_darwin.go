@@ -160,6 +160,10 @@ type macUI struct {
 	overlayCells [][]cellPix
 	overlayDirty bool
 
+	// inputOnlyDirty: Warp bar text/caret changed but shell cells did not.
+	// When shell matrix rain is off, Draw can re-paint only the bar(s).
+	inputOnlyDirty bool
+
 	// Mouse
 	mouseDown bool
 
@@ -307,6 +311,26 @@ func (u *macUI) syncChrome() {
 func (u *macUI) markChromeDirty() {
 	u.chromeDirty = true
 	u.overlayDirty = true
+	u.inputOnlyDirty = false
+}
+
+// markShellDirty forces a full shell repaint (PTY output, scroll, resize).
+func (u *macUI) markShellDirty() {
+	if u != nil {
+		u.inputOnlyDirty = false
+	}
+}
+
+// markInputDirty notes that only the Warp bar needs a refresh.
+func (u *macUI) markInputDirty() {
+	if u == nil {
+		return
+	}
+	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
+		u.inputOnlyDirty = false
+		return
+	}
+	u.inputOnlyDirty = true
 }
 
 func (u *macUI) toast(msg string) {
@@ -739,6 +763,7 @@ func (u *macUI) drainAndParse(tabID int) {
 		}
 	}
 	u.publishBridgeSnapshot()
+	u.markShellDirty()
 	t.inMu.Lock()
 	more := len(t.inBuf) > 0
 	t.inMu.Unlock()
@@ -1561,20 +1586,33 @@ func (u *macUI) handleKeys() {
 
 	// Alt-screen: raw PTY keys (after host shortcuts).
 	if u.appOwnsKeyboard() && tab != nil {
-		// Ctrl alone (not Cmd) for interrupt/paste so Cmd+Enter can be Super+Enter.
+		// Ctrl alone for interrupt so Cmd+Enter can be Super+Enter.
+		// Cmd+C/V match macOS paste/copy; Ctrl+C/V still work for Windows muscle memory.
 		realCtrl := ebiten.IsKeyPressed(ebiten.KeyControl)
 		super := ebiten.IsKeyPressed(ebiten.KeyMeta)
-		if realCtrl && !shift && !super && inpututil.IsKeyJustPressed(ebiten.KeyC) {
-			if !tab.sel.empty() {
-				u.copySelection()
-			} else {
-				u.sendKey([]byte{0x03})
+		if !shift && inpututil.IsKeyJustPressed(ebiten.KeyC) {
+			if realCtrl && !super {
+				if !tab.sel.empty() {
+					u.copySelection()
+				} else {
+					u.sendKey([]byte{0x03})
+				}
+				return
 			}
-			return
+			if super && !realCtrl {
+				// Cmd+C: copy selection only (never send interrupt as ⌘C).
+				if !tab.sel.empty() {
+					u.copySelection()
+				}
+				return
+			}
 		}
-		if realCtrl && !shift && !super && inpututil.IsKeyJustPressed(ebiten.KeyV) {
-			u.pasteClipboard()
-			return
+		if !shift && inpututil.IsKeyJustPressed(ebiten.KeyV) {
+			// Ctrl+V or Cmd+V → paste into the alt-screen app (Grok, vim, …).
+			if (realCtrl && !super) || (super && !realCtrl) {
+				u.pasteClipboard()
+				return
+			}
 		}
 		for _, key := range specialKeys {
 			if inpututil.IsKeyJustPressed(key) {
@@ -1681,10 +1719,12 @@ func (u *macUI) handleKeys() {
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyPageUp) {
 		tab.sb.scrollBy(u.rows/2, u.rows)
+		u.markShellDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyPageDown) {
 		tab.sb.scrollBy(-(u.rows / 2), u.rows)
+		u.markShellDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
@@ -1771,13 +1811,22 @@ func (u *macUI) handleTextInput() {
 		return
 	}
 	prevRows := in.visualRows(u.inputContentCols())
+	// Batch insert (one slice rebuild) — notes-style: avoid per-rune work.
+	rs := make([]rune, 0, len(chars))
 	for _, ch := range chars {
 		if ch >= 32 && ch != 0x7f && unicode.IsPrint(ch) {
-			in.insertRune(ch)
+			rs = append(rs, ch)
 		}
 	}
+	if len(rs) == 0 {
+		return
+	}
+	in.insertRunes(rs)
 	if in.visualRows(u.inputContentCols()) != prevRows {
 		u.maybeResizeForInput()
+		u.markShellDirty() // bar height change reflows shell
+	} else {
+		u.markInputDirty()
 	}
 }
 
@@ -1911,7 +1960,7 @@ func (u *macUI) persistNotes() {
 func (u *macUI) handleMouse() {
 	_, wheelY := ebiten.Wheel()
 	if wheelY != 0 {
-		if t := u.activeTab(); t != nil && !t.altScreen() {
+		if t := u.activeTab(); t != nil {
 			// One notch ≈ a few lines; keep it small so pin-reveal after clear
 			// is progressive (not a full-history flash).
 			steps := int(wheelY * 3)
@@ -1923,7 +1972,18 @@ func (u *macUI) handleMouse() {
 				}
 			}
 			// ebiten: positive wheel is away from user → scroll history up.
-			t.sb.scrollBy(steps, u.rows)
+			if t.altScreen() {
+				// Full-screen apps own scroll — never host history under them.
+				// Forward wheel as SGR mouse (if tracking) or arrow keys.
+				mx, my := ebiten.CursorPosition()
+				cx, cy, _ := u.pixelToCellInPane(int32(mx), int32(my), t)
+				if b := encodeMouseWheel(t.term, cx+1, cy+1, steps); len(b) > 0 {
+					u.sendKey(b)
+				}
+			} else {
+				t.sb.scrollBy(steps, u.rows)
+				u.markShellDirty()
+			}
 		}
 	}
 
@@ -2191,10 +2251,71 @@ func (u *macUI) pasteClipboard() {
 	in.insertRunes([]rune(text))
 	if in.visualRows(u.inputContentCols()) != prevRows {
 		u.maybeResizeForInput()
+		u.markShellDirty()
+		return
 	}
+	u.markInputDirty()
 }
 
 // --- paint ---
+
+// tryPaintInputOnly re-paints only Warp bars over the previous frame when the
+// shell grid is unchanged (notes-style scoping). Returns true if a full paint
+// was skipped. Stays in this mode until markShellDirty / markChromeDirty.
+func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool {
+	if u == nil || !u.inputOnlyDirty || u.painter == nil || u.fb == nil || u.tex == nil {
+		return false
+	}
+	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
+		return false
+	}
+	// Intro / dim modals need a full composite. Shell rain freezes while we
+	// stay in bar-only mode (same tradeoff as notes overlay scoping) — worth
+	// it so typing doesn't re-rasterize a huge idle grid every keystroke.
+	if u.matrixIntroActive() || u.dimShellModal() {
+		return false
+	}
+	if tab == nil || tab.altScreen() {
+		return false
+	}
+	if u.fb.Bounds().Dx() != w || u.fb.Bounds().Dy() != h {
+		return false
+	}
+	layouts := u.computeActiveLayout()
+	if len(layouts) == 0 {
+		sx, sy, sw, sh := u.shellRect(u.width, u.height)
+		layouts = []paneGeom{{
+			pane: tab, x: sx, y: sy, w: sw, h: sh,
+			cols: u.cols, rows: u.rows, focused: true,
+		}}
+	}
+	// Re-draw each leaf bar (caret alpha updates here too).
+	for _, g := range layouts {
+		if g.barH > 0 {
+			u.paintPaneInputIntoFB(g)
+		}
+	}
+	// Single-pane fallback if layout omitted barH.
+	if len(layouts) == 1 && layouts[0].barH < 1 {
+		g := layouts[0]
+		shellBot := int(u.shellBottomY(u.height))
+		g.barY = int32(shellBot) - u.inputBarPixelHeight()
+		if g.barY < u.shellPadY() {
+			g.barY = u.shellPadY()
+		}
+		g.barH = u.height - g.barY
+		g.x = 0
+		g.w = u.width
+		g.barCols = u.inputContentCols()
+		if g.barH > 0 {
+			u.paintPaneInputIntoFB(g)
+		}
+	}
+	u.tex.WritePixels(u.fb.Pix)
+	op := &ebiten.DrawImageOptions{}
+	screen.DrawImage(u.tex, op)
+	return true
+}
 
 func (u *macUI) paintTo(screen *ebiten.Image) {
 	tab := u.activeTab()
@@ -2209,6 +2330,13 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if u.fb == nil || u.fb.Bounds().Dx() != w || u.fb.Bounds().Dy() != h {
 		u.fb = image.NewRGBA(image.Rect(0, 0, w, h))
 		u.tex = ebiten.NewImage(w, h)
+		u.inputOnlyDirty = false
+	}
+
+	// Notes-style scoping for the Warp bar: when only bar text/caret changed
+	// and shell matrix rain is not animating, re-paint bars over the last frame.
+	if u.tryPaintInputOnly(screen, tab, w, h) {
+		return
 	}
 
 	u.ensureChromeCells()
@@ -2302,7 +2430,10 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 	// Quiet looping rain under the shell while sitting open (settings Rain = On).
 	// Not during intro curtain or settings/splash/confirm modals.
-	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() {
+	// Skip under alt-screen TUIs (Grok/vim) — rain still animates under a full
+	// grid every frame and feels like typing lag on large sessions.
+	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() &&
+		!tab.altScreen() {
 		t0 := u.blinkStart
 		if t0.IsZero() {
 			t0 = now

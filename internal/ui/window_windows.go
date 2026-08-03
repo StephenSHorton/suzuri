@@ -207,6 +207,11 @@ type winUI struct {
 	// hard-crash GDI with no Go panic trail.
 	paintPending bool
 
+	// inputOnlyDirty: Warp bar text/caret changed but shell cells did not.
+	// WM_PAINT can re-draw only the bar(s) into memDC (notes-style scoping).
+	// Cleared on PTY output, resize, scroll, overlay, chrome strip changes.
+	inputOnlyDirty bool
+
 	// toastPending is set from background goroutines; drained on wmSuzuriToast.
 	toastMu      sync.Mutex
 	toastPending string
@@ -225,6 +230,29 @@ func (u *winUI) requestPaint() {
 	}
 	u.paintPending = true
 	win.InvalidateRect(u.hwnd, nil, false)
+}
+
+// requestInputPaint marks only the Warp bar dirty (shell grid unchanged).
+// Falls back to a full paint when chrome/overlay also need a refresh.
+func (u *winUI) requestInputPaint() {
+	if u == nil || u.hwnd == 0 {
+		return
+	}
+	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
+		u.inputOnlyDirty = false
+		u.requestPaint()
+		return
+	}
+	u.inputOnlyDirty = true
+	u.requestPaint()
+}
+
+// markShellDirty forces a full shell repaint on the next paint cycle.
+func (u *winUI) markShellDirty() {
+	if u == nil {
+		return
+	}
+	u.inputOnlyDirty = false
 }
 
 func (u *winUI) queueBytes(tabID int)  { postBytes(u, tabID) }
@@ -1270,6 +1298,7 @@ func (u *winUI) drainAndParse(tabID int) {
 			t.postBytes(u)
 		}
 		if visible {
+			u.markShellDirty()
 			u.requestPaint()
 		}
 		return
@@ -1278,6 +1307,7 @@ func (u *winUI) drainAndParse(tabID int) {
 	t.handleHostQueries(data)
 	_, _ = t.term.Write(data)
 	t.sb.noteScreen(t.term)
+	u.markShellDirty()
 	// No host image injection on alt-screen (Grok) — use click → modal instead.
 	if t.sb.atBottom() {
 		t.sb.stickBottom()
@@ -1911,9 +1941,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				in.insertRune(ch)
 				if in.visualRows(u.inputContentCols()) != prevRows {
 					u.maybeResizeForInput()
+					u.markShellDirty() // bar height change reflows shell
+					u.requestPaint()
+				} else {
+					u.requestInputPaint()
 				}
+			} else {
+				u.requestPaint()
 			}
-			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
 
@@ -2195,7 +2230,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			} else if in != nil && len(in.runes) > 0 {
 				in.clear()
 				u.maybeResizeForInput()
-				win.InvalidateRect(hwnd, nil, false)
+				u.markShellDirty()
+				u.requestPaint()
 			} else {
 				u.sendKey([]byte{0x03})
 			}
@@ -2223,8 +2259,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				in.insertNewline()
 				if in.visualRows(cols) != prevRows {
 					u.maybeResizeForInput()
+					u.markShellDirty()
+					u.requestPaint()
+				} else {
+					u.requestInputPaint()
 				}
-				win.InvalidateRect(hwnd, nil, false)
 				return 0
 			}
 			line := in.submit()
@@ -2259,49 +2298,52 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.sendKey([]byte(payload + "\r"))
 			tab.sb.stickBottom()
 			u.publishBridgeSnapshot()
-			win.InvalidateRect(hwnd, nil, false)
+			u.markShellDirty()
+			u.requestPaint()
 		case win.VK_UP:
 			if !in.moveVisualUp(cols) {
 				in.historyUp()
 			}
 			u.maybeResizeForInput()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_DOWN:
 			if !in.moveVisualDown(cols) {
 				in.historyDown()
 			}
 			u.maybeResizeForInput()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_RIGHT:
 			in.moveRight()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_LEFT:
 			in.moveLeft()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_DELETE:
 			in.deleteForward()
 			u.maybeResizeForInput()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_HOME:
 			in.moveHome()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_END:
 			in.moveEnd()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_PRIOR:
 			vr := u.rows
 			if g := u.focusedGeom(); g != nil && g.rows > 0 {
 				vr = g.rows
 			}
 			tab.sb.scrollBy(vr/2, vr)
-			win.InvalidateRect(hwnd, nil, false)
+			u.markShellDirty()
+			u.requestPaint()
 		case win.VK_NEXT:
 			vr := u.rows
 			if g := u.focusedGeom(); g != nil && g.rows > 0 {
 				vr = g.rows
 			}
 			tab.sb.scrollBy(-(vr / 2), vr)
-			win.InvalidateRect(hwnd, nil, false)
+			u.markShellDirty()
+			u.requestPaint()
 		case win.VK_ESCAPE:
 			if u.modalImage != nil {
 				u.modalImage = nil
@@ -2349,10 +2391,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if tab == nil {
 			return 0
 		}
-		// Full-screen apps own the surface — don't scroll host history under them.
-		if tab.altScreen() {
-			return 0
-		}
 		delta := int16(wParam >> 16)
 		steps := int(delta) / 120
 		if steps == 0 {
@@ -2362,12 +2400,27 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				steps = -1
 			}
 		}
+		// Win32: positive delta = wheel away = scroll up.
+		if tab.altScreen() {
+			// Full-screen apps own the surface — never host history under them.
+			// Forward wheel as SGR mouse (if tracking) or arrow keys (Grok, vim, …).
+			var pt win.POINT
+			if win.GetCursorPos(&pt) {
+				win.ScreenToClient(hwnd, &pt)
+			}
+			cx, cy, _ := u.pixelToCellInPane(pt.X, pt.Y, tab)
+			if b := encodeMouseWheel(tab.term, cx+1, cy+1, steps*3); len(b) > 0 {
+				u.sendKey(b)
+			}
+			return 0
+		}
 		viewRows := u.rows
 		if g := u.focusedGeom(); g != nil && g.rows > 0 {
 			viewRows = g.rows
 		}
 		tab.sb.scrollBy(steps*3, viewRows)
-		win.InvalidateRect(hwnd, nil, false)
+		u.inputOnlyDirty = false
+		u.requestPaint()
 		return 0
 
 	case win.WM_LBUTTONDBLCLK:
@@ -2792,6 +2845,27 @@ func (u *winUI) paint(hwnd win.HWND) {
 			win.SelectObject(dest, oldF)
 			return
 		}
+		// Notes-style scoping for the Warp bar: when only bar text/caret changed,
+		// leave the shell grid in memDC and re-paint bars (and chrome if dirty).
+		// Shell rain freezes while we stay here — acceptable, same tradeoff as
+		// notes overlay scoping so typing does not re-blit the whole grid.
+		if u.inputOnlyDirty && !overlay && !dimModal &&
+			!u.matrixIntroActive() &&
+			u.memDC != 0 && dest == u.memDC && u.font != 0 &&
+			u.memW == w && u.memH == h {
+			oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
+			if u.chromeDirty {
+				u.paintChrome(dest, rect)
+			}
+			u.paintInputBar(dest, rect)
+			u.paintImageModal(dest, rect)
+			win.SelectObject(dest, oldF)
+			// Keep inputOnlyDirty sticky until markShellDirty so blink ticks
+			// also take this path (caret pulse without re-blitting the grid).
+			return
+		}
+		// Full paint path — shell is authoritative again.
+		u.inputOnlyDirty = false
 
 		// Void fill once; per-pane blit draws cells only.
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.VoidR, chrome.VoidG, chrome.VoidB)}
@@ -2809,8 +2883,11 @@ func (u *winUI) paint(hwnd win.HWND) {
 		} else {
 			u.overlaySceneReady = false
 			// Shared dim rain under the whole shell region (not per-pane).
+			// Skip under alt-screen TUIs (Grok/vim) — big paint win while typing.
 			if u.shellMatrixOn() && !u.matrixIntroActive() {
-				u.paintShellMatrix(dest, rect, padY, shellBot)
+				if t := u.activeTab(); t == nil || !t.altScreen() {
+					u.paintShellMatrix(dest, rect, padY, shellBot)
+				}
 			}
 			u.paintShellWatermark(dest, rect, padY, shellBot)
 
@@ -3648,12 +3725,19 @@ func (u *winUI) fillPaneBorder(hdc win.HDC, x, y, w, h, t int32, brush win.HBRUS
 // measureCellSize returns the monospaced cell size for the font selected in hdc.
 // GetTextExtent of "M" matches glyph advance better than TmAveCharWidth, which
 // is often 1px short and produces a visible grid of seams under selection.
+// Cell height always covers ascent+descent so descenders (j/g/y) are not clipped
+// by the next row's background fill.
 func measureCellSize(hdc win.HDC) (cw, ch int32) {
 	cw, ch = cellW, cellH
 	var tm win.TEXTMETRIC
 	if win.GetTextMetrics(hdc, &tm) {
 		if tm.TmHeight > 0 {
 			ch = tm.TmHeight
+		}
+		// Prefer explicit ink box when Height under-reports (some bitmap faces).
+		ink := tm.TmAscent + tm.TmDescent
+		if ink > 0 && ch < ink+1 {
+			ch = ink + 1
 		}
 		if tm.TmAveCharWidth > 0 {
 			cw = tm.TmAveCharWidth
@@ -4064,10 +4148,11 @@ func (u *winUI) pasteClipboard() {
 	in.insertRunes([]rune(text))
 	if in.visualRows(u.inputContentCols()) != prevRows {
 		u.maybeResizeForInput()
+		u.markShellDirty()
+		u.requestPaint()
+		return
 	}
-	if u.hwnd != 0 {
-		win.InvalidateRect(u.hwnd, nil, false)
-	}
+	u.requestInputPaint()
 }
 
 // handleInputBackspace edits the Warp bar (rate-limited like the old PTY BS).
@@ -4084,9 +4169,14 @@ func (u *winUI) handleInputBackspace(hwnd win.HWND, lParam uintptr) {
 		in.backspace()
 		if in.visualRows(u.inputContentCols()) != prevRows {
 			u.maybeResizeForInput()
+			u.markShellDirty()
+			u.requestPaint()
+		} else {
+			u.requestInputPaint()
 		}
+	} else {
+		u.requestPaint()
 	}
-	win.InvalidateRect(hwnd, nil, false)
 	u.drainQueuedBackspaces(hwnd)
 }
 
