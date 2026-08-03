@@ -155,12 +155,17 @@ func (m *Model) openNotes() {
 	if len(m.notesBank) == 0 {
 		m.initNotesBank(defaultNotesBank())
 	}
-	m.notesFocus = notesFocusList
+	// Default: open the last active note in the editor (Esc → list).
+	m.notesFocus = notesFocusEditor
 	m.notesTitle = ""
 	m.notesClampCursor()
 	if m.notesSel < 0 {
 		m.notesSel = -1
 	}
+	// Place caret at end of the note body for immediate typing.
+	m.notesCursor = len(m.notesRunes)
+	m.notesSel = -1
+	m.notesEnsureCursorVisible(0)
 }
 
 func (m *Model) toggleNotes() {

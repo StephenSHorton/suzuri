@@ -208,9 +208,10 @@ func TestNotesToggleKeepsBuffer(t *testing.T) {
 	if !m.NotesOpen {
 		t.Fatal("notes open")
 	}
-	// Open lands on list; Enter → editor, then type.
-	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
-	m = r.Model
+	// Default: open last note in the editor (not the list).
+	if m.notesFocus != notesFocusEditor {
+		t.Fatalf("open focus=%v want editor", m.notesFocus)
+	}
 	for _, ch := range "hello" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
@@ -234,15 +235,16 @@ func TestNotesToggleKeepsBuffer(t *testing.T) {
 	if !m.NotesOpen || string(m.notesRunes) != "hello" {
 		t.Fatalf("reopen open=%v buf=%q", m.NotesOpen, string(m.notesRunes))
 	}
+	if m.notesFocus != notesFocusEditor {
+		t.Fatalf("reopen focus=%v want editor", m.notesFocus)
+	}
 }
 
 func TestNotesSelectAllBackspaceTab(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenNotesMsg{})
 	m = r.Model
-	// List → editor, then type
-	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
-	m = r.Model
+	// Opens on editor by default
 	for _, ch := range "ab" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
@@ -295,22 +297,19 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenNotesMsg{})
 	m = r.Model
-	if m.notesFocus != notesFocusList {
-		t.Fatal("open on list")
-	}
-	// Enter editor, type body
-	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
-	m = r.Model
 	if m.notesFocus != notesFocusEditor {
-		t.Fatal("enter → editor")
+		t.Fatal("open on editor (last note)")
 	}
 	for _, ch := range "one" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
 	}
-	// Esc back to list, n for new (title mode)
+	// Esc to list, n for new (title mode)
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
 	m = r.Model
+	if m.notesFocus != notesFocusList {
+		t.Fatal("esc → list")
+	}
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	m = r.Model
 	if len(m.notesBank) != 2 {
@@ -343,10 +342,9 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 	if len(m.notesBank) != 1 {
 		t.Fatalf("after delete len=%d", len(m.notesBank))
 	}
-	// Click rename path
-	r = m.UpdateChrome(NotesClickMsg{CellX: 40, CellY: 3, Cols: 80})
+	// F2 renames from editor (or list)
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
 	m = r.Model
-	// May or may not hit name row depending on layout; F2 always works
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyF2})
 	m = r.Model
 	if m.notesFocus != notesFocusTitle {
@@ -368,8 +366,6 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 func TestNotesEnterSingleBlankLine(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
-	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter}) // list → editor
 	m = r.Model
 	for _, ch := range "hi" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
