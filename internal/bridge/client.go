@@ -105,3 +105,33 @@ func (c *Client) Submit(tabID *int, line string) (SubmitResult, error) {
 	}
 	return out, nil
 }
+
+// Notes runs a notes bank op (list/get/create/update/delete) on the live GUI.
+func (c *Client) Notes(req NotesRequest) (NotesResult, error) {
+	payload, _ := json.Marshal(req)
+	httpReq, err := http.NewRequest(http.MethodPost, c.ep.URL+"/v1/notes", bytes.NewReader(payload))
+	if err != nil {
+		return NotesResult{}, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.ep.Token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	// Writes can wait for UI-thread queue; give a little headroom.
+	client := c.http
+	if client.Timeout < 8*time.Second {
+		client = &http.Client{Timeout: 8 * time.Second}
+	}
+	res, err := client.Do(httpReq)
+	if err != nil {
+		return NotesResult{}, fmt.Errorf("suzuri bridge unreachable: %w", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		return NotesResult{}, fmt.Errorf("notes: %s: %s", res.Status, string(body))
+	}
+	var out NotesResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		return NotesResult{}, err
+	}
+	return out, nil
+}

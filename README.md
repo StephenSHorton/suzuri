@@ -118,9 +118,9 @@ Fields: font, theme, ANSI map, **intro** (`matrix` \| `ripple` \| `none`), profi
 
 `SUZURI_LOG_LEVEL=info` to quiet debug.
 
-## MCP (agent diagnostics)
+## MCP (agent diagnostics + notes)
 
-Spawn-on-demand stdio MCP — attach to a running GUI over loopback. See [`docs/mcp.md`](docs/mcp.md).
+Spawn-on-demand stdio MCP — attach to a running GUI over loopback. Tools include terminal diag/submit/logs and **notes bank** CRUD (`suzuri_notes_list` / `_get` / `_create` / `_update` / `_delete`). See [`docs/mcp.md`](docs/mcp.md).
 
 ```toml
 # ~/.grok/config.toml

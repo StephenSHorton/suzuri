@@ -24,12 +24,17 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | Tool | Purpose |
 |------|---------|
 | `suzuri_status` | GUI up? tab count, pid, bridge URL |
-| `suzuri_diag` | Full report: viewport, blocks, input bar, echo filter, PTY tail, dual-display notes |
-| `suzuri_snapshot` | Same structured snapshot without the extra notes pass |
+| `suzuri_diag` | Full report: viewport, blocks, input bar, echo filter, PTY tail, dual-display *diagnostic* notes |
+| `suzuri_snapshot` | Same structured snapshot without the extra diagnostic notes pass |
 | `suzuri_submit` | Submit a line via Warp bar path (block + echo arm + ConPTY) |
-| `suzuri_logs` | Tail `%LOCALAPPDATA%\suzuri\suzuri.log` (app/host log). Works even if GUI is down. |
+| `suzuri_logs` | Tail app log (`suzuri.log`). Works even if GUI is down. |
+| `suzuri_notes_list` | List the **user notes bank** (Ctrl+Shift+M): id, title, body, active |
+| `suzuri_notes_get` | Get one note by `id` (omit = active) |
+| `suzuri_notes_create` | Create a note (`title?`, `body?`); becomes active |
+| `suzuri_notes_update` | Partial update (`id?`, `title?`, `body?`, `set_active?`) |
+| `suzuri_notes_delete` | Delete by `id` (omit = active; last note is cleared, not removed) |
 
-**Shell output vs app log**
+**Shell output vs app log vs notes**
 
 | What you want | Tool |
 |---------------|------|
@@ -37,33 +42,67 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | Raw ConPTY bytes (escape sequences) | `suzuri_diag` → `pty_tail` |
 | Full-screen TUI (bar hidden) | `suzuri_diag` → `tabs[].alt_screen` |
 | Host events (tabs, bridge, panics, key path) | `suzuri_logs` |
+| User scratch notes (Ctrl+Shift+M) | `suzuri_notes_*` |
+
+### Notes bank details
+
+- Live GUI path: flushes the open editor, mutates the bank, saves `notes.json`, reloads the notes UI if open.
+- Offline path: reads/writes `notes.json` under the OS config dir when the GUI is not running.
+  - Windows: `%LOCALAPPDATA%\suzuri\notes.json`
+  - macOS: `~/Library/Application Support/suzuri/notes.json`
+  - Linux: `~/.config/suzuri/notes.json`
+- `suzuri_diag`’s `notes` field is **agent diagnostics** (e.g. dual-command hints), not this bank.
 
 ## Wire Grok Build
 
+### Windows
+
 ```toml
 [mcp_servers.suzuri]
-command = 'C:\Users\4step\projects\suzuri\suzuri.exe'
+command = 'C:\Users\you\projects\suzuri\suzuri.exe'
 args = ["mcp"]
 enabled = true
 startup_timeout_sec = 30
 ```
 
-Use the **built** `suzuri.exe` path (or `go run` is awkward for MCP). Rebuild after pulling:
-
 ```powershell
-cd C:\Users\4step\projects\suzuri
+cd C:\Users\you\projects\suzuri
 go build -o suzuri.exe ./cmd/suzuri
 ```
+
+### macOS
+
+```toml
+[mcp_servers.suzuri]
+command = "/Applications/suzuri.app/Contents/MacOS/suzuri"
+# or a local build:
+# command = "/Users/you/projects/suzuri/suzuri"
+args = ["mcp"]
+enabled = true
+startup_timeout_sec = 30
+```
+
+```bash
+cd ~/projects/suzuri
+CGO_ENABLED=1 go build -o suzuri ./cmd/suzuri
+```
+
+Use the **built** binary path (`go run` is awkward for MCP). The GUI must be running for live terminal tools; notes also work offline via `notes.json`.
 
 ## Manual smoke
 
 ```powershell
-# Terminal A — GUI (writes bridge.json)
+# Windows — Terminal A: GUI (writes bridge.json)
 .\suzuri.exe
-
-# Terminal B — status via MCP-ish HTTP (or just run the MCP under a client)
-# After GUI is up:
+# Terminal B:
 Get-Content $env:LOCALAPPDATA\suzuri\bridge.json
+```
+
+```bash
+# macOS — Terminal A: GUI
+./suzuri
+# Terminal B:
+cat "$HOME/Library/Application Support/suzuri/bridge.json"
 ```
 
 ## Security

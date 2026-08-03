@@ -83,6 +83,7 @@ func Run() error {
 	ui.bridge = bridge.NewHost()
 	ui.mcpJobs = make(chan mcpJob, 8)
 	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
+	ui.bridge.BindNotes(ui.enqueueMCPNotes)
 	prof := config.FindProfile(cfg, cfg.ActiveProfile)
 	opts := tabOpts{}
 	if prof != nil {
@@ -106,11 +107,16 @@ func Run() error {
 	return ui.loop()
 }
 
-// mcpJob is a submit request from the loopback MCP bridge (HTTP goroutine → UI thread).
+// mcpJob is work from the loopback MCP bridge (HTTP goroutine → UI thread).
 type mcpJob struct {
+	// Submit (kind empty or "submit")
 	tabID int
 	line  string
 	done  chan error
+	// Notes bank CRUD
+	notes    bool
+	notesReq bridge.NotesRequest
+	notesOut chan bridge.NotesResult
 }
 
 
@@ -1502,13 +1508,51 @@ func (u *winUI) enqueueMCPSubmit(tabID int, line string) error {
 	}
 }
 
+func (u *winUI) enqueueMCPNotes(req bridge.NotesRequest) bridge.NotesResult {
+	if u == nil || !u.alive.Load() || u.hwnd == 0 {
+		return bridge.NotesResult{OK: false, Error: "suzuri UI not ready"}
+	}
+	job := mcpJob{
+		notes:    true,
+		notesReq: req,
+		notesOut: make(chan bridge.NotesResult, 1),
+	}
+	select {
+	case u.mcpJobs <- job:
+	default:
+		return bridge.NotesResult{OK: false, Error: "mcp notes queue full"}
+	}
+	if win.PostMessage(u.hwnd, wmSuzuriMCP, 0, 0) == 0 {
+		return bridge.NotesResult{OK: false, Error: "post mcp notes job failed"}
+	}
+	select {
+	case res := <-job.notesOut:
+		return res
+	case <-time.After(5 * time.Second):
+		return bridge.NotesResult{OK: false, Error: "mcp notes timed out"}
+	}
+}
+
 func (u *winUI) drainMCPJobs() {
 	for {
 		select {
 		case job := <-u.mcpJobs:
-			err := u.submitOnUIThread(job.tabID, job.line)
-			if job.done != nil {
-				job.done <- err
+			if job.notes {
+				res := runNotesOnChrome(&u.chrome, job.notesReq)
+				if u.chrome.NotesOpen {
+					u.overlayDirty = true
+					// windows uses different dirty flags — requestPaint covers it
+				}
+				u.markChromeDirty()
+				u.requestPaint()
+				if job.notesOut != nil {
+					job.notesOut <- res
+				}
+			} else {
+				err := u.submitOnUIThread(job.tabID, job.line)
+				if job.done != nil {
+					job.done <- err
+				}
 			}
 		default:
 			return

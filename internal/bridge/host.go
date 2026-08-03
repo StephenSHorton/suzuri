@@ -22,6 +22,7 @@ type Host struct {
 	mu     sync.RWMutex
 	snap   Snapshot
 	submit func(tabID int, line string) error // must be UI-safe (posted by UI layer)
+	notes  func(NotesRequest) NotesResult     // UI-thread notes bank CRUD
 	srv    *http.Server
 	ep     Endpoint
 }
@@ -36,6 +37,13 @@ func (h *Host) BindSubmit(fn func(tabID int, line string) error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.submit = fn
+}
+
+// BindNotes sets the UI-thread notes bank handler (list/get/create/update/delete).
+func (h *Host) BindNotes(fn func(NotesRequest) NotesResult) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.notes = fn
 }
 
 
@@ -83,6 +91,7 @@ func (h *Host) Start() (Endpoint, error) {
 	mux.HandleFunc("/v1/snapshot", h.auth(h.handleSnapshot))
 	mux.HandleFunc("/v1/submit", h.auth(h.handleSubmit))
 	mux.HandleFunc("/v1/logs", h.auth(h.handleLogs))
+	mux.HandleFunc("/v1/notes", h.auth(h.handleNotes))
 
 	h.srv = &http.Server{
 		Handler:           mux,
@@ -209,6 +218,38 @@ func (h *Host) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, SubmitResult{OK: true, TabID: tabID, Line: req.Line})
+}
+
+func (h *Host) handleNotes(w http.ResponseWriter, r *http.Request) {
+	// GET → list (or get ?id=); POST → body with op.
+	var req NotesRequest
+	switch r.Method {
+	case http.MethodGet:
+		req.Op = NotesOpList
+		if id := r.URL.Query().Get("id"); id != "" {
+			req.Op = NotesOpGet
+			req.ID = id
+		}
+	case http.MethodPost:
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Op == "" {
+			req.Op = NotesOpList
+		}
+	default:
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	h.mu.RLock()
+	fn := h.notes
+	h.mu.RUnlock()
+	if fn == nil {
+		writeJSON(w, NotesResult{OK: false, Error: "notes not bound"})
+		return
+	}
+	writeJSON(w, fn(req))
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -64,6 +64,7 @@ func Run() error {
 	ui.alive.Store(true)
 	ui.bridge = bridge.NewHost()
 	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
+	ui.bridge.BindNotes(ui.enqueueMCPNotes)
 	if ui.painter != nil {
 		ui.metricW, ui.metricH = int32(ui.painter.cellW), int32(ui.painter.cellH)
 	}
@@ -91,10 +92,16 @@ func Run() error {
 	return ui.loop()
 }
 
+// mcpJob is work from the loopback MCP bridge (HTTP goroutine → UI tick).
 type mcpJob struct {
+	// Submit (kind empty or "submit")
 	tabID int
 	line  string
 	done  chan error
+	// Notes bank CRUD
+	notes    bool
+	notesReq bridge.NotesRequest
+	notesOut chan bridge.NotesResult
 }
 
 type macUI struct {
@@ -585,7 +592,19 @@ func (u *macUI) Update() error {
 				fn()
 			}
 		case job := <-u.mcpJobs:
-			u.submitOnUIThread(job.tabID, job.line, job.done)
+			if job.notes {
+				res := runNotesOnChrome(&u.chrome, job.notesReq)
+				if u.chrome.NotesOpen {
+					u.overlayDirty = true
+					u.overlayCells = nil
+				}
+				u.markChromeDirty()
+				if job.notesOut != nil {
+					job.notesOut <- res
+				}
+			} else {
+				u.submitOnUIThread(job.tabID, job.line, job.done)
+			}
 		default:
 			goto drained
 		}
@@ -855,6 +874,25 @@ func (u *macUI) enqueueMCPSubmit(tabID int, line string) error {
 		return fmt.Errorf("mcp queue full")
 	}
 	return <-done
+}
+
+func (u *macUI) enqueueMCPNotes(req bridge.NotesRequest) bridge.NotesResult {
+	if !u.alive.Load() {
+		return bridge.NotesResult{OK: false, Error: "ui not alive"}
+	}
+	out := make(chan bridge.NotesResult, 1)
+	job := mcpJob{notes: true, notesReq: req, notesOut: out}
+	select {
+	case u.mcpJobs <- job:
+	default:
+		return bridge.NotesResult{OK: false, Error: "mcp notes queue full"}
+	}
+	select {
+	case res := <-out:
+		return res
+	case <-time.After(5 * time.Second):
+		return bridge.NotesResult{OK: false, Error: "mcp notes timed out"}
+	}
 }
 
 func (u *macUI) submitOnUIThread(tabID int, line string, done chan error) {
