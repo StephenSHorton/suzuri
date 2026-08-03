@@ -51,12 +51,15 @@ type Model struct {
 	// Rename dialog (sync, same key path as palette).
 	renameTarget RenameTarget
 	renameBuf    string
-	// Scratch notes (in-memory only; survives hide/show until process exit).
+	// Notes bank (persisted to notes.json; editor mirrors active note).
+	notesBank   []NoteDoc
+	notesActive int // index into notesBank
 	notesRunes  []rune
 	notesCursor int
 	notesSel    int // selection anchor; -1 = none (cursor is the other end)
 	notesScroll int
 	notesWrapW  int
+	notesDirty  bool
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
 }
@@ -193,12 +196,13 @@ func (i paletteItem) FilterValue() string { return i.title + " " + i.desc }
 func New(width int) Model {
 	cfg := config.Default()
 	m := Model{
-		Width:     width,
-		Height:    TabStripRows(),
-		Status:    "",
-		lastCfg:   cfg,
-		notesSel:  -1,
+		Width:    width,
+		Height:   TabStripRows(),
+		Status:   "",
+		lastCfg:  cfg,
+		notesSel: -1,
 	}
+	m.initNotesBank(defaultNotesBank())
 	m.rebuildPalette()
 	return m
 }
@@ -294,6 +298,16 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.openNotes()
 	case ToggleNotesMsg:
 		m.toggleNotes()
+	case LoadNotesMsg:
+		// Prefer disk bank; keep dirty flag clear after load.
+		if len(msg.Bank.Notes) > 0 || msg.Bank.ActiveID != "" {
+			m.initNotesBank(msg.Bank)
+			m.notesDirty = false
+		}
+	case NotesDeleteMsg:
+		if m.NotesOpen {
+			m.notesDeleteActive()
+		}
 	case DismissOverlayMsg:
 		if m.SettingsOpen {
 			settings = m.settings.snap
@@ -313,8 +327,8 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.SplashOpen = false
 		m.RenameOpen = false
 		m.renameBuf = ""
-		// Notes: put away only — keep notesRunes.
-		m.NotesOpen = false
+		// Notes: put away only — flush active body into bank (host persists).
+		m.putAwayNotes()
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 	case tea.KeyMsg:
@@ -420,7 +434,10 @@ func (m *Model) closeModalsExcept(keep string) {
 		m.renameBuf = ""
 	}
 	if keep != "notes" {
-		m.NotesOpen = false // buffer kept
+		if m.NotesOpen {
+			m.flushActiveNote()
+		}
+		m.NotesOpen = false // bank kept
 	}
 	if keep != "help" {
 		m.HelpOpen = false

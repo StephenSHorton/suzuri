@@ -73,6 +73,11 @@ func Run() error {
 		chrome:     chrome.New(cols),
 	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
+	if bank, err := chrome.LoadNotesBank(); err != nil {
+		log.Warn("notes load failed; using empty bank", "err", err)
+	} else {
+		ui.chrome = ui.chrome.UpdateChrome(chrome.LoadNotesMsg{Bank: bank}).Model
+	}
 	ui.alive.Store(true)
 	ui.bridge = bridge.NewHost()
 	ui.mcpJobs = make(chan mcpJob, 8)
@@ -1867,6 +1872,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				// Filter / rename / notes typing: only dirty the overlay.
 				u.overlayDirty = true
 				u.overlayCells = nil
+				if u.chrome.NotesOpen || u.chrome.NotesDirty() {
+					u.persistNotesIfDirty()
+				}
 				win.InvalidateRect(hwnd, nil, false)
 			}
 			// Settings ignores plain text; arrows via KEYDOWN.
@@ -1914,49 +1922,89 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 		// Charm palette / settings own keys while open (text via WM_CHAR).
 		if u.chrome.OverlayOpen() {
-			// Notes clipboard shortcuts need host (CF_UNICODETEXT).
-			if u.chrome.NotesOpen && ctrl && !shift && !alt {
-				switch wParam {
-				case 'C', 'c':
-					if s := u.chrome.NotesSelectedText(); s != "" {
-						_ = setClipboardText(hwnd, s)
-					}
-					// Leave selection; still feed ctrl+c so model ignores close.
-					km := tea.KeyMsg{Type: tea.KeyCtrlC}
-					r := u.chrome.UpdateChrome(km)
-					u.chrome = r.Model
-					u.overlayDirty = true
-					u.overlayCells = nil
-					win.InvalidateRect(hwnd, nil, false)
-					return 0
-				case 'X', 'x':
-					if s := u.chrome.NotesSelectedText(); s != "" {
-						_ = setClipboardText(hwnd, s)
-					}
-					km := tea.KeyMsg{Type: tea.KeyCtrlX}
-					r := u.chrome.UpdateChrome(km)
-					u.chrome = r.Model
-					u.overlayDirty = true
-					u.overlayCells = nil
-					win.InvalidateRect(hwnd, nil, false)
-					return 0
-				case 'V', 'v':
-					if s, err := getClipboardText(hwnd); err == nil && s != "" {
-						m := u.chrome
-						m.NotesPaste(s)
-						u.chrome = m
+			// Notes clipboard + bank shortcuts need host (CF_UNICODETEXT / chords).
+			if u.chrome.NotesOpen && ctrl && !alt {
+				if !shift {
+					switch wParam {
+					case 'C', 'c':
+						if s := u.chrome.NotesSelectedText(); s != "" {
+							_ = setClipboardText(hwnd, s)
+						}
+						km := tea.KeyMsg{Type: tea.KeyCtrlC}
+						r := u.chrome.UpdateChrome(km)
+						u.chrome = r.Model
 						u.overlayDirty = true
 						u.overlayCells = nil
 						win.InvalidateRect(hwnd, nil, false)
+						u.persistNotesIfDirty()
+						return 0
+					case 'X', 'x':
+						if s := u.chrome.NotesSelectedText(); s != "" {
+							_ = setClipboardText(hwnd, s)
+						}
+						km := tea.KeyMsg{Type: tea.KeyCtrlX}
+						r := u.chrome.UpdateChrome(km)
+						u.chrome = r.Model
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+						u.persistNotesIfDirty()
+						return 0
+					case 'V', 'v':
+						if s, err := getClipboardText(hwnd); err == nil && s != "" {
+							m := u.chrome
+							m.NotesPaste(s)
+							u.chrome = m
+							u.overlayDirty = true
+							u.overlayCells = nil
+							win.InvalidateRect(hwnd, nil, false)
+							u.persistNotesIfDirty()
+						}
+						return 0
+					case 'A', 'a':
+						km := tea.KeyMsg{Type: tea.KeyCtrlA}
+						r := u.chrome.UpdateChrome(km)
+						u.chrome = r.Model
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+						return 0
+					case 'N', 'n':
+						km := tea.KeyMsg{Type: tea.KeyCtrlN}
+						r := u.chrome.UpdateChrome(km)
+						u.chrome = r.Model
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+						u.persistNotesIfDirty()
+						return 0
+					case win.VK_PRIOR: // Ctrl+PageUp — previous note
+						km := tea.KeyMsg{Type: tea.KeyCtrlPgUp}
+						r := u.chrome.UpdateChrome(km)
+						u.chrome = r.Model
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+						u.persistNotesIfDirty()
+						return 0
+					case win.VK_NEXT: // Ctrl+PageDown — next note
+						km := tea.KeyMsg{Type: tea.KeyCtrlPgDown}
+						r := u.chrome.UpdateChrome(km)
+						u.chrome = r.Model
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+						u.persistNotesIfDirty()
+						return 0
 					}
-					return 0
-				case 'A', 'a':
-					km := tea.KeyMsg{Type: tea.KeyCtrlA}
-					r := u.chrome.UpdateChrome(km)
+				} else if wParam == win.VK_BACK {
+					// Ctrl+Shift+Backspace — delete current note
+					r := u.chrome.UpdateChrome(chrome.NotesDeleteMsg{})
 					u.chrome = r.Model
 					u.overlayDirty = true
 					u.overlayCells = nil
 					win.InvalidateRect(hwnd, nil, false)
+					u.persistNotesIfDirty()
 					return 0
 				}
 			}
@@ -1973,11 +2021,12 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					u.syncChrome()
 					u.chromePx = u.chromePixelHeight()
 				}
+				u.persistNotesIfDirty()
 				win.InvalidateRect(hwnd, nil, false)
 			}
 			return 0
 		}
-		// Ctrl+Shift+M — toggle scratch notes (in-memory).
+		// Ctrl+Shift+M — toggle notes bank (persisted).
 		if ctrl && shift && !alt && (wParam == 'M' || wParam == 'm') {
 			r := u.chrome.UpdateChrome(chrome.ToggleNotesMsg{})
 			u.chrome = r.Model
@@ -1985,6 +2034,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.overlayDirty = true
 			u.overlaySceneReady = false
 			u.markChromeDirty()
+			u.persistNotesIfDirty()
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
@@ -2378,7 +2428,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		chromeH := u.chromePixelHeight()
 
 		// Click outside floating overlay (on shell) dismisses it.
+		// Clicks on the card itself (including notes) must not put it away.
 		if u.chrome.OverlayOpen() && py >= chromeH {
+			if u.hitOverlayCard(px, py) {
+				// Keep focus / selection; card owns the click.
+				u.focus()
+				return 0
+			}
 			log.Info("dismiss overlay (click outside)")
 			applog.Sync()
 			// Clear overlay cells first so the next paint cannot draw a stale
@@ -2389,6 +2445,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
 			u.chrome = r.Model
 			u.markChromeDirty()
+			u.persistNotesIfDirty()
 			// applyChromeAction may restore settings snap; keep it light (no
 			// ConPTY on this stack — applyConfigLive posts layout settle).
 			func() {
@@ -2558,6 +2615,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_DESTROY:
 		// Best-effort if WM_CLOSE was skipped (e.g. DestroyWindow from quit).
 		u.persistWindowPlacement(true)
+		u.persistNotes()
 		log.Info("WM_DESTROY — tearing down", "tabs", len(u.tabs))
 		u.alive.Store(false)
 		if u.bridge != nil {
@@ -4787,6 +4845,137 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	u.chromePx = chromeH
 }
 
+// overlayOriginY matches paintOverlay placement (shell region, slight top bias).
+func (u *winUI) overlayOriginY(clientH int32, rows int) int32 {
+	ch := u.metricH
+	if ch < 1 {
+		ch = cellH
+	}
+	padY := u.chromePx
+	bot := u.shellBottomY(clientH)
+	shellH := bot - padY
+	oh := int32(rows) * ch
+	oy := padY + (shellH-oh)/4
+	if oy+oh > bot {
+		oy = bot - oh
+	}
+	if oy < padY {
+		oy = padY
+	}
+	return oy
+}
+
+// ensureOverlayCells builds the floating card grid if missing (for hit-tests).
+func (u *winUI) ensureOverlayCells() {
+	if !u.chrome.OverlayOpen() {
+		return
+	}
+	cols := u.cols
+	if cols < 20 {
+		cols = 20
+	}
+	if !u.overlayDirty && u.chromeCols == cols && len(u.overlayCells) > 0 {
+		return
+	}
+	ct := chrome.RenderOverlayToTerm(u.chrome, cols)
+	if ct == nil {
+		u.overlayCells = nil
+		return
+	}
+	ccols, crows := ct.Size()
+	const maxOverlayRows = 48
+	if crows > maxOverlayRows {
+		crows = maxOverlayRows
+	}
+	if crows < 1 {
+		crows = 1
+	}
+	cells := make([][]cellPix, crows)
+	for y := 0; y < crows; y++ {
+		row := make([]cellPix, cols)
+		for x := 0; x < cols && x < ccols; x++ {
+			row[x] = glyphToCell(ct.Cell(x, y))
+		}
+		cells[y] = row
+	}
+	u.overlayCells = cells
+	u.chromeCols = cols
+	u.overlayDirty = false
+}
+
+// hitOverlayCard is true when (px,py) lands on a non-transparent overlay cell.
+func (u *winUI) hitOverlayCard(px, py int32) bool {
+	if u == nil || !u.chrome.OverlayOpen() {
+		return false
+	}
+	u.ensureOverlayCells()
+	if len(u.overlayCells) == 0 {
+		return false
+	}
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	var rect win.RECT
+	if u.hwnd != 0 {
+		win.GetClientRect(u.hwnd, &rect)
+	}
+	clientH := rect.Bottom - rect.Top
+	if clientH < 1 {
+		clientH = u.height
+	}
+	oy := u.overlayOriginY(clientH, len(u.overlayCells))
+	oh := int32(len(u.overlayCells)) * ch
+	if py < oy || py >= oy+oh {
+		return false
+	}
+	if px < 0 {
+		return false
+	}
+	cy := int((py - oy) / ch)
+	cx := int(px / cw)
+	if cy < 0 || cy >= len(u.overlayCells) {
+		return false
+	}
+	row := u.overlayCells[cy]
+	if cx < 0 || cx >= len(row) {
+		return false
+	}
+	cell := row[cx]
+	empty := cell.Ch == 0 || cell.Ch == ' '
+	if empty && isTransparentOverlayBG(cell.BR, cell.BG, cell.BB) {
+		return false
+	}
+	return true
+}
+
+// persistNotesIfDirty flushes the notes bank to notes.json when dirty.
+func (u *winUI) persistNotesIfDirty() {
+	if u == nil || !u.chrome.NotesDirty() {
+		return
+	}
+	u.persistNotes()
+}
+
+// persistNotes always writes the bank (exit path / force).
+func (u *winUI) persistNotes() {
+	if u == nil {
+		return
+	}
+	m := u.chrome
+	bank := m.NotesSnapshot()
+	if err := chrome.SaveNotesBank(bank); err != nil {
+		log.Warn("notes save failed", "err", err, "path", chrome.NotesPath())
+		u.chrome = m
+		return
+	}
+	m.ClearNotesDirty()
+	u.chrome = m
+}
+
 // paintOverlay draws the floating settings/palette card over the shell.
 func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 	defer applog.Recover("paintOverlay", false)
@@ -4840,17 +5029,7 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 	}
 	// Place in the shell region. Prefer slight top bias; if the stack is tall
 	// (settings + help), shift up so the bottom caption is not clipped.
-	padY := u.chromePx
-	bot := u.shellBottomY(rect.Bottom - rect.Top)
-	shellH := bot - padY
-	oh := int32(len(u.overlayCells)) * ch
-	oy := padY + (shellH-oh)/4
-	if oy+oh > bot {
-		oy = bot - oh
-	}
-	if oy < padY {
-		oy = padY
-	}
+	oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
 	u.paintChromeCells(hdc, rect, u.overlayCells, 0, oy, false)
 }
 

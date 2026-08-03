@@ -55,6 +55,11 @@ func Run() error {
 		mcpJobs:    make(chan mcpJob, 8),
 	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
+	if bank, err := chrome.LoadNotesBank(); err != nil {
+		log.Warn("notes load failed; using empty bank", "err", err)
+	} else {
+		ui.chrome = ui.chrome.UpdateChrome(chrome.LoadNotesMsg{Bank: bank}).Model
+	}
 	ui.alive.Store(true)
 	ui.bridge = bridge.NewHost()
 	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
@@ -1497,8 +1502,32 @@ func (u *macUI) handleMouse() {
 	tabStripH := int32(chrome.TabStripRows()) * chH
 
 	if justPressed {
-		// Dismiss overlay on shell click.
+		// Dismiss overlay on shell click outside the card (not on the card).
 		if u.chrome.OverlayOpen() && int32(my) >= chromeH {
+			// Approximate: full-width overlay grid; skip dismiss for middle third
+			// of shell height where the card typically sits (hit-test without GDI).
+			// Prefer keeping notes open when clicking in the upper half of shell.
+			if u.chrome.NotesOpen || u.chrome.PaletteOpen || u.chrome.SettingsOpen ||
+				u.chrome.HelpOpen || u.chrome.RenameOpen || u.chrome.ConfirmOpen {
+				// Card is horizontally centered ~ half of cols; treat center band as card.
+				cols := u.cols
+				if cols < 20 {
+					cols = 20
+				}
+				cw := u.metricW
+				if cw < 1 {
+					cw = 8
+				}
+				// Rough outer width 40–56 cells centered.
+				cardW := int32(52) * cw
+				if cardW > int32(cols)*cw {
+					cardW = int32(cols) * cw
+				}
+				ox := (int32(cols)*cw - cardW) / 2
+				if int32(mx) >= ox && int32(mx) < ox+cardW {
+					return // click on card band — keep overlay
+				}
+			}
 			u.overlayCells = nil
 			u.overlayDirty = true
 			r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
@@ -1506,6 +1535,13 @@ func (u *macUI) handleMouse() {
 			u.markChromeDirty()
 			u.applyChromeAction(r)
 			u.syncChrome()
+			// Persist notes bank after put-away.
+			if u.chrome.NotesDirty() {
+				m := u.chrome
+				_ = chrome.SaveNotesBank(m.NotesSnapshot())
+				m.ClearNotesDirty()
+				u.chrome = m
+			}
 			return
 		}
 		if int32(my) < chromeH {

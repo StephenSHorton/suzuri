@@ -276,6 +276,51 @@ func TestNotesSelectAllBackspaceTab(t *testing.T) {
 	}
 }
 
+func TestNotesBankNewSwitchPersist(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+
+	m := New(80)
+	r := m.UpdateChrome(OpenNotesMsg{})
+	m = r.Model
+	for _, ch := range "one" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlN})
+	m = r.Model
+	if len(m.notesBank) != 2 {
+		t.Fatalf("bank len=%d", len(m.notesBank))
+	}
+	for _, ch := range "two" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlPgUp})
+	m = r.Model
+	if string(m.notesRunes) != "one" {
+		t.Fatalf("switched body=%q want one", string(m.notesRunes))
+	}
+	bank := m.NotesSnapshot()
+	if err := SaveNotesBank(bank); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadNotesBank()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Notes) != 2 {
+		t.Fatalf("loaded len=%d", len(got.Notes))
+	}
+	bodies := map[string]bool{}
+	for _, n := range got.Notes {
+		bodies[n.Body] = true
+	}
+	if !bodies["one"] || !bodies["two"] {
+		t.Fatalf("bodies=%v", bodies)
+	}
+}
+
 func TestNotesEnterSingleBlankLine(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenNotesMsg{})
