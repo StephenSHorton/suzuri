@@ -5031,10 +5031,17 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 	u.paintNotesCaret(hdc, oy)
 }
 
+// chromeCellOriginX matches paintChromeCells (ox + 4 + col*cw). The notes
+// caret must use the same origin or it paints a second ghost glyph beside
+// the real character.
+const chromeCellOriginX int32 = 4
+
 // paintNotesCaret draws the notes body/title caret using cfg.Cursor.
-// Block style reverse-videos the cell under the caret so the character stays
-// readable (classic terminal: block sits on the glyph at the insertion point;
-// typing inserts to the left of / before that cell's content).
+//
+// Block: solid reverse-video over the insertion cell only (no second TextOut
+// offset from the grid — that was doubling glyphs). The overlay already has
+// the character; we cover that cell then redraw once at the exact same pixel
+// origin paintChromeCells uses.
 func (u *winUI) paintNotesCaret(hdc win.HDC, overlayOY int32) {
 	if u == nil || hdc == 0 || !u.chrome.NotesOpen {
 		return
@@ -5054,56 +5061,87 @@ func (u *winUI) paintNotesCaret(hdc win.HDC, overlayOY int32) {
 	if ch < 1 {
 		ch = cellH
 	}
-	x := int32(cx) * cw
+	// Same pixel rect as paintChromeCells for this cell.
+	x := chromeCellOriginX + int32(cx)*cw
 	y := overlayOY + int32(cy)*ch
+	cellRect := win.RECT{Left: x, Top: y, Right: x + cw, Bottom: y + ch}
 
-	// Bar / underline: thin mark (does not hide the glyph).
-	if u.cfg.Cursor == config.CursorUnderline || u.cfg.Cursor == config.CursorBar {
-		u.paintInputCaret(hdc, x, y, cw, ch)
-		return
-	}
-
-	// Block: reverse-video the insertion cell so the character under the
-	// caret stays legible. Classic terminal: block sits on that cell; typing
-	// inserts before it (glyph shifts right).
 	a := u.caretAlpha()
 	if a <= 0 {
 		return
 	}
-	var chRune rune
-	bgR, bgG, bgB := chrome.PanelR, chrome.PanelG, chrome.PanelB
-	if cy >= 0 && cy < len(u.overlayCells) && cx >= 0 && cx < len(u.overlayCells[cy]) {
-		c := u.overlayCells[cy][cx]
-		if c.Ch != 0 && c.Ch != ' ' {
-			chRune = c.Ch
+
+	switch u.cfg.Cursor {
+	case config.CursorUnderline:
+		th := ch / 8
+		if th < 2 {
+			th = 2
 		}
-		if c.BR != 0 || c.BG != 0 || c.BB != 0 {
-			bgR, bgG, bgB = c.BR, c.BG, c.BB
+		cr, cg, cb := blendRGB(chrome.PanelR, chrome.PanelG, chrome.PanelB, chrome.PrimR, chrome.PrimG, chrome.PrimB, a)
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(cr, cg, cb)}
+		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+			fillRect(hdc, win.RECT{Left: x, Top: y + ch - th, Right: x + cw, Bottom: y + ch}, brush)
+			win.DeleteObject(win.HGDIOBJ(brush))
 		}
+		return
+	case config.CursorBar:
+		th := cw / 5
+		if th < 2 {
+			th = 2
+		}
+		cr, cg, cb := blendRGB(chrome.PanelR, chrome.PanelG, chrome.PanelB, chrome.PrimR, chrome.PrimG, chrome.PrimB, a)
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(cr, cg, cb)}
+		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+			fillRect(hdc, win.RECT{Left: x, Top: y, Right: x + th, Bottom: y + ch}, brush)
+			win.DeleteObject(win.HGDIOBJ(brush))
+		}
+		return
 	}
-	// Fill: blink between cell bg and primary (same pulse as input caret).
-	fillR, fillG, fillB := blendRGB(bgR, bgG, bgB, chrome.PrimR, chrome.PrimG, chrome.PrimB, a)
-	// Glyph: on-primary so it reads on the fill.
+
+	// Block: opaque cover of the cell, then one glyph at the same origin as
+	// the grid paint (insert point = this cell; typed chars land here).
+	var cell cellPix
+	have := false
+	if cy >= 0 && cy < len(u.overlayCells) && cx >= 0 && cx < len(u.overlayCells[cy]) {
+		cell = u.overlayCells[cy][cx]
+		have = true
+	}
+	bgR, bgG, bgB := chrome.PanelR, chrome.PanelG, chrome.PanelB
+	if have && (cell.BR != 0 || cell.BG != 0 || cell.BB != 0) {
+		bgR, bgG, bgB = cell.BR, cell.BG, cell.BB
+	}
+	// Near-opaque so the original glyph is fully covered (no double).
+	fillA := a
+	if fillA < 0.92 {
+		fillA = 0.92
+	}
+	fillR, fillG, fillB := blendRGB(bgR, bgG, bgB, chrome.PrimR, chrome.PrimG, chrome.PrimB, fillA)
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(fillR, fillG, fillB)}
+	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+		fillRect(hdc, cellRect, brush)
+		win.DeleteObject(win.HGDIOBJ(brush))
+	}
+	if !have || cell.Ch == 0 || cell.Ch == ' ' {
+		return
+	}
+	// Single redraw of the covered glyph, same path as paintChromeCells.
 	glR, glG, glB := chrome.OnPrimR, chrome.OnPrimG, chrome.OnPrimB
 	if glR == 0 && glG == 0 && glB == 0 {
 		glR, glG, glB = 12, 12, 14
 	}
-	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(fillR, fillG, fillB)}
-	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-		fillRect(hdc, win.RECT{Left: x, Top: y, Right: x + cw, Bottom: y + ch}, brush)
-		win.DeleteObject(win.HGDIOBJ(brush))
+	if drawCellGlyph(hdc, cell.Ch, cellRect, glR, glG, glB) {
+		return
 	}
-	if chRune != 0 {
-		oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
-		win.SetBkMode(hdc, win.TRANSPARENT)
-		win.SetTextColor(hdc, win.RGB(glR, glG, glB))
-		s, err := syscall.UTF16FromString(string(chRune))
-		if err == nil && len(s) > 1 {
-			win.TextOut(hdc, x, y, &s[0], int32(len(s)-1))
-		}
-		if oldFont != 0 {
-			win.SelectObject(hdc, oldFont)
-		}
+	s, err := syscall.UTF16FromString(string(cell.Ch))
+	if err != nil || len(s) < 2 {
+		return
+	}
+	u.selectFontForRune(hdc, cell.Ch, cell.Bold)
+	win.SetBkMode(hdc, win.TRANSPARENT)
+	win.SetTextColor(hdc, win.RGB(glR, glG, glB))
+	win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
+	if u.font != 0 {
+		win.SelectObject(hdc, win.HGDIOBJ(u.font))
 	}
 }
 
