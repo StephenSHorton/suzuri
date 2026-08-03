@@ -610,12 +610,21 @@ func (u *winUI) postToast(msg string) {
 	}
 }
 
-// postUpdateOffer opens the install-confirm modal on the UI thread.
+// postUpdateOffer opens the install-confirm modal on the UI thread (once).
 func (u *winUI) postUpdateOffer(version string) {
-	if u == nil {
+	if u == nil || version == "" {
+		return
+	}
+	// Already showing update confirm — do not stack another.
+	if u.chrome.ConfirmOpen {
 		return
 	}
 	u.toastMu.Lock()
+	// Drop duplicate offers still in the message queue.
+	if u.updateOfferVer == version {
+		u.toastMu.Unlock()
+		return
+	}
 	u.updateOfferVer = version
 	u.toastMu.Unlock()
 	if u.hwnd != 0 {
@@ -626,6 +635,12 @@ func (u *winUI) postUpdateOffer(version string) {
 }
 
 func (u *winUI) openUpdateConfirm(version string) {
+	if u == nil || version == "" {
+		return
+	}
+	if u.chrome.ConfirmOpen {
+		return
+	}
 	r := u.chrome.UpdateChrome(chrome.OpenConfirmUpdateMsg{Version: version})
 	u.chrome = r.Model
 	u.overlayCells = nil
@@ -859,6 +874,9 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.startUpdateCheck()
 	case chrome.ActionInstallUpdate:
 		applyPendingUpdate(u.postToast)
+	case chrome.ActionUpdateLater:
+		markUpdateLater()
+		u.toast("update deferred")
 	case chrome.ActionOpenRenamePane:
 		u.openRenameUI(chrome.RenameTargetPane)
 	case chrome.ActionOpenRenameTab:
@@ -1744,7 +1762,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		ver := u.updateOfferVer
 		u.updateOfferVer = ""
 		u.toastMu.Unlock()
-		if ver != "" {
+		if ver != "" && !u.chrome.ConfirmOpen {
 			u.openUpdateConfirm(ver)
 		}
 		return 0

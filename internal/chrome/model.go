@@ -121,6 +121,8 @@ const (
 	ActionCheckUpdates
 	// ActionInstallUpdate downloads and applies a pending update (after confirm).
 	ActionInstallUpdate
+	// ActionUpdateLater: user dismissed the update confirm (do not re-offer this session).
+	ActionUpdateLater
 	// Split panes (host implements layout).
 	ActionSplitRight
 	ActionSplitDown
@@ -298,6 +300,10 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		if m.SplashOpen {
 			act = ActionSplashDone
 		}
+		// Click-outside on update confirm = Later (don't re-pop this session).
+		if m.ConfirmOpen && m.confirm.yesAction == ActionInstallUpdate {
+			act = ActionUpdateLater
+		}
 		m.PaletteOpen = false
 		m.SettingsOpen = false
 		m.ConfirmOpen = false
@@ -329,6 +335,10 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 				act = m.confirm.yesAction
 				m.ConfirmOpen = false
 			} else if s == "esc" || s == "n" || s == "ctrl+c" || msg.Type == tea.KeyEsc {
+				// Signal host that user deferred an update offer.
+				if m.confirm.yesAction == ActionInstallUpdate {
+					act = ActionUpdateLater
+				}
 				m.ConfirmOpen = false
 			}
 			return Result{Model: m, Action: act, Index: idx, Settings: settings}

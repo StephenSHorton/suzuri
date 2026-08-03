@@ -919,6 +919,9 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		})
 	case chrome.ActionInstallUpdate:
 		applyPendingUpdate(u.postToast)
+	case chrome.ActionUpdateLater:
+		markUpdateLater()
+		u.toast("update deferred")
 	case chrome.ActionOpenRenamePane:
 		u.openRenameUI(chrome.RenameTargetPane)
 	case chrome.ActionOpenRenameTab:
