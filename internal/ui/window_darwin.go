@@ -1682,9 +1682,8 @@ func (u *macUI) handleKeys() {
 		}
 		return
 	}
-	// Pane focus is after the overlay block (Windows order): when notes/palette
-	// is open, Option/Alt+arrows stay with the dialog. Bare Option matches
-	// Windows Alt+arrows for panes; Ctrl+arrows are word-jump in the bar/Grok.
+	// Pane focus is after the overlay block: when notes/palette is open,
+	// arrows stay with the dialog. ⌘⌥+arrows focus panes; bare Option is word-jump.
 	if ctrl && inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		if shift {
 			u.switchTab(-1)
@@ -1731,7 +1730,7 @@ func (u *macUI) handleKeys() {
 				return
 			}
 		}
-		// Notes: Ctrl word-jump/delete; Option+Backspace word-delete; Cmd line ends.
+		// Notes: Option/Ctrl word-jump; Cmd line ends; ⌘⌥ is host pane focus (outside).
 		if u.chrome.NotesOpen {
 			if u.handleNotesNavKeys(now, realCtrl, meta, alt, shift) {
 				return
@@ -1755,27 +1754,9 @@ func (u *macUI) handleKeys() {
 		return
 	}
 
-	// Option+arrows: focus pane (Windows Alt+arrows parity). After overlay so
-	// notes/palette keep their own arrow keys. Ctrl+Option kept as synonym.
-	if alt && !shift && !meta && !realCtrl {
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
-			u.focusPaneDir(0)
-			return
-		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
-			u.focusPaneDir(1)
-			return
-		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) {
-			u.focusPaneDir(2)
-			return
-		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowDown) {
-			u.focusPaneDir(3)
-			return
-		}
-	}
-	if realCtrl && alt && !shift && !meta {
+	// ⌘⌥+arrows: focus pane (bare Option is word-jump). Ctrl+Option is a synonym.
+	// After overlay so notes/palette keep their own arrow keys.
+	if alt && !shift && (meta || realCtrl) {
 		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
 			u.focusPaneDir(0)
 			return
@@ -1807,9 +1788,9 @@ func (u *macUI) handleKeys() {
 	if u.appOwnsKeyboard() && tab != nil {
 		// Ctrl alone for interrupt so Cmd+Enter can be Super+Enter.
 		// Cmd+C/V match macOS paste/copy; Ctrl+C/V still work for Windows muscle memory.
-		// Option is pane focus (above); Ctrl+arrows word-jump via encodeArrow.
+		// ⌘⌥ is pane focus (above); Option/Ctrl+arrows word-jump via encodeArrow.
 		super := meta
-		opt := alt // still passed for rare Alt+Enter etc.
+		opt := alt // Option+arrows → CSI Alt (Grok word jump)
 		if !shift && inpututil.IsKeyJustPressed(ebiten.KeyC) {
 			if realCtrl && !super {
 				if !tab.sel.empty() {
@@ -1910,9 +1891,9 @@ func (u *macUI) handleKeys() {
 		return
 	}
 	// Navigation with hold-to-repeat (IsKeyJustPressed alone never auto-repeats).
-	// Ctrl+←/→ word jump (Windows parity) · Cmd+←/→ line home/end · Cmd+↑/↓ buffer.
-	// Option+arrows are pane focus (handled above), not word jump.
-	wordMod := realCtrl && !meta && !alt
+	// Option/Ctrl+←/→ word jump · Cmd+←/→ line home/end · Cmd+↑/↓ buffer.
+	// ⌘⌥+arrows are pane focus (handled above).
+	wordMod := (alt && !meta && !realCtrl) || (realCtrl && !meta && !alt)
 	if u.keyRep.fire(ebiten.KeyArrowUp, now) || u.keyRep.fire(ebiten.KeyUp, now) {
 		if meta && !alt {
 			// Cmd+Up: start of buffer (macOS text field).
@@ -1939,7 +1920,7 @@ func (u *macUI) handleKeys() {
 		case meta && !alt:
 			in.moveHome() // Cmd+Left = beginning of line
 		case wordMod:
-			in.moveWordLeft() // Ctrl+Left
+			in.moveWordLeft() // Option/Ctrl+Left
 		default:
 			in.moveLeft()
 		}
@@ -2034,20 +2015,21 @@ func (u *macUI) handleKeys() {
 	}
 }
 
-// handleNotesNavKeys handles hold-to-repeat nav + Ctrl/Cmd combos for notes.
+// handleNotesNavKeys handles hold-to-repeat nav + Option/Ctrl/Cmd combos for notes.
 // Returns true when the event was consumed.
-// Word jump is Ctrl+←/→ (Windows parity); Option is reserved for pane focus outside notes.
+// Word jump is Option or Ctrl+←/→; ⌘⌥ is pane focus outside notes (not handled here).
 func (u *macUI) handleNotesNavKeys(now time.Time, realCtrl, meta, alt, shift bool) bool {
 	if u == nil || !u.chrome.NotesOpen {
 		return false
 	}
-	// Word ops: Ctrl (or Option+Backspace as macOS text tradition).
-	wordMod := (realCtrl && !meta) || (alt && !meta && !realCtrl)
-	wordArrow := realCtrl && !meta && !alt
+	// Word ops: Option or Ctrl (not Cmd alone).
+	wordMod := (alt && !meta && !realCtrl) || (realCtrl && !meta && !alt)
+	optArrow := alt && !meta && !realCtrl
+	ctrlArrow := realCtrl && !meta && !alt
 	fireNav := func(key ebiten.Key, altKey ebiten.Key) bool {
 		return u.keyRep.fire(key, now) || (altKey != key && u.keyRep.fire(altKey, now))
 	}
-	// Ctrl+Backspace/Delete or Option+Backspace: delete word.
+	// Option/Ctrl+Backspace/Delete: delete word.
 	if wordMod && !shift {
 		if fireNav(ebiten.KeyBackspace, ebiten.KeyBackspace) {
 			m := u.chrome
@@ -2058,7 +2040,7 @@ func (u *macUI) handleNotesNavKeys(now time.Time, realCtrl, meta, alt, shift boo
 			u.persistNotesIfDirty()
 			return true
 		}
-		if (realCtrl && !meta) && fireNav(ebiten.KeyDelete, ebiten.KeyDelete) {
+		if fireNav(ebiten.KeyDelete, ebiten.KeyDelete) {
 			m := u.chrome
 			m.NotesDeleteWord(1)
 			u.chrome = m
@@ -2068,7 +2050,7 @@ func (u *macUI) handleNotesNavKeys(now time.Time, realCtrl, meta, alt, shift boo
 			return true
 		}
 	}
-	// Cmd+←/→ = line home/end; Ctrl+←/→ = word. Plain arrows with repeat.
+	// Cmd+←/→ = line home/end; Option/Ctrl+←/→ = word. Plain arrows with repeat.
 	if fireNav(ebiten.KeyArrowLeft, ebiten.KeyLeft) {
 		var km tea.KeyMsg
 		switch {
@@ -2076,9 +2058,13 @@ func (u *macUI) handleNotesNavKeys(now time.Time, realCtrl, meta, alt, shift boo
 			km = tea.KeyMsg{Type: tea.KeyHome}
 		case meta && !alt && shift:
 			km = tea.KeyMsg{Type: tea.KeyShiftHome}
-		case wordArrow && shift:
+		case optArrow && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftLeft, Alt: true}
+		case optArrow:
+			km = tea.KeyMsg{Type: tea.KeyLeft, Alt: true}
+		case ctrlArrow && shift:
 			km = tea.KeyMsg{Type: tea.KeyCtrlShiftLeft}
-		case wordArrow:
+		case ctrlArrow:
 			km = tea.KeyMsg{Type: tea.KeyCtrlLeft}
 		case shift:
 			km = tea.KeyMsg{Type: tea.KeyShiftLeft}
@@ -2099,9 +2085,13 @@ func (u *macUI) handleNotesNavKeys(now time.Time, realCtrl, meta, alt, shift boo
 			km = tea.KeyMsg{Type: tea.KeyEnd}
 		case meta && !alt && shift:
 			km = tea.KeyMsg{Type: tea.KeyShiftEnd}
-		case wordArrow && shift:
+		case optArrow && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftRight, Alt: true}
+		case optArrow:
+			km = tea.KeyMsg{Type: tea.KeyRight, Alt: true}
+		case ctrlArrow && shift:
 			km = tea.KeyMsg{Type: tea.KeyCtrlShiftRight}
-		case wordArrow:
+		case ctrlArrow:
 			km = tea.KeyMsg{Type: tea.KeyCtrlRight}
 		case shift:
 			km = tea.KeyMsg{Type: tea.KeyShiftRight}
@@ -2237,8 +2227,7 @@ func teaKeyFromEbiten(ctrl, shift, alt bool, rep *keyRepeat, now time.Time) *tea
 	up := func() bool { return just(ebiten.KeyArrowUp) || just(ebiten.KeyUp) }
 	down := func() bool { return just(ebiten.KeyArrowDown) || just(ebiten.KeyDown) }
 
-	// Option+Backspace/Delete and rare Option+arrows for overlay KeyMsg.Alt.
-	// Word jump in notes is Ctrl (handleNotesNavKeys); Option is pane focus outside.
+	// Option+arrows / Option+Backspace for overlay KeyMsg.Alt (notes word jump).
 	if !shift && !ctrl && alt {
 		switch {
 		case left():

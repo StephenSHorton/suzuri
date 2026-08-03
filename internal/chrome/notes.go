@@ -1166,7 +1166,7 @@ func (m Model) renderNotesContextKeys(mainWidth, windowCols int) string {
 			{"Click · drag", "Place caret · select"},
 			{KeyCtrl("A"), "Select all"},
 			{KeyCtrl("C") + " / " + KeyCtrl("X") + " / " + KeyCtrl("V"), "Copy / cut / paste"},
-			{"Ctrl+←→", "Word jump"},
+			{"⌥/Ctrl+←→", "Word jump"},
 			{"Tab", "Insert tab"},
 			{KeyCtrlShift("M"), "Hide notes"},
 		}

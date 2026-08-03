@@ -180,7 +180,7 @@ func (b *inputBar) moveRight() {
 	}
 }
 
-// moveWordLeft / moveWordRight: Ctrl+←→ (both platforms; host maps the binding).
+// moveWordLeft / moveWordRight: Option+←→ (macOS) or Ctrl+←→ (Windows / also Mac).
 func (b *inputBar) moveWordLeft() {
 	b.clearComplete()
 	b.cursor = barWordBoundary(b.runes, b.cursor, -1)

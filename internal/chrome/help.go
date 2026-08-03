@@ -166,8 +166,9 @@ func helpSectionsRight(colW int) []helpSectionBlock {
 			rows: [][2]string{
 				{KeyCtrlShift("D"), "Split right"},
 				{KeyCtrlShift("E"), "Split down"},
-				{"Alt/⌥+arrows", "Focus pane"},
-				{"Ctrl+←→", "Word jump"},
+				{"⌘⌥+arrows", "Focus pane (macOS)"},
+				{"Alt+arrows", "Focus pane (Windows)"},
+				{"⌥/Ctrl+←→", "Word jump"},
 				{"⌘←→ · Home/End", "Line ends (macOS)"},
 				{"Hold ←→ / ⌫", "Key repeat"},
 				{"F2", "Rename pane"},

@@ -15,8 +15,7 @@ import (
 // kk is the tab's Kitty progressive-enhancement state (may be nil).
 func ptyKeyFromEbiten(term vt10x.Terminal, kk *kittyKeyboard, key ebiten.Key, ctrl, shift, alt, super bool) []byte {
 	// Bare Alt+letter is left for host. Alt+Enter is an app key (Grok newline).
-	// Alt+arrows are pane focus at the host; Ctrl+arrows are word jump (Grok).
-	// Still encode Alt+arrows if called (tests / future paths).
+	// Alt+arrows are app keys (word jump in Grok); ⌘⌥ pane focus is host-only.
 	if alt && !ctrl && !super && key != ebiten.KeyEnter &&
 		key != ebiten.KeyArrowLeft && key != ebiten.KeyArrowRight &&
 		key != ebiten.KeyArrowUp && key != ebiten.KeyArrowDown &&
