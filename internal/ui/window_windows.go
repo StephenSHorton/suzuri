@@ -286,7 +286,7 @@ func (u *winUI) syncChrome() {
 			if t == nil {
 				continue
 			}
-			title := t.title
+			title := t.displayTitle()
 			if title == "" {
 				title = fmt.Sprintf("shell %d", i+1)
 			}
@@ -819,8 +819,72 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
 		runUpdateCheck(u.postToast)
+	case chrome.ActionOpenRenamePane:
+		u.openRenameUI(chrome.RenameTargetPane)
+	case chrome.ActionOpenRenameTab:
+		u.openRenameUI(chrome.RenameTargetTab)
+	case chrome.ActionApplyRename:
+		u.applyRename(r.RenameTarget, r.Name)
 	}
 	u.syncChrome()
+}
+
+// openRenameUI seeds and opens the rename dialog for a pane or strip tab.
+func (u *winUI) openRenameUI(target chrome.RenameTarget) {
+	seed := ""
+	switch target {
+	case chrome.RenameTargetTab:
+		if p := u.activePage(); p != nil {
+			if p.userTitle != "" {
+				seed = p.userTitle
+			} else {
+				seed = p.title()
+			}
+		} else if t := u.activeTab(); t != nil {
+			seed = t.displayTitle()
+		}
+	default:
+		if t := u.activeTab(); t != nil {
+			if t.userTitle != "" {
+				seed = t.userTitle
+			} else {
+				seed = t.displayTitle()
+			}
+		}
+	}
+	r := u.chrome.UpdateChrome(chrome.OpenRenameMsg{Target: target, Seed: seed})
+	u.chrome = r.Model
+	u.overlayCells = nil
+	u.overlayDirty = true
+	u.overlaySceneReady = false
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+}
+
+// applyRename sets a custom pane or page title (empty clears the lock).
+func (u *winUI) applyRename(target chrome.RenameTarget, name string) {
+	switch target {
+	case chrome.RenameTargetTab:
+		if p := u.activePage(); p != nil {
+			p.setUserTitle(name)
+		} else if t := u.activeTab(); t != nil {
+			t.setUserTitle(name)
+		}
+	default:
+		if t := u.activeTab(); t != nil {
+			t.setUserTitle(name)
+			// Solo page: keep strip in sync with the only pane name.
+			if p := u.activePage(); p != nil && p.leafCount() <= 1 {
+				p.setUserTitle(name)
+			}
+		}
+	}
+	if t := u.activeTab(); t != nil {
+		setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
+	}
+	u.markChromeDirty()
+	u.toast("renamed")
 }
 
 // replayIntro restarts the configured startup curtain (matrix / ripple / none).
@@ -1709,12 +1773,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		ch := rune(wParam)
 		// Charm overlay (palette filter) owns printable text while open.
 		if u.chrome.OverlayOpen() {
-			if u.chrome.PaletteOpen && ch >= 32 && ch != 0x7f {
+			if (u.chrome.PaletteOpen || u.chrome.RenameOpen) && ch >= 32 && ch != 0x7f {
 				km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 				r := u.chrome.UpdateChrome(km)
 				u.chrome = r.Model
-				// Filter typing: only dirty the overlay (not full tab strip /
-				// syncChrome) so keystrokes stay snappy.
+				// Filter / rename typing: only dirty the overlay.
 				u.overlayDirty = true
 				u.overlayCells = nil
 				win.InvalidateRect(hwnd, nil, false)
@@ -1768,9 +1831,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				r := u.chrome.UpdateChrome(*km)
 				u.chrome = r.Model
 				u.applyChromeAction(r)
-				// Palette filter/nav: only dirty overlay. Full syncChrome was
-				// redoing the tab strip every backspace/arrow.
-				if u.chrome.PaletteOpen {
+				// Palette / rename: only dirty overlay.
+				if u.chrome.PaletteOpen || u.chrome.RenameOpen {
 					u.overlayDirty = true
 					u.overlayCells = nil
 				} else {
@@ -1780,6 +1842,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				}
 				win.InvalidateRect(hwnd, nil, false)
 			}
+			return 0
+		}
+		// F2 — rename focused pane (custom title; empty clears).
+		if !ctrl && !shift && !alt && wParam == win.VK_F2 {
+			u.openRenameUI(chrome.RenameTargetPane)
 			return 0
 		}
 		// Host chrome shortcuts always win (even over full-screen apps).
@@ -3194,8 +3261,8 @@ func (u *winUI) paintPaneTitles(hdc win.HDC, layouts []paneGeom) {
 		}
 		title := "shell"
 		if g.pane != nil {
-			if g.pane.title != "" {
-				title = g.pane.title
+			if d := g.pane.displayTitle(); d != "" {
+				title = d
 			} else {
 				title = fmt.Sprintf("shell %d", g.pane.id+1)
 			}
@@ -3872,12 +3939,12 @@ func (u *winUI) staticDimUnderlay() bool {
 }
 
 // floatOverLiveShell is true when a card paints over the live terminal
-// (palette, shortcuts) rather than a dim modal matte.
+// (palette, shortcuts, rename) rather than a dim modal matte.
 func (u *winUI) floatOverLiveShell() bool {
 	if u == nil || u.dimShellModal() {
 		return false
 	}
-	return u.chrome.PaletteOpen || u.chrome.HelpOpen
+	return u.chrome.PaletteOpen || u.chrome.HelpOpen || u.chrome.RenameOpen
 }
 
 func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {

@@ -39,6 +39,7 @@ type Model struct {
 	ConfirmOpen  bool
 	HelpOpen     bool
 	SplashOpen   bool
+	RenameOpen   bool
 	// Sync palette (no bubbles list / tea.Cmd — host key path must stay non-blocking).
 	palAll    []paletteItem
 	palView   []paletteItem
@@ -46,6 +47,9 @@ type Model struct {
 	palIndex  int
 	settings  settingsState
 	confirm   confirmState
+	// Rename dialog (sync, same key path as palette).
+	renameTarget RenameTarget
+	renameBuf    string
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
 }
@@ -113,15 +117,23 @@ const (
 	ActionFocusPaneRight
 	ActionFocusPaneUp
 	ActionFocusPaneDown
+	// ActionOpenRenamePane / Tab: host opens OpenRenameMsg with a seed name.
+	ActionOpenRenamePane
+	ActionOpenRenameTab
+	// ActionApplyRename: Result.Name is the new title (empty clears custom name).
+	// Result.RenameTarget is pane vs strip tab.
+	ActionApplyRename
 )
 
 // Result pairs the new model with an optional host action.
 type Result struct {
-	Model       Model
-	Action      HostAction
-	Index       int
-	Settings    config.Config // set for preview/apply/cancel
-	ProfileName string        // ActionNewTabProfile
+	Model        Model
+	Action       HostAction
+	Index        int
+	Settings     config.Config // set for preview/apply/cancel
+	ProfileName  string        // ActionNewTabProfile
+	Name         string        // ActionApplyRename
+	RenameTarget RenameTarget  // ActionApplyRename
 }
 
 // KeyMap for chrome shortcuts the host may forward.
@@ -175,7 +187,7 @@ func (m Model) Init() tea.Cmd { return nil }
 
 // OverlayOpen is true when any modal owns keyboard focus.
 func (m Model) OverlayOpen() bool {
-	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen || m.HelpOpen || m.SplashOpen
+	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen || m.HelpOpen || m.SplashOpen || m.RenameOpen
 }
 
 // UpdateChrome applies a message and returns host actions.
@@ -184,6 +196,8 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 	var idx int
 	var settings config.Config
 	var profileName string
+	var renameName string
+	var renameTarget RenameTarget
 
 	switch msg := msg.(type) {
 	case SyncTabsMsg:
@@ -239,6 +253,8 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 	case OpenSplashMsg:
 		m.closeModalsExcept("splash")
 		m.SplashOpen = true
+	case OpenRenameMsg:
+		m.openRename(msg.Target, msg.Seed)
 	case DismissOverlayMsg:
 		if m.SettingsOpen {
 			settings = m.settings.snap
@@ -252,6 +268,8 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.ConfirmOpen = false
 		m.HelpOpen = false
 		m.SplashOpen = false
+		m.RenameOpen = false
+		m.renameBuf = ""
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 	case tea.KeyMsg:
@@ -280,6 +298,11 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		}
 		if m.SettingsOpen {
 			return m.updateSettingsKey(msg)
+		}
+		if m.RenameOpen {
+			renameTarget = m.renameTarget
+			act, renameName = m.handleRenameKey(msg)
+			return Result{Model: m, Action: act, Name: renameName, RenameTarget: renameTarget}
 		}
 		if m.PaletteOpen {
 			// Sync filter/nav — never tea.Cmd (Win32 key path must not block).
@@ -326,6 +349,10 @@ func (m *Model) closeModalsExcept(keep string) {
 	}
 	if keep != "confirm" {
 		m.ConfirmOpen = false
+	}
+	if keep != "rename" {
+		m.RenameOpen = false
+		m.renameBuf = ""
 	}
 	if keep != "help" {
 		m.HelpOpen = false
@@ -472,6 +499,8 @@ func (m Model) OverlayView() string {
 		card = m.confirm.render(w)
 	case m.SettingsOpen:
 		card = m.settings.render(w)
+	case m.RenameOpen:
+		card = m.renderRename(w)
 	case m.PaletteOpen:
 		// Crush commands: outer min(70, area), inner = outer − frame.
 		// Sync render — no bubbles list layout/filter on the key path.
@@ -605,6 +634,8 @@ func (m Model) OverlayRowCount() int {
 	case m.SettingsOpen:
 		// Main settings card + gap + help card under it.
 		return 26
+	case m.RenameOpen:
+		return 8
 	case m.PaletteOpen:
 		return 14
 	default:

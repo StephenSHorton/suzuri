@@ -885,8 +885,39 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
 		runUpdateCheck(u.postToast)
+	case chrome.ActionOpenRenamePane:
+		u.openRenameUI(chrome.RenameTargetPane)
+	case chrome.ActionOpenRenameTab:
+		u.openRenameUI(chrome.RenameTargetTab)
+	case chrome.ActionApplyRename:
+		u.applyRename(r.RenameTarget, r.Name)
 	}
 	u.syncChrome()
+}
+
+func (u *macUI) openRenameUI(target chrome.RenameTarget) {
+	seed := ""
+	if t := u.activeTab(); t != nil {
+		if t.userTitle != "" {
+			seed = t.userTitle
+		} else {
+			seed = t.displayTitle()
+		}
+	}
+	r := u.chrome.UpdateChrome(chrome.OpenRenameMsg{Target: target, Seed: seed})
+	u.chrome = r.Model
+	u.overlayCells = nil
+	u.overlayDirty = true
+}
+
+func (u *macUI) applyRename(target chrome.RenameTarget, name string) {
+	// macOS host is single-pane pages; both targets rename the active tab.
+	_ = target
+	if t := u.activeTab(); t != nil {
+		t.setUserTitle(name)
+	}
+	u.markChromeDirty()
+	u.toast("renamed")
 }
 
 // replayIntro restarts the configured startup curtain.

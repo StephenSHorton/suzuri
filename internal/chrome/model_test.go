@@ -201,6 +201,37 @@ func TestDismissOverlay(t *testing.T) {
 	}
 }
 
+func TestRenameDialogApply(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenRenameMsg{Target: RenameTargetPane, Seed: "shell"})
+	m = r.Model
+	if !m.RenameOpen {
+		t.Fatal("rename should open")
+	}
+	// Clear seed and type "work"
+	for i := 0; i < 5; i++ {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyBackspace})
+		m = r.Model
+	}
+	for _, ch := range "work" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionApplyRename {
+		t.Fatalf("action=%v want ApplyRename", r.Action)
+	}
+	if r.Name != "work" {
+		t.Fatalf("name=%q", r.Name)
+	}
+	if r.RenameTarget != RenameTargetPane {
+		t.Fatalf("target=%v", r.RenameTarget)
+	}
+	if r.Model.RenameOpen {
+		t.Fatal("rename should close")
+	}
+}
+
 func TestPlusBounds(t *testing.T) {
 	m := New(80)
 	m.Tabs = []Tab{{ID: 0, Title: "a"}}

@@ -2,6 +2,8 @@
 
 package ui
 
+import "strings"
+
 // Split panes within a chrome tab (equal H/V splits; no sash drag in v1).
 //
 // Model:
@@ -47,6 +49,9 @@ type page struct {
 	root *splitNode
 	// focusID is the focused leaf pane id (*tab.id).
 	focusID int
+	// userTitle is a manual strip name for this page. When set, the chrome tab
+	// label no longer follows the focused pane's title.
+	userTitle string
 }
 
 func newPage(t *tab) *page {
@@ -125,17 +130,34 @@ func (p *page) anyAlive() bool {
 	return false
 }
 
-// title for the strip: focused pane title.
+// title for the strip: page custom name, else focused pane display title.
 func (p *page) title() string {
-	if t := p.focused(); t != nil && t.title != "" {
-		return t.title
+	if p != nil {
+		if s := strings.TrimSpace(p.userTitle); s != "" {
+			return s
+		}
+	}
+	if t := p.focused(); t != nil {
+		if d := t.displayTitle(); d != "" {
+			return d
+		}
 	}
 	for _, t := range p.leaves() {
-		if t != nil && t.title != "" {
-			return t.title
+		if t != nil {
+			if d := t.displayTitle(); d != "" {
+				return d
+			}
 		}
 	}
 	return "shell"
+}
+
+// setUserTitle locks a custom strip name (empty clears → follow pane titles).
+func (p *page) setUserTitle(name string) {
+	if p == nil {
+		return
+	}
+	p.userTitle = strings.TrimSpace(name)
 }
 
 func findPane(n *splitNode, id int) *tab {

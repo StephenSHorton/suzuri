@@ -28,8 +28,11 @@ type tabHost interface {
 // tab is one shell session: PTY + VT grid + scrollback + Warp input bar.
 type tab struct {
 	id    int
-	title string
-	shell string // launch command line (for MCP diag)
+	title string // auto title from OSC / shell (updated while tools run)
+	// userTitle is a manual name; when set it wins over OSC auto titles for
+	// chrome strip + pane title paint. Empty string means “follow auto title”.
+	userTitle string
+	shell     string // launch command line (for MCP diag)
 	// cwd is the shell working directory (OSC from quiet prompt + best-effort
 	// cd tracking). UI-thread for reads/writes after start.
 	cwd string
@@ -149,11 +152,31 @@ func (t *tab) ingestImages(paths []string, blobs []imageBlob, cellW, cellH, cols
 	}
 }
 
-// applyTitle updates the display title and busy flag from a raw OSC title.
+// displayTitle is what chrome and pane titles show: manual name if set, else auto.
+func (t *tab) displayTitle() string {
+	if t == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(t.userTitle); s != "" {
+		return s
+	}
+	return strings.TrimSpace(t.title)
+}
+
+// setUserTitle locks a custom pane name (empty clears → auto OSC titles again).
+func (t *tab) setUserTitle(name string) {
+	if t == nil {
+		return
+	}
+	t.userTitle = strings.TrimSpace(name)
+}
+
+// applyTitle updates the auto title and busy flag from a raw OSC title.
 // Grok (and other tools) put braille spinner frames in the window title while
 // working; we strip those for the tab label but keep titleBusy for the strip.
 // Returns true when the *display* title changed (spinner frame ticks alone
 // do not — they used to flood the log and thrash SetWindowText every chunk).
+// When userTitle is set, OSC still updates busy/auto title but display is locked.
 func (t *tab) applyTitle(raw string) bool {
 	if t == nil {
 		return false
@@ -165,11 +188,14 @@ func (t *tab) applyTitle(raw string) bool {
 	busy := titleReportsBusy(raw)
 	t.titleBusy.Store(busy)
 	next := shortTitle(raw)
-	if t.title == next {
+	prevDisplay := t.displayTitle()
+	if t.title != next {
+		t.title = next
+	}
+	if t.userTitle != "" {
 		return false
 	}
-	t.title = next
-	return true
+	return t.displayTitle() != prevDisplay
 }
 
 // noteIO marks recent PTY activity for the tab strip glyph.
