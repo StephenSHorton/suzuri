@@ -53,3 +53,18 @@ func TestReverseVideoHighlightVisible(t *testing.T) {
 		}
 	}
 }
+
+// Truecolor black packs as 0 (collides with ANSI black). Reverse of white-on-black
+// must still get an opaque light field after conversion.
+func TestReverseTruecolorBlackField(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(10, 2))
+	// White FG, black BG, then reverse → black ink on white field.
+	if _, err := term.Write([]byte("\x1b[38;2;255;255;255m\x1b[48;2;0;0;0m\x1b[7mHI\x1b[0m")); err != nil {
+		t.Fatal(err)
+	}
+	c := glyphToCell(term.Cell(0, 0))
+	if nearBlackRGB(c.BR, c.BG, c.BB) {
+		t.Fatalf("truecolor reverse field still near-black BR=%d,%d,%d FR=%d,%d,%d",
+			c.BR, c.BG, c.BB, c.FR, c.FG, c.FB)
+	}
+}

@@ -66,6 +66,10 @@ type Model struct {
 	notesLayout notesLayout
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
+
+	// Caffeine strip chip (host owns the power assertion; chrome only paints).
+	CaffeineOn   bool
+	CaffeineHint string // "" off, "∞" indefinite, or short remaining ("15m")
 }
 
 type (
@@ -98,6 +102,11 @@ type (
 	// DismissOverlayMsg closes palette/settings/confirm without side effects
 	// (except settings cancel restores snap via ActionSettingsCancel).
 	DismissOverlayMsg struct{}
+	// SyncCaffeineMsg updates the top-right coffee chip (host → chrome).
+	SyncCaffeineMsg struct {
+		Active bool
+		Hint   string // "∞", "15m", or ""
+	}
 )
 
 // HostAction is returned to the Win32 host after UpdateChrome.
@@ -151,6 +160,13 @@ const (
 	ActionZoomIn
 	ActionZoomOut
 	ActionZoomReset
+	// Caffeine stay-awake (host owns IOPM / SetThreadExecutionState).
+	// ActionCaffeineToggle flips indefinite on/off.
+	// ActionCaffeineFor activates for Result.Minutes (0 = indefinite).
+	// ActionCaffeineOff forces off.
+	ActionCaffeineToggle
+	ActionCaffeineFor
+	ActionCaffeineOff
 )
 
 // Result pairs the new model with an optional host action.
@@ -162,6 +178,8 @@ type Result struct {
 	ProfileName  string        // ActionNewTabProfile
 	Name         string        // ActionApplyRename
 	RenameTarget RenameTarget  // ActionApplyRename
+	// Minutes is set for ActionCaffeineFor (0 = indefinite).
+	Minutes int
 	// StartNotesDrag: NotesClickMsg hit the editor body — host should capture
 	// the mouse and send NotesDragMsg while the button is held.
 	StartNotesDrag bool
@@ -198,6 +216,7 @@ var DefaultKeys = KeyMap{
 type paletteItem struct {
 	title, desc, profile string
 	action               HostAction
+	minutes              int // ActionCaffeineFor
 }
 
 func (i paletteItem) Title() string       { return i.title }
@@ -235,6 +254,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 	var renameName string
 	var renameTarget RenameTarget
 	var startNotesDrag bool
+	var minutes int
 
 	switch msg := msg.(type) {
 	case SyncTabsMsg:
@@ -248,6 +268,9 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		}
 	case StatusMsg:
 		m.Status = string(msg)
+	case SyncCaffeineMsg:
+		m.CaffeineOn = msg.Active
+		m.CaffeineHint = strings.TrimSpace(msg.Hint)
 	case SyncConfigMsg:
 		m.lastCfg = config.Normalize(msg.Config)
 		// Avoid rebuilding the palette list while settings is open — live
@@ -404,7 +427,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		}
 		if m.PaletteOpen {
 			// Sync filter/nav — never tea.Cmd (Win32 key path must not block).
-			act, profileName = m.handlePaletteKey(msg)
+			act, profileName, minutes = m.handlePaletteKey(msg)
 			if act == ActionOpenSettings && m.SettingsOpen {
 				settings = m.settings.edit
 			}
@@ -412,7 +435,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 				m.openNotes()
 				act = ActionNone
 			}
-			return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName}
+			return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName, Minutes: minutes}
 		}
 		switch {
 		case key.Matches(msg, DefaultKeys.NewTab):
@@ -443,7 +466,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 
 	return Result{
 		Model: m, Action: act, Index: idx, Settings: settings,
-		ProfileName: profileName, StartNotesDrag: startNotesDrag,
+		ProfileName: profileName, StartNotesDrag: startNotesDrag, Minutes: minutes,
 	}
 }
 
@@ -531,13 +554,15 @@ func titleBudget(stripW, nTabs int) int {
 	if nTabs < 1 {
 		nTabs = 1
 	}
-	// Approximate fixed strip chrome in cells: brand 硯 (2) + plus chip + gaps.
+	// Approximate fixed strip chrome in cells: brand 硯 (2) + plus chip +
+	// caffeine cup on the right + gaps.
 	const brandW = 2
 	const plusW = 3
+	const cafeW = 6 // "☕" + optional hint + padding
 	const stateW = 2 // glyph + space (worst case)
 	const padW = 4   // lipgloss Padding(0, 2) each side
 	gaps := nTabs + 1
-	fixed := brandW + plusW + gaps + 2
+	fixed := brandW + plusW + cafeW + gaps + 2
 	remain := stripW - fixed
 	if remain < nTabs*(stateW+padW+6) {
 		remain = nTabs * (stateW + padW + 6)
@@ -545,7 +570,7 @@ func titleBudget(stripW, nTabs int) int {
 	per := remain/nTabs - stateW - padW
 	if nTabs == 1 {
 		// Single tab: allow a long title instead of the old hard 18-char clip.
-		per = stripW - brandW - plusW - gaps - stateW - padW - 2
+		per = stripW - brandW - plusW - cafeW - gaps - stateW - padW - 2
 	}
 	if per < 8 {
 		per = 8
@@ -589,7 +614,7 @@ func (m Model) StripView() string {
 	if w < 20 {
 		w = 20
 	}
-	tabs, _, _ := m.layoutTabCards(w)
+	tabs, _, _, _ := m.layoutTabCards(w)
 	if m.showStatus() {
 		return tabs + "\n" + m.renderStatus(w)
 	}
@@ -646,10 +671,10 @@ func (m Model) View() string {
 	return m.StripView()
 }
 
-func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int) {
+func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int) {
 	bounds := make([][2]int, len(m.Tabs))
 	var parts []string
-	var plusB [2]int
+	var plusB, cafeB [2]int
 
 	// Quiet brand — no bordered chip, no trailing gap before the first tab.
 	brand := styleBrand().Render("硯")
@@ -690,16 +715,70 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int) {
 	pw := lipgloss.Width(plus)
 	plusB = [2]int{col, col + pw}
 	parts = append(parts, plus)
+	col += pw
 
-	row := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
-	// Fill remaining width with bar bg so the strip is one continuous surface.
+	// Left cluster (brand · tabs · +). Cup sits on the far right.
+	left := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	leftW := lipgloss.Width(left)
+
+	cup := m.renderCaffeineChip()
+	cupW := lipgloss.Width(cup)
+	if cupW < 1 {
+		cupW = 2
+	}
+
+	// Spacer between + and the coffee chip; keep at least one gap cell when possible.
+	spacerW := w - leftW - cupW
+	if spacerW < 1 {
+		// Collapse tabs if the strip is too tight for a right-aligned cup.
+		maxLeft := w - cupW - 1
+		if maxLeft < 8 {
+			maxLeft = 8
+		}
+		if leftW > maxLeft {
+			left = lipgloss.NewStyle().MaxWidth(maxLeft).Background(colBar).Render(left)
+			leftW = lipgloss.Width(left)
+		}
+		spacerW = w - leftW - cupW
+		if spacerW < 0 {
+			spacerW = 0
+		}
+	}
+	spacer := styleGap().Render(strings.Repeat(" ", spacerW))
+	cafeB = [2]int{leftW + spacerW, leftW + spacerW + cupW}
+
+	row := left + spacer + cup
+	// Guarantee full-width bar surface (clip only if still over).
 	lw := lipgloss.Width(row)
 	if lw < w {
 		row = row + styleGap().Render(strings.Repeat(" ", w-lw))
 	} else if lw > w {
 		row = lipgloss.NewStyle().MaxWidth(w).Background(colBar).Render(row)
+		// If clipped, drop a usable hit target at the extreme right.
+		if cafeB[1] > w {
+			cafeB[0] = w - cupW
+			if cafeB[0] < 0 {
+				cafeB[0] = 0
+			}
+			cafeB[1] = w
+		}
 	}
-	return styleBar().Width(w).Render(row), bounds, plusB
+	return styleBar().Width(w).Render(row), bounds, plusB, cafeB
+}
+
+// renderCaffeineChip is the top-right coffee control (empty dim / full bright).
+func (m Model) renderCaffeineChip() string {
+	// HOT BEVERAGE U+2615 — reads as a cup in mono Nerd Font faces.
+	const cup = "☕"
+	label := cup
+	if m.CaffeineOn {
+		hint := strings.TrimSpace(m.CaffeineHint)
+		if hint != "" && hint != "∞" {
+			label = cup + " " + hint
+		}
+		return styleCaffeineOn().Render(label)
+	}
+	return styleCaffeineOff().Render(cup)
 }
 
 func (m Model) showStatus() bool {
@@ -717,7 +796,7 @@ func (m Model) TabBounds() [][2]int {
 	if w < 20 {
 		w = 20
 	}
-	_, bounds, _ := m.layoutTabCards(w)
+	_, bounds, _, _ := m.layoutTabCards(w)
 	return bounds
 }
 
@@ -727,8 +806,18 @@ func (m Model) PlusBounds() [2]int {
 	if w < 20 {
 		w = 20
 	}
-	_, _, plus := m.layoutTabCards(w)
+	_, _, plus, _ := m.layoutTabCards(w)
 	return plus
+}
+
+// CaffeineBounds is [startCol,endCol) of the top-right coffee chip.
+func (m Model) CaffeineBounds() [2]int {
+	w := m.Width
+	if w < 20 {
+		w = 20
+	}
+	_, _, _, cafe := m.layoutTabCards(w)
+	return cafe
 }
 
 // RowCount is strip rows only (overlay floats over the shell).

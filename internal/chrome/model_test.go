@@ -535,6 +535,31 @@ func TestPlusBounds(t *testing.T) {
 	}
 }
 
+func TestCaffeineBoundsRight(t *testing.T) {
+	m := New(80)
+	m.Tabs = []Tab{{ID: 0, Title: "shell"}}
+	b := m.CaffeineBounds()
+	if b[1] <= b[0] {
+		t.Fatalf("caffeine bounds %v", b)
+	}
+	// Cup should sit on the right half of the strip.
+	if b[0] < 40 {
+		t.Fatalf("expected right-side cup, got %v", b)
+	}
+	// Plus is left of caffeine with a spacer.
+	plus := m.PlusBounds()
+	if plus[1] > b[0] {
+		t.Fatalf("plus %v overlaps caffeine %v", plus, b)
+	}
+	// Active chip still has a hit target.
+	m.CaffeineOn = true
+	m.CaffeineHint = "15m"
+	b2 := m.CaffeineBounds()
+	if b2[1] <= b2[0] {
+		t.Fatalf("active caffeine bounds %v", b2)
+	}
+}
+
 func TestRenderToTerm(t *testing.T) {
 	m := New(60)
 	m.Tabs = []Tab{{ID: 0, Title: "shell"}}

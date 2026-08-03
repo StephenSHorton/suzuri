@@ -39,3 +39,32 @@ func TestEncodeMouseButtonSGR(t *testing.T) {
 		t.Fatalf("release: %q", rel)
 	}
 }
+
+func TestEncodeMouseMotionSGR(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(80, 24))
+	// Press-only (1000): no motion reports.
+	_, _ = term.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	if encodeMouseMotion(term, 3, 4, false) != nil {
+		t.Fatal("1000-only should not report free motion")
+	}
+	// Any-event (1003): hover motion with no button → 35.
+	_, _ = term.Write([]byte("\x1b[?1003h"))
+	got := encodeMouseMotion(term, 3, 4, false)
+	if string(got) != "\x1b[<35;3;4M" {
+		t.Fatalf("any-event hover: %q", got)
+	}
+	// Drag motion with left down → 32.
+	got = encodeMouseMotion(term, 3, 4, true)
+	if string(got) != "\x1b[<32;3;4M" {
+		t.Fatalf("drag: %q", got)
+	}
+	// 1002 only: free motion nil, drag ok.
+	term2 := vt10x.New(vt10x.WithSize(80, 24))
+	_, _ = term2.Write([]byte("\x1b[?1002h\x1b[?1006h"))
+	if encodeMouseMotion(term2, 1, 1, false) != nil {
+		t.Fatal("1002 free motion should be nil")
+	}
+	if string(encodeMouseMotion(term2, 1, 1, true)) != "\x1b[<32;1;1M" {
+		t.Fatalf("1002 drag: %q", encodeMouseMotion(term2, 1, 1, true))
+	}
+}

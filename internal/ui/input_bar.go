@@ -158,7 +158,8 @@ func (b *inputBar) backspace() {
 }
 
 // deleteToLineStart removes text from the start of the current logical line
-// through the caret (macOS ⌘⌫). With the caret at EOL this clears the line.
+// through the caret (macOS ⌘⌫ in multiline). With the caret at EOL this
+// clears that line only.
 func (b *inputBar) deleteToLineStart() {
 	b.leaveHistoryBrowse()
 	b.clearComplete()
@@ -171,7 +172,7 @@ func (b *inputBar) deleteToLineStart() {
 	b.cursor = ls
 }
 
-// clearLine clears the entire buffer (all lines). Prefer deleteToLineStart for ⌘⌫.
+// clearLine clears the entire Warp bar buffer (all lines) — ⌘⌫ product behavior.
 func (b *inputBar) clearLine() {
 	b.clear()
 }

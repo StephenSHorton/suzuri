@@ -27,3 +27,13 @@ func TestDeleteToLineStart(t *testing.T) {
 		t.Fatalf("at start no-op: %q", b.text())
 	}
 }
+
+func TestClearLine(t *testing.T) {
+	var b inputBar
+	b.histIdx = -1
+	b.insertRunes([]rune("aa\nbb"))
+	b.clearLine()
+	if b.text() != "" || b.cursor != 0 {
+		t.Fatalf("clearLine: %q cursor=%d", b.text(), b.cursor)
+	}
+}

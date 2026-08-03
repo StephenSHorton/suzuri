@@ -319,6 +319,23 @@ func stylePlus() lipgloss.Style {
 		Padding(0, 1)
 }
 
+// styleCaffeineOff: dim empty-ish cup (sleep allowed).
+func styleCaffeineOff() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(colMute).
+		Background(colBar).
+		Padding(0, 1)
+}
+
+// styleCaffeineOn: full cup — warm secondary accent when awake.
+func styleCaffeineOn() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(colSecondary).
+		Background(colBar).
+		Bold(true).
+		Padding(0, 1)
+}
+
 func styleGap() lipgloss.Style {
 	return lipgloss.NewStyle().Background(colBar)
 }

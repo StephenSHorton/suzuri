@@ -184,6 +184,7 @@ func helpSectionsRight(colW int) []helpSectionBlock {
 				{KeyCtrl(","), "Settings"},
 				{KeyCtrl("/"), "Help (this window)"},
 				{KeyCtrlShift("M"), "Notes"},
+				{"☕ top-right", "Toggle caffeine"},
 				{"⌘+/⌘- · Ctrl++/−", "Zoom in / out"},
 				{"⌘0 · Ctrl+0", "Reset zoom"},
 				{"Esc", "Dismiss overlay"},

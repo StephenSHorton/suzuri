@@ -84,7 +84,10 @@ type cellPix struct {
 
 func glyphToCell(g vt10x.Glyph) cellPix {
 	// Mode bits match vt10x/state.go (attrReverse=1<<0 … attrBold=1<<2 …).
-	const attrBold = 1 << 2
+	const (
+		attrReverse = 1 << 0
+		attrBold    = 1 << 2
+	)
 	bold := g.Mode&attrBold != 0
 	// vt10x setChar already swaps FG/BG into the stored glyph when reverse is
 	// set (and leaves Mode|attrReverse). Do not re-swap here — that undoes
@@ -92,6 +95,17 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 	// as normal text with a skipped black default BG (invisible on rain).
 	fr, fg, fb := colorToRGB(g.FG, bold)
 	br, bg, bb := colorToRGB(g.BG, false)
+	// Reverse video always needs an opaque field. If the stored BG still
+	// resolves near-black (truecolor 0 collides with ANSI black; some TUIs
+	// reverse light-on-dark into dark-on-dark), force a light selection field
+	// so paint does not skip the fill under shell rain / transparent default BG.
+	if g.Mode&attrReverse != 0 && nearBlackRGB(br, bg, bb) {
+		br, bg, bb = 220, 220, 224
+		if nearBlackRGB(fr, fg, fb) {
+			// Both ends dark after convert — use dark ink on light field.
+			fr, fg, fb = 18, 18, 22
+		}
+	}
 	return cellPix{
 		Ch:   displayRune(g.Char),
 		FR:   fr,
@@ -102,6 +116,10 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 		BB:   bb,
 		Bold: bold,
 	}
+}
+
+func nearBlackRGB(r, g, b byte) bool {
+	return r < 28 && g < 28 && b < 28
 }
 
 func displayRune(r rune) rune {

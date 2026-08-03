@@ -22,6 +22,22 @@ func mouseSGR(term vt10x.Terminal) bool {
 	return term.Mode()&vt10x.ModeMouseSgr != 0
 }
 
+// mouseAnyMotion is CSI ?1003 h — report all pointer moves (needed for hover).
+func mouseAnyMotion(term vt10x.Terminal) bool {
+	if term == nil {
+		return false
+	}
+	return term.Mode()&vt10x.ModeMouseMany != 0
+}
+
+// mouseDragMotion is CSI ?1002 h — report motion while a button is held.
+func mouseDragMotion(term vt10x.Terminal) bool {
+	if term == nil {
+		return false
+	}
+	return term.Mode()&vt10x.ModeMouseMotion != 0
+}
+
 // encodeMouseWheel builds PTY bytes for a wheel gesture on an alt-screen app.
 //
 // steps > 0: wheel away / "scroll up" (show older content / move list up)

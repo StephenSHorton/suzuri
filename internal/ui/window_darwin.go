@@ -24,6 +24,7 @@ import (
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/bridge"
+	"github.com/StephenSHorton/suzuri/internal/caffeine"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
 	"github.com/StephenSHorton/suzuri/internal/vt"
@@ -54,6 +55,7 @@ func Run() error {
 		painter:    newSoftwarePainter(cfg.FontFace, cfg.FontSizePx),
 		jobs:       make(chan func(), 64),
 		mcpJobs:    make(chan mcpJob, 8),
+		caffeine:   caffeine.New(),
 	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	if bank, err := chrome.LoadNotesBank(); err != nil {
@@ -185,12 +187,19 @@ type macUI struct {
 	modalImage *tabImage
 	// altMouseDown: left button held while reporting clicks to an alt-screen app.
 	altMouseDown bool
+	// Last SGR motion cell (1-based) sent to alt-screen; avoid flooding the PTY.
+	altMouseCol, altMouseRow int
 
 	// Window placement: last captured frame (updated mid-session; flushed on exit).
 	// restoreMax is applied once after the ebiten loop creates the native window.
 	lastPlacement config.WindowPlacement
 	restoreMax    bool
 	maxApplied    bool
+
+	// Stay-awake (☕ top-right). Process-local IOPM assertion.
+	caffeine *caffeine.Manager
+	// lastCaffeineHint drives chrome dirty when the timed label ticks down.
+	lastCaffeineHint string
 }
 
 func (u *macUI) queueBytes(tabID int) {
@@ -281,6 +290,7 @@ func (u *macUI) syncChrome() {
 		r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
 		u.chrome = r.Model
 		u.chrome.Width = u.cols
+		u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
 		return
 	}
 	tabs := make([]chrome.Tab, len(src))
@@ -322,6 +332,15 @@ func (u *macUI) syncChrome() {
 	r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
 	u.chrome = r.Model
 	u.chrome.Width = u.cols
+	u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
+	hint := ""
+	if u.caffeine != nil {
+		hint = u.caffeine.StripLabel()
+	}
+	if hint != u.lastCaffeineHint {
+		u.lastCaffeineHint = hint
+		dirty = true
+	}
 	if dirty {
 		u.chromeDirty = true
 	}
@@ -552,6 +571,9 @@ func (u *macUI) loop() error {
 	log.Info("starting ebiten window", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
 	err := ebiten.RunGame(u)
 	u.alive.Store(false)
+	if u.caffeine != nil {
+		u.caffeine.Close()
+	}
 	u.persistNotes()
 	u.ready.Store(false)
 	if u.bridge != nil {
@@ -626,6 +648,18 @@ drained:
 	}
 
 	u.clearToastIfDue()
+	if msg := caffeineTick(u.caffeine); msg != "" {
+		u.toast(msg)
+		u.markChromeDirty()
+	} else if u.caffeine != nil && u.caffeine.Active() {
+		// Refresh timed strip caption ("15m" → "14m") without thrashing paint.
+		hint := u.caffeine.StripLabel()
+		if hint != u.lastCaffeineHint {
+			u.lastCaffeineHint = hint
+			u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
+			u.markChromeDirty()
+		}
+	}
 	u.handleResize()
 	u.handleMouse()
 	u.handleKeys()
@@ -1173,6 +1207,13 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		u.openRenameUI(chrome.RenameTargetTab)
 	case chrome.ActionApplyRename:
 		u.applyRename(r.RenameTarget, r.Name)
+	case chrome.ActionCaffeineToggle, chrome.ActionCaffeineFor, chrome.ActionCaffeineOff:
+		if msg, ok := applyCaffeineAction(u.caffeine, r.Action, r.Minutes); ok {
+			if msg != "" {
+				u.toast(msg)
+			}
+			u.markChromeDirty()
+		}
 	}
 	u.syncChrome()
 }
@@ -1894,6 +1935,24 @@ func (u *macUI) handleKeys() {
 	// Option/Ctrl+←/→ word jump · Cmd+←/→ line home/end · Cmd+↑/↓ buffer.
 	// ⌘⌥+arrows are pane focus (handled above).
 	wordMod := (alt && !meta && !realCtrl) || (realCtrl && !meta && !alt)
+
+	// ⌘⌫ / ⌘⌦ — clear entire Warp bar (macOS "delete line" muscle memory).
+	// Handled with JustPressed first so Meta+Backspace is not missed when
+	// key-repeat state is odd under modifiers; also accept Delete key.
+	if meta && !alt && !realCtrl && !shift {
+		if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyDelete) ||
+			u.keyRep.fire(ebiten.KeyBackspace, now) ||
+			u.keyRep.fire(ebiten.KeyDelete, now) {
+			if len(in.runes) > 0 || in.histIdx >= 0 {
+				in.clearLine()
+				u.maybeResizeForInput()
+				u.markInputDirty()
+			}
+			return
+		}
+	}
+
 	if u.keyRep.fire(ebiten.KeyArrowUp, now) || u.keyRep.fire(ebiten.KeyUp, now) {
 		if meta && !alt {
 			// Cmd+Up: start of buffer (macOS text field).
@@ -1999,13 +2058,10 @@ func (u *macUI) handleKeys() {
 	}
 	if u.keyRep.fire(ebiten.KeyBackspace, now) {
 		prevRows := in.visualRows(cols)
-		switch {
-		case meta && !alt && !realCtrl:
-			// ⌘⌫ — delete to start of line (clears the line when caret is at end).
-			in.deleteToLineStart()
-		case wordMod:
+		// Meta+Backspace already handled above; here: Option/Ctrl word, else char.
+		if wordMod {
 			in.deleteWordLeft()
-		default:
+		} else {
 			in.backspace()
 		}
 		if in.visualRows(cols) != prevRows {
@@ -2466,6 +2522,17 @@ func (u *macUI) handleMouse() {
 	// Link hover + pointer cursor (even on alt-screen).
 	u.updateLinkHover(mx, my)
 
+	// Alt-screen TUIs (Grok): SGR motion for button hover (1003) / drag (1002).
+	// Clicks alone are not enough — hover styles need CSI < 35;c;r M reports.
+	if !u.chrome.OverlayOpen() {
+		if t := u.activeTab(); t != nil && t.altScreen() {
+			left := pressed || u.altMouseDown
+			u.maybeSendAltMouseMotion(t, mx, my, left)
+		} else {
+			u.altMouseCol, u.altMouseRow = 0, 0
+		}
+	}
+
 	chH := u.metricH
 	if chH < 1 {
 		chH = cellH
@@ -2541,6 +2608,16 @@ func (u *macUI) handleMouse() {
 		}
 		if int32(my) < chromeH {
 			if int32(my) < tabStripH {
+				if u.hitCaffeine(int32(mx)) {
+					if msg, ok := applyCaffeineAction(u.caffeine, chrome.ActionCaffeineToggle, 0); ok {
+						if msg != "" {
+							u.toast(msg)
+						}
+						u.markChromeDirty()
+						u.syncChrome()
+					}
+					return
+				}
 				if u.hitPlus(int32(mx)) {
 					u.newTabUI("")
 					return
@@ -2671,6 +2748,17 @@ func (u *macUI) hitPlus(px int32) bool {
 		return false
 	}
 	b := u.chrome.PlusBounds()
+	return cellX >= b[0] && cellX < b[1]
+}
+
+// hitCaffeine is true when the pixel x hits the top-right coffee chip.
+func (u *macUI) hitCaffeine(px int32) bool {
+	u.syncChrome()
+	cellX := u.pixelToChromeCol(px)
+	if cellX < 0 {
+		return false
+	}
+	b := u.chrome.CaffeineBounds()
 	return cellX >= b[0] && cellX < b[1]
 }
 
@@ -3464,12 +3552,43 @@ func (u *macUI) sendAltMouse(t *tab, mx, my int, press bool) bool {
 		return false
 	}
 	cx, cy, _ := u.pixelToCellInPane(int32(mx), int32(my), t)
-	b := encodeMouseButton(t.term, cx+1, cy+1, 0, press)
+	col, row := cx+1, cy+1
+	b := encodeMouseButton(t.term, col, row, 0, press)
 	if len(b) == 0 {
 		return false
 	}
+	u.altMouseCol, u.altMouseRow = col, row
 	t.sendKey(b)
 	return true
+}
+
+// maybeSendAltMouseMotion reports pointer moves for hover (1003) or drag (1002).
+func (u *macUI) maybeSendAltMouseMotion(t *tab, mx, my int, leftDown bool) {
+	if u == nil || t == nil || t.term == nil || !t.altScreen() {
+		return
+	}
+	if !mouseAnyMotion(t.term) && !(mouseDragMotion(t.term) && leftDown) {
+		return
+	}
+	if g := u.paneGeomFor(t.id); g != nil {
+		if int32(mx) < g.x || int32(mx) >= g.x+g.w || int32(my) < g.y || int32(my) >= g.y+g.h {
+			return
+		}
+		if g.barH > 0 && int32(my) >= g.barY {
+			return
+		}
+	}
+	cx, cy, _ := u.pixelToCellInPane(int32(mx), int32(my), t)
+	col, row := cx+1, cy+1
+	if col == u.altMouseCol && row == u.altMouseRow {
+		return
+	}
+	b := encodeMouseMotion(t.term, col, row, leftDown)
+	if len(b) == 0 {
+		return
+	}
+	u.altMouseCol, u.altMouseRow = col, row
+	t.sendKey(b)
 }
 
 // linkURLAt returns the URL under client pixels, or "".

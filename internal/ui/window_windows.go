@@ -21,6 +21,7 @@ import (
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/bridge"
+	"github.com/StephenSHorton/suzuri/internal/caffeine"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
 	"github.com/StephenSHorton/suzuri/internal/vt"
@@ -72,6 +73,7 @@ func Run() error {
 		blinkStart: time.Now(),
 		nextTabID:  0,
 		chrome:     chrome.New(cols),
+		caffeine:   caffeine.New(),
 	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	if bank, err := chrome.LoadNotesBank(); err != nil {
@@ -190,6 +192,13 @@ type winUI struct {
 	linkCursorOn bool
 	// altMouseDown: left button held while reporting clicks to an alt-screen app.
 	altMouseDown bool
+	// Last SGR motion cell (1-based) sent to alt-screen; avoid flooding the PTY.
+	altMouseCol, altMouseRow int
+
+	// Stay-awake (☕ top-right). Process-local SetThreadExecutionState.
+	caffeine *caffeine.Manager
+	// lastCaffeineHint drives chrome dirty when the timed label ticks down.
+	lastCaffeineHint string
 
 	// User is dragging or resizing the frame (WM_ENTERSIZEMOVE … EXITSIZEMOVE).
 	// During this window we must not thrash ConPTY / GDI: every WM_SIZE used to
@@ -367,6 +376,7 @@ func (u *winUI) syncChrome() {
 		r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
 		u.chrome = r.Model
 		u.chrome.Width = u.cols
+		u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
 		return
 	}
 	tabs := make([]chrome.Tab, len(src))
@@ -413,6 +423,15 @@ func (u *winUI) syncChrome() {
 	r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
 	u.chrome = r.Model
 	u.chrome.Width = u.cols
+	u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
+	hint := ""
+	if u.caffeine != nil {
+		hint = u.caffeine.StripLabel()
+	}
+	if hint != u.lastCaffeineHint {
+		u.lastCaffeineHint = hint
+		dirty = true
+	}
 	if dirty {
 		u.chromeDirty = true
 	}
@@ -1017,6 +1036,13 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.openRenameUI(chrome.RenameTargetTab)
 	case chrome.ActionApplyRename:
 		u.applyRename(r.RenameTarget, r.Name)
+	case chrome.ActionCaffeineToggle, chrome.ActionCaffeineFor, chrome.ActionCaffeineOff:
+		if msg, ok := applyCaffeineAction(u.caffeine, r.Action, r.Minutes); ok {
+			if msg != "" {
+				u.toast(msg)
+			}
+			u.markChromeDirty()
+		}
 	}
 	u.syncChrome()
 }
@@ -1810,6 +1836,16 @@ func (u *winUI) hitPlus(px int32) bool {
 	return cellX >= b[0] && cellX < b[1]
 }
 
+func (u *winUI) hitCaffeine(px int32) bool {
+	u.syncChrome()
+	cellX := u.pixelToChromeCol(px)
+	if cellX < 0 {
+		return false
+	}
+	b := u.chrome.CaffeineBounds()
+	return cellX >= b[0] && cellX < b[1]
+}
+
 // hitPaneTitleBar returns the multi-pane mini-title row under (px,py), if any.
 func (u *winUI) hitPaneTitleBar(px, py int32, layouts []paneGeom) *paneGeom {
 	for i := range layouts {
@@ -1849,6 +1885,18 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
 			u.clearToastIfDue()
+			if msg := caffeineTick(u.caffeine); msg != "" {
+				u.toast(msg)
+				u.markChromeDirty()
+				u.syncChrome()
+			} else if u.caffeine != nil && u.caffeine.Active() {
+				hint := u.caffeine.StripLabel()
+				if hint != u.lastCaffeineHint {
+					u.lastCaffeineHint = hint
+					u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
+					u.chromeDirty = true
+				}
+			}
 			// Ease scrollback visual → offset (macOS does this in ebiten Update;
 			// without it, wheel only moves offset and the view stays stuck).
 			// Dim modals hide the shell; palette keeps a live shell underneath.
@@ -2775,9 +2823,20 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 
-		// Top tab strip / + chip.
+		// Top tab strip / + chip / caffeine cup.
 		if py < chromeH {
 			if py < tabStripH {
+				if u.hitCaffeine(px) {
+					if msg, ok := applyCaffeineAction(u.caffeine, chrome.ActionCaffeineToggle, 0); ok {
+						if msg != "" {
+							u.toast(msg)
+						}
+						u.markChromeDirty()
+						u.syncChrome()
+						win.InvalidateRect(hwnd, nil, false)
+					}
+					return 0
+				}
 				if u.hitPlus(px) {
 					u.newTabUI("")
 					return 0
@@ -2850,9 +2909,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			// Forward left-click to the TUI when mouse tracking is on (buttons).
 			if mouseTracking(tab.term) {
 				cx, cy, _ := u.pixelToCellInPane(px, py, tab)
-				if b := encodeMouseButton(tab.term, cx+1, cy+1, 0, true); len(b) > 0 {
+				col, row := cx+1, cy+1
+				if b := encodeMouseButton(tab.term, col, row, 0, true); len(b) > 0 {
 					tab.sendKey(b)
 					u.altMouseDown = true
+					u.altMouseCol, u.altMouseRow = col, row
 					win.SetCapture(hwnd)
 				}
 			}
@@ -2874,6 +2935,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Link hover (hand cursor + primary tint) when not dragging.
 		if u.sashDrag == nil && !u.selecting && !u.notesDragging {
 			u.updateLinkHover(px, py)
+		}
+		// Alt-screen: SGR motion for Grok button hover (1003) / drag (1002).
+		if tab := u.activeTab(); tab != nil && tab.altScreen() && !u.chrome.OverlayOpen() {
+			left := u.altMouseDown || (wParam&win.MK_LBUTTON) != 0
+			u.maybeSendAltMouseMotion(tab, px, py, left)
+		} else {
+			u.altMouseCol, u.altMouseRow = 0, 0
 		}
 		// Live sash resize: update ratio, reflow (no-op resize when size stable).
 		if u.sashDrag != nil && (wParam&win.MK_LBUTTON) != 0 {
@@ -3000,6 +3068,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.persistNotes()
 		log.Info("WM_DESTROY — tearing down", "tabs", len(u.tabs))
 		u.alive.Store(false)
+		if u.caffeine != nil {
+			u.caffeine.Close()
+		}
 		if u.bridge != nil {
 			u.bridge.Stop()
 		}
@@ -4487,6 +4558,35 @@ func (u *winUI) linkURLAt(px, py int32) string {
 		return ""
 	}
 	return span.url
+}
+
+// maybeSendAltMouseMotion reports pointer moves for hover (1003) or drag (1002).
+func (u *winUI) maybeSendAltMouseMotion(t *tab, px, py int32, leftDown bool) {
+	if u == nil || t == nil || t.term == nil || !t.altScreen() {
+		return
+	}
+	if !mouseAnyMotion(t.term) && !(mouseDragMotion(t.term) && leftDown) {
+		return
+	}
+	if g := u.paneGeomFor(t.id); g != nil {
+		if px < g.x || px >= g.x+g.w || py < g.y || py >= g.y+g.h {
+			return
+		}
+		if g.barH > 0 && py >= g.barY {
+			return
+		}
+	}
+	cx, cy, _ := u.pixelToCellInPane(px, py, t)
+	col, row := cx+1, cy+1
+	if col == u.altMouseCol && row == u.altMouseRow {
+		return
+	}
+	b := encodeMouseMotion(t.term, col, row, leftDown)
+	if len(b) == 0 {
+		return
+	}
+	u.altMouseCol, u.altMouseRow = col, row
+	t.sendKey(b)
 }
 
 // pixelToCellInPane maps client pixels to cell coords within a pane's layout.
