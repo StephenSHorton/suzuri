@@ -2,9 +2,9 @@ package chrome
 
 import (
 	"strings"
-	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // Scratch notes: one in-memory buffer, floating card like the palette.
@@ -14,6 +14,7 @@ const (
 	notesVisRows   = 12
 	notesMaxRunes  = 64 * 1024
 	notesCaretChar = "▌"
+	notesTabSpaces = "    " // 4 spaces (visible indent; no bare tab glyph)
 )
 
 // OpenNotesMsg opens the notes surface (buffer preserved across open/close).
@@ -25,11 +26,10 @@ type ToggleNotesMsg struct{}
 func (m *Model) openNotes() {
 	m.closeModalsExcept("notes")
 	m.NotesOpen = true
-	if m.notesCursor < 0 {
-		m.notesCursor = 0
-	}
-	if m.notesCursor > len(m.notesRunes) {
-		m.notesCursor = len(m.notesRunes)
+	m.notesClampCursor()
+	// Zero-value notesSel is 0; treat unset as no selection.
+	if m.notesSel < 0 {
+		m.notesSel = -1
 	}
 }
 
@@ -41,42 +41,168 @@ func (m *Model) toggleNotes() {
 	m.openNotes()
 }
 
+func (m *Model) notesClampCursor() {
+	if m.notesCursor < 0 {
+		m.notesCursor = 0
+	}
+	if m.notesCursor > len(m.notesRunes) {
+		m.notesCursor = len(m.notesRunes)
+	}
+	if m.notesSel > len(m.notesRunes) {
+		m.notesSel = len(m.notesRunes)
+	}
+}
+
+func (m *Model) notesHasSel() bool {
+	return m.notesSel >= 0 && m.notesSel != m.notesCursor
+}
+
+func (m *Model) notesSelRange() (lo, hi int) {
+	if !m.notesHasSel() {
+		m.notesClampCursor()
+		return m.notesCursor, m.notesCursor
+	}
+	a, b := m.notesSel, m.notesCursor
+	if a > b {
+		a, b = b, a
+	}
+	if a < 0 {
+		a = 0
+	}
+	if b > len(m.notesRunes) {
+		b = len(m.notesRunes)
+	}
+	return a, b
+}
+
+func (m *Model) notesClearSel() {
+	m.notesSel = -1
+}
+
+// notesDeleteSel removes the selection if any. Returns true if it did.
+func (m *Model) notesDeleteSel() bool {
+	if !m.notesHasSel() {
+		return false
+	}
+	lo, hi := m.notesSelRange()
+	m.notesRunes = append(m.notesRunes[:lo], m.notesRunes[hi:]...)
+	m.notesCursor = lo
+	m.notesSel = -1
+	m.notesEnsureCursorVisible(0)
+	return true
+}
+
+// NotesSelectedText returns the selected text (empty if no selection).
+func (m Model) NotesSelectedText() string {
+	if m.notesSel < 0 || m.notesSel == m.notesCursor {
+		return ""
+	}
+	a, b := m.notesSel, m.notesCursor
+	if a > b {
+		a, b = b, a
+	}
+	if a < 0 {
+		a = 0
+	}
+	if b > len(m.notesRunes) {
+		b = len(m.notesRunes)
+	}
+	return string(m.notesRunes[a:b])
+}
+
+// NotesAllText returns the full notes buffer.
+func (m Model) NotesAllText() string {
+	return string(m.notesRunes)
+}
+
 func (m *Model) handleNotesKey(msg tea.KeyMsg) {
-	switch msg.String() {
+	s := msg.String()
+	extend := strings.HasPrefix(s, "shift+")
+
+	switch s {
 	case "esc":
-		// Put away — keep buffer.
 		m.NotesOpen = false
+		return
+	case "ctrl+a":
+		// Select all
+		if len(m.notesRunes) == 0 {
+			m.notesSel = -1
+			m.notesCursor = 0
+			return
+		}
+		m.notesSel = 0
+		m.notesCursor = len(m.notesRunes)
+		m.notesEnsureCursorVisible(0)
+		return
 	case "ctrl+c":
-		// Don't clear notes; just close (same as esc). Ctrl+A/C copy later.
-		m.NotesOpen = false
+		// Copy is handled by the host (needs clipboard). Leave selection.
+		return
+	case "ctrl+x":
+		// Cut: host copies then we delete selection; if host didn't, delete anyway.
+		if m.notesHasSel() {
+			m.notesDeleteSel()
+		}
+		return
 	case "enter", "ctrl+m":
 		m.notesInsert("\n")
+		return
+	case "tab", "shift+tab":
+		// Indent with spaces (shift+tab same for now; real outdent later).
+		m.notesInsert(notesTabSpaces)
+		return
 	case "backspace":
+		if m.notesDeleteSel() {
+			return
+		}
 		m.notesBackspace()
+		return
 	case "delete", "ctrl+d":
+		if m.notesDeleteSel() {
+			return
+		}
 		m.notesDelete()
-	case "left":
-		m.notesMove(-1)
-	case "right":
-		m.notesMove(1)
-	case "up":
-		m.notesMoveVert(-1)
-	case "down":
-		m.notesMoveVert(1)
-	case "home", "ctrl+a":
-		m.notesHome()
-	case "end", "ctrl+e":
-		m.notesEnd()
+		return
+	case "left", "shift+left":
+		m.notesMove(-1, extend)
+		return
+	case "right", "shift+right":
+		m.notesMove(1, extend)
+		return
+	case "up", "shift+up":
+		m.notesMoveVert(-1, extend)
+		return
+	case "down", "shift+down":
+		m.notesMoveVert(1, extend)
+		return
+	case "home", "shift+home":
+		m.notesHome(extend)
+		return
+	case "end", "shift+end":
+		m.notesEnd(extend)
+		return
+	case "ctrl+home", "ctrl+shift+home":
+		m.notesDocHome(strings.Contains(s, "shift"))
+		return
+	case "ctrl+end", "ctrl+shift+end":
+		m.notesDocEnd(strings.Contains(s, "shift"))
+		return
+	case "ctrl+left", "ctrl+shift+left":
+		m.notesWordMove(-1, strings.Contains(s, "shift"))
+		return
+	case "ctrl+right", "ctrl+shift+right":
+		m.notesWordMove(1, strings.Contains(s, "shift"))
+		return
 	default:
+		// Esc puts away; ctrl+c is copy (host clipboard), not close.
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
 			var b strings.Builder
 			for _, r := range msg.Runes {
-				if r >= 32 || r == '\t' {
-					if r == '\t' {
-						b.WriteString("  ")
-					} else {
-						b.WriteRune(r)
-					}
+				if r == '\t' {
+					b.WriteString(notesTabSpaces)
+					continue
+				}
+				if r >= 32 {
+					b.WriteRune(r)
 				}
 			}
 			if b.Len() > 0 {
@@ -90,13 +216,15 @@ func (m *Model) notesInsert(s string) {
 	if s == "" {
 		return
 	}
+	// Replace selection if any.
+	_ = m.notesDeleteSel()
 	rs := []rune(s)
-	// Cap total size.
 	if len(m.notesRunes)+len(rs) > notesMaxRunes {
-		rs = rs[:notesMaxRunes-len(m.notesRunes)]
-		if len(rs) == 0 {
+		room := notesMaxRunes - len(m.notesRunes)
+		if room <= 0 {
 			return
 		}
+		rs = rs[:room]
 	}
 	cur := m.notesCursor
 	if cur < 0 {
@@ -111,6 +239,7 @@ func (m *Model) notesInsert(s string) {
 	out = append(out, m.notesRunes[cur:]...)
 	m.notesRunes = out
 	m.notesCursor = cur + len(rs)
+	m.notesSel = -1
 	m.notesEnsureCursorVisible(0)
 }
 
@@ -121,6 +250,7 @@ func (m *Model) notesBackspace() {
 	i := m.notesCursor
 	m.notesRunes = append(m.notesRunes[:i-1], m.notesRunes[i:]...)
 	m.notesCursor = i - 1
+	m.notesSel = -1
 	m.notesEnsureCursorVisible(0)
 }
 
@@ -130,22 +260,29 @@ func (m *Model) notesDelete() {
 	}
 	i := m.notesCursor
 	m.notesRunes = append(m.notesRunes[:i], m.notesRunes[i+1:]...)
+	m.notesSel = -1
 	m.notesEnsureCursorVisible(0)
 }
 
-func (m *Model) notesMove(delta int) {
+func (m *Model) notesBeginExtend(extend bool) {
+	if extend {
+		if m.notesSel < 0 {
+			m.notesSel = m.notesCursor
+		}
+	} else {
+		m.notesClearSel()
+	}
+}
+
+func (m *Model) notesMove(delta int, extend bool) {
+	m.notesBeginExtend(extend)
 	m.notesCursor += delta
-	if m.notesCursor < 0 {
-		m.notesCursor = 0
-	}
-	if m.notesCursor > len(m.notesRunes) {
-		m.notesCursor = len(m.notesRunes)
-	}
+	m.notesClampCursor()
 	m.notesEnsureCursorVisible(0)
 }
 
-func (m *Model) notesHome() {
-	// Start of current hard line.
+func (m *Model) notesHome(extend bool) {
+	m.notesBeginExtend(extend)
 	i := m.notesCursor
 	for i > 0 && m.notesRunes[i-1] != '\n' {
 		i--
@@ -154,7 +291,8 @@ func (m *Model) notesHome() {
 	m.notesEnsureCursorVisible(0)
 }
 
-func (m *Model) notesEnd() {
+func (m *Model) notesEnd(extend bool) {
+	m.notesBeginExtend(extend)
 	i := m.notesCursor
 	for i < len(m.notesRunes) && m.notesRunes[i] != '\n' {
 		i++
@@ -163,9 +301,48 @@ func (m *Model) notesEnd() {
 	m.notesEnsureCursorVisible(0)
 }
 
-// notesMoveVert moves by soft-wrapped visual row (width estimated later in render).
-// Uses a reasonable default width; host re-render always uses real width.
-func (m *Model) notesMoveVert(dir int) {
+func (m *Model) notesDocHome(extend bool) {
+	m.notesBeginExtend(extend)
+	m.notesCursor = 0
+	m.notesEnsureCursorVisible(0)
+}
+
+func (m *Model) notesDocEnd(extend bool) {
+	m.notesBeginExtend(extend)
+	m.notesCursor = len(m.notesRunes)
+	m.notesEnsureCursorVisible(0)
+}
+
+func (m *Model) notesWordMove(dir int, extend bool) {
+	m.notesBeginExtend(extend)
+	i := m.notesCursor
+	n := len(m.notesRunes)
+	if dir < 0 {
+		// Skip spaces left, then word chars left.
+		for i > 0 && isNotesSpace(m.notesRunes[i-1]) {
+			i--
+		}
+		for i > 0 && !isNotesSpace(m.notesRunes[i-1]) {
+			i--
+		}
+	} else {
+		for i < n && !isNotesSpace(m.notesRunes[i]) {
+			i++
+		}
+		for i < n && isNotesSpace(m.notesRunes[i]) {
+			i++
+		}
+	}
+	m.notesCursor = i
+	m.notesEnsureCursorVisible(0)
+}
+
+func isNotesSpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n'
+}
+
+func (m *Model) notesMoveVert(dir int, extend bool) {
+	m.notesBeginExtend(extend)
 	w := m.notesWrapW
 	if w < 8 {
 		w = 40
@@ -174,8 +351,9 @@ func (m *Model) notesMoveVert(dir int) {
 	row, col := notesCursorRowCol(lines, m.notesCursor)
 	row += dir
 	if row < 0 {
-		row = 0
-		col = 0
+		m.notesCursor = 0
+		m.notesEnsureCursorVisible(w)
+		return
 	}
 	if row >= len(lines) {
 		m.notesCursor = len(m.notesRunes)
@@ -190,7 +368,6 @@ func (m *Model) notesMoveVert(dir int) {
 	if m.notesCursor > ln.end {
 		m.notesCursor = ln.end
 	}
-	// Don't land past a trailing soft-wrap boundary into next line's start incorrectly.
 	if m.notesCursor > len(m.notesRunes) {
 		m.notesCursor = len(m.notesRunes)
 	}
@@ -218,20 +395,24 @@ func (m *Model) notesEnsureCursorVisible(wrapW int) {
 	}
 }
 
-// NotesPaste inserts clipboard text (host supplies UTF-8).
+// NotesPaste inserts clipboard text (replaces selection).
 func (m *Model) NotesPaste(s string) {
 	if s == "" {
 		return
 	}
-	// Normalize newlines.
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	m.notesInsert(s)
 }
 
+// NotesCutSelection removes selection after host copied it. Returns false if none.
+func (m *Model) NotesCutSelection() bool {
+	return m.notesDeleteSel()
+}
+
 type notesLine struct {
 	start, end int // half-open index into runes
-	width      int // display columns (end-start, excluding hard \n at end)
+	width      int
 	hard       bool
 }
 
@@ -260,7 +441,6 @@ func notesSoftLines(runes []rune, width int) []notesLine {
 		col++
 	}
 	out = append(out, notesLine{start: start, end: len(runes), width: col, hard: false})
-	// Trailing hard newline → empty line for caret.
 	if runes[len(runes)-1] == '\n' {
 		out = append(out, notesLine{start: len(runes), end: len(runes), width: 0, hard: false})
 	}
@@ -272,9 +452,7 @@ func notesCursorRowCol(lines []notesLine, cursor int) (row, col int) {
 		return 0, 0
 	}
 	for i, ln := range lines {
-		// Cursor at end of buffer: last line.
 		if cursor >= ln.start && cursor <= ln.end {
-			// Prefer later soft-wrap line when cursor == boundary.
 			if cursor == ln.end && !ln.hard && i+1 < len(lines) && lines[i+1].start == ln.end {
 				continue
 			}
@@ -291,7 +469,6 @@ func (m Model) renderNotes(windowCols int) string {
 	if inner < 20 {
 		inner = 20
 	}
-	// Content width inside padding for wrap.
 	wrapW := inner - 2
 	if wrapW < 8 {
 		wrapW = 8
@@ -306,6 +483,14 @@ func (m Model) renderNotes(windowCols int) string {
 		scroll = len(lines) - 1
 	}
 	row, col := notesCursorRowCol(lines, m.notesCursor)
+	selLo, selHi := 0, 0
+	hasSel := m.notesSel >= 0 && m.notesSel != m.notesCursor
+	if hasSel {
+		selLo, selHi = m.notesSel, m.notesCursor
+		if selLo > selHi {
+			selLo, selHi = selHi, selLo
+		}
+	}
 
 	var body []string
 	end := scroll + notesVisRows
@@ -314,31 +499,17 @@ func (m Model) renderNotes(windowCols int) string {
 	}
 	for i := scroll; i < end; i++ {
 		ln := lines[i]
-		seg := string(m.notesRunes[ln.start:ln.end])
-		// Insert caret on cursor row.
-		if i == row {
-			rs := []rune(seg)
-			if col > len(rs) {
-				col = len(rs)
-			}
-			if col < 0 {
-				col = 0
-			}
-			seg = string(rs[:col]) + notesCaretChar + string(rs[col:])
-		}
-		plain := padFit(seg, wrapW)
-		body = append(body, styleDialogValue().Width(inner).MaxHeight(1).Padding(0, 1).Render(plain))
+		// Build display with selection highlight + caret.
+		line := m.renderNotesLine(ln, i == row, col, hasSel, selLo, selHi, wrapW)
+		body = append(body, line)
 	}
-	// Pad empty rows so card height is stable.
 	for len(body) < notesVisRows {
 		body = append(body, styleDialogValue().Width(inner).MaxHeight(1).Padding(0, 1).
 			Render(padFit("", wrapW)))
 	}
 	if len(m.notesRunes) == 0 && row == 0 {
-		// Placeholder under caret when empty.
 		body[0] = styleDialogValue().Width(inner).MaxHeight(1).Padding(0, 1).
 			Render(padFit(notesCaretChar, wrapW))
-		// Hint as second line if empty
 		if notesVisRows > 1 {
 			body[1] = styleDialogHint().Width(inner).MaxHeight(1).Padding(0, 1).
 				Render(padFit("scratch notes — not saved to disk yet", wrapW))
@@ -346,12 +517,82 @@ func (m Model) renderNotes(windowCols int) string {
 	}
 	footer := styleDialogHintKey().Render("esc") +
 		styleDialogHint().Render(" put away  ") +
-		styleDialogHintKey().Render("enter") +
-		styleDialogHint().Render(" newline  ") +
-		styleDialogHintKey().Render("ctrl+shift+m") +
-		styleDialogHint().Render(" toggle")
+		styleDialogHintKey().Render("ctrl+a") +
+		styleDialogHint().Render(" all  ") +
+		styleDialogHintKey().Render("ctrl+c/x/v") +
+		styleDialogHint().Render(" copy/cut/paste")
 	return renderDialogCard(outer, "Notes", body, footer)
 }
 
-// notesRuneCount is for tests/debug.
-func notesRuneCount(s string) int { return utf8.RuneCountInString(s) }
+func (m Model) renderNotesLine(ln notesLine, isCursorRow bool, col int, hasSel bool, selLo, selHi, wrapW int) string {
+	inner := wrapW + 2
+	seg := m.notesRunes[ln.start:ln.end]
+	// Paint selection relative to this line's range.
+	var parts []string
+	pos := ln.start
+	for i := 0; i <= len(seg); i++ {
+		abs := ln.start + i
+		// Caret at cursor position on this row.
+		if isCursorRow && i == col {
+			// Flush pending text before caret.
+			if abs > pos {
+				parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:abs], hasSel, selLo, selHi, pos))
+				pos = abs
+			}
+			parts = append(parts, styleDialogHintKey().Render(notesCaretChar))
+		}
+		if i == len(seg) {
+			break
+		}
+	}
+	if pos < ln.end {
+		parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:ln.end], hasSel, selLo, selHi, pos))
+	}
+	// No caret case: whole line
+	if !isCursorRow {
+		parts = nil
+		parts = append(parts, m.notesStyledSpan(seg, hasSel, selLo, selHi, ln.start))
+	}
+	content := strings.Join(parts, "")
+	// Ensure full width panel fill.
+	w := lipgloss.Width(content)
+	if w < wrapW {
+		content += styleDialogValue().Render(strings.Repeat(" ", wrapW-w))
+	}
+	return styleDialogValue().Width(inner).MaxHeight(1).Padding(0, 1).Render(
+		// Content already styled; padFit would strip ANSI — use as-is with MaxWidth.
+		content,
+	)
+}
+
+// notesStyledSpan styles a contiguous span, splitting on selection boundaries.
+func (m Model) notesStyledSpan(rs []rune, hasSel bool, selLo, selHi, absStart int) string {
+	if len(rs) == 0 {
+		return ""
+	}
+	if !hasSel {
+		return styleDialogValue().Render(string(rs))
+	}
+	var b strings.Builder
+	i := 0
+	for i < len(rs) {
+		abs := absStart + i
+		inSel := abs >= selLo && abs < selHi
+		j := i + 1
+		for j < len(rs) {
+			a := absStart + j
+			if (a >= selLo && a < selHi) != inSel {
+				break
+			}
+			j++
+		}
+		chunk := string(rs[i:j])
+		if inSel {
+			b.WriteString(styleDialogActive().Render(chunk))
+		} else {
+			b.WriteString(styleDialogValue().Render(chunk))
+		}
+		i = j
+	}
+	return b.String()
+}

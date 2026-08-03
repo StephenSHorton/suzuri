@@ -1914,6 +1914,52 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 		// Charm palette / settings own keys while open (text via WM_CHAR).
 		if u.chrome.OverlayOpen() {
+			// Notes clipboard shortcuts need host (CF_UNICODETEXT).
+			if u.chrome.NotesOpen && ctrl && !shift && !alt {
+				switch wParam {
+				case 'C', 'c':
+					if s := u.chrome.NotesSelectedText(); s != "" {
+						_ = setClipboardText(hwnd, s)
+					}
+					// Leave selection; still feed ctrl+c so model ignores close.
+					km := tea.KeyMsg{Type: tea.KeyCtrlC}
+					r := u.chrome.UpdateChrome(km)
+					u.chrome = r.Model
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+					return 0
+				case 'X', 'x':
+					if s := u.chrome.NotesSelectedText(); s != "" {
+						_ = setClipboardText(hwnd, s)
+					}
+					km := tea.KeyMsg{Type: tea.KeyCtrlX}
+					r := u.chrome.UpdateChrome(km)
+					u.chrome = r.Model
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+					return 0
+				case 'V', 'v':
+					if s, err := getClipboardText(hwnd); err == nil && s != "" {
+						m := u.chrome
+						m.NotesPaste(s)
+						u.chrome = m
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+					}
+					return 0
+				case 'A', 'a':
+					km := tea.KeyMsg{Type: tea.KeyCtrlA}
+					r := u.chrome.UpdateChrome(km)
+					u.chrome = r.Model
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+					return 0
+				}
+			}
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
 				r := u.chrome.UpdateChrome(*km)
 				u.chrome = r.Model
@@ -1928,18 +1974,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					u.chromePx = u.chromePixelHeight()
 				}
 				win.InvalidateRect(hwnd, nil, false)
-			}
-			// Ctrl+V paste into notes while open (clipboard → runes).
-			if u.chrome.NotesOpen && ctrl && !shift && !alt && (wParam == 'V' || wParam == 'v') {
-				if s, err := getClipboardText(hwnd); err == nil && s != "" {
-					m := u.chrome
-					m.NotesPaste(s)
-					u.chrome = m
-					u.overlayDirty = true
-					u.overlayCells = nil
-					win.InvalidateRect(hwnd, nil, false)
-				}
-				return 0
 			}
 			return 0
 		}
@@ -4821,9 +4855,9 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 }
 
 // teaKeyFromWin maps Win32 navigation keys into Bubble Tea messages for the
-// palette. Printable text arrives via WM_CHAR so filter typing works.
+// palette/notes. Printable text arrives via WM_CHAR so filter typing works.
+// Ctrl+A/C/X/V for notes are handled separately (clipboard needs the host).
 func teaKeyFromWin(wParam uintptr, ctrl, shift bool) *tea.KeyMsg {
-	_ = ctrl
 	switch wParam {
 	case win.VK_ESCAPE:
 		km := tea.KeyMsg{Type: tea.KeyEsc}
@@ -4832,10 +4866,26 @@ func teaKeyFromWin(wParam uintptr, ctrl, shift bool) *tea.KeyMsg {
 		km := tea.KeyMsg{Type: tea.KeyEnter}
 		return &km
 	case win.VK_UP:
-		km := tea.KeyMsg{Type: tea.KeyUp}
+		t := tea.KeyUp
+		if ctrl && shift {
+			t = tea.KeyCtrlShiftUp
+		} else if ctrl {
+			t = tea.KeyCtrlUp
+		} else if shift {
+			t = tea.KeyShiftUp
+		}
+		km := tea.KeyMsg{Type: t}
 		return &km
 	case win.VK_DOWN:
-		km := tea.KeyMsg{Type: tea.KeyDown}
+		t := tea.KeyDown
+		if ctrl && shift {
+			t = tea.KeyCtrlShiftDown
+		} else if ctrl {
+			t = tea.KeyCtrlDown
+		} else if shift {
+			t = tea.KeyShiftDown
+		}
+		km := tea.KeyMsg{Type: t}
 		return &km
 	case win.VK_TAB:
 		if shift {
@@ -4848,19 +4898,51 @@ func teaKeyFromWin(wParam uintptr, ctrl, shift bool) *tea.KeyMsg {
 		km := tea.KeyMsg{Type: tea.KeyBackspace}
 		return &km
 	case win.VK_LEFT:
-		km := tea.KeyMsg{Type: tea.KeyLeft}
+		t := tea.KeyLeft
+		if ctrl && shift {
+			t = tea.KeyCtrlShiftLeft
+		} else if ctrl {
+			t = tea.KeyCtrlLeft
+		} else if shift {
+			t = tea.KeyShiftLeft
+		}
+		km := tea.KeyMsg{Type: t}
 		return &km
 	case win.VK_RIGHT:
-		km := tea.KeyMsg{Type: tea.KeyRight}
+		t := tea.KeyRight
+		if ctrl && shift {
+			t = tea.KeyCtrlShiftRight
+		} else if ctrl {
+			t = tea.KeyCtrlRight
+		} else if shift {
+			t = tea.KeyShiftRight
+		}
+		km := tea.KeyMsg{Type: t}
 		return &km
 	case win.VK_DELETE:
 		km := tea.KeyMsg{Type: tea.KeyDelete}
 		return &km
 	case win.VK_HOME:
-		km := tea.KeyMsg{Type: tea.KeyHome}
+		t := tea.KeyHome
+		if ctrl && shift {
+			t = tea.KeyCtrlShiftHome
+		} else if ctrl {
+			t = tea.KeyCtrlHome
+		} else if shift {
+			t = tea.KeyShiftHome
+		}
+		km := tea.KeyMsg{Type: t}
 		return &km
 	case win.VK_END:
-		km := tea.KeyMsg{Type: tea.KeyEnd}
+		t := tea.KeyEnd
+		if ctrl && shift {
+			t = tea.KeyCtrlShiftEnd
+		} else if ctrl {
+			t = tea.KeyCtrlEnd
+		} else if shift {
+			t = tea.KeyShiftEnd
+		}
+		km := tea.KeyMsg{Type: t}
 		return &km
 	}
 	return nil

@@ -54,6 +54,7 @@ type Model struct {
 	// Scratch notes (in-memory only; survives hide/show until process exit).
 	notesRunes  []rune
 	notesCursor int
+	notesSel    int // selection anchor; -1 = none (cursor is the other end)
 	notesScroll int
 	notesWrapW  int
 	// lastCfg is the host's applied config (for reopening settings).
@@ -192,10 +193,11 @@ func (i paletteItem) FilterValue() string { return i.title + " " + i.desc }
 func New(width int) Model {
 	cfg := config.Default()
 	m := Model{
-		Width:  width,
-		Height: TabStripRows(),
-		Status: "",
-		lastCfg: cfg,
+		Width:     width,
+		Height:    TabStripRows(),
+		Status:    "",
+		lastCfg:   cfg,
+		notesSel:  -1,
 	}
 	m.rebuildPalette()
 	return m

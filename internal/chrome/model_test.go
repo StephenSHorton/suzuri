@@ -227,6 +227,55 @@ func TestNotesToggleKeepsBuffer(t *testing.T) {
 	}
 }
 
+func TestNotesSelectAllBackspaceTab(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenNotesMsg{})
+	m = r.Model
+	for _, ch := range "ab" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	// Ctrl+A selects all
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlA})
+	m = r.Model
+	if m.NotesSelectedText() != "ab" {
+		t.Fatalf("select all=%q", m.NotesSelectedText())
+	}
+	// Backspace deletes selection
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = r.Model
+	if string(m.notesRunes) != "" {
+		t.Fatalf("after BS sel buf=%q", string(m.notesRunes))
+	}
+	// Tab inserts 4 spaces
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyTab})
+	m = r.Model
+	if string(m.notesRunes) != "    " {
+		t.Fatalf("tab buf=%q", string(m.notesRunes))
+	}
+	// Type, shift-select left, cut deletes selection
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = r.Model
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyShiftLeft})
+	m = r.Model
+	if m.NotesSelectedText() != "x" {
+		t.Fatalf("shift-left sel=%q", m.NotesSelectedText())
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlX})
+	m = r.Model
+	if string(m.notesRunes) != "    " {
+		t.Fatalf("after cut buf=%q", string(m.notesRunes))
+	}
+	// Typing replaces selection
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlA})
+	m = r.Model
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	m = r.Model
+	if string(m.notesRunes) != "z" {
+		t.Fatalf("type over sel buf=%q", string(m.notesRunes))
+	}
+}
+
 func TestConfirmUpdateModal(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenConfirmUpdateMsg{Version: "1.2.3"})
