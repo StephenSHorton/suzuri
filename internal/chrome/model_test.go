@@ -348,13 +348,18 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 	if len(m.notesBank) != 1 {
 		t.Fatalf("after delete len=%d", len(m.notesBank))
 	}
-	// F2 renames from editor (or list)
+	// Open editor, ↑ from top of body → title field
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
 	m = r.Model
-	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyF2})
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyUp})
 	m = r.Model
 	if m.notesFocus != notesFocusTitle {
-		t.Fatal("f2 → title")
+		t.Fatal("up from top → title")
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+	m = r.Model
+	if m.notesFocus != notesFocusEditor {
+		t.Fatal("down from title → body")
 	}
 	bank := m.NotesSnapshot()
 	if err := SaveNotesBank(bank); err != nil {

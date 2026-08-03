@@ -349,16 +349,22 @@ func (m Model) NotesAllText() string {
 func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 	s := msg.String()
 
-	// Title rename mode (inline, like rename dialog).
+	// Title rename mode (first row of the editor screen — not the body).
 	if m.notesFocus == notesFocusTitle {
 		switch s {
 		case "esc":
 			m.commitNotesTitle(false)
-			return
-		case "enter":
-			m.commitNotesTitle(true)
-			// Stay on editor screen after naming (new note flow).
 			m.notesFocus = notesFocusEditor
+			return
+		case "enter", "down":
+			m.commitNotesTitle(true)
+			m.notesFocus = notesFocusEditor
+			m.notesCursor = 0
+			m.notesClearSel()
+			m.notesEnsureCursorVisible(0)
+			return
+		case "up":
+			// Already on title — stay.
 			return
 		case "backspace":
 			if m.notesTitle != "" {
@@ -480,6 +486,11 @@ func (m *Model) handleNotesEditorKey(msg tea.KeyMsg) {
 		m.notesMove(1, extend)
 		return
 	case "up", "shift+up":
+		// At top of body: move up into the title field (don't repurpose body).
+		if !extend && m.notesAtBodyTop() {
+			m.beginNotesTitleEdit()
+			return
+		}
 		m.notesMoveVert(-1, extend)
 		return
 	case "down", "shift+down":
@@ -689,6 +700,21 @@ func (m *Model) notesWordMove(dir int, extend bool) {
 
 func isNotesSpace(r rune) bool {
 	return r == ' ' || r == '\t' || r == '\n'
+}
+
+// notesAtBodyTop is true when the caret is on the first soft-wrapped line
+// (or the buffer is empty) so ↑ can promote focus to the title row.
+func (m *Model) notesAtBodyTop() bool {
+	if m.notesCursor <= 0 {
+		return true
+	}
+	w := m.notesWrapW
+	if w < 8 {
+		w = 40
+	}
+	lines := notesSoftLines(m.notesRunes, w)
+	row, _ := notesCursorRowCol(m.notesRunes, lines, m.notesCursor)
+	return row <= 0
 }
 
 func (m *Model) notesMoveVert(dir int, extend bool) {
@@ -986,14 +1012,16 @@ func (m Model) renderNotesContextKeys(mainWidth, windowCols int) string {
 	case notesFocusTitle:
 		title = "Rename note"
 		rows = []struct{ key, desc string }{
-			{"Enter", "Save name"},
+			{"Enter / ↓", "Save · back to body"},
 			{"Esc", "Cancel"},
+			{"Type", "Edit title"},
 		}
 	default:
 		title = "Note editor"
 		rows = []struct{ key, desc string }{
 			{"Esc", "Back to list"},
-			{"F2 / click title", "Rename"},
+			{"↑ (top line) / F2", "Edit title"},
+			{"↓ from title", "Back to body"},
 			{KeyCtrl("A"), "Select all"},
 			{KeyCtrl("C") + " / " + KeyCtrl("X") + " / " + KeyCtrl("V"), "Copy / cut / paste"},
 			{"Tab", "Insert tab"},
@@ -1064,6 +1092,8 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 		wrapW = 8
 	}
 
+	// Fixed chrome title "Note"; note name lives only on the title field row
+	// (avoids green title twice + rename hint on the interactive card).
 	nameLine := m.renderNotesNameRow(inner)
 	edLines := notesSoftLines(m.notesRunes, wrapW)
 	scroll := m.notesScroll
@@ -1090,6 +1120,7 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 		ei := scroll + i
 		if ei < len(edLines) {
 			ln := edLines[ei]
+			// Caret only in body while editor-focused (title mode keeps body idle).
 			isCur := m.notesFocus == notesFocusEditor && ei == crow
 			body = append(body, m.renderNotesEditorLine(ln, isCur, caretOff, hasSel, selLo, selHi, inner, wrapW))
 			continue
@@ -1108,11 +1139,7 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 			Render(strings.Repeat(" ", inner)))
 	}
 
-	cardTitle := "Note"
-	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
-		cardTitle = NoteDisplayTitle(m.notesBank[m.notesActive])
-	}
-	return renderDialogCard(outer, cardTitle, body, "")
+	return renderDialogCard(outer, "Note", body, "")
 }
 
 // computeNotesLayout fills m.notesLayout for click tests (list vs editor screen).
@@ -1161,34 +1188,24 @@ func (m *Model) computeNotesLayout(windowCols int) {
 }
 
 func (m Model) renderNotesNameRow(inner int) string {
-	focused := m.notesFocus == notesFocusTitle
-	if focused {
+	// Title field only — no shortcut copy (that lives on the keys caption).
+	if m.notesFocus == notesFocusTitle {
 		body := m.notesTitle
 		if body == "" {
-			p := styleDialogHintKey().Render("title ")
-			rest := styleDialogHint().Render(padFit("name…"+notesCaretChar, inner-lipgloss.Width("title ")-2))
-			return panelFillLine(inner, p+rest)
+			return styleDialogHint().Width(inner).MaxHeight(1).Padding(0, 1).
+				Render(padFit(notesCaretChar+"name…", inner-2))
 		}
-		plain := padFit("title "+body+notesCaretChar, inner)
-		return styleDialogHintKey().Width(inner).MaxHeight(1).Render(plain)
+		// Active edit: selection-style fill so focus is obvious on this row only.
+		return styleDialogActive().Width(inner).MaxHeight(1).
+			Render(padFit(body+notesCaretChar, inner))
 	}
 	label := "Untitled"
 	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
 		label = NoteDisplayTitle(m.notesBank[m.notesActive])
 	}
-	hint := "  · click / f2 rename"
-	budget := inner - 2
-	if budget < 8 {
-		budget = 8
-	}
-	maxLabel := budget - len([]rune(hint))
-	if maxLabel < 4 {
-		maxLabel = 4
-		hint = ""
-	}
-	label = truncateNoteTitle(label, maxLabel)
-	plain := padFit(label+hint, budget)
-	return styleDialogLabel().Width(inner).MaxHeight(1).Padding(0, 1).Render(plain)
+	// Idle title uses soft label color (not primary) so it doesn't twin the chrome title.
+	return styleDialogLabel().Width(inner).MaxHeight(1).Padding(0, 1).
+		Render(padFit(label, inner-2))
 }
 
 func (m Model) renderNotesEditorLine(ln notesLine, isCursorRow bool, caretOff int, hasSel bool, selLo, selHi, inner, wrapW int) string {
