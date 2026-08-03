@@ -189,9 +189,23 @@ type winUI struct {
 	// close. (A dual CompatibleBitmap underlay hard-crashed.)
 	overlaySceneReady bool
 
+	// paintPending coalesces InvalidateRect. Dual busy alt-screen panes (two
+	// Grok sessions) used to PostMessage+invalidate on every PTY chunk and
+	// hard-crash GDI with no Go panic trail.
+	paintPending bool
+
 	// MCP bridge: loopback HTTP for spawn-on-demand stdio MCP (see internal/bridge).
 	bridge  *bridge.Host
 	mcpJobs chan mcpJob
+}
+
+// requestPaint marks the client dirty at most once until the next WM_PAINT.
+func (u *winUI) requestPaint() {
+	if u == nil || u.hwnd == 0 || u.paintPending {
+		return
+	}
+	u.paintPending = true
+	win.InvalidateRect(u.hwnd, nil, false)
 }
 
 func (u *winUI) queueBytes(tabID int)  { postBytes(u, tabID) }
@@ -1088,7 +1102,7 @@ func (u *winUI) drainAndParse(tabID int) {
 			t.postBytes(u)
 		}
 		if visible {
-			win.InvalidateRect(u.hwnd, nil, false)
+			u.requestPaint()
 		}
 		return
 	}
@@ -1102,10 +1116,18 @@ func (u *winUI) drainAndParse(tabID int) {
 	// working; strip for display, keep titleBusy for the tab strip spinner.
 	if title := t.term.Title(); title != "" {
 		prevBusy := t.busy()
-		t.applyTitle(title)
+		titleChanged := t.applyTitle(title)
 		if t.busy() != prevBusy {
 			u.chromeDirty = true
 			u.syncChrome()
+		} else if titleChanged {
+			// Real title text change (not a spinner frame) — refresh strip labels.
+			u.chromeDirty = true
+		}
+		// Never SetWindowText on spinner frames — that thrash was part of the
+		// dual-Grok crash path. Use the stripped display title only.
+		if titleChanged && u.activeTab() == t {
+			setWindowTitle(u.hwnd, "suzuri — "+t.title)
 		}
 	}
 	// Alt-screen enter/leave: grow/shrink shell (hide Warp bar) like Warp.
@@ -1128,14 +1150,10 @@ func (u *winUI) drainAndParse(tabID int) {
 			u.publishBridgeSnapshot()
 		}
 	}
-	// Only repaint if this pane is on the visible page.
+	// Only repaint if this pane is on the visible page. Coalesce — dual busy
+	// alt-screen panes used to invalidate hundreds of times per second.
 	if visible {
-		if u.activeTab() == t {
-			if title := t.term.Title(); title != "" {
-				setWindowTitle(u.hwnd, "suzuri — "+title)
-			}
-		}
-		win.InvalidateRect(u.hwnd, nil, false)
+		u.requestPaint()
 	}
 	t.inMu.Lock()
 	more := len(t.inBuf) > 0
@@ -1508,13 +1526,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if u.dimShellModal() {
 				if u.chrome.SettingsOpen {
 					if u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
-						win.InvalidateRect(hwnd, nil, false)
+						u.requestPaint()
 					}
 				} else if u.chromeDirty {
-					win.InvalidateRect(hwnd, nil, false)
+					u.requestPaint()
 				}
 			} else {
-				win.InvalidateRect(hwnd, nil, false)
+				u.requestPaint()
 			}
 			_ = needScrollPaint
 		}
@@ -2292,6 +2310,9 @@ func (u *winUI) paint(hwnd win.HWND) {
 			applog.Sync()
 		}
 	}()
+
+	// Accept new coalesced invalidates while we paint.
+	u.paintPending = false
 
 	var ps win.PAINTSTRUCT
 	hdc := win.BeginPaint(hwnd, &ps)

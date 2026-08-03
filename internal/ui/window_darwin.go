@@ -579,8 +579,8 @@ func (u *macUI) drainAndParse(tabID int) {
 		t.sb.stickBottom()
 	}
 	if title := t.term.Title(); title != "" {
-		t.applyTitle(title)
-		if u.activeTab() == t {
+		// Spinner frames don't change the stripped display title — skip thrash.
+		if t.applyTitle(title) && u.activeTab() == t {
 			ebiten.SetWindowTitle("suzuri — " + t.title)
 		}
 	}

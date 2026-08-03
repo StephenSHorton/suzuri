@@ -152,20 +152,24 @@ func (t *tab) ingestImages(paths []string, blobs []imageBlob, cellW, cellH, cols
 // applyTitle updates the display title and busy flag from a raw OSC title.
 // Grok (and other tools) put braille spinner frames in the window title while
 // working; we strip those for the tab label but keep titleBusy for the strip.
-func (t *tab) applyTitle(raw string) {
+// Returns true when the *display* title changed (spinner frame ticks alone
+// do not — they used to flood the log and thrash SetWindowText every chunk).
+func (t *tab) applyTitle(raw string) bool {
 	if t == nil {
-		return
+		return false
 	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return
+		return false
 	}
 	busy := titleReportsBusy(raw)
 	t.titleBusy.Store(busy)
-	t.title = shortTitle(raw)
-	if busy {
-		log.Debug("title spinner busy", "tab", t.id, "raw", truncateRunes(raw, 48))
+	next := shortTitle(raw)
+	if t.title == next {
+		return false
 	}
+	t.title = next
+	return true
 }
 
 // noteIO marks recent PTY activity for the tab strip glyph.
