@@ -354,8 +354,8 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		title = "Rain · " + val
 		if s.edit.ShellMatrix {
 			paras = []string{
-				"Always-on digital rain under empty shell cells — very dim so text stays readable.",
-				"Hides under full-screen apps and while the startup intro is playing.",
+				"Always-on digital rain under empty / default-bg shell cells — very dim so text stays readable.",
+				"Shows through fullscreen TUIs (Grok, vim, etc.) where those apps leave the canvas transparent. Paused while the startup intro is playing or a dim modal is open.",
 			}
 		} else {
 			paras = []string{"No background rain in the shell. Intro and Settings rain are unchanged."}

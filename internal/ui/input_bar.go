@@ -252,6 +252,17 @@ func (b *inputBar) moveHome() {
 	b.cursor = i
 }
 
+// moveDocHome / moveDocEnd: Cmd+↑/↓ (macOS) — whole buffer extremes.
+func (b *inputBar) moveDocHome() {
+	b.clearComplete()
+	b.cursor = 0
+}
+
+func (b *inputBar) moveDocEnd() {
+	b.clearComplete()
+	b.cursor = len(b.runes)
+}
+
 func (b *inputBar) moveEnd() {
 	b.clearComplete()
 	i := b.cursor

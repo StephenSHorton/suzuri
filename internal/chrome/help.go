@@ -27,6 +27,8 @@ func helpBody(windowCols int) string {
 	body = append(body, helpRow(inner, "Alt+arrows", "Focus pane (Windows)"))
 	body = append(body, helpRow(inner, "Ctrl+Alt+arrows", "Focus pane (macOS · also Win)"))
 	body = append(body, helpRow(inner, "⌥/Ctrl+←→", "Word jump (bar · notes)"))
+	body = append(body, helpRow(inner, "⌘←→ · Home/End", "Line start/end (macOS)"))
+	body = append(body, helpRow(inner, "Hold ←→ / ⌫", "Key repeat while held"))
 	body = append(body, helpRow(inner, "F2", "Rename pane"))
 	body = append(body, helpRow(inner, "Double-click", "Rename tab / pane title"))
 	body = append(body, helpRow(inner, KeyCtrlShift("W"), "Close pane"))

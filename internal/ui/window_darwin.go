@@ -150,8 +150,8 @@ type macUI struct {
 	fb      *image.RGBA
 	tex     *ebiten.Image
 
-	// Key repeat tracking for held keys.
-	heldKeys map[ebiten.Key]time.Time
+	// Key repeat for held arrows / backspace in the Warp bar and notes.
+	keyRep *keyRepeat
 
 	// Chrome paint cache.
 	chromeDirty  bool
@@ -521,7 +521,7 @@ func (u *macUI) loop() error {
 	// Startup intro curtain (matrix rain by default). Skipped when always-on
 	// shell rain is already on (Windows beginIntro parity — no double curtain).
 	u.beginIntro(false)
-	u.heldKeys = make(map[ebiten.Key]time.Time)
+	u.keyRep = newKeyRepeat()
 
 	// Startup update check: toast + confirm before install (same as Windows).
 	scheduleStartupUpdateCheck(u.postToast, func(ver string) {
@@ -1539,9 +1539,17 @@ func (u *macUI) persistWindowPlacement() {
 // --- input ---
 
 func (u *macUI) handleKeys() {
-	ctrl := ebiten.IsKeyPressed(ebiten.KeyControl) || ebiten.IsKeyPressed(ebiten.KeyMeta)
-	shift := ebiten.IsKeyPressed(ebiten.KeyShift)
-	alt := ebiten.IsKeyPressed(ebiten.KeyAlt)
+	// ctrl = "primary host modifier" (Cmd or Ctrl) for shortcuts like Cmd+K.
+	// realCtrl / meta / alt are explicit for text navigation.
+	meta := modMeta()
+	alt := modAlt()
+	realCtrl := modControl()
+	ctrl := realCtrl || meta
+	shift := modShift()
+	now := time.Now()
+	if u.keyRep == nil {
+		u.keyRep = newKeyRepeat()
+	}
 
 	// Meta/Ctrl shortcuts (just pressed).
 	if inpututil.IsKeyJustPressed(ebiten.KeyComma) && ctrl && !shift {
@@ -1697,28 +1705,13 @@ func (u *macUI) handleKeys() {
 				return
 			}
 		}
-		// Notes: Option+Backspace/Delete delete a word (macOS).
-		if u.chrome.NotesOpen && alt && !ctrl {
-			if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) {
-				m := u.chrome
-				m.NotesDeleteWord(-1)
-				u.chrome = m
-				u.overlayDirty = true
-				u.overlayCells = nil
-				u.persistNotesIfDirty()
-				return
-			}
-			if inpututil.IsKeyJustPressed(ebiten.KeyDelete) {
-				m := u.chrome
-				m.NotesDeleteWord(1)
-				u.chrome = m
-				u.overlayDirty = true
-				u.overlayCells = nil
-				u.persistNotesIfDirty()
+		// Notes: Option/Ctrl word-delete; Cmd+←/→ line home/end; hold-to-repeat.
+		if u.chrome.NotesOpen {
+			if u.handleNotesNavKeys(now, realCtrl, meta, alt, shift) {
 				return
 			}
 		}
-		if km := teaKeyFromEbiten(ctrl, shift, alt); km != nil {
+		if km := teaKeyFromEbiten(realCtrl || meta, shift, alt, u.keyRep, now); km != nil {
 			r := u.chrome.UpdateChrome(*km)
 			u.chrome = r.Model
 			// Palette / rename / notes: only dirty overlay.
@@ -1843,51 +1836,73 @@ func (u *macUI) handleKeys() {
 		u.publishBridgeSnapshot()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) {
-		if !in.moveVisualUp(cols) {
+	// Navigation with hold-to-repeat (IsKeyJustPressed alone never auto-repeats).
+	// Option+←/→ word jump · Cmd+←/→ line home/end · Cmd+↑/↓ buffer home/end.
+	wordMod := alt || (realCtrl && !meta)
+	if u.keyRep.fire(ebiten.KeyArrowUp, now) || u.keyRep.fire(ebiten.KeyUp, now) {
+		if meta && !alt {
+			// Cmd+Up: start of buffer (macOS text field).
+			in.moveDocHome()
+		} else if !in.moveVisualUp(cols) {
 			in.historyUp()
 		}
 		u.maybeResizeForInput()
+		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowDown) {
-		if !in.moveVisualDown(cols) {
+	if u.keyRep.fire(ebiten.KeyArrowDown, now) || u.keyRep.fire(ebiten.KeyDown, now) {
+		if meta && !alt {
+			in.moveDocEnd()
+		} else if !in.moveVisualDown(cols) {
 			in.historyDown()
 		}
 		u.maybeResizeForInput()
+		u.markInputDirty()
 		return
 	}
-	// Option (or Ctrl) + arrows: word jump (macOS Option · Windows muscle-memory Ctrl).
-	wordMod := alt || (ebiten.IsKeyPressed(ebiten.KeyControl) && !ebiten.IsKeyPressed(ebiten.KeyMeta))
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
-		if wordMod {
-			in.moveWordLeft()
-		} else {
+	if u.keyRep.fire(ebiten.KeyArrowLeft, now) || u.keyRep.fire(ebiten.KeyLeft, now) {
+		switch {
+		case meta && !alt:
+			in.moveHome() // Cmd+Left = beginning of line
+		case wordMod:
+			in.moveWordLeft() // Option/Ctrl+Left
+		default:
 			in.moveLeft()
 		}
 		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
-		if wordMod {
+	if u.keyRep.fire(ebiten.KeyArrowRight, now) || u.keyRep.fire(ebiten.KeyRight, now) {
+		switch {
+		case meta && !alt:
+			in.moveEnd()
+		case wordMod:
 			in.moveWordRight()
-		} else {
+		default:
 			in.moveRight()
 		}
 		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyHome) {
-		in.moveHome()
+	if u.keyRep.fire(ebiten.KeyHome, now) {
+		if meta || realCtrl {
+			in.moveDocHome()
+		} else {
+			in.moveHome()
+		}
 		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyEnd) {
-		in.moveEnd()
+	if u.keyRep.fire(ebiten.KeyEnd, now) {
+		if meta || realCtrl {
+			in.moveDocEnd()
+		} else {
+			in.moveEnd()
+		}
 		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyDelete) {
+	if u.keyRep.fire(ebiten.KeyDelete, now) {
 		if wordMod {
 			in.deleteWordRight()
 		} else {
@@ -1919,12 +1934,7 @@ func (u *macUI) handleKeys() {
 		}
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) {
-		now := time.Now()
-		if now.Sub(u.lastBackspace) < 20*time.Millisecond {
-			return
-		}
-		u.lastBackspace = now
+	if u.keyRep.fire(ebiten.KeyBackspace, now) {
 		prevRows := in.visualRows(cols)
 		if wordMod {
 			in.deleteWordLeft()
@@ -1941,7 +1951,6 @@ func (u *macUI) handleKeys() {
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		prevRows := in.visualRows(cols)
-		shift := ebiten.IsKeyPressed(ebiten.KeyShift)
 		if in.complete(tab.cwd, shift) {
 			if in.visualRows(cols) != prevRows {
 				u.maybeResizeForInput()
@@ -1949,6 +1958,135 @@ func (u *macUI) handleKeys() {
 		}
 		return
 	}
+}
+
+// handleNotesNavKeys handles hold-to-repeat nav + Option/Cmd combos for notes.
+// Returns true when the event was consumed.
+func (u *macUI) handleNotesNavKeys(now time.Time, realCtrl, meta, alt, shift bool) bool {
+	if u == nil || !u.chrome.NotesOpen {
+		return false
+	}
+	wordMod := alt || (realCtrl && !meta)
+	fireNav := func(key ebiten.Key, altKey ebiten.Key) bool {
+		return u.keyRep.fire(key, now) || (altKey != key && u.keyRep.fire(altKey, now))
+	}
+	// Option/Ctrl+Backspace/Delete: delete word.
+	if wordMod && !shift {
+		if fireNav(ebiten.KeyBackspace, ebiten.KeyBackspace) {
+			m := u.chrome
+			m.NotesDeleteWord(-1)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			u.persistNotesIfDirty()
+			return true
+		}
+		if fireNav(ebiten.KeyDelete, ebiten.KeyDelete) {
+			m := u.chrome
+			m.NotesDeleteWord(1)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			u.persistNotesIfDirty()
+			return true
+		}
+	}
+	// Cmd+←/→ = line home/end; Option+←/→ = word (via tea KeyMsg with Alt).
+	// Plain arrows with repeat: send KeyLeft etc. through chrome.
+	if fireNav(ebiten.KeyArrowLeft, ebiten.KeyLeft) {
+		var km tea.KeyMsg
+		switch {
+		case meta && !alt && !shift:
+			km = tea.KeyMsg{Type: tea.KeyHome}
+		case meta && !alt && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftHome}
+		case wordMod && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftLeft, Alt: true}
+		case wordMod:
+			km = tea.KeyMsg{Type: tea.KeyLeft, Alt: true}
+		case shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftLeft}
+		default:
+			km = tea.KeyMsg{Type: tea.KeyLeft}
+		}
+		// Ctrl+Left word jump (also maps to alt+left handler via ctrl+left string).
+		if realCtrl && !meta && !alt {
+			if shift {
+				km = tea.KeyMsg{Type: tea.KeyCtrlShiftLeft}
+			} else {
+				km = tea.KeyMsg{Type: tea.KeyCtrlLeft}
+			}
+		}
+		r := u.chrome.UpdateChrome(km)
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	if fireNav(ebiten.KeyArrowRight, ebiten.KeyRight) {
+		var km tea.KeyMsg
+		switch {
+		case meta && !alt && !shift:
+			km = tea.KeyMsg{Type: tea.KeyEnd}
+		case meta && !alt && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftEnd}
+		case wordMod && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftRight, Alt: true}
+		case wordMod:
+			km = tea.KeyMsg{Type: tea.KeyRight, Alt: true}
+		case shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftRight}
+		default:
+			km = tea.KeyMsg{Type: tea.KeyRight}
+		}
+		if realCtrl && !meta && !alt {
+			if shift {
+				km = tea.KeyMsg{Type: tea.KeyCtrlShiftRight}
+			} else {
+				km = tea.KeyMsg{Type: tea.KeyCtrlRight}
+			}
+		}
+		r := u.chrome.UpdateChrome(km)
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	if fireNav(ebiten.KeyArrowUp, ebiten.KeyUp) {
+		var km tea.KeyMsg
+		if meta && !alt {
+			km = tea.KeyMsg{Type: tea.KeyCtrlHome} // doc home
+		} else if shift {
+			km = tea.KeyMsg{Type: tea.KeyShiftUp}
+		} else {
+			km = tea.KeyMsg{Type: tea.KeyUp}
+		}
+		r := u.chrome.UpdateChrome(km)
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	if fireNav(ebiten.KeyArrowDown, ebiten.KeyDown) {
+		var km tea.KeyMsg
+		if meta && !alt {
+			km = tea.KeyMsg{Type: tea.KeyCtrlEnd}
+		} else if shift {
+			km = tea.KeyMsg{Type: tea.KeyShiftDown}
+		} else {
+			km = tea.KeyMsg{Type: tea.KeyDown}
+		}
+		r := u.chrome.UpdateChrome(km)
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	return false
 }
 
 var specialKeys = []ebiten.Key{
@@ -1966,8 +2104,9 @@ func (u *macUI) handleTextInput() {
 	if len(chars) == 0 {
 		return
 	}
-	ctrl := ebiten.IsKeyPressed(ebiten.KeyControl) || ebiten.IsKeyPressed(ebiten.KeyMeta)
-	if ctrl {
+	// Cmd/Ctrl chords are shortcuts — never insert. Option (Alt) alone still
+	// types special characters (e.g. Option+e accents) when not used with arrows.
+	if modMeta() || modControl() {
 		return
 	}
 
@@ -2022,65 +2161,76 @@ func (u *macUI) handleTextInput() {
 	}
 }
 
-func teaKeyFromEbiten(ctrl, shift, alt bool) *tea.KeyMsg {
+// teaKeyFromEbiten maps one-shot overlay keys (palette, settings, help).
+// Notes navigation with hold-repeat is handled by handleNotesNavKeys first.
+// rep/now optional; when nil, only JustPressed is used.
+func teaKeyFromEbiten(ctrl, shift, alt bool, rep *keyRepeat, now time.Time) *tea.KeyMsg {
+	just := func(k ebiten.Key) bool {
+		if rep != nil {
+			return rep.fire(k, now)
+		}
+		return inpututil.IsKeyJustPressed(k)
+	}
+	left := func() bool { return just(ebiten.KeyArrowLeft) || just(ebiten.KeyLeft) }
+	right := func() bool { return just(ebiten.KeyArrowRight) || just(ebiten.KeyRight) }
+	up := func() bool { return just(ebiten.KeyArrowUp) || just(ebiten.KeyUp) }
+	down := func() bool { return just(ebiten.KeyArrowDown) || just(ebiten.KeyDown) }
+
 	// Option+arrows → alt+left/right (notes word jump on macOS).
-	// Ctrl+arrows → ctrl+left/right (Windows convention also works on Mac).
 	if !shift && !ctrl && alt {
 		switch {
-		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+		case left():
 			return &tea.KeyMsg{Type: tea.KeyLeft, Alt: true}
-		case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+		case right():
 			return &tea.KeyMsg{Type: tea.KeyRight, Alt: true}
-		case inpututil.IsKeyJustPressed(ebiten.KeyUp):
+		case up():
 			return &tea.KeyMsg{Type: tea.KeyUp, Alt: true}
-		case inpututil.IsKeyJustPressed(ebiten.KeyDown):
+		case down():
 			return &tea.KeyMsg{Type: tea.KeyDown, Alt: true}
-		case inpututil.IsKeyJustPressed(ebiten.KeyBackspace):
+		case just(ebiten.KeyBackspace):
 			return &tea.KeyMsg{Type: tea.KeyBackspace, Alt: true}
-		case inpututil.IsKeyJustPressed(ebiten.KeyDelete):
+		case just(ebiten.KeyDelete):
 			return &tea.KeyMsg{Type: tea.KeyDelete, Alt: true}
 		}
 	}
 	if shift && alt && !ctrl {
 		switch {
-		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+		case left():
 			return &tea.KeyMsg{Type: tea.KeyShiftLeft, Alt: true}
-		case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+		case right():
 			return &tea.KeyMsg{Type: tea.KeyShiftRight, Alt: true}
 		}
 	}
-	// Shift+arrows for notes selection (and rename navigation is fine with shift).
 	if shift && !ctrl && !alt {
 		switch {
-		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+		case left():
 			return &tea.KeyMsg{Type: tea.KeyShiftLeft}
-		case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+		case right():
 			return &tea.KeyMsg{Type: tea.KeyShiftRight}
-		case inpututil.IsKeyJustPressed(ebiten.KeyUp):
+		case up():
 			return &tea.KeyMsg{Type: tea.KeyShiftUp}
-		case inpututil.IsKeyJustPressed(ebiten.KeyDown):
+		case down():
 			return &tea.KeyMsg{Type: tea.KeyShiftDown}
 		}
 	}
-	// Ctrl+arrows for word jump (notes already handles ctrl+left via KeyCtrlLeft).
 	if ctrl && !alt {
 		switch {
-		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+		case left():
 			if shift {
 				return &tea.KeyMsg{Type: tea.KeyCtrlShiftLeft}
 			}
 			return &tea.KeyMsg{Type: tea.KeyCtrlLeft}
-		case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+		case right():
 			if shift {
 				return &tea.KeyMsg{Type: tea.KeyCtrlShiftRight}
 			}
 			return &tea.KeyMsg{Type: tea.KeyCtrlRight}
-		case inpututil.IsKeyJustPressed(ebiten.KeyHome):
+		case just(ebiten.KeyHome):
 			if shift {
 				return &tea.KeyMsg{Type: tea.KeyCtrlShiftHome}
 			}
 			return &tea.KeyMsg{Type: tea.KeyCtrlHome}
-		case inpututil.IsKeyJustPressed(ebiten.KeyEnd):
+		case just(ebiten.KeyEnd):
 			if shift {
 				return &tea.KeyMsg{Type: tea.KeyCtrlShiftEnd}
 			}
@@ -2092,19 +2242,19 @@ func teaKeyFromEbiten(ctrl, shift, alt bool) *tea.KeyMsg {
 		return &tea.KeyMsg{Type: tea.KeyEsc}
 	case inpututil.IsKeyJustPressed(ebiten.KeyEnter):
 		return &tea.KeyMsg{Type: tea.KeyEnter}
-	case inpututil.IsKeyJustPressed(ebiten.KeyUp):
+	case up():
 		return &tea.KeyMsg{Type: tea.KeyUp}
-	case inpututil.IsKeyJustPressed(ebiten.KeyDown):
+	case down():
 		return &tea.KeyMsg{Type: tea.KeyDown}
-	case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+	case left():
 		return &tea.KeyMsg{Type: tea.KeyLeft}
-	case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+	case right():
 		return &tea.KeyMsg{Type: tea.KeyRight}
-	case inpututil.IsKeyJustPressed(ebiten.KeyHome):
+	case just(ebiten.KeyHome):
 		return &tea.KeyMsg{Type: tea.KeyHome}
-	case inpututil.IsKeyJustPressed(ebiten.KeyEnd):
+	case just(ebiten.KeyEnd):
 		return &tea.KeyMsg{Type: tea.KeyEnd}
-	case inpututil.IsKeyJustPressed(ebiten.KeyDelete):
+	case just(ebiten.KeyDelete):
 		return &tea.KeyMsg{Type: tea.KeyDelete}
 	case inpututil.IsKeyJustPressed(ebiten.KeyPageUp):
 		return &tea.KeyMsg{Type: tea.KeyPgUp}
@@ -2115,7 +2265,7 @@ func teaKeyFromEbiten(ctrl, shift, alt bool) *tea.KeyMsg {
 			return &tea.KeyMsg{Type: tea.KeyShiftTab}
 		}
 		return &tea.KeyMsg{Type: tea.KeyTab}
-	case inpututil.IsKeyJustPressed(ebiten.KeyBackspace):
+	case just(ebiten.KeyBackspace):
 		return &tea.KeyMsg{Type: tea.KeyBackspace}
 	}
 	return nil
@@ -2747,10 +2897,10 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 	// Quiet looping rain under the shell while sitting open (settings Rain = On).
 	// Not during intro curtain or settings/splash/confirm modals.
-	// Skip under alt-screen TUIs (Grok/vim) — rain still animates under a full
-	// grid every frame and feels like typing lag on large sessions.
-	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() &&
-		!tab.altScreen() {
+	// Also runs under alt-screen TUIs (Grok/vim/etc.): empty/default-bg cells
+	// skip the opaque fill so rain shows through (same path as the 硯 watermark).
+	// Rain is cheap glyph stamps; the full-grid paint already happens for the TUI.
+	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() {
 		t0 := u.blinkStart
 		if t0.IsZero() {
 			t0 = now

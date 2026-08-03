@@ -3119,11 +3119,10 @@ func (u *winUI) paint(hwnd win.HWND) {
 		} else {
 			u.overlaySceneReady = false
 			// Shared dim rain under the whole shell region (not per-pane).
-			// Skip under alt-screen TUIs (Grok/vim) — big paint win while typing.
+			// Also under alt-screen TUIs (Grok/vim): default-bg cells leave the
+			// underlay visible (same as the 硯 watermark).
 			if u.shellMatrixOn() && !u.matrixIntroActive() {
-				if t := u.activeTab(); t == nil || !t.altScreen() {
-					u.paintShellMatrix(dest, rect, padY, shellBot)
-				}
+				u.paintShellMatrix(dest, rect, padY, shellBot)
 			}
 			u.paintShellWatermark(dest, rect, padY, shellBot)
 
@@ -4495,12 +4494,13 @@ func (u *winUI) pasteClipboard() {
 	u.requestInputPaint()
 }
 
-// handleInputBackspace edits the Warp bar (rate-limited like the old PTY BS).
+// handleInputBackspace edits the Warp bar (rate-limited while held).
+// Do not drain the queue on "too soon" — that used to swallow all auto-repeat
+// KEYDOWNs and make hold-backspace feel dead.
 func (u *winUI) handleInputBackspace(hwnd win.HWND, lParam uintptr) {
 	wasDown := (uint32(lParam) & (1 << 30)) != 0
 	now := time.Now()
 	if wasDown && now.Sub(u.lastBackspace) < 30*time.Millisecond {
-		u.drainQueuedBackspaces(hwnd)
 		return
 	}
 	u.lastBackspace = now
@@ -4517,7 +4517,6 @@ func (u *winUI) handleInputBackspace(hwnd win.HWND, lParam uintptr) {
 	} else {
 		u.requestPaint()
 	}
-	u.drainQueuedBackspaces(hwnd)
 }
 
 func (u *winUI) drainQueuedBackspaces(hwnd win.HWND) {
