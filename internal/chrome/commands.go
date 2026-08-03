@@ -19,6 +19,7 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		{ID: "check_updates", Title: "Check for updates", Desc: "GitHub Releases · System", Category: "System", Action: ActionCheckUpdates},
 		{ID: "help", Title: "Keyboard shortcuts", Desc: "Ctrl+/ · Help", Category: "Help", Action: ActionOpenHelp},
 		{ID: "new_tab", Title: "New tab", Desc: "Ctrl+Shift+T · Tabs", Category: "Tabs", Action: ActionNewTab},
+		{ID: "new_window", Title: "New window", Desc: "Ctrl+Shift+N · Window", Category: "Window", Action: ActionNewWindow},
 	}
 	for _, name := range profileNames {
 		if name == "" {

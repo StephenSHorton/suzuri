@@ -107,6 +107,21 @@ func TestNewTabFromPalette(t *testing.T) {
 	}
 }
 
+func TestNewWindowFromPalette(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenPaletteMsg{})
+	m = r.Model
+	// 0 Settings, 1 Replay intro, 2 Check for updates, 3 Help, 4 New tab, 5 New window
+	for i := 0; i < 5; i++ {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionNewWindow {
+		t.Fatalf("action=%v want NewWindow", r.Action)
+	}
+}
+
 func TestPaletteFilterNarrowsItems(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})

@@ -85,6 +85,7 @@ const (
 	ActionNone HostAction = iota
 	ActionNewTab
 	ActionNewTabProfile // Result.ProfileName set
+	ActionNewWindow     // spawn a second OS window (new process)
 	ActionCloseTab
 	ActionSelectTab
 	ActionNextTab
@@ -125,26 +126,28 @@ type Result struct {
 
 // KeyMap for chrome shortcuts the host may forward.
 type KeyMap struct {
-	NewTab   key.Binding
-	CloseTab key.Binding
-	NextTab  key.Binding
-	PrevTab  key.Binding
-	Palette  key.Binding
-	Settings key.Binding
-	Help     key.Binding
-	Quit     key.Binding
+	NewTab    key.Binding
+	NewWindow key.Binding
+	CloseTab  key.Binding
+	NextTab   key.Binding
+	PrevTab   key.Binding
+	Palette   key.Binding
+	Settings  key.Binding
+	Help      key.Binding
+	Quit      key.Binding
 }
 
 // DefaultKeys documents bindings (host also handles most of these).
 var DefaultKeys = KeyMap{
-	NewTab:   key.NewBinding(key.WithKeys("ctrl+shift+t"), key.WithHelp("ctrl+shift+t", "new tab")),
-	CloseTab: key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("ctrl+w", "close tab")),
-	NextTab:  key.NewBinding(key.WithKeys("ctrl+tab", "tab"), key.WithHelp("ctrl+tab", "next tab")),
-	PrevTab:  key.NewBinding(key.WithKeys("ctrl+shift+tab", "shift+tab"), key.WithHelp("ctrl+shift+tab", "prev tab")),
-	Palette:  key.NewBinding(key.WithKeys("ctrl+k", "ctrl+p"), key.WithHelp("ctrl+k", "palette")),
-	Settings: key.NewBinding(key.WithKeys("ctrl+,"), key.WithHelp("ctrl+,", "settings")),
-	Help:     key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "help")),
-	Quit:     key.NewBinding(key.WithKeys("ctrl+shift+q"), key.WithHelp("ctrl+shift+q", "quit")),
+	NewTab:    key.NewBinding(key.WithKeys("ctrl+shift+t"), key.WithHelp("ctrl+shift+t", "new tab")),
+	NewWindow: key.NewBinding(key.WithKeys("ctrl+shift+n"), key.WithHelp("ctrl+shift+n", "new window")),
+	CloseTab:  key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("ctrl+w", "close tab")),
+	NextTab:   key.NewBinding(key.WithKeys("ctrl+tab", "tab"), key.WithHelp("ctrl+tab", "next tab")),
+	PrevTab:   key.NewBinding(key.WithKeys("ctrl+shift+tab", "shift+tab"), key.WithHelp("ctrl+shift+tab", "prev tab")),
+	Palette:   key.NewBinding(key.WithKeys("ctrl+k", "ctrl+p"), key.WithHelp("ctrl+k", "palette")),
+	Settings:  key.NewBinding(key.WithKeys("ctrl+,"), key.WithHelp("ctrl+,", "settings")),
+	Help:      key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "help")),
+	Quit:      key.NewBinding(key.WithKeys("ctrl+shift+q"), key.WithHelp("ctrl+shift+q", "quit")),
 }
 
 type paletteItem struct {
@@ -289,6 +292,8 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		switch {
 		case key.Matches(msg, DefaultKeys.NewTab):
 			act = ActionNewTab
+		case key.Matches(msg, DefaultKeys.NewWindow):
+			act = ActionNewWindow
 		case key.Matches(msg, DefaultKeys.CloseTab):
 			act = ActionCloseTab
 		case key.Matches(msg, DefaultKeys.NextTab):

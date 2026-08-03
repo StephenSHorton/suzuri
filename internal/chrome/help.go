@@ -15,6 +15,7 @@ func helpBody(windowCols int) string {
 	var body []string
 	body = append(body, helpSection(inner, "Tabs"))
 	body = append(body, helpRow(inner, KeyCtrlShift("T"), "New tab"))
+	body = append(body, helpRow(inner, KeyCtrlShift("N"), "New window"))
 	body = append(body, helpRow(inner, KeyCtrl("W"), "Close tab"))
 	body = append(body, helpRow(inner, KeyCtrl("Tab"), "Next / prev"))
 	body = append(body, helpRow(inner, KeyCtrl("1-9"), "Jump"))

@@ -739,6 +739,8 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.newTabUI("")
 	case chrome.ActionNewTabProfile:
 		u.newTabUI(r.ProfileName)
+	case chrome.ActionNewWindow:
+		openNewWindow()
 	case chrome.ActionCloseTab:
 		if p := u.activePage(); p != nil {
 			u.closePageAt(u.active, true)
@@ -1808,6 +1810,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		if ctrl && shift && (wParam == 'T' || wParam == 't') {
 			u.newTabUI("")
+			return 0
+		}
+		if ctrl && shift && (wParam == 'N' || wParam == 'n') {
+			openNewWindow()
 			return 0
 		}
 		// Split panes (Windows Terminal-ish: Alt+Shift+± / Alt+arrows).

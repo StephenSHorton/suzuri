@@ -91,6 +91,7 @@ Go 1.26+ recommended (see `go.mod`). Supported hosts: **Windows** (ConPTY) and *
 | `Ctrl+,` | Settings |
 | `Ctrl+/` | Help |
 | `Ctrl+Shift+T` | New tab |
+| `Ctrl+Shift+N` | New window |
 | `Ctrl+W` | Close tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+1`…`9` | Jump to tab |

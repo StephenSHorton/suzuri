@@ -838,6 +838,8 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		u.newTabUI("")
 	case chrome.ActionNewTabProfile:
 		u.newTabUI(r.ProfileName)
+	case chrome.ActionNewWindow:
+		openNewWindow()
 	case chrome.ActionCloseTab:
 		if t := u.activeTab(); t != nil {
 			u.closeTabUI(t.id)
@@ -1086,6 +1088,10 @@ func (u *macUI) handleKeys() {
 	}
 	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyT) {
 		u.newTabUI("")
+		return
+	}
+	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyN) {
+		openNewWindow()
 		return
 	}
 	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
