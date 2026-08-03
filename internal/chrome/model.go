@@ -746,7 +746,8 @@ func (m Model) OverlayRowCount() int {
 	case m.SplashOpen:
 		return 14
 	case m.HelpOpen:
-		return 20
+		// Two-column compact card; actual height from lipgloss.
+		return 26
 	case m.ConfirmOpen:
 		return 10
 	case m.SettingsOpen:

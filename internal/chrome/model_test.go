@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/StephenSHorton/suzuri/internal/config"
@@ -203,6 +204,32 @@ func TestHelpAndSplash(t *testing.T) {
 	m = r.Model
 	if !m.HelpOpen {
 		t.Fatal("help")
+	}
+	// Wide window → two-column shortcuts (much shorter than single-stack).
+	view := m.OverlayView()
+	h := lipgloss.Height(view)
+	if h < 8 || h > 30 {
+		t.Fatalf("help height=%d (expected two-col card ~14–26 rows)", h)
+	}
+	// Two-col must be shorter than one-col at the same width budget.
+	one := helpBodyOneCol(80)
+	if h >= lipgloss.Height(one) {
+		t.Fatalf("two-col height %d should be < one-col %d", h, lipgloss.Height(one))
+	}
+	if !strings.Contains(view, "Shortcuts") {
+		t.Fatal("help title missing")
+	}
+	if !strings.Contains(view, "Tabs") || !strings.Contains(view, "Terminal") {
+		t.Fatal("help sections missing")
+	}
+	// Narrow window still opens (single column).
+	m2 := New(40)
+	r2 := m2.UpdateChrome(OpenHelpMsg{})
+	if !r2.Model.HelpOpen {
+		t.Fatal("narrow help")
+	}
+	if lipgloss.Height(r2.Model.OverlayView()) < 10 {
+		t.Fatal("narrow help too short")
 	}
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
 	m = r.Model
