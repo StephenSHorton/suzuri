@@ -2167,7 +2167,13 @@ func (u *macUI) persistNotes() {
 func (u *macUI) handleMouse() {
 	_, wheelY := ebiten.Wheel()
 	if wheelY != 0 {
-		if t := u.activeTab(); t != nil {
+		mx, my := ebiten.CursorPosition()
+		// Scroll the pane under the cursor (not only the focused one).
+		t := u.tabUnderPoint(int32(mx), int32(my))
+		if t == nil {
+			t = u.activeTab()
+		}
+		if t != nil {
 			// One notch ≈ a few lines; keep it small so pin-reveal after clear
 			// is progressive (not a full-history flash).
 			steps := int(wheelY * 3)
@@ -2179,16 +2185,19 @@ func (u *macUI) handleMouse() {
 				}
 			}
 			// ebiten: positive wheel is away from user → scroll history up.
+			viewRows := u.rows
+			if g := u.paneGeomFor(t.id); g != nil && g.rows > 0 {
+				viewRows = g.rows
+			}
 			if t.altScreen() {
 				// Full-screen apps own scroll — never host history under them.
 				// Forward wheel as SGR mouse (if tracking) or arrow keys.
-				mx, my := ebiten.CursorPosition()
 				cx, cy, _ := u.pixelToCellInPane(int32(mx), int32(my), t)
 				if b := encodeMouseWheel(t.term, cx+1, cy+1, steps); len(b) > 0 {
-					u.sendKey(b)
+					t.sendKey(b) // that pane's PTY, even if unfocused
 				}
 			} else {
-				t.sb.scrollBy(steps, u.rows)
+				t.sb.scrollBy(steps, viewRows)
 				u.markShellDirty()
 			}
 		}
@@ -2413,6 +2422,29 @@ func (u *macUI) pixelToChromeCol(px int32) int {
 func (u *macUI) pixelToCell(px, py int32) (x, y int) {
 	x, y, _ = u.pixelToCellInPane(px, py, u.activeTab())
 	return x, y
+}
+
+// tabUnderPoint returns the leaf pane under client pixels on the active page,
+// or nil when the cursor is over chrome/sash/empty space.
+func (u *macUI) tabUnderPoint(px, py int32) *tab {
+	if u == nil {
+		return nil
+	}
+	layouts := u.lastPaneLayout
+	if len(layouts) == 0 {
+		layouts = u.computeActiveLayout()
+	}
+	if hi := hitPane(layouts, px, py); hi >= 0 && layouts[hi].pane != nil {
+		return layouts[hi].pane
+	}
+	// Single-pane: any point in the shell band counts as the only leaf.
+	if t := u.activeTab(); t != nil && len(layouts) <= 1 {
+		chromeH := u.chromePixelHeight()
+		if py >= chromeH && py < u.shellBottomY(u.height) {
+			return t
+		}
+	}
+	return nil
 }
 
 // pixelToCellInPane maps client pixels to cell coords within a pane's layout.

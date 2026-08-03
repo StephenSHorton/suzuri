@@ -2560,7 +2560,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return win.DefWindowProc(hwnd, msg, wParam, lParam)
 
 	case win.WM_MOUSEWHEEL:
-		tab := u.activeTab()
+		// Prefer the pane under the cursor so split layouts scroll the hovered leaf.
+		var pt win.POINT
+		if win.GetCursorPos(&pt) {
+			win.ScreenToClient(hwnd, &pt)
+		}
+		tab := u.tabUnderPoint(pt.X, pt.Y)
+		if tab == nil {
+			tab = u.activeTab()
+		}
 		if tab == nil {
 			return 0
 		}
@@ -2574,22 +2582,18 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 		}
 		// Win32: positive delta = wheel away = scroll up.
+		viewRows := u.rows
+		if g := u.paneGeomFor(tab.id); g != nil && g.rows > 0 {
+			viewRows = g.rows
+		}
 		if tab.altScreen() {
 			// Full-screen apps own the surface — never host history under them.
 			// Forward wheel as SGR mouse (if tracking) or arrow keys (Grok, vim, …).
-			var pt win.POINT
-			if win.GetCursorPos(&pt) {
-				win.ScreenToClient(hwnd, &pt)
-			}
 			cx, cy, _ := u.pixelToCellInPane(pt.X, pt.Y, tab)
 			if b := encodeMouseWheel(tab.term, cx+1, cy+1, steps*3); len(b) > 0 {
-				u.sendKey(b)
+				tab.sendKey(b) // hovered pane's PTY, even if unfocused
 			}
 			return 0
-		}
-		viewRows := u.rows
-		if g := u.focusedGeom(); g != nil && g.rows > 0 {
-			viewRows = g.rows
 		}
 		tab.sb.scrollBy(steps*3, viewRows)
 		u.inputOnlyDirty = false
@@ -4296,6 +4300,30 @@ func (u *winUI) focus() {
 func (u *winUI) pixelToCell(px, py int32) (x, y int) {
 	x, y, _ = u.pixelToCellInPane(px, py, u.activeTab())
 	return x, y
+}
+
+// tabUnderPoint returns the leaf pane under client pixels on the active page.
+func (u *winUI) tabUnderPoint(px, py int32) *tab {
+	if u == nil {
+		return nil
+	}
+	layouts := u.lastPaneLayout
+	if len(layouts) == 0 {
+		layouts = u.computeActiveLayout()
+	}
+	if hi := hitPane(layouts, px, py); hi >= 0 && layouts[hi].pane != nil {
+		return layouts[hi].pane
+	}
+	if t := u.activeTab(); t != nil && len(layouts) <= 1 {
+		chromeH := u.chromePixelHeight()
+		if py >= chromeH {
+			shellBot := u.shellBottomY(u.height)
+			if py < shellBot {
+				return t
+			}
+		}
+	}
+	return nil
 }
 
 // updateLinkHover finds an http(s)/www URL under the cursor for primary tint + hand cursor.
