@@ -10,15 +10,19 @@ import (
 )
 
 // ptyKeyFromEbiten maps a key press to PTY bytes for alt-screen apps.
-func ptyKeyFromEbiten(term vt10x.Terminal, key ebiten.Key, ctrl, shift, alt bool) []byte {
-	if alt && !ctrl {
+// super is the macOS Command key (Kitty "super" modifier).
+// kk is the tab's Kitty progressive-enhancement state (may be nil).
+func ptyKeyFromEbiten(term vt10x.Terminal, kk *kittyKeyboard, key ebiten.Key, ctrl, shift, alt, super bool) []byte {
+	// Bare Alt+letter is left for host (focus panes). Alt+Enter is an app key
+	// (Grok newline fallback) and is handled below.
+	if alt && !ctrl && !super && key != ebiten.KeyEnter {
 		return nil
 	}
 	appCursor := term != nil && term.Mode()&vt10x.ModeAppCursor != 0
 
 	switch key {
 	case ebiten.KeyEnter:
-		return []byte{'\r'}
+		return encodeEnter(kk, shift, alt, ctrl, super)
 	case ebiten.KeyEscape:
 		return []byte{0x1b}
 	case ebiten.KeyTab:

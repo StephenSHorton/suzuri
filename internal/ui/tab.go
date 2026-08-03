@@ -69,6 +69,8 @@ type tab struct {
 	// lastCols/lastRows: last ConPTY/VT size applied (skip no-op Resize — rapid
 	// focus/layout thrash was hard-crashing the host via ResizePseudoConsole).
 	lastCols, lastRows int
+	// kitty tracks progressive keyboard enhancement (Shift+Enter → CSI-u for Grok).
+	kitty kittyKeyboard
 }
 
 // busy is true when this tab should show an activity spinner:
@@ -206,24 +208,17 @@ func (t *tab) noteIO() {
 	t.lastIOUnixNano.Store(time.Now().UnixNano())
 }
 
-// conPtyResizeOK is false when ResizePseudoConsole would race the session.
-// Dual alt-screen Grok + resize mid-stream hard-crashes the host (no Go panic).
-// Policy: never resize while on the alternate screen; require a quiet primary
-// buffer before any size change.
+// conPtyResizeOK reports whether a ConPTY/PTY resize may proceed.
+//
+// History: dual alt-screen Grok + ResizePseudoConsole thrash (every-frame
+// settle) hard-crashed the Windows host. That led to a permanent ban on
+// resizing while ModeAltScreen was set — which left Grok/vim letterboxed
+// after split or window resize (TUI kept the old cols×rows forever).
+//
+// Storm prevention lives in the host (layoutDeferred, coalesced settle,
+// same-size no-op in tab.resize, resizeMu). Alt-screen apps must receive
+// the new size so they reflow. Always OK here; hosts may still coalesce.
 func (t *tab) conPtyResizeOK() bool {
-	if t == nil || !t.alive.Load() {
-		return true
-	}
-	// Alt-screen TUIs (Grok, vim, …): keep ConPTY size fixed until they exit.
-	// Paint may letterbox; stability beats a perfect fit under load.
-	if t.altScreen() {
-		return false
-	}
-	const quiet = 2 * time.Second
-	ns := t.lastIOUnixNano.Load()
-	if ns != 0 && time.Since(time.Unix(0, ns)) < quiet {
-		return false
-	}
 	return true
 }
 
@@ -273,13 +268,18 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 		shell:    shell,
 		cwd:      cwd,
 		sess:     sess,
-		term:     vt10x.New(vt10x.WithSize(cols, rows)),
 		sb:       newScrollback(),
 		input:    inputBar{histIdx: -1},
 		writeCh:  make(chan []byte, 256),
 		lastCols: cols,
 		lastRows: rows,
 	}
+	// Feed VT replies (DSR/CPR) and host query answers back into the PTY so
+	// apps can probe Kitty keyboard support and cursor position.
+	t.term = vt10x.New(
+		vt10x.WithSize(cols, rows),
+		vt10x.WithWriter(ptyReplyWriter{t: t}),
+	)
 	t.alive.Store(true)
 	log.Info("tab created", "id", id, "shell", shell, "cwd", cwd, "cols", cols, "rows", rows, "pid", sess.Pid())
 	return t, nil
@@ -321,6 +321,29 @@ func (t *tab) sendKey(b []byte) {
 	select {
 	case t.writeCh <- p:
 	default:
+	}
+}
+
+// ptyReplyWriter is used as vt10x's reply sink (DSR/CPR) → PTY input.
+type ptyReplyWriter struct {
+	t *tab
+}
+
+func (w ptyReplyWriter) Write(p []byte) (int, error) {
+	if w.t == nil || len(p) == 0 {
+		return len(p), nil
+	}
+	w.t.sendKey(p)
+	return len(p), nil
+}
+
+// handleHostQueries answers Kitty keyboard + DA probes from app output.
+func (t *tab) handleHostQueries(data []byte) {
+	if t == nil || len(data) == 0 {
+		return
+	}
+	if reply := t.kitty.consumeHostQueries(data); len(reply) > 0 {
+		t.sendKey(reply)
 	}
 }
 

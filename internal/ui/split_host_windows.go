@@ -210,14 +210,10 @@ func (u *winUI) splitActive(dir splitDir) {
 	focus.sel.clear()
 	setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
 	u.syncChrome()
-	// Prefer paint-only when a sibling is already on alt-screen (Grok) so we
-	// don't ResizePseudoConsole under load. Full settle when safe / later idle.
-	u.relayoutActivePaintOnly()
-	if u.anyPaneConPtyBusy() {
-		u.layoutDeferred = true
-	} else {
-		u.postLayoutSettle()
-	}
+	// Always settle + resize PTYs — including alt-screen Grok/vim so the TUI
+	// reflows into the half-pane. Storm prevention is in layout settle/paint,
+	// not "never resize while alt-screen".
+	u.postLayoutSettle()
 	if dir == splitVert {
 		u.toast("split right")
 	} else {
@@ -375,17 +371,11 @@ func (u *winUI) focusPaneDir(dir int) {
 		setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
 	}
 	u.syncChrome()
-	// Only reflow when Warp bar height would change (alt-screen focus).
-	// Never ResizePseudoConsole under dual Grok — paint-only if unsafe.
+	// Reflow when Warp bar height would change (alt-screen focus).
 	next := u.activeTab()
 	nextAlt := next != nil && next.altScreen()
 	if prevAlt != nextAlt {
-		if u.anyPaneConPtyBusy() {
-			u.layoutDeferred = true
-			u.relayoutActivePaintOnly()
-		} else {
-			u.postLayoutSettle()
-		}
+		u.postLayoutSettle()
 	} else {
 		u.computeActiveLayout()
 	}
@@ -414,12 +404,7 @@ func (u *winUI) focusPaneByID(id int) bool {
 	next := u.activeTab()
 	nextAlt := next != nil && next.altScreen()
 	if prevAlt != nextAlt {
-		if u.anyPaneConPtyBusy() {
-			u.layoutDeferred = true
-			u.relayoutActivePaintOnly()
-		} else {
-			u.postLayoutSettle()
-		}
+		u.postLayoutSettle()
 	} else {
 		u.computeActiveLayout()
 	}

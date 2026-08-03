@@ -648,10 +648,7 @@ func (u *macUI) applyClientSize(w, h int32) {
 			if g.pane == nil || !g.pane.alive.Load() {
 				continue
 			}
-			// Skip resize while alt-screen is busy (same policy as Windows ConPTY).
-			if !g.pane.conPtyResizeOK() {
-				continue
-			}
+			// Always resize — alt-screen TUIs (Grok, vim) must reflow on split.
 			g.pane.resize(g.cols, g.rows)
 		}
 	}
@@ -659,9 +656,6 @@ func (u *macUI) applyClientSize(w, h int32) {
 	if len(u.pages) == 0 {
 		for _, t := range u.tabs {
 			if t == nil || !t.alive.Load() {
-				continue
-			}
-			if !t.conPtyResizeOK() {
 				continue
 			}
 			t.resize(cols, rows)
@@ -723,6 +717,8 @@ func (u *macUI) drainAndParse(tabID int) {
 		}
 		return
 	}
+	// Answer Kitty keyboard / DA probes before VT parse (Grok Shift+Enter).
+	t.handleHostQueries(data)
 	_, _ = t.term.Write(data)
 	t.sb.noteScreen(t.term)
 	if t.sb.atBottom() {
@@ -1545,7 +1541,10 @@ func (u *macUI) handleKeys() {
 
 	// Alt-screen: raw PTY keys (after host shortcuts).
 	if u.appOwnsKeyboard() && tab != nil {
-		if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyC) {
+		// Ctrl alone (not Cmd) for interrupt/paste so Cmd+Enter can be Super+Enter.
+		realCtrl := ebiten.IsKeyPressed(ebiten.KeyControl)
+		super := ebiten.IsKeyPressed(ebiten.KeyMeta)
+		if realCtrl && !shift && !super && inpututil.IsKeyJustPressed(ebiten.KeyC) {
 			if !tab.sel.empty() {
 				u.copySelection()
 			} else {
@@ -1553,13 +1552,13 @@ func (u *macUI) handleKeys() {
 			}
 			return
 		}
-		if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyV) {
+		if realCtrl && !shift && !super && inpututil.IsKeyJustPressed(ebiten.KeyV) {
 			u.pasteClipboard()
 			return
 		}
 		for _, key := range specialKeys {
 			if inpututil.IsKeyJustPressed(key) {
-				if b := ptyKeyFromEbiten(tab.term, key, ctrl, shift, alt); len(b) > 0 {
+				if b := ptyKeyFromEbiten(tab.term, &tab.kitty, key, realCtrl, shift, alt, super); len(b) > 0 {
 					u.sendKey(b)
 				}
 			}

@@ -181,9 +181,8 @@ type winUI struct {
 	inSizeMove bool
 	// layoutSettlePosted coalesces deferred post-resize layout messages.
 	layoutSettlePosted bool
-	// layoutDeferred: ConPTY resize needed but panes are busy (alt-screen Grok
-	// streams). Paint-only relayout hides bars now; full settle when idle.
-	// Dual busy + ResizePseudoConsole mid-stream hard-crashed (no Go panic).
+	// layoutDeferred: size change pending that paint must not re-post every
+	// frame (former settle storm under dual Grok). Blink timer flushes once.
 	layoutDeferred bool
 	// saveFinishPosted / saveNeedFontLayout: deferred settings-save cleanup.
 	saveFinishPosted   bool
@@ -1273,6 +1272,8 @@ func (u *winUI) drainAndParse(tabID int) {
 		}
 		return
 	}
+	// Answer Kitty keyboard / DA probes before VT parse (Grok Shift+Enter).
+	t.handleHostQueries(data)
 	_, _ = t.term.Write(data)
 	t.sb.noteScreen(t.term)
 	// No host image injection on alt-screen (Grok) — use click → modal instead.
@@ -2178,7 +2179,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				}
 				return 0
 			}
-			if b := ptyKeyFromWin(tab.term, wParam, ctrl, shift, alt); len(b) > 0 {
+			if b := ptyKeyFromWin(tab.term, &tab.kitty, wParam, ctrl, shift, alt); len(b) > 0 {
 				u.sendKey(b)
 			}
 			return 0
@@ -2323,6 +2324,23 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 		}
 		return 0
+
+	case win.WM_SYSKEYDOWN:
+		// Alt+key arrives as SYSKEYDOWN. Forward modified Enter (and other app
+		// keys) to alt-screen TUIs so Grok gets Alt+Enter as newline.
+		if u.appOwnsKeyboard() {
+			tab := u.activeTab()
+			if tab != nil {
+				ctrl := win.GetKeyState(win.VK_CONTROL) < 0
+				shift := win.GetKeyState(win.VK_SHIFT) < 0
+				alt := win.GetKeyState(win.VK_MENU) < 0
+				if b := ptyKeyFromWin(tab.term, &tab.kitty, wParam, ctrl, shift, alt); len(b) > 0 {
+					u.sendKey(b)
+					return 0
+				}
+			}
+		}
+		return win.DefWindowProc(hwnd, msg, wParam, lParam)
 
 	case win.WM_MOUSEWHEEL:
 		tab := u.activeTab()
@@ -3028,20 +3046,13 @@ func (u *winUI) anyPaneConPtyBusy() bool {
 	return false
 }
 
-// onAltScreenToggled updates bar geometry for paint without ConPTY resize.
-// Full settle (ResizePseudoConsole) runs later when panes are idle.
+// onAltScreenToggled reflows when a TUI enters/leaves alt-screen (bar hide/show
+// changes usable rows). Always settle so the PTY matches the new leaf size.
 func (u *winUI) onAltScreenToggled(t *tab) {
 	if u == nil {
 		return
 	}
-	u.relayoutActivePaintOnly()
-	if u.anyPaneConPtyBusy() {
-		u.layoutDeferred = true
-		log.Debug("alt screen: paint-only, ConPTY settle deferred", "tab", t.id)
-	} else {
-		u.layoutDeferred = false
-		u.postLayoutSettle()
-	}
+	u.postLayoutSettle()
 	u.requestPaint()
 }
 
@@ -3086,19 +3097,6 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 	if w < 2 || h < 2 {
 		return
 	}
-	// If panes are mid-stream (dual Grok), paint-only and try again later —
-	// never ResizePseudoConsole under load. Do not requestPaint here: the
-	// paint path used to re-post settle every frame → log flood → crash.
-	if u.anyPaneConPtyBusy() {
-		u.layoutDeferred = true
-		u.relayoutActivePaintOnly()
-		u.layoutSettlePosted = false // allow blink to re-post when idle
-		if u.spinTick%32 == 0 {
-			log.Debug("layout settle deferred (pane busy)", "w", w, "h", h)
-		}
-		return
-	}
-
 	log.Info("layout settle begin", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
 	applog.Sync()
 
@@ -3126,8 +3124,10 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 	u.overlayDirty = true
 	u.chromeDirty = true
 
+	// Always apply — including alt-screen TUIs — so split/window resize reflows
+	// Grok. Coalesced settle + same-size no-op prevent ResizePseudoConsole storms.
 	u.applyClientSize(w, h)
-	// applyClientSize may leave layoutDeferred if some panes are still alt-screen.
+	u.layoutDeferred = false
 	log.Info("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows,
 		"deferred", u.layoutDeferred)
 	applog.Sync()
@@ -3197,22 +3197,11 @@ func (u *winUI) applyClientSize(w, h int32) {
 			u.lastShell.w, u.lastShell.h = res.shellW, res.shellH
 			u.inputPx = u.sumActivePaneBarHeights()
 		}
-		deferred := false
 		for _, g := range res.leaves {
 			if g.pane == nil || !g.pane.alive.Load() {
 				continue
 			}
-			// Never ResizePseudoConsole while unsafe (alt-screen / recent I/O).
-			if !g.pane.conPtyResizeOK() {
-				if g.pane.lastCols > 0 && (g.cols != g.pane.lastCols || g.rows != g.pane.lastRows) {
-					deferred = true
-				}
-				continue
-			}
 			g.pane.resize(g.cols, g.rows)
-		}
-		if deferred {
-			u.layoutDeferred = true
 		}
 	}
 	// No pages yet: resize flat tabs to full size (init path).
@@ -3220,10 +3209,6 @@ func (u *winUI) applyClientSize(w, h int32) {
 		tabs := append([]*tab(nil), u.tabs...)
 		for _, t := range tabs {
 			if t == nil || !t.alive.Load() {
-				continue
-			}
-			if !t.conPtyResizeOK() {
-				u.layoutDeferred = true
 				continue
 			}
 			t.resize(cols, rows)

@@ -12,16 +12,17 @@ import (
 // ptyKeyFromWin maps a WM_KEYDOWN to bytes for ConPTY when a full-screen
 // (alt-screen) app owns the keyboard. Host chrome shortcuts are handled first
 // by the caller; this only covers app-bound keys.
-func ptyKeyFromWin(term vt10x.Terminal, wParam uintptr, ctrl, shift, alt bool) []byte {
-	// Leave Alt+… alone (menu / system); bare keys only.
-	if alt && !ctrl {
+// kk is the tab's Kitty progressive-enhancement state (may be nil).
+func ptyKeyFromWin(term vt10x.Terminal, kk *kittyKeyboard, wParam uintptr, ctrl, shift, alt bool) []byte {
+	// Leave bare Alt+letter alone (menus). Alt+Enter is Grok's newline fallback.
+	if alt && !ctrl && wParam != win.VK_RETURN {
 		return nil
 	}
 	appCursor := term != nil && term.Mode()&vt10x.ModeAppCursor != 0
 
 	switch wParam {
 	case win.VK_RETURN:
-		return []byte{'\r'}
+		return encodeEnter(kk, shift, alt, ctrl, false)
 	case win.VK_ESCAPE:
 		return []byte{0x1b}
 	case win.VK_TAB:
