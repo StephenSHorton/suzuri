@@ -489,6 +489,11 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 	if p == nil {
 		return
 	}
+	// Stretch box-drawing / blocks to the full cell so stacked │ and joined ─
+	// form continuous lines (Gohu and most monos leave ink padding → gaps).
+	if p.drawCellGlyph(dst, px, py, r, fr, fg, fb) {
+		return
+	}
 	// Never use Gohu for CJK/halfwidth — it paints .notdef tofu for Index==0.
 	// Prefer CJK face for those; primary mono for Latin/ASCII.
 	var faces []font.Face
