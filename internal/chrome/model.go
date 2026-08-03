@@ -595,9 +595,9 @@ func (m Model) OverlayView() string {
 	case m.RenameOpen:
 		card = m.renderRename(w)
 	case m.NotesOpen:
-		// Main notes UI + contextual shortcuts companion (not a footer on the card).
+		// Interactive notes modal + borderless keys caption (gap via MarginTop).
 		main := m.renderNotes(w)
-		keys := m.renderNotesContextKeys(w)
+		keys := m.renderNotesContextKeys(lipgloss.Width(main), w)
 		card = lipgloss.JoinVertical(lipgloss.Center, main, keys)
 	case m.PaletteOpen:
 		// Crush commands: outer min(70, area), inner = outer − frame.

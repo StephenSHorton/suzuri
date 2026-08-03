@@ -952,39 +952,69 @@ func (m Model) renderNotesListScreen(windowCols int) string {
 	return renderDialogCard(outer, title, body, "")
 }
 
-// renderNotesContextKeys is a companion shortcuts card for the current notes screen
-// (list vs editor vs rename). Shown under the main notes card in OverlayView.
-func (m Model) renderNotesContextKeys(windowCols int) string {
-	outer := clampDialogWidth(40, windowCols)
-	inner := dialogInnerWidth(outer)
-	if inner < 16 {
-		inner = 16
+// renderNotesContextKeys is a non-interactive companion under the notes modal.
+// Panel fill only — no primary border (border = interactive modal).
+// width should match the rendered main card so they center as a pair.
+func (m Model) renderNotesContextKeys(mainWidth, windowCols int) string {
+	if mainWidth < 20 {
+		mainWidth = clampDialogWidth(notesDialogWant, windowCols)
 	}
-	var body []string
+	// Content width inside help padding (Padding 1,2 → 4 horizontal cells).
+	contentW := mainWidth - 4
+	if contentW < 16 {
+		contentW = 16
+	}
+	// Prefer notes dialog inner when the main card is border-wide.
+	inner := dialogInnerWidth(clampDialogWidth(notesDialogWant, windowCols))
+	if contentW > inner && inner >= 16 {
+		contentW = inner
+	}
+
 	var title string
+	var rows []struct{ key, desc string }
 	switch m.notesFocus {
 	case notesFocusList:
 		title = "Notes list"
-		body = append(body, helpRow(inner, KeyUpDown(), "Move selection"))
-		body = append(body, helpRow(inner, "Enter / click", "Open note"))
-		body = append(body, helpRow(inner, "n", "New note"))
-		body = append(body, helpRow(inner, "d / Delete", "Delete note"))
-		body = append(body, helpRow(inner, "Esc", "Close notes"))
-		body = append(body, helpRow(inner, KeyCtrlShift("M"), "Hide notes"))
+		rows = []struct{ key, desc string }{
+			{KeyUpDown(), "Move selection"},
+			{"Enter / click", "Open note"},
+			{"n", "New note"},
+			{"d / Delete", "Delete note"},
+			{"Esc", "Close notes"},
+			{KeyCtrlShift("M"), "Hide notes"},
+		}
 	case notesFocusTitle:
 		title = "Rename note"
-		body = append(body, helpRow(inner, "Enter", "Save name"))
-		body = append(body, helpRow(inner, "Esc", "Cancel"))
-	default: // editor
+		rows = []struct{ key, desc string }{
+			{"Enter", "Save name"},
+			{"Esc", "Cancel"},
+		}
+	default:
 		title = "Note editor"
-		body = append(body, helpRow(inner, "Esc", "Back to list"))
-		body = append(body, helpRow(inner, "F2 / click title", "Rename"))
-		body = append(body, helpRow(inner, KeyCtrl("A"), "Select all"))
-		body = append(body, helpRow(inner, KeyCtrl("C")+" / "+KeyCtrl("X")+" / "+KeyCtrl("V"), "Copy / cut / paste"))
-		body = append(body, helpRow(inner, "Tab", "Insert tab"))
-		body = append(body, helpRow(inner, KeyCtrlShift("M"), "Hide notes"))
+		rows = []struct{ key, desc string }{
+			{"Esc", "Back to list"},
+			{"F2 / click title", "Rename"},
+			{KeyCtrl("A"), "Select all"},
+			{KeyCtrl("C") + " / " + KeyCtrl("X") + " / " + KeyCtrl("V"), "Copy / cut / paste"},
+			{"Tab", "Insert tab"},
+			{KeyCtrlShift("M"), "Hide notes"},
+		}
 	}
-	return renderDialogCard(outer, title, body, "")
+
+	var lines []string
+	lines = append(lines, styleSettingsHelpTitle().
+		Background(colPanel).
+		Width(contentW).
+		MaxHeight(1).
+		Render(title))
+	for _, r := range rows {
+		lines = append(lines, helpRow(contentW, r.key, r.desc))
+	}
+	content := joinLines(lines)
+	// Filled panel, no outline — primary border marks interactive modals only.
+	block := styleSettingsHelpPanel().Width(mainWidth).Render(content)
+	// Gap between interactive modal and this caption (same as settings help).
+	return lipgloss.NewStyle().MarginTop(1).Render(block)
 }
 
 func (m Model) renderNotesListRow(inner, bankIdx int) string {
