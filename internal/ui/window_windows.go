@@ -925,6 +925,8 @@ func (u *winUI) openRenameUI(target chrome.RenameTarget) {
 }
 
 // applyRename sets a custom pane or page title (empty clears the lock).
+// Pane renames never touch page.userTitle when multi-pane (Grok/OSC only
+// rename panes). Solo pages keep strip in sync with the only pane name.
 func (u *winUI) applyRename(target chrome.RenameTarget, name string) {
 	switch target {
 	case chrome.RenameTargetTab:
