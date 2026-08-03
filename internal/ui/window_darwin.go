@@ -2861,14 +2861,28 @@ func (u *macUI) copySelection() {
 }
 
 func (u *macUI) pasteClipboard() {
-	text, err := clipboard.ReadAll()
-	if err != nil || text == "" {
+	// Alt-screen (Grok, …): prefer Kitty Super+V so the app reads the system
+	// pasteboard itself — text, images, and file URLs. Grok's is_paste_key
+	// path probes NSPasteboard for rasters; host-only text paste cannot.
+	if u.appOwnsKeyboard() {
+		if t := u.activeTab(); t != nil && t.kitty.active() {
+			// Super+V → unicode 'v' (118), mods 1+super(8)=9
+			t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
+			return
+		}
+		// No Kitty: inject bracketed paste. Empty frame still triggers Grok's
+		// Event::Paste("") → attachment probe for image-only clipboards.
+		text, err := clipboard.ReadAll()
+		payload := ""
+		if err == nil {
+			payload = strings.ReplaceAll(text, "\r\n", "\n")
+			payload = strings.ReplaceAll(payload, "\n", "\r")
+		}
+		u.sendKey([]byte("\x1b[200~" + payload + "\x1b[201~"))
 		return
 	}
-	if u.appOwnsKeyboard() {
-		payload := strings.ReplaceAll(text, "\r\n", "\n")
-		payload = strings.ReplaceAll(payload, "\n", "\r")
-		u.sendKey([]byte(payload))
+	text, err := clipboard.ReadAll()
+	if err != nil || text == "" {
 		return
 	}
 	in := u.activeInput()
