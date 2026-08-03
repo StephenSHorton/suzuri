@@ -32,3 +32,24 @@ func TestColorDefault(t *testing.T) {
 		t.Fatalf("default fg %d,%d,%d", r, g, b)
 	}
 }
+
+// Reverse video (SGR 7 / lipgloss Reverse) must produce a non-black background
+// so list selection highlights are visible when default-black BG is left transparent.
+func TestReverseVideoHighlightVisible(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(40, 3))
+	if _, err := term.Write([]byte("\x1b[7mSELECTED\x1b[0m")); err != nil {
+		t.Fatal(err)
+	}
+	for x := 0; x < 8; x++ {
+		c := glyphToCell(term.Cell(x, 0))
+		// After reverse: light-ish BG, dark-ish FG (not both black).
+		if c.BR == 0 && c.BG == 0 && c.BB == 0 {
+			t.Fatalf("cell %d reverse BG is black (highlight invisible) FR=%d,%d,%d",
+				x, c.FR, c.FG, c.FB)
+		}
+		if c.FR > 100 && c.BR > 100 {
+			// Both bright — reverse didn't separate ink from field.
+			t.Fatalf("cell %d reverse not contrasted FR=%d BR=%d", x, c.FR, c.BR)
+		}
+	}
+}

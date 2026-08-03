@@ -83,25 +83,15 @@ type cellPix struct {
 }
 
 func glyphToCell(g vt10x.Glyph) cellPix {
-	// attrBold is unexported; Mode bit 1<<2 from vt10x state: attrBold = 1 << iota after reverse, underline
-	// From state.go: attrReverse, attrUnderline, attrBold, attrGfx, attrItalic, attrBlink, attrWrap
-	const (
-		attrReverse = 1 << iota
-		attrUnderline
-		attrBold
-		attrGfx
-		attrItalic
-		attrBlink
-		attrWrap
-	)
+	// Mode bits match vt10x/state.go (attrReverse=1<<0 … attrBold=1<<2 …).
+	const attrBold = 1 << 2
 	bold := g.Mode&attrBold != 0
+	// vt10x setChar already swaps FG/BG into the stored glyph when reverse is
+	// set (and leaves Mode|attrReverse). Do not re-swap here — that undoes
+	// reverse video so selection highlights (SGR 7 / lipgloss Reverse) paint
+	// as normal text with a skipped black default BG (invisible on rain).
 	fr, fg, fb := colorToRGB(g.FG, bold)
 	br, bg, bb := colorToRGB(g.BG, false)
-	if g.Mode&attrReverse != 0 {
-		fr, br = br, fr
-		fg, bg = bg, fg
-		fb, bb = bb, fb
-	}
 	return cellPix{
 		Ch:   displayRune(g.Char),
 		FR:   fr,
