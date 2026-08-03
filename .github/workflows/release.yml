@@ -100,13 +100,19 @@ jobs:
             "$env:ProgramFiles\NSIS\makensis.exe"
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $makensis) { throw "makensis.exe not found after choco install nsis" }
-          $out = "suzuri-$v-windows-amd64-setup.exe"
+          # NSIS File/icon paths are relative to the .nsi script dir — use absolute.
+          $root = (Get-Location).Path
+          $out = Join-Path $root "suzuri-$v-windows-amd64-setup.exe"
+          $exe = Join-Path $root "suzuri.exe"
+          $ico = Join-Path $root "assets\icon\suzuri.ico"
+          if (-not (Test-Path $exe)) { throw "missing $exe" }
+          if (-not (Test-Path $ico)) { throw "missing $ico" }
           & $makensis `
             "/DVERSION=$v" `
             "/DOUTFILE=$out" `
-            "/DSOURCE_EXE=suzuri.exe" `
-            "/DICON=assets\icon\suzuri.ico" `
-            "packaging\windows\suzuri.nsi"
+            "/DSOURCE_EXE=$exe" `
+            "/DICON=$ico" `
+            (Join-Path $root "packaging\windows\suzuri.nsi")
           if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
           Get-Item $out | Format-List Name, Length, FullName
 
