@@ -96,8 +96,8 @@ func TestNewTabFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// 0 Settings, 1 Replay intro, 2 Check for updates, 3 Help, 4 New tab
-	for i := 0; i < 4; i++ {
+	// 0 Settings, 1 Replay intro, 2 Check for updates, 3 Help, 4 Notes, 5 New tab
+	for i := 0; i < 5; i++ {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
 		m = r.Model
 	}
@@ -111,8 +111,8 @@ func TestNewWindowFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// 0 Settings, 1 Replay intro, 2 Check for updates, 3 Help, 4 New tab, 5 New window
-	for i := 0; i < 5; i++ {
+	// … 5 New tab, 6 New window
+	for i := 0; i < 6; i++ {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
 		m = r.Model
 	}
@@ -198,6 +198,32 @@ func TestDismissOverlay(t *testing.T) {
 	r = m.UpdateChrome(DismissOverlayMsg{})
 	if r.Model.PaletteOpen {
 		t.Fatal("palette should close")
+	}
+}
+
+func TestNotesToggleKeepsBuffer(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenNotesMsg{})
+	m = r.Model
+	if !m.NotesOpen {
+		t.Fatal("notes open")
+	}
+	for _, ch := range "hello" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
+	m = r.Model
+	if m.NotesOpen {
+		t.Fatal("notes should close")
+	}
+	if string(m.notesRunes) != "hello" {
+		t.Fatalf("buffer=%q want hello", string(m.notesRunes))
+	}
+	r = m.UpdateChrome(ToggleNotesMsg{})
+	m = r.Model
+	if !m.NotesOpen || string(m.notesRunes) != "hello" {
+		t.Fatalf("reopen open=%v buf=%q", m.NotesOpen, string(m.notesRunes))
 	}
 }
 

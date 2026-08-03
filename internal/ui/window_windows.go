@@ -1842,11 +1842,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		ch := rune(wParam)
 		// Charm overlay (palette filter) owns printable text while open.
 		if u.chrome.OverlayOpen() {
-			if (u.chrome.PaletteOpen || u.chrome.RenameOpen) && ch >= 32 && ch != 0x7f {
+			if (u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen) && ch >= 32 && ch != 0x7f {
 				km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 				r := u.chrome.UpdateChrome(km)
 				u.chrome = r.Model
-				// Filter / rename typing: only dirty the overlay.
+				// Filter / rename / notes typing: only dirty the overlay.
 				u.overlayDirty = true
 				u.overlayCells = nil
 				win.InvalidateRect(hwnd, nil, false)
@@ -1900,8 +1900,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				r := u.chrome.UpdateChrome(*km)
 				u.chrome = r.Model
 				u.applyChromeAction(r)
-				// Palette / rename: only dirty overlay.
-				if u.chrome.PaletteOpen || u.chrome.RenameOpen {
+				// Palette / rename / notes: only dirty overlay.
+				if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen {
 					u.overlayDirty = true
 					u.overlayCells = nil
 				} else {
@@ -1911,6 +1911,29 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				}
 				win.InvalidateRect(hwnd, nil, false)
 			}
+			// Ctrl+V paste into notes while open (clipboard → runes).
+			if u.chrome.NotesOpen && ctrl && !shift && !alt && (wParam == 'V' || wParam == 'v') {
+				if s, err := getClipboardText(hwnd); err == nil && s != "" {
+					m := u.chrome
+					m.NotesPaste(s)
+					u.chrome = m
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+				}
+				return 0
+			}
+			return 0
+		}
+		// Ctrl+Shift+M — toggle scratch notes (in-memory).
+		if ctrl && shift && !alt && (wParam == 'M' || wParam == 'm') {
+			r := u.chrome.UpdateChrome(chrome.ToggleNotesMsg{})
+			u.chrome = r.Model
+			u.overlayCells = nil
+			u.overlayDirty = true
+			u.overlaySceneReady = false
+			u.markChromeDirty()
+			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
 		// F2 — rename focused pane (custom title; empty clears).
@@ -4049,7 +4072,7 @@ func (u *winUI) floatOverLiveShell() bool {
 	if u == nil || u.dimShellModal() {
 		return false
 	}
-	return u.chrome.PaletteOpen || u.chrome.HelpOpen || u.chrome.RenameOpen
+	return u.chrome.PaletteOpen || u.chrome.HelpOpen || u.chrome.RenameOpen || u.chrome.NotesOpen
 }
 
 func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
@@ -4811,6 +4834,15 @@ func teaKeyFromWin(wParam uintptr, ctrl, shift bool) *tea.KeyMsg {
 		return &km
 	case win.VK_RIGHT:
 		km := tea.KeyMsg{Type: tea.KeyRight}
+		return &km
+	case win.VK_DELETE:
+		km := tea.KeyMsg{Type: tea.KeyDelete}
+		return &km
+	case win.VK_HOME:
+		km := tea.KeyMsg{Type: tea.KeyHome}
+		return &km
+	case win.VK_END:
+		km := tea.KeyMsg{Type: tea.KeyEnd}
 		return &km
 	}
 	return nil

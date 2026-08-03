@@ -34,6 +34,7 @@ func helpBody(windowCols int) string {
 	body = append(body, helpRow(inner, KeyCtrl("K"), "Palette (commands, updates, intro)"))
 	body = append(body, helpRow(inner, KeyCtrl(","), "Settings"))
 	body = append(body, helpRow(inner, KeyCtrl("/"), "Help"))
+	body = append(body, helpRow(inner, KeyCtrlShift("M"), "Notes (scratch pad)"))
 	body = append(body, helpRow(inner, "Esc", "Dismiss"))
 	body = append(body, "")
 	body = append(body, helpSection(inner, "Command line"))

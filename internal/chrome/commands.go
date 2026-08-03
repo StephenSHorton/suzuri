@@ -18,6 +18,7 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		{ID: "replay_intro", Title: "Replay intro", Desc: "Play startup curtain again · Appearance", Category: "Appearance", Action: ActionReplayIntro},
 		{ID: "check_updates", Title: "Check for updates", Desc: "GitHub Releases · System", Category: "System", Action: ActionCheckUpdates},
 		{ID: "help", Title: "Keyboard shortcuts", Desc: "Ctrl+/ · Help", Category: "Help", Action: ActionOpenHelp},
+		{ID: "notes", Title: "Notes", Desc: "Ctrl+Shift+M · Scratch pad (session)", Category: "Notes", Action: ActionOpenNotes},
 		{ID: "new_tab", Title: "New tab", Desc: "Ctrl+Shift+T · Tabs", Category: "Tabs", Action: ActionNewTab},
 		{ID: "new_window", Title: "New window", Desc: "Ctrl+Shift+N · Window", Category: "Window", Action: ActionNewWindow},
 	}

@@ -40,6 +40,7 @@ type Model struct {
 	HelpOpen     bool
 	SplashOpen   bool
 	RenameOpen   bool
+	NotesOpen    bool
 	// Sync palette (no bubbles list / tea.Cmd — host key path must stay non-blocking).
 	palAll    []paletteItem
 	palView   []paletteItem
@@ -50,6 +51,11 @@ type Model struct {
 	// Rename dialog (sync, same key path as palette).
 	renameTarget RenameTarget
 	renameBuf    string
+	// Scratch notes (in-memory only; survives hide/show until process exit).
+	notesRunes  []rune
+	notesCursor int
+	notesScroll int
+	notesWrapW  int
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
 }
@@ -129,6 +135,8 @@ const (
 	// ActionApplyRename: Result.Name is the new title (empty clears custom name).
 	// Result.RenameTarget is pane vs strip tab.
 	ActionApplyRename
+	// ActionOpenNotes opens the scratch notes surface (host may also toggle).
+	ActionOpenNotes
 )
 
 // Result pairs the new model with an optional host action.
@@ -153,6 +161,7 @@ type KeyMap struct {
 	Settings  key.Binding
 	Help      key.Binding
 	Quit      key.Binding
+	Notes     key.Binding
 }
 
 // DefaultKeys documents bindings (host also handles most of these).
@@ -166,6 +175,7 @@ var DefaultKeys = KeyMap{
 	Settings:  key.NewBinding(key.WithKeys("ctrl+,"), key.WithHelp("ctrl+,", "settings")),
 	Help:      key.NewBinding(key.WithKeys("ctrl+/"), key.WithHelp("ctrl+/", "help")),
 	Quit:      key.NewBinding(key.WithKeys("ctrl+shift+q"), key.WithHelp("ctrl+shift+q", "quit")),
+	Notes:     key.NewBinding(key.WithKeys("ctrl+shift+m"), key.WithHelp("ctrl+shift+m", "notes")),
 }
 
 type paletteItem struct {
@@ -193,7 +203,8 @@ func (m Model) Init() tea.Cmd { return nil }
 
 // OverlayOpen is true when any modal owns keyboard focus.
 func (m Model) OverlayOpen() bool {
-	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen || m.HelpOpen || m.SplashOpen || m.RenameOpen
+	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen || m.HelpOpen ||
+		m.SplashOpen || m.RenameOpen || m.NotesOpen
 }
 
 // UpdateChrome applies a message and returns host actions.
@@ -275,6 +286,10 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.SplashOpen = true
 	case OpenRenameMsg:
 		m.openRename(msg.Target, msg.Seed)
+	case OpenNotesMsg:
+		m.openNotes()
+	case ToggleNotesMsg:
+		m.toggleNotes()
 	case DismissOverlayMsg:
 		if m.SettingsOpen {
 			settings = m.settings.snap
@@ -290,6 +305,8 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.SplashOpen = false
 		m.RenameOpen = false
 		m.renameBuf = ""
+		// Notes: put away only — keep notesRunes.
+		m.NotesOpen = false
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 	case tea.KeyMsg:
@@ -324,11 +341,25 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			act, renameName = m.handleRenameKey(msg)
 			return Result{Model: m, Action: act, Name: renameName, RenameTarget: renameTarget}
 		}
+		if m.NotesOpen {
+			// Update wrap width for vertical motion from current model width.
+			inner := dialogInnerWidth(clampDialogWidth(56, m.Width))
+			m.notesWrapW = inner - 2
+			if m.notesWrapW < 8 {
+				m.notesWrapW = 8
+			}
+			m.handleNotesKey(msg)
+			return Result{Model: m}
+		}
 		if m.PaletteOpen {
 			// Sync filter/nav — never tea.Cmd (Win32 key path must not block).
 			act, profileName = m.handlePaletteKey(msg)
 			if act == ActionOpenSettings && m.SettingsOpen {
 				settings = m.settings.edit
+			}
+			if act == ActionOpenNotes {
+				m.openNotes()
+				act = ActionNone
 			}
 			return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName}
 		}
@@ -352,6 +383,8 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			act = ActionSettingsPreview
 		case key.Matches(msg, DefaultKeys.Help):
 			m.HelpOpen = true
+		case key.Matches(msg, DefaultKeys.Notes):
+			m.toggleNotes()
 		case key.Matches(msg, DefaultKeys.Quit):
 			act = ActionQuit
 		}
@@ -373,6 +406,9 @@ func (m *Model) closeModalsExcept(keep string) {
 	if keep != "rename" {
 		m.RenameOpen = false
 		m.renameBuf = ""
+	}
+	if keep != "notes" {
+		m.NotesOpen = false // buffer kept
 	}
 	if keep != "help" {
 		m.HelpOpen = false
@@ -521,6 +557,8 @@ func (m Model) OverlayView() string {
 		card = m.settings.render(w)
 	case m.RenameOpen:
 		card = m.renderRename(w)
+	case m.NotesOpen:
+		card = m.renderNotes(w)
 	case m.PaletteOpen:
 		// Crush commands: outer min(70, area), inner = outer − frame.
 		// Sync render — no bubbles list layout/filter on the key path.
@@ -656,6 +694,8 @@ func (m Model) OverlayRowCount() int {
 		return 26
 	case m.RenameOpen:
 		return 8
+	case m.NotesOpen:
+		return notesVisRows + 6
 	case m.PaletteOpen:
 		return 14
 	default:

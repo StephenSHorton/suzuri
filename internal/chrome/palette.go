@@ -105,6 +105,9 @@ func (m *Model) handlePaletteKey(msg tea.KeyMsg) (act HostAction, profile string
 		case ActionOpenHelp:
 			m.HelpOpen = true
 			act = ActionNone
+		case ActionOpenNotes:
+			m.openNotes()
+			act = ActionNone
 		}
 		return act, profile
 	case "up":
