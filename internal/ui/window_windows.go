@@ -993,6 +993,8 @@ func (u *winUI) loop() error {
 	// while Win32 still has the WndProc pointer.
 	wc := win.WNDCLASSEX{
 		CbSize:        uint32(unsafe.Sizeof(win.WNDCLASSEX{})),
+		// CS_DBLCLKS so double-click on tabs / pane titles can open rename.
+		Style:         win.CS_DBLCLKS,
 		LpfnWndProc:   wndProcCallback,
 		HInstance:     hInst,
 		LpszClassName: cname,
@@ -1609,6 +1611,20 @@ func (u *winUI) hitPlus(px int32) bool {
 	}
 	b := u.chrome.PlusBounds()
 	return cellX >= b[0] && cellX < b[1]
+}
+
+// hitPaneTitleBar returns the multi-pane mini-title row under (px,py), if any.
+func (u *winUI) hitPaneTitleBar(px, py int32, layouts []paneGeom) *paneGeom {
+	for i := range layouts {
+		g := &layouts[i]
+		if g.titleH < 1 || g.pane == nil {
+			continue
+		}
+		if px >= g.x && px < g.x+g.w && py >= g.titleY && py < g.titleY+g.titleH {
+			return g
+		}
+	}
+	return nil
 }
 
 func (u *winUI) pixelToChromeCol(px int32) int {
@@ -2235,6 +2251,40 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		win.InvalidateRect(hwnd, nil, false)
 		return 0
 
+	case win.WM_LBUTTONDBLCLK:
+		// Double-click strip tab → rename tab; pane title bar → rename pane.
+		u.focus()
+		px := int32(win.LOWORD(uint32(lParam)))
+		py := int32(win.HIWORD(uint32(lParam)))
+		if u.modalImage != nil || u.chrome.OverlayOpen() {
+			return 0
+		}
+		chH := u.metricH
+		if chH < 1 {
+			chH = cellH
+		}
+		tabStripH := int32(chrome.TabStripRows()) * chH
+		if py < tabStripH {
+			if i := u.hitTab(px); i >= 0 {
+				u.active = i
+				u.selecting = false
+				if t := u.activeTab(); t != nil {
+					t.sel.clear()
+					setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
+				}
+				u.syncChrome()
+				u.openRenameUI(chrome.RenameTargetTab)
+			}
+			return 0
+		}
+		layouts := u.computeActiveLayout()
+		if g := u.hitPaneTitleBar(px, py, layouts); g != nil && g.pane != nil {
+			_ = u.focusPaneByID(g.pane.id)
+			u.openRenameUI(chrome.RenameTargetPane)
+			return 0
+		}
+		return 0
+
 	case win.WM_LBUTTONDOWN:
 		u.focus()
 		px := int32(win.LOWORD(uint32(lParam)))
@@ -2289,7 +2339,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					u.selecting = false
 					if t := u.activeTab(); t != nil {
 						t.sel.clear()
-						setWindowTitle(u.hwnd, "suzuri — "+t.title)
+						setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
 					}
 					u.syncChrome()
 					u.maybeResizeForInput()
