@@ -147,6 +147,10 @@ const (
 	ActionApplyRename
 	// ActionOpenNotes opens the scratch notes surface (host may also toggle).
 	ActionOpenNotes
+	// Zoom adjusts UI font size (host applies FontSizePx + persists).
+	ActionZoomIn
+	ActionZoomOut
+	ActionZoomReset
 )
 
 // Result pairs the new model with an optional host action.

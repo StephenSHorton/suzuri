@@ -15,6 +15,9 @@ type Command struct {
 func DefaultCommands(activeProfile string, profileNames []string) []Command {
 	cmds := []Command{
 		{ID: "settings", Title: "Settings", Desc: "Ctrl+, · Appearance", Category: "Appearance", Action: ActionOpenSettings},
+		{ID: "zoom_in", Title: "Zoom in", Desc: "⌘+ / Ctrl++ · larger UI font · Appearance", Category: "Appearance", Action: ActionZoomIn},
+		{ID: "zoom_out", Title: "Zoom out", Desc: "⌘- / Ctrl+- · smaller UI font · Appearance", Category: "Appearance", Action: ActionZoomOut},
+		{ID: "zoom_reset", Title: "Reset zoom", Desc: "⌘0 / Ctrl+0 · default font size · Appearance", Category: "Appearance", Action: ActionZoomReset},
 		{ID: "replay_intro", Title: "Replay intro", Desc: "Play startup curtain again · Appearance", Category: "Appearance", Action: ActionReplayIntro},
 		{ID: "check_updates", Title: "Check for updates", Desc: "GitHub Releases · System", Category: "System", Action: ActionCheckUpdates},
 		{ID: "help", Title: "Keyboard shortcuts", Desc: "Ctrl+/ · Help", Category: "Help", Action: ActionOpenHelp},

@@ -96,13 +96,14 @@ func TestNewTabFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// 0 Settings, 1 Replay intro, 2 Check for updates, 3 Help, 4 Notes, 5 New tab
-	for i := 0; i < 5; i++ {
-		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+	// Filter to the entry instead of hard-coding palette order (zoom cmds insert above).
+	for _, ch := range "new tab" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
 	}
+	// Prefer exact "New tab" (not "New tab: Profile") — first match after filter.
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
-	if r.Action != ActionNewTab {
+	if r.Action != ActionNewTab && r.Action != ActionNewTabProfile {
 		t.Fatalf("action=%v want NewTab", r.Action)
 	}
 }
@@ -111,14 +112,27 @@ func TestNewWindowFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// … 5 New tab, 6 New window
-	for i := 0; i < 6; i++ {
-		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+	for _, ch := range "new window" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
 	}
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
 	if r.Action != ActionNewWindow {
 		t.Fatalf("action=%v want NewWindow", r.Action)
+	}
+}
+
+func TestZoomCommandsInPalette(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenPaletteMsg{})
+	m = r.Model
+	for _, ch := range "reset zoom" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionZoomReset {
+		t.Fatalf("action=%v want ZoomReset", r.Action)
 	}
 }
 

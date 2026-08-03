@@ -507,6 +507,59 @@ func (u *winUI) applyConfigSave(cfg config.Config) {
 	u.postSaveFinish()
 }
 
+// zoomFont steps UI font size by delta and persists (same path as settings apply).
+func (u *winUI) zoomFont(delta int) {
+	if u == nil || delta == 0 {
+		return
+	}
+	cfg := u.cfg
+	cfg.FontSizePx += delta
+	cfg = config.Normalize(cfg)
+	if cfg.FontSizePx == u.cfg.FontSizePx {
+		u.toast(fmt.Sprintf("font %dpx (limit)", u.cfg.FontSizePx))
+		return
+	}
+	u.chrome.ApplyFontSize(cfg.FontSizePx)
+	// Full live apply + save (font rebuild needs GDI path).
+	u.applyConfigLive(cfg)
+	cfg.Window = u.cfg.Window
+	u.cfg = cfg
+	if err := config.Save(cfg); err != nil {
+		log.Error("zoom save failed", "err", err)
+		u.toast("save failed")
+		return
+	}
+	u.toast(fmt.Sprintf("font %dpx", cfg.FontSizePx))
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+}
+
+func (u *winUI) zoomFontReset() {
+	if u == nil {
+		return
+	}
+	if u.cfg.FontSizePx == config.DefaultFontSizePx {
+		u.toast(fmt.Sprintf("font %dpx (default)", config.DefaultFontSizePx))
+		return
+	}
+	cfg := u.cfg
+	cfg.FontSizePx = config.DefaultFontSizePx
+	u.chrome.ApplyFontSize(cfg.FontSizePx)
+	u.applyConfigLive(cfg)
+	cfg.Window = u.cfg.Window
+	u.cfg = cfg
+	if err := config.Save(cfg); err != nil {
+		log.Error("zoom save failed", "err", err)
+		u.toast("save failed")
+		return
+	}
+	u.toast(fmt.Sprintf("font %dpx (reset)", cfg.FontSizePx))
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+}
+
 // openPaletteSafe builds the command palette off the Ctrl+K keydown stack.
 func (u *winUI) openPaletteSafe() {
 	defer applog.Recover("openPaletteSafe", false)
@@ -920,6 +973,12 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		} else {
 			log.Info("first-run complete")
 		}
+	case chrome.ActionZoomIn:
+		u.zoomFont(+1)
+	case chrome.ActionZoomOut:
+		u.zoomFont(-1)
+	case chrome.ActionZoomReset:
+		u.zoomFontReset()
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
@@ -2136,6 +2195,25 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if ctrl && !shift && wParam == 0xBF {
 			u.openHelpSafe()
 			return 0
+		}
+		// Zoom: Ctrl++ / Ctrl+- / Ctrl+0 (and numpad ±). Works over overlays.
+		if ctrl && !alt {
+			switch wParam {
+			case win.VK_OEM_PLUS, win.VK_ADD: // =/+ key or numpad +
+				// Shift optional: Ctrl+= and Ctrl+Shift+= both zoom in.
+				u.zoomFont(+1)
+				return 0
+			case win.VK_OEM_MINUS, win.VK_SUBTRACT:
+				if !shift {
+					u.zoomFont(-1)
+					return 0
+				}
+			case '0', win.VK_NUMPAD0:
+				if !shift {
+					u.zoomFontReset()
+					return 0
+				}
+			}
 		}
 		if ctrl && shift && (wParam == 'T' || wParam == 't') {
 			u.newTabUI("")

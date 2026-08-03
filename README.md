@@ -97,6 +97,8 @@ Go 1.26+ recommended (see `go.mod`). Supported hosts: **Windows** (ConPTY) and *
 | `Ctrl+K` / `Ctrl+P` | Command palette |
 | `Ctrl+,` | Settings |
 | `Ctrl+/` | Help |
+| `⌘+/⌘-` · `Ctrl++` / `Ctrl+-` | Zoom UI (font size) |
+| `⌘0` · `Ctrl+0` | Reset zoom |
 | `Ctrl+Shift+T` | New tab |
 | `Ctrl+Shift+N` | New window |
 | `Ctrl+W` | Close tab |

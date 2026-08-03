@@ -34,6 +34,25 @@ type settingsState struct {
 	fonts []string
 }
 
+// ApplyFontSize updates lastCfg (and live settings edit/snap if open) so zoom
+// shortcuts stay consistent with Cancel / palette rebuild.
+func (m *Model) ApplyFontSize(px int) {
+	if m == nil {
+		return
+	}
+	if px < 10 {
+		px = 10
+	}
+	if px > 36 {
+		px = 36
+	}
+	m.lastCfg.FontSizePx = px
+	if m.SettingsOpen {
+		m.settings.edit.FontSizePx = px
+		m.settings.snap.FontSizePx = px
+	}
+}
+
 func newSettingsState(cfg config.Config) settingsState {
 	cfg = config.Normalize(cfg)
 	fonts := config.MonoFontFaces()

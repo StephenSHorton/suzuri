@@ -1065,6 +1065,12 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		if err := config.Save(u.cfg); err != nil {
 			log.Warn("first-run flag save failed", "err", err)
 		}
+	case chrome.ActionZoomIn:
+		u.zoomFont(+1)
+	case chrome.ActionZoomOut:
+		u.zoomFont(-1)
+	case chrome.ActionZoomReset:
+		u.zoomFontReset()
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
@@ -1343,6 +1349,51 @@ func (u *macUI) applyConfigSave(cfg config.Config) {
 	u.toast("settings saved")
 }
 
+// zoomFont steps UI font size by delta (clamped via Normalize) and persists.
+func (u *macUI) zoomFont(delta int) {
+	if u == nil || delta == 0 {
+		return
+	}
+	cfg := u.cfg
+	cfg.FontSizePx += delta
+	cfg = config.Normalize(cfg)
+	if cfg.FontSizePx == u.cfg.FontSizePx {
+		u.toast(fmt.Sprintf("font %dpx (limit)", u.cfg.FontSizePx))
+		return
+	}
+	u.applyConfigSaveQuiet(cfg)
+	u.toast(fmt.Sprintf("font %dpx", cfg.FontSizePx))
+}
+
+// zoomFontReset restores the shipping default font size (14 for Gohu).
+func (u *macUI) zoomFontReset() {
+	if u == nil {
+		return
+	}
+	cfg := u.cfg
+	if cfg.FontSizePx == config.DefaultFontSizePx {
+		u.toast(fmt.Sprintf("font %dpx (default)", config.DefaultFontSizePx))
+		return
+	}
+	cfg.FontSizePx = config.DefaultFontSizePx
+	u.applyConfigSaveQuiet(cfg)
+	u.toast(fmt.Sprintf("font %dpx (reset)", cfg.FontSizePx))
+}
+
+// applyConfigSaveQuiet is applyConfigSave without the "settings saved" toast.
+func (u *macUI) applyConfigSaveQuiet(cfg config.Config) {
+	cfg = config.Normalize(cfg)
+	cfg.Window = u.cfg.Window
+	u.chrome.ApplyFontSize(cfg.FontSizePx)
+	u.applyConfigLive(cfg)
+	if err := config.Save(cfg); err != nil {
+		log.Error("zoom save failed", "err", err)
+		u.toast("save failed")
+		return
+	}
+	log.Info("zoom saved", "px", cfg.FontSizePx)
+}
+
 // captureWindowPlacement reads outer frame size/position via ebiten.
 // Position origin is the upper-left of the window's current monitor (GLFW).
 func (u *macUI) captureWindowPlacement() (config.WindowPlacement, bool) {
@@ -1487,6 +1538,30 @@ func (u *macUI) handleKeys() {
 		u.overlayDirty = true
 		return
 	}
+	// Zoom: Cmd (or Ctrl) + / - / 0 — works even while overlays are open.
+	// Use Meta for macOS Command; also accept Control for muscle memory.
+	zoomMod := (ebiten.IsKeyPressed(ebiten.KeyMeta) || ebiten.IsKeyPressed(ebiten.KeyControl)) && !alt
+	if zoomMod && !shift {
+		// Equal key is "+" when Shift held; without Shift still zoom-in (browser style).
+		if inpututil.IsKeyJustPressed(ebiten.KeyEqual) || inpututil.IsKeyJustPressed(ebiten.KeyKPAdd) {
+			u.zoomFont(+1)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyMinus) || inpututil.IsKeyJustPressed(ebiten.KeyKPSubtract) {
+			u.zoomFont(-1)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.Key0) || inpututil.IsKeyJustPressed(ebiten.KeyNumpad0) {
+			u.zoomFontReset()
+			return
+		}
+	}
+	// Shift+= is the physical "+" key on US keyboards (Cmd+Shift+=).
+	if zoomMod && shift && inpututil.IsKeyJustPressed(ebiten.KeyEqual) {
+		u.zoomFont(+1)
+		return
+	}
+
 	// Ctrl+Shift+M — toggle notes (works even while notes overlay is open).
 	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyM) {
 		r := u.chrome.UpdateChrome(chrome.ToggleNotesMsg{})
