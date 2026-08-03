@@ -82,3 +82,27 @@ func TestReverseTruecolorBlackField(t *testing.T) {
 			c.BR, c.BG, c.BB, c.FR, c.FG, c.FB)
 	}
 }
+
+// Grok /resume selection is often truecolor FG + SGR bold with default BG.
+// colorToRGB alone does not brighten truecolor; glyphToCell must still lift
+// ink so arrowing the list changes pixels (bold face is not used on Darwin).
+func TestBoldTruecolorInkBrightens(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(20, 2))
+	// #c0c0c0 normal, then bold same truecolor.
+	if _, err := term.Write([]byte("\x1b[38;2;192;192;192mX\x1b[1mY\x1b[0m")); err != nil {
+		t.Fatal(err)
+	}
+	normal := glyphToCell(term.Cell(0, 0))
+	bold := glyphToCell(term.Cell(1, 0))
+	if !bold.Bold {
+		t.Fatal("expected bold mode on second cell")
+	}
+	if bold.FR <= normal.FR && bold.FG <= normal.FG && bold.FB <= normal.FB {
+		t.Fatalf("bold truecolor ink not brighter: normal=%d,%d,%d bold=%d,%d,%d",
+			normal.FR, normal.FG, normal.FB, bold.FR, bold.FG, bold.FB)
+	}
+	// Default BG stays near-black (transparent host path) — brighten ink only.
+	if !nearBlackRGB(bold.BR, bold.BG, bold.BB) {
+		t.Fatalf("bold should not invent a selection band BR=%d,%d,%d", bold.BR, bold.BG, bold.BB)
+	}
+}

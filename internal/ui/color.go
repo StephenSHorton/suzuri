@@ -95,6 +95,16 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 	// as normal text with a skipped black default BG (invisible on rain).
 	fr, fg, fb := colorToRGB(g.FG, bold)
 	br, bg, bb := colorToRGB(g.BG, false)
+	// Truecolor SGR ignores the bold brighten path in colorToRGB (only ANSI
+	// 0–7 step up). Grok list selection is often text_primary truecolor +
+	// SGR bold + optional bg_visual. When the host skips default-black BG
+	// (rain) and the TUI leaves selection BG as Reset, bold is the only
+	// difference — without a paint-time lift, arrowing the list is a no-op
+	// visually. Always brighten FG when bold so selection is visible even
+	// without a bold face or selection band.
+	if bold {
+		fr, fg, fb = brightenBoldRGB(fr, fg, fb)
+	}
 	// Reverse video always needs an opaque field. If the stored BG still
 	// resolves near-black (truecolor 0 collides with ANSI black; some TUIs
 	// reverse light-on-dark into dark-on-dark), force a light selection field
@@ -120,6 +130,27 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 
 func nearBlackRGB(r, g, b byte) bool {
 	return r < 28 && g < 28 && b < 28
+}
+
+// brightenBoldRGB is a paint-time stand-in for a bold face on truecolor /
+// already-bright ANSI ink (where colorToRGB cannot step the palette).
+// Pushes each channel ~35% toward white — enough to read as "selected" when
+// the only SGR difference is bold (Grok /resume rows).
+func brightenBoldRGB(r, g, b byte) (byte, byte, byte) {
+	return pushTowardWhite(r, 90), pushTowardWhite(g, 90), pushTowardWhite(b, 90)
+}
+
+func pushTowardWhite(c byte, amount int) byte {
+	if amount < 1 {
+		return c
+	}
+	// c + (255-c)*amount/255
+	d := (int(255-c) * amount) / 255
+	v := int(c) + d
+	if v > 255 {
+		return 255
+	}
+	return byte(v)
 }
 
 func displayRune(r rune) rune {
