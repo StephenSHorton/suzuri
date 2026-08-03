@@ -42,6 +42,14 @@ func leafNode(t *tab) *splitNode {
 }
 
 // page is one chrome-strip entry that may contain multiple split panes.
+//
+// Title model (pane vs tab):
+//   - A pane (*tab) always has its own title. OSC sequences from tools like
+//     Grok only ever update the pane (applyTitle) — never the page.
+//   - A page (chrome strip tab) is a separate object even when it has a single
+//     pane. Solo pages follow that pane's display title so the strip stays
+//     useful; multi-pane pages freeze a sticky strip name at first split so
+//     Grok/OSC thrash only shows on the per-pane mini title bars.
 type page struct {
 	// id is stable for chrome (matches first pane id at creation; never reused).
 	id int
@@ -50,8 +58,12 @@ type page struct {
 	// focusID is the focused leaf pane id (*tab.id).
 	focusID int
 	// userTitle is a manual strip name for this page. When set, the chrome tab
-	// label no longer follows the focused pane's title.
+	// label no longer follows panes (or stickyTitle).
 	userTitle string
+	// stickyTitle freezes the strip label when the page first becomes multi-pane
+	// (only if userTitle is empty). Cleared when the page collapses back to one
+	// pane so solo pages follow the remaining pane's OSC title again.
+	stickyTitle string
 }
 
 func newPage(t *tab) *page {
@@ -130,10 +142,19 @@ func (p *page) anyAlive() bool {
 	return false
 }
 
-// title for the strip: page custom name, else focused pane display title.
+// title for the strip:
+//  1. userTitle (manual "Rename tab") always wins
+//  2. multi-pane: stickyTitle (frozen at first split; ignores Grok/OSC)
+//  3. solo (or sticky empty): focused pane display title, then any leaf
 func (p *page) title() string {
-	if p != nil {
-		if s := strings.TrimSpace(p.userTitle); s != "" {
+	if p == nil {
+		return "shell"
+	}
+	if s := strings.TrimSpace(p.userTitle); s != "" {
+		return s
+	}
+	if p.leafCount() > 1 {
+		if s := strings.TrimSpace(p.stickyTitle); s != "" {
 			return s
 		}
 	}
@@ -152,12 +173,45 @@ func (p *page) title() string {
 	return "shell"
 }
 
-// setUserTitle locks a custom strip name (empty clears → follow pane titles).
+// setUserTitle locks a custom strip name (empty clears → sticky/pane titles).
 func (p *page) setUserTitle(name string) {
 	if p == nil {
 		return
 	}
 	p.userTitle = strings.TrimSpace(name)
+}
+
+// captureStickyTitle freezes the current strip label for multi-pane use.
+// No-op when user already locked the tab name or sticky is already set.
+func (p *page) captureStickyTitle() {
+	if p == nil {
+		return
+	}
+	if strings.TrimSpace(p.userTitle) != "" {
+		return
+	}
+	if strings.TrimSpace(p.stickyTitle) != "" {
+		return
+	}
+	// Prefer the current solo/focused display title before the split mutates focus.
+	if t := p.focused(); t != nil {
+		if d := t.displayTitle(); d != "" {
+			p.stickyTitle = d
+			return
+		}
+	}
+	p.stickyTitle = p.title()
+}
+
+// clearStickyTitleIfSolo drops the freeze when only one pane remains so the
+// strip can follow that pane's OSC title again.
+func (p *page) clearStickyTitleIfSolo() {
+	if p == nil {
+		return
+	}
+	if p.leafCount() <= 1 {
+		p.stickyTitle = ""
+	}
 }
 
 func findPane(n *splitNode, id int) *tab {
@@ -194,14 +248,24 @@ func collectLeaves(n *splitNode) []*tab {
 
 // splitFocused replaces the focused leaf with a split of (old | new) in dir.
 // newPane becomes focused. Returns false if focus missing.
+//
+// On the transition from 1 → 2+ panes, freezes the strip label (stickyTitle)
+// so later Grok/OSC updates on individual panes do not thrash the chrome tab.
 func (p *page) splitFocused(dir splitDir, newPane *tab) bool {
 	if p == nil || p.root == nil || newPane == nil {
 		return false
+	}
+	wasSolo := p.leafCount() <= 1
+	if wasSolo {
+		p.captureStickyTitle()
 	}
 	ok := false
 	p.root = splitReplace(p.root, p.focusID, dir, newPane, &ok)
 	if ok {
 		p.focusID = newPane.id
+	} else if wasSolo {
+		// Split failed — don't leave a sticky from a no-op.
+		p.stickyTitle = ""
 	}
 	return ok
 }
@@ -234,6 +298,9 @@ func splitReplace(n *splitNode, id int, dir splitDir, newPane *tab, ok *bool) *s
 
 // removePane drops a leaf by id. Returns the closed pane, whether the page is
 // now empty, and the new focus id (if any).
+//
+// When the page collapses back to a single pane, stickyTitle is cleared so the
+// strip follows that pane again (Grok/OSC renames the only visible title).
 func (p *page) removePane(id int) (closed *tab, empty bool, newFocus int) {
 	if p == nil || p.root == nil {
 		return nil, true, -1
@@ -244,18 +311,21 @@ func (p *page) removePane(id int) (closed *tab, empty bool, newFocus int) {
 		return nil, false, p.focusID
 	}
 	if p.root == nil {
+		p.stickyTitle = ""
 		return removed, true, -1
 	}
 	// Collapse is handled inside removeLeaf; root may be a leaf or branch.
 	leaves := collectLeaves(p.root)
 	if len(leaves) == 0 {
 		p.root = nil
+		p.stickyTitle = ""
 		return removed, true, -1
 	}
 	// If we closed the focused pane, pick a remaining leaf.
 	if p.focusID == id || findPane(p.root, p.focusID) == nil {
 		p.focusID = leaves[0].id
 	}
+	p.clearStickyTitleIfSolo()
 	return removed, false, p.focusID
 }
 

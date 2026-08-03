@@ -1046,13 +1046,27 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 	u.syncChrome()
 }
 
+// openRenameUI seeds and opens the rename dialog for a pane or strip tab.
 func (u *macUI) openRenameUI(target chrome.RenameTarget) {
 	seed := ""
-	if t := u.activeTab(); t != nil {
-		if t.userTitle != "" {
-			seed = t.userTitle
-		} else {
+	switch target {
+	case chrome.RenameTargetTab:
+		if p := u.activePage(); p != nil {
+			if p.userTitle != "" {
+				seed = p.userTitle
+			} else {
+				seed = p.title()
+			}
+		} else if t := u.activeTab(); t != nil {
 			seed = t.displayTitle()
+		}
+	default:
+		if t := u.activeTab(); t != nil {
+			if t.userTitle != "" {
+				seed = t.userTitle
+			} else {
+				seed = t.displayTitle()
+			}
 		}
 	}
 	r := u.chrome.UpdateChrome(chrome.OpenRenameMsg{Target: target, Seed: seed})
@@ -1061,6 +1075,9 @@ func (u *macUI) openRenameUI(target chrome.RenameTarget) {
 	u.overlayDirty = true
 }
 
+// applyRename sets a custom pane or page title (empty clears the lock).
+// Pane renames never touch page.userTitle when multi-pane (Grok/OSC only
+// rename panes). Solo pages keep strip in sync with the only pane name.
 func (u *macUI) applyRename(target chrome.RenameTarget, name string) {
 	switch target {
 	case chrome.RenameTargetTab:
@@ -1070,9 +1087,12 @@ func (u *macUI) applyRename(target chrome.RenameTarget, name string) {
 			t.setUserTitle(name)
 		}
 	default:
-		// Pane rename (or fallback).
 		if t := u.activeTab(); t != nil {
 			t.setUserTitle(name)
+			// Solo page: keep strip in sync with the only pane name.
+			if p := u.activePage(); p != nil && p.leafCount() <= 1 {
+				p.setUserTitle(name)
+			}
 		}
 	}
 	u.markChromeDirty()

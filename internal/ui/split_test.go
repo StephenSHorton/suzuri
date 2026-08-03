@@ -135,6 +135,102 @@ func TestFocusNeighbor(t *testing.T) {
 	}
 }
 
+// Grok/OSC only renames panes. Solo pages follow the pane on the strip;
+// multi-pane pages freeze a sticky strip name so OSC thrash stays on mini titles.
+func TestPageTitleStickyOnSplit(t *testing.T) {
+	a := &tab{id: 0, title: "Grok"}
+	b := &tab{id: 1, title: "shell 2"}
+	p := newPage(a)
+	if got := p.title(); got != "Grok" {
+		t.Fatalf("solo title=%q want Grok", got)
+	}
+	// Pane OSC updates still flow to the solo strip.
+	a.title = "Grok · thinking"
+	if got := p.title(); got != "Grok · thinking" {
+		t.Fatalf("solo follow OSC: %q", got)
+	}
+	if !p.splitFocused(splitVert, b) {
+		t.Fatal("split")
+	}
+	if p.stickyTitle != "Grok · thinking" {
+		t.Fatalf("sticky frozen at split=%q", p.stickyTitle)
+	}
+	// Focus moves to b; strip must not follow the new pane's title.
+	if p.focusID != 1 {
+		t.Fatalf("focus=%d want 1", p.focusID)
+	}
+	if got := p.title(); got != "Grok · thinking" {
+		t.Fatalf("multi strip=%q want sticky", got)
+	}
+	// OSC on either pane must not change the chrome strip.
+	a.title = "Grok A"
+	b.title = "Grok B"
+	if got := p.title(); got != "Grok · thinking" {
+		t.Fatalf("multi strip thrash=%q", got)
+	}
+	// Manual tab rename still wins.
+	p.setUserTitle("work")
+	if got := p.title(); got != "work" {
+		t.Fatalf("userTitle=%q", got)
+	}
+	p.setUserTitle("")
+	if got := p.title(); got != "Grok · thinking" {
+		t.Fatalf("clear user → sticky=%q", got)
+	}
+	// Collapse to solo: sticky clears, strip follows remaining pane.
+	closed, empty, _ := p.removePane(0)
+	if closed != a || empty || p.leafCount() != 1 {
+		t.Fatalf("remove a: closed=%v empty=%v leaves=%d", closed, empty, p.leafCount())
+	}
+	if p.stickyTitle != "" {
+		t.Fatalf("sticky should clear on solo, got %q", p.stickyTitle)
+	}
+	if got := p.title(); got != "Grok B" {
+		t.Fatalf("solo after collapse=%q want Grok B", got)
+	}
+	b.title = "Grok B updated"
+	if got := p.title(); got != "Grok B updated" {
+		t.Fatalf("solo follow again=%q", got)
+	}
+}
+
+func TestPageTitleUserLockIgnoresStickyCapture(t *testing.T) {
+	a := &tab{id: 0, title: "Grok"}
+	b := &tab{id: 1, title: "other"}
+	p := newPage(a)
+	p.setUserTitle("locked")
+	if !p.splitFocused(splitVert, b) {
+		t.Fatal("split")
+	}
+	if p.stickyTitle != "" {
+		t.Fatalf("should not capture sticky when userTitle set, got %q", p.stickyTitle)
+	}
+	if got := p.title(); got != "locked" {
+		t.Fatalf("title=%q want locked", got)
+	}
+	a.title = "should not matter"
+	if got := p.title(); got != "locked" {
+		t.Fatalf("user lock broken: %q", got)
+	}
+}
+
+func TestPaneUserTitleDoesNotChangeMultiStrip(t *testing.T) {
+	a := &tab{id: 0, title: "Grok"}
+	b := &tab{id: 1, title: "shell"}
+	p := newPage(a)
+	if !p.splitFocused(splitVert, b) {
+		t.Fatal("split")
+	}
+	// Simulate F2 rename on focused pane only (multi: strip stays sticky).
+	b.setUserTitle("notes")
+	if got := p.title(); got != "Grok" {
+		t.Fatalf("multi strip after pane rename=%q want sticky Grok", got)
+	}
+	if b.displayTitle() != "notes" {
+		t.Fatalf("pane display=%q", b.displayTitle())
+	}
+}
+
 // hitPane returns a layout index; click-to-focus must use layouts[i].pane.id
 // (not the index). Regression: macOS once passed the index into setFocus,
 // which fails when pane ids are not 0,1,2…

@@ -26,11 +26,17 @@ type tabHost interface {
 }
 
 // tab is one shell session: PTY + VT grid + scrollback + Warp input bar.
+//
+// In the split model this is a *pane* (leaf). A chrome strip *tab* is a page
+// that may hold one or more panes — see page in split.go. Grok and other
+// tools only rename panes via OSC (applyTitle); the page strip may follow a
+// solo pane or keep a sticky/multi-pane name independent of OSC.
 type tab struct {
 	id    int
 	title string // auto title from OSC / shell (updated while tools run)
 	// userTitle is a manual name; when set it wins over OSC auto titles for
-	// chrome strip + pane title paint. Empty string means “follow auto title”.
+	// chrome strip (solo page) + pane title paint. Empty string means “follow
+	// auto title”.
 	userTitle string
 	shell     string // launch command line (for MCP diag)
 	// cwd is the shell working directory (OSC from quiet prompt + best-effort
