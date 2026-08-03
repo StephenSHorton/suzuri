@@ -252,8 +252,28 @@ func (u *macUI) markChromeDirty() {
 
 func (u *macUI) toast(msg string) {
 	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg(msg)).Model
-	u.statusUntil = time.Now().Add(2500 * time.Millisecond)
+	dur := 2500 * time.Millisecond
+	if strings.Contains(msg, "update") || strings.Contains(msg, "up to date") ||
+		strings.Contains(msg, "installing") {
+		dur = 4 * time.Second
+	}
+	u.statusUntil = time.Now().Add(dur)
 	u.markChromeDirty()
+}
+
+// postToast queues a toast onto the ebiten UI tick (safe from goroutines).
+func (u *macUI) postToast(msg string) {
+	if u == nil {
+		return
+	}
+	if u.jobs != nil {
+		select {
+		case u.jobs <- func() { u.toast(msg) }:
+			return
+		default:
+		}
+	}
+	u.toast(msg)
 }
 
 func (u *macUI) clearToastIfDue() {
@@ -862,7 +882,7 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
-		runUpdateCheck(u.toast)
+		runUpdateCheck(u.postToast)
 	}
 	u.syncChrome()
 }

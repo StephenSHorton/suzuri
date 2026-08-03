@@ -43,6 +43,9 @@ const (
 	// wmSuzuriOpenPalette rebuilds the bubbles list off the Ctrl+K keydown stack
 	// (rebuild + first View on KEYDOWN hard-crashed for some users).
 	wmSuzuriOpenPalette = win.WM_APP + 7
+	// wmSuzuriToast delivers a status toast from a background goroutine
+	// (manual update check) onto the UI thread.
+	wmSuzuriToast = win.WM_APP + 8
 )
 
 // Run opens a native Win32 window with one shell tab (more via Ctrl+Shift+T).
@@ -197,6 +200,10 @@ type winUI struct {
 	// Grok sessions) used to PostMessage+invalidate on every PTY chunk and
 	// hard-crash GDI with no Go panic trail.
 	paintPending bool
+
+	// toastPending is set from background goroutines; drained on wmSuzuriToast.
+	toastMu      sync.Mutex
+	toastPending string
 
 	// MCP bridge: loopback HTTP for spawn-on-demand stdio MCP (see internal/bridge).
 	bridge  *bridge.Host
@@ -567,13 +574,35 @@ func (u *winUI) finishConfigSave() {
 	applog.Sync()
 }
 
-// toast sets a short-lived status line under the tab strip.
+// toast sets a short-lived status line under the tab strip (UI thread only).
 func (u *winUI) toast(msg string) {
 	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg(msg)).Model
-	u.statusUntil = time.Now().Add(2500 * time.Millisecond)
+	// Update results need a bit longer to read than split toasts.
+	dur := 2500 * time.Millisecond
+	if strings.Contains(msg, "update") || strings.Contains(msg, "up to date") ||
+		strings.Contains(msg, "installing") {
+		dur = 4 * time.Second
+	}
+	u.statusUntil = time.Now().Add(dur)
 	u.markChromeDirty()
 	if u.hwnd != 0 {
 		win.InvalidateRect(u.hwnd, nil, false)
+	}
+}
+
+// postToast queues a toast for the UI thread (safe from background goroutines).
+func (u *winUI) postToast(msg string) {
+	if u == nil {
+		return
+	}
+	u.toastMu.Lock()
+	u.toastPending = msg
+	u.toastMu.Unlock()
+	if u.hwnd != 0 {
+		if win.PostMessage(u.hwnd, wmSuzuriToast, 0, 0) == 0 {
+			// Best-effort: if post fails, try inline (may race if off UI thread).
+			u.toast(msg)
+		}
 	}
 }
 
@@ -787,7 +816,7 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
-		runUpdateCheck(u.toast)
+		runUpdateCheck(u.postToast)
 	}
 	u.syncChrome()
 }
@@ -1572,6 +1601,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case wmSuzuriSaveFinish:
 		u.finishConfigSave()
+		return 0
+
+	case wmSuzuriToast:
+		u.toastMu.Lock()
+		msg := u.toastPending
+		u.toastPending = ""
+		u.toastMu.Unlock()
+		if msg != "" {
+			u.toast(msg)
+		}
 		return 0
 
 	case wmSuzuriOpenPalette:
