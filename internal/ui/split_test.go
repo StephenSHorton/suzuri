@@ -134,3 +134,59 @@ func TestFocusNeighbor(t *testing.T) {
 		t.Fatalf("want focus 1 got %d", p.focusID)
 	}
 }
+
+// hitPane returns a layout index; click-to-focus must use layouts[i].pane.id
+// (not the index). Regression: macOS once passed the index into setFocus,
+// which fails when pane ids are not 0,1,2…
+func TestHitPaneClickFocusUsesPaneID(t *testing.T) {
+	a := &tab{id: 10}
+	b := &tab{id: 20}
+	p := newPage(a)
+	if !p.splitFocused(splitVert, b) {
+		t.Fatal("split")
+	}
+	// After split, focus is on b (20).
+	if p.focusID != 20 {
+		t.Fatalf("focus after split=%d want 20", p.focusID)
+	}
+	geoms := layoutPage(p.root, 0, 0, 200, 100, 10, 10, p.focusID).leaves
+	if len(geoms) != 2 {
+		t.Fatalf("leaves=%d", len(geoms))
+	}
+	// Click the left pane (a, id 10).
+	var left *paneGeom
+	for i := range geoms {
+		if geoms[i].pane != nil && geoms[i].pane.id == 10 {
+			left = &geoms[i]
+			break
+		}
+	}
+	if left == nil {
+		t.Fatal("left pane missing")
+	}
+	hi := hitPane(geoms, left.x+1, left.outerY+1)
+	if hi < 0 {
+		t.Fatal("hitPane miss")
+	}
+	// Index is not the pane id when ids are 10/20.
+	if hi == 10 || hi == 20 {
+		t.Fatalf("hitPane returned id-like index %d (test assumption broken)", hi)
+	}
+	if geoms[hi].pane == nil || geoms[hi].pane.id != 10 {
+		t.Fatalf("hit index %d pane=%v", hi, geoms[hi].pane)
+	}
+	// Wrong: setFocus(layout index) must not steal focus to a missing id.
+	if p.setFocus(hi) {
+		t.Fatalf("setFocus(%d) should fail (no pane with that id)", hi)
+	}
+	if p.focusID != 20 {
+		t.Fatalf("focus changed after bad setFocus: %d", p.focusID)
+	}
+	// Right: setFocus(pane.id).
+	if !p.setFocus(geoms[hi].pane.id) {
+		t.Fatal("setFocus(pane.id) failed")
+	}
+	if p.focusID != 10 {
+		t.Fatalf("focus=%d want 10", p.focusID)
+	}
+}

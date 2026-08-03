@@ -1928,14 +1928,22 @@ func (u *macUI) handleMouse() {
 	if justPressed {
 		// Sash drag start (multi-pane).
 		if !u.chrome.OverlayOpen() {
+			layouts := u.computeActiveLayout()
 			if si := hitSash(u.lastSashes, int32(mx), int32(my)); si >= 0 && si < len(u.lastSashes) {
 				s := u.lastSashes[si]
 				u.sashDrag = &s
 				return
 			}
-			// Click-to-focus pane.
-			if id := hitPane(u.lastPaneLayout, int32(mx), int32(my)); id >= 0 {
-				_ = u.focusPaneByID(id)
+			// Click-to-focus: hitPane returns a layout index, not pane id.
+			if hi := hitPane(layouts, int32(mx), int32(my)); hi >= 0 && layouts[hi].pane != nil {
+				g := layouts[hi]
+				// Input bar: focus only (no shell selection).
+				if g.barH > 0 && int32(my) >= g.barY && int32(my) < g.barY+g.barH {
+					_ = u.focusPaneByID(g.pane.id)
+					return
+				}
+				_ = u.focusPaneByID(g.pane.id)
+				// Fall through so a drag can still start selection on the new focus.
 			}
 		}
 		// Overlay card hits (notes list/title/editor) or dismiss outside.
@@ -1991,8 +1999,16 @@ func (u *macUI) handleMouse() {
 		if tab == nil {
 			return
 		}
-		x, y := u.pixelToCell(int32(mx), int32(my))
-		absY := tab.sb.absLine(y, u.rows, liveExtent(tab.term))
+		// Don't start shell selection on the focused pane's bar region.
+		if g := u.focusedGeom(); g != nil && g.barH > 0 && int32(my) >= g.barY {
+			return
+		}
+		// Alt-screen TUIs own the surface (no host selection over Grok).
+		if tab.altScreen() {
+			return
+		}
+		x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
+		absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
 		tab.sel.active = true
 		tab.sel.x0, tab.sel.y0 = x, absY
 		tab.sel.x1, tab.sel.y1 = x, absY
@@ -2017,11 +2033,7 @@ func (u *macUI) handleMouse() {
 	if pressed && u.selecting {
 		tab := u.activeTab()
 		if tab != nil {
-			x, y := u.pixelToCell(int32(mx), int32(my))
-			viewRows := u.rows
-			if g := u.focusedGeom(); g != nil && g.rows > 0 {
-				viewRows = g.rows
-			}
+			x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
 			absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
 			tab.sel.x1, tab.sel.y1 = x, absY
 		}
@@ -2081,6 +2093,13 @@ func (u *macUI) pixelToChromeCol(px int32) int {
 }
 
 func (u *macUI) pixelToCell(px, py int32) (x, y int) {
+	x, y, _ = u.pixelToCellInPane(px, py, u.activeTab())
+	return x, y
+}
+
+// pixelToCellInPane maps client pixels to cell coords within a pane's layout.
+// viewRows is the pane viewport height for scrollback absLine.
+func (u *macUI) pixelToCellInPane(px, py int32, tab *tab) (x, y, viewRows int) {
 	cw, ch := u.metricW, u.metricH
 	if cw < 1 {
 		cw = cellW
@@ -2088,8 +2107,21 @@ func (u *macUI) pixelToCell(px, py int32) (x, y int) {
 	if ch < 1 {
 		ch = cellH
 	}
-	const padX int32 = 4
+	viewRows = u.rows
+	cols := u.cols
+	padX := int32(4)
 	padY := u.shellPadY()
+	if tab != nil {
+		if g := u.paneGeomFor(tab.id); g != nil {
+			padX, padY = g.x, g.y
+			if g.rows > 0 {
+				viewRows = g.rows
+			}
+			if g.cols > 0 {
+				cols = g.cols
+			}
+		}
+	}
 	x = int((px - padX) / cw)
 	y = int((py - padY) / ch)
 	if x < 0 {
@@ -2098,13 +2130,13 @@ func (u *macUI) pixelToCell(px, py int32) (x, y int) {
 	if y < 0 {
 		y = 0
 	}
-	if x >= u.cols {
-		x = u.cols - 1
+	if cols > 0 && x >= cols {
+		x = cols - 1
 	}
-	if y >= u.rows {
-		y = u.rows - 1
+	if viewRows > 0 && y >= viewRows {
+		y = viewRows - 1
 	}
-	return x, y
+	return x, y, viewRows
 }
 
 func (u *macUI) copySelection() {
