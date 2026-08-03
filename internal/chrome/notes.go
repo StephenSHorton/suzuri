@@ -14,7 +14,6 @@ import (
 const (
 	notesListRows   = 12 // rows in list browser OR editor body
 	notesMaxRunes   = 64 * 1024
-	notesCaretChar  = "▌"
 	notesTabStop    = 4
 	notesMaxBank    = 48
 	notesDialogWant = 56
@@ -1092,8 +1091,8 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 		wrapW = 8
 	}
 
-	// Fixed chrome title "Note"; note name lives only on the title field row
-	// (avoids green title twice + rename hint on the interactive card).
+	// Fixed chrome title "Note"; note name lives only on the title field row.
+	// Caret is painted by the host (same block/underline/bar as the terminal).
 	nameLine := m.renderNotesNameRow(inner)
 	edLines := notesSoftLines(m.notesRunes, wrapW)
 	scroll := m.notesScroll
@@ -1103,8 +1102,6 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 	if scroll > 0 && scroll >= len(edLines) {
 		scroll = len(edLines) - 1
 	}
-	crow, _ := notesCursorRowCol(m.notesRunes, edLines, m.notesCursor)
-	caretOff := notesRuneOffset(edLines, crow, m.notesCursor)
 	selLo, selHi := 0, 0
 	hasSel := m.notesSel >= 0 && m.notesSel != m.notesCursor
 	if hasSel {
@@ -1120,14 +1117,7 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 		ei := scroll + i
 		if ei < len(edLines) {
 			ln := edLines[ei]
-			// Caret only in body while editor-focused (title mode keeps body idle).
-			isCur := m.notesFocus == notesFocusEditor && ei == crow
-			body = append(body, m.renderNotesEditorLine(ln, isCur, caretOff, hasSel, selLo, selHi, inner, wrapW))
-			continue
-		}
-		if ei == 0 && len(m.notesRunes) == 0 && m.notesFocus == notesFocusEditor {
-			body = append(body, styleDialogValue().Width(inner).MaxHeight(1).Padding(0, 1).
-				Render(padFit(notesCaretChar, wrapW)))
+			body = append(body, m.renderNotesEditorLine(ln, hasSel, selLo, selHi, inner, wrapW))
 			continue
 		}
 		if ei == 0 && len(m.notesRunes) == 0 {
@@ -1140,6 +1130,60 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 	}
 
 	return renderDialogCard(outer, "Note", body, "")
+}
+
+// NotesCaretCell returns the caret cell in the full-width overlay grid.
+// Host paints block/underline/bar using the user's terminal cursor setting.
+// ok is false on the list screen or when the caret is scrolled out of view.
+func (m Model) NotesCaretCell(cols int) (cellX, cellY int, ok bool) {
+	if !m.NotesOpen {
+		return 0, 0, false
+	}
+	if m.notesFocus != notesFocusEditor && m.notesFocus != notesFocusTitle {
+		return 0, 0, false
+	}
+	if cols < 20 {
+		cols = 20
+	}
+	outer := clampDialogWidth(notesDialogWant, cols)
+	inner := dialogInnerWidth(outer)
+	if inner < 20 {
+		inner = 20
+	}
+	cardLeft := (cols - outer) / 2
+	if cardLeft < 0 {
+		cardLeft = 0
+	}
+	h, _ := dialogFrameSize()
+	// Content origin: left frame half (border+pad) + body line Padding(0,1).
+	textLeft := cardLeft + h/2 + 1
+	wrapW := inner - 2
+	if wrapW < 8 {
+		wrapW = 8
+	}
+
+	// Overlay rows for editor card (see computeNotesLayout).
+	const nameY = 3
+	const bodyY0 = 4
+
+	if m.notesFocus == notesFocusTitle {
+		col := lipgloss.Width(m.notesTitle)
+		if col > wrapW {
+			col = wrapW
+		}
+		return textLeft + col, nameY, true
+	}
+
+	lines := notesSoftLines(m.notesRunes, wrapW)
+	row, visCol := notesCursorRowCol(m.notesRunes, lines, m.notesCursor)
+	screenRow := row - m.notesScroll
+	if screenRow < 0 || screenRow >= notesListRows {
+		return 0, 0, false
+	}
+	if visCol > wrapW {
+		visCol = wrapW
+	}
+	return textLeft + visCol, bodyY0 + screenRow, true
 }
 
 // computeNotesLayout fills m.notesLayout for click tests (list vs editor screen).
@@ -1188,16 +1232,16 @@ func (m *Model) computeNotesLayout(windowCols int) {
 }
 
 func (m Model) renderNotesNameRow(inner int) string {
-	// Title field only — no shortcut copy (that lives on the keys caption).
+	// Title field only — host draws the caret when this row is focused.
 	if m.notesFocus == notesFocusTitle {
 		body := m.notesTitle
 		if body == "" {
 			return styleDialogHint().Width(inner).MaxHeight(1).Padding(0, 1).
-				Render(padFit(notesCaretChar+"name…", inner-2))
+				Render(padFit("name…", inner-2))
 		}
 		// Active edit: selection-style fill so focus is obvious on this row only.
 		return styleDialogActive().Width(inner).MaxHeight(1).
-			Render(padFit(body+notesCaretChar, inner))
+			Render(padFit(body, inner))
 	}
 	label := "Untitled"
 	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
@@ -1208,33 +1252,9 @@ func (m Model) renderNotesNameRow(inner int) string {
 		Render(padFit(label, inner-2))
 }
 
-func (m Model) renderNotesEditorLine(ln notesLine, isCursorRow bool, caretOff int, hasSel bool, selLo, selHi, inner, wrapW int) string {
+func (m Model) renderNotesEditorLine(ln notesLine, hasSel bool, selLo, selHi, inner, wrapW int) string {
 	seg := m.notesRunes[ln.start:ln.end]
-	var parts []string
-	if !isCursorRow {
-		parts = append(parts, m.notesStyledSpan(seg, hasSel, selLo, selHi, ln.start, 0))
-	} else {
-		pos := ln.start
-		for i := 0; i <= len(seg); i++ {
-			abs := ln.start + i
-			if i == caretOff {
-				if abs > pos {
-					vis := notesVisualCol(m.notesRunes, ln.start, pos)
-					parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:abs], hasSel, selLo, selHi, pos, vis))
-					pos = abs
-				}
-				parts = append(parts, styleDialogHintKey().Render(notesCaretChar))
-			}
-			if i == len(seg) {
-				break
-			}
-		}
-		if pos < ln.end {
-			vis := notesVisualCol(m.notesRunes, ln.start, pos)
-			parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:ln.end], hasSel, selLo, selHi, pos, vis))
-		}
-	}
-	content := strings.Join(parts, "")
+	content := m.notesStyledSpan(seg, hasSel, selLo, selHi, ln.start, 0)
 	w := lipgloss.Width(content)
 	if w < wrapW {
 		content += styleDialogValue().Render(strings.Repeat(" ", wrapW-w))

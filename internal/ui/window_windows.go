@@ -5027,6 +5027,33 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 	// (settings + help), shift up so the bottom caption is not clipped.
 	oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
 	u.paintChromeCells(hdc, rect, u.overlayCells, 0, oy, false)
+	// Notes editor caret: same block/underline/bar as the terminal cursor.
+	u.paintNotesCaret(hdc, oy)
+}
+
+// paintNotesCaret draws the notes body/title caret using cfg.Cursor.
+func (u *winUI) paintNotesCaret(hdc win.HDC, overlayOY int32) {
+	if u == nil || hdc == 0 || !u.chrome.NotesOpen {
+		return
+	}
+	cols := u.cols
+	if cols < 20 {
+		cols = 20
+	}
+	cx, cy, ok := u.chrome.NotesCaretCell(cols)
+	if !ok {
+		return
+	}
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	x := int32(cx) * cw
+	y := overlayOY + int32(cy)*ch
+	u.paintInputCaret(hdc, x, y, cw, ch)
 }
 
 // teaKeyFromWin maps Win32 navigation keys into Bubble Tea messages for the
