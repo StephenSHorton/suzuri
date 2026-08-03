@@ -14,7 +14,7 @@ const (
 	notesVisRows   = 12
 	notesMaxRunes  = 64 * 1024
 	notesCaretChar = "▌"
-	notesTabSpaces = "    " // 4 spaces (visible indent; no bare tab glyph)
+	notesTabStop   = 4 // display width advances to next multiple of this
 )
 
 // OpenNotesMsg opens the notes surface (buffer preserved across open/close).
@@ -147,8 +147,8 @@ func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 		m.notesInsert("\n")
 		return
 	case "tab", "shift+tab":
-		// Indent with spaces (shift+tab same for now; real outdent later).
-		m.notesInsert(notesTabSpaces)
+		// Real tab character (shift+tab same for now; outdent later).
+		m.notesInsert("\t")
 		return
 	case "backspace":
 		if m.notesDeleteSel() {
@@ -194,14 +194,11 @@ func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 		return
 	default:
 		// Esc puts away; ctrl+c is copy (host clipboard), not close.
+		// Keep \t as a real tab; drop other C0 controls.
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
 			var b strings.Builder
 			for _, r := range msg.Runes {
-				if r == '\t' {
-					b.WriteString(notesTabSpaces)
-					continue
-				}
-				if r >= 32 {
+				if r == '\t' || r >= 32 {
 					b.WriteRune(r)
 				}
 			}
@@ -348,7 +345,7 @@ func (m *Model) notesMoveVert(dir int, extend bool) {
 		w = 40
 	}
 	lines := notesSoftLines(m.notesRunes, w)
-	row, col := notesCursorRowCol(lines, m.notesCursor)
+	row, visCol := notesCursorRowCol(m.notesRunes, lines, m.notesCursor)
 	row += dir
 	if row < 0 {
 		m.notesCursor = 0
@@ -361,13 +358,10 @@ func (m *Model) notesMoveVert(dir int, extend bool) {
 		return
 	}
 	ln := lines[row]
-	if col > ln.width {
-		col = ln.width
+	if visCol > ln.width {
+		visCol = ln.width
 	}
-	m.notesCursor = ln.start + col
-	if m.notesCursor > ln.end {
-		m.notesCursor = ln.end
-	}
+	m.notesCursor = notesIndexAtVisual(m.notesRunes, ln.start, ln.end, visCol)
 	if m.notesCursor > len(m.notesRunes) {
 		m.notesCursor = len(m.notesRunes)
 	}
@@ -383,7 +377,7 @@ func (m *Model) notesEnsureCursorVisible(wrapW int) {
 		w = 40
 	}
 	lines := notesSoftLines(m.notesRunes, w)
-	row, _ := notesCursorRowCol(lines, m.notesCursor)
+	row, _ := notesCursorRowCol(m.notesRunes, lines, m.notesCursor)
 	if row < m.notesScroll {
 		m.notesScroll = row
 	}
@@ -412,8 +406,44 @@ func (m *Model) NotesCutSelection() bool {
 
 type notesLine struct {
 	start, end int // half-open index into runes
-	width      int
+	width      int // visual columns
 	hard       bool
+}
+
+// notesTabWidth is how many display columns a tab occupies at visual col.
+func notesTabWidth(col int) int {
+	stop := notesTabStop
+	if stop < 1 {
+		stop = 4
+	}
+	return stop - (col % stop)
+}
+
+func notesDisplayWidth(r rune, col int) int {
+	if r == '\t' {
+		return notesTabWidth(col)
+	}
+	return 1
+}
+
+// notesExpandTabs turns tabs into spaces for display only (buffer keeps \t).
+func notesExpandTabs(rs []rune, startCol int) string {
+	if len(rs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	col := startCol
+	for _, r := range rs {
+		if r == '\t' {
+			w := notesTabWidth(col)
+			b.WriteString(strings.Repeat(" ", w))
+			col += w
+			continue
+		}
+		b.WriteRune(r)
+		col++
+	}
+	return b.String()
 }
 
 func notesSoftLines(runes []rune, width int) []notesLine {
@@ -433,12 +463,19 @@ func notesSoftLines(runes []rune, width int) []notesLine {
 			col = 0
 			continue
 		}
-		if col >= width {
+		w := notesDisplayWidth(runes[i], col)
+		// Soft-wrap before this rune if it won't fit (unless line is empty).
+		if col > 0 && col+w > width {
 			out = append(out, notesLine{start: start, end: i, width: col, hard: false})
 			start = i
 			col = 0
+			w = notesDisplayWidth(runes[i], col)
 		}
-		col++
+		// Pathological: single tab wider than width — still emit one cell.
+		if w > width {
+			w = width
+		}
+		col += w
 	}
 	out = append(out, notesLine{start: start, end: len(runes), width: col, hard: false})
 	if runes[len(runes)-1] == '\n' {
@@ -447,7 +484,8 @@ func notesSoftLines(runes []rune, width int) []notesLine {
 	return out
 }
 
-func notesCursorRowCol(lines []notesLine, cursor int) (row, col int) {
+// notesCursorRowCol returns soft-line row and visual column of cursor.
+func notesCursorRowCol(runes []rune, lines []notesLine, cursor int) (row, visCol int) {
 	if len(lines) == 0 {
 		return 0, 0
 	}
@@ -456,11 +494,63 @@ func notesCursorRowCol(lines []notesLine, cursor int) (row, col int) {
 			if cursor == ln.end && !ln.hard && i+1 < len(lines) && lines[i+1].start == ln.end {
 				continue
 			}
-			return i, cursor - ln.start
+			return i, notesVisualCol(runes, ln.start, cursor)
 		}
 	}
 	last := lines[len(lines)-1]
 	return len(lines) - 1, last.width
+}
+
+// notesVisualCol is display column of index `at` within a soft line starting at start.
+func notesVisualCol(runes []rune, start, at int) int {
+	col := 0
+	if at < start {
+		return 0
+	}
+	if at > len(runes) {
+		at = len(runes)
+	}
+	for i := start; i < at; i++ {
+		if runes[i] == '\n' {
+			break
+		}
+		col += notesDisplayWidth(runes[i], col)
+	}
+	return col
+}
+
+// notesIndexAtVisual maps a visual column to a rune index in [start,end].
+func notesIndexAtVisual(runes []rune, start, end, target int) int {
+	if target <= 0 {
+		return start
+	}
+	col := 0
+	for i := start; i < end; i++ {
+		w := notesDisplayWidth(runes[i], col)
+		if col+w > target {
+			return i
+		}
+		col += w
+		if col == target {
+			return i + 1
+		}
+	}
+	return end
+}
+
+// notesRuneOffset is cursor's index into a soft line's runes (for caret paint).
+func notesRuneOffset(lines []notesLine, row, cursor int) int {
+	if row < 0 || row >= len(lines) {
+		return 0
+	}
+	ln := lines[row]
+	if cursor < ln.start {
+		return 0
+	}
+	if cursor > ln.end {
+		return ln.end - ln.start
+	}
+	return cursor - ln.start
 }
 
 func (m Model) renderNotes(windowCols int) string {
@@ -482,7 +572,8 @@ func (m Model) renderNotes(windowCols int) string {
 	if scroll > 0 && scroll >= len(lines) {
 		scroll = len(lines) - 1
 	}
-	row, col := notesCursorRowCol(lines, m.notesCursor)
+	row, _ := notesCursorRowCol(m.notesRunes, lines, m.notesCursor)
+	caretOff := notesRuneOffset(lines, row, m.notesCursor)
 	selLo, selHi := 0, 0
 	hasSel := m.notesSel >= 0 && m.notesSel != m.notesCursor
 	if hasSel {
@@ -500,7 +591,7 @@ func (m Model) renderNotes(windowCols int) string {
 	for i := scroll; i < end; i++ {
 		ln := lines[i]
 		// Build display with selection highlight + caret.
-		line := m.renderNotesLine(ln, i == row, col, hasSel, selLo, selHi, wrapW)
+		line := m.renderNotesLine(ln, i == row, caretOff, hasSel, selLo, selHi, wrapW)
 		body = append(body, line)
 	}
 	for len(body) < notesVisRows {
@@ -524,34 +615,34 @@ func (m Model) renderNotes(windowCols int) string {
 	return renderDialogCard(outer, "Notes", body, footer)
 }
 
-func (m Model) renderNotesLine(ln notesLine, isCursorRow bool, col int, hasSel bool, selLo, selHi, wrapW int) string {
+func (m Model) renderNotesLine(ln notesLine, isCursorRow bool, caretOff int, hasSel bool, selLo, selHi, wrapW int) string {
 	inner := wrapW + 2
 	seg := m.notesRunes[ln.start:ln.end]
-	// Paint selection relative to this line's range.
+	// Paint selection relative to this line's range; expand tabs for display.
 	var parts []string
-	pos := ln.start
-	for i := 0; i <= len(seg); i++ {
-		abs := ln.start + i
-		// Caret at cursor position on this row.
-		if isCursorRow && i == col {
-			// Flush pending text before caret.
-			if abs > pos {
-				parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:abs], hasSel, selLo, selHi, pos))
-				pos = abs
-			}
-			parts = append(parts, styleDialogHintKey().Render(notesCaretChar))
-		}
-		if i == len(seg) {
-			break
-		}
-	}
-	if pos < ln.end {
-		parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:ln.end], hasSel, selLo, selHi, pos))
-	}
-	// No caret case: whole line
 	if !isCursorRow {
-		parts = nil
-		parts = append(parts, m.notesStyledSpan(seg, hasSel, selLo, selHi, ln.start))
+		parts = append(parts, m.notesStyledSpan(seg, hasSel, selLo, selHi, ln.start, 0))
+	} else {
+		pos := ln.start
+		vis := 0
+		for i := 0; i <= len(seg); i++ {
+			abs := ln.start + i
+			if i == caretOff {
+				if abs > pos {
+					parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:abs], hasSel, selLo, selHi, pos, vis))
+					vis = notesVisualCol(m.notesRunes, ln.start, abs)
+					pos = abs
+				}
+				parts = append(parts, styleDialogHintKey().Render(notesCaretChar))
+			}
+			if i == len(seg) {
+				break
+			}
+		}
+		if pos < ln.end {
+			vis = notesVisualCol(m.notesRunes, ln.start, pos)
+			parts = append(parts, m.notesStyledSpan(m.notesRunes[pos:ln.end], hasSel, selLo, selHi, pos, vis))
+		}
 	}
 	content := strings.Join(parts, "")
 	// Ensure full width panel fill.
@@ -566,15 +657,17 @@ func (m Model) renderNotesLine(ln notesLine, isCursorRow bool, col int, hasSel b
 }
 
 // notesStyledSpan styles a contiguous span, splitting on selection boundaries.
-func (m Model) notesStyledSpan(rs []rune, hasSel bool, selLo, selHi, absStart int) string {
+// Tabs are expanded to spaces for paint only; absStart is the buffer index of rs[0].
+func (m Model) notesStyledSpan(rs []rune, hasSel bool, selLo, selHi, absStart, startCol int) string {
 	if len(rs) == 0 {
 		return ""
 	}
 	if !hasSel {
-		return styleDialogValue().Render(string(rs))
+		return styleDialogValue().Render(notesExpandTabs(rs, startCol))
 	}
 	var b strings.Builder
 	i := 0
+	col := startCol
 	for i < len(rs) {
 		abs := absStart + i
 		inSel := abs >= selLo && abs < selHi
@@ -586,7 +679,10 @@ func (m Model) notesStyledSpan(rs []rune, hasSel bool, selLo, selHi, absStart in
 			}
 			j++
 		}
-		chunk := string(rs[i:j])
+		chunk := notesExpandTabs(rs[i:j], col)
+		for k := i; k < j; k++ {
+			col += notesDisplayWidth(rs[k], col)
+		}
 		if inSel {
 			b.WriteString(styleDialogActive().Render(chunk))
 		} else {

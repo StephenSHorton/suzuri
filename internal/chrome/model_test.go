@@ -247,10 +247,10 @@ func TestNotesSelectAllBackspaceTab(t *testing.T) {
 	if string(m.notesRunes) != "" {
 		t.Fatalf("after BS sel buf=%q", string(m.notesRunes))
 	}
-	// Tab inserts 4 spaces
+	// Tab inserts a real tab character
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyTab})
 	m = r.Model
-	if string(m.notesRunes) != "    " {
+	if string(m.notesRunes) != "\t" {
 		t.Fatalf("tab buf=%q", string(m.notesRunes))
 	}
 	// Type, shift-select left, cut deletes selection
@@ -263,7 +263,7 @@ func TestNotesSelectAllBackspaceTab(t *testing.T) {
 	}
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlX})
 	m = r.Model
-	if string(m.notesRunes) != "    " {
+	if string(m.notesRunes) != "\t" {
 		t.Fatalf("after cut buf=%q", string(m.notesRunes))
 	}
 	// Typing replaces selection
