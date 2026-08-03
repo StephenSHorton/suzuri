@@ -157,6 +157,25 @@ func (b *inputBar) backspace() {
 	b.cursor--
 }
 
+// deleteToLineStart removes text from the start of the current logical line
+// through the caret (macOS ⌘⌫). With the caret at EOL this clears the line.
+func (b *inputBar) deleteToLineStart() {
+	b.leaveHistoryBrowse()
+	b.clearComplete()
+	b.clampCursor()
+	ls := lineStartAt(b.runes, b.cursor)
+	if b.cursor <= ls {
+		return
+	}
+	b.runes = append(b.runes[:ls], b.runes[b.cursor:]...)
+	b.cursor = ls
+}
+
+// clearLine clears the entire buffer (all lines). Prefer deleteToLineStart for ⌘⌫.
+func (b *inputBar) clearLine() {
+	b.clear()
+}
+
 func (b *inputBar) deleteForward() {
 	b.leaveHistoryBrowse()
 	b.clearComplete()

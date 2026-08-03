@@ -1999,9 +1999,13 @@ func (u *macUI) handleKeys() {
 	}
 	if u.keyRep.fire(ebiten.KeyBackspace, now) {
 		prevRows := in.visualRows(cols)
-		if wordMod {
+		switch {
+		case meta && !alt && !realCtrl:
+			// ⌘⌫ — delete to start of line (clears the line when caret is at end).
+			in.deleteToLineStart()
+		case wordMod:
 			in.deleteWordLeft()
-		} else {
+		default:
 			in.backspace()
 		}
 		if in.visualRows(cols) != prevRows {

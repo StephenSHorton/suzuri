@@ -7,9 +7,8 @@ import (
 )
 
 func TestNotesClickAndDragSelect(t *testing.T) {
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
+	m := openNotesBody(New(80))
+	var r Result
 	for _, ch := range "hello world" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
@@ -51,9 +50,8 @@ func TestNotesClickAndDragSelect(t *testing.T) {
 }
 
 func TestNotesWordMoveAndDelete(t *testing.T) {
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
+	m := openNotesBody(New(80))
+	var r Result
 	for _, ch := range "one two three" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model

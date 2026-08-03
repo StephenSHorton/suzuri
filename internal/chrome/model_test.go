@@ -271,16 +271,14 @@ func TestDismissOverlay(t *testing.T) {
 }
 
 func TestNotesToggleKeepsBuffer(t *testing.T) {
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
+	m := openNotesBody(New(80))
 	if !m.NotesOpen {
 		t.Fatal("notes open")
 	}
-	// Default: open last note in the editor (not the list).
 	if m.notesFocus != notesFocusEditor {
 		t.Fatalf("open focus=%v want editor", m.notesFocus)
 	}
+	var r Result
 	for _, ch := range "hello" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
@@ -316,10 +314,8 @@ func TestNotesToggleKeepsBuffer(t *testing.T) {
 }
 
 func TestNotesSelectAllBackspaceTab(t *testing.T) {
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
-	// Opens on editor by default
+	m := openNotesBody(New(80))
+	var r Result
 	for _, ch := range "ab" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
@@ -369,11 +365,11 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("LOCALAPPDATA", dir)
 
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
+	m := openNotesBody(New(80))
+	var r Result
+	// Fresh blank note opens on title; openNotesBody enters body.
 	if m.notesFocus != notesFocusEditor {
-		t.Fatal("open on editor (last note)")
+		t.Fatalf("want editor after openNotesBody, got %v", m.notesFocus)
 	}
 	for _, ch := range "one" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
@@ -391,7 +387,10 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 		t.Fatalf("bank len=%d", len(m.notesBank))
 	}
 	if m.notesFocus != notesFocusTitle {
-		t.Fatal("new → title rename")
+		t.Fatal("new → title field (not body)")
+	}
+	if m.notesTitle != "" {
+		t.Fatalf("new note title should start empty, got %q", m.notesTitle)
 	}
 	for _, ch := range "Two" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
@@ -444,9 +443,8 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 }
 
 func TestNotesEnterSingleBlankLine(t *testing.T) {
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
+	m := openNotesBody(New(80))
+	var r Result
 	for _, ch := range "hi" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model

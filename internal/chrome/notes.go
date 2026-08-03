@@ -164,16 +164,20 @@ func (m *Model) openNotes() {
 	if len(m.notesBank) == 0 {
 		m.initNotesBank(defaultNotesBank())
 	}
-	// Default: open the last active note in the editor (Esc → list).
-	m.notesFocus = notesFocusEditor
 	m.notesTitle = ""
 	m.notesClampCursor()
-	if m.notesSel < 0 {
-		m.notesSel = -1
-	}
-	// Place caret at end of the note body for immediate typing.
-	m.notesCursor = len(m.notesRunes)
 	m.notesSel = -1
+	// Blank active note (e.g. fresh Scratch): open title field first so the
+	// user names it before typing the body.
+	if m.activeNoteIsBlank() {
+		m.notesTitle = ""
+		m.notesFocus = notesFocusTitle
+		m.notesCursor = 0
+		return
+	}
+	// Default: open the last active note in the editor (Esc → list).
+	m.notesFocus = notesFocusEditor
+	m.notesCursor = len(m.notesRunes)
 	m.notesEnsureCursorVisible(0)
 }
 
@@ -211,7 +215,33 @@ func (m *Model) notesNew() {
 	m.notesActive = len(m.notesBank) - 1
 	m.loadActiveNoteIntoEditor()
 	m.notesDirty = true
-	m.beginNotesTitleEdit()
+	// Always open the editor screen with the title field focused and empty
+	// (not the body) so naming comes first.
+	m.notesTitle = ""
+	m.notesFocus = notesFocusTitle
+	m.notesCursor = 0
+	m.notesSel = -1
+}
+
+// activeNoteIsBlank is true when the active note has no title and no body.
+func (m Model) activeNoteIsBlank() bool {
+	if len(m.notesBank) == 0 {
+		return true
+	}
+	if m.notesActive < 0 || m.notesActive >= len(m.notesBank) {
+		return true
+	}
+	n := m.notesBank[m.notesActive]
+	if strings.TrimSpace(n.Title) != "" {
+		return false
+	}
+	if strings.TrimSpace(string(m.notesRunes)) != "" {
+		return false
+	}
+	if strings.TrimSpace(n.Body) != "" {
+		return false
+	}
+	return true
 }
 
 func (m *Model) notesDeleteActive() {
