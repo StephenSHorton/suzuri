@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/update"
 )
 
@@ -19,6 +20,11 @@ func SetUpdater(s *update.Service) {
 	updaterMu.Lock()
 	updater = s
 	updaterMu.Unlock()
+}
+
+// SetAppVersion records the build version for settings chrome and toasts.
+func SetAppVersion(v string) {
+	chrome.SetAppVersion(v)
 }
 
 func getUpdater() *update.Service {

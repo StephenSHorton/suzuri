@@ -92,6 +92,7 @@ func main() {
 	upd := update.New("StephenSHorton/suzuri", version)
 	go upd.AutoUpdate()
 	ui.SetUpdater(upd)
+	ui.SetAppVersion(version)
 
 	log.Info("starting",
 		"pid", os.Getpid(),

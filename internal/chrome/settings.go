@@ -208,7 +208,9 @@ func (s settingsState) render(windowCols int) string {
 		styleDialogHintKey().Render("enter") + styleDialogHint().Render(" save  ") +
 		styleDialogHintKey().Render("esc")
 
-	main := renderDialogCard(outer, "Settings", body, footer)
+	// Title carries the running build so users can see version without CLI.
+	title := "Settings · v" + AppVersion()
+	main := renderDialogCard(outer, title, body, footer)
 	// Match the rendered settings card width (includes border) so the help
 	// panel centers flush under it rather than left-aligning narrower.
 	mainW := lipgloss.Width(main)
