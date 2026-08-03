@@ -472,6 +472,7 @@ func (u *macUI) loop() error {
 	log.Info("starting ebiten window", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
 	err := ebiten.RunGame(u)
 	u.alive.Store(false)
+	u.persistNotes()
 	u.ready.Store(false)
 	if u.bridge != nil {
 		u.bridge.Stop()
@@ -1292,6 +1293,18 @@ func (u *macUI) handleKeys() {
 		r := u.chrome.UpdateChrome(chrome.OpenHelpMsg{})
 		u.chrome = r.Model
 		u.markChromeDirty()
+		u.overlayCells = nil
+		u.overlayDirty = true
+		return
+	}
+	// Ctrl+Shift+M — toggle notes (works even while notes overlay is open).
+	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyM) {
+		r := u.chrome.UpdateChrome(chrome.ToggleNotesMsg{})
+		u.chrome = r.Model
+		u.overlayCells = nil
+		u.overlayDirty = true
+		u.markChromeDirty()
+		u.persistNotesIfDirty()
 		return
 	}
 	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyT) {
@@ -1382,15 +1395,28 @@ func (u *macUI) handleKeys() {
 		return
 	}
 
-	// Overlay owns navigation keys.
+	// Overlay owns navigation / editor keys (palette, notes, rename, …).
 	if u.chrome.OverlayOpen() {
+		// Notes clipboard + bank shortcuts need host clipboard (atotto).
+		if u.chrome.NotesOpen && ctrl && !alt {
+			if u.handleNotesHostChord(shift) {
+				return
+			}
+		}
 		if km := teaKeyFromEbiten(ctrl, shift); km != nil {
 			r := u.chrome.UpdateChrome(*km)
 			u.chrome = r.Model
-			u.markChromeDirty()
+			// Palette / rename / notes: only dirty overlay.
+			if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen {
+				u.overlayDirty = true
+				u.overlayCells = nil
+			} else {
+				u.markChromeDirty()
+				u.syncChrome()
+				u.chromePx = u.chromePixelHeight()
+			}
 			u.applyChromeAction(r)
-			u.syncChrome()
-			u.chromePx = u.chromePixelHeight()
+			u.persistNotesIfDirty()
 		}
 		return
 	}
@@ -1575,17 +1601,19 @@ func (u *macUI) handleTextInput() {
 	}
 
 	if u.chrome.OverlayOpen() {
-		if u.chrome.PaletteOpen {
+		// Palette filter, rename, and notes body/title all accept runes.
+		if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen {
 			for _, ch := range chars {
 				if ch >= 32 && ch != 0x7f {
 					km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 					r := u.chrome.UpdateChrome(km)
 					u.chrome = r.Model
-					u.markChromeDirty()
+					u.overlayDirty = true
+					u.overlayCells = nil
 					u.applyChromeAction(r)
-					u.syncChrome()
 				}
 			}
+			u.persistNotesIfDirty()
 		}
 		return
 	}
@@ -1615,6 +1643,19 @@ func (u *macUI) handleTextInput() {
 }
 
 func teaKeyFromEbiten(ctrl, shift bool) *tea.KeyMsg {
+	// Shift+arrows for notes selection (and rename navigation is fine with shift).
+	if shift && !ctrl {
+		switch {
+		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+			return &tea.KeyMsg{Type: tea.KeyShiftLeft}
+		case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+			return &tea.KeyMsg{Type: tea.KeyShiftRight}
+		case inpututil.IsKeyJustPressed(ebiten.KeyUp):
+			return &tea.KeyMsg{Type: tea.KeyShiftUp}
+		case inpututil.IsKeyJustPressed(ebiten.KeyDown):
+			return &tea.KeyMsg{Type: tea.KeyShiftDown}
+		}
+	}
 	switch {
 	case inpututil.IsKeyJustPressed(ebiten.KeyEscape):
 		return &tea.KeyMsg{Type: tea.KeyEsc}
@@ -1628,6 +1669,16 @@ func teaKeyFromEbiten(ctrl, shift bool) *tea.KeyMsg {
 		return &tea.KeyMsg{Type: tea.KeyLeft}
 	case inpututil.IsKeyJustPressed(ebiten.KeyRight):
 		return &tea.KeyMsg{Type: tea.KeyRight}
+	case inpututil.IsKeyJustPressed(ebiten.KeyHome):
+		return &tea.KeyMsg{Type: tea.KeyHome}
+	case inpututil.IsKeyJustPressed(ebiten.KeyEnd):
+		return &tea.KeyMsg{Type: tea.KeyEnd}
+	case inpututil.IsKeyJustPressed(ebiten.KeyDelete):
+		return &tea.KeyMsg{Type: tea.KeyDelete}
+	case inpututil.IsKeyJustPressed(ebiten.KeyPageUp):
+		return &tea.KeyMsg{Type: tea.KeyPgUp}
+	case inpututil.IsKeyJustPressed(ebiten.KeyPageDown):
+		return &tea.KeyMsg{Type: tea.KeyPgDown}
 	case inpututil.IsKeyJustPressed(ebiten.KeyTab):
 		if shift {
 			return &tea.KeyMsg{Type: tea.KeyShiftTab}
@@ -1637,6 +1688,85 @@ func teaKeyFromEbiten(ctrl, shift bool) *tea.KeyMsg {
 		return &tea.KeyMsg{Type: tea.KeyBackspace}
 	}
 	return nil
+}
+
+// handleNotesHostChord processes Ctrl/Cmd chords that need the host clipboard
+// or explicit tea.KeyCtrl* messages. Returns true if the chord was handled.
+func (u *macUI) handleNotesHostChord(shift bool) bool {
+	if shift {
+		return false
+	}
+	// Ctrl+C / X / V / A / N while notes is open.
+	switch {
+	case inpututil.IsKeyJustPressed(ebiten.KeyC):
+		if s := u.chrome.NotesSelectedText(); s != "" {
+			_ = clipboard.WriteAll(s)
+		}
+		r := u.chrome.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlC})
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	case inpututil.IsKeyJustPressed(ebiten.KeyX):
+		if s := u.chrome.NotesSelectedText(); s != "" {
+			_ = clipboard.WriteAll(s)
+		}
+		r := u.chrome.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlX})
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	case inpututil.IsKeyJustPressed(ebiten.KeyV):
+		if s, err := clipboard.ReadAll(); err == nil && s != "" {
+			m := u.chrome
+			m.NotesPaste(s)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			u.persistNotesIfDirty()
+		}
+		return true
+	case inpututil.IsKeyJustPressed(ebiten.KeyA):
+		r := u.chrome.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlA})
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		return true
+	case inpututil.IsKeyJustPressed(ebiten.KeyN):
+		// New note (list or editor) — not Ctrl+Shift+N (new window).
+		r := u.chrome.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlN})
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	return false
+}
+
+// persistNotesIfDirty flushes the notes bank to notes.json when dirty.
+func (u *macUI) persistNotesIfDirty() {
+	if u == nil || !u.chrome.NotesDirty() {
+		return
+	}
+	u.persistNotes()
+}
+
+// persistNotes always writes the bank (exit path / force).
+func (u *macUI) persistNotes() {
+	if u == nil {
+		return
+	}
+	m := u.chrome
+	bank := m.NotesSnapshot()
+	if err := chrome.SaveNotesBank(bank); err != nil {
+		log.Warn("notes save failed", "err", err, "path", chrome.NotesPath())
+		return
+	}
+	m.ClearNotesDirty()
+	u.chrome = m
 }
 
 func (u *macUI) handleMouse() {
@@ -1689,31 +1819,22 @@ func (u *macUI) handleMouse() {
 				_ = u.focusPaneByID(id)
 			}
 		}
-		// Dismiss overlay on shell click outside the card (not on the card).
+		// Overlay card hits (notes list/title/editor) or dismiss outside.
 		if u.chrome.OverlayOpen() && int32(my) >= chromeH {
-			// Approximate: full-width overlay grid; skip dismiss for middle third
-			// of shell height where the card typically sits (hit-test without GDI).
-			// Prefer keeping notes open when clicking in the upper half of shell.
-			if u.chrome.NotesOpen || u.chrome.PaletteOpen || u.chrome.SettingsOpen ||
-				u.chrome.HelpOpen || u.chrome.RenameOpen || u.chrome.ConfirmOpen {
-				// Card is horizontally centered ~ half of cols; treat center band as card.
-				cols := u.cols
-				if cols < 20 {
-					cols = 20
+			if cellX, cellY, ok := u.overlayCellAt(int32(mx), int32(my)); ok {
+				// Notes: route click into list / title / editor.
+				if u.chrome.NotesOpen {
+					r := u.chrome.UpdateChrome(chrome.NotesClickMsg{
+						CellX: cellX, CellY: cellY, Cols: u.cols,
+					})
+					u.chrome = r.Model
+					u.overlayDirty = true
+					u.overlayCells = nil
+					u.persistNotesIfDirty()
+					return
 				}
-				cw := u.metricW
-				if cw < 1 {
-					cw = 8
-				}
-				// Rough outer width 40–56 cells centered.
-				cardW := int32(52) * cw
-				if cardW > int32(cols)*cw {
-					cardW = int32(cols) * cw
-				}
-				ox := (int32(cols)*cw - cardW) / 2
-				if int32(mx) >= ox && int32(mx) < ox+cardW {
-					return // click on card band — keep overlay
-				}
+				// Other overlays: keep open when clicking the card band.
+				return
 			}
 			u.overlayCells = nil
 			u.overlayDirty = true
@@ -1722,13 +1843,7 @@ func (u *macUI) handleMouse() {
 			u.markChromeDirty()
 			u.applyChromeAction(r)
 			u.syncChrome()
-			// Persist notes bank after put-away.
-			if u.chrome.NotesDirty() {
-				m := u.chrome
-				_ = chrome.SaveNotesBank(m.NotesSnapshot())
-				m.ClearNotesDirty()
-				u.chrome = m
-			}
+			u.persistNotesIfDirty()
 			return
 		}
 		if int32(my) < chromeH {
@@ -2068,7 +2183,9 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		CurY:             cur.Y,
 		CurVis:           curVis,
 		CurAlpha:         curAlpha,
-		DimShell:         u.chrome.OverlayOpen(),
+		// Dim matte only for settings/confirm/splash — palette, help, notes,
+		// rename float over the live shell (Windows dimShellModal parity).
+		DimShell:         u.dimShellModal(),
 		SettingsOpen:     u.chrome.SettingsOpen,
 		MatrixCells:      rain,
 		ShellMatrixCells: shellRain,
@@ -2147,9 +2264,131 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		u.painter.paintOverlayOnly(u.fb, overlay, padY, shellBot)
 	}
 
+	// Notes caret (block/underline/bar) over the overlay grid.
+	if u.chrome.NotesOpen && u.painter != nil && len(overlay) > 0 {
+		u.paintNotesCaret(u.fb, overlay, padY, shellBot)
+	}
+
 	u.tex.WritePixels(u.fb.Pix)
 	op := &ebiten.DrawImageOptions{}
 	screen.DrawImage(u.tex, op)
+}
+
+// overlayOriginY matches paintFrame / paintOverlayOnly placement.
+func (u *macUI) overlayOriginY(padY, shellBot, overlayRows int) int {
+	ch := int(u.metricH)
+	if ch < 1 {
+		ch = cellH
+	}
+	oh := overlayRows * ch
+	shellH := shellBot - padY
+	oy := padY + (shellH-oh)/4
+	if oy+oh > shellBot {
+		oy = shellBot - oh
+	}
+	if oy < padY {
+		oy = padY
+	}
+	return oy
+}
+
+// overlayCellAt maps a client pixel to a cell in the floating overlay grid.
+// ok is false when the click is outside the painted overlay block.
+func (u *macUI) overlayCellAt(px, py int32) (cellX, cellY int, ok bool) {
+	overlay := u.ensureOverlayCells()
+	if len(overlay) == 0 {
+		return 0, 0, false
+	}
+	cw, ch := int(u.metricW), int(u.metricH)
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	padY := int(u.shellPadY())
+	shellBot := int(u.shellBottomY(u.height))
+	oy := u.overlayOriginY(padY, shellBot, len(overlay))
+	// Overlay paint uses ox=0 (full-width lipgloss-centered grid).
+	if int(py) < oy || int(py) >= oy+len(overlay)*ch {
+		return 0, 0, false
+	}
+	cellY = (int(py) - oy) / ch
+	cellX = int(px) / cw
+	if cellY < 0 || cellY >= len(overlay) {
+		return 0, 0, false
+	}
+	row := overlay[cellY]
+	if cellX < 0 || cellX >= len(row) {
+		return 0, 0, false
+	}
+	// Transparent gutter: treat as outside the card so click dismisses.
+	cell := row[cellX]
+	empty := cell.Ch == 0 || cell.Ch == ' '
+	if empty && isTransparentOverlayBG(cell.BR, cell.BG, cell.BB) {
+		return 0, 0, false
+	}
+	return cellX, cellY, true
+}
+
+// paintNotesCaret draws the notes body/title caret using cfg.Cursor.
+func (u *macUI) paintNotesCaret(dst *image.RGBA, overlay [][]cellPix, padY, shellBot int) {
+	if u == nil || u.painter == nil || dst == nil || !u.chrome.NotesOpen {
+		return
+	}
+	cols := u.cols
+	if cols < 20 {
+		cols = 20
+	}
+	cx, cy, ok := u.chrome.NotesCaretCell(cols)
+	if !ok {
+		return
+	}
+	cw, ch := int(u.metricW), int(u.metricH)
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	oy := u.overlayOriginY(padY, shellBot, len(overlay))
+	// Overlay grid is painted at ox=0 (see paintFrame).
+	x := cx * cw
+	y := oy + cy*ch
+	a := u.caretAlpha()
+	if a <= 0 {
+		return
+	}
+	style := int(u.cfg.Cursor)
+	// Block: reverse-video the insertion cell so the glyph under the caret
+	// stays readable (match Windows paintNotesCaret).
+	if style == 0 || style == int(config.CursorBlock) {
+		var cell cellPix
+		have := false
+		if cy >= 0 && cy < len(overlay) && cx >= 0 && cx < len(overlay[cy]) {
+			cell = overlay[cy][cx]
+			have = true
+		}
+		bgR, bgG, bgB := chrome.PanelR, chrome.PanelG, chrome.PanelB
+		if have && (cell.BR != 0 || cell.BG != 0 || cell.BB != 0) {
+			bgR, bgG, bgB = cell.BR, cell.BG, cell.BB
+		}
+		fillA := a
+		if fillA < 0.92 {
+			fillA = 0.92
+		}
+		fr, fg, fb := blendRGB(bgR, bgG, bgB, chrome.PrimR, chrome.PrimG, chrome.PrimB, fillA)
+		fillRectRGBA(dst, x, y, cw, ch, fr, fg, fb)
+		if have && cell.Ch != 0 && cell.Ch != ' ' {
+			glR, glG, glB := chrome.OnPrimR, chrome.OnPrimG, chrome.OnPrimB
+			if glR == 0 && glG == 0 && glB == 0 {
+				glR, glG, glB = 12, 12, 14
+			}
+			u.painter.drawGlyph(dst, x, y, cell.Ch, glR, glG, glB)
+		}
+		return
+	}
+	u.painter.paintInputCaret(dst, x, y, style, a)
 }
 
 // paintPaneIntoFB draws one leaf's VT grid (+ images) into the framebuffer.
