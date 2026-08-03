@@ -91,10 +91,14 @@
         const meta = document.getElementById('release-meta');
         meta.innerHTML = `Latest <strong>${rel.tag_name}</strong> · Windows amd64 · macOS arm64 · MIT`;
         const assets = rel.assets || [];
-        const win = assets.find(x => /windows-amd64(\.exe|\.zip)?$/i.test(x.name) && x.name.endsWith('.exe'))
+        const win = assets.find(x => /windows-amd64-setup\.exe$/i.test(x.name))
+          || assets.find(x => /windows-amd64(\.exe|\.zip)?$/i.test(x.name) && x.name.endsWith('.exe'))
           || assets.find(x => /windows-amd64/i.test(x.name));
-        const mac = assets.find(x => /darwin-arm64(\.zip)?$/i.test(x.name) && !x.name.endsWith('.zip'))
-          || assets.find(x => /darwin-arm64\.zip$/i.test(x.name))
+        // Prefer DMG installer, then .app.zip, then portable binary.
+        const mac = assets.find(x => /darwin-arm64\.dmg$/i.test(x.name))
+          || assets.find(x => /darwin-arm64\.app\.zip$/i.test(x.name))
+          || assets.find(x => /darwin-arm64(\.zip)?$/i.test(x.name) && !x.name.endsWith('.zip') && !/\.app/i.test(x.name))
+          || assets.find(x => /darwin-arm64\.zip$/i.test(x.name) && !/\.app/i.test(x.name))
           || assets.find(x => /darwin-arm64/i.test(x.name));
         const winA = document.getElementById('download-win');
         const macA = document.getElementById('download-mac');

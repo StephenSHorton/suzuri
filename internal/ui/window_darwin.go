@@ -83,6 +83,7 @@ func Run() error {
 	}
 	ui.nextTabID++
 	ui.tabs = []*tab{t}
+	ui.pages = []*page{newPage(t)}
 	ui.active = 0
 	ui.syncChrome()
 	ui.showSplash = !cfg.FirstRunDone
@@ -96,10 +97,20 @@ type mcpJob struct {
 }
 
 type macUI struct {
+	// pages are chrome-strip tabs; each may hold a split tree of panes.
+	// tabs is the flat list of all pane sessions (I/O by id, bridge, teardown).
+	pages     []*page
 	tabs      []*tab
 	active    int
 	nextTabID int
 	chrome    chrome.Model
+
+	// lastPaneLayout / lastSashes: active page geometry (paint/hit/focus/drag).
+	lastPaneLayout []paneGeom
+	lastSashes     []sashGeom
+	lastShell      struct{ x, y, w, h int32 }
+	// sashDrag is non-nil while the user is dragging a shared pane divider.
+	sashDrag *sashGeom
 
 	width    int32
 	height   int32
@@ -127,7 +138,7 @@ type macUI struct {
 	matrixIntroClearAt  time.Time
 
 	// Settings underlay intro preview (loops with a gap between full plays).
-	settingsPreviewT0     time.Time
+	settingsPreviewT0      time.Time
 	settingsIntroIdleUntil time.Time
 
 	// Deferred work from PTY/MCP goroutines → UI tick.
@@ -157,13 +168,13 @@ func (u *macUI) queueBytes(tabID int) {
 	u.enqueue(func() { u.drainAndParse(tabID) })
 }
 func (u *macUI) queueClosed(tabID int) {
-	// Shell exited (e.g. user typed `exit`) — close that tab; last tab quits the app.
+	// Shell exited (e.g. user typed `exit`) — close that pane; last pane of last page quits.
 	u.enqueue(func() {
-		if u.tabByID(tabID) == nil {
+		if u.tabByID(tabID) == nil && findPaneAcrossPages(u, tabID) == nil {
 			return
 		}
-		log.Info("shell session ended — closing tab", "tab", tabID, "tabs", len(u.tabs))
-		u.closeTabUI(tabID)
+		log.Info("shell session ended — closing pane", "tab", tabID, "panes", u.paneCount())
+		u.closePaneUI(tabID, false)
 	})
 }
 func (u *macUI) isAlive() bool     { return u != nil && u.alive.Load() }
@@ -181,6 +192,10 @@ func (u *macUI) enqueue(fn func()) {
 }
 
 func (u *macUI) activeTab() *tab {
+	if p := u.activePage(); p != nil {
+		return p.focused()
+	}
+	// Legacy fallback during init before pages are set.
 	if u.active < 0 || u.active >= len(u.tabs) {
 		return nil
 	}
@@ -195,6 +210,16 @@ func (u *macUI) activeInput() *inputBar {
 }
 
 func (u *macUI) inputContentCols() int {
+	if g := u.focusedGeom(); g != nil {
+		if g.barCols > 0 {
+			return g.barCols
+		}
+		cw := u.metricW
+		if cw < 1 {
+			cw = cellW
+		}
+		return paneInputContentCols(g.w, cw)
+	}
 	cw := u.metricW
 	if cw < 1 {
 		cw = cellW
@@ -203,28 +228,51 @@ func (u *macUI) inputContentCols() int {
 	if w < 1 {
 		w = int32(u.cols) * cw
 	}
-	const padX int32 = 8
-	promptW := int32(len([]rune(inputBarPrompt))) * cw
-	cols := int((w - padX - promptW - padX) / cw)
-	if cols < minInputContentWidth {
-		cols = minInputContentWidth
-	}
-	return cols
+	return paneInputContentCols(w, cw)
 }
 
 func (u *macUI) syncChrome() {
-	tabs := make([]chrome.Tab, len(u.tabs))
-	for i, t := range u.tabs {
-		title := t.title
+	// One chrome strip entry per page (split panes share a strip tab).
+	src := u.pages
+	if len(src) == 0 {
+		tabs := make([]chrome.Tab, len(u.tabs))
+		for i, t := range u.tabs {
+			if t == nil {
+				continue
+			}
+			title := t.displayTitle()
+			if title == "" {
+				title = fmt.Sprintf("shell %d", i+1)
+			}
+			tabs[i] = chrome.Tab{
+				ID: t.id, Title: title, Alive: t.alive.Load(),
+				AltScreen: t.altScreen(), Busy: t.busy(),
+			}
+		}
+		r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
+		u.chrome = r.Model
+		u.chrome.Width = u.cols
+		return
+	}
+	tabs := make([]chrome.Tab, len(src))
+	for i, p := range src {
+		if p == nil {
+			continue
+		}
+		title := p.title()
 		if title == "" {
 			title = fmt.Sprintf("shell %d", i+1)
 		}
+		focus := p.focused()
+		alive := p.anyAlive()
+		alt := false
+		busy := p.anyBusy()
+		if focus != nil {
+			alt = focus.altScreen()
+		}
 		tabs[i] = chrome.Tab{
-			ID:        t.id,
-			Title:     title,
-			Alive:     t.alive.Load(),
-			AltScreen: t.altScreen(),
-			Busy:      t.busy(),
+			ID: p.id, Title: title, Alive: alive,
+			AltScreen: alt, Busy: busy,
 		}
 	}
 	dirty := u.chromeDirty ||
@@ -305,7 +353,12 @@ func (u *macUI) chromePixelHeight() int32 {
 
 func (u *macUI) shellPadY() int32 { return u.chromePixelHeight() }
 
+// inputBarPixelHeight is kept as a layout signature (sum of active-page pane
+// bars). Bars paint inside each leaf; shell region uses full height under chrome.
 func (u *macUI) inputBarPixelHeight() int32 {
+	if len(u.lastPaneLayout) > 0 {
+		return u.sumActivePaneBarHeights()
+	}
 	if t := u.activeTab(); t != nil && t.altScreen() {
 		return 0
 	}
@@ -313,19 +366,15 @@ func (u *macUI) inputBarPixelHeight() int32 {
 	if ch < 1 {
 		ch = cellH
 	}
-	rows := 1
-	if in := u.activeInput(); in != nil {
-		rows = in.visualRows(u.inputContentCols())
+	cw := u.metricW
+	if cw < 1 {
+		cw = cellW
 	}
-	if rows < 1 {
-		rows = 1
+	w := u.width
+	if w < 1 {
+		w = int32(u.cols) * cw
 	}
-	cwdRows := int32(0)
-	if u.inputBarCwd() != "" {
-		cwdRows = 1
-	}
-	hair, topPad, botPad := inputBarVPads(ch)
-	return hair + topPad + cwdRows*ch + int32(rows)*ch + botPad
+	return paneInputBarPixelHeight(u.activeTab(), w, cw, ch)
 }
 
 func (u *macUI) inputBarCwd() string {
@@ -347,12 +396,13 @@ func (u *macUI) maybeResizeForInput() {
 	}
 }
 
+// shellBottomY is the exclusive bottom of the shell region (client bottom).
+// Input bars are painted inside each pane, not as a global strip.
 func (u *macUI) shellBottomY(clientH int32) int32 {
-	bot := clientH - u.inputBarPixelHeight()
-	if bot < u.shellPadY()+int32(cellH) {
-		bot = clientH
+	if clientH < u.shellPadY()+int32(cellH) {
+		return clientH
 	}
-	return bot
+	return clientH
 }
 
 func (u *macUI) loop() error {
@@ -522,6 +572,8 @@ func (u *macUI) handleResize() {
 	u.applyClientSize(u.width, u.height)
 }
 
+// applyClientSize updates cols/rows/chrome from a client pixel size.
+// Layout: [tab strip] [shell region]. Each leaf stacks [title?][VT][input bar?].
 func (u *macUI) applyClientSize(w, h int32) {
 	defer applog.Recover("applyClientSize", false)
 	if w < 1 || h < 1 {
@@ -547,11 +599,8 @@ func (u *macUI) applyClientSize(w, h int32) {
 	u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: 24}).Model
 	u.markChromeDirty()
 	u.chromePx = u.chromePixelHeight()
-	u.inputPx = u.inputBarPixelHeight()
-	shellH := h - u.chromePx - u.inputPx
-	if u.inputPx > 0 && shellH < ch*5 {
-		shellH = h - u.chromePx - ch*2
-	}
+	// Full height under chrome — per-pane bars are inside each leaf.
+	shellH := h - u.chromePx
 	if shellH < ch {
 		shellH = ch
 	}
@@ -559,23 +608,47 @@ func (u *macUI) applyClientSize(w, h int32) {
 	if rows < 1 {
 		rows = 1
 	}
-	if u.inputPx > 0 && rows < 5 {
-		rows = 5
-	}
 	if rows > maxTermRows {
 		rows = maxTermRows
 	}
-	if rows != u.rows || cols != u.cols {
-		u.cols = cols
-		u.rows = rows
-		tabs := append([]*tab(nil), u.tabs...)
-		for _, t := range tabs {
-			if t != nil {
-				t.resize(cols, rows)
-			}
+	u.cols = cols
+	u.rows = rows
+
+	sx, sy, sw, sh := u.shellRect(w, h)
+	for _, pg := range u.pages {
+		if pg == nil || pg.root == nil {
+			continue
 		}
-	} else {
-		u.cols = cols
+		res := layoutPage(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID)
+		if pg == u.activePage() {
+			u.lastPaneLayout = res.leaves
+			u.lastSashes = res.sashes
+			u.lastShell.x, u.lastShell.y = res.shellX, res.shellY
+			u.lastShell.w, u.lastShell.h = res.shellW, res.shellH
+			u.inputPx = u.sumActivePaneBarHeights()
+		}
+		for _, g := range res.leaves {
+			if g.pane == nil || !g.pane.alive.Load() {
+				continue
+			}
+			// Skip resize while alt-screen is busy (same policy as Windows ConPTY).
+			if !g.pane.conPtyResizeOK() {
+				continue
+			}
+			g.pane.resize(g.cols, g.rows)
+		}
+	}
+	// No pages yet: resize flat tabs to full size (init path).
+	if len(u.pages) == 0 {
+		for _, t := range u.tabs {
+			if t == nil || !t.alive.Load() {
+				continue
+			}
+			if !t.conPtyResizeOK() {
+				continue
+			}
+			t.resize(cols, rows)
+		}
 	}
 }
 
@@ -603,6 +676,25 @@ func (u *macUI) drainAndParse(tabID int) {
 		}
 	} else {
 		data = clean
+	}
+	// Inline images: iTerm OSC 1337, suzuri OSC 7879, and path heuristics.
+	{
+		clean, paths, blobs := stripAndTakeImages(data)
+		data = clean
+		if len(paths) > 0 || len(blobs) > 0 {
+			cw, ch := int(u.metricW), int(u.metricH)
+			if cw < 1 {
+				cw = cellW
+			}
+			if ch < 1 {
+				ch = cellH
+			}
+			paneCols := u.cols
+			if g := u.paneGeomFor(t.id); g != nil && g.cols > 0 {
+				paneCols = g.cols
+			}
+			t.ingestImages(paths, blobs, cw, ch, paneCols)
+		}
 	}
 	if len(data) == 0 {
 		// Still re-arm if more buffered.
@@ -776,23 +868,15 @@ func trimLiveLines(lines []string) []string {
 }
 
 func (u *macUI) newTabUI(profileName string) {
-	if len(u.tabs) >= maxTabs {
+	if len(u.pages) >= maxTabs {
 		u.toast("tab limit")
 		return
 	}
-	opts := tabOpts{}
-	cfg := u.cfg
-	name := profileName
-	if name == "" {
-		name = cfg.ActiveProfile
+	if u.paneCount() >= maxPanesTotal {
+		u.toast("max panes")
+		return
 	}
-	if p := config.FindProfile(cfg, name); p != nil {
-		opts.shell = p.Shell
-		opts.cwd = p.Cwd
-		if p.Name != "" && p.Name != "Default" {
-			opts.title = p.Name
-		}
-	}
+	opts := splitOptsFromProfile(u.cfg, profileName)
 	t, err := newTab(u.nextTabID, u.cols, u.rows, opts)
 	if err != nil {
 		u.toast("new tab failed")
@@ -800,8 +884,7 @@ func (u *macUI) newTabUI(profileName string) {
 		return
 	}
 	u.nextTabID++
-	u.tabs = append(u.tabs, t)
-	u.active = len(u.tabs) - 1
+	u.addPageWithTab(t)
 	t.startWorkers(u)
 	u.syncChrome()
 	u.maybeResizeForInput()
@@ -810,40 +893,29 @@ func (u *macUI) newTabUI(profileName string) {
 }
 
 func (u *macUI) closeTabUI(id int) {
-	idx := -1
-	for i, t := range u.tabs {
-		if t != nil && t.id == id {
-			idx = i
-			break
+	// Prefer page id match (chrome strip).
+	for i, p := range u.pages {
+		if p != nil && p.id == id {
+			u.closePageAt(i, true)
+			return
 		}
 	}
-	if idx < 0 {
+	// Pane id → close whole page that contains it.
+	if pi, _ := u.pageByPaneID(id); pi >= 0 {
+		u.closePageAt(pi, true)
 		return
 	}
-	u.tabs[idx].close()
-	u.tabs = append(u.tabs[:idx], u.tabs[idx+1:]...)
-	if len(u.tabs) == 0 {
-		u.quit = true
-		return
-	}
-	if u.active >= len(u.tabs) {
-		u.active = len(u.tabs) - 1
-	} else if u.active > idx {
-		u.active--
-	}
-	if t := u.activeTab(); t != nil {
-		ebiten.SetWindowTitle("suzuri — " + t.title)
-	}
-	u.syncChrome()
-	u.maybeResizeForInput()
-	u.publishBridgeSnapshot()
 }
 
 func (u *macUI) switchTab(delta int) {
-	if len(u.tabs) == 0 {
+	n := len(u.pages)
+	if n == 0 {
+		n = len(u.tabs)
+	}
+	if n == 0 {
 		return
 	}
-	u.active = (u.active + delta + len(u.tabs)) % len(u.tabs)
+	u.active = (u.active + delta + n) % n
 	u.selecting = false
 	if t := u.activeTab(); t != nil {
 		t.sel.clear()
@@ -862,20 +934,44 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionNewWindow:
 		openNewWindow()
 	case chrome.ActionCloseTab:
-		if t := u.activeTab(); t != nil {
+		if p := u.activePage(); p != nil {
+			u.closePageAt(u.active, true)
+		} else if t := u.activeTab(); t != nil {
 			u.closeTabUI(t.id)
 		}
+	case chrome.ActionClosePane:
+		if t := u.activeTab(); t != nil {
+			u.closePaneUI(t.id, true)
+		}
+	case chrome.ActionSplitRight:
+		u.splitActive(splitVert)
+	case chrome.ActionSplitDown:
+		u.splitActive(splitHoriz)
+	case chrome.ActionFocusPaneLeft:
+		u.focusPaneDir(0)
+	case chrome.ActionFocusPaneRight:
+		u.focusPaneDir(1)
+	case chrome.ActionFocusPaneUp:
+		u.focusPaneDir(2)
+	case chrome.ActionFocusPaneDown:
+		u.focusPaneDir(3)
 	case chrome.ActionNextTab:
 		u.switchTab(1)
 	case chrome.ActionPrevTab:
 		u.switchTab(-1)
 	case chrome.ActionSelectTab:
-		if r.Index >= 0 && r.Index < len(u.tabs) {
+		n := len(u.pages)
+		if n == 0 {
+			n = len(u.tabs)
+		}
+		if r.Index >= 0 && r.Index < n {
 			u.active = r.Index
 			u.selecting = false
 			if t := u.activeTab(); t != nil {
 				t.sel.clear()
 			}
+			u.syncChrome()
+			u.applyClientSize(u.width, u.height)
 		}
 	case chrome.ActionQuit:
 		u.quit = true
@@ -953,10 +1049,18 @@ func (u *macUI) openRenameUI(target chrome.RenameTarget) {
 }
 
 func (u *macUI) applyRename(target chrome.RenameTarget, name string) {
-	// macOS host is single-pane pages; both targets rename the active tab.
-	_ = target
-	if t := u.activeTab(); t != nil {
-		t.setUserTitle(name)
+	switch target {
+	case chrome.RenameTargetTab:
+		if p := u.activePage(); p != nil {
+			p.setUserTitle(name)
+		} else if t := u.activeTab(); t != nil {
+			t.setUserTitle(name)
+		}
+	default:
+		// Pane rename (or fallback).
+		if t := u.activeTab(); t != nil {
+			t.setUserTitle(name)
+		}
 	}
 	u.markChromeDirty()
 	u.toast("renamed")
@@ -1167,11 +1271,47 @@ func (u *macUI) handleKeys() {
 		openNewWindow()
 		return
 	}
-	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
+	// Split panes (match Windows host shortcuts).
+	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyD) {
+		u.splitActive(splitVert)
+		return
+	}
+	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyE) {
+		u.splitActive(splitHoriz)
+		return
+	}
+	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
 		if t := u.activeTab(); t != nil {
+			u.closePaneUI(t.id, true)
+		}
+		return
+	}
+	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
+		if p := u.activePage(); p != nil {
+			u.closePageAt(u.active, true)
+		} else if t := u.activeTab(); t != nil {
 			u.closeTabUI(t.id)
 		}
 		return
+	}
+	// Alt+arrows / Ctrl+Alt+arrows: focus pane.
+	if (alt || (ctrl && alt)) && !shift {
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
+			u.focusPaneDir(0)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
+			u.focusPaneDir(1)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) {
+			u.focusPaneDir(2)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowDown) {
+			u.focusPaneDir(3)
+			return
+		}
 	}
 	if ctrl && inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		if shift {
@@ -1182,11 +1322,15 @@ func (u *macUI) handleKeys() {
 		return
 	}
 	// Ctrl+1..9
+	nTabs := len(u.pages)
+	if nTabs == 0 {
+		nTabs = len(u.tabs)
+	}
 	for i, k := range []ebiten.Key{
 		ebiten.Key1, ebiten.Key2, ebiten.Key3, ebiten.Key4, ebiten.Key5,
 		ebiten.Key6, ebiten.Key7, ebiten.Key8, ebiten.Key9,
 	} {
-		if ctrl && inpututil.IsKeyJustPressed(k) && i < len(u.tabs) {
+		if ctrl && inpututil.IsKeyJustPressed(k) && i < nTabs {
 			u.active = i
 			u.selecting = false
 			if t := u.activeTab(); t != nil {
@@ -1502,6 +1646,18 @@ func (u *macUI) handleMouse() {
 	tabStripH := int32(chrome.TabStripRows()) * chH
 
 	if justPressed {
+		// Sash drag start (multi-pane).
+		if !u.chrome.OverlayOpen() {
+			if si := hitSash(u.lastSashes, int32(mx), int32(my)); si >= 0 && si < len(u.lastSashes) {
+				s := u.lastSashes[si]
+				u.sashDrag = &s
+				return
+			}
+			// Click-to-focus pane.
+			if id := hitPane(u.lastPaneLayout, int32(mx), int32(my)); id >= 0 {
+				_ = u.focusPaneByID(id)
+			}
+		}
 		// Dismiss overlay on shell click outside the card (not on the card).
 		if u.chrome.OverlayOpen() && int32(my) >= chromeH {
 			// Approximate: full-width overlay grid; skip dismiss for middle third
@@ -1580,11 +1736,28 @@ func (u *macUI) handleMouse() {
 		return
 	}
 
+	// Sash drag.
+	if pressed && u.sashDrag != nil {
+		applySashDrag(*u.sashDrag, int32(mx), int32(my))
+		u.computeActiveLayout()
+		u.applyClientSize(u.width, u.height)
+		return
+	}
+	if justReleased && u.sashDrag != nil {
+		u.sashDrag = nil
+		u.applyClientSize(u.width, u.height)
+		return
+	}
+
 	if pressed && u.selecting {
 		tab := u.activeTab()
 		if tab != nil {
 			x, y := u.pixelToCell(int32(mx), int32(my))
-			absY := tab.sb.absLine(y, u.rows, liveExtent(tab.term))
+			viewRows := u.rows
+			if g := u.focusedGeom(); g != nil && g.rows > 0 {
+				viewRows = g.rows
+			}
+			absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
 			tab.sel.x1, tab.sel.y1 = x, absY
 		}
 	}
@@ -1596,7 +1769,11 @@ func (u *macUI) handleMouse() {
 
 // hitTab maps an x pixel to a tab index using chrome.TabBounds (same layout as View).
 func (u *macUI) hitTab(px int32) int {
-	if len(u.tabs) == 0 {
+	n := len(u.pages)
+	if n == 0 {
+		n = len(u.tabs)
+	}
+	if n == 0 {
 		return -1
 	}
 	u.syncChrome()
@@ -1720,13 +1897,16 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	u.ensureChromeCells()
 	overlay := u.ensureOverlayCells()
 
-	grid := tab.sb.viewCells(tab.term, u.rows)
-	if !tab.sel.empty() {
-		applySelectionTint(grid, tab, u.rows)
+	layouts := u.computeActiveLayout()
+	if len(layouts) == 0 {
+		// Single-pane fallback geometry = full shell under chrome.
+		sx, sy, sw, sh := u.shellRect(u.width, u.height)
+		layouts = []paneGeom{{
+			pane: tab, x: sx, y: sy, w: sw, h: sh,
+			cols: u.cols, rows: u.rows, focused: true,
+		}}
+		u.lastPaneLayout = layouts
 	}
-	cur := tab.term.Cursor()
-	curVis := tab.altScreen() && tab.term.CursorVisible()
-	curAlpha := u.caretAlpha()
 
 	padY := int(u.shellPadY())
 	shellBot := int(u.shellBottomY(u.height))
@@ -1753,34 +1933,27 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	now := time.Now()
 	cwPx, chPx := cw, ch
 	if u.chrome.SettingsOpen {
-		// Live-preview the selected intro behind the settings card.
 		t0, active := u.settingsUnderlayClock(now)
 		if active {
 			switch introStyle {
 			case config.IntroRipple:
-				// Fullwidth columns for 猫/咪 rings.
 				rCols := shellCols / 2
 				if rCols < 2 {
 					rCols = 2
 				}
 				var drew bool
 				rain, drew = rippleCells(rCols, shellRows, cwPx, chPx, t0, matrixIntroSpawn, now)
-				// Full play done when spawn elapsed and nothing left on screen.
 				if now.Sub(t0) > matrixIntroSpawn && !drew {
 					u.settingsUnderlayFinished(now)
 				}
-				// Safety: never loop longer than intro max + gap trigger.
 				if now.Sub(t0) > matrixIntroMaxTotal {
 					u.settingsUnderlayFinished(now)
 				}
 			case config.IntroNone:
-				// Quiet dim underlay only (no rain/ripple).
 			default:
-				// Matrix: continuous loop under settings (Windows parity).
 				rain = matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now)
 			}
 		}
-		// idle gap: rain stays nil → dim matte only
 	} else if u.matrixIntroActive() && introStyle != config.IntroNone {
 		mode := matrixSpawn
 		if now.After(u.matrixIntroSpawnEnd) {
@@ -1804,24 +1977,44 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 			}
 		}
 	} else if introStyle == config.IntroNone && u.matrixIntroActive() {
-		// No rain — finish after spawn so watermark can fade in.
 		if now.After(u.matrixIntroSpawnEnd) {
 			u.finishMatrixIntro()
 		}
 	}
 
-	// Scrollbar metrics (hide on alt-screen / overlays).
+	// Paint focused pane as primary shell (watermark/intro/chrome/overlay via paintFrame).
+	// Additional panes are blitted after with paintPaneGrid.
+	focusGrid := tab.sb.viewCells(tab.term, u.rows)
+	if g := u.focusedGeom(); g != nil && g.rows > 0 {
+		focusGrid = tab.sb.viewCells(tab.term, g.rows)
+	}
+	if !tab.sel.empty() {
+		applySelectionTint(focusGrid, tab, len(focusGrid))
+	}
+	cur := tab.term.Cursor()
+	curVis := tab.altScreen() && tab.term.CursorVisible()
+	curAlpha := u.caretAlpha()
+
+	// Scrollbar for focused pane only (hide on alt-screen / overlays).
 	liveRows := liveExtent(tab.term)
-	scrollTrack := !tab.altScreen() && !u.chrome.OverlayOpen()
+	viewRows := u.rows
+	if g := u.focusedGeom(); g != nil && g.rows > 0 {
+		viewRows = g.rows
+	}
+	scrollTrack := !tab.altScreen() && !u.chrome.OverlayOpen() && len(layouts) <= 1
 	var thumbY, thumbH int
 	if scrollTrack {
 		trackH := shellBot - padY - 4
-		thumbY, thumbH, scrollTrack = tab.sb.Scrollbar(u.rows, liveRows, trackH)
+		thumbY, thumbH, scrollTrack = tab.sb.Scrollbar(viewRows, liveRows, trackH)
 	}
 
+	// Global ShowInput only for single-pane; multi-pane paints per-leaf bars.
+	showGlobalInput := len(layouts) <= 1 && u.inputBarPixelHeight() > 0
+	// When using layout bars, shell region is full client; paintFrame input uses
+	// focused geom's bar region via ShowInput=false + post paint.
 	inOpts := u.inputBarPaint()
 	opts := paintOpts{
-		Shell:         grid,
+		Shell:         focusGrid,
 		Chrome:        u.chromeCells,
 		Overlay:       overlay,
 		PadY:          padY,
@@ -1838,7 +2031,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		ScrollThumbY:  thumbY,
 		ScrollThumbH:  thumbH,
 		ScrollTrack:   scrollTrack,
-		ShowInput:     u.inputBarPixelHeight() > 0,
+		ShowInput:     false, // always paint bars via layout (per-pane or focused)
 		CursorStyle:   int(u.cfg.Cursor),
 	}
 	opts.InputPrompt = inOpts.prompt
@@ -1849,12 +2042,123 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	opts.InputHint = inOpts.hint
 	opts.InputCwd = inOpts.cwd
 	opts.InputGhost = inOpts.ghost
+	if !tab.altScreen() && len(layouts) <= 1 {
+		opts.Images = tab.sb.visibleImages(tab.term, viewRows)
+	}
+
+	// For multi-pane: don't paint the focused shell full-window — clear shell
+	// and draw each leaf into its rect.
+	if len(layouts) > 1 {
+		opts.Shell = nil
+		opts.Images = nil
+		opts.ScrollTrack = false
+		opts.WatermarkFade = 0 // watermark under multi-pane is noisy
+	}
 
 	u.painter.paintFrame(u.fb, opts)
+
+	dimModal := u.chrome.OverlayOpen() && (u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen)
+	if !dimModal {
+		if len(layouts) > 1 {
+			for _, g := range layouts {
+				if g.pane == nil {
+					continue
+				}
+				u.paintPaneIntoFB(g, curAlpha)
+			}
+			u.painter.paintPaneTitles(u.fb, layouts, cw, ch)
+			u.painter.paintPaneSashes(u.fb, u.lastSashes, u.lastShell)
+		} else if showGlobalInput || (len(layouts) == 1 && layouts[0].barH > 0) {
+			// Single pane: paint input bar into leaf bar region (or full width).
+			g := layouts[0]
+			if g.barH < 1 {
+				// Fallback full-width bar at bottom if layout omitted it.
+				g.barY = int32(shellBot) - u.inputBarPixelHeight()
+				if g.barY < int32(padY) {
+					g.barY = int32(padY)
+				}
+				g.barH = u.height - g.barY
+				g.x = 0
+				g.w = u.width
+				g.barCols = u.inputContentCols()
+			}
+			u.paintPaneInputIntoFB(g)
+		}
+		// Multi-pane always paints each bar in paintPaneIntoFB.
+		if len(layouts) > 1 {
+			for _, g := range layouts {
+				if g.barH > 0 {
+					u.paintPaneInputIntoFB(g)
+				}
+			}
+		}
+	}
+
+	// Re-paint overlay on top of pane content (paintFrame already drew it once
+	// before multi-pane grids; draw again so cards float above shells).
+	if len(layouts) > 1 && len(overlay) > 0 {
+		u.painter.paintOverlayOnly(u.fb, overlay, padY, shellBot)
+	}
 
 	u.tex.WritePixels(u.fb.Pix)
 	op := &ebiten.DrawImageOptions{}
 	screen.DrawImage(u.tex, op)
+}
+
+// paintPaneIntoFB draws one leaf's VT grid (+ images) into the framebuffer.
+func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
+	if u.painter == nil || g.pane == nil {
+		return
+	}
+	t := g.pane
+	viewRows := g.rows
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
+	grid := t.sb.viewCells(t.term, viewRows)
+	if t == u.activeTab() && !t.sel.empty() {
+		applySelectionTint(grid, t, viewRows)
+	}
+	cur := t.term.Cursor()
+	curVis := t.altScreen() && t.term.CursorVisible() && g.focused
+	u.painter.paintPaneGrid(u.fb, grid, g, cur.X, cur.Y, curVis, curAlpha)
+	if !t.altScreen() {
+		vis := t.sb.visibleImages(t.term, viewRows)
+		u.painter.paintPaneImages(u.fb, vis, g)
+	}
+}
+
+// paintPaneInputIntoFB draws one pane's Warp bar into g.barY/g.barH.
+func (u *macUI) paintPaneInputIntoFB(g paneGeom) {
+	if u.painter == nil || g.pane == nil || g.barH < 1 {
+		return
+	}
+	t := g.pane
+	in := &t.input
+	cols := g.barCols
+	if cols < 1 {
+		cols = paneInputContentCols(g.w, u.metricW)
+	}
+	po := paintOpts{
+		InputPrompt: inputBarPrompt,
+		InputHint:   chrome.InputBarPlaceholder(),
+		InputEmpty:  len(in.runes) == 0,
+		InputCwd:    displayPath(t.cwd),
+		CursorStyle: int(u.cfg.Cursor),
+		CurAlpha:    u.caretAlpha(),
+	}
+	if !po.InputEmpty {
+		view, caretRow, caretCol := in.visibleWindow(cols, maxInputVisualRows)
+		po.InputLines = view
+		po.InputCaretRow = caretRow
+		po.InputCaretCol = caretCol
+		po.InputGhost = in.ghostSuffix(t.cwd)
+	}
+	// Only the focused pane shows a live caret.
+	if !g.focused {
+		po.CurAlpha = 0
+	}
+	u.painter.paintPaneInputBar(u.fb, po, g)
 }
 
 type inputBarPaint struct {

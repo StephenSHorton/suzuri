@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/math/fixed"
+	xdraw "golang.org/x/image/draw"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
@@ -126,6 +127,8 @@ type paintOpts struct {
 	InputGhost    string // soft Tab-completion preview after caret
 	ShowInput     bool
 	CursorStyle   int // config.CursorStyle as int to avoid import cycle issues — use values 0/1/2
+	// Scrollback-attached images (primary buffer only; alt-screen leaves empty).
+	Images []visImage
 }
 
 // paintFrame draws shell + chrome + intro + input + overlay into dst.
@@ -222,6 +225,11 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 			tb := blendByte(44, chrome.PrimB, 0.45)
 			fillRectRGBA(dst, trackX, ty, 4, th, tr, tg, tb)
 		}
+	}
+
+	// Host-rendered scrollback images (Windows GDI StretchBlt parity).
+	if len(o.Images) > 0 && !o.DimShell {
+		p.paintShellImages(dst, o, padY, shellBot, yShift)
 	}
 
 	// Matrix rain (intro or settings underlay) over the shell field.
@@ -478,6 +486,378 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 	// Ultimate fallback for rain: a bright bar so streams never go blank/tofu.
 	if isHalfwidthKatakana(r) || isEastAsianRune(r) {
 		fillRectRGBA(dst, px+p.cellW/3, py+2, max(1, p.cellW/3), max(1, p.cellH-4), fr, fg, fb)
+	}
+}
+
+// paintPaneGrid draws a VT cell grid into a pane's content rect.
+func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64) {
+	if dst == nil || p == nil || g.w < 1 || g.h < 1 {
+		return
+	}
+	cw, ch := p.cellW, p.cellH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	// Pane content background.
+	fillRectRGBA(dst, int(g.x), int(g.y), int(g.w), int(g.h), 0, 0, 0)
+	const padX = 2
+	shellRight := int(g.x) + int(g.w) - 2
+	for y, row := range grid {
+		py := int(g.y) + y*ch
+		if py+ch <= int(g.y) || py >= int(g.y)+int(g.h) {
+			continue
+		}
+		for x, cell := range row {
+			px := int(g.x) + padX + x*cw
+			if px >= shellRight {
+				break
+			}
+			br, bg, bb := cell.BR, cell.BG, cell.BB
+			if curVis && x == curX && y == curY {
+				a := curAlpha
+				if a < 0.15 {
+					a = 0.15
+				}
+				if a > 1 {
+					a = 1
+				}
+				br = blendByte(br, cell.FR, a)
+				bg = blendByte(bg, cell.FG, a)
+				bb = blendByte(bb, cell.FB, a)
+			}
+			if br != 0 || bg != 0 || bb != 0 {
+				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
+			}
+			if cell.Ch != 0 && cell.Ch != ' ' {
+				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
+			}
+		}
+	}
+}
+
+// paintPaneImages draws scrollback images clipped to a pane layout rect.
+func (p *softwarePainter) paintPaneImages(dst *image.RGBA, vis []visImage, g paneGeom) {
+	if dst == nil || p == nil || len(vis) == 0 || g.w < 40 {
+		return
+	}
+	cw, ch := p.cellW, p.cellH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	padX := int(g.x) + 4
+	padY := int(g.y)
+	shellBot := int(g.y + g.h)
+	availW := int(g.w) - 8
+	if availW < 40 {
+		return
+	}
+	for _, v := range vis {
+		if v.img == nil || v.img.img == nil {
+			continue
+		}
+		src := v.img.img
+		sb := src.Bounds()
+		sw, sh := sb.Dx(), sb.Dy()
+		if sw < 1 || sh < 1 {
+			continue
+		}
+		yTop := padY + v.viewRow*ch
+		bodyTop := yTop
+		bodyRows := v.span
+		if v.span > 1 {
+			bodyTop = yTop + ch
+			bodyRows = v.span - 1
+		}
+		yBot := bodyTop + bodyRows*ch
+		if yBot > shellBot {
+			yBot = shellBot
+		}
+		if bodyTop >= shellBot || yBot <= padY {
+			continue
+		}
+		boxH := yBot - bodyTop
+		if boxH < 8 {
+			continue
+		}
+		dw, dh := fitPreferNative(sw, sh, availW, boxH)
+		if dw < 1 || dh < 1 {
+			continue
+		}
+		drawTop := bodyTop
+		if drawTop < padY {
+			drawTop = padY
+		}
+		dr := image.Rect(padX, drawTop, padX+dw, drawTop+dh)
+		clip := image.Rect(int(g.x), padY, int(g.x+g.w), shellBot)
+		dr = dr.Intersect(clip).Intersect(dst.Bounds())
+		if dr.Empty() {
+			continue
+		}
+		fillRectRGBA(dst, dr.Min.X-1, dr.Min.Y-1, dr.Dx()+2, 1, 60, 60, 70)
+		fillRectRGBA(dst, dr.Min.X-1, dr.Max.Y, dr.Dx()+2, 1, 60, 60, 70)
+		fillRectRGBA(dst, dr.Min.X-1, dr.Min.Y-1, 1, dr.Dy()+2, 60, 60, 70)
+		fillRectRGBA(dst, dr.Max.X, dr.Min.Y-1, 1, dr.Dy()+2, 60, 60, 70)
+		xdraw.CatmullRom.Scale(dst, dr, src, sb, xdraw.Over, nil)
+	}
+}
+
+// paintPaneTitles draws the mini title strip on each multi-pane leaf.
+func (p *softwarePainter) paintPaneTitles(dst *image.RGBA, layouts []paneGeom, cw, ch int) {
+	if dst == nil || p == nil || len(layouts) < 2 {
+		return
+	}
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	for _, g := range layouts {
+		if g.titleH < 1 || g.pane == nil {
+			continue
+		}
+		// Focused: slightly brighter bar.
+		br, bg, bb := chrome.BarR, chrome.BarG, chrome.BarB
+		if g.focused {
+			br = blendByte(br, chrome.PrimR, 0.25)
+			bg = blendByte(bg, chrome.PrimG, 0.25)
+			bb = blendByte(bb, chrome.PrimB, 0.25)
+		}
+		fillRectRGBA(dst, int(g.x), int(g.titleY), int(g.w), int(g.titleH), br, bg, bb)
+		title := g.pane.displayTitle()
+		if title == "" {
+			title = "shell"
+		}
+		maxCols := int(g.w)/cw - 2
+		if maxCols < 1 {
+			maxCols = 1
+		}
+		label := truncateRunes(title, maxCols)
+		fr, fg, fb := chrome.SoftR, chrome.SoftG, chrome.SoftB
+		if g.focused {
+			fr, fg, fb = chrome.TextR, chrome.TextG, chrome.TextB
+		}
+		x := int(g.x) + 4
+		y := int(g.titleY)
+		for _, r := range []rune(label) {
+			p.drawGlyph(dst, x, y, r, fr, fg, fb)
+			x += cw
+		}
+	}
+}
+
+// paintPaneSashes draws shared dividers between sibling panes.
+func (p *softwarePainter) paintPaneSashes(dst *image.RGBA, sashes []sashGeom, shell struct{ x, y, w, h int32 }) {
+	if dst == nil {
+		return
+	}
+	// Outer perimeter.
+	if shell.w > 0 && shell.h > 0 {
+		fillRectRGBA(dst, int(shell.x), int(shell.y), int(shell.w), 1, 40, 40, 48)
+		fillRectRGBA(dst, int(shell.x), int(shell.y+shell.h-1), int(shell.w), 1, 40, 40, 48)
+		fillRectRGBA(dst, int(shell.x), int(shell.y), 1, int(shell.h), 40, 40, 48)
+		fillRectRGBA(dst, int(shell.x+shell.w-1), int(shell.y), 1, int(shell.h), 40, 40, 48)
+	}
+	for _, s := range sashes {
+		fillRectRGBA(dst, int(s.x), int(s.y), int(s.w), int(s.h), 48, 48, 56)
+	}
+}
+
+// paintOverlayOnly re-draws a floating card strip over existing shell content.
+func (p *softwarePainter) paintOverlayOnly(dst *image.RGBA, overlay [][]cellPix, padY, shellBot int) {
+	if dst == nil || p == nil || len(overlay) == 0 {
+		return
+	}
+	ch := p.cellH
+	if ch < 1 {
+		ch = cellH
+	}
+	oh := len(overlay) * ch
+	shellH := shellBot - padY
+	oy := padY + (shellH-oh)/4
+	if oy+oh > shellBot {
+		oy = shellBot - oh
+	}
+	if oy < padY {
+		oy = padY
+	}
+	paintCellStrip(p, dst, overlay, 0, oy, false)
+}
+
+// paintPaneInputBar draws one pane's command line into g.barY/g.barH.
+func (p *softwarePainter) paintPaneInputBar(dst *image.RGBA, o paintOpts, g paneGeom) {
+	if dst == nil || p == nil || g.barH < 1 {
+		return
+	}
+	cw, ch := p.cellW, p.cellH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	top := int(g.barY)
+	barH := int(g.barH)
+	x0 := int(g.x)
+	bw := int(g.w)
+	if bw < 1 {
+		return
+	}
+	fillRectRGBA(dst, x0, top, bw, barH, chrome.PanelR, chrome.PanelG, chrome.PanelB)
+	hair, topPad, _ := inputBarVPads(int32(ch))
+	fillRectRGBA(dst, x0, top, bw, int(hair), chrome.PrimR, chrome.PrimG, chrome.PrimB)
+	padTop := top + int(hair) + int(topPad)
+	const padX = 8
+
+	if cwd := stringsTrimSpace(o.InputCwd); cwd != "" {
+		maxCols := (bw - padX - 8) / cw
+		if maxCols < 8 {
+			maxCols = 8
+		}
+		label := truncateRunes(cwd, maxCols)
+		x := x0 + padX
+		for _, r := range []rune(label) {
+			p.drawGlyph(dst, x, padTop, r, chrome.SoftR, chrome.SoftG, chrome.SoftB)
+			x += cw
+		}
+		padTop += ch
+	}
+
+	prompt := o.InputPrompt
+	if prompt == "" {
+		prompt = inputBarPrompt
+	}
+	promptRunes := []rune(prompt)
+	promptW := len(promptRunes) * cw
+
+	if o.InputEmpty {
+		x := x0 + padX
+		for _, r := range promptRunes {
+			p.drawGlyph(dst, x, padTop, r, chrome.PrimR, chrome.PrimG, chrome.PrimB)
+			x += cw
+		}
+		if o.InputHint != "" {
+			x = x0 + padX + promptW + 2*cw
+			for _, r := range []rune(o.InputHint) {
+				p.drawGlyph(dst, x, padTop, r, chrome.SoftR, chrome.SoftG, chrome.SoftB)
+				x += cw
+			}
+		}
+		if o.CurAlpha > 0 {
+			p.paintInputCaret(dst, x0+padX+promptW, padTop, o.CursorStyle, o.CurAlpha)
+		}
+		return
+	}
+
+	for i, line := range o.InputLines {
+		y := padTop + i*ch
+		xText := x0 + padX + promptW
+		if i == 0 {
+			x := x0 + padX
+			for _, r := range promptRunes {
+				p.drawGlyph(dst, x, y, r, chrome.PrimR, chrome.PrimG, chrome.PrimB)
+				x += cw
+			}
+		}
+		if line != "" {
+			x := xText
+			for _, r := range []rune(line) {
+				p.drawGlyph(dst, x, y, r, chrome.TextR, chrome.TextG, chrome.TextB)
+				x += cw
+			}
+		}
+	}
+	if o.CurAlpha > 0 {
+		caretY := padTop + o.InputCaretRow*ch
+		caretX := x0 + padX + promptW + o.InputCaretCol*cw
+		if o.InputGhost != "" {
+			x := caretX
+			for _, r := range []rune(o.InputGhost) {
+				p.drawGlyph(dst, x, caretY, r, chrome.MuteR, chrome.MuteG, chrome.MuteB)
+				x += cw
+			}
+		}
+		p.paintInputCaret(dst, caretX, caretY, o.CursorStyle, o.CurAlpha)
+	}
+}
+
+// paintShellImages draws scrollback-attached bitmaps over reserved image rows.
+// Caption row (sub=0) is left as cells; the body span is filled with the image.
+func (p *softwarePainter) paintShellImages(dst *image.RGBA, o paintOpts, padY, shellBot, yShift int) {
+	if dst == nil || p == nil || len(o.Images) == 0 {
+		return
+	}
+	cw, ch := p.cellW, p.cellH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	const padX = 4
+	w := dst.Bounds().Dx()
+	availW := w - padX - 12 // leave scrollbar gutter
+	if availW < 40 {
+		return
+	}
+	for _, v := range o.Images {
+		if v.img == nil || v.img.img == nil {
+			continue
+		}
+		src := v.img.img
+		sb := src.Bounds()
+		sw, sh := sb.Dx(), sb.Dy()
+		if sw < 1 || sh < 1 {
+			continue
+		}
+		yTop := padY + v.viewRow*ch - yShift
+		bodyTop := yTop
+		bodyRows := v.span
+		if v.span > 1 {
+			bodyTop = yTop + ch // first row is caption
+			bodyRows = v.span - 1
+		}
+		yBot := bodyTop + bodyRows*ch
+		if yBot > shellBot {
+			yBot = shellBot
+		}
+		if bodyTop >= shellBot || yBot <= padY {
+			continue
+		}
+		boxH := yBot - bodyTop
+		if boxH < 8 {
+			continue
+		}
+		dw, dh := fitPreferNative(sw, sh, availW, boxH)
+		if dw < 1 || dh < 1 {
+			continue
+		}
+		drawTop := bodyTop
+		if drawTop < padY {
+			if bodyTop+dh < padY {
+				continue
+			}
+			drawTop = padY
+		}
+		dr := image.Rect(padX, drawTop, padX+dw, drawTop+dh)
+		// Clip to shell band.
+		clip := image.Rect(0, padY, w, shellBot)
+		dr = dr.Intersect(clip).Intersect(dst.Bounds())
+		if dr.Empty() {
+			continue
+		}
+		// Soft border.
+		fillRectRGBA(dst, dr.Min.X-1, dr.Min.Y-1, dr.Dx()+2, 1, 60, 60, 70)
+		fillRectRGBA(dst, dr.Min.X-1, dr.Max.Y, dr.Dx()+2, 1, 60, 60, 70)
+		fillRectRGBA(dst, dr.Min.X-1, dr.Min.Y-1, 1, dr.Dy()+2, 60, 60, 70)
+		fillRectRGBA(dst, dr.Max.X, dr.Min.Y-1, 1, dr.Dy()+2, 60, 60, 70)
+		xdraw.CatmullRom.Scale(dst, dr, src, sb, xdraw.Over, nil)
 	}
 }
 

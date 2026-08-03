@@ -27,6 +27,30 @@ func TestPickReleaseAssetSkipsSetup(t *testing.T) {
 	}
 }
 
+func TestPickReleaseAssetSkipsMacInstaller(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("pickReleaseAsset selects by runtime.GOOS")
+	}
+	assets := []ghAsset{
+		{Name: "SHA256SUMS", URL: "https://example/sums"},
+		{Name: "suzuri-1.2.3-darwin-arm64.dmg", URL: "https://example/dmg"},
+		{Name: "suzuri-1.2.3-darwin-arm64.app.zip", URL: "https://example/appzip"},
+		{Name: "suzuri-1.2.3-darwin-arm64.zip", URL: "https://example/zip"},
+		{Name: "suzuri-1.2.3-darwin-arm64", URL: "https://example/bin"},
+	}
+	a, sums := pickReleaseAsset(assets)
+	if sums != "https://example/sums" {
+		t.Fatalf("sums=%q", sums)
+	}
+	// Prefer bare portable binary over zip; never dmg/app.zip.
+	if a.Name != "suzuri-1.2.3-darwin-arm64" && a.Name != "suzuri-1.2.3-darwin-arm64.zip" {
+		t.Fatalf("name=%q want portable darwin asset", a.Name)
+	}
+	if a.URL == "https://example/dmg" || a.URL == "https://example/appzip" {
+		t.Fatalf("picked installer %q", a.URL)
+	}
+}
+
 func TestCmpSemver(t *testing.T) {
 	cases := []struct {
 		a, b string

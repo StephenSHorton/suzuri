@@ -80,6 +80,7 @@ jobs:
             cp suzuri.exe "$base.exe"
             7z a -tzip "$base.zip" suzuri.exe || powershell -Command "Compress-Archive -Path suzuri.exe -DestinationPath $base.zip -Force"
           else
+            # Portable bare binary (also the in-app update payload).
             cp suzuri "$base"
             chmod +x "$base"
             zip -9 "$base.zip" "$base"
@@ -115,6 +116,25 @@ jobs:
             (Join-Path $root "packaging\windows\suzuri.nsi")
           if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
           Get-Item $out | Format-List Name, Length, FullName
+
+      # macOS: .app bundle with dock icon + DMG (drag to Applications).
+      # Portable bare binary above remains the in-app update payload.
+      - name: macOS app + DMG
+        if: matrix.goos == 'darwin'
+        shell: bash
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          arch="${{ matrix.goarch }}"
+          mkdir -p dist-mac
+          packaging/macos/build-app.sh \
+            --binary ./suzuri \
+            --version "$v" \
+            --arch "$arch" \
+            --out dist-mac
+          # Flatten release artifacts into the job workspace root for upload.
+          cp -f dist-mac/suzuri-*-darwin-*.app.zip . 2>/dev/null || true
+          cp -f dist-mac/suzuri-*-darwin-*.dmg . 2>/dev/null || true
+          ls -la suzuri-*-darwin-* || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
