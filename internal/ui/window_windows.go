@@ -171,6 +171,10 @@ type winUI struct {
 	inSizeMove bool
 	// layoutSettlePosted coalesces deferred post-resize layout messages.
 	layoutSettlePosted bool
+	// layoutDeferred: ConPTY resize needed but panes are busy (alt-screen Grok
+	// streams). Paint-only relayout hides bars now; full settle when idle.
+	// Dual busy + ResizePseudoConsole mid-stream hard-crashed (no Go panic).
+	layoutDeferred bool
 	// saveFinishPosted / saveNeedFontLayout: deferred settings-save cleanup.
 	saveFinishPosted   bool
 	saveNeedFontLayout bool
@@ -1130,16 +1134,14 @@ func (u *winUI) drainAndParse(tabID int) {
 			setWindowTitle(u.hwnd, "suzuri — "+t.title)
 		}
 	}
-	// Alt-screen enter/leave: grow/shrink shell (hide Warp bar) like Warp.
-	// Defer ConPTY resize off this PTY-drain stack — sync resize while I/O is
-	// in flight has hard-crashed the host (no Go panic trail).
+	// Alt-screen enter/leave: hide/show Warp bar. Never ConPTY-resize here —
+	// dual Grok + ResizePseudoConsole mid-stream hard-crashes (log dies with
+	// no panic after "layout settle"). Paint-only now; settle when idle.
 	nowAlt := t.altScreen()
 	if nowAlt != t.wasAlt {
 		t.wasAlt = nowAlt
 		log.Info("alt screen", "tab", t.id, "on", nowAlt)
-		if u.activeTab() == t {
-			u.postLayoutSettle()
-		}
+		u.onAltScreenToggled(t)
 	}
 	// Bridge snapshot is relatively expensive — skip on pure spam frames.
 	// (MCP clients still get updates on submit / tab change.)
@@ -1519,6 +1521,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				chrome.AdvanceTabSpinner()
 				u.chromeDirty = true
 				u.syncChrome()
+			}
+			// Flush a deferred ConPTY settle only when no pane is streaming hard.
+			if u.layoutDeferred && !u.anyPaneConPtyBusy() && u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
+				u.layoutDeferred = false
+				u.postLayoutSettle()
 			}
 			// Dim modals: throttle (settings rain) or chrome-dirty only.
 			// Palette floats over live shell — keep full-rate repaints so PTY
@@ -2655,6 +2662,71 @@ func (u *winUI) postLayoutSettle() {
 	}
 }
 
+// anyPaneConPtyBusy is true when a ConPTY resize would race streaming I/O.
+// Dual alt-screen (Grok) + ResizePseudoConsole is a known hard-crash path.
+func (u *winUI) anyPaneConPtyBusy() bool {
+	if u == nil {
+		return false
+	}
+	for _, t := range u.allPanes() {
+		if t == nil || !t.alive.Load() {
+			continue
+		}
+		if t.altScreen() && t.busy() {
+			return true
+		}
+		// Recent PTY bytes even without alt — still risky mid-resize.
+		ns := t.lastIOUnixNano.Load()
+		if ns != 0 && time.Since(time.Unix(0, ns)) < 200*time.Millisecond {
+			return true
+		}
+	}
+	return false
+}
+
+// onAltScreenToggled updates bar geometry for paint without ConPTY resize.
+// Full settle (ResizePseudoConsole) runs later when panes are idle.
+func (u *winUI) onAltScreenToggled(t *tab) {
+	if u == nil {
+		return
+	}
+	u.relayoutActivePaintOnly()
+	if u.anyPaneConPtyBusy() {
+		u.layoutDeferred = true
+		log.Debug("alt screen: paint-only, ConPTY settle deferred", "tab", t.id)
+	} else {
+		u.layoutDeferred = false
+		u.postLayoutSettle()
+	}
+	u.requestPaint()
+}
+
+// relayoutActivePaintOnly recomputes leaf geometry (bars/titles) for the active
+// page without resizing ConPTY or dropping the backbuffer.
+func (u *winUI) relayoutActivePaintOnly() {
+	if u == nil || u.width < 2 || u.height < 2 {
+		return
+	}
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	pg := u.activePage()
+	if pg == nil || pg.root == nil {
+		return
+	}
+	sx, sy, sw, sh := u.shellRect(u.width, u.height)
+	res := layoutPage(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID)
+	u.lastPaneLayout = res.leaves
+	u.lastSashes = res.sashes
+	u.lastShell.x, u.lastShell.y = res.shellX, res.shellY
+	u.lastShell.w, u.lastShell.h = res.shellW, res.shellH
+	u.inputPx = u.sumActivePaneBarHeights()
+}
+
 // applyLayoutAfterSizeMove runs off the size-move stack: measure, reflow chrome,
 // resize VT/ConPTY once, rebuild backbuffer on next paint.
 func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
@@ -2670,6 +2742,17 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 	if w < 2 || h < 2 {
 		return
 	}
+	// If panes are mid-stream (dual Grok), paint-only and try again later —
+	// never ResizePseudoConsole under load.
+	if u.anyPaneConPtyBusy() {
+		u.layoutDeferred = true
+		u.relayoutActivePaintOnly()
+		u.layoutSettlePosted = false
+		u.requestPaint()
+		log.Debug("layout settle deferred (pane busy)", "w", w, "h", h)
+		return
+	}
+
 	log.Info("layout settle begin", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
 	applog.Sync()
 
@@ -2689,17 +2772,21 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 		win.ReleaseDC(hwnd, hdc)
 	}
 
-	// Drop stale backbuffer so next paint allocates at the new size.
-	u.releaseBackbuffer()
+	// Drop backbuffer only when client size changed — dual busy settles used
+	// to thrash GDI by recreating a full-window bitmap every alt-screen toggle.
+	if u.memW != w || u.memH != h || u.memDC == 0 {
+		u.releaseBackbuffer()
+	}
 	u.overlayDirty = true
 	u.chromeDirty = true
+	u.layoutDeferred = false
 
 	u.applyClientSize(w, h)
 	log.Info("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
 	applog.Sync()
 
 	if u.alive.Load() {
-		win.InvalidateRect(hwnd, nil, false)
+		u.requestPaint()
 	}
 }
 
@@ -2765,6 +2852,14 @@ func (u *winUI) applyClientSize(w, h int32) {
 		}
 		for _, g := range res.leaves {
 			if g.pane == nil || !g.pane.alive.Load() {
+				continue
+			}
+			// Skip ConPTY resize on busy alt-screen panes (caller should have
+			// deferred full settle; belt-and-suspenders).
+			if g.pane.altScreen() && g.pane.busy() &&
+				g.pane.lastCols > 0 && g.pane.lastRows > 0 &&
+				(g.cols != g.pane.lastCols || g.rows != g.pane.lastRows) {
+				u.layoutDeferred = true
 				continue
 			}
 			g.pane.resize(g.cols, g.rows)
