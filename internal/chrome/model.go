@@ -595,7 +595,10 @@ func (m Model) OverlayView() string {
 	case m.RenameOpen:
 		card = m.renderRename(w)
 	case m.NotesOpen:
-		card = m.renderNotes(w)
+		// Main notes UI + contextual shortcuts companion (not a footer on the card).
+		main := m.renderNotes(w)
+		keys := m.renderNotesContextKeys(w)
+		card = lipgloss.JoinVertical(lipgloss.Center, main, keys)
 	case m.PaletteOpen:
 		// Crush commands: outer min(70, area), inner = outer − frame.
 		// Sync render — no bubbles list layout/filter on the key path.
@@ -732,7 +735,8 @@ func (m Model) OverlayRowCount() int {
 	case m.RenameOpen:
 		return 8
 	case m.NotesOpen:
-		return notesListRows + 10
+		// List/editor card + gap + contextual keys companion.
+		return notesListRows + 18
 	case m.PaletteOpen:
 		return 14
 	default:

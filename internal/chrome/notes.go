@@ -949,7 +949,41 @@ func (m Model) renderNotesListScreen(windowCols int) string {
 	if n := len(m.notesBank); n > 0 {
 		title = fmt.Sprintf("Notes  (%d)", n)
 	}
-	// No shortcut footer on the note card — see Help (Ctrl+/).
+	return renderDialogCard(outer, title, body, "")
+}
+
+// renderNotesContextKeys is a companion shortcuts card for the current notes screen
+// (list vs editor vs rename). Shown under the main notes card in OverlayView.
+func (m Model) renderNotesContextKeys(windowCols int) string {
+	outer := clampDialogWidth(40, windowCols)
+	inner := dialogInnerWidth(outer)
+	if inner < 16 {
+		inner = 16
+	}
+	var body []string
+	var title string
+	switch m.notesFocus {
+	case notesFocusList:
+		title = "Notes list"
+		body = append(body, helpRow(inner, KeyUpDown(), "Move selection"))
+		body = append(body, helpRow(inner, "Enter / click", "Open note"))
+		body = append(body, helpRow(inner, "n", "New note"))
+		body = append(body, helpRow(inner, "d / Delete", "Delete note"))
+		body = append(body, helpRow(inner, "Esc", "Close notes"))
+		body = append(body, helpRow(inner, KeyCtrlShift("M"), "Hide notes"))
+	case notesFocusTitle:
+		title = "Rename note"
+		body = append(body, helpRow(inner, "Enter", "Save name"))
+		body = append(body, helpRow(inner, "Esc", "Cancel"))
+	default: // editor
+		title = "Note editor"
+		body = append(body, helpRow(inner, "Esc", "Back to list"))
+		body = append(body, helpRow(inner, "F2 / click title", "Rename"))
+		body = append(body, helpRow(inner, KeyCtrl("A"), "Select all"))
+		body = append(body, helpRow(inner, KeyCtrl("C")+" / "+KeyCtrl("X")+" / "+KeyCtrl("V"), "Copy / cut / paste"))
+		body = append(body, helpRow(inner, "Tab", "Insert tab"))
+		body = append(body, helpRow(inner, KeyCtrlShift("M"), "Hide notes"))
+	}
 	return renderDialogCard(outer, title, body, "")
 }
 
@@ -1048,11 +1082,11 @@ func (m Model) renderNotesEditorScreen(windowCols int) string {
 	if len(m.notesBank) > 0 && m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
 		cardTitle = NoteDisplayTitle(m.notesBank[m.notesActive])
 	}
-	// No shortcut footer on the note card — see Help (Ctrl+/).
 	return renderDialogCard(outer, cardTitle, body, "")
 }
 
 // computeNotesLayout fills m.notesLayout for click tests (list vs editor screen).
+// Coordinates are relative to the main notes card only (not the keys companion).
 func (m *Model) computeNotesLayout(windowCols int) {
 	if windowCols < 20 {
 		windowCols = 20
