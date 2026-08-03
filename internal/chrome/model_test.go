@@ -201,6 +201,19 @@ func TestDismissOverlay(t *testing.T) {
 	}
 }
 
+func TestConfirmUpdateModal(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenConfirmUpdateMsg{Version: "1.2.3"})
+	m = r.Model
+	if !m.ConfirmOpen {
+		t.Fatal("confirm should open")
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionInstallUpdate {
+		t.Fatalf("action=%v want InstallUpdate", r.Action)
+	}
+}
+
 func TestRenameDialogApply(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenRenameMsg{Target: RenameTargetPane, Seed: "shell"})

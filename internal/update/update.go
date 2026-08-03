@@ -66,8 +66,9 @@ func New(repo, currentVersion string) *Service {
 // Current returns the running version.
 func (s *Service) Current() string { return s.current }
 
-// AutoUpdate checks and installs if newer. Errors are logged, never returned
-// to the UI path — offline/dev builds must not block startup.
+// AutoUpdate is retained for tests/tools. Production UI never silent-installs:
+// it checks, toasts, and requires OpenConfirmUpdateMsg before DownloadAndApply.
+// This helper only logs availability (does not apply).
 func (s *Service) AutoUpdate() {
 	info, err := s.Check()
 	if err != nil {
@@ -78,10 +79,7 @@ func (s *Service) AutoUpdate() {
 		log.Debug("update: already current", "version", s.current)
 		return
 	}
-	log.Info("update: installing", "version", info.Version)
-	if err := s.DownloadAndApply(*info); err != nil {
-		log.Warn("update apply failed", "err", err)
-	}
+	log.Info("update: available (not applied; UI confirm required)", "version", info.Version)
 }
 
 // Check returns update info, or nil if up to date / dev / no releases.

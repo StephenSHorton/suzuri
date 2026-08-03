@@ -46,6 +46,8 @@ const (
 	// wmSuzuriToast delivers a status toast from a background goroutine
 	// (manual update check) onto the UI thread.
 	wmSuzuriToast = win.WM_APP + 8
+	// wmSuzuriUpdateOffer opens the update confirm modal (version in toastPending).
+	wmSuzuriUpdateOffer = win.WM_APP + 9
 )
 
 // Run opens a native Win32 window with one shell tab (more via Ctrl+Shift+T).
@@ -204,6 +206,8 @@ type winUI struct {
 	// toastPending is set from background goroutines; drained on wmSuzuriToast.
 	toastMu      sync.Mutex
 	toastPending string
+	// updateOfferVer is the version string for wmSuzuriUpdateOffer confirm.
+	updateOfferVer string
 
 	// MCP bridge: loopback HTTP for spawn-on-demand stdio MCP (see internal/bridge).
 	bridge  *bridge.Host
@@ -606,6 +610,40 @@ func (u *winUI) postToast(msg string) {
 	}
 }
 
+// postUpdateOffer opens the install-confirm modal on the UI thread.
+func (u *winUI) postUpdateOffer(version string) {
+	if u == nil {
+		return
+	}
+	u.toastMu.Lock()
+	u.updateOfferVer = version
+	u.toastMu.Unlock()
+	if u.hwnd != 0 {
+		if win.PostMessage(u.hwnd, wmSuzuriUpdateOffer, 0, 0) == 0 {
+			u.openUpdateConfirm(version)
+		}
+	}
+}
+
+func (u *winUI) openUpdateConfirm(version string) {
+	r := u.chrome.UpdateChrome(chrome.OpenConfirmUpdateMsg{Version: version})
+	u.chrome = r.Model
+	u.overlayCells = nil
+	u.overlayDirty = true
+	u.overlaySceneReady = false
+	u.markChromeDirty()
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+}
+
+func (u *winUI) startUpdateCheck() {
+	runUpdateCheck(updateCheckHooks{
+		toast:       u.postToast,
+		offerUpdate: u.postUpdateOffer,
+	})
+}
+
 func (u *winUI) clearToastIfDue() {
 	if u.statusUntil.IsZero() {
 		return
@@ -818,7 +856,9 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
-		runUpdateCheck(u.postToast)
+		u.startUpdateCheck()
+	case chrome.ActionInstallUpdate:
+		applyPendingUpdate(u.postToast)
 	case chrome.ActionOpenRenamePane:
 		u.openRenameUI(chrome.RenameTargetPane)
 	case chrome.ActionOpenRenameTab:
@@ -1037,6 +1077,9 @@ func (u *winUI) loop() error {
 			u.publishBridgeSnapshot()
 		}
 	}
+	// Startup update check: toast "checking…" then confirm before any install.
+	scheduleStartupUpdateCheck(u.postToast, u.postUpdateOffer)
+
 	if u.showSplash {
 		r := u.chrome.UpdateChrome(chrome.OpenSplashMsg{})
 		u.chrome = r.Model
@@ -1677,6 +1720,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.toastMu.Unlock()
 		if msg != "" {
 			u.toast(msg)
+		}
+		return 0
+
+	case wmSuzuriUpdateOffer:
+		u.toastMu.Lock()
+		ver := u.updateOfferVer
+		u.updateOfferVer = ""
+		u.toastMu.Unlock()
+		if ver != "" {
+			u.openUpdateConfirm(ver)
 		}
 		return 0
 

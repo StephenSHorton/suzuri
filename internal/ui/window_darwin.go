@@ -884,7 +884,25 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
-		runUpdateCheck(u.postToast)
+		runUpdateCheck(updateCheckHooks{
+			toast: u.postToast,
+			offerUpdate: func(ver string) {
+				if u.jobs != nil {
+					select {
+					case u.jobs <- func() {
+						r := u.chrome.UpdateChrome(chrome.OpenConfirmUpdateMsg{Version: ver})
+						u.chrome = r.Model
+						u.overlayCells = nil
+						u.overlayDirty = true
+						u.markChromeDirty()
+					}:
+					default:
+					}
+				}
+			},
+		})
+	case chrome.ActionInstallUpdate:
+		applyPendingUpdate(u.postToast)
 	case chrome.ActionOpenRenamePane:
 		u.openRenameUI(chrome.RenameTargetPane)
 	case chrome.ActionOpenRenameTab:

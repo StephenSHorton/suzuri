@@ -88,9 +88,9 @@ func main() {
 	// Leftover from a previous portable update (renamed running image).
 	update.CleanupOldBinary()
 
-	// Fire-and-forget auto-update (release builds only; never blocks UI start).
+	// Updater is wired for UI-driven checks (startup toast + confirm before install).
+	// Never silent-apply: host offers a modal; user must confirm restart.
 	upd := update.New("StephenSHorton/suzuri", version)
-	go upd.AutoUpdate()
 	ui.SetUpdater(upd)
 	ui.SetAppVersion(version)
 

@@ -73,6 +73,10 @@ type (
 	}
 	// OpenConfirmQuitMsg asks to quit the app (last tab closed).
 	OpenConfirmQuitMsg struct{}
+	// OpenConfirmUpdateMsg asks before installing a GitHub release.
+	OpenConfirmUpdateMsg struct {
+		Version string // without leading v
+	}
 	// OpenHelpMsg shows keyboard shortcuts.
 	OpenHelpMsg struct{}
 	// OpenSplashMsg shows first-run welcome (once).
@@ -107,8 +111,10 @@ const (
 	ActionSplashDone
 	// ActionReplayIntro re-runs the configured startup curtain (matrix/ripple/none).
 	ActionReplayIntro
-	// ActionCheckUpdates queries GitHub Releases and installs if newer.
+	// ActionCheckUpdates queries GitHub Releases (host may open confirm).
 	ActionCheckUpdates
+	// ActionInstallUpdate downloads and applies a pending update (after confirm).
+	ActionInstallUpdate
 	// Split panes (host implements layout).
 	ActionSplitRight
 	ActionSplitDown
@@ -246,6 +252,20 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			yesLabel:  "Quit",
 			noLabel:   "Cancel",
 			yesAction: ActionQuit,
+		}
+	case OpenConfirmUpdateMsg:
+		m.closeModalsExcept("confirm")
+		m.ConfirmOpen = true
+		ver := strings.TrimPrefix(strings.TrimSpace(msg.Version), "v")
+		if ver == "" {
+			ver = "?"
+		}
+		m.confirm = confirmState{
+			title:     "Update suzuri?",
+			body:      fmt.Sprintf("v%s is available. Install and restart?", ver),
+			yesLabel:  "Update",
+			noLabel:   "Later",
+			yesAction: ActionInstallUpdate,
 		}
 	case OpenHelpMsg:
 		m.closeModalsExcept("help")

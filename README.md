@@ -152,7 +152,7 @@ git push origin v0.6.0
 
 ## Auto-update
 
-Release builds embed a version via `-ldflags -X main.version=…`. On startup (and via palette **Check for updates**), suzuri queries GitHub Releases, downloads the **portable** asset for the running OS/arch (not the setup installer), verifies `SHA256SUMS` when present, replaces the running binary, and relaunches. That works for both the portable `.exe` and the installed copy under `%LOCALAPPDATA%\Programs\suzuri\`. Dev builds (`version=dev`) never auto-update.
+Release builds embed a version via `-ldflags -X main.version=…`. On startup (and via palette **Check for updates**), suzuri queries GitHub Releases and toasts progress. If a newer version exists, a **confirmation modal** asks before install; **Update** downloads the portable asset (not the setup installer), verifies `SHA256SUMS` when present, replaces the running binary, and relaunches. **Later** dismisses without installing. Works for portable `.exe` and the install under `%LOCALAPPDATA%\Programs\suzuri\`. Dev builds (`version=dev`) never offer updates.
 
 ## Windows packaging
 
