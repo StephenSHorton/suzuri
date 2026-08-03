@@ -58,12 +58,22 @@ header.wrap {
   margin: 0;
   font-weight: 600;
   letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  image-rendering: auto;
+  flex-shrink: 0;
 }
 .kanji {
   font-family: var(--serif);
   color: var(--accent);
   font-size: 1.35em;
-  margin-right: 0.25rem;
+  margin-right: 0.1rem;
 }
 nav a {
   color: var(--mute);
