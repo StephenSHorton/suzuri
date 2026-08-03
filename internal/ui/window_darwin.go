@@ -1934,6 +1934,14 @@ func (u *macUI) handleKeys() {
 		case wordMod:
 			in.moveWordRight()
 		default:
+			// zsh-autosuggest: → at EOL accepts the ghost suggestion.
+			if in.cursor >= len(in.runes) {
+				if t := u.activeTab(); t != nil && in.acceptGhost(t.cwd) {
+					u.maybeResizeForInput()
+					u.markInputDirty()
+					return
+				}
+			}
 			in.moveRight()
 		}
 		u.markInputDirty()

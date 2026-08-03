@@ -141,6 +141,7 @@ func helpSectionsLeft(colW int) []helpSectionBlock {
 				{"Enter", "Run command"},
 				{KeyShift("Enter"), "New line"},
 				{KeyUpDown(), "Line / history"},
+				{"→ / Tab", "Accept suggest · complete"},
 				{"Esc", "Clear line"},
 				{KeyCtrl("C"), "Clear / interrupt"},
 				{KeyCtrl("V"), "Paste into bar"},

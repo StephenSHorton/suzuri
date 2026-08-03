@@ -2544,6 +2544,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.maybeResizeForInput()
 			u.requestInputPaint()
 		case win.VK_RIGHT:
+			// zsh-autosuggest: → at EOL accepts the ghost suggestion.
+			if in.cursor >= len(in.runes) {
+				if in.acceptGhost(tab.cwd) {
+					u.maybeResizeForInput()
+					u.requestInputPaint()
+					break
+				}
+			}
 			in.moveRight()
 			u.requestInputPaint()
 		case win.VK_LEFT:

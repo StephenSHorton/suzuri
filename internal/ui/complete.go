@@ -25,8 +25,9 @@ func (b *inputBar) clearComplete() {
 	b.ghostCache = ""
 }
 
-// ghostSuffix is the soft placeholder after the caret: the remainder of the
-// first Tab match (fish-style inline suggestion). Empty when none / not at EOL.
+// ghostSuffix is the soft placeholder after the caret (zsh-autosuggest style).
+// Prefer newest history line that has the current buffer as a prefix; fall
+// back to path/Tab completion remainder. Empty when none / not at EOL.
 func (b *inputBar) ghostSuffix(cwd string) string {
 	if b == nil || len(b.runes) == 0 || b.cursor != len(b.runes) || b.histIdx >= 0 {
 		return ""
@@ -40,32 +41,62 @@ func (b *inputBar) ghostSuffix(cwd string) string {
 	return b.ghostCache
 }
 
+// acceptGhost appends the current ghost suggestion (Right-arrow at EOL).
+// Returns true if the buffer changed.
+func (b *inputBar) acceptGhost(cwd string) bool {
+	if b == nil {
+		return false
+	}
+	g := b.ghostSuffix(cwd)
+	if g == "" {
+		return false
+	}
+	b.clearComplete()
+	b.leaveHistoryBrowse()
+	gr := []rune(g)
+	b.runes = append(b.runes, gr...)
+	b.cursor = len(b.runes)
+	b.ghostKey = ""
+	b.ghostCache = ""
+	return true
+}
+
 func (b *inputBar) computeGhostSuffix(cwd string) string {
+	// While Tab-cycling, preview the next alternative (fish-style).
+	if b.comp.active && b.stillInCompleteSession() && len(b.comp.matches) > 1 {
+		idx := (b.comp.idx + 1) % len(b.comp.matches)
+		m := b.comp.matches[idx]
+		cur := b.currentCompleteToken()
+		return ghostRemainder(cur, m)
+	}
+
+	linePrefix := string(b.runes[lineStartAt(b.runes, b.cursor):b.cursor])
+	// zsh-autosuggestions: newest history entry with full line as prefix.
+	if rem := historyGhostRemainder(b.history, linePrefix); rem != "" {
+		return rem
+	}
+
+	// Fall back to path / token completion (empty token after "cd " etc.).
 	start, _, prefix, firstWord := tokenAtCursor(b.runes, b.cursor)
-	// No ghost for a bare empty token ("cd " / empty line) — would list whole dirs.
-	if prefix == "" {
+	if prefix == "" && firstWord {
 		return ""
 	}
-	linePrefix := string(b.runes[lineStartAt(b.runes, b.cursor):b.cursor])
-	matches, kindPath := collectCompletions(cwd, b.history, linePrefix, prefix, firstWord)
+	matches, _ := collectCompletions(cwd, b.history, linePrefix, prefix, firstWord)
 	if len(matches) == 0 {
 		return ""
 	}
-	// First Tab match; while cycling, preview the *next* alternative.
-	idx := 0
-	if b.comp.active && b.stillInCompleteSession() && len(b.comp.matches) > 1 {
-		idx = (b.comp.idx + 1) % len(b.comp.matches)
-		matches = b.comp.matches
-		kindPath = b.comp.kindPath
-	}
-	_ = kindPath
-	m := matches[idx]
+	m := matches[0]
 	cur := string(b.runes[start:b.cursor])
-	if cur == m {
+	// History match is whole line from tokenStart for non-path; path is token only.
+	return ghostRemainder(cur, m)
+}
+
+// ghostRemainder is the part of match after cur (case-insensitive prefix).
+func ghostRemainder(cur, match string) string {
+	if cur == match || match == "" {
 		return ""
 	}
-	// Case-insensitive prefix (Windows paths); ghost keeps the match's remaining spelling.
-	cr, mr := []rune(cur), []rune(m)
+	cr, mr := []rune(cur), []rune(match)
 	if len(mr) <= len(cr) {
 		return ""
 	}
@@ -73,6 +104,27 @@ func (b *inputBar) computeGhostSuffix(cwd string) string {
 		return ""
 	}
 	return string(mr[len(cr):])
+}
+
+// historyGhostRemainder returns the untyped suffix of the newest history line
+// that has linePrefix as a prefix (zsh-autosuggestions strategy).
+func historyGhostRemainder(history []string, linePrefix string) string {
+	linePrefix = strings.TrimRight(linePrefix, "\n\r")
+	if strings.TrimSpace(linePrefix) == "" {
+		return ""
+	}
+	pl := strings.ToLower(linePrefix)
+	for i := len(history) - 1; i >= 0; i-- {
+		h := history[i]
+		if h == linePrefix {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToLower(h), pl) {
+			continue
+		}
+		return ghostRemainder(linePrefix, h)
+	}
+	return ""
 }
 
 func itoa(n int) string {
@@ -261,21 +313,29 @@ func tokenAtCursor(runes []rune, cursor int) (start, end int, prefix string, fir
 func collectCompletions(cwd string, history []string, linePrefix, token string, firstWord bool) (matches []string, kindPath bool) {
 	pathLike := tokenLooksPath(token)
 
-	// Path when token looks path-like, empty token after another word (e.g. "cd "),
-	// or non-first-word.
-	wantPath := pathLike || !firstWord || (token == "" && !firstWord)
-	// "cd " → firstWord false after space... actually "cd " has firstWord=false for empty token after cd.
-	// "cd" alone is firstWord with token "cd" — history or path.
+	// Path when token looks path-like, or non-first-word (args / "cd ").
+	wantPath := pathLike || !firstWord
 
-	if firstWord && !pathLike && token != "" {
-		// Prefer history for command-ish first word; fall back to path.
+	// Full-line history first whenever the typed line is non-empty (multi-word
+	// too: "git sta" → "git status"). Path completions still win Tab into dirs.
+	if strings.TrimSpace(linePrefix) != "" {
 		if hm := historyCompletions(history, linePrefix); len(hm) > 0 {
-			return hm, false
+			// For path-like tokens at first word (./foo), prefer path if any.
+			if pathLike && firstWord {
+				if pm := pathCompletions(cwd, token); len(pm) > 0 {
+					return pm, true
+				}
+			}
+			// Non-first-word path tokens: offer path when token is path-like.
+			if !firstWord && pathLike {
+				if pm := pathCompletions(cwd, token); len(pm) > 0 {
+					return pm, true
+				}
+			}
+			if firstWord || !pathLike {
+				return hm, false
+			}
 		}
-		if pm := pathCompletions(cwd, token); len(pm) > 0 {
-			return pm, true
-		}
-		return nil, false
 	}
 
 	if wantPath || firstWord {
@@ -283,7 +343,7 @@ func collectCompletions(cwd string, history []string, linePrefix, token string, 
 			return pm, true
 		}
 	}
-	if firstWord {
+	if strings.TrimSpace(linePrefix) != "" {
 		if hm := historyCompletions(history, linePrefix); len(hm) > 0 {
 			return hm, false
 		}

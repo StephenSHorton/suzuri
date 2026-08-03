@@ -135,6 +135,41 @@ func TestGhostSuffix(t *testing.T) {
 	}
 }
 
+func TestMultiWordHistoryGhost(t *testing.T) {
+	var b inputBar
+	b.histIdx = -1
+	b.history = []string{"git status -sb", "git commit -m 'x'", "ls"}
+	b.insertRunes([]rune("git sta"))
+	g := b.ghostSuffix("")
+	if g != "tus -sb" {
+		t.Fatalf("multi-word history ghost: %q", g)
+	}
+}
+
+func TestAcceptGhost(t *testing.T) {
+	var b inputBar
+	b.histIdx = -1
+	b.history = []string{"echo hello world"}
+	b.insertRunes([]rune("echo he"))
+	if !b.acceptGhost("") {
+		t.Fatal("expected accept")
+	}
+	if b.text() != "echo hello world" {
+		t.Fatalf("got %q", b.text())
+	}
+	if b.cursor != len(b.runes) {
+		t.Fatalf("cursor=%d", b.cursor)
+	}
+	// At EOL with full match: no further ghost.
+	if b.ghostSuffix("") != "" {
+		t.Fatalf("should not re-suggest full line: %q", b.ghostSuffix(""))
+	}
+	// → with no ghost does nothing (caller moves right).
+	if b.acceptGhost("") {
+		t.Fatal("no ghost to accept")
+	}
+}
+
 func stringsHasPrefixFold(s, prefix string) bool {
 	return strings.HasPrefix(strings.ToLower(s), strings.ToLower(prefix))
 }
