@@ -19,10 +19,17 @@ const (
 	fieldANSIMap
 	fieldIntro
 	fieldShellMatrix
+	fieldRainOpacity
 	fieldAnimateUnfocused
 	fieldProfile
 	settingsFieldCount
 )
+
+// rainOpacityStep is left/right nudge size for the rain strength slider (%).
+const rainOpacityStep = 5
+
+// rainOpacityBarCells is the filled/empty bar width in the settings value column.
+const rainOpacityBarCells = 10
 
 // Fixed label column so values sit on a clean right column.
 const settingsLabelCols = 10
@@ -120,6 +127,11 @@ func (s *settingsState) nudge(delta int) {
 		s.edit.Intro = ids[i]
 	case fieldShellMatrix:
 		s.edit.ShellMatrix = !s.edit.ShellMatrix
+	case fieldRainOpacity:
+		// Slider: left/right steps by 5%. Charm has no native slider widget;
+		// we render a block bar and nudge like font size.
+		s.edit.ShellMatrixOpacity += delta * rainOpacityStep
+		s.edit = config.Normalize(s.edit)
 	case fieldAnimateUnfocused:
 		s.edit.AnimateUnfocused = !s.edit.AnimateUnfocused
 	case fieldProfile:
@@ -159,6 +171,8 @@ func (s settingsState) valueLabel(f settingsField) string {
 			return "On"
 		}
 		return "Off"
+	case fieldRainOpacity:
+		return formatRainOpacitySlider(s.edit.ShellMatrixOpacity, rainOpacityBarCells)
 	case fieldAnimateUnfocused:
 		if s.edit.AnimateUnfocused {
 			return "On"
@@ -190,6 +204,8 @@ func (s settingsState) fieldLabel(f settingsField) string {
 		return "Intro"
 	case fieldShellMatrix:
 		return "Rain"
+	case fieldRainOpacity:
+		return "Opacity"
 	case fieldAnimateUnfocused:
 		return "Bg anim"
 	case fieldProfile:
@@ -355,10 +371,16 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		if s.edit.ShellMatrix {
 			paras = []string{
 				"Always-on digital rain under empty / default-bg shell cells — very dim so text stays readable.",
-				"Shows through fullscreen TUIs (Grok, vim, etc.) where those apps leave the canvas transparent. Paused while the startup intro is playing or a dim modal is open.",
+				"Shows through fullscreen TUIs (Grok, vim, etc.) where those apps leave the canvas transparent. Paused while the startup intro is playing or a dim modal is open. Use Opacity to dim or strengthen it.",
 			}
 		} else {
 			paras = []string{"No background rain in the shell. Intro and Settings rain are unchanged."}
+		}
+	case fieldRainOpacity:
+		title = "Opacity · " + fmt.Sprintf("%d%%", s.edit.ShellMatrixOpacity)
+		paras = []string{
+			"Strength of always-on shell rain (left/right, 5% steps). 100% is the designed default; lower values fade the rain under text and TUIs.",
+			"Only applies when Rain is On. Live-previews as you change it — Enter saves.",
 		}
 	case fieldAnimateUnfocused:
 		title = "Bg anim · " + val
@@ -429,6 +451,34 @@ func wrapWords(s string, width int) []string {
 		}
 	}
 	return out
+}
+
+// formatRainOpacitySlider renders a text slider, e.g. "██████░░░░  60%".
+// No Charm slider widget — settings use left/right nudge like Size.
+func formatRainOpacitySlider(pct, barW int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	if barW < 6 {
+		barW = 6
+	}
+	filled := (pct*barW + 50) / 100
+	if filled > barW {
+		filled = barW
+	}
+	var b strings.Builder
+	b.Grow(barW + 6)
+	for i := 0; i < barW; i++ {
+		if i < filled {
+			b.WriteRune('█')
+		} else {
+			b.WriteRune('░')
+		}
+	}
+	return fmt.Sprintf("%s %3d%%", b.String(), pct)
 }
 
 // settingsRow is one label | value line.

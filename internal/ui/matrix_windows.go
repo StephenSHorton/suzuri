@@ -202,8 +202,3 @@ func (u *winUI) paintDimMatrixIntensity(hdc win.HDC, rect win.RECT, top, bot int
 	return drew
 }
 
-// shellMatrixIntensity is how bright persistent shell rain is vs settings/intro.
-const shellMatrixIntensity = 0.20
-
-// shellMatrixAltScreenIntensity — see intro_darwin.go (same rationale).
-const shellMatrixAltScreenIntensity = 0.48

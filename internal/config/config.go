@@ -66,6 +66,10 @@ type Config struct {
 	Intro string
 	// ShellMatrix draws quiet digital rain under the shell viewport (always-on).
 	ShellMatrix bool
+	// ShellMatrixOpacity is 0–100 strength for always-on rain (multiplies the
+	// host base intensity). 100 = shipping default brightness; 0 = invisible
+	// rain while still "on". Missing JSON loads as 100.
+	ShellMatrixOpacity int
 	// AnimateUnfocused keeps the paint clock running when another app has focus
 	// (matrix rain, tab spinner, caret). Off freezes chrome animation in background.
 	AnimateUnfocused bool
@@ -108,10 +112,11 @@ type fileDTO struct {
 	ActiveProfile string           `json:"active_profile,omitempty"`
 	FirstRunDone  bool            `json:"first_run_done,omitempty"`
 	Intro         string          `json:"intro,omitempty"`
-	// Ptr fields distinguish "missing" from false when loading JSON.
-	ShellMatrixPtr       *bool           `json:"shell_matrix,omitempty"`
-	AnimateUnfocusedPtr  *bool           `json:"animate_unfocused,omitempty"`
-	Window               WindowPlacement `json:"window,omitempty"`
+	// Ptr fields distinguish "missing" from false / 0 when loading JSON.
+	ShellMatrixPtr         *bool           `json:"shell_matrix,omitempty"`
+	ShellMatrixOpacityPtr  *int            `json:"shell_matrix_opacity,omitempty"`
+	AnimateUnfocusedPtr    *bool           `json:"animate_unfocused,omitempty"`
+	Window                 WindowPlacement `json:"window,omitempty"`
 }
 
 // DefaultFontFace is the shipping monospaced face (bundled GohuFont uni14 Mono).
@@ -130,12 +135,13 @@ func Default() Config {
 		FontSizePx:    DefaultFontSizePx,
 		Theme:         ThemeHighContrast,
 		ShellANSIMap:  ANSIMapSoft,
-		Intro:              IntroMatrix,
-		ShellMatrix:        true, // quiet always-on rain under shell cells
-		AnimateUnfocused:   true, // keep rain/spinners smooth in the background
-		Profiles:           DefaultProfiles(),
-		ActiveProfile:      "Default",
-		FirstRunDone:       false,
+		Intro:                IntroMatrix,
+		ShellMatrix:          true, // quiet always-on rain under shell cells
+		ShellMatrixOpacity:   100,  // full designed strength
+		AnimateUnfocused:     true, // keep rain/spinners smooth in the background
+		Profiles:             DefaultProfiles(),
+		ActiveProfile:        "Default",
+		FirstRunDone:         false,
 	}
 }
 
@@ -277,7 +283,25 @@ func Normalize(c Config) Config {
 	if c.ActiveProfile == "" || FindProfile(c, c.ActiveProfile) == nil {
 		c.ActiveProfile = c.Profiles[0].Name
 	}
+	if c.ShellMatrixOpacity < 0 {
+		c.ShellMatrixOpacity = 0
+	}
+	if c.ShellMatrixOpacity > 100 {
+		c.ShellMatrixOpacity = 100
+	}
 	return c
+}
+
+// ShellMatrixOpacity01 returns always-on rain strength in [0,1].
+func (c Config) ShellMatrixOpacity01() float64 {
+	op := c.ShellMatrixOpacity
+	if op < 0 {
+		return 0
+	}
+	if op > 100 {
+		return 1
+	}
+	return float64(op) / 100
 }
 
 // FindProfile returns a pointer to a profile by name (case-insensitive), or nil.
@@ -421,6 +445,11 @@ func fromDTO(d fileDTO) Config {
 	} else {
 		c.ShellMatrix = dflt.ShellMatrix
 	}
+	if d.ShellMatrixOpacityPtr != nil {
+		c.ShellMatrixOpacity = *d.ShellMatrixOpacityPtr
+	} else {
+		c.ShellMatrixOpacity = dflt.ShellMatrixOpacity
+	}
 	if d.AnimateUnfocusedPtr != nil {
 		c.AnimateUnfocused = *d.AnimateUnfocusedPtr
 	} else {
@@ -431,19 +460,21 @@ func fromDTO(d fileDTO) Config {
 
 func toDTO(c Config) fileDTO {
 	sm := c.ShellMatrix
+	op := c.ShellMatrixOpacity
 	au := c.AnimateUnfocused
 	return fileDTO{
-		FontFace:             c.FontFace,
-		FontSizePx:           c.FontSizePx,
-		Cursor:               CursorString(c.Cursor),
-		Theme:                c.Theme,
-		ShellANSIMap:         c.ShellANSIMap,
-		Profiles:             c.Profiles,
-		ActiveProfile:        c.ActiveProfile,
-		FirstRunDone:         c.FirstRunDone,
-		Intro:                c.Intro,
-		ShellMatrixPtr:       &sm,
-		AnimateUnfocusedPtr:  &au,
-		Window:               c.Window,
+		FontFace:              c.FontFace,
+		FontSizePx:            c.FontSizePx,
+		Cursor:                CursorString(c.Cursor),
+		Theme:                 c.Theme,
+		ShellANSIMap:          c.ShellANSIMap,
+		Profiles:              c.Profiles,
+		ActiveProfile:         c.ActiveProfile,
+		FirstRunDone:          c.FirstRunDone,
+		Intro:                 c.Intro,
+		ShellMatrixPtr:        &sm,
+		ShellMatrixOpacityPtr: &op,
+		AnimateUnfocusedPtr:   &au,
+		Window:                c.Window,
 	}
 }

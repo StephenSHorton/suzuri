@@ -13,6 +13,56 @@ func TestNormalizeDefaults(t *testing.T) {
 	}
 }
 
+func TestShellMatrixOpacityClamp(t *testing.T) {
+	c := Normalize(Config{ShellMatrixOpacity: 150})
+	if c.ShellMatrixOpacity != 100 {
+		t.Fatalf("clamp high: %d", c.ShellMatrixOpacity)
+	}
+	c = Normalize(Config{ShellMatrixOpacity: -10})
+	if c.ShellMatrixOpacity != 0 {
+		t.Fatalf("clamp low: %d", c.ShellMatrixOpacity)
+	}
+	if Default().ShellMatrixOpacity != 100 {
+		t.Fatalf("default opacity %d", Default().ShellMatrixOpacity)
+	}
+	if Default().ShellMatrixOpacity01() != 1 {
+		t.Fatalf("default 01=%v", Default().ShellMatrixOpacity01())
+	}
+}
+
+func TestShellMatrixOpacityRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+	want := Default()
+	want.ShellMatrixOpacity = 45
+	if err := Save(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShellMatrixOpacity != 45 {
+		t.Fatalf("got opacity %d", got.ShellMatrixOpacity)
+	}
+	// Missing key → default 100
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	path := Path()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"font_face":"x","font_size_px":14,"cursor":"block","theme":"inkstone","shell_ansi_map":"soft"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShellMatrixOpacity != 100 {
+		t.Fatalf("missing opacity should default 100, got %d", got.ShellMatrixOpacity)
+	}
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	// Point LOCALAPPDATA at temp so Path() is isolated.

@@ -4726,11 +4726,11 @@ func (u *winUI) paintShellMatrix(hdc win.HDC, rect win.RECT, padY, bot int32) {
 	if t0.IsZero() {
 		t0 = time.Now()
 	}
-	intensity := shellMatrixIntensity
-	if t := u.activeTab(); t != nil && t.altScreen() {
-		intensity = shellMatrixAltScreenIntensity
+	alt := false
+	if t := u.activeTab(); t != nil {
+		alt = t.altScreen()
 	}
-	u.paintDimMatrixIntensity(hdc, rect, padY, bot, matrixLoop, t0, 0, intensity)
+	u.paintDimMatrixIntensity(hdc, rect, padY, bot, matrixLoop, t0, 0, effectiveShellMatrixIntensity(u.cfg, alt))
 }
 
 // matrixIntroActive is true while startup rain is spawning or winding down.

@@ -2966,10 +2966,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		if t0.IsZero() {
 			t0 = now
 		}
-		intensity := shellMatrixIntensity
-		if tab.altScreen() {
-			intensity = shellMatrixAltScreenIntensity
-		}
+		intensity := effectiveShellMatrixIntensity(u.cfg, tab.altScreen())
 		shellRain = dimRainCells(
 			matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now),
 			intensity,
