@@ -166,6 +166,8 @@ type macUI struct {
 
 	// Mouse
 	mouseDown bool
+	// notesDragging: left button down after a notes body click (extend selection).
+	notesDragging bool
 
 	// Window placement: last captured frame (updated mid-session; flushed on exit).
 	// restoreMax is applied once after the ebiten loop creates the native window.
@@ -606,11 +608,38 @@ func (u *macUI) handleResize() {
 	if w < 2 || h < 2 {
 		return
 	}
+	// Soft magnetic snap to ½ / ⅓ / ¼ / ⅔ / ¾ / full of the monitor work area.
+	// Small threshold so the magnet "lets go easily" when dragging past.
+	if monW, monH, ok := u.monitorWorkSize(); ok {
+		nw, nh := softSnapSize(w, h, monW, monH, softSnapThresholdPx)
+		if nw != w || nh != h {
+			ebiten.SetWindowSize(nw, nh)
+			w, h = nw, nh
+		}
+	}
 	if int32(w) == u.width && int32(h) == u.height {
 		return
 	}
 	u.width, u.height = int32(w), int32(h)
 	u.applyClientSize(u.width, u.height)
+}
+
+// monitorWorkSize is the current window's monitor size in pixels (best-effort
+// work area; ebiten does not expose the menu-bar inset).
+func (u *macUI) monitorWorkSize() (w, h int, ok bool) {
+	mon := ebiten.Monitor()
+	if mon == nil {
+		mons := ebiten.AppendMonitors(nil)
+		if len(mons) == 0 || mons[0] == nil {
+			return 0, 0, false
+		}
+		mon = mons[0]
+	}
+	mw, mh := mon.Size()
+	if mw < 100 || mh < 100 {
+		return 0, 0, false
+	}
+	return mw, mh, true
 }
 
 // applyClientSize updates cols/rows/chrome from a client pixel size.
@@ -1499,8 +1528,9 @@ func (u *macUI) handleKeys() {
 		}
 		return
 	}
-	// Alt+arrows / Ctrl+Alt+arrows: focus pane.
-	if (alt || (ctrl && alt)) && !shift {
+	// Ctrl+Alt+arrows: focus pane. Bare Option+arrows are word-jump in the
+	// Warp bar and notes (macOS convention) — do not steal them here.
+	if ctrl && alt && !shift {
 		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
 			u.focusPaneDir(0)
 			return
@@ -1564,7 +1594,28 @@ func (u *macUI) handleKeys() {
 				return
 			}
 		}
-		if km := teaKeyFromEbiten(ctrl, shift); km != nil {
+		// Notes: Option+Backspace/Delete delete a word (macOS).
+		if u.chrome.NotesOpen && alt && !ctrl {
+			if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) {
+				m := u.chrome
+				m.NotesDeleteWord(-1)
+				u.chrome = m
+				u.overlayDirty = true
+				u.overlayCells = nil
+				u.persistNotesIfDirty()
+				return
+			}
+			if inpututil.IsKeyJustPressed(ebiten.KeyDelete) {
+				m := u.chrome
+				m.NotesDeleteWord(1)
+				u.chrome = m
+				u.overlayDirty = true
+				u.overlayCells = nil
+				u.persistNotesIfDirty()
+				return
+			}
+		}
+		if km := teaKeyFromEbiten(ctrl, shift, alt); km != nil {
 			r := u.chrome.UpdateChrome(*km)
 			u.chrome = r.Model
 			// Palette / rename / notes: only dirty overlay.
@@ -1696,25 +1747,44 @@ func (u *macUI) handleKeys() {
 		u.maybeResizeForInput()
 		return
 	}
+	// Option (or Ctrl) + arrows: word jump (macOS Option · Windows muscle-memory Ctrl).
+	wordMod := alt || (ebiten.IsKeyPressed(ebiten.KeyControl) && !ebiten.IsKeyPressed(ebiten.KeyMeta))
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
-		in.moveLeft()
+		if wordMod {
+			in.moveWordLeft()
+		} else {
+			in.moveLeft()
+		}
+		u.markInputDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
-		in.moveRight()
+		if wordMod {
+			in.moveWordRight()
+		} else {
+			in.moveRight()
+		}
+		u.markInputDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyHome) {
 		in.moveHome()
+		u.markInputDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyEnd) {
 		in.moveEnd()
+		u.markInputDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyDelete) {
-		in.deleteForward()
+		if wordMod {
+			in.deleteWordRight()
+		} else {
+			in.deleteForward()
+		}
 		u.maybeResizeForInput()
+		u.markInputDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyPageUp) {
@@ -1741,9 +1811,16 @@ func (u *macUI) handleKeys() {
 		}
 		u.lastBackspace = now
 		prevRows := in.visualRows(cols)
-		in.backspace()
+		if wordMod {
+			in.deleteWordLeft()
+		} else {
+			in.backspace()
+		}
 		if in.visualRows(cols) != prevRows {
 			u.maybeResizeForInput()
+			u.markShellDirty()
+		} else {
+			u.markInputDirty()
 		}
 		return
 	}
@@ -1830,9 +1907,35 @@ func (u *macUI) handleTextInput() {
 	}
 }
 
-func teaKeyFromEbiten(ctrl, shift bool) *tea.KeyMsg {
+func teaKeyFromEbiten(ctrl, shift, alt bool) *tea.KeyMsg {
+	// Option+arrows → alt+left/right (notes word jump on macOS).
+	// Ctrl+arrows → ctrl+left/right (Windows convention also works on Mac).
+	if !shift && !ctrl && alt {
+		switch {
+		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+			return &tea.KeyMsg{Type: tea.KeyLeft, Alt: true}
+		case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+			return &tea.KeyMsg{Type: tea.KeyRight, Alt: true}
+		case inpututil.IsKeyJustPressed(ebiten.KeyUp):
+			return &tea.KeyMsg{Type: tea.KeyUp, Alt: true}
+		case inpututil.IsKeyJustPressed(ebiten.KeyDown):
+			return &tea.KeyMsg{Type: tea.KeyDown, Alt: true}
+		case inpututil.IsKeyJustPressed(ebiten.KeyBackspace):
+			return &tea.KeyMsg{Type: tea.KeyBackspace, Alt: true}
+		case inpututil.IsKeyJustPressed(ebiten.KeyDelete):
+			return &tea.KeyMsg{Type: tea.KeyDelete, Alt: true}
+		}
+	}
+	if shift && alt && !ctrl {
+		switch {
+		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+			return &tea.KeyMsg{Type: tea.KeyShiftLeft, Alt: true}
+		case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+			return &tea.KeyMsg{Type: tea.KeyShiftRight, Alt: true}
+		}
+	}
 	// Shift+arrows for notes selection (and rename navigation is fine with shift).
-	if shift && !ctrl {
+	if shift && !ctrl && !alt {
 		switch {
 		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
 			return &tea.KeyMsg{Type: tea.KeyShiftLeft}
@@ -1842,6 +1945,31 @@ func teaKeyFromEbiten(ctrl, shift bool) *tea.KeyMsg {
 			return &tea.KeyMsg{Type: tea.KeyShiftUp}
 		case inpututil.IsKeyJustPressed(ebiten.KeyDown):
 			return &tea.KeyMsg{Type: tea.KeyShiftDown}
+		}
+	}
+	// Ctrl+arrows for word jump (notes already handles ctrl+left via KeyCtrlLeft).
+	if ctrl && !alt {
+		switch {
+		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+			if shift {
+				return &tea.KeyMsg{Type: tea.KeyCtrlShiftLeft}
+			}
+			return &tea.KeyMsg{Type: tea.KeyCtrlLeft}
+		case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+			if shift {
+				return &tea.KeyMsg{Type: tea.KeyCtrlShiftRight}
+			}
+			return &tea.KeyMsg{Type: tea.KeyCtrlRight}
+		case inpututil.IsKeyJustPressed(ebiten.KeyHome):
+			if shift {
+				return &tea.KeyMsg{Type: tea.KeyCtrlShiftHome}
+			}
+			return &tea.KeyMsg{Type: tea.KeyCtrlHome}
+		case inpututil.IsKeyJustPressed(ebiten.KeyEnd):
+			if shift {
+				return &tea.KeyMsg{Type: tea.KeyCtrlShiftEnd}
+			}
+			return &tea.KeyMsg{Type: tea.KeyCtrlEnd}
 		}
 	}
 	switch {
@@ -2029,7 +2157,7 @@ func (u *macUI) handleMouse() {
 		// Overlay card hits (notes list/title/editor) or dismiss outside.
 		if u.chrome.OverlayOpen() && int32(my) >= chromeH {
 			if cellX, cellY, ok := u.overlayCellAt(int32(mx), int32(my)); ok {
-				// Notes: route click into list / title / editor.
+				// Notes: route click into list / title / editor (start drag-select).
 				if u.chrome.NotesOpen {
 					r := u.chrome.UpdateChrome(chrome.NotesClickMsg{
 						CellX: cellX, CellY: cellY, Cols: u.cols,
@@ -2037,12 +2165,14 @@ func (u *macUI) handleMouse() {
 					u.chrome = r.Model
 					u.overlayDirty = true
 					u.overlayCells = nil
+					u.notesDragging = r.StartNotesDrag
 					u.persistNotesIfDirty()
 					return
 				}
 				// Other overlays: keep open when clicking the card band.
 				return
 			}
+			u.notesDragging = false
 			u.overlayCells = nil
 			u.overlayDirty = true
 			r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
@@ -2108,6 +2238,22 @@ func (u *macUI) handleMouse() {
 		u.sashDrag = nil
 		u.applyClientSize(u.width, u.height)
 		return
+	}
+
+	// Notes drag-select.
+	if pressed && u.notesDragging && u.chrome.NotesOpen {
+		if cellX, cellY, ok := u.overlayCellAt(int32(mx), int32(my)); ok {
+			r := u.chrome.UpdateChrome(chrome.NotesDragMsg{
+				CellX: cellX, CellY: cellY, Cols: u.cols,
+			})
+			u.chrome = r.Model
+			u.overlayDirty = true
+			u.overlayCells = nil
+		}
+	}
+	if justReleased && u.notesDragging {
+		u.notesDragging = false
+		u.persistNotesIfDirty()
 	}
 
 	if pressed && u.selecting {

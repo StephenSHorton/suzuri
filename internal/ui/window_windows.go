@@ -175,6 +175,9 @@ type winUI struct {
 	memW      int32
 	memH      int32
 
+	// notesDragging: LBUTTON held after a notes body click (drag-select text).
+	notesDragging bool
+
 	// User is dragging or resizing the frame (WM_ENTERSIZEMOVE … EXITSIZEMOVE).
 	// During this window we must not thrash ConPTY / GDI: every WM_SIZE used to
 	// resize all tabs + recreate the backbuffer, which hard-crashed mid-drag.
@@ -230,6 +233,23 @@ func (u *winUI) requestPaint() {
 	}
 	u.paintPending = true
 	win.InvalidateRect(u.hwnd, nil, false)
+}
+
+// monitorWorkArea returns the nearest monitor's work rect (excludes taskbar).
+func (u *winUI) monitorWorkArea() (left, top, right, bottom int, ok bool) {
+	if u == nil || u.hwnd == 0 {
+		return 0, 0, 0, 0, false
+	}
+	hmon := win.MonitorFromWindow(u.hwnd, win.MONITOR_DEFAULTTONEAREST)
+	if hmon == 0 {
+		return 0, 0, 0, 0, false
+	}
+	var mi win.MONITORINFO
+	mi.CbSize = uint32(unsafe.Sizeof(mi))
+	if !win.GetMonitorInfo(hmon, &mi) {
+		return 0, 0, 0, 0, false
+	}
+	return int(mi.RcWork.Left), int(mi.RcWork.Top), int(mi.RcWork.Right), int(mi.RcWork.Bottom), true
 }
 
 // requestInputPaint marks only the Warp bar dirty (shell grid unchanged).
@@ -1844,6 +1864,21 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		log.Debug("WM_ENTERSIZEMOVE")
 		return 0
 
+	case win.WM_SIZING:
+		// Soft magnetic snap to ½ / ⅓ / ¼ / ⅔ / ¾ / full of the monitor work area.
+		// Small threshold so the magnet lets go easily when dragging past.
+		if lParam == 0 {
+			return 1
+		}
+		r := (*win.RECT)(unsafe.Pointer(lParam))
+		if workL, workT, workR, workB, ok := u.monitorWorkArea(); ok {
+			l, top, rt, bot := int(r.Left), int(r.Top), int(r.Right), int(r.Bottom)
+			if softSnapRect(&l, &top, &rt, &bot, int(wParam), workL, workT, workR, workB, softSnapThresholdPx) {
+				r.Left, r.Top, r.Right, r.Bottom = int32(l), int32(top), int32(rt), int32(bot)
+			}
+		}
+		return 1 // TRUE = we may have modified the rect
+
 	case win.WM_EXITSIZEMOVE:
 		// Do almost nothing here. applyClientSize / ConPTY / backbuffer work on
 		// the EXITSIZEMOVE stack hard-crashed (native AV, no Go panic). Post a
@@ -2030,6 +2065,27 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 						u.persistNotesIfDirty()
 						return 0
 					}
+					// Ctrl+Backspace / Ctrl+Delete: delete word.
+					if wParam == win.VK_BACK {
+						m := u.chrome
+						m.NotesDeleteWord(-1)
+						u.chrome = m
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+						u.persistNotesIfDirty()
+						return 0
+					}
+					if wParam == win.VK_DELETE {
+						m := u.chrome
+						m.NotesDeleteWord(1)
+						u.chrome = m
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+						u.persistNotesIfDirty()
+						return 0
+					}
 				}
 			}
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
@@ -2116,9 +2172,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				return 0
 			}
 		}
-		// Pane focus: Alt+arrows (WT-style) and Ctrl+Alt+arrows.
-		// Not Alt+Shift (reserved for split keys). Geometric neighbor pick.
-		if alt && !shift {
+		// Pane focus: Alt+arrows (Windows Terminal style). Word-jump is Ctrl+arrows
+		// (handled in the input bar / notes paths below). Not Alt+Shift (splits).
+		if alt && !shift && !ctrl {
 			switch wParam {
 			case win.VK_LEFT:
 				u.focusPaneDir(0)
@@ -2251,6 +2307,41 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		cols := u.inputContentCols()
 		// Warp input bar editing + shell scroll.
+		// Ctrl+←/→ word jump; Ctrl+Backspace/Delete word delete (Windows native).
+		if ctrl && !alt {
+			switch wParam {
+			case win.VK_LEFT:
+				in.moveWordLeft()
+				u.requestInputPaint()
+				return 0
+			case win.VK_RIGHT:
+				in.moveWordRight()
+				u.requestInputPaint()
+				return 0
+			case win.VK_BACK:
+				prevRows := in.visualRows(cols)
+				in.deleteWordLeft()
+				if in.visualRows(cols) != prevRows {
+					u.maybeResizeForInput()
+					u.markShellDirty()
+					u.requestPaint()
+				} else {
+					u.requestInputPaint()
+				}
+				return 0
+			case win.VK_DELETE:
+				prevRows := in.visualRows(cols)
+				in.deleteWordRight()
+				if in.visualRows(cols) != prevRows {
+					u.maybeResizeForInput()
+					u.markShellDirty()
+					u.requestPaint()
+				} else {
+					u.requestInputPaint()
+				}
+				return 0
+			}
+		}
 		switch wParam {
 		case win.VK_RETURN:
 			if shift {
@@ -2499,6 +2590,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					u.chrome = r.Model
 					u.overlayDirty = true
 					u.overlayCells = nil
+					u.notesDragging = r.StartNotesDrag
+					if u.notesDragging {
+						win.SetCapture(hwnd)
+					}
 					u.persistNotesIfDirty()
 					win.InvalidateRect(hwnd, nil, false)
 				}
@@ -2615,6 +2710,29 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
+		// Notes drag-select.
+		if u.notesDragging && u.chrome.NotesOpen && (wParam&win.MK_LBUTTON) != 0 {
+			cw, ch := u.metricW, u.metricH
+			if cw < 1 {
+				cw = cellW
+			}
+			if ch < 1 {
+				ch = cellH
+			}
+			var rect win.RECT
+			win.GetClientRect(hwnd, &rect)
+			oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
+			cx := int(px / cw)
+			cy := int((py - oy) / ch)
+			r := u.chrome.UpdateChrome(chrome.NotesDragMsg{
+				CellX: cx, CellY: cy, Cols: u.cols,
+			})
+			u.chrome = r.Model
+			u.overlayDirty = true
+			u.overlayCells = nil
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
 		// Hover cursor on sash (when not dragging selection).
 		if !u.selecting && u.sashDrag == nil {
 			_ = u.computeActiveLayout()
@@ -2642,6 +2760,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.ReleaseCapture()
 			// Final settle so ConPTY matches the dragged sizes cleanly.
 			u.postLayoutSettle()
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+		if u.notesDragging {
+			u.notesDragging = false
+			win.ReleaseCapture()
+			u.persistNotesIfDirty()
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}

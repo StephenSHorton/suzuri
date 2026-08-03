@@ -180,6 +180,68 @@ func (b *inputBar) moveRight() {
 	}
 }
 
+// moveWordLeft / moveWordRight: Option+←→ (macOS) or Ctrl+←→ (Windows).
+func (b *inputBar) moveWordLeft() {
+	b.clearComplete()
+	b.cursor = barWordBoundary(b.runes, b.cursor, -1)
+}
+
+func (b *inputBar) moveWordRight() {
+	b.clearComplete()
+	b.cursor = barWordBoundary(b.runes, b.cursor, 1)
+}
+
+// deleteWordLeft / deleteWordRight: Option/Ctrl+Backspace/Delete.
+func (b *inputBar) deleteWordLeft() {
+	b.leaveHistoryBrowse()
+	b.clearComplete()
+	if b.cursor <= 0 {
+		return
+	}
+	start := barWordBoundary(b.runes, b.cursor, -1)
+	b.runes = append(b.runes[:start], b.runes[b.cursor:]...)
+	b.cursor = start
+}
+
+func (b *inputBar) deleteWordRight() {
+	b.leaveHistoryBrowse()
+	b.clearComplete()
+	if b.cursor >= len(b.runes) {
+		return
+	}
+	end := barWordBoundary(b.runes, b.cursor, 1)
+	b.runes = append(b.runes[:b.cursor], b.runes[end:]...)
+}
+
+func barWordBoundary(runes []rune, i, dir int) int {
+	n := len(runes)
+	if i < 0 {
+		i = 0
+	}
+	if i > n {
+		i = n
+	}
+	isSpace := func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n'
+	}
+	if dir < 0 {
+		for i > 0 && isSpace(runes[i-1]) {
+			i--
+		}
+		for i > 0 && !isSpace(runes[i-1]) {
+			i--
+		}
+		return i
+	}
+	for i < n && !isSpace(runes[i]) {
+		i++
+	}
+	for i < n && isSpace(runes[i]) {
+		i++
+	}
+	return i
+}
+
 func (b *inputBar) moveHome() {
 	b.clearComplete()
 	// Start of current logical line (after last \n), not whole buffer.

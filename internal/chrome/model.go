@@ -158,6 +158,9 @@ type Result struct {
 	ProfileName  string        // ActionNewTabProfile
 	Name         string        // ActionApplyRename
 	RenameTarget RenameTarget  // ActionApplyRename
+	// StartNotesDrag: NotesClickMsg hit the editor body — host should capture
+	// the mouse and send NotesDragMsg while the button is held.
+	StartNotesDrag bool
 }
 
 // KeyMap for chrome shortcuts the host may forward.
@@ -227,6 +230,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 	var profileName string
 	var renameName string
 	var renameTarget RenameTarget
+	var startNotesDrag bool
 
 	switch msg := msg.(type) {
 	case SyncTabsMsg:
@@ -319,7 +323,16 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 				cols = m.Width
 			}
 			m.computeNotesLayout(cols)
-			m.handleNotesClick(msg.CellX, msg.CellY, cols)
+			startNotesDrag = m.handleNotesClick(msg.CellX, msg.CellY, cols)
+		}
+	case NotesDragMsg:
+		if m.NotesOpen {
+			cols := msg.Cols
+			if cols < 20 {
+				cols = m.Width
+			}
+			m.computeNotesLayout(cols)
+			m.handleNotesDrag(msg.CellX, msg.CellY, cols)
 		}
 	case DismissOverlayMsg:
 		if m.SettingsOpen {
@@ -424,7 +437,10 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		}
 	}
 
-	return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName}
+	return Result{
+		Model: m, Action: act, Index: idx, Settings: settings,
+		ProfileName: profileName, StartNotesDrag: startNotesDrag,
+	}
 }
 
 func (m *Model) closeModalsExcept(keep string) {
