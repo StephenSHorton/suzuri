@@ -168,6 +168,10 @@ type macUI struct {
 	mouseDown bool
 	// notesDragging: left button down after a notes body click (extend selection).
 	notesDragging bool
+	// Link hover: http(s)/www under the cursor in the shell grid.
+	hoverLink    linkSpan
+	hoverLinkOK  bool
+	linkCursorOn bool
 
 	// Window placement: last captured frame (updated mid-session; flushed on exit).
 	// restoreMax is applied once after the ebiten loop creates the native window.
@@ -2201,6 +2205,9 @@ func (u *macUI) handleMouse() {
 		return
 	}
 
+	// Link hover + pointer cursor (even on alt-screen).
+	u.updateLinkHover(mx, my)
+
 	chH := u.metricH
 	if chH < 1 {
 		chH = cellH
@@ -2209,6 +2216,16 @@ func (u *macUI) handleMouse() {
 	tabStripH := int32(chrome.TabStripRows()) * chH
 
 	if justPressed {
+		// Cmd+click (or Ctrl+click) on a link → open in browser.
+		meta := ebiten.IsKeyPressed(ebiten.KeyMeta)
+		ctrlOnly := ebiten.IsKeyPressed(ebiten.KeyControl) && !meta
+		if (meta || ctrlOnly) && !u.chrome.OverlayOpen() {
+			if url := u.linkURLAt(mx, my); url != "" {
+				openURLInBrowser(url)
+				u.toast("opened link")
+				return
+			}
+		}
 		// Sash drag start (multi-pane).
 		if !u.chrome.OverlayOpen() {
 			layouts := u.computeActiveLayout()
@@ -2674,6 +2691,10 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if !tab.sel.empty() {
 		applySelectionTint(focusGrid, tab, len(focusGrid))
 	}
+	// Hovered hyperlink → theme primary (Cmd/Ctrl+click opens).
+	if u.hoverLinkOK {
+		applyLinkHoverTint(focusGrid, u.hoverLink)
+	}
 	cur := tab.term.Cursor()
 	curVis := tab.altScreen() && tab.term.CursorVisible()
 	curAlpha := u.caretAlpha()
@@ -2928,6 +2949,9 @@ func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
 	if t == u.activeTab() && !t.sel.empty() {
 		applySelectionTint(grid, t, viewRows)
 	}
+	if t == u.activeTab() && u.hoverLinkOK {
+		applyLinkHoverTint(grid, u.hoverLink)
+	}
 	cur := t.term.Cursor()
 	curVis := t.altScreen() && t.term.CursorVisible() && g.focused
 	u.painter.paintPaneGrid(u.fb, grid, g, cur.X, cur.Y, curVis, curAlpha)
@@ -3069,4 +3093,82 @@ func applySelectionTint(grid [][]cellPix, tab *tab, viewRows int) {
 		}
 		grid[y] = row
 	}
+}
+
+// updateLinkHover finds an http(s)/www URL under the cursor and tracks it for paint.
+func (u *macUI) updateLinkHover(mx, my int) {
+	if u == nil {
+		return
+	}
+	clear := func() {
+		if u.hoverLinkOK || u.linkCursorOn {
+			u.hoverLinkOK = false
+			u.hoverLink = linkSpan{}
+			if u.linkCursorOn {
+				ebiten.SetCursorShape(ebiten.CursorShapeDefault)
+				u.linkCursorOn = false
+			}
+			u.markShellDirty()
+		}
+	}
+	if u.chrome.OverlayOpen() || u.selecting || u.sashDrag != nil || u.notesDragging {
+		clear()
+		return
+	}
+	tab := u.activeTab()
+	if tab == nil {
+		clear()
+		return
+	}
+	// Outside shell / on input bar → no link hover.
+	if g := u.focusedGeom(); g != nil && g.barH > 0 && int32(my) >= g.barY {
+		clear()
+		return
+	}
+	x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
+	grid := tab.sb.viewCells(tab.term, viewRows)
+	spans := findLinksInGrid(grid)
+	span, ok := linkAt(spans, x, y)
+	if !ok {
+		clear()
+		return
+	}
+	changed := !u.hoverLinkOK || u.hoverLink.url != span.url ||
+		u.hoverLink.row != span.row || u.hoverLink.x0 != span.x0 || u.hoverLink.x1 != span.x1
+	u.hoverLink = span
+	u.hoverLinkOK = true
+	if !u.linkCursorOn {
+		ebiten.SetCursorShape(ebiten.CursorShapePointer)
+		u.linkCursorOn = true
+	}
+	if changed {
+		u.markShellDirty()
+	}
+}
+
+// linkURLAt returns the URL under client pixels, or "".
+func (u *macUI) linkURLAt(mx, my int) string {
+	if u == nil || u.chrome.OverlayOpen() {
+		return ""
+	}
+	tab := u.activeTab()
+	if tab == nil {
+		return ""
+	}
+	if g := u.focusedGeom(); g != nil && g.barH > 0 && int32(my) >= g.barY {
+		return ""
+	}
+	x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
+	grid := tab.sb.viewCells(tab.term, viewRows)
+	span, ok := linkAt(findLinksInGrid(grid), x, y)
+	if !ok {
+		return ""
+	}
+	return span.url
 }

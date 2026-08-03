@@ -177,6 +177,10 @@ type winUI struct {
 
 	// notesDragging: LBUTTON held after a notes body click (drag-select text).
 	notesDragging bool
+	// Link hover: http(s)/www under the cursor.
+	hoverLink    linkSpan
+	hoverLinkOK  bool
+	linkCursorOn bool
 
 	// User is dragging or resizing the frame (WM_ENTERSIZEMOVE … EXITSIZEMOVE).
 	// During this window we must not thrash ConPTY / GDI: every WM_SIZE used to
@@ -2755,6 +2759,17 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.focus()
 			return 0
 		}
+		// Ctrl+click a URL → open in the system browser (works on alt-screen too).
+		ctrlClick := win.GetKeyState(win.VK_CONTROL) < 0
+		altClick := win.GetKeyState(win.VK_MENU) < 0
+		shiftClick := win.GetKeyState(win.VK_SHIFT) < 0
+		if ctrlClick && !altClick && !shiftClick {
+			if url := u.linkURLAt(px, py); url != "" {
+				openURLInBrowser(url)
+				u.toast("opened link")
+				return 0
+			}
+		}
 		// Grok / alt-screen: click near "[Open Image]" or a path opens a modal.
 		// Primary shell: click an image block opens the same modal.
 		if u.tryOpenImageModalAt(px, py) {
@@ -2778,6 +2793,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_MOUSEMOVE:
 		px := int32(win.LOWORD(uint32(lParam)))
 		py := int32(win.HIWORD(uint32(lParam)))
+		// Link hover (hand cursor + primary tint) when not dragging.
+		if u.sashDrag == nil && !u.selecting && !u.notesDragging {
+			u.updateLinkHover(px, py)
+		}
 		// Live sash resize: update ratio, reflow (no-op resize when size stable).
 		if u.sashDrag != nil && (wParam&win.MK_LBUTTON) != 0 {
 			applySashDrag(*u.sashDrag, px, py)
@@ -3103,6 +3122,9 @@ func (u *winUI) paint(hwnd win.HWND) {
 					viewRows = u.rows
 				}
 				grid := g.pane.sb.viewCells(g.pane.term, viewRows)
+				if g.pane == u.activeTab() && u.hoverLinkOK {
+					applyLinkHoverTint(grid, u.hoverLink)
+				}
 				cur := g.pane.term.Cursor()
 				curVis := g.pane.altScreen() && g.pane.term.CursorVisible() && g.focused
 				u.blitGridPane(dest, rect, grid, cur.X, cur.Y, curVis, g)
@@ -4274,6 +4296,83 @@ func (u *winUI) focus() {
 func (u *winUI) pixelToCell(px, py int32) (x, y int) {
 	x, y, _ = u.pixelToCellInPane(px, py, u.activeTab())
 	return x, y
+}
+
+// updateLinkHover finds an http(s)/www URL under the cursor for primary tint + hand cursor.
+func (u *winUI) updateLinkHover(px, py int32) {
+	if u == nil {
+		return
+	}
+	clear := func() {
+		if u.hoverLinkOK || u.linkCursorOn {
+			u.hoverLinkOK = false
+			u.hoverLink = linkSpan{}
+			if u.linkCursorOn {
+				win.SetCursor(win.LoadCursor(0, win.MAKEINTRESOURCE(win.IDC_ARROW)))
+				u.linkCursorOn = false
+			}
+			u.markShellDirty()
+			u.requestPaint()
+		}
+	}
+	if u.chrome.OverlayOpen() || u.selecting || u.sashDrag != nil || u.notesDragging {
+		clear()
+		return
+	}
+	tab := u.activeTab()
+	if tab == nil {
+		clear()
+		return
+	}
+	if g := u.focusedGeom(); g != nil && g.barH > 0 && py >= g.barY {
+		clear()
+		return
+	}
+	x, y, viewRows := u.pixelToCellInPane(px, py, tab)
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
+	grid := tab.sb.viewCells(tab.term, viewRows)
+	span, ok := linkAt(findLinksInGrid(grid), x, y)
+	if !ok {
+		clear()
+		return
+	}
+	changed := !u.hoverLinkOK || u.hoverLink.url != span.url ||
+		u.hoverLink.row != span.row || u.hoverLink.x0 != span.x0 || u.hoverLink.x1 != span.x1
+	u.hoverLink = span
+	u.hoverLinkOK = true
+	if !u.linkCursorOn {
+		win.SetCursor(win.LoadCursor(0, win.MAKEINTRESOURCE(win.IDC_HAND)))
+		u.linkCursorOn = true
+	}
+	if changed {
+		u.markShellDirty()
+		u.requestPaint()
+	}
+}
+
+func (u *winUI) linkURLAt(px, py int32) string {
+	if u == nil || u.chrome.OverlayOpen() {
+		return ""
+	}
+	tab := u.activeTab()
+	if tab == nil {
+		return ""
+	}
+	if g := u.focusedGeom(); g != nil && g.barH > 0 && py >= g.barY {
+		return ""
+	}
+	x, y, viewRows := u.pixelToCellInPane(px, py, tab)
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
+	grid := tab.sb.viewCells(tab.term, viewRows)
+	span, ok := linkAt(findLinksInGrid(grid), x, y)
+	if !ok {
+		return ""
+	}
+	return span.url
 }
 
 // pixelToCellInPane maps client pixels to cell coords within a pane's layout.

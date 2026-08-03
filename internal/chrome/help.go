@@ -56,6 +56,8 @@ func helpBody(windowCols int) string {
 	body = append(body, helpSection(inner, "Terminal"))
 	body = append(body, helpRow(inner, KeyCtrlShift("C"), "Copy selection"))
 	body = append(body, helpRow(inner, "Wheel", "Scrollback"))
+	body = append(body, helpRow(inner, "⌘-click · Ctrl-click", "Open URL in browser"))
+	body = append(body, helpRow(inner, "Hover link", "Highlight (theme primary)"))
 
 	// Footer: keep gap styled with panel bg (unstyled " " punches holes in VT paint).
 	footer := styleDialogHintKey().Render("esc") + styleDialogHint().Render(" close")

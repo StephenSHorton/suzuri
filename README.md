@@ -105,6 +105,7 @@ Go 1.26+ recommended (see `go.mod`). Supported hosts: **Windows** (ConPTY) and *
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+1`…`9` | Jump to tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
+| `⌘-click` · `Ctrl-click` URL | Open link in browser |
 
 ## Config
 
