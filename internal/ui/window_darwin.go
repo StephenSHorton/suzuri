@@ -2861,24 +2861,36 @@ func (u *macUI) copySelection() {
 }
 
 func (u *macUI) pasteClipboard() {
-	// Alt-screen (Grok, …): prefer Kitty Super+V so the app reads the system
-	// pasteboard itself — text, images, and file URLs. Grok's is_paste_key
-	// path probes NSPasteboard for rasters; host-only text paste cannot.
+	// Alt-screen (Grok, …): host must deliver images. Relying on Super+V so
+	// Grok re-reads NSPasteboard is unreliable under a custom host (Kitty
+	// event encoding, TCC, AppKit load). Instead: dump pasteboard raster to a
+	// temp PNG and inject the path as bracketed paste — Grok's drop classifier
+	// turns image paths into [Image #N] chips.
 	if u.appOwnsKeyboard() {
+		if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
+			log.Info("paste clipboard image", "path", imgPath)
+			u.sendKey(bracketedPaste(imgPath))
+			u.toast("image pasted")
+			return
+		} else if err != nil {
+			log.Debug("clipboard image read failed", "err", err)
+		}
+		// Text (or empty): bracketed paste so multi-line lands as Event::Paste.
+		// When Kitty is active, also fire Super+V so Grok can probe for file
+		// URLs / rasters we failed to coerce — secondary path.
+		text, _ := clipboard.ReadAll()
+		if strings.TrimSpace(text) != "" {
+			u.sendKey(bracketedPaste(text))
+			return
+		}
 		if t := u.activeTab(); t != nil && t.kitty.active() {
 			// Super+V → unicode 'v' (118), mods 1+super(8)=9
 			t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
 			return
 		}
-		// No Kitty: inject bracketed paste. Empty frame still triggers Grok's
-		// Event::Paste("") → attachment probe for image-only clipboards.
-		text, err := clipboard.ReadAll()
-		payload := ""
-		if err == nil {
-			payload = strings.ReplaceAll(text, "\r\n", "\n")
-			payload = strings.ReplaceAll(payload, "\n", "\r")
-		}
-		u.sendKey([]byte("\x1b[200~" + payload + "\x1b[201~"))
+		// Empty image-less pasteboard: still emit empty bracketed paste so
+		// Grok's attachment probe can run if it sees a raster we missed.
+		u.sendKey(bracketedPaste(""))
 		return
 	}
 	text, err := clipboard.ReadAll()
