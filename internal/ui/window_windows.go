@@ -5032,6 +5032,9 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 }
 
 // paintNotesCaret draws the notes body/title caret using cfg.Cursor.
+// Block style reverse-videos the cell under the caret so the character stays
+// readable (classic terminal: block sits on the glyph at the insertion point;
+// typing inserts to the left of / before that cell's content).
 func (u *winUI) paintNotesCaret(hdc win.HDC, overlayOY int32) {
 	if u == nil || hdc == 0 || !u.chrome.NotesOpen {
 		return
@@ -5053,7 +5056,55 @@ func (u *winUI) paintNotesCaret(hdc win.HDC, overlayOY int32) {
 	}
 	x := int32(cx) * cw
 	y := overlayOY + int32(cy)*ch
-	u.paintInputCaret(hdc, x, y, cw, ch)
+
+	// Bar / underline: thin mark (does not hide the glyph).
+	if u.cfg.Cursor == config.CursorUnderline || u.cfg.Cursor == config.CursorBar {
+		u.paintInputCaret(hdc, x, y, cw, ch)
+		return
+	}
+
+	// Block: reverse-video the insertion cell so the character under the
+	// caret stays legible. Classic terminal: block sits on that cell; typing
+	// inserts before it (glyph shifts right).
+	a := u.caretAlpha()
+	if a <= 0 {
+		return
+	}
+	var chRune rune
+	bgR, bgG, bgB := chrome.PanelR, chrome.PanelG, chrome.PanelB
+	if cy >= 0 && cy < len(u.overlayCells) && cx >= 0 && cx < len(u.overlayCells[cy]) {
+		c := u.overlayCells[cy][cx]
+		if c.Ch != 0 && c.Ch != ' ' {
+			chRune = c.Ch
+		}
+		if c.BR != 0 || c.BG != 0 || c.BB != 0 {
+			bgR, bgG, bgB = c.BR, c.BG, c.BB
+		}
+	}
+	// Fill: blink between cell bg and primary (same pulse as input caret).
+	fillR, fillG, fillB := blendRGB(bgR, bgG, bgB, chrome.PrimR, chrome.PrimG, chrome.PrimB, a)
+	// Glyph: on-primary so it reads on the fill.
+	glR, glG, glB := chrome.OnPrimR, chrome.OnPrimG, chrome.OnPrimB
+	if glR == 0 && glG == 0 && glB == 0 {
+		glR, glG, glB = 12, 12, 14
+	}
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(fillR, fillG, fillB)}
+	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+		fillRect(hdc, win.RECT{Left: x, Top: y, Right: x + cw, Bottom: y + ch}, brush)
+		win.DeleteObject(win.HGDIOBJ(brush))
+	}
+	if chRune != 0 {
+		oldFont := win.SelectObject(hdc, win.HGDIOBJ(u.font))
+		win.SetBkMode(hdc, win.TRANSPARENT)
+		win.SetTextColor(hdc, win.RGB(glR, glG, glB))
+		s, err := syscall.UTF16FromString(string(chRune))
+		if err == nil && len(s) > 1 {
+			win.TextOut(hdc, x, y, &s[0], int32(len(s)-1))
+		}
+		if oldFont != 0 {
+			win.SelectObject(hdc, oldFont)
+		}
+	}
 }
 
 // teaKeyFromWin maps Win32 navigation keys into Bubble Tea messages for the

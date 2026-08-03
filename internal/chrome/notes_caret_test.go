@@ -3,9 +3,11 @@ package chrome
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestNotesEditorLayoutLines(t *testing.T) {
@@ -16,32 +18,44 @@ func TestNotesEditorLayoutLines(t *testing.T) {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
 	}
+	// Cursor at end of "ab" → block sits in the empty cell after 'b' (col textLeft+2).
+	// Mid-text: cursor=1 → block sits ON 'b' (col textLeft+1).
 	view := m.OverlayView()
 	lines := strings.Split(view, "\n")
-	t.Logf("overlay height=%d lipgloss=%d", len(lines), lipgloss.Height(view))
-	for i, ln := range lines {
-		if i > 22 {
-			break
-		}
-		// Show a short prefix (ANSI-heavy).
-		end := len(ln)
-		if end > 80 {
-			end = 80
-		}
-		t.Logf("%02d %q", i, ln[:end])
+	_, bodyY0 := notesEditorOverlayRows()
+	if bodyY0 >= len(lines) {
+		t.Fatalf("no body line at %d (h=%d)", bodyY0, len(lines))
 	}
+	plainBody := ansi.Strip(lines[bodyY0])
+	idx := strings.Index(plainBody, "ab")
+	if idx < 0 {
+		t.Fatalf("body line has no \"ab\": %q", plainBody)
+	}
+	// Display column of 'a' (rune-aware).
+	textLeft := utf8.RuneCountInString(plainBody[:idx])
+	t.Logf("measured textLeft=%d body=%q", textLeft, plainBody)
+
 	cx, cy, ok := m.NotesCaretCell(80)
-	t.Logf("caret cell x=%d y=%d ok=%v cursor=%d text=%q", cx, cy, ok, m.notesCursor, string(m.notesRunes))
-	_, wantBodyY0 := notesEditorOverlayRows()
-	if !ok || cy != wantBodyY0 {
-		t.Fatalf("caret y=%d want bodyY0=%d (first body line for \"ab\")", cy, wantBodyY0)
+	if !ok || cy != bodyY0 {
+		t.Fatalf("caret y=%d want %d ok=%v", cy, bodyY0, ok)
 	}
-	// Body line "ab" ends at cursor; caret should sit on the cell after 'b'.
-	wantX := notesBodyTextLeft(80) + 2 // after two runes
-	if cx != wantX {
-		t.Fatalf("caret x=%d want %d (textLeft=%d)", cx, wantX, notesBodyTextLeft(80))
+	// At end of "ab": insertion cell is after 'b'.
+	if cx != textLeft+2 {
+		t.Fatalf("EOL caret x=%d want %d (measured textLeft=%d, notesBodyTextLeft=%d)",
+			cx, textLeft+2, textLeft, notesBodyTextLeft(80))
 	}
+
+	// Move cursor onto 'b' (index 1): block should cover 'b'.
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyLeft})
+	m = r.Model
+	cx, cy, ok = m.NotesCaretCell(80)
+	if !ok || cx != textLeft+1 {
+		t.Fatalf("on 'b' caret x=%d want %d (cursor=%d)", cx, textLeft+1, m.notesCursor)
+	}
+
 	// ↑ into title
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyHome})
+	m = r.Model
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyUp})
 	m = r.Model
 	if m.notesFocus != notesFocusTitle {
@@ -52,4 +66,5 @@ func TestNotesEditorLayoutLines(t *testing.T) {
 	if !ok || cy != wantTitleY {
 		t.Fatalf("title caret y=%d want %d", cy, wantTitleY)
 	}
+	_ = lipgloss.Width
 }
