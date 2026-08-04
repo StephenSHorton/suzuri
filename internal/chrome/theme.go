@@ -252,7 +252,9 @@ var themeCatalog = map[string]themeSpec{
 	},
 	config.ThemeMonokai: {
 		void: "#1e1f1c", bar: "#272822", panel: "#3e3d32",
-		primary: "#f92672", secondary: "#e6db74", onPrimary: "#1e1f1c",
+		// onPrimary must be pure black: primary pink is a fill for active tabs /
+		// settings selection — near-black inkstone tones wash out on #f92672.
+		primary: "#f92672", secondary: "#e6db74", onPrimary: "#000000",
 		text: "#f8f8f2", soft: "#cfcfc2", dim: "#75715e", mute: "#49483e",
 		sel: "#49483e", match: "#a6e22e", cyan: "#66d9ef",
 		border: "#f92672", dimMatte: "#141510",
