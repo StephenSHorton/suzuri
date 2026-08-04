@@ -151,14 +151,56 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
           Get-Item $out | Format-List Name, Length, FullName
 
-      # macOS: .app bundle with dock icon + DMG (drag to Applications).
-      # Portable zip (host + transfer) is the in-app update payload.
-      - name: macOS app + DMG
-        if: matrix.goos == 'darwin'
+      # Import Developer ID cert when secrets are configured (optional).
+      # Without secrets, build-app.sh falls back to ad-hoc signing.
+      - name: Import Apple signing certificate
+        # Skip when secret unset (ad-hoc local-style macOS artifacts).
+        if: matrix.goos == 'darwin' && secrets.MACOS_CERTIFICATE_P12_BASE64 != ''
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}
         shell: bash
         run: |
+          set -euo pipefail
+          CERT="$RUNNER_TEMP/suzuri-dev-id.p12"
+          echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode >"$CERT"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import "$CERT" -k build.keychain -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security list-keychains -d user -s build.keychain $(security list-keychains -d user | tr -d '"')
+          echo "==> codesigning identities:"
+          security find-identity -v -p codesigning
+          rm -f "$CERT"
+
+      # macOS: .app bundle with dock icon + DMG (drag to Applications).
+      # Portable zip (host + transfer) is the in-app update payload.
+      # When Developer ID secrets are present: sign + notarize (.app and .dmg).
+      - name: macOS app + DMG
+        if: matrix.goos == 'darwin'
+        env:
+          SUZURI_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
           v="${{ steps.ver.outputs.version }}"
           arch="${{ matrix.goarch }}"
+          # Default ad-hoc when identity secret is empty.
+          export SUZURI_CODESIGN_IDENTITY="${SUZURI_CODESIGN_IDENTITY:--}"
+          # Skip notarize when no credentials (local-style CI without secrets).
+          if [[ -z "${APPLE_ID:-}" && -z "${APPLE_API_KEY_ID:-}" ]]; then
+            export SUZURI_NOTARIZE=0
+          fi
           mkdir -p dist-mac
           packaging/macos/build-app.sh \
             --binary ./suzuri \

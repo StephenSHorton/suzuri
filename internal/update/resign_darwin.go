@@ -3,6 +3,7 @@
 package update
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -94,10 +95,13 @@ func codesignIdentityOf(path string) string {
 }
 
 func runCodesign(identity, identifier, path string) error {
-	args := []string{"--force", "--sign", identity, "--identifier", identifier}
-	// Hardened runtime only for Developer ID (matches packaging/macos/build-app.sh).
+	args := []string{"--force", "--sign", identity, "--identifier", identifier, "--timestamp"}
+	// Hardened runtime + entitlements for Developer ID (matches packaging/macos/build-app.sh).
 	if identity != "-" && strings.HasPrefix(identity, "Developer ID") {
 		args = append(args, "--options", "runtime")
+		if ent := findEntitlementsPlist(); ent != "" {
+			args = append(args, "--entitlements", ent)
+		}
 	}
 	if strings.HasSuffix(path, ".app") {
 		args = append(args, "--deep")
@@ -106,8 +110,29 @@ func runCodesign(identity, identifier, path string) error {
 	cmd := exec.Command("codesign", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 	}
 	_ = out
 	return nil
+}
+
+// findEntitlementsPlist looks for the shipping entitlements next to a
+// development checkout, then next to the running binary (not usually present).
+func findEntitlementsPlist() string {
+	candidates := []string{
+		"packaging/macos/entitlements.plist",
+	}
+	if exe, err := os.Executable(); err == nil {
+		// .../suzuri.app/Contents/MacOS/suzuri → not useful; skip
+		_ = exe
+	}
+	for _, c := range candidates {
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			if abs, err := filepath.Abs(c); err == nil {
+				return abs
+			}
+			return c
+		}
+	}
+	return ""
 }
