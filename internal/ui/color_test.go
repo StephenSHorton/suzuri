@@ -88,8 +88,8 @@ func TestReverseTruecolorBlackField(t *testing.T) {
 // ink so arrowing the list changes pixels (bold face is not used on Darwin).
 func TestBoldTruecolorInkBrightens(t *testing.T) {
 	term := vt10x.New(vt10x.WithSize(20, 2))
-	// #c0c0c0 normal, then bold same truecolor.
-	if _, err := term.Write([]byte("\x1b[38;2;192;192;192mX\x1b[1mY\x1b[0m")); err != nil {
+	// Mid grey #90: brighten alone is enough; no selection band required.
+	if _, err := term.Write([]byte("\x1b[38;2;144;144;144mX\x1b[1mY\x1b[0m")); err != nil {
 		t.Fatal(err)
 	}
 	normal := glyphToCell(term.Cell(0, 0))
@@ -101,8 +101,25 @@ func TestBoldTruecolorInkBrightens(t *testing.T) {
 		t.Fatalf("bold truecolor ink not brighter: normal=%d,%d,%d bold=%d,%d,%d",
 			normal.FR, normal.FG, normal.FB, bold.FR, bold.FG, bold.FB)
 	}
-	// Default BG stays near-black (transparent host path) — brighten ink only.
-	if !nearBlackRGB(bold.BR, bold.BG, bold.BB) {
-		t.Fatalf("bold should not invent a selection band BR=%d,%d,%d", bold.BR, bold.BG, bold.BB)
+}
+
+// Bright truecolor bold (typical Grok selected row) must not rely on ink lift
+// alone — host skips near-black fills, so stamp a selection band.
+func TestBoldBrightTruecolorGetsSelectionBand(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(20, 2))
+	// #d0d0d0 bold on default BG (Grok-like primary text).
+	if _, err := term.Write([]byte("\x1b[38;2;208;208;208m\x1b[1mSEL\x1b[0m")); err != nil {
+		t.Fatal(err)
+	}
+	c := glyphToCell(term.Cell(0, 0))
+	if !c.Bold {
+		t.Fatal("expected bold")
+	}
+	if nearBlackRGB(c.BR, c.BG, c.BB) {
+		t.Fatalf("bright bold selection must paint an opaque field BR=%d,%d,%d", c.BR, c.BG, c.BB)
+	}
+	// Field should be the soft slate band, not pure white reverse.
+	if c.BR > 100 && c.BG > 100 && c.BB > 100 {
+		t.Fatalf("selection band too light BR=%d,%d,%d", c.BR, c.BG, c.BB)
 	}
 }

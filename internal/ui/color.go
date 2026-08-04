@@ -96,14 +96,18 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 	fr, fg, fb := colorToRGB(g.FG, bold)
 	br, bg, bb := colorToRGB(g.BG, false)
 	// Truecolor SGR ignores the bold brighten path in colorToRGB (only ANSI
-	// 0–7 step up). Grok list selection is often text_primary truecolor +
-	// SGR bold + optional bg_visual. When the host skips default-black BG
-	// (rain) and the TUI leaves selection BG as Reset, bold is the only
-	// difference — without a paint-time lift, arrowing the list is a no-op
-	// visually. Always brighten FG when bold so selection is visible even
-	// without a bold face or selection band.
+	// 0–7 step up). Grok /resume (and similar list pickers) often mark the
+	// selected row with text_primary truecolor + SGR bold while leaving BG as
+	// default/Reset. Host paint skips default-black fills so shell rain shows
+	// through — if bold ink is already light, brighten-toward-white is nearly
+	// a no-op and arrowing the list changes zero pixels (no bold face on
+	// Darwin either). Lift FG, and when ink stays bright on a near-black field,
+	// stamp a soft selection band so the row is obvious under rain.
 	if bold {
 		fr, fg, fb = brightenBoldRGB(fr, fg, fb)
+		if nearBlackRGB(br, bg, bb) && brightInkRGB(fr, fg, fb) {
+			br, bg, bb = selectionBandRGB()
+		}
 	}
 	// Reverse video always needs an opaque field. If the stored BG still
 	// resolves near-black (truecolor 0 collides with ANSI black; some TUIs
@@ -115,6 +119,12 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 			// Both ends dark after convert — use dark ink on light field.
 			fr, fg, fb = 18, 18, 22
 		}
+	}
+	// Low-contrast reverse (dark slate on darker slate) also vanishes under
+	// rain; ensure a minimum field/ink split when reverse is set.
+	if g.Mode&attrReverse != 0 && lowContrastRGB(fr, fg, fb, br, bg, bb) {
+		br, bg, bb = 220, 220, 224
+		fr, fg, fb = 18, 18, 22
 	}
 	return cellPix{
 		Ch:   displayRune(g.Char),
@@ -132,12 +142,42 @@ func nearBlackRGB(r, g, b byte) bool {
 	return r < 28 && g < 28 && b < 28
 }
 
+// brightInkRGB is true when FG is already light enough that further brighten
+// barely moves pixels (typical truecolor "primary text" for selected rows).
+func brightInkRGB(r, g, b byte) bool {
+	// Luma-ish: any strong channel counts as bright ink.
+	return int(r)+int(g)+int(b) >= 420 || r >= 170 || g >= 170 || b >= 170
+}
+
+// selectionBandRGB is a soft slate field for bold-on-default-BG selection rows
+// (Grok /resume). Opaque enough that paint does not skip the fill under rain.
+func selectionBandRGB() (byte, byte, byte) {
+	return 52, 56, 78
+}
+
+// lowContrastRGB reports FG and BG that are too close to distinguish as a band.
+func lowContrastRGB(fr, fg, fb, br, bg, bb byte) bool {
+	dr := absByte(fr, br)
+	dg := absByte(fg, bg)
+	db := absByte(fb, bb)
+	return dr+dg+db < 90
+}
+
+func absByte(a, b byte) int {
+	if a >= b {
+		return int(a - b)
+	}
+	return int(b - a)
+}
+
 // brightenBoldRGB is a paint-time stand-in for a bold face on truecolor /
 // already-bright ANSI ink (where colorToRGB cannot step the palette).
-// Pushes each channel ~35% toward white — enough to read as "selected" when
-// the only SGR difference is bold (Grok /resume rows).
+// Pushes each channel toward white — enough to read as "selected" when the
+// only SGR difference is bold (Grok /resume rows) on mid-tone ink.
 func brightenBoldRGB(r, g, b byte) (byte, byte, byte) {
-	return pushTowardWhite(r, 90), pushTowardWhite(g, 90), pushTowardWhite(b, 90)
+	// Stronger lift than the original ~35%: mid greys need more travel so the
+	// selected row is obvious without a bold typeface.
+	return pushTowardWhite(r, 140), pushTowardWhite(g, 140), pushTowardWhite(b, 140)
 }
 
 func pushTowardWhite(c byte, amount int) byte {

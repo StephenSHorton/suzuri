@@ -124,6 +124,36 @@ func TestNewWindowFromPalette(t *testing.T) {
 	}
 }
 
+func TestTransferAcceptsFileDropOnlyOnSendPrompt(t *testing.T) {
+	m := New(80)
+	if m.AcceptsFileDrop() {
+		t.Fatal("should not accept drops with no prompt")
+	}
+	r := m.UpdateChrome(OpenTransferPromptMsg{Mode: TransferModeReceive})
+	m = r.Model
+	if m.AcceptsFileDrop() {
+		t.Fatal("receive prompt must not accept file drops")
+	}
+	r = m.UpdateChrome(OpenTransferPromptMsg{Mode: TransferModeSend})
+	m = r.Model
+	if !m.AcceptsFileDrop() {
+		t.Fatal("send prompt should accept file drops")
+	}
+	r = m.UpdateChrome(TransferDropHoverMsg{Hover: true})
+	m = r.Model
+	if !m.transferDropHover {
+		t.Fatal("expected drop hover")
+	}
+	r = m.UpdateChrome(TransferDropPathsMsg{Paths: []string{"/tmp/dropped.bin"}})
+	if r.Action != ActionTransferStart || r.Name != "/tmp/dropped.bin" {
+		t.Fatalf("drop start action=%v name=%q", r.Action, r.Name)
+	}
+	m = r.Model
+	if m.AcceptsFileDrop() {
+		t.Fatal("prompt should close after auto-start drop")
+	}
+}
+
 func TestTransferSendFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})

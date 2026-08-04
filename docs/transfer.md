@@ -64,6 +64,16 @@ Host ↔ engine uses NDJSON (`--json`). See [`libs/transfer/docs/machine-mode.md
 | **Send file (ticket)…** | Path prompt → prepare → ticket panel (`c` copy, `esc` stop) |
 | **Receive ticket…** | Ticket prompt → download into `~/Downloads` (or home) with progress |
 
+### Drag and drop (send only)
+
+While the **Send file** dialog is open:
+
+- Drop zone shows “drop a file or folder here”
+- **Drop** a file/folder onto the suzuri window → transfer starts (first item if several)
+- On Windows, the OS only treats the window as a drop target while this dialog is open (so normal shell use is not claimed for transfer)
+
+Drops are **ignored for transfer** when that dialog is closed (so they are not assumed to mean “send”). Nested tools (e.g. Grok) still run inside the PTY; OS file drops to the suzuri window are host-level and only become a transfer when Send file is open.
+
 Keep suzuri open while serving. Engine missing → toast from host when start fails.
 
 ## Status

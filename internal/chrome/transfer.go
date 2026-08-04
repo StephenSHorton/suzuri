@@ -37,12 +37,66 @@ type TransferStatusMsg struct {
 // CloseTransferMsg dismisses prompt and/or panel without cancelling (host cancels separately).
 type CloseTransferMsg struct{}
 
+// TransferDropHoverMsg is host-driven OS drag-over feedback (send prompt only).
+// Hover true while a file drag is over the window; false on leave/drop.
+type TransferDropHoverMsg struct {
+	Hover bool
+}
+
+// TransferDropPathsMsg delivers filesystem paths from an OS file drop.
+// Host must only send this when AcceptsFileDrop() was true (send prompt open).
+type TransferDropPathsMsg struct {
+	Paths []string
+}
+
+// AcceptsFileDrop reports whether the host should accept OS file drops as
+// transfer-send input. False when not on the Send file prompt so drops are
+// not stolen for transfer (other apps / normal window behavior).
+func (m Model) AcceptsFileDrop() bool {
+	return m.TransferPromptOpen && m.transferMode == TransferModeSend
+}
+
 func (m *Model) openTransferPrompt(mode TransferMode, seed string) {
 	m.closeModalsExcept("transfer_prompt")
 	m.TransferPromptOpen = true
 	m.TransferPanelOpen = false
 	m.transferMode = mode
 	m.transferBuf = strings.TrimSpace(seed)
+	m.transferDropHover = false
+	m.transferDropHint = ""
+}
+
+// applyTransferDropPaths fills the send path from a drop. Returns TransferStart
+// when a single existing path is ready to send; otherwise ActionNone (user hits enter).
+func (m *Model) applyTransferDropPaths(paths []string) (act HostAction, value string) {
+	if !m.AcceptsFileDrop() {
+		return ActionNone, ""
+	}
+	m.transferDropHover = false
+	clean := make([]string, 0, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			clean = append(clean, p)
+		}
+	}
+	if len(clean) == 0 {
+		m.transferDropHint = "drop ignored — no path"
+		return ActionNone, ""
+	}
+	// Engine send takes one path (file or folder).
+	m.transferBuf = clean[0]
+	if len(clean) == 1 {
+		m.transferDropHint = "dropped — press enter to send"
+		// Auto-start single drop: same as enter with a path.
+		value = m.transferBuf
+		m.TransferPromptOpen = false
+		m.transferBuf = ""
+		m.transferDropHint = ""
+		return ActionTransferStart, value
+	}
+	m.transferDropHint = fmt.Sprintf("using first of %d items — enter to send", len(clean))
+	return ActionNone, ""
 }
 
 func (m *Model) applyTransferStatus(msg TransferStatusMsg) {
@@ -158,8 +212,6 @@ func (m Model) renderTransferPrompt(windowCols int) string {
 		// Show end of long paths/tickets.
 		plain := prompt + body + "▌"
 		if lipgloss.Width(plain) > inner {
-			plain = "…" + padFit(prompt+body+"▌", inner-1)
-			// simpler: take right side
 			rs := []rune(prompt + body + "▌")
 			for lipgloss.Width(string(rs)) > inner && len(rs) > 2 {
 				rs = rs[1:]
@@ -170,11 +222,63 @@ func (m Model) renderTransferPrompt(windowCols int) string {
 		}
 		line = styleDialogHintKey().Width(inner).MaxHeight(1).Render(plain)
 	}
+
+	var bodyLines []string
+	// Drop zone only for send — receive is ticket paste, not files.
+	if m.transferMode == TransferModeSend {
+		bodyLines = append(bodyLines, m.renderTransferDropZone(inner))
+		if m.transferDropHint != "" {
+			bodyLines = append(bodyLines, styleDialogHint().Width(inner).MaxHeight(1).Render(
+				padFit(m.transferDropHint, inner),
+			))
+		}
+		bodyLines = append(bodyLines, panelFillLine(inner, styleDialogHint().Render(padFit("— or type a path —", inner))))
+	}
+	bodyLines = append(bodyLines, line)
+
 	footer := styleDialogHintKey().Render("enter") +
 		styleDialogHint().Render(" start  ") +
 		styleDialogHintKey().Render("esc") +
 		styleDialogHint().Render(" cancel")
-	return renderDialogCard(outer, title, []string{line}, footer)
+	if m.transferMode == TransferModeSend {
+		footer = styleDialogHint().Render("drop file · ") + footer
+	}
+	return renderDialogCard(outer, title, bodyLines, footer)
+}
+
+func (m Model) renderTransferDropZone(inner int) string {
+	// Two-line zone so hover is obvious even without OS drag-enter events (macOS/ebiten).
+	var top, bot string
+	if m.transferDropHover {
+		top = "▼  release to send this file  ▼"
+		bot = "drop target active"
+		return styleDialogActive().Width(inner).MaxHeight(1).Render(padFit(top, inner)) + "\n" +
+			styleDialogActive().Width(inner).MaxHeight(1).Render(padFit(bot, inner))
+	}
+	top = "┌── drop a file or folder here ──┐"
+	bot = "└────────────────────────────────┘"
+	// Fit separators to inner width.
+	if inner >= 10 {
+		label := " drop a file or folder here "
+		side := (inner - lipgloss.Width(label) - 2) / 2
+		if side < 1 {
+			side = 1
+		}
+		top = "┌" + strings.Repeat("─", side) + label + strings.Repeat("─", inner-2-side-lipgloss.Width(label)) + "┐"
+		if lipgloss.Width(top) > inner {
+			top = padFit("┌ drop a file or folder here ┐", inner)
+		}
+		dash := inner - 2
+		if dash < 1 {
+			dash = 1
+		}
+		bot = "└" + strings.Repeat("─", dash) + "┘"
+		if lipgloss.Width(bot) > inner {
+			bot = padFit(bot, inner)
+		}
+	}
+	return styleDialogHint().Width(inner).MaxHeight(1).Render(padFit(top, inner)) + "\n" +
+		styleDialogHint().Width(inner).MaxHeight(1).Render(padFit(bot, inner))
 }
 
 func (m Model) renderTransferPanel(windowCols int) string {
