@@ -153,9 +153,9 @@ jobs:
 
       # Import Developer ID cert when secrets are configured (optional).
       # Without secrets, build-app.sh falls back to ad-hoc signing.
+      # Note: do not use `secrets.*` in `if:` — GitHub rejects the workflow file.
       - name: Import Apple signing certificate
-        # Skip when secret unset (ad-hoc local-style macOS artifacts).
-        if: matrix.goos == 'darwin' && secrets.MACOS_CERTIFICATE_P12_BASE64 != ''
+        if: matrix.goos == 'darwin'
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -163,6 +163,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -z "${MACOS_CERTIFICATE_P12_BASE64:-}" ]]; then
+            echo "==> No MACOS_CERTIFICATE_P12_BASE64; skipping cert import (ad-hoc sign)."
+            exit 0
+          fi
           CERT="$RUNNER_TEMP/suzuri-dev-id.p12"
           echo "$MACOS_CERTIFICATE_P12_BASE64" | base64 --decode >"$CERT"
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
