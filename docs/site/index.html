@@ -195,6 +195,14 @@
         site <strong id="site-version-label">__SITE_VERSION__</strong>
         <span class="site-version-built" id="site-version-built">· __SITE_BUILT__</span>
       </p>
+      <p class="hic-row">
+        <label class="hic-toggle" for="hic-toggle" title="When off, Glitch and Decrypt use plain HTML so you can preview what most visitors see without the Chrome html-in-canvas flag / origin trial. Glyph rain still runs (it does not need that API).">
+          <input type="checkbox" id="hic-toggle" />
+          <span class="hic-toggle-ui" aria-hidden="true"></span>
+          <span class="hic-toggle-label">html-in-canvas effects</span>
+        </label>
+        <span class="hic-status" id="hic-status"></span>
+      </p>
     </footer>
   </div>
 
@@ -273,10 +281,59 @@
       })
       .catch(() => {});
 
+    // Prefer html-in-canvas when the browser supports it. localStorage can force
+    // fallback so you can preview what visitors without the flag/trial see.
+    const HIC_PREF_KEY = "suzuri-site-hic";
+    const browserHasHic = supportsHtmlInCanvas();
+    let preferHic = true;
+    try {
+      const stored = localStorage.getItem(HIC_PREF_KEY);
+      if (stored === "0") preferHic = false;
+      if (stored === "1") preferHic = true;
+    } catch {
+      /* private mode etc. */
+    }
+    // Effective: only use HIC when both browser + preference allow it.
+    const useHic = browserHasHic && preferHic;
+
+    {
+      const toggle = document.getElementById("hic-toggle");
+      const status = document.getElementById("hic-status");
+      if (toggle) {
+        toggle.checked = preferHic;
+        toggle.disabled = !browserHasHic;
+        if (!browserHasHic) {
+          toggle.checked = false;
+          toggle.title = "This browser does not expose html-in-canvas (flag or origin trial required).";
+        }
+        toggle.addEventListener("change", () => {
+          try {
+            localStorage.setItem(HIC_PREF_KEY, toggle.checked ? "1" : "0");
+          } catch {
+            /* ignore */
+          }
+          // Clean remount of WebGL / reparented DOM.
+          location.reload();
+        });
+      }
+      if (status) {
+        if (!browserHasHic) {
+          status.textContent = "browser: unavailable";
+          status.dataset.state = "unavailable";
+        } else if (useHic) {
+          status.textContent = "on";
+          status.dataset.state = "on";
+        } else {
+          status.textContent = "off · plain HTML preview";
+          status.dataset.state = "off";
+        }
+      }
+    }
+
     /**
      * Mount a Canvas UI effect. Reparents content into the source canvas when
-     * html-in-canvas is available, then keeps the host height in sync with the
-     * content (absolute source would otherwise collapse the mount to 0px).
+     * html-in-canvas is available (and preferred), then keeps the host height
+     * in sync with the content (absolute source would otherwise collapse to 0).
      */
     function mountCanvasUI(root, createFn, options = {}) {
       if (!root) return null;
@@ -285,13 +342,20 @@
       const output = root.querySelector(".cui-output");
       if (!source || !content || !output) return null;
 
-      const native = supportsHtmlInCanvas();
+      const native = useHic;
       root.dataset.mode = native ? "html-in-canvas" : "fallback";
       if (native) {
         source.appendChild(content);
         source.style.display = "";
       } else {
         source.style.display = "none";
+      }
+
+      // In forced-fallback preview, skip creating the WebGL instance entirely so
+      // Glitch/Decrypt don't paint over plain HTML (same as unsupported browsers).
+      if (!native) {
+        root.classList.add("cui-failed");
+        return null;
       }
 
       const instance = createFn({ source, content, output }, options);
@@ -301,35 +365,37 @@
         return null;
       }
 
-      if (native) {
-        const syncHeight = () => {
-          const h = Math.ceil(
-            Math.max(content.scrollHeight, content.offsetHeight, content.getBoundingClientRect().height, 1),
-          );
-          root.style.height = `${h}px`;
-          source.style.height = `${h}px`;
-          output.style.height = `${h}px`;
-          instance.resize?.();
-        };
-        const ro = new ResizeObserver(() => {
-          // Double-rAF: wait for layout after reparent / font load.
-          requestAnimationFrame(() => requestAnimationFrame(syncHeight));
-        });
-        ro.observe(content);
+      const syncHeight = () => {
+        const h = Math.ceil(
+          Math.max(
+            content.scrollHeight,
+            content.offsetHeight,
+            content.getBoundingClientRect().height,
+            1,
+          ),
+        );
+        root.style.height = `${h}px`;
+        source.style.height = `${h}px`;
+        output.style.height = `${h}px`;
+        instance.resize?.();
+      };
+      const ro = new ResizeObserver(() => {
         requestAnimationFrame(() => requestAnimationFrame(syncHeight));
-        window.addEventListener("load", syncHeight, { once: true });
-      }
+      });
+      ro.observe(content);
+      requestAnimationFrame(() => requestAnimationFrame(syncHeight));
+      window.addEventListener("load", syncHeight, { once: true });
 
       return instance;
     }
 
-    const native = supportsHtmlInCanvas();
-    document.documentElement.dataset.canvasUi = native ? "html-in-canvas" : "fallback";
+    document.documentElement.dataset.canvasUi = useHic ? "html-in-canvas" : "fallback";
 
     const hint = document.getElementById("dossier-hint");
-    if (hint && !native) {
-      hint.textContent =
-        "Full decrypt effect needs Chrome html-in-canvas (origin trial or flag). Content stays readable.";
+    if (hint && !useHic) {
+      hint.textContent = browserHasHic
+        ? "html-in-canvas effects are off (footer toggle) — plain HTML preview."
+        : "Full decrypt effect needs Chrome html-in-canvas (origin trial or flag). Content stays readable.";
     }
 
     // --- Glyph Rain: fixed full-viewport overlay (does not wrap page content) ---
