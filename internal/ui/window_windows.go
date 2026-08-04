@@ -1164,7 +1164,10 @@ func (u *winUI) drainTransferStatus() {
 }
 
 func (u *winUI) copyText(s string) {
-	_ = setClipboardText(s)
+	if u == nil {
+		return
+	}
+	_ = setClipboardText(u.hwnd, s)
 }
 
 func (u *winUI) defaultReceiveDir() string {
