@@ -20,3 +20,20 @@ func TestStripPreservesBackspace(t *testing.T) {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
+
+func TestStripOSC8Hyperlinks(t *testing.T) {
+	// ESC]8;;https://example.comST + text + ESC]8;;ST
+	in := []byte("see \x1b]8;;https://example.com/path\x1b\\click me\x1b]8;;\x1b\\ please")
+	got := string(StripOSC8Hyperlinks(in))
+	want := "see click me please"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	// BEL terminator form
+	in2 := []byte("\x1b]8;;http://x\x07label\x1b]8;;\x07")
+	if g := string(StripOSC8Hyperlinks(in2)); g != "label" {
+		t.Fatalf("BEL form: %q", g)
+	}
+}
+
+

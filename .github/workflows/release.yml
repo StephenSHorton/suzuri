@@ -40,12 +40,11 @@ jobs:
           cache: true
 
       # P2P transfer engine (iroh) — built from hato as suzuri-transfer.
-      # Pin ref until feat/json-machine-mode lands on hato main.
       - name: Checkout transfer engine (hato)
         uses: actions/checkout@v4
         with:
           repository: StephenSHorton/hato
-          ref: feat/json-machine-mode
+          ref: main
           path: vendor/hato
 
       - name: Install Rust toolchain

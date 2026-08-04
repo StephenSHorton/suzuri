@@ -18,11 +18,18 @@ const (
 	fieldTheme
 	fieldANSIMap
 	fieldIntro
-	fieldShellMatrix
+	fieldShellAmbient
+	fieldRainOpacity // ambient intensity (JSON: shell_matrix_opacity)
 	fieldAnimateUnfocused
 	fieldProfile
 	settingsFieldCount
 )
+
+// rainOpacityStep is left/right nudge size for the rain strength slider (%).
+const rainOpacityStep = 5
+
+// rainOpacityBarCells is the filled/empty bar width in the settings value column.
+const rainOpacityBarCells = 10
 
 // Fixed label column so values sit on a clean right column.
 const settingsLabelCols = 10
@@ -32,6 +39,25 @@ type settingsState struct {
 	edit  config.Config
 	field settingsField
 	fonts []string
+}
+
+// ApplyFontSize updates lastCfg (and live settings edit/snap if open) so zoom
+// shortcuts stay consistent with Cancel / palette rebuild.
+func (m *Model) ApplyFontSize(px int) {
+	if m == nil {
+		return
+	}
+	if px < 10 {
+		px = 10
+	}
+	if px > 36 {
+		px = 36
+	}
+	m.lastCfg.FontSizePx = px
+	if m.SettingsOpen {
+		m.settings.edit.FontSizePx = px
+		m.settings.snap.FontSizePx = px
+	}
 }
 
 func newSettingsState(cfg config.Config) settingsState {
@@ -59,6 +85,14 @@ func newSettingsState(cfg config.Config) settingsState {
 func (s *settingsState) moveField(delta int) {
 	n := int(settingsFieldCount)
 	s.field = settingsField((int(s.field) + delta%n + n) % n)
+}
+
+// SettingsShowcaseIntro is true when Settings should preview the startup
+// curtain under the modal (Intro row focused). Otherwise the underlay
+// showcases Ambient (default for every other field, including Ambient /
+// Intensity while cycling styles).
+func (m Model) SettingsShowcaseIntro() bool {
+	return m.SettingsOpen && m.settings.field == fieldIntro
 }
 
 func (s *settingsState) nudge(delta int) {
@@ -99,8 +133,20 @@ func (s *settingsState) nudge(delta int) {
 		}
 		i = (i + delta + len(ids)) % len(ids)
 		s.edit.Intro = ids[i]
-	case fieldShellMatrix:
-		s.edit.ShellMatrix = !s.edit.ShellMatrix
+	case fieldShellAmbient:
+		ids := config.AmbientIDs()
+		i := indexFold(ids, s.edit.ShellAmbient)
+		if i < 0 {
+			i = 0
+		}
+		i = (i + delta + len(ids)) % len(ids)
+		s.edit.ShellAmbient = ids[i]
+		s.edit = config.Normalize(s.edit)
+	case fieldRainOpacity:
+		// Slider: left/right steps by 5%. Charm has no native slider widget;
+		// we render a block bar and nudge like font size.
+		s.edit.ShellMatrixOpacity += delta * rainOpacityStep
+		s.edit = config.Normalize(s.edit)
 	case fieldAnimateUnfocused:
 		s.edit.AnimateUnfocused = !s.edit.AnimateUnfocused
 	case fieldProfile:
@@ -135,11 +181,10 @@ func (s settingsState) valueLabel(f settingsField) string {
 		return config.ANSIMapLabel(s.edit.ShellANSIMap)
 	case fieldIntro:
 		return config.IntroLabel(s.edit.Intro)
-	case fieldShellMatrix:
-		if s.edit.ShellMatrix {
-			return "On"
-		}
-		return "Off"
+	case fieldShellAmbient:
+		return config.AmbientLabel(s.edit.ShellAmbient)
+	case fieldRainOpacity:
+		return formatRainOpacitySlider(s.edit.ShellMatrixOpacity, rainOpacityBarCells)
 	case fieldAnimateUnfocused:
 		if s.edit.AnimateUnfocused {
 			return "On"
@@ -169,8 +214,10 @@ func (s settingsState) fieldLabel(f settingsField) string {
 		return "ANSI"
 	case fieldIntro:
 		return "Intro"
-	case fieldShellMatrix:
-		return "Rain"
+	case fieldShellAmbient:
+		return "Ambient"
+	case fieldRainOpacity:
+		return "Intensity"
 	case fieldAnimateUnfocused:
 		return "Bg anim"
 	case fieldProfile:
@@ -288,14 +335,7 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		}
 	case fieldTheme:
 		title = "Theme · " + val
-		switch s.edit.Theme {
-		case config.ThemeCharmtone:
-			paras = []string{"Warm violet/pink chrome inspired by Charm. Shell ANSI colors follow when ANSI is Soft or Full."}
-		case config.ThemeHighContrast:
-			paras = []string{"Punchy green-on-black chrome for maximum contrast. Best for bright rooms or low vision."}
-		default:
-			paras = []string{"Inkstone — cool mauve on dark grey. The default suzuri look (硯)."}
-		}
+		paras = []string{config.ThemeDesc(s.edit.Theme)}
 	case fieldANSIMap:
 		title = "ANSI · " + val
 		switch s.edit.ShellANSIMap {
@@ -317,29 +357,18 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		}
 	case fieldIntro:
 		title = "Intro · " + val
-		switch s.edit.Intro {
-		case config.IntroRipple:
-			paras = []string{
-				"Puddle of 猫/咪 rings expanding from the center mark.",
-				"Wave colors: theme → white → theme → black. Save & relaunch to preview.",
-			}
-		case config.IntroNone:
-			paras = []string{"Skip the startup curtain. The center 硯 still fades in quietly."}
-		default:
-			paras = []string{
-				"Digital rain (Matrix-style) over the shell for ~2s, then streams fall off.",
-				"Skipped automatically when Rain (always-on shell matrix) is On — no double curtain.",
-			}
+		paras = []string{config.IntroDesc(s.edit.Intro)}
+	case fieldShellAmbient:
+		title = "Ambient · " + val
+		paras = []string{
+			config.AmbientDesc(s.edit.ShellAmbient),
+			"Left/right cycles styles. Freezes while typing in the Warp bar so input stays snappy. Use Intensity below to dim or strengthen.",
 		}
-	case fieldShellMatrix:
-		title = "Rain · " + val
-		if s.edit.ShellMatrix {
-			paras = []string{
-				"Always-on digital rain under empty shell cells — very dim so text stays readable.",
-				"Hides under full-screen apps and while the startup intro is playing.",
-			}
-		} else {
-			paras = []string{"No background rain in the shell. Intro and Settings rain are unchanged."}
+	case fieldRainOpacity:
+		title = "Intensity · " + fmt.Sprintf("%d%%", s.edit.ShellMatrixOpacity)
+		paras = []string{
+			"Strength of always-on Ambient underlay (left/right, 5% steps). 100% is the designed default; lower values fade the effect under text and TUIs.",
+			"Only applies when Ambient is not Off. Live-previews as you change it — Enter saves.",
 		}
 	case fieldAnimateUnfocused:
 		title = "Bg anim · " + val
@@ -410,6 +439,34 @@ func wrapWords(s string, width int) []string {
 		}
 	}
 	return out
+}
+
+// formatRainOpacitySlider renders a text slider, e.g. "██████░░░░  60%".
+// No Charm slider widget — settings use left/right nudge like Size.
+func formatRainOpacitySlider(pct, barW int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	if barW < 6 {
+		barW = 6
+	}
+	filled := (pct*barW + 50) / 100
+	if filled > barW {
+		filled = barW
+	}
+	var b strings.Builder
+	b.Grow(barW + 6)
+	for i := 0; i < barW; i++ {
+		if i < filled {
+			b.WriteRune('█')
+		} else {
+			b.WriteRune('░')
+		}
+	}
+	return fmt.Sprintf("%s %3d%%", b.String(), pct)
 }
 
 // settingsRow is one label | value line.

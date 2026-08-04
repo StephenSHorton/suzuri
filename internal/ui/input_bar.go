@@ -157,6 +157,26 @@ func (b *inputBar) backspace() {
 	b.cursor--
 }
 
+// deleteToLineStart removes text from the start of the current logical line
+// through the caret (macOS ⌘⌫ in multiline). With the caret at EOL this
+// clears that line only.
+func (b *inputBar) deleteToLineStart() {
+	b.leaveHistoryBrowse()
+	b.clearComplete()
+	b.clampCursor()
+	ls := lineStartAt(b.runes, b.cursor)
+	if b.cursor <= ls {
+		return
+	}
+	b.runes = append(b.runes[:ls], b.runes[b.cursor:]...)
+	b.cursor = ls
+}
+
+// clearLine clears the entire Warp bar buffer (all lines) — ⌘⌫ product behavior.
+func (b *inputBar) clearLine() {
+	b.clear()
+}
+
 func (b *inputBar) deleteForward() {
 	b.leaveHistoryBrowse()
 	b.clearComplete()
@@ -180,6 +200,68 @@ func (b *inputBar) moveRight() {
 	}
 }
 
+// moveWordLeft / moveWordRight: Option+←→ (macOS) or Ctrl+←→ (Windows / also Mac).
+func (b *inputBar) moveWordLeft() {
+	b.clearComplete()
+	b.cursor = barWordBoundary(b.runes, b.cursor, -1)
+}
+
+func (b *inputBar) moveWordRight() {
+	b.clearComplete()
+	b.cursor = barWordBoundary(b.runes, b.cursor, 1)
+}
+
+// deleteWordLeft / deleteWordRight: Option/Ctrl+Backspace/Delete.
+func (b *inputBar) deleteWordLeft() {
+	b.leaveHistoryBrowse()
+	b.clearComplete()
+	if b.cursor <= 0 {
+		return
+	}
+	start := barWordBoundary(b.runes, b.cursor, -1)
+	b.runes = append(b.runes[:start], b.runes[b.cursor:]...)
+	b.cursor = start
+}
+
+func (b *inputBar) deleteWordRight() {
+	b.leaveHistoryBrowse()
+	b.clearComplete()
+	if b.cursor >= len(b.runes) {
+		return
+	}
+	end := barWordBoundary(b.runes, b.cursor, 1)
+	b.runes = append(b.runes[:b.cursor], b.runes[end:]...)
+}
+
+func barWordBoundary(runes []rune, i, dir int) int {
+	n := len(runes)
+	if i < 0 {
+		i = 0
+	}
+	if i > n {
+		i = n
+	}
+	isSpace := func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n'
+	}
+	if dir < 0 {
+		for i > 0 && isSpace(runes[i-1]) {
+			i--
+		}
+		for i > 0 && !isSpace(runes[i-1]) {
+			i--
+		}
+		return i
+	}
+	for i < n && !isSpace(runes[i]) {
+		i++
+	}
+	for i < n && isSpace(runes[i]) {
+		i++
+	}
+	return i
+}
+
 func (b *inputBar) moveHome() {
 	b.clearComplete()
 	// Start of current logical line (after last \n), not whole buffer.
@@ -188,6 +270,17 @@ func (b *inputBar) moveHome() {
 		i--
 	}
 	b.cursor = i
+}
+
+// moveDocHome / moveDocEnd: Cmd+↑/↓ (macOS) — whole buffer extremes.
+func (b *inputBar) moveDocHome() {
+	b.clearComplete()
+	b.cursor = 0
+}
+
+func (b *inputBar) moveDocEnd() {
+	b.clearComplete()
+	b.cursor = len(b.runes)
 }
 
 func (b *inputBar) moveEnd() {

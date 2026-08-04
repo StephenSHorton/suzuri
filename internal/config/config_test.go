@@ -13,6 +13,56 @@ func TestNormalizeDefaults(t *testing.T) {
 	}
 }
 
+func TestShellMatrixOpacityClamp(t *testing.T) {
+	c := Normalize(Config{ShellMatrixOpacity: 150})
+	if c.ShellMatrixOpacity != 100 {
+		t.Fatalf("clamp high: %d", c.ShellMatrixOpacity)
+	}
+	c = Normalize(Config{ShellMatrixOpacity: -10})
+	if c.ShellMatrixOpacity != 0 {
+		t.Fatalf("clamp low: %d", c.ShellMatrixOpacity)
+	}
+	if Default().ShellMatrixOpacity != 100 {
+		t.Fatalf("default opacity %d", Default().ShellMatrixOpacity)
+	}
+	if Default().ShellMatrixOpacity01() != 1 {
+		t.Fatalf("default 01=%v", Default().ShellMatrixOpacity01())
+	}
+}
+
+func TestShellMatrixOpacityRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+	want := Default()
+	want.ShellMatrixOpacity = 45
+	if err := Save(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShellMatrixOpacity != 45 {
+		t.Fatalf("got opacity %d", got.ShellMatrixOpacity)
+	}
+	// Missing key → default 100
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	path := Path()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"font_face":"x","font_size_px":14,"cursor":"block","theme":"inkstone","shell_ansi_map":"soft"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShellMatrixOpacity != 100 {
+		t.Fatalf("missing opacity should default 100, got %d", got.ShellMatrixOpacity)
+	}
+}
+
 func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	// Point LOCALAPPDATA at temp so Path() is isolated.
@@ -71,5 +121,80 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 	d := Default()
 	if c.FontFace != d.FontFace || c.Theme != d.Theme {
 		t.Fatalf("got %+v", c)
+	}
+}
+
+func TestAmbientAndIntroIDs(t *testing.T) {
+	if len(IntroIDs()) < 5 {
+		t.Fatalf("intro ids: %v", IntroIDs())
+	}
+	if len(AmbientIDs()) < 5 {
+		t.Fatalf("ambient ids: %v", AmbientIDs())
+	}
+	for _, id := range IntroIDs() {
+		if !ValidIntro(id) || IntroLabel(id) == "" || IntroDesc(id) == "" {
+			t.Fatalf("intro %q", id)
+		}
+	}
+	for _, id := range AmbientIDs() {
+		if !ValidAmbient(id) || AmbientLabel(id) == "" || AmbientDesc(id) == "" {
+			t.Fatalf("ambient %q", id)
+		}
+	}
+	// Legacy shell_matrix=true → rain ambient
+	c := Normalize(Config{ShellMatrix: true})
+	if c.ShellAmbient != AmbientRain {
+		t.Fatalf("legacy matrix true → ambient %q", c.ShellAmbient)
+	}
+	c = Normalize(Config{ShellMatrix: false, ShellAmbient: ""})
+	// empty ambient + false matrix
+	if c.ShellAmbient != AmbientNone {
+		t.Fatalf("legacy matrix false → ambient %q", c.ShellAmbient)
+	}
+	// Explicit ambient wins
+	c = Normalize(Config{ShellAmbient: AmbientWaves, ShellMatrix: true})
+	if c.ShellAmbient != AmbientWaves {
+		t.Fatalf("explicit ambient lost: %q", c.ShellAmbient)
+	}
+	if c.ShellMatrix {
+		t.Fatal("ShellMatrix should be false when ambient is waves")
+	}
+}
+
+func TestThemeIDsUniqueAndValid(t *testing.T) {
+	ids := ThemeIDs()
+	if len(ids) < 10 {
+		t.Fatalf("expected a bunch of themes, got %d", len(ids))
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if id == "" {
+			t.Fatal("empty theme id")
+		}
+		if seen[id] {
+			t.Fatalf("duplicate theme %q", id)
+		}
+		seen[id] = true
+		if !ValidTheme(id) {
+			t.Fatalf("ThemeIDs entry not ValidTheme: %q", id)
+		}
+		if ThemeLabel(id) == "" {
+			t.Fatalf("empty label for %q", id)
+		}
+		if ThemeDesc(id) == "" {
+			t.Fatalf("empty desc for %q", id)
+		}
+	}
+	// Unknown → Normalize falls back to high contrast
+	c := Normalize(Config{Theme: "not_a_theme"})
+	if c.Theme != ThemeHighContrast {
+		t.Fatalf("unknown theme: %q", c.Theme)
+	}
+	// Known themes survive Normalize
+	for _, id := range ids {
+		c := Normalize(Config{Theme: id})
+		if c.Theme != id {
+			t.Fatalf("Normalize dropped %q → %q", id, c.Theme)
+		}
 	}
 }

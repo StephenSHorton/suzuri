@@ -90,3 +90,42 @@ type LogsResult struct {
 	Count int      `json:"count"`
 	Error string   `json:"error,omitempty"`
 }
+
+// NotesOp is the notes bank action for POST /v1/notes.
+type NotesOp string
+
+const (
+	NotesOpList   NotesOp = "list"
+	NotesOpGet    NotesOp = "get"
+	NotesOpCreate NotesOp = "create"
+	NotesOpUpdate NotesOp = "update"
+	NotesOpDelete NotesOp = "delete"
+)
+
+// NotesRequest mutates or reads the suzuri notes bank (Ctrl+Shift+M).
+type NotesRequest struct {
+	Op        NotesOp `json:"op"`
+	ID        string  `json:"id,omitempty"`         // empty = active note for get/update/delete
+	Title     *string `json:"title,omitempty"`      // create: optional; update: nil=leave
+	Body      *string `json:"body,omitempty"`       // create: optional; update: nil=leave
+	SetActive bool    `json:"set_active,omitempty"` // after create/update, make this note active
+}
+
+// NoteItem is one note for agents (full body included).
+type NoteItem struct {
+	ID      string    `json:"id"`
+	Title   string    `json:"title"` // display title (stored or derived)
+	Body    string    `json:"body"`
+	Updated time.Time `json:"updated"`
+	Active  bool      `json:"active,omitempty"`
+}
+
+// NotesResult is the response from notes list/get/create/update/delete.
+type NotesResult struct {
+	OK    bool       `json:"ok"`
+	Path  string     `json:"path,omitempty"`
+	Note  *NoteItem  `json:"note,omitempty"`
+	Notes []NoteItem `json:"notes,omitempty"`
+	Count int        `json:"count,omitempty"`
+	Error string     `json:"error,omitempty"`
+}

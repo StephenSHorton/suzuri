@@ -77,6 +77,13 @@ type tab struct {
 	lastCols, lastRows int
 	// kitty tracks progressive keyboard enhancement (Shift+Enter → CSI-u for Grok).
 	kitty kittyKeyboard
+	// kittyGfx: Kitty graphics protocol images (Grok prompt previews, inline media).
+	kittyGfx *kittyGfxState
+
+	// Warp-bar command queue: when a job is still running, further Enter
+	// submits wait here instead of dumping into the live process stdin.
+	cmdQueue    []queuedCmd
+	barAwaiting bool // true after a bar command until shell looks idle
 }
 
 // busy is true when this tab should show an activity spinner:
@@ -279,6 +286,7 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 		writeCh:  make(chan []byte, 256),
 		lastCols: cols,
 		lastRows: rows,
+		kittyGfx: newKittyGfx(),
 	}
 	// Feed VT replies (DSR/CPR) and host query answers back into the PTY so
 	// apps can probe Kitty keyboard support and cursor position.
@@ -292,12 +300,18 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 }
 
 // setCwd updates the tab working directory (from OSC or cd tracking).
+// Cwd OSC from the quiet prompt is a strong "shell is idle" signal.
 func (t *tab) setCwd(path string) {
 	if t == nil {
 		return
 	}
 	path = stringsTrimSpace(path)
-	if path == "" || path == t.cwd {
+	if path == "" {
+		return
+	}
+	// Prompt OSC often re-reports the same cwd — still means idle.
+	t.markShellIdle()
+	if path == t.cwd {
 		return
 	}
 	t.cwd = path

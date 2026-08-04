@@ -182,6 +182,18 @@ func quietShellEnv(shellPath string, args []string, base []string) (env []string
 	if getenv(env, "COLORTERM") == "" {
 		env = setEnv(env, "COLORTERM", "truecolor")
 	}
+	// Advertise Kitty/Ghostty-class graphics so Grok emits pixel previews
+	// (Kitty APC) instead of metadata-only image chips. Suzuri implements
+	// the Kitty graphics receive path for prompt overlays.
+	if getenv(env, "TERM_PROGRAM") == "" {
+		env = setEnv(env, "TERM_PROGRAM", "ghostty")
+	}
+	if getenv(env, "TERM_PROGRAM_VERSION") == "" {
+		env = setEnv(env, "TERM_PROGRAM_VERSION", "1.0.0")
+	}
+	if getenv(env, "KITTY_WINDOW_ID") == "" {
+		env = setEnv(env, "KITTY_WINDOW_ID", "1")
+	}
 
 	baseName := strings.ToLower(filepathBase(shellPath))
 	// Skip quieting when the user already passed a custom -c / rcfile.

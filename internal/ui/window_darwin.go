@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -24,8 +25,10 @@ import (
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/bridge"
+	"github.com/StephenSHorton/suzuri/internal/caffeine"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/vt"
 )
 
 // Run opens a native macOS window with one shell tab (more via Ctrl+Shift+T).
@@ -53,6 +56,7 @@ func Run() error {
 		painter:    newSoftwarePainter(cfg.FontFace, cfg.FontSizePx),
 		jobs:       make(chan func(), 64),
 		mcpJobs:    make(chan mcpJob, 8),
+		caffeine:   caffeine.New(),
 	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	if bank, err := chrome.LoadNotesBank(); err != nil {
@@ -63,6 +67,7 @@ func Run() error {
 	ui.alive.Store(true)
 	ui.bridge = bridge.NewHost()
 	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
+	ui.bridge.BindNotes(ui.enqueueMCPNotes)
 	if ui.painter != nil {
 		ui.metricW, ui.metricH = int32(ui.painter.cellW), int32(ui.painter.cellH)
 	}
@@ -90,10 +95,16 @@ func Run() error {
 	return ui.loop()
 }
 
+// mcpJob is work from the loopback MCP bridge (HTTP goroutine → UI tick).
 type mcpJob struct {
+	// Submit (kind empty or "submit")
 	tabID int
 	line  string
 	done  chan error
+	// Notes bank CRUD
+	notes    bool
+	notesReq bridge.NotesRequest
+	notesOut chan bridge.NotesResult
 }
 
 type macUI struct {
@@ -140,6 +151,9 @@ type macUI struct {
 	// Settings underlay intro preview (loops with a gap between full plays).
 	settingsPreviewT0      time.Time
 	settingsIntroIdleUntil time.Time
+	// settingsShowedIntro tracks whether the previous frame was the Intro
+	// showcase so focusing that row restarts a full curtain cycle.
+	settingsShowedIntro bool
 
 	// Deferred work from PTY/MCP goroutines → UI tick.
 	jobs    chan func()
@@ -150,8 +164,8 @@ type macUI struct {
 	fb      *image.RGBA
 	tex     *ebiten.Image
 
-	// Key repeat tracking for held keys.
-	heldKeys map[ebiten.Key]time.Time
+	// Key repeat for held arrows / backspace in the Warp bar and notes.
+	keyRep *keyRepeat
 
 	// Chrome paint cache.
 	chromeDirty  bool
@@ -160,14 +174,41 @@ type macUI struct {
 	overlayCells [][]cellPix
 	overlayDirty bool
 
+	// inputOnlyDirty: Warp bar text/caret changed but shell cells did not.
+	// When shell matrix rain is off, Draw can re-paint only the bar(s).
+	inputOnlyDirty bool
+
 	// Mouse
 	mouseDown bool
+	// notesDragging: left button down after a notes body click (extend selection).
+	notesDragging bool
+	// Link hover: http(s)/www under the cursor in the shell grid.
+	hoverLink    linkSpan
+	hoverLinkOK  bool
+	linkCursorOn bool
+
+	// modalImage: full-window lightbox (click path / Open Image / image block).
+	modalImage *tabImage
+	// altMouseDown: left button held while reporting clicks to an alt-screen app.
+	altMouseDown bool
+	// Last SGR motion cell (1-based) sent to alt-screen; avoid flooding the PTY.
+	altMouseCol, altMouseRow int
 
 	// Window placement: last captured frame (updated mid-session; flushed on exit).
 	// restoreMax is applied once after the ebiten loop creates the native window.
 	lastPlacement config.WindowPlacement
 	restoreMax    bool
 	maxApplied    bool
+
+	// Stay-awake (☕ top-right). Process-local IOPM assertion.
+	caffeine *caffeine.Manager
+	// lastCaffeineHint drives chrome dirty when the timed label ticks down.
+	lastCaffeineHint string
+
+	// Async alt-screen paste (clipboard image dump must not block Draw/Update).
+	pasteBusy      atomic.Bool
+	pendingPasteMu sync.Mutex
+	pendingPaste   []pendingPaste
 }
 
 func (u *macUI) queueBytes(tabID int) {
@@ -258,6 +299,7 @@ func (u *macUI) syncChrome() {
 		r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
 		u.chrome = r.Model
 		u.chrome.Width = u.cols
+		u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
 		return
 	}
 	tabs := make([]chrome.Tab, len(src))
@@ -299,6 +341,15 @@ func (u *macUI) syncChrome() {
 	r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
 	u.chrome = r.Model
 	u.chrome.Width = u.cols
+	u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
+	hint := ""
+	if u.caffeine != nil {
+		hint = u.caffeine.StripLabel()
+	}
+	if hint != u.lastCaffeineHint {
+		u.lastCaffeineHint = hint
+		dirty = true
+	}
 	if dirty {
 		u.chromeDirty = true
 	}
@@ -307,17 +358,51 @@ func (u *macUI) syncChrome() {
 func (u *macUI) markChromeDirty() {
 	u.chromeDirty = true
 	u.overlayDirty = true
+	u.inputOnlyDirty = false
+}
+
+// markShellDirty forces a full shell repaint (PTY output, scroll, resize).
+func (u *macUI) markShellDirty() {
+	if u != nil {
+		u.inputOnlyDirty = false
+	}
+}
+
+// markInputDirty notes that only the Warp bar needs a refresh.
+func (u *macUI) markInputDirty() {
+	if u == nil {
+		return
+	}
+	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
+		u.inputOnlyDirty = false
+		return
+	}
+	u.inputOnlyDirty = true
 }
 
 func (u *macUI) toast(msg string) {
+	if u == nil {
+		return
+	}
+	msg = strings.TrimSpace(msg)
+	prevRows := u.chrome.RowCount()
 	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg(msg)).Model
 	dur := 2500 * time.Millisecond
 	if strings.Contains(msg, "update") || strings.Contains(msg, "up to date") ||
-		strings.Contains(msg, "installing") {
+		strings.Contains(msg, "installing") || strings.Contains(msg, "opened") {
 		dur = 4 * time.Second
 	}
 	u.statusUntil = time.Now().Add(dur)
 	u.markChromeDirty()
+	// Status adds a second strip row — reflow shell so the toast isn't painted
+	// over the top of the VT grid (and so clearing it restores height).
+	if u.chrome.RowCount() != prevRows {
+		u.chromePx = u.chromePixelHeight()
+		if u.width > 0 && u.height > 0 {
+			u.applyClientSize(u.width, u.height)
+		}
+	}
+	log.Debug("toast", "msg", msg, "rows", u.chrome.RowCount())
 }
 
 // postToast queues a toast onto the ebiten UI tick (safe from goroutines).
@@ -339,9 +424,16 @@ func (u *macUI) clearToastIfDue() {
 	if u.statusUntil.IsZero() || time.Now().Before(u.statusUntil) {
 		return
 	}
+	prevRows := u.chrome.RowCount()
 	u.statusUntil = time.Time{}
 	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("")).Model
 	u.markChromeDirty()
+	if u.chrome.RowCount() != prevRows {
+		u.chromePx = u.chromePixelHeight()
+		if u.width > 0 && u.height > 0 {
+			u.applyClientSize(u.width, u.height)
+		}
+	}
 }
 
 func (u *macUI) chromePixelHeight() int32 {
@@ -467,7 +559,7 @@ func (u *macUI) loop() error {
 	// Startup intro curtain (matrix rain by default). Skipped when always-on
 	// shell rain is already on (Windows beginIntro parity — no double curtain).
 	u.beginIntro(false)
-	u.heldKeys = make(map[ebiten.Key]time.Time)
+	u.keyRep = newKeyRepeat()
 
 	// Startup update check: toast + confirm before install (same as Windows).
 	scheduleStartupUpdateCheck(u.postToast, func(ver string) {
@@ -488,6 +580,9 @@ func (u *macUI) loop() error {
 	log.Info("starting ebiten window", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
 	err := ebiten.RunGame(u)
 	u.alive.Store(false)
+	if u.caffeine != nil {
+		u.caffeine.Close()
+	}
 	u.persistNotes()
 	u.ready.Store(false)
 	if u.bridge != nil {
@@ -528,12 +623,32 @@ func (u *macUI) Update() error {
 				fn()
 			}
 		case job := <-u.mcpJobs:
-			u.submitOnUIThread(job.tabID, job.line, job.done)
+			if job.notes {
+				res := runNotesOnChrome(&u.chrome, job.notesReq)
+				if u.chrome.NotesOpen {
+					u.overlayDirty = true
+					u.overlayCells = nil
+				}
+				u.markChromeDirty()
+				if job.notesOut != nil {
+					job.notesOut <- res
+				}
+			} else {
+				u.submitOnUIThread(job.tabID, job.line, job.done)
+			}
 		default:
 			goto drained
 		}
 	}
 drained:
+
+	u.drainPendingPaste()
+	// Flush Warp-bar queue once the shell has been quiet (no PTY chunk required).
+	for _, t := range u.allPanes() {
+		if t != nil && !t.altScreen() && t.queueLen() > 0 {
+			u.tryFlushCmdQueue(t)
+		}
+	}
 
 	// Track outer frame placement mid-session (survives crash better than exit-only).
 	u.maybePersistWindowPlacement(false)
@@ -550,6 +665,18 @@ drained:
 	}
 
 	u.clearToastIfDue()
+	if msg := caffeineTick(u.caffeine); msg != "" {
+		u.toast(msg)
+		u.markChromeDirty()
+	} else if u.caffeine != nil && u.caffeine.Active() {
+		// Refresh timed strip caption ("15m" → "14m") without thrashing paint.
+		hint := u.caffeine.StripLabel()
+		if hint != u.lastCaffeineHint {
+			u.lastCaffeineHint = hint
+			u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
+			u.markChromeDirty()
+		}
+	}
 	u.handleResize()
 	u.handleMouse()
 	u.handleKeys()
@@ -582,11 +709,38 @@ func (u *macUI) handleResize() {
 	if w < 2 || h < 2 {
 		return
 	}
+	// Soft magnetic snap to ½ / ⅓ / ¼ / ⅔ / ¾ / full of the monitor work area.
+	// Small threshold so the magnet "lets go easily" when dragging past.
+	if monW, monH, ok := u.monitorWorkSize(); ok {
+		nw, nh := softSnapSize(w, h, monW, monH, softSnapThresholdPx)
+		if nw != w || nh != h {
+			ebiten.SetWindowSize(nw, nh)
+			w, h = nw, nh
+		}
+	}
 	if int32(w) == u.width && int32(h) == u.height {
 		return
 	}
 	u.width, u.height = int32(w), int32(h)
 	u.applyClientSize(u.width, u.height)
+}
+
+// monitorWorkSize is the current window's monitor size in pixels (best-effort
+// work area; ebiten does not expose the menu-bar inset).
+func (u *macUI) monitorWorkSize() (w, h int, ok bool) {
+	mon := ebiten.Monitor()
+	if mon == nil {
+		mons := ebiten.AppendMonitors(nil)
+		if len(mons) == 0 || mons[0] == nil {
+			return 0, 0, false
+		}
+		mon = mons[0]
+	}
+	mw, mh := mon.Size()
+	if mw < 100 || mh < 100 {
+		return 0, 0, false
+	}
+	return mw, mh, true
 }
 
 // applyClientSize updates cols/rows/chrome from a client pixel size.
@@ -669,6 +823,34 @@ func (u *macUI) sendKey(b []byte) {
 	}
 }
 
+func (u *macUI) barCols(tab *tab) int {
+	cols := u.cols
+	if tab != nil {
+		if g := u.paneGeomFor(tab.id); g != nil && g.cols > 0 {
+			return g.cols
+		}
+	}
+	return cols
+}
+
+func (u *macUI) submitBarLine(tab *tab, line string) {
+	if u == nil || tab == nil {
+		return
+	}
+	submitBarLine(tab, line, u.barCols(tab), u.toast)
+	u.publishBridgeSnapshot()
+}
+
+func (u *macUI) tryFlushCmdQueue(tab *tab) {
+	if u == nil || tab == nil {
+		return
+	}
+	if tryFlushCmdQueue(tab, u.barCols(tab), u.toast) {
+		u.publishBridgeSnapshot()
+		u.markShellDirty()
+	}
+}
+
 func (u *macUI) drainAndParse(tabID int) {
 	t := u.tabByID(tabID)
 	if t == nil || t.term == nil {
@@ -719,7 +901,22 @@ func (u *macUI) drainAndParse(tabID int) {
 	}
 	// Answer Kitty keyboard / DA probes before VT parse (Grok Shift+Enter).
 	t.handleHostQueries(data)
-	_, _ = t.term.Write(data)
+	// Unwrap OSC 8 hyperlinks so markdown link labels stay visible.
+	data = vt.StripOSC8Hyperlinks(data)
+	// Kitty graphics APCs (Grok image previews): strip + apply against live
+	// cursor between VT segments so a=p places at the CSI-H position.
+	if t.kittyGfx == nil {
+		t.kittyGfx = newKittyGfx()
+	}
+	data = feedKittyAPCs(t.kittyGfx, data, func(b []byte) {
+		_, _ = t.term.Write(b)
+	}, func() (col, row int) {
+		c := t.term.Cursor()
+		return c.X, c.Y
+	})
+	if len(data) > 0 {
+		_, _ = t.term.Write(data)
+	}
 	t.sb.noteScreen(t.term)
 	if t.sb.atBottom() {
 		t.sb.stickBottom()
@@ -732,13 +929,26 @@ func (u *macUI) drainAndParse(tabID int) {
 	}
 	nowAlt := t.altScreen()
 	if nowAlt != t.wasAlt {
+		if t.wasAlt {
+			// Leaving alt-screen (clean exit or hard kill): stop mouse inject
+			// and drop Kitty placements so the shell doesn't print SGR garbage.
+			resetHostAfterAltApp(t.term)
+			if t.kittyGfx != nil {
+				t.kittyGfx.clear()
+			}
+			t.markShellIdle()
+		}
 		t.wasAlt = nowAlt
 		log.Info("alt screen", "tab", t.id, "on", nowAlt)
 		if u.activeTab() == t {
 			u.maybeResizeForInput()
 		}
 	}
+	// Cwd OSC already called markShellIdle; also release on quiet PTY.
+	t.maybeReleaseBarAwaiting()
+	u.tryFlushCmdQueue(t)
 	u.publishBridgeSnapshot()
+	u.markShellDirty()
 	t.inMu.Lock()
 	more := len(t.inBuf) > 0
 	t.inMu.Unlock()
@@ -768,6 +978,25 @@ func (u *macUI) enqueueMCPSubmit(tabID int, line string) error {
 		return fmt.Errorf("mcp queue full")
 	}
 	return <-done
+}
+
+func (u *macUI) enqueueMCPNotes(req bridge.NotesRequest) bridge.NotesResult {
+	if !u.alive.Load() {
+		return bridge.NotesResult{OK: false, Error: "ui not alive"}
+	}
+	out := make(chan bridge.NotesResult, 1)
+	job := mcpJob{notes: true, notesReq: req, notesOut: out}
+	select {
+	case u.mcpJobs <- job:
+	default:
+		return bridge.NotesResult{OK: false, Error: "mcp notes queue full"}
+	}
+	select {
+	case res := <-out:
+		return res
+	case <-time.After(5 * time.Second):
+		return bridge.NotesResult{OK: false, Error: "mcp notes timed out"}
+	}
 }
 
 func (u *macUI) submitOnUIThread(tabID int, line string, done chan error) {
@@ -989,9 +1218,10 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionQuit:
 		u.quit = true
 	case chrome.ActionOpenSettings:
-		// Fresh underlay cycle each time settings opens.
+		// Fresh underlay cycle each time settings opens (starts on Ambient).
 		u.settingsPreviewT0 = time.Now()
 		u.settingsIntroIdleUntil = time.Time{}
+		u.settingsShowedIntro = false
 		if r.Settings.FontFace != "" || r.Settings.FontSizePx > 0 {
 			u.applyConfigLive(r.Settings)
 		}
@@ -1011,6 +1241,12 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		if err := config.Save(u.cfg); err != nil {
 			log.Warn("first-run flag save failed", "err", err)
 		}
+	case chrome.ActionZoomIn:
+		u.zoomFont(+1)
+	case chrome.ActionZoomOut:
+		u.zoomFont(-1)
+	case chrome.ActionZoomReset:
+		u.zoomFontReset()
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
@@ -1042,6 +1278,13 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		u.openRenameUI(chrome.RenameTargetTab)
 	case chrome.ActionApplyRename:
 		u.applyRename(r.RenameTarget, r.Name)
+	case chrome.ActionCaffeineToggle, chrome.ActionCaffeineFor, chrome.ActionCaffeineOff:
+		if msg, ok := applyCaffeineAction(u.caffeine, r.Action, r.Minutes); ok {
+			if msg != "" {
+				u.toast(msg)
+			}
+			u.markChromeDirty()
+		}
 	case chrome.ActionOpenTransferSend:
 		r2 := u.chrome.UpdateChrome(chrome.OpenTransferPromptMsg{Mode: chrome.TransferModeSend})
 		u.chrome = r2.Model
@@ -1172,15 +1415,15 @@ func (u *macUI) beginIntro(replay bool) {
 	now := time.Now()
 	style := config.Normalize(u.cfg).Intro
 	// Persistent shell rain + matrix intro would play the same effect twice.
-	if style == config.IntroMatrix && u.cfg.ShellMatrix {
+	if style == config.IntroMatrix && u.shellMatrixOn() {
 		u.matrixIntroStart = now
 		u.matrixIntroSpawnEnd = now
 		u.matrixIntroDone = true
 		u.matrixIntroClearAt = now // watermark at full opacity immediately
 		if replay {
-			log.Info("replay intro skipped", "reason", "shell matrix on", "style", style)
+			log.Info("replay intro skipped", "reason", "shell rain ambient on", "style", style)
 		} else {
-			log.Info("startup intro skipped", "reason", "shell matrix on", "style", style)
+			log.Info("startup intro skipped", "reason", "shell rain ambient on", "style", style)
 		}
 		return
 	}
@@ -1204,9 +1447,23 @@ func (u *macUI) replayIntro() {
 	u.beginIntro(true)
 }
 
-// shellMatrixOn is true when settings ask for always-on shell rain.
+// shellMatrixOn is true when ambient is classic rain.
 func (u *macUI) shellMatrixOn() bool {
-	return u != nil && u.cfg.ShellMatrix
+	return u != nil && u.cfg.ShellAmbient == config.AmbientRain
+}
+
+// shellAmbientOn is true for any always-on underlay.
+func (u *macUI) shellAmbientOn() bool {
+	return u != nil && u.cfg.AmbientActive()
+}
+
+func (u *macUI) themeAmbientColors() ambientColors {
+	return ambientColors{
+		pr: byte(chrome.PrimR), pg: byte(chrome.PrimG), pb: byte(chrome.PrimB),
+		sr: byte(chrome.SoftR), sg: byte(chrome.SoftG), sb: byte(chrome.SoftB),
+		mr: byte(chrome.MuteR), mg: byte(chrome.MuteG), mb: byte(chrome.MuteB),
+		tr: byte(chrome.TextR), tg: byte(chrome.TextG), tb: byte(chrome.TextB),
+	}
 }
 
 // dimShellModal is true for overlays that replace the live shell (not palette/help).
@@ -1274,6 +1531,8 @@ func configVisualEqual(a, b config.Config) bool {
 		a.ShellANSIMap == b.ShellANSIMap &&
 		a.Cursor == b.Cursor &&
 		strings.EqualFold(a.Intro, b.Intro) &&
+		strings.EqualFold(a.ShellAmbient, b.ShellAmbient) &&
+		a.ShellMatrixOpacity == b.ShellMatrixOpacity &&
 		strings.EqualFold(a.ActiveProfile, b.ActiveProfile)
 }
 
@@ -1351,6 +1610,51 @@ func (u *macUI) applyConfigSave(cfg config.Config) {
 	}
 	log.Info("config saved", "path", config.Path(), "font", cfg.FontFace, "px", cfg.FontSizePx)
 	u.toast("settings saved")
+}
+
+// zoomFont steps UI font size by delta (clamped via Normalize) and persists.
+func (u *macUI) zoomFont(delta int) {
+	if u == nil || delta == 0 {
+		return
+	}
+	cfg := u.cfg
+	cfg.FontSizePx += delta
+	cfg = config.Normalize(cfg)
+	if cfg.FontSizePx == u.cfg.FontSizePx {
+		u.toast(fmt.Sprintf("font %dpx (limit)", u.cfg.FontSizePx))
+		return
+	}
+	u.applyConfigSaveQuiet(cfg)
+	u.toast(fmt.Sprintf("font %dpx", cfg.FontSizePx))
+}
+
+// zoomFontReset restores the shipping default font size (14 for Gohu).
+func (u *macUI) zoomFontReset() {
+	if u == nil {
+		return
+	}
+	cfg := u.cfg
+	if cfg.FontSizePx == config.DefaultFontSizePx {
+		u.toast(fmt.Sprintf("font %dpx (default)", config.DefaultFontSizePx))
+		return
+	}
+	cfg.FontSizePx = config.DefaultFontSizePx
+	u.applyConfigSaveQuiet(cfg)
+	u.toast(fmt.Sprintf("font %dpx (reset)", cfg.FontSizePx))
+}
+
+// applyConfigSaveQuiet is applyConfigSave without the "settings saved" toast.
+func (u *macUI) applyConfigSaveQuiet(cfg config.Config) {
+	cfg = config.Normalize(cfg)
+	cfg.Window = u.cfg.Window
+	u.chrome.ApplyFontSize(cfg.FontSizePx)
+	u.applyConfigLive(cfg)
+	if err := config.Save(cfg); err != nil {
+		log.Error("zoom save failed", "err", err)
+		u.toast("save failed")
+		return
+	}
+	log.Info("zoom saved", "px", cfg.FontSizePx)
 }
 
 // captureWindowPlacement reads outer frame size/position via ebiten.
@@ -1470,9 +1774,17 @@ func (u *macUI) persistWindowPlacement() {
 // --- input ---
 
 func (u *macUI) handleKeys() {
-	ctrl := ebiten.IsKeyPressed(ebiten.KeyControl) || ebiten.IsKeyPressed(ebiten.KeyMeta)
-	shift := ebiten.IsKeyPressed(ebiten.KeyShift)
-	alt := ebiten.IsKeyPressed(ebiten.KeyAlt)
+	// ctrl = "primary host modifier" (Cmd or Ctrl) for shortcuts like Cmd+K.
+	// realCtrl / meta / alt are explicit for text navigation.
+	meta := modMeta()
+	alt := modAlt()
+	realCtrl := modControl()
+	ctrl := realCtrl || meta
+	shift := modShift()
+	now := time.Now()
+	if u.keyRep == nil {
+		u.keyRep = newKeyRepeat()
+	}
 
 	// Meta/Ctrl shortcuts (just pressed).
 	if inpututil.IsKeyJustPressed(ebiten.KeyComma) && ctrl && !shift {
@@ -1497,6 +1809,30 @@ func (u *macUI) handleKeys() {
 		u.overlayDirty = true
 		return
 	}
+	// Zoom: Cmd (or Ctrl) + / - / 0 — works even while overlays are open.
+	// Use Meta for macOS Command; also accept Control for muscle memory.
+	zoomMod := (ebiten.IsKeyPressed(ebiten.KeyMeta) || ebiten.IsKeyPressed(ebiten.KeyControl)) && !alt
+	if zoomMod && !shift {
+		// Equal key is "+" when Shift held; without Shift still zoom-in (browser style).
+		if inpututil.IsKeyJustPressed(ebiten.KeyEqual) || inpututil.IsKeyJustPressed(ebiten.KeyKPAdd) {
+			u.zoomFont(+1)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyMinus) || inpututil.IsKeyJustPressed(ebiten.KeyKPSubtract) {
+			u.zoomFont(-1)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.Key0) || inpututil.IsKeyJustPressed(ebiten.KeyNumpad0) {
+			u.zoomFontReset()
+			return
+		}
+	}
+	// Shift+= is the physical "+" key on US keyboards (Cmd+Shift+=).
+	if zoomMod && shift && inpututil.IsKeyJustPressed(ebiten.KeyEqual) {
+		u.zoomFont(+1)
+		return
+	}
+
 	// Ctrl+Shift+M — toggle notes (works even while notes overlay is open).
 	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyM) {
 		r := u.chrome.UpdateChrome(chrome.ToggleNotesMsg{})
@@ -1538,25 +1874,8 @@ func (u *macUI) handleKeys() {
 		}
 		return
 	}
-	// Alt+arrows / Ctrl+Alt+arrows: focus pane.
-	if (alt || (ctrl && alt)) && !shift {
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
-			u.focusPaneDir(0)
-			return
-		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
-			u.focusPaneDir(1)
-			return
-		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) {
-			u.focusPaneDir(2)
-			return
-		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyArrowDown) {
-			u.focusPaneDir(3)
-			return
-		}
-	}
+	// Pane focus is after the overlay block: when notes/palette is open,
+	// arrows stay with the dialog. ⌘⌥+arrows focus panes; bare Option is word-jump.
 	if ctrl && inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		if shift {
 			u.switchTab(-1)
@@ -1603,7 +1922,13 @@ func (u *macUI) handleKeys() {
 				return
 			}
 		}
-		if km := teaKeyFromEbiten(ctrl, shift); km != nil {
+		// Notes: Option/Ctrl word-jump; Cmd line ends; ⌘⌥ is host pane focus (outside).
+		if u.chrome.NotesOpen {
+			if u.handleNotesNavKeys(now, realCtrl, meta, alt, shift) {
+				return
+			}
+		}
+		if km := teaKeyFromEbiten(realCtrl || meta, shift, alt, u.keyRep, now); km != nil {
 			r := u.chrome.UpdateChrome(*km)
 			u.chrome = r.Model
 			// Palette / rename / notes: only dirty overlay.
@@ -1621,28 +1946,77 @@ func (u *macUI) handleKeys() {
 		return
 	}
 
+	// ⌘⌥+arrows: focus pane (bare Option is word-jump). Ctrl+Option is a synonym.
+	// After overlay so notes/palette keep their own arrow keys.
+	if alt && !shift && (meta || realCtrl) {
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
+			u.focusPaneDir(0)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
+			u.focusPaneDir(1)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) {
+			u.focusPaneDir(2)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowDown) {
+			u.focusPaneDir(3)
+			return
+		}
+	}
+
 	tab := u.activeTab()
+
+	// Image lightbox owns Esc before alt-screen apps (and before bar clear).
+	if u.modalImage != nil && inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+		u.modalImage = nil
+		u.markShellDirty()
+		return
+	}
 
 	// Alt-screen: raw PTY keys (after host shortcuts).
 	if u.appOwnsKeyboard() && tab != nil {
-		// Ctrl alone (not Cmd) for interrupt/paste so Cmd+Enter can be Super+Enter.
-		realCtrl := ebiten.IsKeyPressed(ebiten.KeyControl)
-		super := ebiten.IsKeyPressed(ebiten.KeyMeta)
-		if realCtrl && !shift && !super && inpututil.IsKeyJustPressed(ebiten.KeyC) {
-			if !tab.sel.empty() {
-				u.copySelection()
-			} else {
-				u.sendKey([]byte{0x03})
+		// Ctrl alone for interrupt so Cmd+Enter can be Super+Enter.
+		// Cmd+C/V match macOS paste/copy; Ctrl+C/V still work for Windows muscle memory.
+		// ⌘⌥ is pane focus (above); Option/Ctrl+arrows word-jump via encodeArrow.
+		super := meta
+		opt := alt // Option+arrows → CSI Alt (Grok word jump)
+		if !shift && inpututil.IsKeyJustPressed(ebiten.KeyC) {
+			if realCtrl && !super {
+				if !tab.sel.empty() {
+					u.copySelection()
+				} else {
+					u.sendKey([]byte{0x03})
+				}
+				return
 			}
-			return
+			if super && !realCtrl {
+				// Cmd+C: copy selection only (never send interrupt as ⌘C).
+				if !tab.sel.empty() {
+					u.copySelection()
+				}
+				return
+			}
 		}
-		if realCtrl && !shift && !super && inpututil.IsKeyJustPressed(ebiten.KeyV) {
-			u.pasteClipboard()
-			return
+		if !shift && inpututil.IsKeyJustPressed(ebiten.KeyV) {
+			// Ctrl+V or Cmd+V → paste into the alt-screen app (Grok, vim, …).
+			if (realCtrl && !super) || (super && !realCtrl) {
+				u.pasteClipboard()
+				return
+			}
 		}
+		// Hold-to-repeat for arrows / backspace / delete (Grok text fields).
 		for _, key := range specialKeys {
-			if inpututil.IsKeyJustPressed(key) {
-				if b := ptyKeyFromEbiten(tab.term, &tab.kitty, key, realCtrl, shift, alt, super); len(b) > 0 {
+			if !u.keyRep.fire(key, now) {
+				continue
+			}
+			if b := ptyKeyFromEbiten(tab.term, &tab.kitty, key, realCtrl, shift, opt, super); len(b) > 0 {
+				// Prefer focused-pane write when splits (sendKey uses active).
+				if t := u.activeTab(); t != nil {
+					t.sendKey(b)
+				} else {
 					u.sendKey(b)
 				}
 			}
@@ -1659,6 +2033,12 @@ func (u *macUI) handleKeys() {
 			in.clear()
 			u.maybeResizeForInput()
 		} else {
+			// Interrupt + drop queued bar lines so they don't fire after ^C.
+			if tab != nil {
+				if n := tab.clearCmdQueue(); n > 0 {
+					u.toast(fmt.Sprintf("cleared %d queued", n))
+				}
+			}
 			u.sendKey([]byte{0x03})
 		}
 		return
@@ -1685,95 +2065,152 @@ func (u *macUI) handleKeys() {
 		}
 		line := in.submit()
 		u.maybeResizeForInput()
-		display, payload := expandBarSubmit(line, tab.shell)
-		if stringsTrimSpace(display) != "" {
-			// Previous command's output → history, then this block header.
-			tab.sb.commitLive(tab.term)
-			tab.sb.pushBlock(display, u.cols, tab.cwd)
-			if next, ok := cwdAfterCommand(tab.cwd, payload); ok {
-				tab.setCwd(next)
-			}
-			tab.echo.arm(payload)
-			// clear/cls: commitLive already blanked the host VT, so noteScreen
-			// never sees a clear transition — pin here so history stays above.
-			if isClearCommand(payload) {
-				tab.sb.pinHere()
-			}
-		}
-		if strings.Contains(payload, "\n") {
-			payload = strings.ReplaceAll(payload, "\n", "\r")
-		}
-		u.sendKey([]byte(payload + "\r"))
-		tab.sb.stickBottom()
-		u.publishBridgeSnapshot()
+		u.submitBarLine(tab, line)
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowUp) {
-		if !in.moveVisualUp(cols) {
+	// Navigation with hold-to-repeat (IsKeyJustPressed alone never auto-repeats).
+	// Option/Ctrl+←/→ word jump · Cmd+←/→ line home/end · Cmd+↑/↓ buffer.
+	// ⌘⌥+arrows are pane focus (handled above).
+	wordMod := (alt && !meta && !realCtrl) || (realCtrl && !meta && !alt)
+
+	// ⌘⌫ / ⌘⌦ — clear entire Warp bar (macOS "delete line" muscle memory).
+	// Handled with JustPressed first so Meta+Backspace is not missed when
+	// key-repeat state is odd under modifiers; also accept Delete key.
+	if meta && !alt && !realCtrl && !shift {
+		if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyDelete) ||
+			u.keyRep.fire(ebiten.KeyBackspace, now) ||
+			u.keyRep.fire(ebiten.KeyDelete, now) {
+			if len(in.runes) > 0 || in.histIdx >= 0 {
+				in.clearLine()
+				u.maybeResizeForInput()
+				u.markInputDirty()
+			}
+			return
+		}
+	}
+
+	if u.keyRep.fire(ebiten.KeyArrowUp, now) || u.keyRep.fire(ebiten.KeyUp, now) {
+		if meta && !alt {
+			// Cmd+Up: start of buffer (macOS text field).
+			in.moveDocHome()
+		} else if !in.moveVisualUp(cols) {
 			in.historyUp()
 		}
 		u.maybeResizeForInput()
+		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowDown) {
-		if !in.moveVisualDown(cols) {
+	if u.keyRep.fire(ebiten.KeyArrowDown, now) || u.keyRep.fire(ebiten.KeyDown, now) {
+		if meta && !alt {
+			in.moveDocEnd()
+		} else if !in.moveVisualDown(cols) {
 			in.historyDown()
 		}
 		u.maybeResizeForInput()
+		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
-		in.moveLeft()
+	if u.keyRep.fire(ebiten.KeyArrowLeft, now) || u.keyRep.fire(ebiten.KeyLeft, now) {
+		switch {
+		case meta && !alt:
+			in.moveHome() // Cmd+Left = beginning of line
+		case wordMod:
+			in.moveWordLeft() // Option/Ctrl+Left
+		default:
+			in.moveLeft()
+		}
+		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
-		in.moveRight()
+	if u.keyRep.fire(ebiten.KeyArrowRight, now) || u.keyRep.fire(ebiten.KeyRight, now) {
+		switch {
+		case meta && !alt:
+			in.moveEnd()
+		case wordMod:
+			in.moveWordRight()
+		default:
+			// zsh-autosuggest: → at EOL accepts the ghost suggestion.
+			if in.cursor >= len(in.runes) {
+				if t := u.activeTab(); t != nil && in.acceptGhost(t.cwd) {
+					u.maybeResizeForInput()
+					u.markInputDirty()
+					return
+				}
+			}
+			in.moveRight()
+		}
+		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyHome) {
-		in.moveHome()
+	if u.keyRep.fire(ebiten.KeyHome, now) {
+		if meta || realCtrl {
+			in.moveDocHome()
+		} else {
+			in.moveHome()
+		}
+		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyEnd) {
-		in.moveEnd()
+	if u.keyRep.fire(ebiten.KeyEnd, now) {
+		if meta || realCtrl {
+			in.moveDocEnd()
+		} else {
+			in.moveEnd()
+		}
+		u.markInputDirty()
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyDelete) {
-		in.deleteForward()
+	if u.keyRep.fire(ebiten.KeyDelete, now) {
+		if wordMod {
+			in.deleteWordRight()
+		} else {
+			in.deleteForward()
+		}
 		u.maybeResizeForInput()
+		u.markInputDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyPageUp) {
 		tab.sb.scrollBy(u.rows/2, u.rows)
+		u.markShellDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyPageDown) {
 		tab.sb.scrollBy(-(u.rows / 2), u.rows)
+		u.markShellDirty()
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+		if u.modalImage != nil {
+			u.modalImage = nil
+			u.markShellDirty()
+			return
+		}
 		if len(in.runes) > 0 || in.histIdx >= 0 {
 			in.clear()
 			u.maybeResizeForInput()
 		}
 		return
 	}
-	if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) {
-		now := time.Now()
-		if now.Sub(u.lastBackspace) < 20*time.Millisecond {
-			return
-		}
-		u.lastBackspace = now
+	if u.keyRep.fire(ebiten.KeyBackspace, now) {
 		prevRows := in.visualRows(cols)
-		in.backspace()
+		// Meta+Backspace already handled above; here: Option/Ctrl word, else char.
+		if wordMod {
+			in.deleteWordLeft()
+		} else {
+			in.backspace()
+		}
 		if in.visualRows(cols) != prevRows {
 			u.maybeResizeForInput()
+			u.markShellDirty()
+		} else {
+			u.markInputDirty()
 		}
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		prevRows := in.visualRows(cols)
-		shift := ebiten.IsKeyPressed(ebiten.KeyShift)
 		if in.complete(tab.cwd, shift) {
 			if in.visualRows(cols) != prevRows {
 				u.maybeResizeForInput()
@@ -1781,6 +2218,131 @@ func (u *macUI) handleKeys() {
 		}
 		return
 	}
+}
+
+// handleNotesNavKeys handles hold-to-repeat nav + Option/Ctrl/Cmd combos for notes.
+// Returns true when the event was consumed.
+// Word jump is Option or Ctrl+←/→; ⌘⌥ is pane focus outside notes (not handled here).
+func (u *macUI) handleNotesNavKeys(now time.Time, realCtrl, meta, alt, shift bool) bool {
+	if u == nil || !u.chrome.NotesOpen {
+		return false
+	}
+	// Word ops: Option or Ctrl (not Cmd alone).
+	wordMod := (alt && !meta && !realCtrl) || (realCtrl && !meta && !alt)
+	optArrow := alt && !meta && !realCtrl
+	ctrlArrow := realCtrl && !meta && !alt
+	fireNav := func(key ebiten.Key, altKey ebiten.Key) bool {
+		return u.keyRep.fire(key, now) || (altKey != key && u.keyRep.fire(altKey, now))
+	}
+	// Option/Ctrl+Backspace/Delete: delete word.
+	if wordMod && !shift {
+		if fireNav(ebiten.KeyBackspace, ebiten.KeyBackspace) {
+			m := u.chrome
+			m.NotesDeleteWord(-1)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			u.persistNotesIfDirty()
+			return true
+		}
+		if fireNav(ebiten.KeyDelete, ebiten.KeyDelete) {
+			m := u.chrome
+			m.NotesDeleteWord(1)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			u.persistNotesIfDirty()
+			return true
+		}
+	}
+	// Cmd+←/→ = line home/end; Option/Ctrl+←/→ = word. Plain arrows with repeat.
+	if fireNav(ebiten.KeyArrowLeft, ebiten.KeyLeft) {
+		var km tea.KeyMsg
+		switch {
+		case meta && !alt && !shift:
+			km = tea.KeyMsg{Type: tea.KeyHome}
+		case meta && !alt && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftHome}
+		case optArrow && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftLeft, Alt: true}
+		case optArrow:
+			km = tea.KeyMsg{Type: tea.KeyLeft, Alt: true}
+		case ctrlArrow && shift:
+			km = tea.KeyMsg{Type: tea.KeyCtrlShiftLeft}
+		case ctrlArrow:
+			km = tea.KeyMsg{Type: tea.KeyCtrlLeft}
+		case shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftLeft}
+		default:
+			km = tea.KeyMsg{Type: tea.KeyLeft}
+		}
+		r := u.chrome.UpdateChrome(km)
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	if fireNav(ebiten.KeyArrowRight, ebiten.KeyRight) {
+		var km tea.KeyMsg
+		switch {
+		case meta && !alt && !shift:
+			km = tea.KeyMsg{Type: tea.KeyEnd}
+		case meta && !alt && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftEnd}
+		case optArrow && shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftRight, Alt: true}
+		case optArrow:
+			km = tea.KeyMsg{Type: tea.KeyRight, Alt: true}
+		case ctrlArrow && shift:
+			km = tea.KeyMsg{Type: tea.KeyCtrlShiftRight}
+		case ctrlArrow:
+			km = tea.KeyMsg{Type: tea.KeyCtrlRight}
+		case shift:
+			km = tea.KeyMsg{Type: tea.KeyShiftRight}
+		default:
+			km = tea.KeyMsg{Type: tea.KeyRight}
+		}
+		r := u.chrome.UpdateChrome(km)
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	if fireNav(ebiten.KeyArrowUp, ebiten.KeyUp) {
+		var km tea.KeyMsg
+		if meta && !alt {
+			km = tea.KeyMsg{Type: tea.KeyCtrlHome} // doc home
+		} else if shift {
+			km = tea.KeyMsg{Type: tea.KeyShiftUp}
+		} else {
+			km = tea.KeyMsg{Type: tea.KeyUp}
+		}
+		r := u.chrome.UpdateChrome(km)
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	if fireNav(ebiten.KeyArrowDown, ebiten.KeyDown) {
+		var km tea.KeyMsg
+		if meta && !alt {
+			km = tea.KeyMsg{Type: tea.KeyCtrlEnd}
+		} else if shift {
+			km = tea.KeyMsg{Type: tea.KeyShiftDown}
+		} else {
+			km = tea.KeyMsg{Type: tea.KeyDown}
+		}
+		r := u.chrome.UpdateChrome(km)
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	return false
 }
 
 var specialKeys = []ebiten.Key{
@@ -1798,8 +2360,9 @@ func (u *macUI) handleTextInput() {
 	if len(chars) == 0 {
 		return
 	}
-	ctrl := ebiten.IsKeyPressed(ebiten.KeyControl) || ebiten.IsKeyPressed(ebiten.KeyMeta)
-	if ctrl {
+	// Cmd/Ctrl chords are shortcuts — never insert. Option (Alt) alone still
+	// types special characters (e.g. Option+e accents) when not used with arrows.
+	if modMeta() || modControl() {
 		return
 	}
 
@@ -1835,28 +2398,99 @@ func (u *macUI) handleTextInput() {
 		return
 	}
 	prevRows := in.visualRows(u.inputContentCols())
+	// Batch insert (one slice rebuild) — notes-style: avoid per-rune work.
+	rs := make([]rune, 0, len(chars))
 	for _, ch := range chars {
 		if ch >= 32 && ch != 0x7f && unicode.IsPrint(ch) {
-			in.insertRune(ch)
+			rs = append(rs, ch)
 		}
 	}
+	if len(rs) == 0 {
+		return
+	}
+	in.insertRunes(rs)
 	if in.visualRows(u.inputContentCols()) != prevRows {
 		u.maybeResizeForInput()
+		u.markShellDirty() // bar height change reflows shell
+	} else {
+		u.markInputDirty()
 	}
 }
 
-func teaKeyFromEbiten(ctrl, shift bool) *tea.KeyMsg {
-	// Shift+arrows for notes selection (and rename navigation is fine with shift).
-	if shift && !ctrl {
+// teaKeyFromEbiten maps one-shot overlay keys (palette, settings, help).
+// Notes navigation with hold-repeat is handled by handleNotesNavKeys first.
+// rep/now optional; when nil, only JustPressed is used.
+func teaKeyFromEbiten(ctrl, shift, alt bool, rep *keyRepeat, now time.Time) *tea.KeyMsg {
+	just := func(k ebiten.Key) bool {
+		if rep != nil {
+			return rep.fire(k, now)
+		}
+		return inpututil.IsKeyJustPressed(k)
+	}
+	left := func() bool { return just(ebiten.KeyArrowLeft) || just(ebiten.KeyLeft) }
+	right := func() bool { return just(ebiten.KeyArrowRight) || just(ebiten.KeyRight) }
+	up := func() bool { return just(ebiten.KeyArrowUp) || just(ebiten.KeyUp) }
+	down := func() bool { return just(ebiten.KeyArrowDown) || just(ebiten.KeyDown) }
+
+	// Option+arrows / Option+Backspace for overlay KeyMsg.Alt (notes word jump).
+	if !shift && !ctrl && alt {
 		switch {
-		case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+		case left():
+			return &tea.KeyMsg{Type: tea.KeyLeft, Alt: true}
+		case right():
+			return &tea.KeyMsg{Type: tea.KeyRight, Alt: true}
+		case up():
+			return &tea.KeyMsg{Type: tea.KeyUp, Alt: true}
+		case down():
+			return &tea.KeyMsg{Type: tea.KeyDown, Alt: true}
+		case just(ebiten.KeyBackspace):
+			return &tea.KeyMsg{Type: tea.KeyBackspace, Alt: true}
+		case just(ebiten.KeyDelete):
+			return &tea.KeyMsg{Type: tea.KeyDelete, Alt: true}
+		}
+	}
+	if shift && alt && !ctrl {
+		switch {
+		case left():
+			return &tea.KeyMsg{Type: tea.KeyShiftLeft, Alt: true}
+		case right():
+			return &tea.KeyMsg{Type: tea.KeyShiftRight, Alt: true}
+		}
+	}
+	if shift && !ctrl && !alt {
+		switch {
+		case left():
 			return &tea.KeyMsg{Type: tea.KeyShiftLeft}
-		case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+		case right():
 			return &tea.KeyMsg{Type: tea.KeyShiftRight}
-		case inpututil.IsKeyJustPressed(ebiten.KeyUp):
+		case up():
 			return &tea.KeyMsg{Type: tea.KeyShiftUp}
-		case inpututil.IsKeyJustPressed(ebiten.KeyDown):
+		case down():
 			return &tea.KeyMsg{Type: tea.KeyShiftDown}
+		}
+	}
+	if ctrl && !alt {
+		switch {
+		case left():
+			if shift {
+				return &tea.KeyMsg{Type: tea.KeyCtrlShiftLeft}
+			}
+			return &tea.KeyMsg{Type: tea.KeyCtrlLeft}
+		case right():
+			if shift {
+				return &tea.KeyMsg{Type: tea.KeyCtrlShiftRight}
+			}
+			return &tea.KeyMsg{Type: tea.KeyCtrlRight}
+		case just(ebiten.KeyHome):
+			if shift {
+				return &tea.KeyMsg{Type: tea.KeyCtrlShiftHome}
+			}
+			return &tea.KeyMsg{Type: tea.KeyCtrlHome}
+		case just(ebiten.KeyEnd):
+			if shift {
+				return &tea.KeyMsg{Type: tea.KeyCtrlShiftEnd}
+			}
+			return &tea.KeyMsg{Type: tea.KeyCtrlEnd}
 		}
 	}
 	switch {
@@ -1864,19 +2498,19 @@ func teaKeyFromEbiten(ctrl, shift bool) *tea.KeyMsg {
 		return &tea.KeyMsg{Type: tea.KeyEsc}
 	case inpututil.IsKeyJustPressed(ebiten.KeyEnter):
 		return &tea.KeyMsg{Type: tea.KeyEnter}
-	case inpututil.IsKeyJustPressed(ebiten.KeyUp):
+	case up():
 		return &tea.KeyMsg{Type: tea.KeyUp}
-	case inpututil.IsKeyJustPressed(ebiten.KeyDown):
+	case down():
 		return &tea.KeyMsg{Type: tea.KeyDown}
-	case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
+	case left():
 		return &tea.KeyMsg{Type: tea.KeyLeft}
-	case inpututil.IsKeyJustPressed(ebiten.KeyRight):
+	case right():
 		return &tea.KeyMsg{Type: tea.KeyRight}
-	case inpututil.IsKeyJustPressed(ebiten.KeyHome):
+	case just(ebiten.KeyHome):
 		return &tea.KeyMsg{Type: tea.KeyHome}
-	case inpututil.IsKeyJustPressed(ebiten.KeyEnd):
+	case just(ebiten.KeyEnd):
 		return &tea.KeyMsg{Type: tea.KeyEnd}
-	case inpututil.IsKeyJustPressed(ebiten.KeyDelete):
+	case just(ebiten.KeyDelete):
 		return &tea.KeyMsg{Type: tea.KeyDelete}
 	case inpututil.IsKeyJustPressed(ebiten.KeyPageUp):
 		return &tea.KeyMsg{Type: tea.KeyPgUp}
@@ -1887,7 +2521,7 @@ func teaKeyFromEbiten(ctrl, shift bool) *tea.KeyMsg {
 			return &tea.KeyMsg{Type: tea.KeyShiftTab}
 		}
 		return &tea.KeyMsg{Type: tea.KeyTab}
-	case inpututil.IsKeyJustPressed(ebiten.KeyBackspace):
+	case just(ebiten.KeyBackspace):
 		return &tea.KeyMsg{Type: tea.KeyBackspace}
 	}
 	return nil
@@ -1975,7 +2609,13 @@ func (u *macUI) persistNotes() {
 func (u *macUI) handleMouse() {
 	_, wheelY := ebiten.Wheel()
 	if wheelY != 0 {
-		if t := u.activeTab(); t != nil && !t.altScreen() {
+		mx, my := ebiten.CursorPosition()
+		// Scroll the pane under the cursor (not only the focused one).
+		t := u.tabUnderPoint(int32(mx), int32(my))
+		if t == nil {
+			t = u.activeTab()
+		}
+		if t != nil {
 			// One notch ≈ a few lines; keep it small so pin-reveal after clear
 			// is progressive (not a full-history flash).
 			steps := int(wheelY * 3)
@@ -1987,7 +2627,21 @@ func (u *macUI) handleMouse() {
 				}
 			}
 			// ebiten: positive wheel is away from user → scroll history up.
-			t.sb.scrollBy(steps, u.rows)
+			viewRows := u.rows
+			if g := u.paneGeomFor(t.id); g != nil && g.rows > 0 {
+				viewRows = g.rows
+			}
+			if t.altScreen() {
+				// Full-screen apps own scroll — never host history under them.
+				// Forward wheel as SGR mouse (if tracking) or arrow keys.
+				cx, cy, _ := u.pixelToCellInPane(int32(mx), int32(my), t)
+				if b := encodeMouseWheel(t.term, cx+1, cy+1, steps); len(b) > 0 {
+					t.sendKey(b) // that pane's PTY, even if unfocused
+				}
+			} else {
+				t.sb.scrollBy(steps, viewRows)
+				u.markShellDirty()
+			}
 		}
 	}
 
@@ -2002,6 +2656,25 @@ func (u *macUI) handleMouse() {
 		return
 	}
 
+	// Link hover + pointer cursor (even on alt-screen).
+	u.updateLinkHover(mx, my)
+
+	// Alt-screen TUIs (Grok): SGR motion for button hover (1003) / drag (1002).
+	// Clicks alone are not enough — hover styles need CSI < 35;c;r M reports.
+	if !u.chrome.OverlayOpen() {
+		if t := u.activeTab(); t != nil && t.altScreen() {
+			left := pressed || u.altMouseDown
+			u.maybeSendAltMouseMotion(t, mx, my, left)
+		} else {
+			u.altMouseCol, u.altMouseRow = 0, 0
+			// Hard-killed TUIs leave mouse mode on; disarm so we don't inject
+			// SGR reports into the shell (prints as "35;c;rM…" garbage).
+			if t := u.activeTab(); t != nil && t.term != nil && mouseTracking(t.term) {
+				resetHostMouseModes(t.term)
+			}
+		}
+	}
+
 	chH := u.metricH
 	if chH < 1 {
 		chH = cellH
@@ -2010,6 +2683,22 @@ func (u *macUI) handleMouse() {
 	tabStripH := int32(chrome.TabStripRows()) * chH
 
 	if justPressed {
+		// Image lightbox: any click closes.
+		if u.modalImage != nil {
+			u.modalImage = nil
+			u.markShellDirty()
+			return
+		}
+		// Cmd+click (or Ctrl+click) on a link → open in browser.
+		meta := ebiten.IsKeyPressed(ebiten.KeyMeta)
+		ctrlOnly := ebiten.IsKeyPressed(ebiten.KeyControl) && !meta
+		if (meta || ctrlOnly) && !u.chrome.OverlayOpen() {
+			if url := u.linkURLAt(mx, my); url != "" {
+				openURLInBrowser(url)
+				u.toast("opened link")
+				return
+			}
+		}
 		// Sash drag start (multi-pane).
 		if !u.chrome.OverlayOpen() {
 			layouts := u.computeActiveLayout()
@@ -2033,7 +2722,7 @@ func (u *macUI) handleMouse() {
 		// Overlay card hits (notes list/title/editor) or dismiss outside.
 		if u.chrome.OverlayOpen() && int32(my) >= chromeH {
 			if cellX, cellY, ok := u.overlayCellAt(int32(mx), int32(my)); ok {
-				// Notes: route click into list / title / editor.
+				// Notes: route click into list / title / editor (start drag-select).
 				if u.chrome.NotesOpen {
 					r := u.chrome.UpdateChrome(chrome.NotesClickMsg{
 						CellX: cellX, CellY: cellY, Cols: u.cols,
@@ -2041,12 +2730,14 @@ func (u *macUI) handleMouse() {
 					u.chrome = r.Model
 					u.overlayDirty = true
 					u.overlayCells = nil
+					u.notesDragging = r.StartNotesDrag
 					u.persistNotesIfDirty()
 					return
 				}
 				// Other overlays: keep open when clicking the card band.
 				return
 			}
+			u.notesDragging = false
 			u.overlayCells = nil
 			u.overlayDirty = true
 			r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
@@ -2059,6 +2750,16 @@ func (u *macUI) handleMouse() {
 		}
 		if int32(my) < chromeH {
 			if int32(my) < tabStripH {
+				if u.hitCaffeine(int32(mx)) {
+					if msg, ok := applyCaffeineAction(u.caffeine, chrome.ActionCaffeineToggle, 0); ok {
+						if msg != "" {
+							u.toast(msg)
+						}
+						u.markChromeDirty()
+						u.syncChrome()
+					}
+					return
+				}
 				if u.hitPlus(int32(mx)) {
 					u.newTabUI("")
 					return
@@ -2087,8 +2788,16 @@ func (u *macUI) handleMouse() {
 		if g := u.focusedGeom(); g != nil && g.barH > 0 && int32(my) >= g.barY {
 			return
 		}
-		// Alt-screen TUIs own the surface (no host selection over Grok).
+		// Grok / alt-screen: click path or "[Open Image]"; primary: image block.
+		if u.tryOpenImageModalAt(mx, my) {
+			u.markShellDirty()
+			return
+		}
+		// Alt-screen TUIs: forward mouse clicks (buttons, lists) when tracking is on.
 		if tab.altScreen() {
+			if u.sendAltMouse(tab, mx, my, true) {
+				u.altMouseDown = true
+			}
 			return
 		}
 		x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
@@ -2112,6 +2821,29 @@ func (u *macUI) handleMouse() {
 		u.sashDrag = nil
 		u.applyClientSize(u.width, u.height)
 		return
+	}
+
+	// Notes drag-select.
+	if pressed && u.notesDragging && u.chrome.NotesOpen {
+		if cellX, cellY, ok := u.overlayCellAt(int32(mx), int32(my)); ok {
+			r := u.chrome.UpdateChrome(chrome.NotesDragMsg{
+				CellX: cellX, CellY: cellY, Cols: u.cols,
+			})
+			u.chrome = r.Model
+			u.overlayDirty = true
+			u.overlayCells = nil
+		}
+	}
+	if justReleased && u.notesDragging {
+		u.notesDragging = false
+		u.persistNotesIfDirty()
+	}
+	// Alt-screen mouse release (SGR …m).
+	if justReleased && u.altMouseDown {
+		u.altMouseDown = false
+		if t := u.activeTab(); t != nil && t.altScreen() {
+			u.sendAltMouse(t, mx, my, false)
+		}
 	}
 
 	if pressed && u.selecting {
@@ -2161,6 +2893,17 @@ func (u *macUI) hitPlus(px int32) bool {
 	return cellX >= b[0] && cellX < b[1]
 }
 
+// hitCaffeine is true when the pixel x hits the top-right coffee chip.
+func (u *macUI) hitCaffeine(px int32) bool {
+	u.syncChrome()
+	cellX := u.pixelToChromeCol(px)
+	if cellX < 0 {
+		return false
+	}
+	b := u.chrome.CaffeineBounds()
+	return cellX >= b[0] && cellX < b[1]
+}
+
 // pixelToChromeCol maps a client-x pixel to a chrome cell column
 // (matches paint padX of 4 and cell pitch).
 func (u *macUI) pixelToChromeCol(px int32) int {
@@ -2179,6 +2922,29 @@ func (u *macUI) pixelToChromeCol(px int32) int {
 func (u *macUI) pixelToCell(px, py int32) (x, y int) {
 	x, y, _ = u.pixelToCellInPane(px, py, u.activeTab())
 	return x, y
+}
+
+// tabUnderPoint returns the leaf pane under client pixels on the active page,
+// or nil when the cursor is over chrome/sash/empty space.
+func (u *macUI) tabUnderPoint(px, py int32) *tab {
+	if u == nil {
+		return nil
+	}
+	layouts := u.lastPaneLayout
+	if len(layouts) == 0 {
+		layouts = u.computeActiveLayout()
+	}
+	if hi := hitPane(layouts, px, py); hi >= 0 && layouts[hi].pane != nil {
+		return layouts[hi].pane
+	}
+	// Single-pane: any point in the shell band counts as the only leaf.
+	if t := u.activeTab(); t != nil && len(layouts) <= 1 {
+		chromeH := u.chromePixelHeight()
+		if py >= chromeH && py < u.shellBottomY(u.height) {
+			return t
+		}
+	}
+	return nil
 }
 
 // pixelToCellInPane maps client pixels to cell coords within a pane's layout.
@@ -2237,14 +3003,18 @@ func (u *macUI) copySelection() {
 }
 
 func (u *macUI) pasteClipboard() {
-	text, err := clipboard.ReadAll()
-	if err != nil || text == "" {
+	// Alt-screen (Grok, …): host delivers images. osascript PNG dump is slow
+	// (~300–800ms) — never block the ebiten UI thread; finish on a worker
+	// and inject bracketed paste when ready.
+	if u.appOwnsKeyboard() {
+		if u.pasteBusy.Swap(true) {
+			return // already dumping a clipboard image
+		}
+		go u.pasteAltScreenAsync()
 		return
 	}
-	if u.appOwnsKeyboard() {
-		payload := strings.ReplaceAll(text, "\r\n", "\n")
-		payload = strings.ReplaceAll(payload, "\n", "\r")
-		u.sendKey([]byte(payload))
+	text, err := clipboard.ReadAll()
+	if err != nil || text == "" {
 		return
 	}
 	in := u.activeInput()
@@ -2255,10 +3025,123 @@ func (u *macUI) pasteClipboard() {
 	in.insertRunes([]rune(text))
 	if in.visualRows(u.inputContentCols()) != prevRows {
 		u.maybeResizeForInput()
+		u.markShellDirty()
+		return
+	}
+	u.markInputDirty()
+}
+
+// pasteAltScreenAsync reads the pasteboard off-thread and queues PTY inject.
+func (u *macUI) pasteAltScreenAsync() {
+	defer u.pasteBusy.Store(false)
+	if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
+		log.Info("paste clipboard image", "path", imgPath)
+		u.pendingPasteMu.Lock()
+		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(imgPath), toast: "image pasted"})
+		u.pendingPasteMu.Unlock()
+		return
+	} else if err != nil {
+		log.Debug("clipboard image read failed", "err", err)
+	}
+	text, _ := clipboard.ReadAll()
+	var payload []byte
+	var toast string
+	if strings.TrimSpace(text) != "" {
+		payload = bracketedPaste(text)
+	} else {
+		// Empty board: Super+V so Grok can still probe, else empty bracketed.
+		payload = bracketedPaste("")
+		toast = ""
+	}
+	u.pendingPasteMu.Lock()
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: payload, toast: toast, preferSuperV: strings.TrimSpace(text) == ""})
+	u.pendingPasteMu.Unlock()
+}
+
+// drainPendingPaste injects async paste results on the UI thread.
+func (u *macUI) drainPendingPaste() {
+	if u == nil {
+		return
+	}
+	u.pendingPasteMu.Lock()
+	batch := u.pendingPaste
+	u.pendingPaste = nil
+	u.pendingPasteMu.Unlock()
+	for _, p := range batch {
+		if p.preferSuperV {
+			if t := u.activeTab(); t != nil && t.kitty.active() {
+				t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
+				continue
+			}
+		}
+		if len(p.payload) > 0 {
+			u.sendKey(p.payload)
+		}
+		if p.toast != "" {
+			u.toast(p.toast)
+		}
 	}
 }
 
 // --- paint ---
+
+// tryPaintInputOnly re-paints only Warp bars over the previous frame when the
+// shell grid is unchanged (notes-style scoping). Returns true if a full paint
+// was skipped. Stays in this mode until markShellDirty / markChromeDirty.
+func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool {
+	if u == nil || !u.inputOnlyDirty || u.painter == nil || u.fb == nil || u.tex == nil {
+		return false
+	}
+	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
+		return false
+	}
+	// Intro / dim modals need a full composite. Shell rain freezes while we
+	// stay in bar-only mode (same tradeoff as notes overlay scoping) — worth
+	// it so typing doesn't re-rasterize a huge idle grid every keystroke.
+	if u.matrixIntroActive() || u.dimShellModal() {
+		return false
+	}
+	if tab == nil || tab.altScreen() {
+		return false
+	}
+	if u.fb.Bounds().Dx() != w || u.fb.Bounds().Dy() != h {
+		return false
+	}
+	layouts := u.computeActiveLayout()
+	if len(layouts) == 0 {
+		sx, sy, sw, sh := u.shellRect(u.width, u.height)
+		layouts = []paneGeom{{
+			pane: tab, x: sx, y: sy, w: sw, h: sh,
+			cols: u.cols, rows: u.rows, focused: true,
+		}}
+	}
+	// Re-draw each leaf bar (caret alpha updates here too).
+	for _, g := range layouts {
+		if g.barH > 0 {
+			u.paintPaneInputIntoFB(g)
+		}
+	}
+	// Single-pane fallback if layout omitted barH.
+	if len(layouts) == 1 && layouts[0].barH < 1 {
+		g := layouts[0]
+		shellBot := int(u.shellBottomY(u.height))
+		g.barY = int32(shellBot) - u.inputBarPixelHeight()
+		if g.barY < u.shellPadY() {
+			g.barY = u.shellPadY()
+		}
+		g.barH = u.height - g.barY
+		g.x = 0
+		g.w = u.width
+		g.barCols = u.inputContentCols()
+		if g.barH > 0 {
+			u.paintPaneInputIntoFB(g)
+		}
+	}
+	u.tex.WritePixels(u.fb.Pix)
+	op := &ebiten.DrawImageOptions{}
+	screen.DrawImage(u.tex, op)
+	return true
+}
 
 func (u *macUI) paintTo(screen *ebiten.Image) {
 	tab := u.activeTab()
@@ -2273,6 +3156,13 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if u.fb == nil || u.fb.Bounds().Dx() != w || u.fb.Bounds().Dy() != h {
 		u.fb = image.NewRGBA(image.Rect(0, 0, w, h))
 		u.tex = ebiten.NewImage(w, h)
+		u.inputOnlyDirty = false
+	}
+
+	// Notes-style scoping for the Warp bar: when only bar text/caret changed
+	// and shell matrix rain is not animating, re-paint bars over the last frame.
+	if u.tryPaintInputOnly(screen, tab, w, h) {
+		return
 	}
 
 	u.ensureChromeCells()
@@ -2308,33 +3198,78 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		shellCols = u.cols
 	}
 
-	// Intro underlay: startup curtain, or settings preview of the chosen style.
-	// Always-on shell rain is separate (ShellMatrixCells, under glyphs).
+	// Underlays: settings previews Ambient by default; Intro only when that
+	// row is focused. Startup curtain is separate. Always-on ambient uses
+	// ShellMatrixCells / CRT scanlines outside of dim modals.
 	var rain []rainCell
 	var shellRain []rainCell
+	crtIntensity := 0.0
 	introStyle := config.Normalize(u.cfg).Intro
 	now := time.Now()
 	cwPx, chPx := cw, ch
+	col := u.themeAmbientColors()
 	if u.chrome.SettingsOpen {
-		t0, active := u.settingsUnderlayClock(now)
-		if active {
-			switch introStyle {
-			case config.IntroRipple:
-				rCols := shellCols / 2
-				if rCols < 2 {
-					rCols = 2
+		showIntro := u.chrome.SettingsShowcaseIntro()
+		if showIntro && !u.settingsShowedIntro {
+			// Just focused Intro — restart a full curtain play.
+			u.settingsPreviewT0 = now
+			u.settingsIntroIdleUntil = time.Time{}
+		}
+		u.settingsShowedIntro = showIntro
+		if showIntro {
+			// Focused Intro row → loop the chosen startup curtain.
+			t0, active := u.settingsUnderlayClock(now)
+			if active {
+				switch introStyle {
+				case config.IntroRipple:
+					rCols := shellCols / 2
+					if rCols < 2 {
+						rCols = 2
+					}
+					var drew bool
+					rain, drew = rippleCells(rCols, shellRows, cwPx, chPx, t0, matrixIntroSpawn, now)
+					if now.Sub(t0) > matrixIntroSpawn && !drew {
+						u.settingsUnderlayFinished(now)
+					}
+					if now.Sub(t0) > matrixIntroMaxTotal {
+						u.settingsUnderlayFinished(now)
+					}
+				case config.IntroInkWash:
+					rain = inkWashCells(shellCols, shellRows, t0, matrixIntroSpawn, now, col)
+					if now.Sub(t0) > matrixIntroSpawn && len(rain) == 0 {
+						u.settingsUnderlayFinished(now)
+					}
+				case config.IntroCRT:
+					rain = crtIntroCells(shellCols, shellRows, t0, matrixIntroSpawn, now, col)
+					crtIntensity = 0.45
+					if now.Sub(t0) > matrixIntroSpawn {
+						u.settingsUnderlayFinished(now)
+						crtIntensity = 0
+					}
+				case config.IntroNone:
+					// Matte only (paint path fills when SettingsOpen).
+				default:
+					rain = matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now)
 				}
-				var drew bool
-				rain, drew = rippleCells(rCols, shellRows, cwPx, chPx, t0, matrixIntroSpawn, now)
-				if now.Sub(t0) > matrixIntroSpawn && !drew {
-					u.settingsUnderlayFinished(now)
-				}
-				if now.Sub(t0) > matrixIntroMaxTotal {
-					u.settingsUnderlayFinished(now)
-				}
-			case config.IntroNone:
+			}
+		} else if u.shellAmbientOn() {
+			// Default settings underlay (and Ambient / Intensity fields):
+			// showcase the always-on ambient style + intensity.
+			t0 := u.blinkStart
+			if t0.IsZero() {
+				t0 = now
+			}
+			intensity := settingsAmbientShowcaseIntensity(u.cfg)
+			switch u.cfg.ShellAmbient {
+			case config.AmbientRain:
+				rain = dimRainCells(
+					matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now),
+					intensity,
+				)
+			case config.AmbientCRT:
+				crtIntensity = intensity * 0.9
 			default:
-				rain = matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now)
+				rain = ambientGlyphCells(u.cfg.ShellAmbient, shellCols, shellRows, t0, now, col, intensity)
 			}
 		}
 	} else if u.matrixIntroActive() && introStyle != config.IntroNone {
@@ -2353,6 +3288,18 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 			if mode == matrixWindDown && !drew {
 				u.finishMatrixIntro()
 			}
+		case config.IntroInkWash:
+			rain = inkWashCells(shellCols, shellRows, u.matrixIntroStart, matrixIntroSpawn, now, col)
+			if mode == matrixWindDown && len(rain) == 0 {
+				u.finishMatrixIntro()
+			}
+		case config.IntroCRT:
+			rain = crtIntroCells(shellCols, shellRows, u.matrixIntroStart, matrixIntroSpawn, now, col)
+			crtIntensity = 0.55
+			if mode == matrixWindDown && len(rain) == 0 {
+				u.finishMatrixIntro()
+				crtIntensity = 0
+			}
 		default:
 			rain = matrixRainCells(shellCols, shellRows, mode, u.matrixIntroStart, matrixIntroSpawn, now)
 			if mode == matrixWindDown && len(rain) == 0 {
@@ -2364,17 +3311,25 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 			u.finishMatrixIntro()
 		}
 	}
-	// Quiet looping rain under the shell while sitting open (settings Rain = On).
-	// Not during intro curtain or settings/splash/confirm modals.
-	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() {
+	// Always-on ambient under empty/default-bg cells (settings Ambient).
+	// Freezes while input-only typing path is sticky (tryPaintInputOnly).
+	if u.shellAmbientOn() && !u.matrixIntroActive() && !u.dimShellModal() {
 		t0 := u.blinkStart
 		if t0.IsZero() {
 			t0 = now
 		}
-		shellRain = dimRainCells(
-			matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now),
-			shellMatrixIntensity,
-		)
+		intensity := effectiveAmbientIntensity(u.cfg, tab.altScreen())
+		switch u.cfg.ShellAmbient {
+		case config.AmbientRain:
+			shellRain = dimRainCells(
+				matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now),
+				intensity,
+			)
+		case config.AmbientCRT:
+			crtIntensity = intensity * 0.9
+		default:
+			shellRain = ambientGlyphCells(u.cfg.ShellAmbient, shellCols, shellRows, t0, now, col, intensity)
+		}
 	}
 
 	// Paint focused pane as primary shell (watermark/intro/chrome/overlay via paintFrame).
@@ -2385,6 +3340,10 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 	if !tab.sel.empty() {
 		applySelectionTint(focusGrid, tab, len(focusGrid))
+	}
+	// Hovered hyperlink → theme primary (Cmd/Ctrl+click opens).
+	if u.hoverLinkOK {
+		applyLinkHoverTint(focusGrid, u.hoverLink)
 	}
 	cur := tab.term.Cursor()
 	curVis := tab.altScreen() && tab.term.CursorVisible()
@@ -2424,6 +3383,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		SettingsOpen:     u.chrome.SettingsOpen,
 		MatrixCells:      rain,
 		ShellMatrixCells: shellRain,
+		CRTScanlines:     crtIntensity,
 		WatermarkFade:    u.watermarkFade(),
 		ScrollFrac:       tab.sb.scrollFrac(),
 		ScrollThumbY:     thumbY,
@@ -2455,6 +3415,13 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 
 	u.painter.paintFrame(u.fb, opts)
+
+	// Grok prompt image previews (Kitty graphics APC) — over the cell grid.
+	if tab.kittyGfx != nil {
+		if places := tab.kittyGfx.snapshotPlacements(); len(places) > 0 {
+			u.painter.paintKittyPlacements(u.fb, places, tab.kittyGfx, padY, shellBot)
+		}
+	}
 
 	dimModal := u.chrome.OverlayOpen() && (u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen)
 	if !dimModal {
@@ -2502,6 +3469,11 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	// Notes caret (block/underline/bar) over the overlay grid.
 	if u.chrome.NotesOpen && u.painter != nil && len(overlay) > 0 {
 		u.paintNotesCaret(u.fb, overlay, padY, shellBot)
+	}
+
+	// Image lightbox on top of everything.
+	if u.modalImage != nil {
+		u.paintImageModal(u.fb)
 	}
 
 	u.tex.WritePixels(u.fb.Pix)
@@ -2639,6 +3611,9 @@ func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
 	grid := t.sb.viewCells(t.term, viewRows)
 	if t == u.activeTab() && !t.sel.empty() {
 		applySelectionTint(grid, t, viewRows)
+	}
+	if t == u.activeTab() && u.hoverLinkOK {
+		applyLinkHoverTint(grid, u.hoverLink)
 	}
 	cur := t.term.Cursor()
 	curVis := t.altScreen() && t.term.CursorVisible() && g.focused
@@ -2781,4 +3756,128 @@ func applySelectionTint(grid [][]cellPix, tab *tab, viewRows int) {
 		}
 		grid[y] = row
 	}
+}
+
+// updateLinkHover finds an http(s)/www URL under the cursor and tracks it for paint.
+func (u *macUI) updateLinkHover(mx, my int) {
+	if u == nil {
+		return
+	}
+	clear := func() {
+		if u.hoverLinkOK || u.linkCursorOn {
+			u.hoverLinkOK = false
+			u.hoverLink = linkSpan{}
+			if u.linkCursorOn {
+				ebiten.SetCursorShape(ebiten.CursorShapeDefault)
+				u.linkCursorOn = false
+			}
+			u.markShellDirty()
+		}
+	}
+	if u.chrome.OverlayOpen() || u.selecting || u.sashDrag != nil || u.notesDragging {
+		clear()
+		return
+	}
+	tab := u.activeTab()
+	if tab == nil {
+		clear()
+		return
+	}
+	// Outside shell / on input bar → no link hover.
+	if g := u.focusedGeom(); g != nil && g.barH > 0 && int32(my) >= g.barY {
+		clear()
+		return
+	}
+	x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
+	grid := tab.sb.viewCells(tab.term, viewRows)
+	spans := findLinksInGrid(grid)
+	span, ok := linkAt(spans, x, y)
+	if !ok {
+		clear()
+		return
+	}
+	changed := !u.hoverLinkOK || u.hoverLink.url != span.url ||
+		u.hoverLink.row != span.row || u.hoverLink.x0 != span.x0 || u.hoverLink.x1 != span.x1
+	u.hoverLink = span
+	u.hoverLinkOK = true
+	if !u.linkCursorOn {
+		ebiten.SetCursorShape(ebiten.CursorShapePointer)
+		u.linkCursorOn = true
+	}
+	if changed {
+		u.markShellDirty()
+	}
+}
+
+// sendAltMouse forwards a left-button press/release to an alt-screen app
+// (Grok action buttons, list selection, …) when mouse tracking is enabled.
+func (u *macUI) sendAltMouse(t *tab, mx, my int, press bool) bool {
+	if t == nil || t.term == nil || !mouseTracking(t.term) {
+		return false
+	}
+	cx, cy, _ := u.pixelToCellInPane(int32(mx), int32(my), t)
+	col, row := cx+1, cy+1
+	b := encodeMouseButton(t.term, col, row, 0, press)
+	if len(b) == 0 {
+		return false
+	}
+	u.altMouseCol, u.altMouseRow = col, row
+	t.sendKey(b)
+	return true
+}
+
+// maybeSendAltMouseMotion reports pointer moves for hover (1003) or drag (1002).
+func (u *macUI) maybeSendAltMouseMotion(t *tab, mx, my int, leftDown bool) {
+	if u == nil || t == nil || t.term == nil || !t.altScreen() {
+		return
+	}
+	if !mouseAnyMotion(t.term) && !(mouseDragMotion(t.term) && leftDown) {
+		return
+	}
+	if g := u.paneGeomFor(t.id); g != nil {
+		if int32(mx) < g.x || int32(mx) >= g.x+g.w || int32(my) < g.y || int32(my) >= g.y+g.h {
+			return
+		}
+		if g.barH > 0 && int32(my) >= g.barY {
+			return
+		}
+	}
+	cx, cy, _ := u.pixelToCellInPane(int32(mx), int32(my), t)
+	col, row := cx+1, cy+1
+	if col == u.altMouseCol && row == u.altMouseRow {
+		return
+	}
+	b := encodeMouseMotion(t.term, col, row, leftDown)
+	if len(b) == 0 {
+		return
+	}
+	u.altMouseCol, u.altMouseRow = col, row
+	t.sendKey(b)
+}
+
+// linkURLAt returns the URL under client pixels, or "".
+func (u *macUI) linkURLAt(mx, my int) string {
+	if u == nil || u.chrome.OverlayOpen() {
+		return ""
+	}
+	tab := u.activeTab()
+	if tab == nil {
+		return ""
+	}
+	if g := u.focusedGeom(); g != nil && g.barH > 0 && int32(my) >= g.barY {
+		return ""
+	}
+	x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
+	grid := tab.sb.viewCells(tab.term, viewRows)
+	span, ok := linkAt(findLinksInGrid(grid), x, y)
+	if !ok {
+		return ""
+	}
+	return span.url
 }

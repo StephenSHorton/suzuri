@@ -88,7 +88,8 @@ func SaveNotesBank(bank NotesBank) error {
 }
 
 func defaultNotesBank() NotesBank {
-	n := newNoteDoc("Scratch", "")
+	// Empty title so first open focuses the name field (not the body).
+	n := newNoteDoc("", "")
 	return NotesBank{ActiveID: n.ID, Notes: []NoteDoc{n}}
 }
 

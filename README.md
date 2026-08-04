@@ -27,10 +27,10 @@ Most “pretty terminals” are either:
 |------|------------|
 | **Host** | Native window (Win32 / macOS), ConPTY or POSIX PTY shells, scrollback, selection, copy/paste |
 | **Chrome** | Tabs, command palette (`Ctrl+K`), settings (`Ctrl+,`), help, themes |
-| **Panes** | Split right/down, shared sashes, per-pane Warp bars, focus with Alt+arrows |
+| **Panes** | Split right/down, shared sashes, per-pane Warp bars, focus with ⌘⌥+arrows (macOS) / Alt+arrows (Windows) |
 | **Input** | Warp-style bottom bar — local edit, multiline, history, echo filter |
-| **Look** | Inkstone / Charmtone / High contrast · bundled Gohu mono · app icon · box-drawing |
-| **Polish** | Window placement, matrix/ripple intros (Windows), 猫咪 dim under settings, floating palette/help over live shell |
+| **Look** | 16 themes (Inkstone, Charmtone, Nord, Dracula, Tokyo Night, …) · bundled Gohu mono · app icon · box-drawing |
+| **Polish** | Intros (matrix, ripple, ink wash, CRT) · shell ambient (rain, grain, waves, fireflies, CRT) · 猫咪 dim under settings · floating chrome |
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
 | **Transfer** | Peer-to-peer send/receive (palette + CLI; iroh via `suzuri-transfer`) |
 | **Updates** | Auto-update from GitHub Releases on startup; palette **Check for updates** |
@@ -98,12 +98,15 @@ Go 1.26+ recommended (see `go.mod`). Supported hosts: **Windows** (ConPTY) and *
 | `Ctrl+K` / `Ctrl+P` | Command palette |
 | `Ctrl+,` | Settings |
 | `Ctrl+/` | Help |
+| `⌘+/⌘-` · `Ctrl++` / `Ctrl+-` | Zoom UI (font size) |
+| `⌘0` · `Ctrl+0` | Reset zoom |
 | `Ctrl+Shift+T` | New tab |
 | `Ctrl+Shift+N` | New window |
 | `Ctrl+W` | Close tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+1`…`9` | Jump to tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
+| `⌘-click` · `Ctrl-click` URL | Open link in browser |
 
 ## Config
 
@@ -132,11 +135,11 @@ suzuri transfer version
 suzuri transfer me
 ```
 
-Identity lives under the suzuri config tree: `…/suzuri/transfer/`. Palette: **Send file (ticket)…** / **Receive ticket…**. See [`docs/transfer.md`](docs/transfer.md). Installers that bundle the engine are next.
+Identity lives under the suzuri config tree: `…/suzuri/transfer/`. Palette: **Send file (ticket)…** / **Receive ticket…**. See [`docs/transfer.md`](docs/transfer.md).
 
-## MCP (agent diagnostics)
+## MCP (agent diagnostics + notes)
 
-Spawn-on-demand stdio MCP — attach to a running GUI over loopback. See [`docs/mcp.md`](docs/mcp.md).
+Spawn-on-demand stdio MCP — attach to a running GUI over loopback. Tools include terminal diag/submit/logs and **notes bank** CRUD (`suzuri_notes_list` / `_get` / `_create` / `_update` / `_delete`). See [`docs/mcp.md`](docs/mcp.md).
 
 ```toml
 # ~/.grok/config.toml

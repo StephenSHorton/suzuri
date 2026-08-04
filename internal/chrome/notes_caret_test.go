@@ -11,9 +11,8 @@ import (
 )
 
 func TestNotesEditorLayoutLines(t *testing.T) {
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
+	m := openNotesBody(New(80))
+	var r Result
 	for _, ch := range "ab" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model

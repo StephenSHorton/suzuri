@@ -21,8 +21,10 @@ import (
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/bridge"
+	"github.com/StephenSHorton/suzuri/internal/caffeine"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/vt"
 )
 
 const (
@@ -73,6 +75,7 @@ func Run() error {
 		blinkStart: time.Now(),
 		nextTabID:  0,
 		chrome:     chrome.New(cols),
+		caffeine:   caffeine.New(),
 	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
 	if bank, err := chrome.LoadNotesBank(); err != nil {
@@ -84,6 +87,7 @@ func Run() error {
 	ui.bridge = bridge.NewHost()
 	ui.mcpJobs = make(chan mcpJob, 8)
 	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
+	ui.bridge.BindNotes(ui.enqueueMCPNotes)
 	prof := config.FindProfile(cfg, cfg.ActiveProfile)
 	opts := tabOpts{}
 	if prof != nil {
@@ -107,11 +111,16 @@ func Run() error {
 	return ui.loop()
 }
 
-// mcpJob is a submit request from the loopback MCP bridge (HTTP goroutine → UI thread).
+// mcpJob is work from the loopback MCP bridge (HTTP goroutine → UI thread).
 type mcpJob struct {
+	// Submit (kind empty or "submit")
 	tabID int
 	line  string
 	done  chan error
+	// Notes bank CRUD
+	notes    bool
+	notesReq bridge.NotesRequest
+	notesOut chan bridge.NotesResult
 }
 
 
@@ -177,6 +186,27 @@ type winUI struct {
 	memW      int32
 	memH      int32
 
+	// notesDragging: LBUTTON held after a notes body click (drag-select text).
+	notesDragging bool
+	// Link hover: http(s)/www under the cursor.
+	hoverLink    linkSpan
+	hoverLinkOK  bool
+	linkCursorOn bool
+	// altMouseDown: left button held while reporting clicks to an alt-screen app.
+	altMouseDown bool
+	// Last SGR motion cell (1-based) sent to alt-screen; avoid flooding the PTY.
+	altMouseCol, altMouseRow int
+
+	// Stay-awake (☕ top-right). Process-local SetThreadExecutionState.
+	caffeine *caffeine.Manager
+	// lastCaffeineHint drives chrome dirty when the timed label ticks down.
+	lastCaffeineHint string
+
+	// Async alt-screen paste (clipboard image dump must not block the UI thread).
+	pasteBusy      atomic.Bool
+	pendingPasteMu sync.Mutex
+	pendingPaste   []pendingPaste
+
 	// User is dragging or resizing the frame (WM_ENTERSIZEMOVE … EXITSIZEMOVE).
 	// During this window we must not thrash ConPTY / GDI: every WM_SIZE used to
 	// resize all tabs + recreate the backbuffer, which hard-crashed mid-drag.
@@ -209,6 +239,11 @@ type winUI struct {
 	// hard-crash GDI with no Go panic trail.
 	paintPending bool
 
+	// inputOnlyDirty: Warp bar text/caret changed but shell cells did not.
+	// WM_PAINT can re-draw only the bar(s) into memDC (notes-style scoping).
+	// Cleared on PTY output, resize, scroll, overlay, chrome strip changes.
+	inputOnlyDirty bool
+
 	// toastPending is set from background goroutines; drained on wmSuzuriToast.
 	toastMu      sync.Mutex
 	toastPending string
@@ -231,6 +266,67 @@ func (u *winUI) requestPaint() {
 	}
 	u.paintPending = true
 	win.InvalidateRect(u.hwnd, nil, false)
+}
+
+// monitorWorkArea returns the nearest monitor's work rect (excludes taskbar).
+func (u *winUI) monitorWorkArea() (left, top, right, bottom int, ok bool) {
+	if u == nil || u.hwnd == 0 {
+		return 0, 0, 0, 0, false
+	}
+	hmon := win.MonitorFromWindow(u.hwnd, win.MONITOR_DEFAULTTONEAREST)
+	if hmon == 0 {
+		return 0, 0, 0, 0, false
+	}
+	var mi win.MONITORINFO
+	mi.CbSize = uint32(unsafe.Sizeof(mi))
+	if !win.GetMonitorInfo(hmon, &mi) {
+		return 0, 0, 0, 0, false
+	}
+	return int(mi.RcWork.Left), int(mi.RcWork.Top), int(mi.RcWork.Right), int(mi.RcWork.Bottom), true
+}
+
+// requestInputPaint marks only the Warp bar dirty (shell grid unchanged).
+// Falls back to a full paint when a floating overlay is open (palette/notes/…).
+// chromeDirty alone is fine: the input-only paint path re-draws the strip
+// without re-blitting the shell grid (same idea as macOS tryPaintInputOnly).
+// While ambient is on, blink periodically clears sticky input-only so rain/CRT
+// keep moving (see wmSuzuriBlink).
+func (u *winUI) requestInputPaint() {
+	if u == nil || u.hwnd == 0 {
+		return
+	}
+	if u.chrome.OverlayOpen() {
+		u.inputOnlyDirty = false
+		u.requestPaint()
+		return
+	}
+	u.inputOnlyDirty = true
+	u.requestPaint()
+}
+
+// warpBarInsertNewline adds a soft line break in the Warp bar (Shift/Alt+Enter).
+func (u *winUI) warpBarInsertNewline(in *inputBar) {
+	if u == nil || in == nil {
+		return
+	}
+	cols := u.inputContentCols()
+	prevRows := in.visualRows(cols)
+	in.insertNewline()
+	if in.visualRows(cols) != prevRows {
+		u.maybeResizeForInput()
+		u.markShellDirty()
+		u.requestPaint()
+		return
+	}
+	u.requestInputPaint()
+}
+
+// markShellDirty forces a full shell repaint on the next paint cycle.
+func (u *winUI) markShellDirty() {
+	if u == nil {
+		return
+	}
+	u.inputOnlyDirty = false
 }
 
 func (u *winUI) queueBytes(tabID int)  { postBytes(u, tabID) }
@@ -312,6 +408,7 @@ func (u *winUI) syncChrome() {
 		r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
 		u.chrome = r.Model
 		u.chrome.Width = u.cols
+		u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
 		return
 	}
 	tabs := make([]chrome.Tab, len(src))
@@ -358,6 +455,15 @@ func (u *winUI) syncChrome() {
 	r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
 	u.chrome = r.Model
 	u.chrome.Width = u.cols
+	u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
+	hint := ""
+	if u.caffeine != nil {
+		hint = u.caffeine.StripLabel()
+	}
+	if hint != u.lastCaffeineHint {
+		u.lastCaffeineHint = hint
+		dirty = true
+	}
 	if dirty {
 		u.chromeDirty = true
 	}
@@ -365,7 +471,12 @@ func (u *winUI) syncChrome() {
 
 func (u *winUI) markChromeDirty() {
 	u.chromeDirty = true
-	u.overlayDirty = true
+	// Only dirty the floating card when it is actually open. Setting overlayDirty
+	// while closed used to stick forever (nothing clears it without paintOverlay),
+	// which forced every Warp-bar keystroke into a full shell repaint.
+	if u.chrome.OverlayOpen() {
+		u.overlayDirty = true
+	}
 }
 
 // applyConfigLive updates fonts/theme/ANSI map from cfg without writing disk.
@@ -463,6 +574,59 @@ func (u *winUI) applyConfigSave(cfg config.Config) {
 
 	u.saveNeedFontLayout = fontChanged
 	u.postSaveFinish()
+}
+
+// zoomFont steps UI font size by delta and persists (same path as settings apply).
+func (u *winUI) zoomFont(delta int) {
+	if u == nil || delta == 0 {
+		return
+	}
+	cfg := u.cfg
+	cfg.FontSizePx += delta
+	cfg = config.Normalize(cfg)
+	if cfg.FontSizePx == u.cfg.FontSizePx {
+		u.toast(fmt.Sprintf("font %dpx (limit)", u.cfg.FontSizePx))
+		return
+	}
+	u.chrome.ApplyFontSize(cfg.FontSizePx)
+	// Full live apply + save (font rebuild needs GDI path).
+	u.applyConfigLive(cfg)
+	cfg.Window = u.cfg.Window
+	u.cfg = cfg
+	if err := config.Save(cfg); err != nil {
+		log.Error("zoom save failed", "err", err)
+		u.toast("save failed")
+		return
+	}
+	u.toast(fmt.Sprintf("font %dpx", cfg.FontSizePx))
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
+}
+
+func (u *winUI) zoomFontReset() {
+	if u == nil {
+		return
+	}
+	if u.cfg.FontSizePx == config.DefaultFontSizePx {
+		u.toast(fmt.Sprintf("font %dpx (default)", config.DefaultFontSizePx))
+		return
+	}
+	cfg := u.cfg
+	cfg.FontSizePx = config.DefaultFontSizePx
+	u.chrome.ApplyFontSize(cfg.FontSizePx)
+	u.applyConfigLive(cfg)
+	cfg.Window = u.cfg.Window
+	u.cfg = cfg
+	if err := config.Save(cfg); err != nil {
+		log.Error("zoom save failed", "err", err)
+		u.toast("save failed")
+		return
+	}
+	u.toast(fmt.Sprintf("font %dpx (reset)", cfg.FontSizePx))
+	if u.hwnd != 0 {
+		win.InvalidateRect(u.hwnd, nil, false)
+	}
 }
 
 // openPaletteSafe builds the command palette off the Ctrl+K keydown stack.
@@ -590,18 +754,28 @@ func (u *winUI) finishConfigSave() {
 
 // toast sets a short-lived status line under the tab strip (UI thread only).
 func (u *winUI) toast(msg string) {
+	if u == nil {
+		return
+	}
+	msg = strings.TrimSpace(msg)
+	prevRows := u.chrome.RowCount()
 	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg(msg)).Model
 	// Update results need a bit longer to read than split toasts.
 	dur := 2500 * time.Millisecond
 	if strings.Contains(msg, "update") || strings.Contains(msg, "up to date") ||
-		strings.Contains(msg, "installing") {
+		strings.Contains(msg, "installing") || strings.Contains(msg, "opened") {
 		dur = 4 * time.Second
 	}
 	u.statusUntil = time.Now().Add(dur)
 	u.markChromeDirty()
+	// Extra strip row for status — settle layout so toast has its own band.
+	if u.chrome.RowCount() != prevRows && u.hwnd != 0 {
+		u.postLayoutSettle()
+	}
 	if u.hwnd != 0 {
 		win.InvalidateRect(u.hwnd, nil, false)
 	}
+	log.Debug("toast", "msg", msg, "rows", u.chrome.RowCount())
 }
 
 // postToast queues a toast for the UI thread (safe from background goroutines).
@@ -878,6 +1052,12 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		} else {
 			log.Info("first-run complete")
 		}
+	case chrome.ActionZoomIn:
+		u.zoomFont(+1)
+	case chrome.ActionZoomOut:
+		u.zoomFont(-1)
+	case chrome.ActionZoomReset:
+		u.zoomFontReset()
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
 	case chrome.ActionCheckUpdates:
@@ -893,6 +1073,13 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.openRenameUI(chrome.RenameTargetTab)
 	case chrome.ActionApplyRename:
 		u.applyRename(r.RenameTarget, r.Name)
+	case chrome.ActionCaffeineToggle, chrome.ActionCaffeineFor, chrome.ActionCaffeineOff:
+		if msg, ok := applyCaffeineAction(u.caffeine, r.Action, r.Minutes); ok {
+			if msg != "" {
+				u.toast(msg)
+			}
+			u.markChromeDirty()
+		}
 	case chrome.ActionOpenTransferSend:
 		r2 := u.chrome.UpdateChrome(chrome.OpenTransferPromptMsg{Mode: chrome.TransferModeSend})
 		u.chrome = r2.Model
@@ -1064,15 +1251,15 @@ func (u *winUI) beginIntro(replay bool) {
 	now := time.Now()
 	style := config.Normalize(u.cfg).Intro
 	// Persistent shell rain + matrix intro would play the same effect twice.
-	if style == config.IntroMatrix && u.cfg.ShellMatrix {
+	if style == config.IntroMatrix && u.shellMatrixOn() {
 		u.matrixIntroStart = now
 		u.matrixIntroSpawnEnd = now
 		u.matrixIntroDone = true
 		u.matrixIntroClearAt = now // watermark at full opacity immediately
 		if replay {
-			log.Info("replay intro skipped", "reason", "shell matrix on", "style", style)
+			log.Info("replay intro skipped", "reason", "shell rain ambient on", "style", style)
 		} else {
-			log.Info("startup intro skipped", "reason", "shell matrix on", "style", style)
+			log.Info("startup intro skipped", "reason", "shell rain ambient on", "style", style)
 		}
 		return
 	}
@@ -1290,6 +1477,35 @@ func (u *winUI) sendKey(b []byte) {
 	}
 }
 
+func (u *winUI) barCols(tab *tab) int {
+	cols := u.cols
+	if tab != nil {
+		if g := u.paneGeomFor(tab.id); g != nil && g.cols > 0 {
+			return g.cols
+		}
+	}
+	return cols
+}
+
+func (u *winUI) submitBarLine(tab *tab, line string) {
+	if u == nil || tab == nil {
+		return
+	}
+	submitBarLine(tab, line, u.barCols(tab), u.toast)
+	u.publishBridgeSnapshot()
+}
+
+func (u *winUI) tryFlushCmdQueue(tab *tab) {
+	if u == nil || tab == nil {
+		return
+	}
+	if tryFlushCmdQueue(tab, u.barCols(tab), u.toast) {
+		u.publishBridgeSnapshot()
+		u.markShellDirty()
+		u.requestPaint()
+	}
+}
+
 func (u *winUI) blinkLoop() {
 	t := time.NewTicker(cursorBlinkTick)
 	defer t.Stop()
@@ -1363,14 +1579,31 @@ func (u *winUI) drainAndParse(tabID int) {
 			t.postBytes(u)
 		}
 		if visible {
+			u.markShellDirty()
 			u.requestPaint()
 		}
 		return
 	}
 	// Answer Kitty keyboard / DA probes before VT parse (Grok Shift+Enter).
 	t.handleHostQueries(data)
-	_, _ = t.term.Write(data)
+	// Unwrap OSC 8 hyperlinks so markdown link labels stay visible.
+	data = vt.StripOSC8Hyperlinks(data)
+	// Kitty graphics APCs (Grok image previews): strip + apply against live
+	// cursor between VT segments so a=p places at the CSI-H position.
+	if t.kittyGfx == nil {
+		t.kittyGfx = newKittyGfx()
+	}
+	data = feedKittyAPCs(t.kittyGfx, data, func(b []byte) {
+		_, _ = t.term.Write(b)
+	}, func() (col, row int) {
+		c := t.term.Cursor()
+		return c.X, c.Y
+	})
+	if len(data) > 0 {
+		_, _ = t.term.Write(data)
+	}
 	t.sb.noteScreen(t.term)
+	u.markShellDirty()
 	// No host image injection on alt-screen (Grok) — use click → modal instead.
 	if t.sb.atBottom() {
 		t.sb.stickBottom()
@@ -1398,10 +1631,20 @@ func (u *winUI) drainAndParse(tabID int) {
 	// no panic after "layout settle"). Paint-only now; settle when idle.
 	nowAlt := t.altScreen()
 	if nowAlt != t.wasAlt {
+		if t.wasAlt {
+			resetHostAfterAltApp(t.term)
+			if t.kittyGfx != nil {
+				t.kittyGfx.clear()
+			}
+			clearKittyHBMCache(t.id)
+			t.markShellIdle()
+		}
 		t.wasAlt = nowAlt
 		log.Info("alt screen", "tab", t.id, "on", nowAlt)
 		u.onAltScreenToggled(t)
 	}
+	t.maybeReleaseBarAwaiting()
+	u.tryFlushCmdQueue(t)
 	// Bridge snapshot is relatively expensive — skip on pure spam frames.
 	// (MCP clients still get updates on submit / tab change.)
 	if u.bridge != nil && len(data) > 0 {
@@ -1468,13 +1711,51 @@ func (u *winUI) enqueueMCPSubmit(tabID int, line string) error {
 	}
 }
 
+func (u *winUI) enqueueMCPNotes(req bridge.NotesRequest) bridge.NotesResult {
+	if u == nil || !u.alive.Load() || u.hwnd == 0 {
+		return bridge.NotesResult{OK: false, Error: "suzuri UI not ready"}
+	}
+	job := mcpJob{
+		notes:    true,
+		notesReq: req,
+		notesOut: make(chan bridge.NotesResult, 1),
+	}
+	select {
+	case u.mcpJobs <- job:
+	default:
+		return bridge.NotesResult{OK: false, Error: "mcp notes queue full"}
+	}
+	if win.PostMessage(u.hwnd, wmSuzuriMCP, 0, 0) == 0 {
+		return bridge.NotesResult{OK: false, Error: "post mcp notes job failed"}
+	}
+	select {
+	case res := <-job.notesOut:
+		return res
+	case <-time.After(5 * time.Second):
+		return bridge.NotesResult{OK: false, Error: "mcp notes timed out"}
+	}
+}
+
 func (u *winUI) drainMCPJobs() {
 	for {
 		select {
 		case job := <-u.mcpJobs:
-			err := u.submitOnUIThread(job.tabID, job.line)
-			if job.done != nil {
-				job.done <- err
+			if job.notes {
+				res := runNotesOnChrome(&u.chrome, job.notesReq)
+				if u.chrome.NotesOpen {
+					u.overlayDirty = true
+					// windows uses different dirty flags — requestPaint covers it
+				}
+				u.markChromeDirty()
+				u.requestPaint()
+				if job.notesOut != nil {
+					job.notesOut <- res
+				}
+			} else {
+				err := u.submitOnUIThread(job.tabID, job.line)
+				if job.done != nil {
+					job.done <- err
+				}
 			}
 		default:
 			return
@@ -1494,30 +1775,7 @@ func (u *winUI) submitOnUIThread(tabID int, line string) error {
 	if !t.alive.Load() {
 		return fmt.Errorf("tab not alive")
 	}
-	display, payload := expandBarSubmit(line, t.shell)
-	// Prefer bar path so draft/history stay consistent when line matches.
-	if stringsTrimSpace(display) != "" {
-		// Fold previous live output into history so this block owns the next run.
-		t.sb.commitLive(t.term)
-		blockCols := u.cols
-		if g := u.paneGeomFor(t.id); g != nil && g.cols > 0 {
-			blockCols = g.cols
-		}
-		t.sb.pushBlock(display, blockCols, t.cwd)
-		if next, ok := cwdAfterCommand(t.cwd, payload); ok {
-			t.setCwd(next)
-		}
-		t.echo.arm(payload)
-		if isClearCommand(payload) {
-			t.sb.pinHere()
-		}
-	}
-	if strings.Contains(payload, "\n") {
-		payload = strings.ReplaceAll(payload, "\n", "\r\n")
-	}
-	t.sendKey([]byte(payload + "\r"))
-	t.sb.stickBottom()
-	u.publishBridgeSnapshot()
+	u.submitBarLine(t, line)
 	win.InvalidateRect(u.hwnd, nil, false)
 	return nil
 }
@@ -1732,6 +1990,16 @@ func (u *winUI) hitPlus(px int32) bool {
 	return cellX >= b[0] && cellX < b[1]
 }
 
+func (u *winUI) hitCaffeine(px int32) bool {
+	u.syncChrome()
+	cellX := u.pixelToChromeCol(px)
+	if cellX < 0 {
+		return false
+	}
+	b := u.chrome.CaffeineBounds()
+	return cellX >= b[0] && cellX < b[1]
+}
+
 // hitPaneTitleBar returns the multi-pane mini-title row under (px,py), if any.
 func (u *winUI) hitPaneTitleBar(px, py int32, layouts []paneGeom) *paneGeom {
 	for i := range layouts {
@@ -1771,6 +2039,25 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
 			u.clearToastIfDue()
+			// Inject async clipboard paste results (image dump runs off-thread).
+			u.drainPendingPaste()
+			for _, t := range u.allPanes() {
+				if t != nil && !t.altScreen() && t.queueLen() > 0 {
+					u.tryFlushCmdQueue(t)
+				}
+			}
+			if msg := caffeineTick(u.caffeine); msg != "" {
+				u.toast(msg)
+				u.markChromeDirty()
+				u.syncChrome()
+			} else if u.caffeine != nil && u.caffeine.Active() {
+				hint := u.caffeine.StripLabel()
+				if hint != u.lastCaffeineHint {
+					u.lastCaffeineHint = hint
+					u.chrome = syncCaffeineChrome(u.chrome, u.caffeine)
+					u.chromeDirty = true
+				}
+			}
 			// Ease scrollback visual → offset (macOS does this in ebiten Update;
 			// without it, wheel only moves offset and the view stays stuck).
 			// Dim modals hide the shell; palette keeps a live shell underneath.
@@ -1801,9 +2088,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.spinTick%uint64(tabSpinEveryNTicks*4) == 0 {
 				u.postLayoutSettle()
 			}
-			// Dim modals: throttle (settings rain) or chrome-dirty only.
-			// Palette floats over live shell — keep full-rate repaints so PTY
-			// output and cursor blink still update under the card.
+			// Paint policy (macOS input-only parity):
+			// - Scroll / shell anim / alt-screen cursor → full paint
+			// - Warp bar caret / sticky inputOnlyDirty → bar-only (no grid blit)
+			// Full 25fps grid+matrix paints made bar typing feel laggy.
 			if u.dimShellModal() {
 				if u.chrome.SettingsOpen {
 					if u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
@@ -1812,10 +2100,28 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				} else if u.chromeDirty {
 					u.requestPaint()
 				}
-			} else {
+			} else if needScrollPaint {
+				u.markShellDirty()
 				u.requestPaint()
+			} else if u.inputOnlyDirty {
+				// Sticky bar-only after typing. If ambient is on, unstick every
+				// few ticks so underlays keep animating on the normal shell
+				// (not only under Grok) without full-painting every keystroke.
+				if u.shellAmbientOn() && u.spinTick%uint64(tabSpinEveryNTicks*3) == 0 {
+					u.markShellDirty()
+				}
+				u.requestPaint()
+			} else if u.chrome.OverlayOpen() {
+				// Palette/help float over a live shell — need full composite.
+				u.requestPaint()
+			} else if u.needsShellAnimPaint() {
+				// Ambient / alt caret / intro: always full paint.
+				// Never call requestInputPaint here — sticky input-only freezes ambient.
+				u.requestPaint()
+			} else {
+				// Idle shell, no ambient: only pulse the Warp caret.
+				u.requestInputPaint()
 			}
-			_ = needScrollPaint
 		}
 		return 0
 
@@ -1910,6 +2216,21 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.inSizeMove = true
 		log.Debug("WM_ENTERSIZEMOVE")
 		return 0
+
+	case win.WM_SIZING:
+		// Soft magnetic snap to ½ / ⅓ / ¼ / ⅔ / ¾ / full of the monitor work area.
+		// Small threshold so the magnet lets go easily when dragging past.
+		if lParam == 0 {
+			return 1
+		}
+		r := (*win.RECT)(unsafe.Pointer(lParam))
+		if workL, workT, workR, workB, ok := u.monitorWorkArea(); ok {
+			l, top, rt, bot := int(r.Left), int(r.Top), int(r.Right), int(r.Bottom)
+			if softSnapRect(&l, &top, &rt, &bot, int(wParam), workL, workT, workR, workB, softSnapThresholdPx) {
+				r.Left, r.Top, r.Right, r.Bottom = int32(l), int32(top), int32(rt), int32(bot)
+			}
+		}
+		return 1 // TRUE = we may have modified the rect
 
 	case win.WM_EXITSIZEMOVE:
 		// Do almost nothing here. applyClientSize / ConPTY / backbuffer work on
@@ -2008,9 +2329,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				in.insertRune(ch)
 				if in.visualRows(u.inputContentCols()) != prevRows {
 					u.maybeResizeForInput()
+					u.markShellDirty() // bar height change reflows shell
+					u.requestPaint()
+				} else {
+					u.requestInputPaint()
 				}
+			} else {
+				u.requestPaint()
 			}
-			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
 
@@ -2092,6 +2418,27 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 						u.persistNotesIfDirty()
 						return 0
 					}
+					// Ctrl+Backspace / Ctrl+Delete: delete word.
+					if wParam == win.VK_BACK {
+						m := u.chrome
+						m.NotesDeleteWord(-1)
+						u.chrome = m
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+						u.persistNotesIfDirty()
+						return 0
+					}
+					if wParam == win.VK_DELETE {
+						m := u.chrome
+						m.NotesDeleteWord(1)
+						u.chrome = m
+						u.overlayDirty = true
+						u.overlayCells = nil
+						win.InvalidateRect(hwnd, nil, false)
+						u.persistNotesIfDirty()
+						return 0
+					}
 				}
 			}
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
@@ -2143,6 +2490,25 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.openHelpSafe()
 			return 0
 		}
+		// Zoom: Ctrl++ / Ctrl+- / Ctrl+0 (and numpad ±). Works over overlays.
+		if ctrl && !alt {
+			switch wParam {
+			case win.VK_OEM_PLUS, win.VK_ADD: // =/+ key or numpad +
+				// Shift optional: Ctrl+= and Ctrl+Shift+= both zoom in.
+				u.zoomFont(+1)
+				return 0
+			case win.VK_OEM_MINUS, win.VK_SUBTRACT:
+				if !shift {
+					u.zoomFont(-1)
+					return 0
+				}
+			case '0', win.VK_NUMPAD0:
+				if !shift {
+					u.zoomFontReset()
+					return 0
+				}
+			}
+		}
 		if ctrl && shift && (wParam == 'T' || wParam == 't') {
 			u.newTabUI("")
 			return 0
@@ -2178,9 +2544,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				return 0
 			}
 		}
-		// Pane focus: Alt+arrows (WT-style) and Ctrl+Alt+arrows.
-		// Not Alt+Shift (reserved for split keys). Geometric neighbor pick.
-		if alt && !shift {
+		// Pane focus: Alt+arrows (Windows Terminal style). Word-jump is Ctrl+arrows
+		// (handled in the input bar / notes paths below). Not Alt+Shift (splits).
+		if alt && !shift && !ctrl {
 			switch wParam {
 			case win.VK_LEFT:
 				u.focusPaneDir(0)
@@ -2268,14 +2634,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				return 0
 			}
 			// Ctrl+V / Shift+Insert paste into the PTY, not the bar.
+			// Route through pasteClipboard so image + bracketed paste match darwin.
 			if (ctrl && !shift && (wParam == 'V' || wParam == 'v')) ||
 				(shift && !ctrl && wParam == win.VK_INSERT) {
-				if text, err := getClipboardText(hwnd); err == nil && text != "" {
-					// Normalize newlines for PTY paste.
-					payload := strings.ReplaceAll(text, "\r\n", "\n")
-					payload = strings.ReplaceAll(payload, "\n", "\r")
-					u.sendKey([]byte(payload))
-				}
+				u.pasteClipboard()
 				return 0
 			}
 			if b := ptyKeyFromWin(tab.term, &tab.kitty, wParam, ctrl, shift, alt); len(b) > 0 {
@@ -2284,7 +2646,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 
-		// Ctrl+C: copy selection, else clear bar, else interrupt PTY.
+		// Ctrl+C: copy selection, else clear bar, else interrupt PTY + drop queue.
 		if ctrl && !shift && (wParam == 'C' || wParam == 'c') {
 			in := u.activeInput()
 			if tab != nil && !tab.sel.empty() {
@@ -2292,8 +2654,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			} else if in != nil && len(in.runes) > 0 {
 				in.clear()
 				u.maybeResizeForInput()
-				win.InvalidateRect(hwnd, nil, false)
+				u.markShellDirty()
+				u.requestPaint()
 			} else {
+				if tab != nil {
+					if n := tab.clearCmdQueue(); n > 0 {
+						u.toast(fmt.Sprintf("cleared %d queued", n))
+					}
+				}
 				u.sendKey([]byte{0x03})
 			}
 			return 0
@@ -2302,6 +2670,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if ctrl && !shift && (wParam == 'V' || wParam == 'v') {
 			u.pasteClipboard()
 			return 0
+		}
+		// Shift+Enter / Alt+Enter → multiline in Warp bar BEFORE activeInput nil
+		// checks and before any path that might DefWindowProc (system beep).
+		// Use L/R shift bits too — some layouts report VK_SHIFT flaky mid-chord.
+		shiftDown := shift || win.GetKeyState(win.VK_LSHIFT) < 0 || win.GetKeyState(win.VK_RSHIFT) < 0
+		if !u.appOwnsKeyboard() && !ctrl && wParam == win.VK_RETURN && (shiftDown || alt) {
+			if in := u.activeInput(); in != nil {
+				u.warpBarInsertNewline(in)
+				return 0
+			}
 		}
 		if tab == nil {
 			return 0
@@ -2312,93 +2690,105 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		cols := u.inputContentCols()
 		// Warp input bar editing + shell scroll.
-		switch wParam {
-		case win.VK_RETURN:
-			if shift {
-				// Shift+Enter — new line in the bar (multiline script).
+		// Ctrl+←/→ word jump; Ctrl+Backspace/Delete word delete (Windows native).
+		if ctrl && !alt {
+			switch wParam {
+			case win.VK_LEFT:
+				in.moveWordLeft()
+				u.requestInputPaint()
+				return 0
+			case win.VK_RIGHT:
+				in.moveWordRight()
+				u.requestInputPaint()
+				return 0
+			case win.VK_BACK:
 				prevRows := in.visualRows(cols)
-				in.insertNewline()
+				in.deleteWordLeft()
 				if in.visualRows(cols) != prevRows {
 					u.maybeResizeForInput()
+					u.markShellDirty()
+					u.requestPaint()
+				} else {
+					u.requestInputPaint()
 				}
-				win.InvalidateRect(hwnd, nil, false)
+				return 0
+			case win.VK_DELETE:
+				prevRows := in.visualRows(cols)
+				in.deleteWordRight()
+				if in.visualRows(cols) != prevRows {
+					u.maybeResizeForInput()
+					u.markShellDirty()
+					u.requestPaint()
+				} else {
+					u.requestInputPaint()
+				}
+				return 0
+			}
+		}
+		switch wParam {
+		case win.VK_RETURN:
+			if shiftDown {
+				// Shift+Enter — new line in the bar (multiline script).
+				u.warpBarInsertNewline(in)
 				return 0
 			}
 			line := in.submit()
 			u.maybeResizeForInput()
-			// Warp-style command block in scrollback, then send to PTY.
-			// Arm echo suppress so PS/cmd local-echo doesn't duplicate the block.
-			// Bare `cd` → home (PowerShell/cmd don't match bash bare-cd by default).
-			display, payload := expandBarSubmit(line, tab.shell)
-			if stringsTrimSpace(display) != "" {
-				// Previous command's output → history under its block first.
-				tab.sb.commitLive(tab.term)
-				blockCols := u.cols
-				if g := u.paneGeomFor(tab.id); g != nil && g.cols > 0 {
-					blockCols = g.cols
-				}
-				tab.sb.pushBlock(display, blockCols, tab.cwd)
-				// Best-effort cwd until the next prompt OSC arrives.
-				if next, ok := cwdAfterCommand(tab.cwd, payload); ok {
-					tab.setCwd(next)
-				}
-				tab.echo.arm(payload)
-				if isClearCommand(payload) {
-					tab.sb.pinHere()
-				}
-				log.Debug("submit arm echo", "tab", tab.id, "line", display, "payload", payload, "cwd", tab.cwd)
-			}
-			// Multi-line: send with real newlines; final CR executes.
-			if strings.Contains(payload, "\n") {
-				// PowerShell accepts multi-line paste ending in CR.
-				payload = strings.ReplaceAll(payload, "\n", "\r\n")
-			}
-			u.sendKey([]byte(payload + "\r"))
-			tab.sb.stickBottom()
-			u.publishBridgeSnapshot()
-			win.InvalidateRect(hwnd, nil, false)
+			u.submitBarLine(tab, line)
+			u.markShellDirty()
+			u.requestPaint()
 		case win.VK_UP:
 			if !in.moveVisualUp(cols) {
 				in.historyUp()
 			}
 			u.maybeResizeForInput()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_DOWN:
 			if !in.moveVisualDown(cols) {
 				in.historyDown()
 			}
 			u.maybeResizeForInput()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_RIGHT:
+			// zsh-autosuggest: → at EOL accepts the ghost suggestion.
+			if in.cursor >= len(in.runes) {
+				if in.acceptGhost(tab.cwd) {
+					u.maybeResizeForInput()
+					u.requestInputPaint()
+					break
+				}
+			}
 			in.moveRight()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_LEFT:
 			in.moveLeft()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_DELETE:
 			in.deleteForward()
 			u.maybeResizeForInput()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_HOME:
 			in.moveHome()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_END:
 			in.moveEnd()
-			win.InvalidateRect(hwnd, nil, false)
+			u.requestInputPaint()
 		case win.VK_PRIOR:
 			vr := u.rows
 			if g := u.focusedGeom(); g != nil && g.rows > 0 {
 				vr = g.rows
 			}
 			tab.sb.scrollBy(vr/2, vr)
-			win.InvalidateRect(hwnd, nil, false)
+			u.markShellDirty()
+			u.requestPaint()
 		case win.VK_NEXT:
 			vr := u.rows
 			if g := u.focusedGeom(); g != nil && g.rows > 0 {
 				vr = g.rows
 			}
 			tab.sb.scrollBy(-(vr / 2), vr)
-			win.InvalidateRect(hwnd, nil, false)
+			u.markShellDirty()
+			u.requestPaint()
 		case win.VK_ESCAPE:
 			if u.modalImage != nil {
 				u.modalImage = nil
@@ -2425,29 +2815,46 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_SYSKEYDOWN:
-		// Alt+key arrives as SYSKEYDOWN. Forward modified Enter (and other app
-		// keys) to alt-screen TUIs so Grok gets Alt+Enter as newline.
+		// Alt+key arrives as SYSKEYDOWN. Never DefWindowProc for keys we own —
+		// that is what plays the Windows "ding" on Alt+Enter.
+		ctrl := win.GetKeyState(win.VK_CONTROL) < 0
+		shift := win.GetKeyState(win.VK_SHIFT) < 0 || win.GetKeyState(win.VK_LSHIFT) < 0 || win.GetKeyState(win.VK_RSHIFT) < 0
+		alt := win.GetKeyState(win.VK_MENU) < 0
+		// Alt+Enter in Warp bar → multiline (same as Shift+Enter).
+		if alt && !ctrl && wParam == win.VK_RETURN && !u.appOwnsKeyboard() {
+			if in := u.activeInput(); in != nil {
+				u.warpBarInsertNewline(in)
+				return 0
+			}
+		}
+		// Alt+Enter (and other app keys) → alt-screen TUIs (Grok newline).
 		if u.appOwnsKeyboard() {
 			tab := u.activeTab()
 			if tab != nil {
-				ctrl := win.GetKeyState(win.VK_CONTROL) < 0
-				shift := win.GetKeyState(win.VK_SHIFT) < 0
-				alt := win.GetKeyState(win.VK_MENU) < 0
 				if b := ptyKeyFromWin(tab.term, &tab.kitty, wParam, ctrl, shift, alt); len(b) > 0 {
 					u.sendKey(b)
 					return 0
 				}
 			}
 		}
-		return win.DefWindowProc(hwnd, msg, wParam, lParam)
+		// Swallow unhandled syskeys so Windows does not beep.
+		return 0
+
+	case win.WM_SYSCHAR:
+		// Companion to SYSKEYDOWN — DefWindowProc would beep on Alt+letter/Enter.
+		return 0
 
 	case win.WM_MOUSEWHEEL:
-		tab := u.activeTab()
-		if tab == nil {
-			return 0
+		// Prefer the pane under the cursor so split layouts scroll the hovered leaf.
+		var pt win.POINT
+		if win.GetCursorPos(&pt) {
+			win.ScreenToClient(hwnd, &pt)
 		}
-		// Full-screen apps own the surface — don't scroll host history under them.
-		if tab.altScreen() {
+		tab := u.tabUnderPoint(pt.X, pt.Y)
+		if tab == nil {
+			tab = u.activeTab()
+		}
+		if tab == nil {
 			return 0
 		}
 		delta := int16(wParam >> 16)
@@ -2459,12 +2866,23 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				steps = -1
 			}
 		}
+		// Win32: positive delta = wheel away = scroll up.
 		viewRows := u.rows
-		if g := u.focusedGeom(); g != nil && g.rows > 0 {
+		if g := u.paneGeomFor(tab.id); g != nil && g.rows > 0 {
 			viewRows = g.rows
 		}
+		if tab.altScreen() {
+			// Full-screen apps own the surface — never host history under them.
+			// Forward wheel as SGR mouse (if tracking) or arrow keys (Grok, vim, …).
+			cx, cy, _ := u.pixelToCellInPane(pt.X, pt.Y, tab)
+			if b := encodeMouseWheel(tab.term, cx+1, cy+1, steps*3); len(b) > 0 {
+				tab.sendKey(b) // hovered pane's PTY, even if unfocused
+			}
+			return 0
+		}
 		tab.sb.scrollBy(steps*3, viewRows)
-		win.InvalidateRect(hwnd, nil, false)
+		u.inputOnlyDirty = false
+		u.requestPaint()
 		return 0
 
 	case win.WM_LBUTTONDBLCLK:
@@ -2543,6 +2961,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					u.chrome = r.Model
 					u.overlayDirty = true
 					u.overlayCells = nil
+					u.notesDragging = r.StartNotesDrag
+					if u.notesDragging {
+						win.SetCapture(hwnd)
+					}
 					u.persistNotesIfDirty()
 					win.InvalidateRect(hwnd, nil, false)
 				}
@@ -2572,9 +2994,20 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 
-		// Top tab strip / + chip.
+		// Top tab strip / + chip / caffeine cup.
 		if py < chromeH {
 			if py < tabStripH {
+				if u.hitCaffeine(px) {
+					if msg, ok := applyCaffeineAction(u.caffeine, chrome.ActionCaffeineToggle, 0); ok {
+						if msg != "" {
+							u.toast(msg)
+						}
+						u.markChromeDirty()
+						u.syncChrome()
+						win.InvalidateRect(hwnd, nil, false)
+					}
+					return 0
+				}
 				if u.hitPlus(px) {
 					u.newTabUI("")
 					return 0
@@ -2626,6 +3059,17 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.focus()
 			return 0
 		}
+		// Ctrl+click a URL → open in the system browser (works on alt-screen too).
+		ctrlClick := win.GetKeyState(win.VK_CONTROL) < 0
+		altClick := win.GetKeyState(win.VK_MENU) < 0
+		shiftClick := win.GetKeyState(win.VK_SHIFT) < 0
+		if ctrlClick && !altClick && !shiftClick {
+			if url := u.linkURLAt(px, py); url != "" {
+				openURLInBrowser(url)
+				u.toast("opened link")
+				return 0
+			}
+		}
 		// Grok / alt-screen: click near "[Open Image]" or a path opens a modal.
 		// Primary shell: click an image block opens the same modal.
 		if u.tryOpenImageModalAt(px, py) {
@@ -2633,7 +3077,17 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 		if tab.altScreen() {
-			// Let the app own the click (no host selection over Grok).
+			// Forward left-click to the TUI when mouse tracking is on (buttons).
+			if mouseTracking(tab.term) {
+				cx, cy, _ := u.pixelToCellInPane(px, py, tab)
+				col, row := cx+1, cy+1
+				if b := encodeMouseButton(tab.term, col, row, 0, true); len(b) > 0 {
+					tab.sendKey(b)
+					u.altMouseDown = true
+					u.altMouseCol, u.altMouseRow = col, row
+					win.SetCapture(hwnd)
+				}
+			}
 			return 0
 		}
 		x, y, viewRows := u.pixelToCellInPane(px, py, tab)
@@ -2649,6 +3103,17 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_MOUSEMOVE:
 		px := int32(win.LOWORD(uint32(lParam)))
 		py := int32(win.HIWORD(uint32(lParam)))
+		// Link hover (hand cursor + primary tint) when not dragging.
+		if u.sashDrag == nil && !u.selecting && !u.notesDragging {
+			u.updateLinkHover(px, py)
+		}
+		// Alt-screen: SGR motion for Grok button hover (1003) / drag (1002).
+		if tab := u.activeTab(); tab != nil && tab.altScreen() && !u.chrome.OverlayOpen() {
+			left := u.altMouseDown || (wParam&win.MK_LBUTTON) != 0
+			u.maybeSendAltMouseMotion(tab, px, py, left)
+		} else {
+			u.altMouseCol, u.altMouseRow = 0, 0
+		}
 		// Live sash resize: update ratio, reflow (no-op resize when size stable).
 		if u.sashDrag != nil && (wParam&win.MK_LBUTTON) != 0 {
 			applySashDrag(*u.sashDrag, px, py)
@@ -2656,6 +3121,29 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if u.width > 0 && u.height > 0 {
 				u.applyClientSize(u.width, u.height)
 			}
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+		// Notes drag-select.
+		if u.notesDragging && u.chrome.NotesOpen && (wParam&win.MK_LBUTTON) != 0 {
+			cw, ch := u.metricW, u.metricH
+			if cw < 1 {
+				cw = cellW
+			}
+			if ch < 1 {
+				ch = cellH
+			}
+			var rect win.RECT
+			win.GetClientRect(hwnd, &rect)
+			oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
+			cx := int(px / cw)
+			cy := int((py - oy) / ch)
+			r := u.chrome.UpdateChrome(chrome.NotesDragMsg{
+				CellX: cx, CellY: cy, Cols: u.cols,
+			})
+			u.chrome = r.Model
+			u.overlayDirty = true
+			u.overlayCells = nil
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
@@ -2687,6 +3175,26 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			// Final settle so ConPTY matches the dragged sizes cleanly.
 			u.postLayoutSettle()
 			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+		if u.notesDragging {
+			u.notesDragging = false
+			win.ReleaseCapture()
+			u.persistNotesIfDirty()
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
+		if u.altMouseDown {
+			u.altMouseDown = false
+			px := int32(win.LOWORD(uint32(lParam)))
+			py := int32(win.HIWORD(uint32(lParam)))
+			if t := u.activeTab(); t != nil && t.altScreen() && mouseTracking(t.term) {
+				cx, cy, _ := u.pixelToCellInPane(px, py, t)
+				if b := encodeMouseButton(t.term, cx+1, cy+1, 0, false); len(b) > 0 {
+					t.sendKey(b)
+				}
+			}
+			win.ReleaseCapture()
 			return 0
 		}
 		tab := u.activeTab()
@@ -2731,6 +3239,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.persistNotes()
 		log.Info("WM_DESTROY — tearing down", "tabs", len(u.tabs))
 		u.alive.Store(false)
+		if u.caffeine != nil {
+			u.caffeine.Close()
+		}
 		if u.bridge != nil {
 			u.bridge.Stop()
 		}
@@ -2889,6 +3400,32 @@ func (u *winUI) paint(hwnd win.HWND) {
 			win.SelectObject(dest, oldF)
 			return
 		}
+		// Notes-style scoping for the Warp bar: when only bar text/caret changed,
+		// leave the shell grid in memDC and re-paint bars (and chrome if dirty).
+		// Shell rain freezes while we stay here — acceptable, same tradeoff as
+		// notes overlay scoping so typing does not re-blit the whole grid.
+		if u.inputOnlyDirty && !overlay && !dimModal &&
+			!u.matrixIntroActive() &&
+			u.memDC != 0 && dest == u.memDC && u.font != 0 &&
+			u.memW == w && u.memH == h {
+			oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
+			if u.chromeDirty {
+				u.paintChrome(dest, rect)
+			}
+			u.paintInputBar(dest, rect)
+			u.paintImageModal(dest, rect)
+			win.SelectObject(dest, oldF)
+			// Keep inputOnlyDirty sticky until markShellDirty so blink ticks
+			// also take this path (caret pulse without re-blitting the grid).
+			// Drop a stale overlayDirty left over from markChromeDirty while the
+			// card was closed — nothing else clears it without paintOverlay.
+			if !u.chrome.OverlayOpen() {
+				u.overlayDirty = false
+			}
+			return
+		}
+		// Full paint path — shell is authoritative again.
+		u.inputOnlyDirty = false
 
 		// Void fill once; per-pane blit draws cells only.
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.VoidR, chrome.VoidG, chrome.VoidB)}
@@ -2906,8 +3443,10 @@ func (u *winUI) paint(hwnd win.HWND) {
 		} else {
 			u.overlaySceneReady = false
 			// Shared dim rain under the whole shell region (not per-pane).
-			if u.shellMatrixOn() && !u.matrixIntroActive() {
-				u.paintShellMatrix(dest, rect, padY, shellBot)
+			// Also under alt-screen TUIs (Grok/vim): default-bg cells leave the
+			// underlay visible (same as the 硯 watermark).
+			if u.shellAmbientOn() && !u.matrixIntroActive() {
+				u.paintShellAmbient(dest, rect, padY, shellBot)
 			}
 			u.paintShellWatermark(dest, rect, padY, shellBot)
 
@@ -2920,12 +3459,21 @@ func (u *winUI) paint(hwnd win.HWND) {
 					viewRows = u.rows
 				}
 				grid := g.pane.sb.viewCells(g.pane.term, viewRows)
+				if g.pane == u.activeTab() && u.hoverLinkOK {
+					applyLinkHoverTint(grid, u.hoverLink)
+				}
 				cur := g.pane.term.Cursor()
 				curVis := g.pane.altScreen() && g.pane.term.CursorVisible() && g.focused
 				u.blitGridPane(dest, rect, grid, cur.X, cur.Y, curVis, g)
 				if !g.pane.altScreen() {
 					u.paintPaneImages(dest, rect, g)
 				}
+				// Grok prompt image previews (Kitty graphics APC) — over the cell grid.
+				u.paintKittyPlacements(dest, rect, g.pane, g.y, g.y+g.h)
+			}
+			// CRT scanlines over the grid so empty cells don't hide them.
+			if u.shellAmbientOn() && !u.matrixIntroActive() {
+				u.paintShellAmbientOver(dest, rect, padY, shellBot)
 			}
 			if len(layouts) > 1 {
 				u.paintPaneTitles(dest, layouts)
@@ -2936,6 +3484,10 @@ func (u *winUI) paint(hwnd win.HWND) {
 					switch strings.ToLower(strings.TrimSpace(u.cfg.Intro)) {
 					case config.IntroRipple:
 						u.paintRippleIntro(dest, rect)
+					case config.IntroInkWash:
+						u.paintInkWashIntro(dest, rect)
+					case config.IntroCRT:
+						u.paintCRTIntro(dest, rect)
 					case config.IntroNone:
 						if time.Now().After(u.matrixIntroSpawnEnd) {
 							u.finishMatrixIntro()
@@ -2996,6 +3548,8 @@ func configVisualEqual(a, b config.Config) bool {
 		a.ShellANSIMap == b.ShellANSIMap &&
 		a.Cursor == b.Cursor &&
 		strings.EqualFold(a.Intro, b.Intro) &&
+		strings.EqualFold(a.ShellAmbient, b.ShellAmbient) &&
+		a.ShellMatrixOpacity == b.ShellMatrixOpacity &&
 		strings.EqualFold(a.ActiveProfile, b.ActiveProfile)
 }
 
@@ -3332,8 +3886,8 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 	// calls blitGrid directly).
 	fillRect(hdc, rect, win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)))
 	shellBot := u.shellBottomY(rect.Bottom - rect.Top)
-	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() {
-		u.paintShellMatrix(hdc, rect, padY, shellBot)
+	if u.shellAmbientOn() && !u.matrixIntroActive() && !u.dimShellModal() {
+		u.paintShellAmbient(hdc, rect, padY, shellBot)
 	}
 	u.paintShellWatermark(hdc, rect, padY, shellBot)
 	u.blitGridPane(hdc, rect, grid, curX, curY, curVis, g)
@@ -3745,12 +4299,19 @@ func (u *winUI) fillPaneBorder(hdc win.HDC, x, y, w, h, t int32, brush win.HBRUS
 // measureCellSize returns the monospaced cell size for the font selected in hdc.
 // GetTextExtent of "M" matches glyph advance better than TmAveCharWidth, which
 // is often 1px short and produces a visible grid of seams under selection.
+// Cell height always covers ascent+descent so descenders (j/g/y) are not clipped
+// by the next row's background fill.
 func measureCellSize(hdc win.HDC) (cw, ch int32) {
 	cw, ch = cellW, cellH
 	var tm win.TEXTMETRIC
 	if win.GetTextMetrics(hdc, &tm) {
 		if tm.TmHeight > 0 {
 			ch = tm.TmHeight
+		}
+		// Prefer explicit ink box when Height under-reports (some bitmap faces).
+		ink := tm.TmAscent + tm.TmDescent
+		if ink > 0 && ch < ink+1 {
+			ch = ink + 1
 		}
 		if tm.TmAveCharWidth > 0 {
 			cw = tm.TmAveCharWidth
@@ -4086,6 +4647,136 @@ func (u *winUI) pixelToCell(px, py int32) (x, y int) {
 	return x, y
 }
 
+// tabUnderPoint returns the leaf pane under client pixels on the active page.
+func (u *winUI) tabUnderPoint(px, py int32) *tab {
+	if u == nil {
+		return nil
+	}
+	layouts := u.lastPaneLayout
+	if len(layouts) == 0 {
+		layouts = u.computeActiveLayout()
+	}
+	if hi := hitPane(layouts, px, py); hi >= 0 && layouts[hi].pane != nil {
+		return layouts[hi].pane
+	}
+	if t := u.activeTab(); t != nil && len(layouts) <= 1 {
+		chromeH := u.chromePixelHeight()
+		if py >= chromeH {
+			shellBot := u.shellBottomY(u.height)
+			if py < shellBot {
+				return t
+			}
+		}
+	}
+	return nil
+}
+
+// updateLinkHover finds an http(s)/www URL under the cursor for primary tint + hand cursor.
+func (u *winUI) updateLinkHover(px, py int32) {
+	if u == nil {
+		return
+	}
+	clear := func() {
+		if u.hoverLinkOK || u.linkCursorOn {
+			u.hoverLinkOK = false
+			u.hoverLink = linkSpan{}
+			if u.linkCursorOn {
+				win.SetCursor(win.LoadCursor(0, win.MAKEINTRESOURCE(win.IDC_ARROW)))
+				u.linkCursorOn = false
+			}
+			u.markShellDirty()
+			u.requestPaint()
+		}
+	}
+	if u.chrome.OverlayOpen() || u.selecting || u.sashDrag != nil || u.notesDragging {
+		clear()
+		return
+	}
+	tab := u.activeTab()
+	if tab == nil {
+		clear()
+		return
+	}
+	if g := u.focusedGeom(); g != nil && g.barH > 0 && py >= g.barY {
+		clear()
+		return
+	}
+	x, y, viewRows := u.pixelToCellInPane(px, py, tab)
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
+	grid := tab.sb.viewCells(tab.term, viewRows)
+	span, ok := linkAt(findLinksInGrid(grid), x, y)
+	if !ok {
+		clear()
+		return
+	}
+	changed := !u.hoverLinkOK || u.hoverLink.url != span.url ||
+		u.hoverLink.row != span.row || u.hoverLink.x0 != span.x0 || u.hoverLink.x1 != span.x1
+	u.hoverLink = span
+	u.hoverLinkOK = true
+	if !u.linkCursorOn {
+		win.SetCursor(win.LoadCursor(0, win.MAKEINTRESOURCE(win.IDC_HAND)))
+		u.linkCursorOn = true
+	}
+	if changed {
+		u.markShellDirty()
+		u.requestPaint()
+	}
+}
+
+func (u *winUI) linkURLAt(px, py int32) string {
+	if u == nil || u.chrome.OverlayOpen() {
+		return ""
+	}
+	tab := u.activeTab()
+	if tab == nil {
+		return ""
+	}
+	if g := u.focusedGeom(); g != nil && g.barH > 0 && py >= g.barY {
+		return ""
+	}
+	x, y, viewRows := u.pixelToCellInPane(px, py, tab)
+	if viewRows < 1 {
+		viewRows = u.rows
+	}
+	grid := tab.sb.viewCells(tab.term, viewRows)
+	span, ok := linkAt(findLinksInGrid(grid), x, y)
+	if !ok {
+		return ""
+	}
+	return span.url
+}
+
+// maybeSendAltMouseMotion reports pointer moves for hover (1003) or drag (1002).
+func (u *winUI) maybeSendAltMouseMotion(t *tab, px, py int32, leftDown bool) {
+	if u == nil || t == nil || t.term == nil || !t.altScreen() {
+		return
+	}
+	if !mouseAnyMotion(t.term) && !(mouseDragMotion(t.term) && leftDown) {
+		return
+	}
+	if g := u.paneGeomFor(t.id); g != nil {
+		if px < g.x || px >= g.x+g.w || py < g.y || py >= g.y+g.h {
+			return
+		}
+		if g.barH > 0 && py >= g.barY {
+			return
+		}
+	}
+	cx, cy, _ := u.pixelToCellInPane(px, py, t)
+	col, row := cx+1, cy+1
+	if col == u.altMouseCol && row == u.altMouseRow {
+		return
+	}
+	b := encodeMouseMotion(t.term, col, row, leftDown)
+	if len(b) == 0 {
+		return
+	}
+	u.altMouseCol, u.altMouseRow = col, row
+	t.sendKey(b)
+}
+
 // pixelToCellInPane maps client pixels to cell coords within a pane's layout.
 // viewRows is the pane viewport height for scrollback absLine.
 func (u *winUI) pixelToCellInPane(px, py int32, tab *tab) (x, y, viewRows int) {
@@ -4141,15 +4832,17 @@ func (u *winUI) copySelection() {
 }
 
 func (u *winUI) pasteClipboard() {
-	text, err := getClipboardText(u.hwnd)
-	if err != nil || text == "" {
+	// Alt-screen (Grok, …): host delivers images. Clipboard PNG/DIB dump can be
+	// slow — never block the UI thread; finish on a worker and inject on blink.
+	if u.appOwnsKeyboard() {
+		if u.pasteBusy.Swap(true) {
+			return // already dumping a clipboard image
+		}
+		go u.pasteAltScreenAsync()
 		return
 	}
-	// Full-screen app: paste straight into ConPTY.
-	if u.appOwnsKeyboard() {
-		payload := strings.ReplaceAll(text, "\r\n", "\n")
-		payload = strings.ReplaceAll(payload, "\n", "\r")
-		u.sendKey([]byte(payload))
+	text, err := getClipboardText(u.hwnd)
+	if err != nil || text == "" {
 		return
 	}
 	in := u.activeInput()
@@ -4161,18 +4854,75 @@ func (u *winUI) pasteClipboard() {
 	in.insertRunes([]rune(text))
 	if in.visualRows(u.inputContentCols()) != prevRows {
 		u.maybeResizeForInput()
+		u.markShellDirty()
+		u.requestPaint()
+		return
 	}
-	if u.hwnd != 0 {
-		win.InvalidateRect(u.hwnd, nil, false)
+	u.requestInputPaint()
+}
+
+// pasteAltScreenAsync reads the clipboard off-thread and queues PTY inject.
+func (u *winUI) pasteAltScreenAsync() {
+	defer u.pasteBusy.Store(false)
+	if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
+		log.Info("paste clipboard image", "path", imgPath)
+		u.pendingPasteMu.Lock()
+		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(imgPath), toast: "image pasted"})
+		u.pendingPasteMu.Unlock()
+		return
+	} else if err != nil {
+		log.Debug("clipboard image read failed", "err", err)
+	}
+	text, _ := getClipboardText(u.hwnd)
+	var payload []byte
+	var toast string
+	if strings.TrimSpace(text) != "" {
+		payload = bracketedPaste(text)
+	} else {
+		// Empty board: Super+V CSI-u so Grok can still probe, else empty bracketed.
+		payload = bracketedPaste("")
+		toast = ""
+	}
+	u.pendingPasteMu.Lock()
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{
+		payload: payload, toast: toast,
+		preferSuperV: strings.TrimSpace(text) == "",
+	})
+	u.pendingPasteMu.Unlock()
+}
+
+// drainPendingPaste injects async paste results on the UI thread.
+func (u *winUI) drainPendingPaste() {
+	if u == nil {
+		return
+	}
+	u.pendingPasteMu.Lock()
+	batch := u.pendingPaste
+	u.pendingPaste = nil
+	u.pendingPasteMu.Unlock()
+	for _, p := range batch {
+		if p.preferSuperV {
+			if t := u.activeTab(); t != nil && t.kitty.active() {
+				t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
+				continue
+			}
+		}
+		if len(p.payload) > 0 {
+			u.sendKey(p.payload)
+		}
+		if p.toast != "" {
+			u.toast(p.toast)
+		}
 	}
 }
 
-// handleInputBackspace edits the Warp bar (rate-limited like the old PTY BS).
+// handleInputBackspace edits the Warp bar (rate-limited while held).
+// Do not drain the queue on "too soon" — that used to swallow all auto-repeat
+// KEYDOWNs and make hold-backspace feel dead.
 func (u *winUI) handleInputBackspace(hwnd win.HWND, lParam uintptr) {
 	wasDown := (uint32(lParam) & (1 << 30)) != 0
 	now := time.Now()
 	if wasDown && now.Sub(u.lastBackspace) < 30*time.Millisecond {
-		u.drainQueuedBackspaces(hwnd)
 		return
 	}
 	u.lastBackspace = now
@@ -4181,10 +4931,14 @@ func (u *winUI) handleInputBackspace(hwnd win.HWND, lParam uintptr) {
 		in.backspace()
 		if in.visualRows(u.inputContentCols()) != prevRows {
 			u.maybeResizeForInput()
+			u.markShellDirty()
+			u.requestPaint()
+		} else {
+			u.requestInputPaint()
 		}
+	} else {
+		u.requestPaint()
 	}
-	win.InvalidateRect(hwnd, nil, false)
-	u.drainQueuedBackspaces(hwnd)
 }
 
 func (u *winUI) drainQueuedBackspaces(hwnd win.HWND) {
@@ -4310,22 +5064,35 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	return true
 }
 
-// shellMatrixOn is true when settings ask for always-on shell rain.
-func (u *winUI) shellMatrixOn() bool {
-	return u != nil && u.cfg.ShellMatrix
+// needsShellAnimPaint is true when the shell underlay or alt-screen caret must
+// animate (full paint). Idle normal shells only need the Warp-bar caret.
+func (u *winUI) needsShellAnimPaint() bool {
+	if u == nil {
+		return false
+	}
+	if u.matrixIntroActive() || u.shellAmbientOn() {
+		return true
+	}
+	return u.anyAltScreenCursor()
 }
 
-// paintShellMatrix draws quiet looping rain under the shell (not over glyphs).
+// anyAltScreenCursor is true when a visible pane is on alt-screen with a
+// blinking app caret (Grok, vim, …).
+func (u *winUI) anyAltScreenCursor() bool {
+	for _, t := range u.allPanes() {
+		if t == nil || !t.altScreen() || t.term == nil {
+			continue
+		}
+		if t.term.CursorVisible() {
+			return true
+		}
+	}
+	return false
+}
+
+// paintShellMatrix is a rain-only alias kept for call-site clarity in comments/tests.
 func (u *winUI) paintShellMatrix(hdc win.HDC, rect win.RECT, padY, bot int32) {
-	if bot <= padY {
-		return
-	}
-	// Use blinkStart so rain keeps moving with the animation clock.
-	t0 := u.blinkStart
-	if t0.IsZero() {
-		t0 = time.Now()
-	}
-	u.paintDimMatrixIntensity(hdc, rect, padY, bot, matrixLoop, t0, 0, shellMatrixIntensity)
+	u.paintShellAmbient(hdc, rect, padY, bot)
 }
 
 // matrixIntroActive is true while startup rain is spawning or winding down.
@@ -4406,7 +5173,8 @@ func (u *winUI) paintMatrixIntro(hdc win.HDC, rect win.RECT) {
 }
 
 // paintDimShell darkens the shell viewport under a floating overlay.
-// Settings: animated Matrix rain. Other modals: Charm-style 猫咪 field.
+// Settings: Ambient showcase by default; Intro curtain when that row is focused.
+// Other modals: Charm-style 猫咪 field.
 // Restored from b78e569 (pre-session dim formula + dense grid).
 func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 	defer applog.Recover("paintDimShell", false)
@@ -4416,8 +5184,7 @@ func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 		return
 	}
 	if u.chrome.SettingsOpen {
-		// Continuous loop under settings (independent of intro).
-		u.paintMatrixMatteAndRain(hdc, rect, padY, bot, matrixLoop, u.blinkStart, 0)
+		u.paintSettingsUnderlay(hdc, rect, padY, bot)
 		return
 	}
 	// Non-settings overlays: theme dim + 猫咪 texture.
@@ -4428,6 +5195,120 @@ func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 		win.DeleteObject(win.HGDIOBJ(brush))
 	}
 	u.paintDimNekoField(hdc, rect, padY, bot)
+}
+
+// paintSettingsUnderlay fills the settings matte and previews Ambient (default)
+// or the focused Intro curtain behind the modal.
+func (u *winUI) paintSettingsUnderlay(hdc win.HDC, rect win.RECT, padY, bot int32) {
+	// Theme-tinted matte first (same base as paintMatrixMatteAndRain).
+	baseR, baseG, baseB := blendRGB(0, 0, 0, chrome.DimR, chrome.DimG, chrome.DimB, 0.35)
+	matteR, matteG, matteB := blendRGB(baseR, baseG, baseB,
+		chrome.PrimR, chrome.PrimG, chrome.PrimB, 0.05)
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(matteR, matteG, matteB)}
+	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+		r := win.RECT{Left: 0, Top: padY, Right: rect.Right, Bottom: bot}
+		fillRect(hdc, r, brush)
+		win.DeleteObject(win.HGDIOBJ(brush))
+	}
+
+	if u.chrome.SettingsShowcaseIntro() {
+		u.paintSettingsIntroPreview(hdc, rect, padY, bot)
+		return
+	}
+
+	// Default: showcase Ambient + Intensity behind the card.
+	if !u.shellAmbientOn() {
+		return
+	}
+	intensity := settingsAmbientShowcaseIntensity(u.cfg)
+	if intensity <= 0 {
+		return
+	}
+	switch u.cfg.ShellAmbient {
+	case config.AmbientRain:
+		u.paintDimMatrixIntensity(hdc, rect, padY, bot, matrixLoop, u.blinkStart, 0, intensity)
+	case config.AmbientCRT:
+		u.paintCRTAmbient(hdc, rect, padY, bot, intensity*0.9)
+	default:
+		u.paintAmbientGlyphs(hdc, rect, padY, bot, u.cfg.ShellAmbient, intensity)
+	}
+}
+
+// paintSettingsIntroPreview draws the focused Intro style under settings.
+// Uses shared cell helpers where possible so we never call finishMatrixIntro
+// (which would end a live startup curtain).
+func (u *winUI) paintSettingsIntroPreview(hdc win.HDC, rect win.RECT, padY, bot int32) {
+	style := config.Normalize(u.cfg).Intro
+	now := time.Now()
+	origin := u.blinkStart
+	if origin.IsZero() {
+		origin = now
+	}
+	// Loop finite curtains (ripple / ink / CRT) with a short gap; matrix loops forever.
+	cycle := matrixIntroSpawn + 800*time.Millisecond
+	if cycle < time.Second {
+		cycle = time.Second
+	}
+	phase := now.Sub(origin) % cycle
+	playT0 := now.Add(-phase)
+
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	rows := int((bot - padY + ch - 1) / ch)
+	cols := int((rect.Right + cw - 1) / cw)
+	col := themeAmbientColors()
+
+	switch style {
+	case config.IntroNone:
+		return
+	case config.IntroInkWash:
+		cells := inkWashCells(cols, rows, playT0, matrixIntroSpawn, now, col)
+		u.paintRainCellList(hdc, rect, padY, bot, cells)
+	case config.IntroCRT:
+		t := phase.Seconds()
+		sp := matrixIntroSpawn.Seconds()
+		if t < sp {
+			flash := 0.55
+			if t < 0.3 {
+				flash = 0.85
+			}
+			fade := 1.0
+			if t > sp*0.55 {
+				fade = 1 - (t-sp*0.55)/(sp*0.55)
+				if fade < 0 {
+					fade = 0
+				}
+			}
+			if fade > 0 {
+				u.paintCRTAmbient(hdc, rect, padY, bot, flash*fade)
+			}
+			cells := crtIntroCells(cols, rows, playT0, matrixIntroSpawn, now, col)
+			u.paintRainCellList(hdc, rect, padY, bot, cells)
+		}
+	case config.IntroRipple:
+		// Continuous-ish preview: matrix rain stands in for ring math here
+		// (full ripple painter mutates intro state). Still reads as motion.
+		// Prefer a short spawn+wind cycle via temporary intro fields without
+		// finishing if already done.
+		if u.matrixIntroDone {
+			savedStart, savedSpawn := u.matrixIntroStart, u.matrixIntroSpawnEnd
+			u.matrixIntroStart = playT0
+			u.matrixIntroSpawnEnd = playT0.Add(matrixIntroSpawn)
+			u.paintRippleIntro(hdc, rect)
+			u.matrixIntroStart, u.matrixIntroSpawnEnd = savedStart, savedSpawn
+			// paintRippleIntro may no-op finish when already done.
+		} else {
+			// Avoid mutating an active startup intro — show matrix instead.
+			u.paintDimMatrix(hdc, rect, padY, bot, matrixLoop, origin, 0)
+		}
+	default:
+		u.paintDimMatrix(hdc, rect, padY, bot, matrixLoop, origin, 0)
+	}
 }
 
 // paintMatrixMatteAndRain fills a dark theme-tinted matte then digital rain.

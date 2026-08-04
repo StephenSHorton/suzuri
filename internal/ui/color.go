@@ -83,24 +83,38 @@ type cellPix struct {
 }
 
 func glyphToCell(g vt10x.Glyph) cellPix {
-	// attrBold is unexported; Mode bit 1<<2 from vt10x state: attrBold = 1 << iota after reverse, underline
-	// From state.go: attrReverse, attrUnderline, attrBold, attrGfx, attrItalic, attrBlink, attrWrap
+	// Mode bits match vt10x/state.go (attrReverse=1<<0 … attrBold=1<<2 …).
 	const (
-		attrReverse = 1 << iota
-		attrUnderline
-		attrBold
-		attrGfx
-		attrItalic
-		attrBlink
-		attrWrap
+		attrReverse = 1 << 0
+		attrBold    = 1 << 2
 	)
 	bold := g.Mode&attrBold != 0
+	// vt10x setChar already swaps FG/BG into the stored glyph when reverse is
+	// set (and leaves Mode|attrReverse). Do not re-swap here — that undoes
+	// reverse video so selection highlights (SGR 7 / lipgloss Reverse) paint
+	// as normal text with a skipped black default BG (invisible on rain).
 	fr, fg, fb := colorToRGB(g.FG, bold)
 	br, bg, bb := colorToRGB(g.BG, false)
-	if g.Mode&attrReverse != 0 {
-		fr, br = br, fr
-		fg, bg = bg, fg
-		fb, bb = bb, fb
+	// Truecolor SGR ignores the bold brighten path in colorToRGB (only ANSI
+	// 0–7 step up). Grok list selection is often text_primary truecolor +
+	// SGR bold + optional bg_visual. When the host skips default-black BG
+	// (rain) and the TUI leaves selection BG as Reset, bold is the only
+	// difference — without a paint-time lift, arrowing the list is a no-op
+	// visually. Always brighten FG when bold so selection is visible even
+	// without a bold face or selection band.
+	if bold {
+		fr, fg, fb = brightenBoldRGB(fr, fg, fb)
+	}
+	// Reverse video always needs an opaque field. If the stored BG still
+	// resolves near-black (truecolor 0 collides with ANSI black; some TUIs
+	// reverse light-on-dark into dark-on-dark), force a light selection field
+	// so paint does not skip the fill under shell rain / transparent default BG.
+	if g.Mode&attrReverse != 0 && nearBlackRGB(br, bg, bb) {
+		br, bg, bb = 220, 220, 224
+		if nearBlackRGB(fr, fg, fb) {
+			// Both ends dark after convert — use dark ink on light field.
+			fr, fg, fb = 18, 18, 22
+		}
 	}
 	return cellPix{
 		Ch:   displayRune(g.Char),
@@ -112,6 +126,31 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 		BB:   bb,
 		Bold: bold,
 	}
+}
+
+func nearBlackRGB(r, g, b byte) bool {
+	return r < 28 && g < 28 && b < 28
+}
+
+// brightenBoldRGB is a paint-time stand-in for a bold face on truecolor /
+// already-bright ANSI ink (where colorToRGB cannot step the palette).
+// Pushes each channel ~35% toward white — enough to read as "selected" when
+// the only SGR difference is bold (Grok /resume rows).
+func brightenBoldRGB(r, g, b byte) (byte, byte, byte) {
+	return pushTowardWhite(r, 90), pushTowardWhite(g, 90), pushTowardWhite(b, 90)
+}
+
+func pushTowardWhite(c byte, amount int) byte {
+	if amount < 1 {
+		return c
+	}
+	// c + (255-c)*amount/255
+	d := (int(255-c) * amount) / 255
+	v := int(c) + d
+	if v > 255 {
+		return 255
+	}
+	return byte(v)
 }
 
 func displayRune(r rune) rune {
@@ -133,23 +172,32 @@ func displayRune(r rune) rune {
 	if isEastAsianRune(r) {
 		return r
 	}
-	// Status / spinner glyphs used by chrome (tab activity) and TUIs.
-	// Braille Patterns = the classic 6-dot cells (⠿ ⠋ …) every CLI uses.
-	if r >= 0x2800 && r <= 0x28FF {
+	// Common terminal / chrome UI symbol blocks (Gohu Nerd Font covers these).
+	switch {
+	case r >= 0x2190 && r <= 0x21FF: // Arrows: ← → ↑ ↓ ⇒ …
+		return r
+	case r >= 0x2200 && r <= 0x22FF: // Math: ∞ ≈ ≠ ≤ ≥ …
+		return r
+	case r >= 0x2300 && r <= 0x23FF: // Technical: ⌘ ⌥ ⌫ ⏎ …
+		return r
+	case r >= 0x2500 && r <= 0x259F: // Box / block drawing
+		return r
+	case r >= 0x25A0 && r <= 0x25FF: // Geometric: ● ○ ◉ ◆ ▶ …
+		return r
+	case r >= 0x2600 && r <= 0x26FF: // Misc symbols: ☕ ☀ …
+		return r
+	case r >= 0x2700 && r <= 0x27BF: // Dingbats: ✓ ✗ ❯ ✂ …
+		return r
+	case r >= 0x2800 && r <= 0x28FF: // Braille spinners
+		return r
+	case r >= 0x2000 && r <= 0x206F: // General punctuation: • — …
 		return r
 	}
-	// Geometric Shapes: ● ○ ◉ ◆ ◎ ◐ …
-	if r >= 0x25A0 && r <= 0x25FF {
-		return r
-	}
-	// Beyond Latin Extended-B: keep box-drawing / light punctuation; drop
-	// exotic scripts we cannot paint cleanly without per-script fallbacks.
-	if r > 0x024F &&
-		!(r >= 0x2500 && r <= 0x259F) && // box / block drawing
-		!(r >= 0x2000 && r <= 0x206F) { // general punctuation
+	// Latin / Greek used in TUIs (λ); drop other exotic scripts without fallbacks.
+	if r > 0x024F {
 		switch r {
-		case '✓', '✗', '→', '←', '▶', '❯', 'λ', '•':
-			return ' '
+		case 'λ', 'μ', 'π', 'Σ', 'Ω':
+			return r
 		default:
 			if !unicode.In(r, unicode.Latin, unicode.Common) {
 				return ' '

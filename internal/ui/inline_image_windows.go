@@ -143,6 +143,182 @@ func (u *winUI) paintTabImages(hdc win.HDC, rect win.RECT) {
 	u.paintPaneImages(hdc, rect, g)
 }
 
+// kittyHBMCache holds GDI bitmaps for Kitty graphics images (tabID, imageID).
+var kittyHBMCache = struct {
+	m map[kittyHBMKey]*imgBitmap
+}{m: map[kittyHBMKey]*imgBitmap{}}
+
+type kittyHBMKey struct {
+	tabID int
+	imgID uint32
+}
+
+func clearKittyHBMCache(tabID int) {
+	for k, b := range kittyHBMCache.m {
+		if k.tabID != tabID {
+			continue
+		}
+		if b != nil && b.hbm != 0 {
+			procDeleteObj.Call(uintptr(b.hbm))
+		}
+		delete(kittyHBMCache.m, k)
+	}
+}
+
+func kittyEnsureBitmap(hdc win.HDC, tabID int, imgID uint32, src image.Image) *imgBitmap {
+	if src == nil {
+		return nil
+	}
+	k := kittyHBMKey{tabID: tabID, imgID: imgID}
+	if b, ok := kittyHBMCache.m[k]; ok && b != nil && b.hbm != 0 {
+		return b
+	}
+	b := rgbaToHBITMAP(hdc, src)
+	if b == nil {
+		return nil
+	}
+	// Drop previous for this key if any.
+	if old, ok := kittyHBMCache.m[k]; ok && old != nil && old.hbm != 0 {
+		procDeleteObj.Call(uintptr(old.hbm))
+	}
+	kittyHBMCache.m[k] = b
+	return b
+}
+
+// paintKittyPlacements draws Grok/Kitty graphics protocol images over the
+// shell cell grid (prompt previews, inline media). Cell coords are 0-based.
+// Painted on alt-screen too (unlike scrollback path images).
+func (u *winUI) paintKittyPlacements(hdc win.HDC, rect win.RECT, t *tab, padY, shellBot int32) {
+	if hdc == 0 || t == nil || t.kittyGfx == nil {
+		return
+	}
+	places := t.kittyGfx.snapshotPlacements()
+	if len(places) == 0 {
+		return
+	}
+	cw, ch := int(u.metricW), int(u.metricH)
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	const padX = 4
+	// Stable paint order: lower z first so higher z draws on top.
+	ordered := append([]kittyPlace(nil), places...)
+	for i := 0; i < len(ordered); i++ {
+		for j := i + 1; j < len(ordered); j++ {
+			if ordered[j].z < ordered[i].z {
+				ordered[i], ordered[j] = ordered[j], ordered[i]
+			}
+		}
+	}
+	memDC, _, _ := procCreateComp.Call(uintptr(hdc))
+	if memDC == 0 {
+		return
+	}
+	defer procDeleteDC.Call(memDC)
+
+	clipL := rect.Left
+	clipR := rect.Right
+	clipT := padY
+	if clipT < rect.Top {
+		clipT = rect.Top
+	}
+	clipB := shellBot
+	if clipB > rect.Bottom {
+		clipB = rect.Bottom
+	}
+
+	for _, pl := range ordered {
+		img := t.kittyGfx.image(pl.id)
+		if img == nil {
+			continue
+		}
+		sb := img.Bounds()
+		// Optional source crop (Kitty x,y,w,h in pixels).
+		srcX, srcY, srcW, srcH := 0, 0, sb.Dx(), sb.Dy()
+		if pl.srcW > 0 && pl.srcH > 0 {
+			r := image.Rect(pl.srcX, pl.srcY, pl.srcX+pl.srcW, pl.srcY+pl.srcH).Intersect(sb)
+			if r.Empty() {
+				continue
+			}
+			srcX, srcY = r.Min.X-sb.Min.X, r.Min.Y-sb.Min.Y
+			srcW, srcH = r.Dx(), r.Dy()
+		}
+		if srcW < 1 || srcH < 1 {
+			continue
+		}
+		// Build HBITMAP from full image; StretchBlt crops via source rect.
+		bm := kittyEnsureBitmap(hdc, t.id, pl.id, img)
+		if bm == nil {
+			continue
+		}
+		px := int32(padX) + int32(pl.col*cw)
+		py := padY + int32(pl.row*ch)
+		boxW := pl.cols * cw
+		boxH := pl.rows * ch
+		if boxW < 4 || boxH < 4 {
+			continue
+		}
+		dw, dh := fitPreferNative(srcW, srcH, boxW, boxH)
+		if dw < 1 || dh < 1 {
+			continue
+		}
+		// Center in placement box.
+		ox := px + int32((boxW-dw)/2)
+		oy := py + int32((boxH-dh)/2)
+		// Clip to shell region.
+		dstL, dstT := ox, oy
+		dstR, dstB := ox+int32(dw), oy+int32(dh)
+		if dstL < clipL {
+			dstL = clipL
+		}
+		if dstT < clipT {
+			dstT = clipT
+		}
+		if dstR > clipR {
+			dstR = clipR
+		}
+		if dstB > clipB {
+			dstB = clipB
+		}
+		if dstR <= dstL || dstB <= dstT {
+			continue
+		}
+		// Adjust source when destination is clipped (uniform scale approximation).
+		drawW := int(dstR - dstL)
+		drawH := int(dstB - dstT)
+		old, _, _ := procSelectObj.Call(memDC, uintptr(bm.hbm))
+		win.SetStretchBltMode(hdc, halftone)
+		// Map crop into full bitmap space (image origin at 0,0 in HBITMAP).
+		sx, sy := srcX, srcY
+		if pl.srcW > 0 && pl.srcH > 0 {
+			sx, sy = pl.srcX, pl.srcY
+			if sx < 0 {
+				sx = 0
+			}
+			if sy < 0 {
+				sy = 0
+			}
+		}
+		procStretchBlt.Call(
+			uintptr(hdc),
+			uintptr(dstL),
+			uintptr(dstT),
+			uintptr(drawW),
+			uintptr(drawH),
+			memDC,
+			uintptr(sx),
+			uintptr(sy),
+			uintptr(srcW),
+			uintptr(srcH),
+			uintptr(srcCopy),
+		)
+		procSelectObj.Call(memDC, old)
+	}
+}
+
 // paintPaneImages draws scrollback images clipped to a pane layout rect.
 func (u *winUI) paintPaneImages(hdc win.HDC, rect win.RECT, g paneGeom) {
 	if hdc == 0 || g.pane == nil || g.pane.altScreen() {

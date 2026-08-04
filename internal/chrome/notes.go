@@ -59,10 +59,22 @@ type LoadNotesMsg struct {
 }
 
 // NotesDeleteMsg deletes the active note (or clears the last one).
-type NotesDeleteMsg struct{}
+// Force skips the interactive confirm (MCP / agent tools use Force: true).
+type NotesDeleteMsg struct {
+	Force bool
+}
 
 // NotesClickMsg is a host mouse click on the notes overlay grid (cell coords).
+// Places the caret in the editor body (or handles list/title hits).
 type NotesClickMsg struct {
+	CellX int
+	CellY int
+	Cols  int
+}
+
+// NotesDragMsg is a host mouse-drag while the button is held after a body click.
+// Extends the selection from the click anchor to the cell under the cursor.
+type NotesDragMsg struct {
 	CellX int
 	CellY int
 	Cols  int
@@ -155,16 +167,20 @@ func (m *Model) openNotes() {
 	if len(m.notesBank) == 0 {
 		m.initNotesBank(defaultNotesBank())
 	}
-	// Default: open the last active note in the editor (Esc → list).
-	m.notesFocus = notesFocusEditor
 	m.notesTitle = ""
 	m.notesClampCursor()
-	if m.notesSel < 0 {
-		m.notesSel = -1
-	}
-	// Place caret at end of the note body for immediate typing.
-	m.notesCursor = len(m.notesRunes)
 	m.notesSel = -1
+	// Blank active note (e.g. fresh Scratch): open title field first so the
+	// user names it before typing the body.
+	if m.activeNoteIsBlank() {
+		m.notesTitle = ""
+		m.notesFocus = notesFocusTitle
+		m.notesCursor = 0
+		return
+	}
+	// Default: open the last active note in the editor (Esc → list).
+	m.notesFocus = notesFocusEditor
+	m.notesCursor = len(m.notesRunes)
 	m.notesEnsureCursorVisible(0)
 }
 
@@ -202,7 +218,68 @@ func (m *Model) notesNew() {
 	m.notesActive = len(m.notesBank) - 1
 	m.loadActiveNoteIntoEditor()
 	m.notesDirty = true
-	m.beginNotesTitleEdit()
+	// Always open the editor screen with the title field focused and empty
+	// (not the body) so naming comes first.
+	m.notesTitle = ""
+	m.notesFocus = notesFocusTitle
+	m.notesCursor = 0
+	m.notesSel = -1
+}
+
+// activeNoteIsBlank is true when the active note has no title and no body.
+func (m Model) activeNoteIsBlank() bool {
+	if len(m.notesBank) == 0 {
+		return true
+	}
+	if m.notesActive < 0 || m.notesActive >= len(m.notesBank) {
+		return true
+	}
+	n := m.notesBank[m.notesActive]
+	if strings.TrimSpace(n.Title) != "" {
+		return false
+	}
+	if strings.TrimSpace(string(m.notesRunes)) != "" {
+		return false
+	}
+	if strings.TrimSpace(n.Body) != "" {
+		return false
+	}
+	return true
+}
+
+// openConfirmDeleteNote asks before removing/clearing the active note.
+// Notes stay open underneath; MCP/agent deletes call notesDeleteActive directly.
+func (m *Model) openConfirmDeleteNote() {
+	if !m.NotesOpen || len(m.notesBank) == 0 {
+		return
+	}
+	// Keep notes open; only tuck other modals.
+	m.PaletteOpen = false
+	m.SettingsOpen = false
+	m.HelpOpen = false
+	m.RenameOpen = false
+	m.SplashOpen = false
+
+	label := "this note"
+	if m.notesActive >= 0 && m.notesActive < len(m.notesBank) {
+		if t := NoteDisplayTitle(m.notesBank[m.notesActive]); t != "" {
+			label = t
+		}
+	}
+	body := fmt.Sprintf("Delete “%s”? This cannot be undone.", label)
+	yes := "Delete"
+	if len(m.notesBank) <= 1 {
+		body = fmt.Sprintf("Clear “%s”? The last note is emptied, not removed.", label)
+		yes = "Clear"
+	}
+	m.ConfirmOpen = true
+	m.confirm = confirmState{
+		title:     "Delete note?",
+		body:      body,
+		yesLabel:  yes,
+		noLabel:   "Cancel",
+		yesAction: ActionDeleteNote,
+	}
 }
 
 func (m *Model) notesDeleteActive() {
@@ -407,7 +484,8 @@ func (m *Model) handleNotesKey(msg tea.KeyMsg) {
 			m.notesNew()
 			return
 		case "d", "delete", "backspace":
-			m.notesDeleteActive()
+			// Interactive path: confirm before delete (MCP uses Force).
+			m.openConfirmDeleteNote()
 			return
 		case "f2", "r":
 			m.beginNotesTitleEdit()
@@ -508,11 +586,21 @@ func (m *Model) handleNotesEditorKey(msg tea.KeyMsg) {
 	case "ctrl+end", "ctrl+shift+end":
 		m.notesDocEnd(strings.Contains(s, "shift"))
 		return
-	case "ctrl+left", "ctrl+shift+left":
+	case "ctrl+left", "ctrl+shift+left", "alt+left", "alt+shift+left":
+		// Host sends Ctrl+←/→ for word jump (Windows parity on macOS too).
+		// alt+ variants kept for tea KeyMsg.Alt paths.
 		m.notesWordMove(-1, strings.Contains(s, "shift"))
 		return
-	case "ctrl+right", "ctrl+shift+right":
+	case "ctrl+right", "ctrl+shift+right", "alt+right", "alt+shift+right":
 		m.notesWordMove(1, strings.Contains(s, "shift"))
+		return
+	case "alt+backspace", "ctrl+h":
+		// Option/Ctrl+Backspace: delete previous word (macOS / Windows).
+		// Host may also call NotesDeleteWord directly for Ctrl+Backspace.
+		m.notesDeleteWord(-1)
+		return
+	case "alt+delete", "ctrl+delete":
+		m.notesDeleteWord(1)
 		return
 	default:
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
@@ -530,35 +618,43 @@ func (m *Model) handleNotesEditorKey(msg tea.KeyMsg) {
 }
 
 // handleNotesClick maps an overlay cell click into list / title / editor.
-func (m *Model) handleNotesClick(cellX, cellY, cols int) {
+// In the body, places the caret and clears selection (drag extends via NotesDragMsg).
+// Returns true when the host should start a body drag-select.
+func (m *Model) handleNotesClick(cellX, cellY, cols int) bool {
 	if !m.NotesOpen {
-		return
+		return false
 	}
 	m.computeNotesLayout(cols)
 	lay := m.notesLayout
 	if !lay.Valid {
-		return
+		return false
 	}
 	if cellX < lay.CardLeft || cellX >= lay.CardRight {
-		return
+		return false
 	}
 
-	// Editor screen: chrome title (above divider) renames; body focuses editor.
+	// Editor screen: chrome title (above divider) renames; body places caret.
 	if !lay.ListMode {
 		if lay.NameY >= 0 && cellY == lay.NameY {
 			m.beginNotesTitleEdit()
-			return
+			return false
 		}
 		if m.notesFocus == notesFocusTitle {
 			m.commitNotesTitle(true)
 		}
 		m.notesFocus = notesFocusEditor
-		return
+		if idx, ok := m.notesIndexAtCell(cellX, cellY, cols); ok {
+			m.notesCursor = idx
+			m.notesClearSel()
+			m.notesEnsureCursorVisible(0)
+			return true // host may drag-select from here
+		}
+		return false
 	}
 
 	// List screen: click a row to select + open editor.
 	if cellY < lay.BodyY0 || cellY >= lay.BodyY0+lay.BodyRows {
-		return
+		return false
 	}
 	row := cellY - lay.BodyY0
 	start := 0
@@ -570,6 +666,110 @@ func (m *Model) handleNotesClick(cellX, cellY, cols int) {
 		m.notesSelect(idx)
 		m.notesFocus = notesFocusEditor
 	}
+	return false
+}
+
+// handleNotesDrag extends the selection while the mouse is held in the body.
+func (m *Model) handleNotesDrag(cellX, cellY, cols int) {
+	if !m.NotesOpen || m.notesFocus == notesFocusList {
+		return
+	}
+	if m.notesFocus == notesFocusTitle {
+		return
+	}
+	m.notesFocus = notesFocusEditor
+	idx, ok := m.notesIndexAtCell(cellX, cellY, cols)
+	if !ok {
+		return
+	}
+	// First drag tick: anchor at the previous click caret if no selection yet.
+	if m.notesSel < 0 {
+		m.notesSel = m.notesCursor
+	}
+	m.notesCursor = idx
+	m.notesClampCursor()
+	m.notesEnsureCursorVisible(0)
+}
+
+// notesIndexAtCell maps an overlay cell to a rune index in the body (or false
+// when the click is outside the text band / body rows).
+func (m *Model) notesIndexAtCell(cellX, cellY, cols int) (int, bool) {
+	m.computeNotesLayout(cols)
+	lay := m.notesLayout
+	if !lay.Valid || lay.ListMode {
+		return 0, false
+	}
+	if cellY < lay.BodyY0 || cellY >= lay.BodyY0+lay.BodyRows {
+		return 0, false
+	}
+	textLeft := notesBodyTextLeft(cols)
+	wrapW := m.notesWrapW
+	if wrapW < 8 {
+		wrapW = 8
+	}
+	visCol := cellX - textLeft
+	if visCol < 0 {
+		visCol = 0
+	}
+	if visCol > wrapW {
+		visCol = wrapW
+	}
+	row := (cellY - lay.BodyY0) + m.notesScroll
+	if row < 0 {
+		row = 0
+	}
+	lines := notesSoftLines(m.notesRunes, wrapW)
+	if len(lines) == 0 {
+		return 0, true
+	}
+	if row >= len(lines) {
+		return len(m.notesRunes), true
+	}
+	ln := lines[row]
+	if visCol > ln.width {
+		visCol = ln.width
+	}
+	return notesIndexAtVisual(m.notesRunes, ln.start, ln.end, visCol), true
+}
+
+// NotesEditorActive is true when the notes body (or title) owns the keyboard.
+// Host uses this to start drag-select only over the editor, not the list.
+func (m Model) NotesEditorActive() bool {
+	return m.NotesOpen && (m.notesFocus == notesFocusEditor || m.notesFocus == notesFocusTitle)
+}
+
+// NotesDeleteWord deletes one word backward (dir < 0) or forward (dir > 0).
+// Used by host for Ctrl/Option+Backspace/Delete.
+func (m *Model) NotesDeleteWord(dir int) {
+	if m.notesFocus == notesFocusTitle {
+		return
+	}
+	if m.notesFocus != notesFocusEditor {
+		m.notesFocus = notesFocusEditor
+	}
+	m.notesDeleteWord(dir)
+}
+
+func (m *Model) notesDeleteWord(dir int) {
+	if m.notesDeleteSel() {
+		return
+	}
+	cur := m.notesCursor
+	bound := notesWordBoundary(m.notesRunes, cur, dir)
+	var lo, hi int
+	if dir < 0 {
+		lo, hi = bound, cur
+	} else {
+		lo, hi = cur, bound
+	}
+	if lo >= hi {
+		return
+	}
+	m.notesRunes = append(m.notesRunes[:lo], m.notesRunes[hi:]...)
+	m.notesCursor = lo
+	m.notesSel = -1
+	m.notesDirty = true
+	m.notesEnsureCursorVisible(0)
 }
 
 func (m *Model) notesInsert(s string) {
@@ -677,25 +877,36 @@ func (m *Model) notesDocEnd(extend bool) {
 
 func (m *Model) notesWordMove(dir int, extend bool) {
 	m.notesBeginExtend(extend)
-	i := m.notesCursor
-	n := len(m.notesRunes)
-	if dir < 0 {
-		for i > 0 && isNotesSpace(m.notesRunes[i-1]) {
-			i--
-		}
-		for i > 0 && !isNotesSpace(m.notesRunes[i-1]) {
-			i--
-		}
-	} else {
-		for i < n && !isNotesSpace(m.notesRunes[i]) {
-			i++
-		}
-		for i < n && isNotesSpace(m.notesRunes[i]) {
-			i++
-		}
-	}
-	m.notesCursor = i
+	m.notesCursor = notesWordBoundary(m.notesRunes, m.notesCursor, dir)
+	m.notesClampCursor()
 	m.notesEnsureCursorVisible(0)
+}
+
+// notesWordBoundary is the next/prev word edge from i (macOS/Windows style).
+func notesWordBoundary(runes []rune, i, dir int) int {
+	n := len(runes)
+	if i < 0 {
+		i = 0
+	}
+	if i > n {
+		i = n
+	}
+	if dir < 0 {
+		for i > 0 && isNotesSpace(runes[i-1]) {
+			i--
+		}
+		for i > 0 && !isNotesSpace(runes[i-1]) {
+			i--
+		}
+		return i
+	}
+	for i < n && !isNotesSpace(runes[i]) {
+		i++
+	}
+	for i < n && isNotesSpace(runes[i]) {
+		i++
+	}
+	return i
 }
 
 func isNotesSpace(r rune) bool {
@@ -1005,7 +1216,7 @@ func (m Model) renderNotesContextKeys(mainWidth, windowCols int) string {
 			{KeyUpDown(), "Move selection"},
 			{"Enter / click", "Open note"},
 			{"n", "New note"},
-			{"d / Delete", "Delete note"},
+			{"d / Delete", "Delete (asks first)"},
 			{"Esc", "Close notes"},
 			{KeyCtrlShift("M"), "Hide notes"},
 		}
@@ -1021,9 +1232,10 @@ func (m Model) renderNotesContextKeys(mainWidth, windowCols int) string {
 		rows = []struct{ key, desc string }{
 			{"Esc", "Back to list"},
 			{"↑ (top) / F2 / click title", "Edit name (above divider)"},
-			{"↓ / Enter from title", "Back to body"},
+			{"Click · drag", "Place caret · select"},
 			{KeyCtrl("A"), "Select all"},
 			{KeyCtrl("C") + " / " + KeyCtrl("X") + " / " + KeyCtrl("V"), "Copy / cut / paste"},
+			{"⌥/Ctrl+←→", "Word jump"},
 			{"Tab", "Insert tab"},
 			{KeyCtrlShift("M"), "Hide notes"},
 		}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/bridge"
+	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
 
 // RunStdio starts the MCP server on stdin/stdout. Logs go to stderr only.
@@ -135,8 +136,90 @@ func RunStdio() error {
 		}), nil, nil
 	})
 
+	// --- Notes bank (Ctrl+Shift+M) ---
+	// Prefer live GUI (flushes open editor); fall back to notes.json on disk.
+
+	type notesListArgs struct{}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "suzuri_notes_list",
+		Description: "List all suzuri notes (Ctrl+Shift+M bank): id, title, body, updated, active. Prefers the live GUI; falls back to notes.json if the GUI is down.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, _ notesListArgs) (*mcp.CallToolResult, any, error) {
+		return notesTool(bridge.NotesRequest{Op: bridge.NotesOpList}), nil, nil
+	})
+
+	type notesGetArgs struct {
+		ID string `json:"id,omitempty" jsonschema:"note id; omit or empty for the active note"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "suzuri_notes_get",
+		Description: "Get one suzuri note by id (full body). Omit id for the currently active note.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args notesGetArgs) (*mcp.CallToolResult, any, error) {
+		return notesTool(bridge.NotesRequest{Op: bridge.NotesOpGet, ID: args.ID}), nil, nil
+	})
+
+	type notesCreateArgs struct {
+		Title string `json:"title,omitempty" jsonschema:"optional title"`
+		Body  string `json:"body,omitempty" jsonschema:"note body text"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "suzuri_notes_create",
+		Description: "Create a new suzuri note (becomes active). Title optional; body is the full text. Syncs the open notes UI when the GUI is running.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args notesCreateArgs) (*mcp.CallToolResult, any, error) {
+		title, body := args.Title, args.Body
+		return notesTool(bridge.NotesRequest{
+			Op:    bridge.NotesOpCreate,
+			Title: &title,
+			Body:  &body,
+		}), nil, nil
+	})
+
+	type notesUpdateArgs struct {
+		ID        string  `json:"id,omitempty" jsonschema:"note id; omit for active note"`
+		Title     *string `json:"title,omitempty" jsonschema:"new title; omit to leave unchanged; empty string clears stored title"`
+		Body      *string `json:"body,omitempty" jsonschema:"new body; omit to leave unchanged"`
+		SetActive bool    `json:"set_active,omitempty" jsonschema:"make this note the active one"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "suzuri_notes_update",
+		Description: "Update an existing suzuri note (partial: title and/or body). Omit id for the active note. set_active makes it the current note.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args notesUpdateArgs) (*mcp.CallToolResult, any, error) {
+		if args.Title == nil && args.Body == nil && !args.SetActive {
+			return errResult(fmt.Errorf("notes_update: provide title, body, and/or set_active")), nil, nil
+		}
+		return notesTool(bridge.NotesRequest{
+			Op:        bridge.NotesOpUpdate,
+			ID:        args.ID,
+			Title:     args.Title,
+			Body:      args.Body,
+			SetActive: args.SetActive,
+		}), nil, nil
+	})
+
+	type notesDeleteArgs struct {
+		ID string `json:"id,omitempty" jsonschema:"note id; omit for active note"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "suzuri_notes_delete",
+		Description: "Delete a suzuri note by id (omit id = active). The last remaining note is cleared rather than removed.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args notesDeleteArgs) (*mcp.CallToolResult, any, error) {
+		return notesTool(bridge.NotesRequest{Op: bridge.NotesOpDelete, ID: args.ID}), nil, nil
+	})
+
 	logf("stdio MCP ready (attach to GUI via %s)", bridge.EndpointPath())
 	return server.Run(context.Background(), &mcp.StdioTransport{})
+}
+
+// notesTool prefers the live bridge (UI-thread, flushes editor); falls back to notes.json.
+func notesTool(req bridge.NotesRequest) *mcp.CallToolResult {
+	if c, err := bridge.Dial(); err == nil {
+		res, err := c.Notes(req)
+		if err == nil {
+			return textResult(res)
+		}
+		// Fall through to disk if bridge call fails mid-flight.
+	}
+	off := chrome.ApplyNotesDiskOp(string(req.Op), req.ID, req.Title, req.Body, req.SetActive)
+	return textResult(off)
 }
 
 func textResult(v any) *mcp.CallToolResult {

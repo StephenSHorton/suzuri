@@ -16,13 +16,14 @@ import (
 
 // softwarePainter rasterizes terminal cell grids into an RGBA buffer.
 type softwarePainter struct {
-	face     font.Face
-	cjkFace  font.Face
-	cellW    int
-	cellH    int
-	ascent   int
-	sizePx   float64
-	faceName string
+	face        font.Face
+	cjkFace     font.Face
+	symbolsFace font.Face // Apple Symbols — ☕ and other UI marks mono lacks
+	cellW       int
+	cellH       int
+	ascent      int
+	sizePx      float64
+	faceName    string
 }
 
 // newSoftwarePainter builds a painter for the settings face name + size.
@@ -36,10 +37,11 @@ func newSoftwarePainter(faceName string, sizePx int) *softwarePainter {
 	}
 	face := faceForName(faceName, float64(sizePx))
 	cjk := cjkFaceForSize(float64(sizePx))
+	sym := symbolsFaceForSize(float64(sizePx))
 	if face == nil && cjk == nil {
 		return &softwarePainter{
 			cellW: cellW, cellH: cellH, ascent: cellH - 4,
-			sizePx: float64(sizePx), faceName: faceName,
+			sizePx: float64(sizePx), faceName: faceName, symbolsFace: sym,
 		}
 	}
 	mFace := face
@@ -55,22 +57,49 @@ func newSoftwarePainter(faceName string, sizePx int) *softwarePainter {
 	if cw < 6 {
 		cw = 6
 	}
+	// Prefer font Height, but always reserve room for full ink (ascent+descent).
+	// Gohu @14 needs ~12 ascent + ~3 descent; a rounded Height of 14 left only
+	// 2px under the baseline and clipped j/g/y/p/q (and the next cell's BG
+	// fill covers any overflow).
+	ascent := m.Ascent.Round()
+	descent := m.Descent.Round()
+	if descent < 0 {
+		descent = -descent
+	}
 	ch := m.Height.Round()
+	minInk := ascent + descent
+	if minInk < 1 {
+		minInk = sizePx
+	}
+	// +1 so descenders never share a pixel row with the next cell's top edge.
+	if ch < minInk+1 {
+		ch = minInk + 1
+	}
 	if ch < sizePx {
 		ch = sizePx + 2
 	}
-	ascent := m.Ascent.Round()
 	if ascent < 1 {
-		ascent = ch - 4
+		ascent = ch - descent
+		if ascent < 1 {
+			ascent = ch - 4
+		}
+	}
+	// Keep baseline high enough that descent fits inside the cell.
+	if ascent+descent > ch {
+		ascent = ch - descent
+		if ascent < 1 {
+			ascent = 1
+		}
 	}
 	return &softwarePainter{
-		face:     face,
-		cjkFace:  cjk,
-		cellW:    cw,
-		cellH:    ch,
-		ascent:   ascent,
-		sizePx:   float64(sizePx),
-		faceName: faceName,
+		face:        face,
+		cjkFace:     cjk,
+		symbolsFace: sym,
+		cellW:       cw,
+		cellH:       ch,
+		ascent:      ascent,
+		sizePx:      float64(sizePx),
+		faceName:    faceName,
 	}
 }
 
@@ -109,9 +138,11 @@ type paintOpts struct {
 	SettingsOpen bool
 	// Intro / underlay (MatrixCells paint over the shell field after the grid).
 	MatrixCells   []rainCell
-	// ShellMatrixCells: quiet always-on rain UNDER shell glyphs (Windows ShellMatrix).
+	// ShellMatrixCells: quiet always-on rain/grain/waves UNDER shell glyphs.
 	ShellMatrixCells []rainCell
-	WatermarkFade    float64
+	// CRTScanlines: 0..1 intensity for horizontal scanlines + soft side vignette.
+	CRTScanlines  float64
+	WatermarkFade float64
 	// Sub-line smooth scroll (0..1): shift shell content up by frac*cellH.
 	ScrollFrac float64
 	// Scrollbar (host-drawn; Charm has no native host scrollbar).
@@ -156,8 +187,8 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		fillRectRGBA(dst, 0, padY, w, shellBot-padY, 0, 0, 0)
 	}
 
-	// Always-on shell rain under glyphs (Windows paintShellMatrix order).
-	// Skip when a dim modal matte will cover the field.
+	// Always-on shell ambient under glyphs (grain/waves/fireflies/rain).
+	// CRT scanlines paint AFTER the grid so empty cells don't hide them.
 	if len(o.ShellMatrixCells) > 0 && !o.DimShell {
 		p.paintMatrixRain(dst, padY, shellBot, o.ShellMatrixCells)
 	}
@@ -240,17 +271,31 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		p.paintShellImages(dst, o, padY, shellBot, yShift)
 	}
 
-	// Matrix rain (intro or settings underlay) over the shell field.
-	if len(o.MatrixCells) > 0 {
-		if o.SettingsOpen || o.DimShell {
-			// Matte first for settings underlay.
-			fillShellMatte(dst, padY, shellBot, true)
+	// CRT scanlines over the live shell grid (not under dim matte).
+	if o.CRTScanlines > 0.01 && !o.DimShell {
+		p.paintCRTScanlines(dst, padY, shellBot, o.CRTScanlines)
+	}
+
+	// Intro / settings underlay over the shell field.
+	// Settings default: Ambient showcase (MatrixCells / CRTScanlines).
+	// Settings + Intro focused: startup curtain preview (MatrixCells).
+	if o.SettingsOpen || (o.DimShell && len(o.MatrixCells) > 0) {
+		// Theme matte so rain/ambient read on a dark field (not live shell).
+		fillShellMatte(dst, padY, shellBot, true)
+		if len(o.MatrixCells) > 0 {
+			p.paintMatrixRain(dst, padY, shellBot, o.MatrixCells)
 		}
-		p.paintMatrixRain(dst, padY, shellBot, o.MatrixCells)
+		// CRT ambient / CRT intro scanlines on the matte.
+		if o.SettingsOpen && o.CRTScanlines > 0.01 {
+			p.paintCRTScanlines(dst, padY, shellBot, o.CRTScanlines)
+		}
 	} else if o.DimShell && !o.SettingsOpen {
 		// Non-settings overlay: dim matte + 猫咪 texture.
 		fillShellMatte(dst, padY, shellBot, false)
 		p.paintDimNekoField(dst, padY, shellBot)
+	} else if len(o.MatrixCells) > 0 {
+		// Live intro curtain over the shell (no matte).
+		p.paintMatrixRain(dst, padY, shellBot, o.MatrixCells)
 	} else if o.DimShell {
 		// Generic dim.
 		for y := padY; y < shellBot && y < h; y++ {
@@ -463,6 +508,11 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 	if p == nil {
 		return
 	}
+	// Stretch box-drawing / blocks to the full cell so stacked │ and joined ─
+	// form continuous lines (Gohu and most monos leave ink padding → gaps).
+	if p.drawCellGlyph(dst, px, py, r, fr, fg, fb) {
+		return
+	}
 	// Never use Gohu for CJK/halfwidth — it paints .notdef tofu for Index==0.
 	// Prefer CJK face for those; primary mono for Latin/ASCII.
 	var faces []font.Face
@@ -477,6 +527,10 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 		}
 		if p.cjkFace != nil && cjkHasRune(r) {
 			faces = append(faces, p.cjkFace)
+		}
+		// UI marks mono faces omit (caffeine ☕, dingbats, …).
+		if p.symbolsFace != nil && symbolsHasRune(r) {
+			faces = append(faces, p.symbolsFace)
 		}
 	}
 	for _, face := range faces {
@@ -870,6 +924,70 @@ func (p *softwarePainter) paintShellImages(dst *image.RGBA, o paintOpts, padY, s
 	}
 }
 
+// paintKittyPlacements draws Grok/Kitty graphics protocol images over the
+// shell cell grid (prompt previews, inline media). Cell coords are 0-based.
+func (p *softwarePainter) paintKittyPlacements(dst *image.RGBA, places []kittyPlace, gfx *kittyGfxState, padY, shellBot int) {
+	if p == nil || dst == nil || gfx == nil || len(places) == 0 {
+		return
+	}
+	cw, ch := p.cellW, p.cellH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	const padX = 4
+	// Stable paint order: lower z first so higher z draws on top.
+	ordered := append([]kittyPlace(nil), places...)
+	for i := 0; i < len(ordered); i++ {
+		for j := i + 1; j < len(ordered); j++ {
+			if ordered[j].z < ordered[i].z {
+				ordered[i], ordered[j] = ordered[j], ordered[i]
+			}
+		}
+	}
+	for _, pl := range ordered {
+		img := gfx.image(pl.id)
+		if img == nil {
+			continue
+		}
+		sb := img.Bounds()
+		// Optional source crop (Kitty x,y,w,h in pixels).
+		if pl.srcW > 0 && pl.srcH > 0 {
+			r := image.Rect(pl.srcX, pl.srcY, pl.srcX+pl.srcW, pl.srcY+pl.srcH).Intersect(sb)
+			if !r.Empty() {
+				sb = r
+			}
+		}
+		sw, sh := sb.Dx(), sb.Dy()
+		if sw < 1 || sh < 1 {
+			continue
+		}
+		px := padX + pl.col*cw
+		py := padY + pl.row*ch
+		boxW := pl.cols * cw
+		boxH := pl.rows * ch
+		if boxW < 4 || boxH < 4 {
+			continue
+		}
+		dw, dh := fitPreferNative(sw, sh, boxW, boxH)
+		if dw < 1 || dh < 1 {
+			continue
+		}
+		// Center in placement box.
+		ox := px + (boxW-dw)/2
+		oy := py + (boxH-dh)/2
+		dr := image.Rect(ox, oy, ox+dw, oy+dh)
+		clip := image.Rect(0, padY, dst.Bounds().Dx(), shellBot)
+		dr = dr.Intersect(clip).Intersect(dst.Bounds())
+		if dr.Empty() {
+			continue
+		}
+		xdraw.CatmullRom.Scale(dst, dr, img, sb, xdraw.Over, nil)
+	}
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a
@@ -922,4 +1040,50 @@ func isTransparentOverlayBG(r, g, b byte) bool {
 		return true
 	}
 	return false
+}
+
+// paintCRTScanlines draws horizontal scanlines + soft side vignette over the grid.
+func (p *softwarePainter) paintCRTScanlines(dst *image.RGBA, padY, shellBot int, intensity float64) {
+	if dst == nil || intensity <= 0 || shellBot <= padY {
+		return
+	}
+	if intensity > 1 {
+		intensity = 1
+	}
+	w := dst.Bounds().Dx()
+	// Darken every 3rd row (visible phosphor lines).
+	lineA := 0.25 + intensity*0.35
+	if lineA > 0.65 {
+		lineA = 0.65
+	}
+	for y := padY; y < shellBot; y += 3 {
+		for x := 0; x < w; x++ {
+			i := dst.PixOffset(x, y)
+			dst.Pix[i+0] = byte(float64(dst.Pix[i+0]) * (1 - lineA))
+			dst.Pix[i+1] = byte(float64(dst.Pix[i+1]) * (1 - lineA))
+			dst.Pix[i+2] = byte(float64(dst.Pix[i+2]) * (1 - lineA))
+		}
+	}
+	// Side vignette
+	vigW := w / 14
+	if vigW < 12 {
+		vigW = 12
+	}
+	if vigW > 64 {
+		vigW = 64
+	}
+	va := 0.22 + intensity*0.3
+	for y := padY; y < shellBot; y++ {
+		for x := 0; x < vigW; x++ {
+			a := va * (1 - float64(x)/float64(vigW))
+			i := dst.PixOffset(x, y)
+			dst.Pix[i+0] = byte(float64(dst.Pix[i+0]) * (1 - a))
+			dst.Pix[i+1] = byte(float64(dst.Pix[i+1]) * (1 - a))
+			dst.Pix[i+2] = byte(float64(dst.Pix[i+2]) * (1 - a))
+			j := dst.PixOffset(w-1-x, y)
+			dst.Pix[j+0] = byte(float64(dst.Pix[j+0]) * (1 - a))
+			dst.Pix[j+1] = byte(float64(dst.Pix[j+1]) * (1 - a))
+			dst.Pix[j+2] = byte(float64(dst.Pix[j+2]) * (1 - a))
+		}
+	}
 }

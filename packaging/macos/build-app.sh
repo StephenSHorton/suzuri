@@ -136,9 +136,30 @@ fi
 iconutil -c icns "$ICONSET" -o "$RES_DIR/suzuri.icns"
 rm -rf "$ICONSET"
 
-# Ad-hoc sign so Gatekeeper is less hostile on local/CI builds (not notarized).
+# Code-sign the .app so TCC can attribute folder grants to a stable identity.
+#
+# Prefer a real signing identity when available (same cert across builds ⇒ macOS
+# remembers Desktop/Documents/Downloads grants). Override with:
+#   SUZURI_CODESIGN_IDENTITY="Developer ID Application: …"
+#   SUZURI_CODESIGN_IDENTITY="Suzuri Local"   # self-signed cert in login keychain
+# Default "-" is ad-hoc: fine for Gatekeeper-ish local runs, but every binary
+# change gets a new CDHash and macOS re-prompts for protected folders.
+#
+# Do NOT enable hardened runtime for ad-hoc/local certs unless you also ship
+# entitlements — it can break Metal/PTY hosts. Runtime flag is only for
+# Developer ID / notarization identities.
+BUNDLE_ID="com.stephenshorton.suzuri"
+SIGN_ID="${SUZURI_CODESIGN_IDENTITY:--}"
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$APP_PATH" 2>/dev/null || true
+  echo "==> codesign identity=${SIGN_ID} id=${BUNDLE_ID}"
+  SIGN_ARGS=(--force --sign "$SIGN_ID" --identifier "$BUNDLE_ID")
+  if [[ "$SIGN_ID" != "-" && "$SIGN_ID" == Developer\ ID* ]]; then
+    SIGN_ARGS+=(--options runtime)
+  fi
+  # Sign nested executable first, then the bundle (binds Info.plist / resources).
+  codesign "${SIGN_ARGS[@]}" "$MACOS_DIR/suzuri" || true
+  codesign "${SIGN_ARGS[@]}" --deep "$APP_PATH" || true
+  codesign -dv --verbose=2 "$APP_PATH" 2>&1 | head -20 || true
 fi
 
 # Zip of the .app (Finder-friendly install: unzip → drag to Applications)

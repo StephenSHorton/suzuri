@@ -30,5 +30,19 @@
 	<string>MIT © Stephen S. Horton</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- TCC folder prompts: explain why the terminal may touch protected dirs.
+	     Note: macOS only *remembers* grants across rebuilds when the app is
+	     signed with a stable certificate identity (Team ID). Ad-hoc/linker
+	     signatures change CDHash every update and re-prompt. -->
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>suzuri needs access when your shell or tools (for example Grok) read or write files in Documents.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>suzuri needs access when your shell or tools (for example Grok) read or write files on the Desktop.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>suzuri needs access when your shell or tools (for example Grok) read or write files in Downloads.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>suzuri needs access when your shell or tools work with files on removable volumes.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>suzuri needs access when your shell or tools work with files on network volumes.</string>
 </dict>
 </plist>

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
@@ -96,13 +98,14 @@ func TestNewTabFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// 0 Settings … 4 Notes, 5 Send file, 6 Receive ticket, 7 New tab
-	for i := 0; i < 7; i++ {
-		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+	// Filter to the entry instead of hard-coding palette order (zoom cmds insert above).
+	for _, ch := range "new tab" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
 	}
+	// Prefer exact "New tab" (not "New tab: Profile") — first match after filter.
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
-	if r.Action != ActionNewTab {
+	if r.Action != ActionNewTab && r.Action != ActionNewTabProfile {
 		t.Fatalf("action=%v want NewTab", r.Action)
 	}
 }
@@ -111,9 +114,8 @@ func TestNewWindowFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// … 7 New tab, 8 New window
-	for i := 0; i < 8; i++ {
-		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
+	for _, ch := range "new window" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
 	}
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
@@ -153,6 +155,47 @@ func TestTransferSendFromPalette(t *testing.T) {
 	}
 	if r.TransferMode != TransferModeSend {
 		t.Fatalf("mode=%v", r.TransferMode)
+	}
+}
+
+func TestStatusToastRow(t *testing.T) {
+	m := New(80)
+	if m.RowCount() != 1 {
+		t.Fatalf("idle rows=%d want 1", m.RowCount())
+	}
+	if m.showStatus() {
+		t.Fatal("empty status should not show")
+	}
+	r := m.UpdateChrome(StatusMsg("opened link"))
+	m = r.Model
+	if !m.showStatus() || m.Status != "opened link" {
+		t.Fatalf("status=%q show=%v", m.Status, m.showStatus())
+	}
+	if m.RowCount() != 2 {
+		t.Fatalf("toast rows=%d want 2", m.RowCount())
+	}
+	strip := m.StripView()
+	if !strings.Contains(ansi.Strip(strip), "opened link") {
+		t.Fatalf("strip missing toast: %q", ansi.Strip(strip))
+	}
+	r = m.UpdateChrome(StatusMsg(""))
+	m = r.Model
+	if m.showStatus() || m.RowCount() != 1 {
+		t.Fatalf("cleared status still showing rows=%d", m.RowCount())
+	}
+}
+
+func TestZoomCommandsInPalette(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenPaletteMsg{})
+	m = r.Model
+	for _, ch := range "reset zoom" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionZoomReset {
+		t.Fatalf("action=%v want ZoomReset", r.Action)
 	}
 }
 
@@ -196,6 +239,32 @@ func TestHelpAndSplash(t *testing.T) {
 	if !m.HelpOpen {
 		t.Fatal("help")
 	}
+	// Wide window → two-column shortcuts (much shorter than single-stack).
+	view := m.OverlayView()
+	h := lipgloss.Height(view)
+	if h < 8 || h > 30 {
+		t.Fatalf("help height=%d (expected two-col card ~14–26 rows)", h)
+	}
+	// Two-col must be shorter than one-col at the same width budget.
+	one := helpBodyOneCol(80)
+	if h >= lipgloss.Height(one) {
+		t.Fatalf("two-col height %d should be < one-col %d", h, lipgloss.Height(one))
+	}
+	if !strings.Contains(view, "Shortcuts") {
+		t.Fatal("help title missing")
+	}
+	if !strings.Contains(view, "Tabs") || !strings.Contains(view, "Terminal") {
+		t.Fatal("help sections missing")
+	}
+	// Narrow window still opens (single column).
+	m2 := New(40)
+	r2 := m2.UpdateChrome(OpenHelpMsg{})
+	if !r2.Model.HelpOpen {
+		t.Fatal("narrow help")
+	}
+	if lipgloss.Height(r2.Model.OverlayView()) < 10 {
+		t.Fatal("narrow help too short")
+	}
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
 	m = r.Model
 	if m.HelpOpen {
@@ -236,16 +305,14 @@ func TestDismissOverlay(t *testing.T) {
 }
 
 func TestNotesToggleKeepsBuffer(t *testing.T) {
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
+	m := openNotesBody(New(80))
 	if !m.NotesOpen {
 		t.Fatal("notes open")
 	}
-	// Default: open last note in the editor (not the list).
 	if m.notesFocus != notesFocusEditor {
 		t.Fatalf("open focus=%v want editor", m.notesFocus)
 	}
+	var r Result
 	for _, ch := range "hello" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
@@ -281,10 +348,8 @@ func TestNotesToggleKeepsBuffer(t *testing.T) {
 }
 
 func TestNotesSelectAllBackspaceTab(t *testing.T) {
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
-	// Opens on editor by default
+	m := openNotesBody(New(80))
+	var r Result
 	for _, ch := range "ab" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
@@ -334,11 +399,11 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("LOCALAPPDATA", dir)
 
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
+	m := openNotesBody(New(80))
+	var r Result
+	// Fresh blank note opens on title; openNotesBody enters body.
 	if m.notesFocus != notesFocusEditor {
-		t.Fatal("open on editor (last note)")
+		t.Fatalf("want editor after openNotesBody, got %v", m.notesFocus)
 	}
 	for _, ch := range "one" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
@@ -356,7 +421,10 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 		t.Fatalf("bank len=%d", len(m.notesBank))
 	}
 	if m.notesFocus != notesFocusTitle {
-		t.Fatal("new → title rename")
+		t.Fatal("new → title field (not body)")
+	}
+	if m.notesTitle != "" {
+		t.Fatalf("new note title should start empty, got %q", m.notesTitle)
 	}
 	for _, ch := range "Two" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
@@ -379,6 +447,27 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 	m = r.Model
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	m = r.Model
+	// Delete asks for confirmation first.
+	if !m.ConfirmOpen {
+		t.Fatal("d should open delete confirm")
+	}
+	if len(m.notesBank) != 2 {
+		t.Fatalf("before confirm len=%d", len(m.notesBank))
+	}
+	// Esc cancels
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEsc})
+	m = r.Model
+	if m.ConfirmOpen || len(m.notesBank) != 2 {
+		t.Fatalf("cancel: confirm=%v len=%d", m.ConfirmOpen, len(m.notesBank))
+	}
+	// d + Enter confirms
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	m = r.Model
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	m = r.Model
+	if m.ConfirmOpen {
+		t.Fatal("confirm should close after enter")
+	}
 	if len(m.notesBank) != 1 {
 		t.Fatalf("after delete len=%d", len(m.notesBank))
 	}
@@ -409,9 +498,8 @@ func TestNotesBankListNewRenameDelete(t *testing.T) {
 }
 
 func TestNotesEnterSingleBlankLine(t *testing.T) {
-	m := New(80)
-	r := m.UpdateChrome(OpenNotesMsg{})
-	m = r.Model
+	m := openNotesBody(New(80))
+	var r Result
 	for _, ch := range "hi" {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
 		m = r.Model
@@ -499,6 +587,31 @@ func TestPlusBounds(t *testing.T) {
 	b := m.PlusBounds()
 	if b[1] <= b[0] {
 		t.Fatalf("plus bounds %v", b)
+	}
+}
+
+func TestCaffeineBoundsRight(t *testing.T) {
+	m := New(80)
+	m.Tabs = []Tab{{ID: 0, Title: "shell"}}
+	b := m.CaffeineBounds()
+	if b[1] <= b[0] {
+		t.Fatalf("caffeine bounds %v", b)
+	}
+	// Cup should sit on the right half of the strip.
+	if b[0] < 40 {
+		t.Fatalf("expected right-side cup, got %v", b)
+	}
+	// Plus is left of caffeine with a spacer.
+	plus := m.PlusBounds()
+	if plus[1] > b[0] {
+		t.Fatalf("plus %v overlaps caffeine %v", plus, b)
+	}
+	// Active chip still has a hit target.
+	m.CaffeineOn = true
+	m.CaffeineHint = "15m"
+	b2 := m.CaffeineBounds()
+	if b2[1] <= b2[0] {
+		t.Fatalf("active caffeine bounds %v", b2)
 	}
 }
 

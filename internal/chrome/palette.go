@@ -29,6 +29,7 @@ func loadPaletteItems(cfg config.Config) []paletteItem {
 			desc:    c.Desc,
 			action:  c.Action,
 			profile: c.ProfileName,
+			minutes: c.Minutes,
 		})
 	}
 	return out
@@ -85,19 +86,20 @@ func (m *Model) paletteSelected() (paletteItem, bool) {
 }
 
 // handlePaletteKey processes keys for the sync palette. Never calls tea.Cmd.
-func (m *Model) handlePaletteKey(msg tea.KeyMsg) (act HostAction, profile string) {
+func (m *Model) handlePaletteKey(msg tea.KeyMsg) (act HostAction, profile string, minutes int) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		m.PaletteOpen = false
-		return ActionNone, ""
+		return ActionNone, "", 0
 	case "enter":
 		it, ok := m.paletteSelected()
 		if !ok {
-			return ActionNone, ""
+			return ActionNone, "", 0
 		}
 		m.PaletteOpen = false
 		act = it.action
 		profile = it.profile
+		minutes = it.minutes
 		switch act {
 		case ActionOpenSettings:
 			m.SettingsOpen = true
@@ -115,24 +117,24 @@ func (m *Model) handlePaletteKey(msg tea.KeyMsg) (act HostAction, profile string
 			m.openTransferPrompt(TransferModeReceive, "")
 			act = ActionNone
 		}
-		return act, profile
+		return act, profile, minutes
 	case "up":
 		if m.palIndex > 0 {
 			m.palIndex--
 		}
-		return ActionNone, ""
+		return ActionNone, "", 0
 	case "down":
 		if m.palIndex+1 < len(m.palView) {
 			m.palIndex++
 		}
-		return ActionNone, ""
+		return ActionNone, "", 0
 	case "backspace":
 		if m.palFilter != "" {
 			rs := []rune(m.palFilter)
 			m.palFilter = string(rs[:len(rs)-1])
 			m.refilterPalette()
 		}
-		return ActionNone, ""
+		return ActionNone, "", 0
 	default:
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
 			// Ignore control runes.
@@ -145,7 +147,7 @@ func (m *Model) handlePaletteKey(msg tea.KeyMsg) (act HostAction, profile string
 			// Keep selection on first match after refilter for predictable Enter.
 			m.palIndex = 0
 		}
-		return ActionNone, ""
+		return ActionNone, "", 0
 	}
 }
 

@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"fmt"
 	"unicode/utf8"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -13,9 +14,12 @@ import (
 // super is the macOS Command key (Kitty "super" modifier).
 // kk is the tab's Kitty progressive-enhancement state (may be nil).
 func ptyKeyFromEbiten(term vt10x.Terminal, kk *kittyKeyboard, key ebiten.Key, ctrl, shift, alt, super bool) []byte {
-	// Bare Alt+letter is left for host (focus panes). Alt+Enter is an app key
-	// (Grok newline fallback) and is handled below.
-	if alt && !ctrl && !super && key != ebiten.KeyEnter {
+	// Bare Alt+letter is left for host. Alt+Enter is an app key (Grok newline).
+	// Alt+arrows are app keys (word jump in Grok); ⌘⌥ pane focus is host-only.
+	if alt && !ctrl && !super && key != ebiten.KeyEnter &&
+		key != ebiten.KeyArrowLeft && key != ebiten.KeyArrowRight &&
+		key != ebiten.KeyArrowUp && key != ebiten.KeyArrowDown &&
+		key != ebiten.KeyBackspace && key != ebiten.KeyDelete {
 		return nil
 	}
 	appCursor := term != nil && term.Mode()&vt10x.ModeAppCursor != 0
@@ -31,45 +35,64 @@ func ptyKeyFromEbiten(term vt10x.Terminal, kk *kittyKeyboard, key ebiten.Key, ct
 		}
 		return []byte{'\t'}
 	case ebiten.KeyBackspace:
+		// Option+Backspace → delete word (readline Meta+DEL / many TUIs Alt+BS).
+		if alt && !ctrl && !super {
+			return []byte{0x1b, 0x7f}
+		}
 		return []byte{0x7f}
 	case ebiten.KeyDelete:
+		if alt || ctrl || shift || super {
+			// Modified delete: xterm CSI 3 ; mods ~
+			mods := kittyMods(shift, alt, ctrl, super)
+			return []byte(fmt.Sprintf("\x1b[3;%d~", mods))
+		}
 		return []byte("\x1b[3~")
 	case ebiten.KeyInsert:
 		return []byte("\x1b[2~")
 	case ebiten.KeyHome:
-		if appCursor {
+		if appCursor && !shift && !alt && !ctrl && !super {
 			return []byte("\x1bOH")
+		}
+		if shift || alt || ctrl || super {
+			mods := kittyMods(shift, alt, ctrl, super)
+			return []byte(fmt.Sprintf("\x1b[1;%dH", mods))
 		}
 		return []byte("\x1b[H")
 	case ebiten.KeyEnd:
-		if appCursor {
+		if appCursor && !shift && !alt && !ctrl && !super {
 			return []byte("\x1bOF")
+		}
+		if shift || alt || ctrl || super {
+			mods := kittyMods(shift, alt, ctrl, super)
+			return []byte(fmt.Sprintf("\x1b[1;%dF", mods))
 		}
 		return []byte("\x1b[F")
 	case ebiten.KeyPageUp:
 		return []byte("\x1b[5~")
 	case ebiten.KeyPageDown:
 		return []byte("\x1b[6~")
-	case ebiten.KeyArrowUp:
-		if appCursor {
-			return []byte("\x1bOA")
-		}
-		return []byte("\x1b[A")
+	case ebiten.KeyArrowUp: // KeyUp is the same constant
+		return encodeArrow(kk, 'A', appCursor, shift, alt, ctrl, super)
 	case ebiten.KeyArrowDown:
-		if appCursor {
-			return []byte("\x1bOB")
-		}
-		return []byte("\x1b[B")
+		return encodeArrow(kk, 'B', appCursor, shift, alt, ctrl, super)
 	case ebiten.KeyArrowRight:
-		if appCursor {
-			return []byte("\x1bOC")
+		// Cmd+Right → End (macOS text-field convention for apps that don't
+		// understand Super+arrow).
+		if super && !alt && !ctrl && !shift {
+			if appCursor {
+				return []byte("\x1bOF")
+			}
+			return []byte("\x1b[F")
 		}
-		return []byte("\x1b[C")
+		return encodeArrow(kk, 'C', appCursor, shift, alt, ctrl, super)
 	case ebiten.KeyArrowLeft:
-		if appCursor {
-			return []byte("\x1bOD")
+		if super && !alt && !ctrl && !shift {
+			if appCursor {
+				return []byte("\x1bOH")
+			}
+			return []byte("\x1b[H")
 		}
-		return []byte("\x1b[D")
+		return encodeArrow(kk, 'D', appCursor, shift, alt, ctrl, super)
 	case ebiten.KeyF1:
 		return []byte("\x1bOP")
 	case ebiten.KeyF2:

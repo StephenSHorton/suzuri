@@ -194,6 +194,10 @@ func (s *Service) DownloadAndApply(info Info) error {
 		_ = os.Rename(old, self)
 		return fmt.Errorf("install new exe: %w", err)
 	}
+	// macOS: re-apply a stable codesign identity so TCC folder grants can
+	// stick across updates when a real cert is used. Ad-hoc still changes
+	// CDHash (re-prompts), but at least binds CFBundleIdentifier instead of a.out.
+	resignMacExecutable(self)
 
 	cmd := exec.Command(self)
 	cmd.Dir = selfDir
