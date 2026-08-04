@@ -29,7 +29,7 @@ Most “pretty terminals” are either:
 | **Chrome** | Tabs, command palette (`Ctrl+K`), settings (`Ctrl+,`), help, themes |
 | **Panes** | Split right/down, shared sashes, per-pane Warp bars, focus with ⌘⌥+arrows (macOS) / Alt+arrows (Windows) |
 | **Input** | Warp-style bottom bar — local edit, multiline, history, echo filter |
-| **Look** | Inkstone / Charmtone / High contrast · bundled Gohu mono · app icon · box-drawing |
+| **Look** | 16 themes (Inkstone, Charmtone, Nord, Dracula, Tokyo Night, …) · bundled Gohu mono · app icon · box-drawing |
 | **Polish** | Window placement, matrix/ripple intros (Windows), 猫咪 dim under settings, floating palette/help over live shell |
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
 | **Updates** | Auto-update from GitHub Releases on startup; palette **Check for updates** |

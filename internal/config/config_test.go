@@ -123,3 +123,41 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 		t.Fatalf("got %+v", c)
 	}
 }
+
+func TestThemeIDsUniqueAndValid(t *testing.T) {
+	ids := ThemeIDs()
+	if len(ids) < 10 {
+		t.Fatalf("expected a bunch of themes, got %d", len(ids))
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if id == "" {
+			t.Fatal("empty theme id")
+		}
+		if seen[id] {
+			t.Fatalf("duplicate theme %q", id)
+		}
+		seen[id] = true
+		if !ValidTheme(id) {
+			t.Fatalf("ThemeIDs entry not ValidTheme: %q", id)
+		}
+		if ThemeLabel(id) == "" {
+			t.Fatalf("empty label for %q", id)
+		}
+		if ThemeDesc(id) == "" {
+			t.Fatalf("empty desc for %q", id)
+		}
+	}
+	// Unknown → Normalize falls back to high contrast
+	c := Normalize(Config{Theme: "not_a_theme"})
+	if c.Theme != ThemeHighContrast {
+		t.Fatalf("unknown theme: %q", c.Theme)
+	}
+	// Known themes survive Normalize
+	for _, id := range ids {
+		c := Normalize(Config{Theme: id})
+		if c.Theme != id {
+			t.Fatalf("Normalize dropped %q → %q", id, c.Theme)
+		}
+	}
+}

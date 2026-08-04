@@ -323,14 +323,7 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		}
 	case fieldTheme:
 		title = "Theme · " + val
-		switch s.edit.Theme {
-		case config.ThemeCharmtone:
-			paras = []string{"Warm violet/pink chrome inspired by Charm. Shell ANSI colors follow when ANSI is Soft or Full."}
-		case config.ThemeHighContrast:
-			paras = []string{"Punchy green-on-black chrome for maximum contrast. Best for bright rooms or low vision."}
-		default:
-			paras = []string{"Inkstone — cool mauve on dark grey. The default suzuri look (硯)."}
-		}
+		paras = []string{config.ThemeDesc(s.edit.Theme)}
 	case fieldANSIMap:
 		title = "ANSI · " + val
 		switch s.edit.ShellANSIMap {

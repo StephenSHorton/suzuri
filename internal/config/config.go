@@ -28,6 +28,19 @@ const (
 	ThemeInkstone     = "inkstone"
 	ThemeCharmtone    = "charmtone"
 	ThemeHighContrast = "high_contrast"
+	ThemeNord         = "nord"
+	ThemeDracula      = "dracula"
+	ThemeTokyoNight   = "tokyo_night"
+	ThemeCatppuccin   = "catppuccin"
+	ThemeGruvbox      = "gruvbox"
+	ThemeOneDark      = "one_dark"
+	ThemeSolarized    = "solarized"
+	ThemeRosePine     = "rose_pine"
+	ThemeKanagawa     = "kanagawa"
+	ThemeMonokai      = "monokai"
+	ThemeForest       = "forest"
+	ThemeOcean        = "ocean"
+	ThemeAmber        = "amber"
 )
 
 // Shell ANSI map modes.
@@ -240,10 +253,9 @@ func Normalize(c Config) Config {
 	default:
 		c.Cursor = CursorBlock
 	}
-	switch strings.ToLower(strings.TrimSpace(c.Theme)) {
-	case ThemeInkstone, ThemeCharmtone, ThemeHighContrast:
-		c.Theme = strings.ToLower(strings.TrimSpace(c.Theme))
-	default:
+	if id := strings.ToLower(strings.TrimSpace(c.Theme)); ValidTheme(id) {
+		c.Theme = id
+	} else {
 		c.Theme = ThemeHighContrast
 	}
 	switch strings.ToLower(strings.TrimSpace(c.ShellANSIMap)) {
@@ -347,9 +359,36 @@ func ParseCursor(s string) CursorStyle {
 	}
 }
 
-// ThemeIDs lists selectable themes.
+// ThemeIDs lists selectable themes in settings cycle order.
 func ThemeIDs() []string {
-	return []string{ThemeInkstone, ThemeCharmtone, ThemeHighContrast}
+	return []string{
+		ThemeInkstone,
+		ThemeCharmtone,
+		ThemeHighContrast,
+		ThemeNord,
+		ThemeDracula,
+		ThemeTokyoNight,
+		ThemeCatppuccin,
+		ThemeGruvbox,
+		ThemeOneDark,
+		ThemeSolarized,
+		ThemeRosePine,
+		ThemeKanagawa,
+		ThemeMonokai,
+		ThemeForest,
+		ThemeOcean,
+		ThemeAmber,
+	}
+}
+
+// ValidTheme is true for a known theme id (case-sensitive id form).
+func ValidTheme(id string) bool {
+	for _, t := range ThemeIDs() {
+		if t == id {
+			return true
+		}
+	}
+	return false
 }
 
 // ThemeLabel is a human title for a theme id.
@@ -359,8 +398,72 @@ func ThemeLabel(id string) string {
 		return "Charmtone"
 	case ThemeHighContrast:
 		return "High contrast"
+	case ThemeNord:
+		return "Nord"
+	case ThemeDracula:
+		return "Dracula"
+	case ThemeTokyoNight:
+		return "Tokyo Night"
+	case ThemeCatppuccin:
+		return "Catppuccin"
+	case ThemeGruvbox:
+		return "Gruvbox"
+	case ThemeOneDark:
+		return "One Dark"
+	case ThemeSolarized:
+		return "Solarized"
+	case ThemeRosePine:
+		return "Rosé Pine"
+	case ThemeKanagawa:
+		return "Kanagawa"
+	case ThemeMonokai:
+		return "Monokai"
+	case ThemeForest:
+		return "Forest"
+	case ThemeOcean:
+		return "Ocean"
+	case ThemeAmber:
+		return "Amber CRT"
 	default:
 		return "Inkstone"
+	}
+}
+
+// ThemeDesc is a short settings blurb for a theme id.
+func ThemeDesc(id string) string {
+	switch id {
+	case ThemeCharmtone:
+		return "Warm violet/pink chrome inspired by Charm. Shell ANSI follows when ANSI is Soft or Full."
+	case ThemeHighContrast:
+		return "Punchy green-on-black chrome for maximum contrast. Best for bright rooms or low vision."
+	case ThemeNord:
+		return "Arctic blue-greys (Nord). Cool, calm, and easy on long sessions."
+	case ThemeDracula:
+		return "Classic purple-pink Dracula vibes. Bold accents on a deep purple base."
+	case ThemeTokyoNight:
+		return "Modern night-city blues and magentas. Sharp, dense, and focused."
+	case ThemeCatppuccin:
+		return "Soft Catppuccin Mocha pastels. Gentle contrast without going pastel-washed."
+	case ThemeGruvbox:
+		return "Warm retro Gruvbox earth tones. Cozy browns and golds."
+	case ThemeOneDark:
+		return "Atom One Dark blues and soft greys. Familiar coding default."
+	case ThemeSolarized:
+		return "Solarized Dark — Ethan Schoonover’s balanced cyan/base palette."
+	case ThemeRosePine:
+		return "Rosé Pine muted rose and pine. Soft, literary, low glare."
+	case ThemeKanagawa:
+		return "Kanagawa wave — ink blues and paper golds. Suits the 硯 name."
+	case ThemeMonokai:
+		return "Classic Monokai magenta/yellow on charcoal. High pop, 2010s energy."
+	case ThemeForest:
+		return "Deep moss and leaf greens. Quieter than High contrast, still verdant."
+	case ThemeOcean:
+		return "Deep ocean teal and sky accents. Cool undercurrent for the shell."
+	case ThemeAmber:
+		return "Amber-on-black CRT terminal nostalgia. Warm phosphor glow."
+	default:
+		return "Inkstone — cool mauve on dark grey. The default suzuri look (硯)."
 	}
 }
 
