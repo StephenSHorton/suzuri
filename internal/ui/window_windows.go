@@ -280,12 +280,14 @@ func (u *winUI) monitorWorkArea() (left, top, right, bottom int, ok bool) {
 }
 
 // requestInputPaint marks only the Warp bar dirty (shell grid unchanged).
-// Falls back to a full paint when chrome/overlay also need a refresh.
+// Falls back to a full paint when a floating overlay is open (palette/notes/…).
+// chromeDirty alone is fine: the input-only paint path re-draws the strip
+// without re-blitting the shell grid (same idea as macOS tryPaintInputOnly).
 func (u *winUI) requestInputPaint() {
 	if u == nil || u.hwnd == 0 {
 		return
 	}
-	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
+	if u.chrome.OverlayOpen() {
 		u.inputOnlyDirty = false
 		u.requestPaint()
 		return
@@ -444,7 +446,12 @@ func (u *winUI) syncChrome() {
 
 func (u *winUI) markChromeDirty() {
 	u.chromeDirty = true
-	u.overlayDirty = true
+	// Only dirty the floating card when it is actually open. Setting overlayDirty
+	// while closed used to stick forever (nothing clears it without paintOverlay),
+	// which forced every Warp-bar keystroke into a full shell repaint.
+	if u.chrome.OverlayOpen() {
+		u.overlayDirty = true
+	}
 }
 
 // applyConfigLive updates fonts/theme/ANSI map from cfg without writing disk.
@@ -1969,9 +1976,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.spinTick%uint64(tabSpinEveryNTicks*4) == 0 {
 				u.postLayoutSettle()
 			}
-			// Dim modals: throttle (settings rain) or chrome-dirty only.
-			// Palette floats over live shell — keep full-rate repaints so PTY
-			// output and cursor blink still update under the card.
+			// Paint policy (macOS input-only parity):
+			// - Scroll / shell anim / alt-screen cursor → full paint
+			// - Warp bar caret / sticky inputOnlyDirty → bar-only (no grid blit)
+			// Full 25fps grid+matrix paints made bar typing feel laggy.
 			if u.dimShellModal() {
 				if u.chrome.SettingsOpen {
 					if u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
@@ -1980,10 +1988,28 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				} else if u.chromeDirty {
 					u.requestPaint()
 				}
-			} else {
+			} else if needScrollPaint {
+				u.markShellDirty()
 				u.requestPaint()
+			} else if u.inputOnlyDirty {
+				// Sticky bar-only after typing; caret keeps pulsing here.
+				u.requestPaint()
+			} else if u.chrome.OverlayOpen() {
+				// Palette/help float over a live shell — need full composite.
+				u.requestPaint()
+			} else if u.needsShellAnimPaint() {
+				// Rain / alt caret / intro: full paint, but rain-only ticks are
+				// halved so the UI thread stays responsive to keystrokes.
+				if u.shellMatrixOn() && !u.matrixIntroActive() && !u.anyAltScreenCursor() &&
+					u.spinTick%2 != 0 {
+					u.requestInputPaint()
+				} else {
+					u.requestPaint()
+				}
+			} else {
+				// Idle shell: only pulse the Warp caret (input-only path).
+				u.requestInputPaint()
 			}
-			_ = needScrollPaint
 		}
 		return 0
 
@@ -3260,6 +3286,11 @@ func (u *winUI) paint(hwnd win.HWND) {
 			win.SelectObject(dest, oldF)
 			// Keep inputOnlyDirty sticky until markShellDirty so blink ticks
 			// also take this path (caret pulse without re-blitting the grid).
+			// Drop a stale overlayDirty left over from markChromeDirty while the
+			// card was closed — nothing else clears it without paintOverlay.
+			if !u.chrome.OverlayOpen() {
+				u.overlayDirty = false
+			}
 			return
 		}
 		// Full paint path — shell is authoritative again.
@@ -4895,6 +4926,32 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 // shellMatrixOn is true when settings ask for always-on shell rain.
 func (u *winUI) shellMatrixOn() bool {
 	return u != nil && u.cfg.ShellMatrix
+}
+
+// needsShellAnimPaint is true when the shell underlay or alt-screen caret must
+// animate (full paint). Idle normal shells only need the Warp-bar caret.
+func (u *winUI) needsShellAnimPaint() bool {
+	if u == nil {
+		return false
+	}
+	if u.matrixIntroActive() || u.shellMatrixOn() {
+		return true
+	}
+	return u.anyAltScreenCursor()
+}
+
+// anyAltScreenCursor is true when a visible pane is on alt-screen with a
+// blinking app caret (Grok, vim, …).
+func (u *winUI) anyAltScreenCursor() bool {
+	for _, t := range u.allPanes() {
+		if t == nil || !t.altScreen() || t.term == nil {
+			continue
+		}
+		if t.term.CursorVisible() {
+			return true
+		}
+	}
+	return false
 }
 
 // paintShellMatrix draws quiet looping rain under the shell (not over glyphs).
