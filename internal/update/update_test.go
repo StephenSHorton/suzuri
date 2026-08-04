@@ -19,10 +19,11 @@ func TestPickReleaseAssetSkipsSetup(t *testing.T) {
 	if sums != "https://example/sums" {
 		t.Fatalf("sums=%q", sums)
 	}
-	if a.URL != "https://example/exe" {
-		t.Fatalf("got %q want portable exe (not setup)", a.URL)
+	// Prefer portable zip (host + transfer) over bare exe; never setup.
+	if a.URL != "https://example/zip" {
+		t.Fatalf("got %q want portable zip (not setup/exe)", a.URL)
 	}
-	if a.Name != "suzuri-1.2.3-windows-amd64.exe" {
+	if a.Name != "suzuri-1.2.3-windows-amd64.zip" {
 		t.Fatalf("name=%q", a.Name)
 	}
 }
@@ -42,9 +43,9 @@ func TestPickReleaseAssetSkipsMacInstaller(t *testing.T) {
 	if sums != "https://example/sums" {
 		t.Fatalf("sums=%q", sums)
 	}
-	// Prefer bare portable binary over zip; never dmg/app.zip.
-	if a.Name != "suzuri-1.2.3-darwin-arm64" && a.Name != "suzuri-1.2.3-darwin-arm64.zip" {
-		t.Fatalf("name=%q want portable darwin asset", a.Name)
+	// Prefer zip (host + transfer) over bare binary; never dmg/app.zip.
+	if a.Name != "suzuri-1.2.3-darwin-arm64.zip" {
+		t.Fatalf("name=%q want portable darwin zip", a.Name)
 	}
 	if a.URL == "https://example/dmg" || a.URL == "https://example/appzip" {
 		t.Fatalf("picked installer %q", a.URL)

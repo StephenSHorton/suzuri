@@ -149,13 +149,17 @@ func (s *Service) DownloadAndApply(info Info) error {
 		}
 	}
 
-	newExe := dst
+	var newExe string
+	var newTransfer string
 	if strings.HasSuffix(strings.ToLower(dst), ".zip") {
-		extracted, err := extractExeFromZip(dst, dir)
+		host, xfer, err := extractPackageFromZip(dst, dir)
 		if err != nil {
 			return err
 		}
-		newExe = extracted
+		newExe = host
+		newTransfer = xfer
+	} else {
+		newExe = dst
 	}
 
 	self, err := os.Executable()
@@ -165,6 +169,17 @@ func (s *Service) DownloadAndApply(info Info) error {
 	self, err = filepath.EvalSymlinks(self)
 	if err != nil {
 		return err
+	}
+	selfDir := filepath.Dir(self)
+
+	// Install transfer engine first (sidecar next to host) so a failed host
+	// replace doesn't leave a mismatched pair after a partial update.
+	if newTransfer != "" {
+		xferDst := filepath.Join(selfDir, transferSiblingName())
+		if err := installSibling(newTransfer, xferDst); err != nil {
+			return fmt.Errorf("install transfer engine: %w", err)
+		}
+		log.Info("update: transfer engine installed", "path", xferDst)
 	}
 
 	// Windows allows renaming a running image. Move current → .old, copy new
@@ -185,7 +200,7 @@ func (s *Service) DownloadAndApply(info Info) error {
 	resignMacExecutable(self)
 
 	cmd := exec.Command(self)
-	cmd.Dir = filepath.Dir(self)
+	cmd.Dir = selfDir
 	if err := cmd.Start(); err != nil {
 		_ = os.Rename(old, self)
 		return fmt.Errorf("relaunch: %w", err)
@@ -197,6 +212,28 @@ func (s *Service) DownloadAndApply(info Info) error {
 		time.Sleep(200 * time.Millisecond)
 		os.Exit(0)
 	}()
+	return nil
+}
+
+func transferSiblingName() string {
+	if runtime.GOOS == "windows" {
+		return "suzuri-transfer.exe"
+	}
+	return "suzuri-transfer"
+}
+
+// installSibling replaces a non-running helper binary (rename → copy).
+func installSibling(src, dst string) error {
+	old := dst + ".old"
+	_ = os.Remove(old)
+	if _, err := os.Stat(dst); err == nil {
+		_ = os.Rename(dst, old)
+	}
+	if err := copyFile(src, dst); err != nil {
+		_ = os.Rename(old, dst)
+		return err
+	}
+	_ = os.Remove(old)
 	return nil
 }
 
@@ -308,110 +345,138 @@ func (s *Service) download(ctx context.Context, url, dst string) (err error) {
 	return err
 }
 
-// pickReleaseAsset chooses the portable binary for the running GOOS/GOARCH.
-// Never picks installers (setup.exe) — those are for first install only;
-// in-app update swaps the already-installed portable exe in place.
+// pickReleaseAsset chooses the portable package for the running GOOS/GOARCH.
+// Prefers .zip (host + suzuri-transfer) over bare host-only binaries.
+// Never picks installers (setup.exe / .dmg / .app.zip) — first install only.
 func pickReleaseAsset(assets []ghAsset) (ghAsset, string) {
 	var asset ghAsset
 	var sumsURL string
 	goos, goarch := runtime.GOOS, runtime.GOARCH
-	// Prefer fully qualified names: suzuri-<ver>-<goos>-<goarch>(.exe|.zip)
 	wantSuffix := fmt.Sprintf("-%s-%s", goos, goarch)
+	score := func(name string) int {
+		n := strings.ToLower(name)
+		if n == "sha256sums" {
+			return -1
+		}
+		if strings.Contains(n, "setup") || strings.Contains(n, "installer") ||
+			strings.Contains(n, ".msi") || strings.Contains(n, ".dmg") ||
+			strings.Contains(n, ".app.zip") || strings.Contains(n, ".app.") {
+			return -1
+		}
+		if !strings.Contains(n, wantSuffix) &&
+			!(goos == "windows" && strings.Contains(n, "windows-amd64")) &&
+			!(goos == "darwin" && strings.Contains(n, "darwin") && strings.Contains(n, goarch)) {
+			return -1
+		}
+		// Higher is better: zip with transfer pair > bare zip > bare exe.
+		if strings.HasSuffix(n, ".zip") {
+			return 30
+		}
+		if goos == "windows" && strings.HasSuffix(n, ".exe") {
+			return 10
+		}
+		// Bare unix binary (no extension) or versioned name without .zip
+		if goos != "windows" && (!strings.Contains(n, ".") || strings.Count(n, ".") <= 2) {
+			return 10
+		}
+		return 5
+	}
+	best := -1
 	for _, a := range assets {
 		n := strings.ToLower(a.Name)
 		if n == "sha256sums" {
 			sumsURL = a.URL
 			continue
 		}
-		// Installers / setup packages are not in-place update targets.
-		// macOS .app.zip / .dmg are first-install only (like Windows setup.exe).
-		if strings.Contains(n, "setup") || strings.Contains(n, "installer") ||
-			strings.Contains(n, ".msi") || strings.Contains(n, ".dmg") ||
-			strings.Contains(n, ".app.zip") || strings.Contains(n, ".app.") {
-			continue
-		}
-		switch goos {
-		case "windows":
-			if strings.Contains(n, wantSuffix) && (strings.HasSuffix(n, ".exe") || strings.HasSuffix(n, ".zip")) {
-				// Prefer .exe over .zip when both exist.
-				if asset.URL == "" || strings.HasSuffix(n, ".exe") {
-					asset = a
-				}
-			}
-			if asset.URL == "" && strings.HasSuffix(n, "-windows-amd64.exe") {
-				asset = a
-			}
-			if asset.URL == "" && strings.HasSuffix(n, "-windows-amd64.zip") {
-				asset = a
-			}
-		case "darwin":
-			// Prefer bare portable binary; accept plain .zip of that binary.
-			// Never pick installer packages (filtered above).
-			if strings.Contains(n, wantSuffix) {
-				if !strings.Contains(n, ".") || strings.HasSuffix(n, ".zip") {
-					if asset.URL == "" || !strings.Contains(n, ".") {
-						asset = a
-					}
-				}
-			}
-			// Also accept bare binary names like suzuri-0.1.0-darwin-arm64
-			if asset.URL == "" && strings.Contains(n, "darwin") && strings.Contains(n, goarch) &&
-				!strings.Contains(n, ".app") && !strings.HasSuffix(n, ".dmg") {
-				asset = a
-			}
-		default:
-			if strings.Contains(n, wantSuffix) {
-				asset = a
-			}
+		sc := score(a.Name)
+		if sc > best {
+			best = sc
+			asset = a
 		}
 	}
 	return asset, sumsURL
 }
 
-func extractExeFromZip(zipPath, dir string) (string, error) {
+// extractPackageFromZip pulls the host binary and optional suzuri-transfer
+// sidecar from a release zip.
+func extractPackageFromZip(zipPath, dir string) (hostPath, transferPath string, err error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer func() { _ = r.Close() }()
-	for _, f := range r.File {
-		base := filepath.Base(f.Name)
-		lower := strings.ToLower(base)
-		// Skip directories and checksums.
-		if strings.HasSuffix(f.Name, "/") || lower == "sha256sums" {
-			continue
-		}
-		isWin := strings.EqualFold(base, "suzuri.exe") || strings.HasSuffix(lower, ".exe")
-		isUnix := lower == "suzuri" || (strings.HasPrefix(lower, "suzuri") && !strings.Contains(lower, "."))
-		if !isWin && !isUnix {
-			// darwin-arm64 style artifact inside zip
-			if !strings.Contains(lower, "suzuri") {
-				continue
-			}
-		}
+
+	extract := func(f *zip.File, outName string) (string, error) {
 		rc, err := f.Open()
 		if err != nil {
 			return "", err
 		}
-		outName := "suzuri-new"
-		if isWin {
-			outName = "suzuri-new.exe"
-		}
+		defer func() { _ = rc.Close() }()
 		out := filepath.Join(dir, outName)
 		w, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
-			_ = rc.Close()
 			return "", err
 		}
-		_, err = io.Copy(w, rc)
+		_, copyErr := io.Copy(w, rc)
 		_ = w.Close()
-		_ = rc.Close()
-		if err != nil {
-			return "", err
+		if copyErr != nil {
+			return "", copyErr
 		}
 		return out, nil
 	}
-	return "", fmt.Errorf("zip has no suzuri binary")
+
+	for _, f := range r.File {
+		base := filepath.Base(f.Name)
+		lower := strings.ToLower(base)
+		if strings.HasSuffix(f.Name, "/") || lower == "sha256sums" {
+			continue
+		}
+		switch {
+		case lower == "suzuri-transfer.exe" || lower == "suzuri-transfer":
+			transferPath, err = extract(f, "suzuri-transfer-new"+extForOS())
+			if err != nil {
+				return "", "", err
+			}
+		case lower == "suzuri.exe" || lower == "suzuri":
+			hostPath, err = extract(f, "suzuri-new"+extForOS())
+			if err != nil {
+				return "", "", err
+			}
+		case strings.HasPrefix(lower, "suzuri-") && strings.Contains(lower, "transfer"):
+			transferPath, err = extract(f, "suzuri-transfer-new"+extForOS())
+			if err != nil {
+				return "", "", err
+			}
+		case strings.HasPrefix(lower, "suzuri-") && !strings.Contains(lower, "transfer") &&
+			!strings.HasSuffix(lower, ".zip") && !strings.Contains(lower, "setup"):
+			// Versioned bare name e.g. suzuri-0.9.71-darwin-arm64
+			if hostPath == "" {
+				hostPath, err = extract(f, "suzuri-new"+extForOS())
+				if err != nil {
+					return "", "", err
+				}
+			}
+		case strings.HasSuffix(lower, ".exe") && strings.Contains(lower, "suzuri") &&
+			!strings.Contains(lower, "transfer") && !strings.Contains(lower, "setup"):
+			if hostPath == "" {
+				hostPath, err = extract(f, "suzuri-new.exe")
+				if err != nil {
+					return "", "", err
+				}
+			}
+		}
+	}
+	if hostPath == "" {
+		return "", "", fmt.Errorf("zip has no suzuri binary")
+	}
+	return hostPath, transferPath, nil
+}
+
+func extForOS() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 func copyFile(src, dst string) error {

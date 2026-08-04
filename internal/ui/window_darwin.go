@@ -1285,8 +1285,72 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 			}
 			u.markChromeDirty()
 		}
+	case chrome.ActionOpenTransferSend:
+		r2 := u.chrome.UpdateChrome(chrome.OpenTransferPromptMsg{Mode: chrome.TransferModeSend})
+		u.chrome = r2.Model
+		u.overlayCells = nil
+		u.overlayDirty = true
+	case chrome.ActionOpenTransferReceive:
+		r2 := u.chrome.UpdateChrome(chrome.OpenTransferPromptMsg{Mode: chrome.TransferModeReceive})
+		u.chrome = r2.Model
+		u.overlayCells = nil
+		u.overlayDirty = true
+	case chrome.ActionTransferStart:
+		switch r.TransferMode {
+		case chrome.TransferModeReceive:
+			startTransferReceive(u, r.Name, u.defaultReceiveDir())
+		default:
+			startTransferSend(u, r.Name)
+		}
+	case chrome.ActionTransferCancel:
+		cancelTransfer()
+		u.postTransferStatus(chrome.TransferStatusMsg{
+			Active:  true,
+			Phase:   "stopped",
+			Message: "cancelled",
+		})
+		u.toast("transfer cancelled")
+	case chrome.ActionTransferCopyTicket:
+		ticket := r.Name
+		if ticket == "" {
+			ticket = u.chrome.TransferTicket()
+		}
+		if ticket != "" {
+			u.copyText(ticket)
+			u.toast("ticket copied")
+		}
 	}
 	u.syncChrome()
+}
+
+// transferHost implementation for macUI.
+func (u *macUI) postTransferStatus(msg chrome.TransferStatusMsg) {
+	if u == nil {
+		return
+	}
+	fn := func() {
+		r := u.chrome.UpdateChrome(msg)
+		u.chrome = r.Model
+		u.overlayCells = nil
+		u.overlayDirty = true
+		u.markChromeDirty()
+	}
+	if u.jobs != nil {
+		select {
+		case u.jobs <- fn:
+			return
+		default:
+		}
+	}
+	fn()
+}
+
+func (u *macUI) copyText(s string) {
+	_ = clipboard.WriteAll(s)
+}
+
+func (u *macUI) defaultReceiveDir() string {
+	return defaultDownloadDir()
 }
 
 // openRenameUI seeds and opens the rename dialog for a pane or strip tab.

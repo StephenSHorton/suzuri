@@ -19,6 +19,9 @@ SetCompressor /SOLID lzma
 !ifndef SOURCE_EXE
   !define SOURCE_EXE "suzuri.exe"
 !endif
+!ifndef SOURCE_TRANSFER
+  !define SOURCE_TRANSFER ""
+!endif
 !ifndef ICON
   !define ICON "assets\icon\suzuri.ico"
 !endif
@@ -71,9 +74,14 @@ Section "suzuri" SecMain
   ; Stop a running instance so we can overwrite the exe.
   nsExec::ExecToLog 'taskkill /IM suzuri.exe /F'
   Pop $0
+  nsExec::ExecToLog 'taskkill /IM suzuri-transfer.exe /F'
+  Pop $0
   Sleep 300
 
   File "/oname=suzuri.exe" "${SOURCE_EXE}"
+  !if "${SOURCE_TRANSFER}" != ""
+    File "/oname=suzuri-transfer.exe" "${SOURCE_TRANSFER}"
+  !endif
   File "${ICON}"
 
   ; Start Menu
@@ -120,10 +128,14 @@ SectionEnd
 Section "Uninstall"
   nsExec::ExecToLog 'taskkill /IM suzuri.exe /F'
   Pop $0
+  nsExec::ExecToLog 'taskkill /IM suzuri-transfer.exe /F'
+  Pop $0
   Sleep 300
 
   Delete "$INSTDIR\suzuri.exe"
   Delete "$INSTDIR\suzuri.exe.old"
+  Delete "$INSTDIR\suzuri-transfer.exe"
+  Delete "$INSTDIR\suzuri-transfer.exe.old"
   Delete "$INSTDIR\suzuri.ico"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

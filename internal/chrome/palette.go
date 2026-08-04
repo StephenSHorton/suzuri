@@ -110,6 +110,12 @@ func (m *Model) handlePaletteKey(msg tea.KeyMsg) (act HostAction, profile string
 		case ActionOpenNotes:
 			m.openNotes()
 			act = ActionNone
+		case ActionOpenTransferSend:
+			m.openTransferPrompt(TransferModeSend, "")
+			act = ActionNone
+		case ActionOpenTransferReceive:
+			m.openTransferPrompt(TransferModeReceive, "")
+			act = ActionNone
 		}
 		return act, profile, minutes
 	case "up":

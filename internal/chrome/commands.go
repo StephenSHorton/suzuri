@@ -28,6 +28,8 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		{ID: "caffeine_off", Title: "Caffeine off", Desc: "Allow sleep · System", Category: "System", Action: ActionCaffeineOff},
 		{ID: "help", Title: "Keyboard shortcuts", Desc: "Ctrl+/ · Help", Category: "Help", Action: ActionOpenHelp},
 		{ID: "notes", Title: "Notes", Desc: "Ctrl+Shift+M · List + editor (saved)", Category: "Notes", Action: ActionOpenNotes},
+		{ID: "transfer_send", Title: "Send file (ticket)…", Desc: "P2P · Transfer", Category: "Transfer", Action: ActionOpenTransferSend},
+		{ID: "transfer_receive", Title: "Receive ticket…", Desc: "P2P · Transfer", Category: "Transfer", Action: ActionOpenTransferReceive},
 		{ID: "new_tab", Title: "New tab", Desc: "Ctrl+Shift+T · Tabs", Category: "Tabs", Action: ActionNewTab},
 		{ID: "new_window", Title: "New window", Desc: "Ctrl+Shift+N · Window", Category: "Window", Action: ActionNewWindow},
 	}

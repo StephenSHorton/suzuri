@@ -124,6 +124,40 @@ func TestNewWindowFromPalette(t *testing.T) {
 	}
 }
 
+func TestTransferSendFromPalette(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenPaletteMsg{})
+	m = r.Model
+	// Filter to transfer send
+	for _, ch := range "send file" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	m = r.Model
+	if r.Action != ActionNone {
+		t.Fatalf("palette enter action=%v want None (prompt opens in chrome)", r.Action)
+	}
+	if !m.TransferPromptOpen {
+		t.Fatal("expected transfer prompt open")
+	}
+	if m.transferMode != TransferModeSend {
+		t.Fatalf("mode=%v want send", m.transferMode)
+	}
+	// Type a path and start
+	for _, ch := range "/tmp/x" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionTransferStart || r.Name != "/tmp/x" {
+		t.Fatalf("start action=%v name=%q", r.Action, r.Name)
+	}
+	if r.TransferMode != TransferModeSend {
+		t.Fatalf("mode=%v", r.TransferMode)
+	}
+}
+
 func TestStatusToastRow(t *testing.T) {
 	m := New(80)
 	if m.RowCount() != 1 {

@@ -32,6 +32,7 @@ Most “pretty terminals” are either:
 | **Look** | 16 themes (Inkstone, Charmtone, Nord, Dracula, Tokyo Night, …) · bundled Gohu mono · app icon · box-drawing |
 | **Polish** | Intros (matrix, ripple, ink wash, CRT) · shell ambient (rain, grain, waves, fireflies, CRT) · 猫咪 dim under settings · floating chrome |
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
+| **Transfer** | Peer-to-peer send/receive (palette + CLI; iroh via `suzuri-transfer`) |
 | **Updates** | Auto-update from GitHub Releases on startup; palette **Check for updates** |
 | **Install** | Windows: user-scoped setup (`*-setup.exe`) · macOS: `.dmg` / `.app.zip` → Applications |
 
@@ -117,6 +118,24 @@ Go 1.26+ recommended (see `go.mod`). Supported hosts: **Windows** (ConPTY) and *
 Fields: font, theme, ANSI map, **intro** (`matrix` \| `ripple` \| `none`), profiles, window placement.
 
 `SUZURI_LOG_LEVEL=info` to quiet debug.
+
+## Transfer (P2P files)
+
+Send a file straight to another machine — no cloud, no size cap. Engine is the former [hato](https://github.com/StephenSHorton/hato) CLI (iroh + BLAKE3 resume), shipped as `suzuri-transfer` next to suzuri (or on `PATH` / `SUZURI_TRANSFER_BIN` while developing).
+
+```sh
+# Terminal A — print a ticket and keep serving until Ctrl+C
+suzuri send ./holiday.mkv
+
+# Terminal B — download (paste the ticket)
+suzuri receive 'blob…' ~/Downloads
+
+# Engine path + local identity
+suzuri transfer version
+suzuri transfer me
+```
+
+Identity lives under the suzuri config tree: `…/suzuri/transfer/`. Palette: **Send file (ticket)…** / **Receive ticket…**. See [`docs/transfer.md`](docs/transfer.md).
 
 ## MCP (agent diagnostics + notes)
 

@@ -4,6 +4,7 @@
 # Usage (from repo root after go build):
 #   packaging/macos/build-app.sh \
 #     --binary ./suzuri \
+#     --transfer ./suzuri-transfer \
 #     --version 0.9.29 \
 #     --out dist
 #
@@ -14,6 +15,7 @@
 set -euo pipefail
 
 BINARY=""
+TRANSFER=""
 VERSION="0.0.0-dev"
 OUT_DIR="dist"
 ARCH="$(uname -m)"
@@ -26,11 +28,12 @@ esac
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) BINARY="$2"; shift 2 ;;
+    --transfer) TRANSFER="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
     --arch) GOARCH="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,20p' "$0"
+      sed -n '2,22p' "$0"
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -59,9 +62,14 @@ echo "==> assembling $APP_NAME (version $VERSION)"
 rm -rf "$APP_PATH"
 mkdir -p "$MACOS_DIR" "$RES_DIR"
 
-# Executable
+# Executable + optional P2P transfer engine (sibling for ResolveBinary).
 cp "$BINARY" "$MACOS_DIR/suzuri"
 chmod +x "$MACOS_DIR/suzuri"
+if [[ -n "$TRANSFER" && -f "$TRANSFER" ]]; then
+  cp "$TRANSFER" "$MACOS_DIR/suzuri-transfer"
+  chmod +x "$MACOS_DIR/suzuri-transfer"
+  echo "==> bundled transfer engine"
+fi
 
 # Info.plist with version stamped
 sed "s/VERSION_PLACEHOLDER/${VERSION//\//\\/}/g" "$SCRIPT_DIR/Info.plist" > "$CONTENTS/Info.plist"
