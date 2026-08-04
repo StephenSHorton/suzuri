@@ -41,6 +41,9 @@ type Model struct {
 	SplashOpen   bool
 	RenameOpen   bool
 	NotesOpen    bool
+	// Transfer: path/ticket prompt, then progress panel while engine runs.
+	TransferPromptOpen bool
+	TransferPanelOpen  bool
 	// Sync palette (no bubbles list / tea.Cmd — host key path must stay non-blocking).
 	palAll    []paletteItem
 	palView   []paletteItem
@@ -51,6 +54,14 @@ type Model struct {
 	// Rename dialog (sync, same key path as palette).
 	renameTarget RenameTarget
 	renameBuf    string
+	// Transfer prompt + panel state.
+	transferMode   TransferMode
+	transferBuf    string
+	transferPhase  string
+	transferTicket string
+	transferDone   uint64
+	transferTotal  uint64
+	transferMsg    string
 	// Notes bank (persisted to notes.json; editor mirrors active note).
 	notesBank   []NoteDoc
 	notesActive int // index into notesBank
@@ -147,6 +158,16 @@ const (
 	ActionApplyRename
 	// ActionOpenNotes opens the scratch notes surface (host may also toggle).
 	ActionOpenNotes
+	// ActionOpenTransferSend / Receive: host opens the transfer path/ticket prompt.
+	ActionOpenTransferSend
+	ActionOpenTransferReceive
+	// ActionTransferStart: Result.Name is path (send) or ticket (receive);
+	// Result.TransferMode selects which.
+	ActionTransferStart
+	// ActionTransferCancel stops an in-flight engine process.
+	ActionTransferCancel
+	// ActionTransferCopyTicket copies the active ticket to the clipboard.
+	ActionTransferCopyTicket
 )
 
 // Result pairs the new model with an optional host action.
@@ -156,8 +177,9 @@ type Result struct {
 	Index        int
 	Settings     config.Config // set for preview/apply/cancel
 	ProfileName  string        // ActionNewTabProfile
-	Name         string        // ActionApplyRename
+	Name         string        // ActionApplyRename / ActionTransferStart
 	RenameTarget RenameTarget  // ActionApplyRename
+	TransferMode TransferMode  // ActionTransferStart
 }
 
 // KeyMap for chrome shortcuts the host may forward.
@@ -216,8 +238,12 @@ func (m Model) Init() tea.Cmd { return nil }
 // OverlayOpen is true when any modal owns keyboard focus.
 func (m Model) OverlayOpen() bool {
 	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen || m.HelpOpen ||
-		m.SplashOpen || m.RenameOpen || m.NotesOpen
+		m.SplashOpen || m.RenameOpen || m.NotesOpen ||
+		m.TransferPromptOpen || m.TransferPanelOpen
 }
+
+// TransferTicket returns the ticket shown on the progress panel (for copy).
+func (m Model) TransferTicket() string { return m.transferTicket }
 
 // UpdateChrome applies a message and returns host actions.
 func (m Model) UpdateChrome(msg tea.Msg) Result {
@@ -298,6 +324,14 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.SplashOpen = true
 	case OpenRenameMsg:
 		m.openRename(msg.Target, msg.Seed)
+	case OpenTransferPromptMsg:
+		m.openTransferPrompt(msg.Mode, msg.Seed)
+	case TransferStatusMsg:
+		m.applyTransferStatus(msg)
+	case CloseTransferMsg:
+		m.TransferPromptOpen = false
+		m.TransferPanelOpen = false
+		m.transferBuf = ""
 	case OpenNotesMsg:
 		m.openNotes()
 	case ToggleNotesMsg:
@@ -340,6 +374,14 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.SplashOpen = false
 		m.RenameOpen = false
 		m.renameBuf = ""
+		// Transfer: dismiss UI; host should cancel via ActionTransferCancel if active.
+		wasTransfer := m.TransferPanelOpen
+		m.TransferPromptOpen = false
+		m.TransferPanelOpen = false
+		m.transferBuf = ""
+		if wasTransfer {
+			act = ActionTransferCancel
+		}
 		// Notes: put away only — flush active body into bank (host persists).
 		m.putAwayNotes()
 	case tea.WindowSizeMsg:
@@ -380,6 +422,15 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			act, renameName = m.handleRenameKey(msg)
 			return Result{Model: m, Action: act, Name: renameName, RenameTarget: renameTarget}
 		}
+		if m.TransferPromptOpen {
+			var val string
+			act, val = m.handleTransferPromptKey(msg)
+			return Result{Model: m, Action: act, Name: val, TransferMode: m.transferMode}
+		}
+		if m.TransferPanelOpen {
+			act = m.handleTransferPanelKey(msg)
+			return Result{Model: m, Action: act, Name: m.transferTicket}
+		}
 		if m.NotesOpen {
 			m.computeNotesLayout(m.Width)
 			m.handleNotesKey(msg)
@@ -393,6 +444,14 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			}
 			if act == ActionOpenNotes {
 				m.openNotes()
+				act = ActionNone
+			}
+			if act == ActionOpenTransferSend {
+				m.openTransferPrompt(TransferModeSend, "")
+				act = ActionNone
+			}
+			if act == ActionOpenTransferReceive {
+				m.openTransferPrompt(TransferModeReceive, "")
 				act = ActionNone
 			}
 			return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName}
@@ -441,6 +500,12 @@ func (m *Model) closeModalsExcept(keep string) {
 		m.RenameOpen = false
 		m.renameBuf = ""
 	}
+	if keep != "transfer_prompt" {
+		m.TransferPromptOpen = false
+		m.transferBuf = ""
+	}
+	// Transfer progress panel is long-lived: leave open when other modals open
+	// so an in-flight send keeps showing the ticket.
 	if keep != "notes" {
 		if m.NotesOpen {
 			m.flushActiveNote()
@@ -594,6 +659,10 @@ func (m Model) OverlayView() string {
 		card = m.settings.render(w)
 	case m.RenameOpen:
 		card = m.renderRename(w)
+	case m.TransferPromptOpen:
+		card = m.renderTransferPrompt(w)
+	case m.TransferPanelOpen:
+		card = m.renderTransferPanel(w)
 	case m.NotesOpen:
 		// Interactive notes modal + borderless keys caption (gap via MarginTop).
 		main := m.renderNotes(w)

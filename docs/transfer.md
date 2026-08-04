@@ -49,10 +49,19 @@ HATO_CONFIG_DIR=/tmp/suzuri-b suzuri receive "$TICKET" /tmp/out
 
 Host ↔ engine uses NDJSON (`--json`). See [hato machine-mode](https://github.com/StephenSHorton/hato/blob/main/docs/machine-mode.md).
 
+## GUI (command palette)
+
+| Command | Flow |
+|---------|------|
+| **Send file (ticket)…** | Path prompt → prepare → ticket panel (`c` copy, `esc` stop) |
+| **Receive ticket…** | Ticket prompt → download into `~/Downloads` (or home) with progress |
+
+Keep suzuri open while serving. Engine missing → toast from host when start fails.
+
 ## Status
 
 - [x] CLI send / receive (raw tickets)
-- [ ] Palette / progress panel in the GUI
+- [x] Palette / progress panel in the GUI
 - [ ] Bundle `suzuri-transfer` in release installers + multi-file updater
 - [ ] Contacts / pair / listen (needs mailbox)
 - [ ] Short codes

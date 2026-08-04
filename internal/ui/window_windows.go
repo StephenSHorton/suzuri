@@ -48,6 +48,8 @@ const (
 	wmSuzuriToast = win.WM_APP + 8
 	// wmSuzuriUpdateOffer opens the update confirm modal (version in toastPending).
 	wmSuzuriUpdateOffer = win.WM_APP + 9
+	// wmSuzuriTransfer drains transfer progress/status from engine goroutines.
+	wmSuzuriTransfer = win.WM_APP + 10
 )
 
 // Run opens a native Win32 window with one shell tab (more via Ctrl+Shift+T).
@@ -212,6 +214,10 @@ type winUI struct {
 	toastPending string
 	// updateOfferVer is the version string for wmSuzuriUpdateOffer confirm.
 	updateOfferVer string
+
+	// Transfer status queue (engine goroutine → UI thread).
+	xferMu      sync.Mutex
+	xferPending []chrome.TransferStatusMsg
 
 	// MCP bridge: loopback HTTP for spawn-on-demand stdio MCP (see internal/bridge).
 	bridge  *bridge.Host
@@ -887,8 +893,95 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.openRenameUI(chrome.RenameTargetTab)
 	case chrome.ActionApplyRename:
 		u.applyRename(r.RenameTarget, r.Name)
+	case chrome.ActionOpenTransferSend:
+		r2 := u.chrome.UpdateChrome(chrome.OpenTransferPromptMsg{Mode: chrome.TransferModeSend})
+		u.chrome = r2.Model
+		u.overlayCells = nil
+		u.overlayDirty = true
+		u.overlaySceneReady = false
+		if u.hwnd != 0 {
+			win.InvalidateRect(u.hwnd, nil, false)
+		}
+	case chrome.ActionOpenTransferReceive:
+		r2 := u.chrome.UpdateChrome(chrome.OpenTransferPromptMsg{Mode: chrome.TransferModeReceive})
+		u.chrome = r2.Model
+		u.overlayCells = nil
+		u.overlayDirty = true
+		u.overlaySceneReady = false
+		if u.hwnd != 0 {
+			win.InvalidateRect(u.hwnd, nil, false)
+		}
+	case chrome.ActionTransferStart:
+		switch r.TransferMode {
+		case chrome.TransferModeReceive:
+			startTransferReceive(u, r.Name, u.defaultReceiveDir())
+		default:
+			startTransferSend(u, r.Name)
+		}
+	case chrome.ActionTransferCancel:
+		cancelTransfer()
+		u.postTransferStatus(chrome.TransferStatusMsg{
+			Active:  true,
+			Phase:   "stopped",
+			Message: "cancelled",
+		})
+		u.toast("transfer cancelled")
+	case chrome.ActionTransferCopyTicket:
+		ticket := r.Name
+		if ticket == "" {
+			ticket = u.chrome.TransferTicket()
+		}
+		if ticket != "" {
+			u.copyText(ticket)
+			u.toast("ticket copied")
+		}
 	}
 	u.syncChrome()
+}
+
+// transferHost implementation for winUI.
+func (u *winUI) postTransferStatus(msg chrome.TransferStatusMsg) {
+	if u == nil {
+		return
+	}
+	// Reuse toast queue machinery: post a custom work item via toast channel pattern.
+	// Progress can be frequent — always hop to UI thread with PostMessage when possible.
+	u.xferMu.Lock()
+	u.xferPending = append(u.xferPending, msg)
+	u.xferMu.Unlock()
+	if u.hwnd != 0 {
+		_ = win.PostMessage(u.hwnd, wmSuzuriTransfer, 0, 0)
+		return
+	}
+	u.drainTransferStatus()
+}
+
+func (u *winUI) drainTransferStatus() {
+	u.xferMu.Lock()
+	pending := u.xferPending
+	u.xferPending = nil
+	u.xferMu.Unlock()
+	for _, msg := range pending {
+		r := u.chrome.UpdateChrome(msg)
+		u.chrome = r.Model
+	}
+	if len(pending) > 0 {
+		u.overlayCells = nil
+		u.overlayDirty = true
+		u.overlaySceneReady = false
+		u.markChromeDirty()
+		if u.hwnd != 0 {
+			win.InvalidateRect(u.hwnd, nil, false)
+		}
+	}
+}
+
+func (u *winUI) copyText(s string) {
+	_ = setClipboardText(s)
+}
+
+func (u *winUI) defaultReceiveDir() string {
+	return defaultDownloadDir()
 }
 
 // openRenameUI seeds and opens the rename dialog for a pane or strip tab.
@@ -1777,6 +1870,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case wmSuzuriOpenPalette:
 		u.openPaletteSafe()
+		return 0
+
+	case wmSuzuriTransfer:
+		u.drainTransferStatus()
 		return 0
 
 	case win.WM_ERASEBKGND:

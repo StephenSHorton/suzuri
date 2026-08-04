@@ -96,8 +96,8 @@ func TestNewTabFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// 0 Settings, 1 Replay intro, 2 Check for updates, 3 Help, 4 Notes, 5 New tab
-	for i := 0; i < 5; i++ {
+	// 0 Settings … 4 Notes, 5 Send file, 6 Receive ticket, 7 New tab
+	for i := 0; i < 7; i++ {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
 		m = r.Model
 	}
@@ -111,14 +111,48 @@ func TestNewWindowFromPalette(t *testing.T) {
 	m := New(80)
 	r := m.UpdateChrome(OpenPaletteMsg{})
 	m = r.Model
-	// … 5 New tab, 6 New window
-	for i := 0; i < 6; i++ {
+	// … 7 New tab, 8 New window
+	for i := 0; i < 8; i++ {
 		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyDown})
 		m = r.Model
 	}
 	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
 	if r.Action != ActionNewWindow {
 		t.Fatalf("action=%v want NewWindow", r.Action)
+	}
+}
+
+func TestTransferSendFromPalette(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenPaletteMsg{})
+	m = r.Model
+	// Filter to transfer send
+	for _, ch := range "send file" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	m = r.Model
+	if r.Action != ActionNone {
+		t.Fatalf("palette enter action=%v want None (prompt opens in chrome)", r.Action)
+	}
+	if !m.TransferPromptOpen {
+		t.Fatal("expected transfer prompt open")
+	}
+	if m.transferMode != TransferModeSend {
+		t.Fatalf("mode=%v want send", m.transferMode)
+	}
+	// Type a path and start
+	for _, ch := range "/tmp/x" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionTransferStart || r.Name != "/tmp/x" {
+		t.Fatalf("start action=%v name=%q", r.Action, r.Name)
+	}
+	if r.TransferMode != TransferModeSend {
+		t.Fatalf("mode=%v", r.TransferMode)
 	}
 }
 

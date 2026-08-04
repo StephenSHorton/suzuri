@@ -32,7 +32,7 @@ Most “pretty terminals” are either:
 | **Look** | Inkstone / Charmtone / High contrast · bundled Gohu mono · app icon · box-drawing |
 | **Polish** | Window placement, matrix/ripple intros (Windows), 猫咪 dim under settings, floating palette/help over live shell |
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
-| **Transfer** | Peer-to-peer file send/receive (CLI; iroh engine via `suzuri-transfer`) |
+| **Transfer** | Peer-to-peer send/receive (palette + CLI; iroh via `suzuri-transfer`) |
 | **Updates** | Auto-update from GitHub Releases on startup; palette **Check for updates** |
 | **Install** | Windows: user-scoped setup (`*-setup.exe`) · macOS: `.dmg` / `.app.zip` → Applications |
 
@@ -132,7 +132,7 @@ suzuri transfer version
 suzuri transfer me
 ```
 
-Identity/contacts live under the suzuri config tree: `…/suzuri/transfer/`. See [`docs/transfer.md`](docs/transfer.md). Palette UI and installers that bundle the engine are next.
+Identity lives under the suzuri config tree: `…/suzuri/transfer/`. Palette: **Send file (ticket)…** / **Receive ticket…**. See [`docs/transfer.md`](docs/transfer.md). Installers that bundle the engine are next.
 
 ## MCP (agent diagnostics)
 
