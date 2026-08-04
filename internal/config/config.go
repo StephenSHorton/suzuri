@@ -552,15 +552,15 @@ func IntroLabel(id string) string {
 func IntroDesc(id string) string {
 	switch strings.ToLower(strings.TrimSpace(id)) {
 	case IntroRipple:
-		return "Puddle of 猫/咪 rings expanding from the center mark. Save & relaunch (or replay intro) to preview."
+		return "Puddle of 猫/咪 rings expanding from the center mark. Live-previews behind Settings while this row is focused (or replay intro anytime)."
 	case IntroInkWash:
-		return "Ink blot blooms from the 硯 mark, then soaks into the void. On-brand for suzuri."
+		return "Ink blot blooms from the 硯 mark, then soaks into the void. On-brand for suzuri. Live-previews behind Settings while this row is focused."
 	case IntroCRT:
-		return "Scanline phosphor boot — green/amber flash settles into the shell. Pairs with Amber CRT theme."
+		return "Scanline phosphor boot — green/amber flash settles into the shell. Pairs with Amber CRT theme. Live-previews behind Settings while this row is focused."
 	case IntroNone:
 		return "Skip the startup curtain. The center 硯 still fades in quietly."
 	default:
-		return "Digital rain over the shell for ~2s, then streams fall off. Skipped when Ambient is Rain (no double curtain)."
+		return "Digital rain over the shell for ~2s, then streams fall off. Live-previews behind Settings while this row is focused. Skipped when Ambient is Rain (no double curtain)."
 	}
 }
 
@@ -609,9 +609,9 @@ func AmbientDesc(id string) string {
 	case AmbientCRT:
 		return "Scanlines + edge vignette painted over the shell (and a slow bright band). Pair with Amber CRT."
 	case AmbientNone:
-		return "No always-on underlay. Intro curtains and Settings previews are unchanged."
+		return "No always-on underlay. Settings shows a plain matte unless Intro is focused."
 	default:
-		return "Always-on digital rain under empty/default-bg cells — dim so text stays readable. Shows through TUIs that leave cells transparent."
+		return "Always-on digital rain under empty/default-bg cells — dim so text stays readable. Shows through TUIs that leave cells transparent. Live-previews behind Settings by default (and while this row is focused)."
 	}
 }
 

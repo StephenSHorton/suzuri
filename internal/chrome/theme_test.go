@@ -33,3 +33,41 @@ func TestApplyThemeAllIDs(t *testing.T) {
 		t.Fatal("inkstone missing")
 	}
 }
+
+func TestOnPrimaryWhiteForBrightPrimaries(t *testing.T) {
+	// These themes use bright primary fills for selection — onPrimary must be
+	// white so active tabs / settings rows stay readable.
+	wantWhite := []string{
+		config.ThemeMonokai,
+		config.ThemeCharmtone,
+		config.ThemeKanagawa,
+		config.ThemeOneDark,
+	}
+	for _, id := range wantWhite {
+		ApplyTheme(id)
+		if OnPrimR < 240 || OnPrimG < 240 || OnPrimB < 240 {
+			t.Fatalf("theme %q onPrimary want near-white, got #%02x%02x%02x",
+				id, OnPrimR, OnPrimG, OnPrimB)
+		}
+	}
+}
+
+func TestSettingsShowcaseIntro(t *testing.T) {
+	m := Model{}
+	if m.SettingsShowcaseIntro() {
+		t.Fatal("closed settings should not showcase intro")
+	}
+	m.SettingsOpen = true
+	m.settings.field = fieldFontFace
+	if m.SettingsShowcaseIntro() {
+		t.Fatal("default field should showcase ambient, not intro")
+	}
+	m.settings.field = fieldIntro
+	if !m.SettingsShowcaseIntro() {
+		t.Fatal("Intro field should showcase intro")
+	}
+	m.settings.field = fieldShellAmbient
+	if m.SettingsShowcaseIntro() {
+		t.Fatal("Ambient field should showcase ambient")
+	}
+}

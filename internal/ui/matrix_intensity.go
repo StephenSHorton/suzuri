@@ -21,3 +21,17 @@ func effectiveShellMatrixIntensity(cfg config.Config, altScreen bool) float64 {
 	}
 	return base * cfg.ShellMatrixOpacity01()
 }
+
+// settingsAmbientShowcaseIntensity is brighter than quiet shell ambient so the
+// chosen Ambient style reads clearly behind the settings card (matte + modal).
+func settingsAmbientShowcaseIntensity(cfg config.Config) float64 {
+	// ~3.5× quiet shell rain (0.20 → ~0.70 at full opacity), clamped.
+	v := effectiveShellMatrixIntensity(cfg, false) * 3.5
+	if v > 1 {
+		return 1
+	}
+	if v < 0 {
+		return 0
+	}
+	return v
+}

@@ -271,22 +271,31 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		p.paintShellImages(dst, o, padY, shellBot, yShift)
 	}
 
-	// CRT scanlines over the grid (must not be covered by cell fills).
+	// CRT scanlines over the live shell grid (not under dim matte).
 	if o.CRTScanlines > 0.01 && !o.DimShell {
 		p.paintCRTScanlines(dst, padY, shellBot, o.CRTScanlines)
 	}
 
-	// Matrix rain (intro or settings underlay) over the shell field.
-	if len(o.MatrixCells) > 0 {
-		if o.SettingsOpen || o.DimShell {
-			// Matte first for settings underlay.
-			fillShellMatte(dst, padY, shellBot, true)
+	// Intro / settings underlay over the shell field.
+	// Settings default: Ambient showcase (MatrixCells / CRTScanlines).
+	// Settings + Intro focused: startup curtain preview (MatrixCells).
+	if o.SettingsOpen || (o.DimShell && len(o.MatrixCells) > 0) {
+		// Theme matte so rain/ambient read on a dark field (not live shell).
+		fillShellMatte(dst, padY, shellBot, true)
+		if len(o.MatrixCells) > 0 {
+			p.paintMatrixRain(dst, padY, shellBot, o.MatrixCells)
 		}
-		p.paintMatrixRain(dst, padY, shellBot, o.MatrixCells)
+		// CRT ambient / CRT intro scanlines on the matte.
+		if o.SettingsOpen && o.CRTScanlines > 0.01 {
+			p.paintCRTScanlines(dst, padY, shellBot, o.CRTScanlines)
+		}
 	} else if o.DimShell && !o.SettingsOpen {
 		// Non-settings overlay: dim matte + 猫咪 texture.
 		fillShellMatte(dst, padY, shellBot, false)
 		p.paintDimNekoField(dst, padY, shellBot)
+	} else if len(o.MatrixCells) > 0 {
+		// Live intro curtain over the shell (no matte).
+		p.paintMatrixRain(dst, padY, shellBot, o.MatrixCells)
 	} else if o.DimShell {
 		// Generic dim.
 		for y := padY; y < shellBot && y < h; y++ {

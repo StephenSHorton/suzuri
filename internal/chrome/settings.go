@@ -87,6 +87,14 @@ func (s *settingsState) moveField(delta int) {
 	s.field = settingsField((int(s.field) + delta%n + n) % n)
 }
 
+// SettingsShowcaseIntro is true when Settings should preview the startup
+// curtain under the modal (Intro row focused). Otherwise the underlay
+// showcases Ambient (default for every other field, including Ambient /
+// Intensity while cycling styles).
+func (m Model) SettingsShowcaseIntro() bool {
+	return m.SettingsOpen && m.settings.field == fieldIntro
+}
+
 func (s *settingsState) nudge(delta int) {
 	switch s.field {
 	case fieldFontFace:

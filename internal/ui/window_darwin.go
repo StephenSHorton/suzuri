@@ -151,6 +151,9 @@ type macUI struct {
 	// Settings underlay intro preview (loops with a gap between full plays).
 	settingsPreviewT0      time.Time
 	settingsIntroIdleUntil time.Time
+	// settingsShowedIntro tracks whether the previous frame was the Intro
+	// showcase so focusing that row restarts a full curtain cycle.
+	settingsShowedIntro bool
 
 	// Deferred work from PTY/MCP goroutines → UI tick.
 	jobs    chan func()
@@ -1215,9 +1218,10 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 	case chrome.ActionQuit:
 		u.quit = true
 	case chrome.ActionOpenSettings:
-		// Fresh underlay cycle each time settings opens.
+		// Fresh underlay cycle each time settings opens (starts on Ambient).
 		u.settingsPreviewT0 = time.Now()
 		u.settingsIntroIdleUntil = time.Time{}
+		u.settingsShowedIntro = false
 		if r.Settings.FontFace != "" || r.Settings.FontSizePx > 0 {
 			u.applyConfigLive(r.Settings)
 		}
@@ -3130,8 +3134,9 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		shellCols = u.cols
 	}
 
-	// Intro underlay: startup curtain, or settings preview of the chosen style.
-	// Always-on shell ambient is separate (ShellMatrixCells / CRT scanlines).
+	// Underlays: settings previews Ambient by default; Intro only when that
+	// row is focused. Startup curtain is separate. Always-on ambient uses
+	// ShellMatrixCells / CRT scanlines outside of dim modals.
 	var rain []rainCell
 	var shellRain []rainCell
 	crtIntensity := 0.0
@@ -3140,37 +3145,67 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	cwPx, chPx := cw, ch
 	col := u.themeAmbientColors()
 	if u.chrome.SettingsOpen {
-		t0, active := u.settingsUnderlayClock(now)
-		if active {
-			switch introStyle {
-			case config.IntroRipple:
-				rCols := shellCols / 2
-				if rCols < 2 {
-					rCols = 2
+		showIntro := u.chrome.SettingsShowcaseIntro()
+		if showIntro && !u.settingsShowedIntro {
+			// Just focused Intro — restart a full curtain play.
+			u.settingsPreviewT0 = now
+			u.settingsIntroIdleUntil = time.Time{}
+		}
+		u.settingsShowedIntro = showIntro
+		if showIntro {
+			// Focused Intro row → loop the chosen startup curtain.
+			t0, active := u.settingsUnderlayClock(now)
+			if active {
+				switch introStyle {
+				case config.IntroRipple:
+					rCols := shellCols / 2
+					if rCols < 2 {
+						rCols = 2
+					}
+					var drew bool
+					rain, drew = rippleCells(rCols, shellRows, cwPx, chPx, t0, matrixIntroSpawn, now)
+					if now.Sub(t0) > matrixIntroSpawn && !drew {
+						u.settingsUnderlayFinished(now)
+					}
+					if now.Sub(t0) > matrixIntroMaxTotal {
+						u.settingsUnderlayFinished(now)
+					}
+				case config.IntroInkWash:
+					rain = inkWashCells(shellCols, shellRows, t0, matrixIntroSpawn, now, col)
+					if now.Sub(t0) > matrixIntroSpawn && len(rain) == 0 {
+						u.settingsUnderlayFinished(now)
+					}
+				case config.IntroCRT:
+					rain = crtIntroCells(shellCols, shellRows, t0, matrixIntroSpawn, now, col)
+					crtIntensity = 0.45
+					if now.Sub(t0) > matrixIntroSpawn {
+						u.settingsUnderlayFinished(now)
+						crtIntensity = 0
+					}
+				case config.IntroNone:
+					// Matte only (paint path fills when SettingsOpen).
+				default:
+					rain = matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now)
 				}
-				var drew bool
-				rain, drew = rippleCells(rCols, shellRows, cwPx, chPx, t0, matrixIntroSpawn, now)
-				if now.Sub(t0) > matrixIntroSpawn && !drew {
-					u.settingsUnderlayFinished(now)
-				}
-				if now.Sub(t0) > matrixIntroMaxTotal {
-					u.settingsUnderlayFinished(now)
-				}
-			case config.IntroInkWash:
-				rain = inkWashCells(shellCols, shellRows, t0, matrixIntroSpawn, now, col)
-				if now.Sub(t0) > matrixIntroSpawn && len(rain) == 0 {
-					u.settingsUnderlayFinished(now)
-				}
-			case config.IntroCRT:
-				rain = crtIntroCells(shellCols, shellRows, t0, matrixIntroSpawn, now, col)
-				crtIntensity = 0.45
-				if now.Sub(t0) > matrixIntroSpawn {
-					u.settingsUnderlayFinished(now)
-					crtIntensity = 0
-				}
-			case config.IntroNone:
+			}
+		} else if u.shellAmbientOn() {
+			// Default settings underlay (and Ambient / Intensity fields):
+			// showcase the always-on ambient style + intensity.
+			t0 := u.blinkStart
+			if t0.IsZero() {
+				t0 = now
+			}
+			intensity := settingsAmbientShowcaseIntensity(u.cfg)
+			switch u.cfg.ShellAmbient {
+			case config.AmbientRain:
+				rain = dimRainCells(
+					matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now),
+					intensity,
+				)
+			case config.AmbientCRT:
+				crtIntensity = intensity * 0.9
 			default:
-				rain = matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now)
+				rain = ambientGlyphCells(u.cfg.ShellAmbient, shellCols, shellRows, t0, now, col, intensity)
 			}
 		}
 	} else if u.matrixIntroActive() && introStyle != config.IntroNone {

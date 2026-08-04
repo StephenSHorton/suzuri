@@ -5076,7 +5076,8 @@ func (u *winUI) paintMatrixIntro(hdc win.HDC, rect win.RECT) {
 }
 
 // paintDimShell darkens the shell viewport under a floating overlay.
-// Settings: animated Matrix rain. Other modals: Charm-style 猫咪 field.
+// Settings: Ambient showcase by default; Intro curtain when that row is focused.
+// Other modals: Charm-style 猫咪 field.
 // Restored from b78e569 (pre-session dim formula + dense grid).
 func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 	defer applog.Recover("paintDimShell", false)
@@ -5086,8 +5087,7 @@ func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 		return
 	}
 	if u.chrome.SettingsOpen {
-		// Continuous loop under settings (independent of intro).
-		u.paintMatrixMatteAndRain(hdc, rect, padY, bot, matrixLoop, u.blinkStart, 0)
+		u.paintSettingsUnderlay(hdc, rect, padY, bot)
 		return
 	}
 	// Non-settings overlays: theme dim + 猫咪 texture.
@@ -5098,6 +5098,120 @@ func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 		win.DeleteObject(win.HGDIOBJ(brush))
 	}
 	u.paintDimNekoField(hdc, rect, padY, bot)
+}
+
+// paintSettingsUnderlay fills the settings matte and previews Ambient (default)
+// or the focused Intro curtain behind the modal.
+func (u *winUI) paintSettingsUnderlay(hdc win.HDC, rect win.RECT, padY, bot int32) {
+	// Theme-tinted matte first (same base as paintMatrixMatteAndRain).
+	baseR, baseG, baseB := blendRGB(0, 0, 0, chrome.DimR, chrome.DimG, chrome.DimB, 0.35)
+	matteR, matteG, matteB := blendRGB(baseR, baseG, baseB,
+		chrome.PrimR, chrome.PrimG, chrome.PrimB, 0.05)
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(matteR, matteG, matteB)}
+	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+		r := win.RECT{Left: 0, Top: padY, Right: rect.Right, Bottom: bot}
+		fillRect(hdc, r, brush)
+		win.DeleteObject(win.HGDIOBJ(brush))
+	}
+
+	if u.chrome.SettingsShowcaseIntro() {
+		u.paintSettingsIntroPreview(hdc, rect, padY, bot)
+		return
+	}
+
+	// Default: showcase Ambient + Intensity behind the card.
+	if !u.shellAmbientOn() {
+		return
+	}
+	intensity := settingsAmbientShowcaseIntensity(u.cfg)
+	if intensity <= 0 {
+		return
+	}
+	switch u.cfg.ShellAmbient {
+	case config.AmbientRain:
+		u.paintDimMatrixIntensity(hdc, rect, padY, bot, matrixLoop, u.blinkStart, 0, intensity)
+	case config.AmbientCRT:
+		u.paintCRTAmbient(hdc, rect, padY, bot, intensity*0.9)
+	default:
+		u.paintAmbientGlyphs(hdc, rect, padY, bot, u.cfg.ShellAmbient, intensity)
+	}
+}
+
+// paintSettingsIntroPreview draws the focused Intro style under settings.
+// Uses shared cell helpers where possible so we never call finishMatrixIntro
+// (which would end a live startup curtain).
+func (u *winUI) paintSettingsIntroPreview(hdc win.HDC, rect win.RECT, padY, bot int32) {
+	style := config.Normalize(u.cfg).Intro
+	now := time.Now()
+	origin := u.blinkStart
+	if origin.IsZero() {
+		origin = now
+	}
+	// Loop finite curtains (ripple / ink / CRT) with a short gap; matrix loops forever.
+	cycle := matrixIntroSpawn + 800*time.Millisecond
+	if cycle < time.Second {
+		cycle = time.Second
+	}
+	phase := now.Sub(origin) % cycle
+	playT0 := now.Add(-phase)
+
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	rows := int((bot - padY + ch - 1) / ch)
+	cols := int((rect.Right + cw - 1) / cw)
+	col := themeAmbientColors()
+
+	switch style {
+	case config.IntroNone:
+		return
+	case config.IntroInkWash:
+		cells := inkWashCells(cols, rows, playT0, matrixIntroSpawn, now, col)
+		u.paintRainCellList(hdc, rect, padY, bot, cells)
+	case config.IntroCRT:
+		t := phase.Seconds()
+		sp := matrixIntroSpawn.Seconds()
+		if t < sp {
+			flash := 0.55
+			if t < 0.3 {
+				flash = 0.85
+			}
+			fade := 1.0
+			if t > sp*0.55 {
+				fade = 1 - (t-sp*0.55)/(sp*0.55)
+				if fade < 0 {
+					fade = 0
+				}
+			}
+			if fade > 0 {
+				u.paintCRTAmbient(hdc, rect, padY, bot, flash*fade)
+			}
+			cells := crtIntroCells(cols, rows, playT0, matrixIntroSpawn, now, col)
+			u.paintRainCellList(hdc, rect, padY, bot, cells)
+		}
+	case config.IntroRipple:
+		// Continuous-ish preview: matrix rain stands in for ring math here
+		// (full ripple painter mutates intro state). Still reads as motion.
+		// Prefer a short spawn+wind cycle via temporary intro fields without
+		// finishing if already done.
+		if u.matrixIntroDone {
+			savedStart, savedSpawn := u.matrixIntroStart, u.matrixIntroSpawnEnd
+			u.matrixIntroStart = playT0
+			u.matrixIntroSpawnEnd = playT0.Add(matrixIntroSpawn)
+			u.paintRippleIntro(hdc, rect)
+			u.matrixIntroStart, u.matrixIntroSpawnEnd = savedStart, savedSpawn
+			// paintRippleIntro may no-op finish when already done.
+		} else {
+			// Avoid mutating an active startup intro — show matrix instead.
+			u.paintDimMatrix(hdc, rect, padY, bot, matrixLoop, origin, 0)
+		}
+	default:
+		u.paintDimMatrix(hdc, rect, padY, bot, matrixLoop, origin, 0)
+	}
 }
 
 // paintMatrixMatteAndRain fills a dark theme-tinted matte then digital rain.

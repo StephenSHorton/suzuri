@@ -110,9 +110,9 @@ var themeCatalog = map[string]themeSpec{
 		},
 	},
 	config.ThemeCharmtone: {
-		// Crush Pantera roles: primary≈charple, onPrimary dark on lavender.
+		// Crush Pantera roles: primary≈charple; white text on lavender fills.
 		void: "#1a1418", bar: "#201a1e", panel: "#2a2228",
-		primary: "#a78bfa", secondary: "#f0d9a8", onPrimary: "#1a1418",
+		primary: "#a78bfa", secondary: "#f0d9a8", onPrimary: "#ffffff",
 		text: "#f3e8ee", soft: "#c9b8c0", dim: "#8a7a84", mute: "#5a4a54",
 		sel: "#3a2e40", match: "#c4b5fd", cyan: "#7dd3c0",
 		border: "#a78bfa", dimMatte: "#100c10",
@@ -200,7 +200,8 @@ var themeCatalog = map[string]themeSpec{
 	},
 	config.ThemeOneDark: {
 		void: "#21252b", bar: "#282c34", panel: "#2c313a",
-		primary: "#61afef", secondary: "#c678dd", onPrimary: "#21252b",
+		// White on Atom blue fills (active tab / settings selection).
+		primary: "#61afef", secondary: "#c678dd", onPrimary: "#ffffff",
 		text: "#abb2bf", soft: "#9da5b4", dim: "#5c6370", mute: "#3e4451",
 		sel: "#3e4451", match: "#e5c07b", cyan: "#56b6c2",
 		border: "#61afef", dimMatte: "#1b1f23",
@@ -239,7 +240,8 @@ var themeCatalog = map[string]themeSpec{
 	},
 	config.ThemeKanagawa: {
 		void: "#1f1f28", bar: "#2a2a37", panel: "#363646",
-		primary: "#7e9cd8", secondary: "#e6c384", onPrimary: "#1f1f28",
+		// White on wave-blue fills (active tab / settings selection).
+		primary: "#7e9cd8", secondary: "#e6c384", onPrimary: "#ffffff",
 		text: "#dcd7ba", soft: "#c8c093", dim: "#727169", mute: "#54546d",
 		sel: "#2d4f67", match: "#7aa89f", cyan: "#7fb4ca",
 		border: "#7e9cd8", dimMatte: "#16161d",
@@ -252,9 +254,8 @@ var themeCatalog = map[string]themeSpec{
 	},
 	config.ThemeMonokai: {
 		void: "#1e1f1c", bar: "#272822", panel: "#3e3d32",
-		// onPrimary must be pure black: primary pink is a fill for active tabs /
-		// settings selection — near-black inkstone tones wash out on #f92672.
-		primary: "#f92672", secondary: "#e6db74", onPrimary: "#000000",
+		// White on classic pink fills (active tab / settings selection).
+		primary: "#f92672", secondary: "#e6db74", onPrimary: "#ffffff",
 		text: "#f8f8f2", soft: "#cfcfc2", dim: "#75715e", mute: "#49483e",
 		sel: "#49483e", match: "#a6e22e", cyan: "#66d9ef",
 		border: "#f92672", dimMatte: "#141510",
