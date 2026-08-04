@@ -58,8 +58,16 @@ else
 fi
 
 echo "==> notarytool submit $(basename "$SUBMIT")"
-# --wait blocks until Accepted/Invalid (can take a few minutes).
-xcrun notarytool submit "$SUBMIT" "${AUTH_ARGS[@]}" --wait --timeout 30m
+# --wait blocks until Accepted/Invalid. First submissions (new cert/account)
+# often exceed 30m on Apple's queue; allow up to 90m.
+TIMEOUT="${SUZURI_NOTARY_TIMEOUT:-90m}"
+echo "==> notary wait timeout: $TIMEOUT"
+if ! xcrun notarytool submit "$SUBMIT" "${AUTH_ARGS[@]}" --wait --timeout "$TIMEOUT"; then
+  echo "error: notarytool submit failed or timed out for $(basename "$SUBMIT")" >&2
+  echo "  Check status with: xcrun notarytool history --apple-id … --team-id …" >&2
+  # Best-effort: if Apple still has an ID in recent history, print hint.
+  exit 1
+fi
 
 echo "==> staple $(basename "$TARGET")"
 xcrun stapler staple "$TARGET"
