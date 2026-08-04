@@ -253,6 +253,8 @@ type winUI struct {
 	// Transfer status queue (engine goroutine → UI thread).
 	xferMu      sync.Mutex
 	xferPending []chrome.TransferStatusMsg
+	// fileDropAccept mirrors DragAcceptFiles — only true on Send-file prompt.
+	fileDropAccept bool
 
 	// MCP bridge: loopback HTTP for spawn-on-demand stdio MCP (see internal/bridge).
 	bridge  *bridge.Host
@@ -1086,6 +1088,7 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.overlayCells = nil
 		u.overlayDirty = true
 		u.overlaySceneReady = false
+		u.syncFileDropAccept()
 		if u.hwnd != 0 {
 			win.InvalidateRect(u.hwnd, nil, false)
 		}
@@ -1095,6 +1098,7 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.overlayCells = nil
 		u.overlayDirty = true
 		u.overlaySceneReady = false
+		u.syncFileDropAccept()
 		if u.hwnd != 0 {
 			win.InvalidateRect(u.hwnd, nil, false)
 		}
@@ -1124,6 +1128,26 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		}
 	}
 	u.syncChrome()
+	u.syncFileDropAccept()
+}
+
+// syncFileDropAccept enables WM_DROPFILES only while Send-file prompt is open.
+func (u *winUI) syncFileDropAccept() {
+	if u == nil || u.hwnd == 0 {
+		return
+	}
+	want := u.chrome.AcceptsFileDrop()
+	if want == u.fileDropAccept {
+		return
+	}
+	u.fileDropAccept = want
+	setWindowFileDropAccept(u.hwnd, want)
+	if want {
+		// Prompt UI already shows drop zone; OS will allow the drop cursor.
+		log.Debug("file drop accept on (send prompt)")
+	} else {
+		log.Debug("file drop accept off")
+	}
 }
 
 // transferHost implementation for winUI.
@@ -2177,6 +2201,30 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		return 0
 
+	case win.WM_DROPFILES:
+		// Only armed while Send-file prompt is open (DragAcceptFiles).
+		hDrop := win.HDROP(wParam)
+		if !u.chrome.AcceptsFileDrop() {
+			dragFinish(hDrop)
+			return 0
+		}
+		// Hover-style feedback then commit paths.
+		rHover := u.chrome.UpdateChrome(chrome.TransferDropHoverMsg{Hover: true})
+		u.chrome = rHover.Model
+		paths := pathsFromHDROP(hDrop)
+		r := u.chrome.UpdateChrome(chrome.TransferDropPathsMsg{Paths: paths})
+		u.chrome = r.Model
+		u.overlayCells = nil
+		u.overlayDirty = true
+		u.overlaySceneReady = false
+		u.applyChromeAction(r)
+		u.syncFileDropAccept()
+		u.markChromeDirty()
+		if u.hwnd != 0 {
+			win.InvalidateRect(u.hwnd, nil, false)
+		}
+		return 0
+
 	case wmSuzuriOpenPalette:
 		u.openPaletteSafe()
 		return 0
@@ -2448,8 +2496,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				r := u.chrome.UpdateChrome(*km)
 				u.chrome = r.Model
 				u.applyChromeAction(r)
+				u.syncFileDropAccept()
 				// Palette / rename / notes: only dirty overlay.
-				if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen {
+				if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
+					u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen {
 					u.overlayDirty = true
 					u.overlayCells = nil
 				} else {

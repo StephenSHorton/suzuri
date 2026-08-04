@@ -55,13 +55,15 @@ type Model struct {
 	renameTarget RenameTarget
 	renameBuf    string
 	// Transfer prompt + panel state.
-	transferMode   TransferMode
-	transferBuf    string
-	transferPhase  string
-	transferTicket string
-	transferDone   uint64
-	transferTotal  uint64
-	transferMsg    string
+	transferMode      TransferMode
+	transferBuf       string
+	transferPhase     string
+	transferTicket    string
+	transferDone      uint64
+	transferTotal     uint64
+	transferMsg       string
+	transferDropHover bool   // OS file drag over window (send prompt)
+	transferDropHint  string // short feedback under drop zone
 	// Notes bank (persisted to notes.json; editor mirrors active note).
 	notesBank   []NoteDoc
 	notesActive int // index into notesBank
@@ -362,10 +364,27 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.openTransferPrompt(msg.Mode, msg.Seed)
 	case TransferStatusMsg:
 		m.applyTransferStatus(msg)
+	case TransferDropHoverMsg:
+		if m.AcceptsFileDrop() {
+			m.transferDropHover = msg.Hover
+			if !msg.Hover && m.transferDropHint == "drop target active" {
+				m.transferDropHint = ""
+			}
+		} else {
+			m.transferDropHover = false
+		}
+	case TransferDropPathsMsg:
+		var dropPath string
+		act, dropPath = m.applyTransferDropPaths(msg.Paths)
+		if act == ActionTransferStart {
+			return Result{Model: m, Action: act, Name: dropPath, TransferMode: TransferModeSend}
+		}
 	case CloseTransferMsg:
 		m.TransferPromptOpen = false
 		m.TransferPanelOpen = false
 		m.transferBuf = ""
+		m.transferDropHover = false
+		m.transferDropHint = ""
 	case OpenNotesMsg:
 		m.openNotes()
 	case ToggleNotesMsg:
@@ -425,6 +444,8 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.TransferPromptOpen = false
 		m.TransferPanelOpen = false
 		m.transferBuf = ""
+		m.transferDropHover = false
+		m.transferDropHint = ""
 		if wasTransfer {
 			act = ActionTransferCancel
 		}
@@ -557,6 +578,8 @@ func (m *Model) closeModalsExcept(keep string) {
 	if keep != "transfer_prompt" {
 		m.TransferPromptOpen = false
 		m.transferBuf = ""
+		m.transferDropHover = false
+		m.transferDropHint = ""
 	}
 	// Transfer progress panel is long-lived: leave open when other modals open
 	// so an in-flight send keeps showing the ticket.

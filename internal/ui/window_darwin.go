@@ -681,7 +681,34 @@ drained:
 	u.handleMouse()
 	u.handleKeys()
 	u.handleTextInput()
+	// File drops: only consume when Send-file prompt is open (see AcceptsFileDrop).
+	u.pollTransferFileDrop()
 	return nil
+}
+
+// pollTransferFileDrop reads ebiten.DroppedFiles only while the send prompt
+// accepts drops. Ignoring drops otherwise avoids treating every window drop
+// as a transfer (e.g. while using Grok in the shell).
+func (u *macUI) pollTransferFileDrop() {
+	if !u.chrome.AcceptsFileDrop() {
+		return
+	}
+	fsys := ebiten.DroppedFiles()
+	if fsys == nil {
+		return
+	}
+	paths := extractDroppedPaths(fsys)
+	if len(paths) == 0 {
+		u.toast("drop ignored — could not read path")
+		return
+	}
+	// Brief hover flash is unavailable on ebiten (drop-only API); highlight via drop msg.
+	r := u.chrome.UpdateChrome(chrome.TransferDropPathsMsg{Paths: paths})
+	u.chrome = r.Model
+	u.overlayCells = nil
+	u.overlayDirty = true
+	u.markChromeDirty()
+	u.applyChromeAction(r)
 }
 
 func (u *macUI) Draw(screen *ebiten.Image) {
