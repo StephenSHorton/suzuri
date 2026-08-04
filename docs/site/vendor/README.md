@@ -5,10 +5,10 @@ Vanilla (framework-free) runtimes from [Canvas UI](https://canvasui.dev)
 
 | File | Component | Role on page |
 |------|-----------|--------------|
-| `glyph-rain.js` | Glyph Rain | Full-page rain backdrop |
+| `glyph-rain.js` | Glyph Rain | Fixed full-viewport rain backdrop (overlay only) |
 | `glitch.js` | Glitch | Hero headline |
-| `liquid.js` | Liquid | Download / CTA strip |
 | `decrypt-reveal.js` | Decrypt Reveal | “Session dossier” panel |
+| `liquid.js` | Liquid | Vendored, not currently mounted (CTA left plain) |
 
 License: MIT + Commons Clause (see `LICENSE-canvas-ui.txt`). Components are
 embedded as part of this website, not redistributed as a library.

@@ -11,18 +11,13 @@
 }
 
 * { box-sizing: border-box; }
-/*
-  Viewport shell: page scroll lives on .glyph-rain-content, not document.
-  Required when content is reparented into an absolute html-in-canvas source —
-  otherwise the document has no in-flow height and cannot scroll.
-*/
 html, body {
   margin: 0;
   padding: 0;
-  height: 100%;
-  overflow: hidden;
+  min-height: 100%;
 }
 body {
+  min-height: 100vh;
   font-family: var(--mono);
   color: var(--fg);
   background: var(--bg);
@@ -30,74 +25,51 @@ body {
   font-size: 15px;
 }
 
-/* --- Canvas UI Glyph Rain host --- */
-.glyph-rain-root {
-  position: relative;
-  height: 100%;
-  width: 100%;
-  isolation: isolate;
-  background: var(--bg);
-  overflow: hidden;
-}
-.glyph-rain-source {
-  position: absolute;
+/* --- Glyph Rain: fixed backdrop (never wraps / reparents page content) --- */
+.glyph-rain-backdrop {
+  position: fixed;
   inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
   z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background: var(--bg);
 }
-.glyph-rain-content {
-  position: relative;
-  z-index: 1;
-  width: 100%;
-  height: 100%;
-  overflow-x: hidden;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
-  /* Soft vignette so body text stays readable under rain */
-  background:
-    radial-gradient(ellipse 90% 70% at 50% 40%, transparent 15%, #050806d8 78%),
-    linear-gradient(180deg, #050806e0 0%, transparent 16%, transparent 72%, #050806f2 100%);
-}
+.glyph-rain-source,
 .glyph-rain-output {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-  z-index: 2;
-  pointer-events: none;
   display: block;
 }
-/* Overlay mode: rain paints transparent glyphs over normal HTML. */
-.glyph-rain-root[data-mode="overlay"] .glyph-rain-source {
-  display: none !important;
+.glyph-rain-empty {
+  display: none;
 }
-.glyph-rain-root[data-mode="overlay"] .glyph-rain-output {
+.glyph-rain-output {
   mix-blend-mode: screen;
-  opacity: 0.92;
+  opacity: 0.9;
 }
-/* Full mode: source hosts layoutsubtree DOM; keep it interactive for hit-testing. */
-.glyph-rain-root[data-mode="html-in-canvas"] .glyph-rain-source {
-  pointer-events: auto;
-}
-/* When content lives inside the source canvas, it must still be the scrollport. */
-.glyph-rain-root[data-mode="html-in-canvas"] .glyph-rain-source .glyph-rain-content {
-  height: 100%;
-  overflow-x: hidden;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-}
-.glyph-rain-root.glyph-rain-failed .glyph-rain-output {
+.glyph-rain-backdrop.glyph-rain-failed {
   display: none;
 }
 
-/* --- Shared Canvas UI mounts (Glitch / Liquid / Decrypt) --- */
+/* Page content above the rain */
+.page {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  /* Soft vignette so text stays readable over the rain */
+  background:
+    radial-gradient(ellipse 90% 70% at 50% 40%, transparent 15%, #050806d0 78%),
+    linear-gradient(180deg, #050806d8 0%, transparent 16%, transparent 72%, #050806f0 100%);
+}
+
+/* --- Shared Canvas UI mounts (Glitch / Decrypt) --- */
 .cui-mount {
   position: relative;
   isolation: isolate;
   width: 100%;
+  /* Height is set by JS when html-in-canvas reparents content into absolute source. */
 }
 .cui-source {
   position: absolute;
@@ -129,33 +101,15 @@ body {
 .cui-mount.cui-failed .cui-output {
   display: none !important;
 }
-/* Liquid / glitch need a defined height host so WebGL can size. */
 .cui-glitch {
   margin: 0 0 1.25rem;
-  min-height: 4.5rem;
 }
 .cui-glitch .cui-content h1 {
   margin: 0;
 }
-.cui-liquid {
-  margin: 0 0 0.5rem;
-  border-radius: 10px;
-  overflow: hidden;
-}
-.cui-liquid .cta-panel {
-  padding: 1rem 1.05rem 0.95rem;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: rgba(10, 18, 12, 0.82);
-  backdrop-filter: blur(4px);
-}
-.cui-liquid .cta {
-  margin-bottom: 0.65rem;
-}
 .cui-decrypt {
   border-radius: 12px;
-  overflow: hidden;
-  min-height: 280px;
+  /* Do NOT use overflow:hidden here — it clips before height sync. */
 }
 
 .wrap {
@@ -230,7 +184,21 @@ nav a:hover { color: var(--accent); }
 .lede strong { color: var(--fg); }
 .lede em { color: var(--fg); font-style: normal; }
 
-.cta { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 0.85rem; }
+.cta-panel {
+  margin: 0 0 0.5rem;
+  padding: 1rem 1.05rem 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(10, 18, 12, 0.88);
+  backdrop-filter: blur(4px);
+  max-width: 40rem;
+}
+.cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
 .btn {
   display: inline-block;
   padding: 0.7rem 1.15rem;
@@ -265,7 +233,6 @@ nav a:hover { color: var(--accent); }
   border-radius: 3px;
 }
 
-/* Windows signing note under CTAs */
 .notice {
   margin: 1.35rem 0 0;
   max-width: 40rem;
@@ -320,7 +287,6 @@ nav a:hover { color: var(--accent); }
   font-size: 0.88rem;
 }
 
-/* --- Decrypt dossier --- */
 .dossier {
   padding: 0.5rem 0 3rem;
 }
@@ -347,8 +313,7 @@ nav a:hover { color: var(--accent); }
   padding: 1.15rem 1.25rem 1rem;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: rgba(8, 14, 10, 0.94);
-  min-height: 260px;
+  background: rgba(8, 14, 10, 0.96);
 }
 .dossier-card-top {
   display: flex;
@@ -462,15 +427,14 @@ footer code { font-size: 0.8em; }
   opacity: 0.75;
   margin-left: 0.15rem;
 }
-/* Unstamped local / pre-deploy HTML still shows the placeholder literally — hide noise. */
-.site-version:has(strong:is(:empty)),
-.site-version strong:is([data-missing="1"]) {
-  /* no-op; JS marks missing stamps */
-}
 
 @media (prefers-reduced-motion: reduce) {
   .glyph-rain-output { opacity: 0.35; }
   .btn.primary { box-shadow: none; }
+  .cui-glitch .cui-output,
+  .cui-decrypt .cui-output {
+    display: none !important;
+  }
 }
 
 @media (max-width: 560px) {
@@ -479,15 +443,7 @@ footer code { font-size: 0.8em; }
   .dossier-dl {
     grid-template-columns: 1fr;
   }
-  .cui-liquid .cta-panel {
+  .cta-panel {
     padding: 0.85rem;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cui-glitch .cui-output,
-  .cui-liquid .cui-output,
-  .cui-decrypt .cui-output {
-    display: none !important;
   }
 }

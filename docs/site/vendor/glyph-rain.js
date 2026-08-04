@@ -273,8 +273,10 @@ function createGlyphRain(elements, options = {}) {
   if (!gl || gl.isContextLost()) return null;
   const sourceCtx = source.getContext("2d");
   const paintable = source;
+  // Only capture DOM when content is a layoutsubtree descendant of source.
+  // Sibling/empty content => pure rain overlay (needed for full-page sites).
   const htmlInCanvas = Boolean(
-    sourceCtx && typeof sourceCtx.drawElementImage === "function" && typeof paintable.requestPaint === "function"
+    sourceCtx && typeof sourceCtx.drawElementImage === "function" && typeof paintable.requestPaint === "function" && source.contains(content)
   );
   let contentDirty = false;
   let pageLum = 0;
