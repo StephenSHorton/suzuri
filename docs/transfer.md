@@ -62,6 +62,6 @@ Keep suzuri open while serving. Engine missing → toast from host when start fa
 
 - [x] CLI send / receive (raw tickets)
 - [x] Palette / progress panel in the GUI
-- [ ] Bundle `suzuri-transfer` in release installers + multi-file updater
+- [x] Bundle `suzuri-transfer` in release installers + multi-file updater
 - [ ] Contacts / pair / listen (needs mailbox)
 - [ ] Short codes
