@@ -54,7 +54,7 @@ Most “pretty terminals” are either:
 
 1. Grab **`suzuri-*-darwin-arm64.dmg`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
 2. Open the DMG and drag **suzuri** into **Applications** (or `~/Applications`).  
-3. Builds are **not Apple-notarized** (no paid Developer ID). First launch may show **“suzuri” Not Opened** — Apple could not verify it is free of malware. Click **Done** (not Move to Trash), then either **System Settings → Privacy & Security → Open Anyway**, or right-click the app → **Open** → **Open**. After the first allow, it opens normally.  
+3. **Signed releases:** when Developer ID + notarization secrets are configured, macOS builds are **Developer ID signed and notarized** (see [`packaging/macos/SIGNING.md`](packaging/macos/SIGNING.md)). Until then, first launch of an unsigned/ad-hoc build may show **“suzuri” Not Opened** — **System Settings → Privacy & Security → Open Anyway**, or right-click → **Open**.  
 4. Config and logs live in `~/Library/Application Support/suzuri/`. In-app updates replace the binary inside the `.app` (portable payload, not the DMG).
 
 **macOS (portable)**

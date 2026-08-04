@@ -145,21 +145,58 @@ rm -rf "$ICONSET"
 # Default "-" is ad-hoc: fine for Gatekeeper-ish local runs, but every binary
 # change gets a new CDHash and macOS re-prompts for protected folders.
 #
-# Do NOT enable hardened runtime for ad-hoc/local certs unless you also ship
-# entitlements — it can break Metal/PTY hosts. Runtime flag is only for
-# Developer ID / notarization identities.
+# Developer ID uses hardened runtime + entitlements (required for notarization).
+# Ad-hoc/local certs skip runtime unless SUZURI_CODESIGN_HARDENED=1.
 BUNDLE_ID="com.stephenshorton.suzuri"
+ENTITLEMENTS="$SCRIPT_DIR/entitlements.plist"
 SIGN_ID="${SUZURI_CODESIGN_IDENTITY:--}"
-if command -v codesign >/dev/null 2>&1; then
-  echo "==> codesign identity=${SIGN_ID} id=${BUNDLE_ID}"
-  SIGN_ARGS=(--force --sign "$SIGN_ID" --identifier "$BUNDLE_ID")
-  if [[ "$SIGN_ID" != "-" && "$SIGN_ID" == Developer\ ID* ]]; then
-    SIGN_ARGS+=(--options runtime)
+DEVELOPER_ID=0
+if [[ "$SIGN_ID" != "-" && "$SIGN_ID" == Developer\ ID* ]]; then
+  DEVELOPER_ID=1
+fi
+
+codesign_one() {
+  local path="$1"
+  local deep="${2:-0}"
+  local args=(--force --sign "$SIGN_ID" --identifier "$BUNDLE_ID" --timestamp)
+  if [[ "$DEVELOPER_ID" -eq 1 || "${SUZURI_CODESIGN_HARDENED:-0}" == "1" ]]; then
+    args+=(--options runtime)
+    if [[ -f "$ENTITLEMENTS" ]]; then
+      args+=(--entitlements "$ENTITLEMENTS")
+    fi
   fi
-  # Sign nested executable first, then the bundle (binds Info.plist / resources).
-  codesign "${SIGN_ARGS[@]}" "$MACOS_DIR/suzuri" || true
-  codesign "${SIGN_ARGS[@]}" --deep "$APP_PATH" || true
-  codesign -dv --verbose=2 "$APP_PATH" 2>&1 | head -20 || true
+  if [[ "$deep" == "1" ]]; then
+    args+=(--deep)
+  fi
+  args+=("$path")
+  if [[ "$DEVELOPER_ID" -eq 1 ]]; then
+    codesign "${args[@]}"
+  else
+    codesign "${args[@]}" || true
+  fi
+}
+
+if command -v codesign >/dev/null 2>&1; then
+  echo "==> codesign identity=${SIGN_ID} id=${BUNDLE_ID} developer_id=${DEVELOPER_ID}"
+  # Nested Mach-Os first (inside-out), then the .app bundle.
+  codesign_one "$MACOS_DIR/suzuri" 0
+  if [[ -f "$MACOS_DIR/suzuri-transfer" ]]; then
+    codesign_one "$MACOS_DIR/suzuri-transfer" 0
+  fi
+  codesign_one "$APP_PATH" 1
+  echo "==> codesign verify"
+  codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+  codesign -dv --verbose=2 "$APP_PATH" 2>&1 | head -25 || true
+fi
+
+# Optional notarization (Developer ID only). See packaging/macos/SIGNING.md.
+if [[ "$DEVELOPER_ID" -eq 1 && "${SUZURI_NOTARIZE:-1}" != "0" ]]; then
+  if [[ -x "$SCRIPT_DIR/notarize.sh" ]] || [[ -f "$SCRIPT_DIR/notarize.sh" ]]; then
+    bash "$SCRIPT_DIR/notarize.sh" "$APP_PATH" || {
+      echo "error: notarize failed for $APP_PATH" >&2
+      exit 1
+    }
+  fi
 fi
 
 # Zip of the .app (Finder-friendly install: unzip → drag to Applications)
@@ -193,6 +230,18 @@ if command -v hdiutil >/dev/null 2>&1; then
   hdiutil create -volname "suzuri" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null
   rm -rf "$STAGE"
   echo "==> $DMG_PATH"
+
+  # Sign + notarize the DMG when using Developer ID (Gatekeeper on the disk image).
+  if [[ "$DEVELOPER_ID" -eq 1 ]] && command -v codesign >/dev/null 2>&1; then
+    echo "==> codesign DMG"
+    codesign --force --sign "$SIGN_ID" --timestamp "$DMG_PATH"
+    if [[ "${SUZURI_NOTARIZE:-1}" != "0" ]]; then
+      bash "$SCRIPT_DIR/notarize.sh" "$DMG_PATH" || {
+        echo "error: notarize failed for $DMG_PATH" >&2
+        exit 1
+      }
+    fi
+  fi
 else
   echo "==> hdiutil not available; skipped DMG"
 fi
