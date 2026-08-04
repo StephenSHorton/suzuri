@@ -121,7 +121,7 @@ Fields: font, theme, ANSI map, **intro** (`matrix` \| `ripple` \| `none`), profi
 
 ## Transfer (P2P files)
 
-Send a file straight to another machine — no cloud, no size cap. Engine is the former [hato](https://github.com/StephenSHorton/hato) CLI (iroh + BLAKE3 resume), shipped as `suzuri-transfer` next to suzuri (or on `PATH` / `SUZURI_TRANSFER_BIN` while developing).
+Send a file straight to another machine — no cloud, no size cap. Engine is Rust/iroh in [`libs/transfer`](libs/transfer/), shipped as `suzuri-transfer` next to the host (or `SUZURI_TRANSFER_BIN` / `PATH` while developing).
 
 ```sh
 # Terminal A — print a ticket and keep serving until Ctrl+C
@@ -133,9 +133,12 @@ suzuri receive 'blob…' ~/Downloads
 # Engine path + local identity
 suzuri transfer version
 suzuri transfer me
+
+# Dev: build engine next to a local binary
+./tools/build-transfer.sh --copy ./suzuri
 ```
 
-Identity lives under the suzuri config tree: `…/suzuri/transfer/`. Palette: **Send file (ticket)…** / **Receive ticket…**. See [`docs/transfer.md`](docs/transfer.md).
+Identity lives under the suzuri config tree: `…/suzuri/transfer/`. Palette: **Send file (ticket)…** / **Receive ticket…**. See [`docs/transfer.md`](docs/transfer.md) and [`libs/README.md`](libs/README.md).
 
 ## MCP (agent diagnostics + notes)
 

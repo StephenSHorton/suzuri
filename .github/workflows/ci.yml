@@ -21,10 +21,23 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Test
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (transfer engine)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: libs/transfer -> libs/transfer/target
+          shared-key: ci-transfer-${{ matrix.os }}
+          cache-targets: false
+
+      - name: Test (Go)
         run: go test ./...
 
-      - name: Build
+      - name: Test (transfer engine)
+        run: cargo test --manifest-path libs/transfer/Cargo.toml --workspace
+
+      - name: Build host
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
@@ -32,4 +45,14 @@ jobs:
             go build -ldflags "-H windowsgui -s -w" -o suzuri.exe ./cmd/suzuri
           else
             go build -o suzuri ./cmd/suzuri
+          fi
+
+      - name: Build transfer engine
+        shell: bash
+        run: |
+          cargo build --release --manifest-path libs/transfer/Cargo.toml -p hato-cli
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            test -f libs/transfer/target/release/suzuri-transfer.exe
+          else
+            test -f libs/transfer/target/release/suzuri-transfer
           fi

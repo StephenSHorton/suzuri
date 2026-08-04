@@ -1,5 +1,7 @@
 /suzuri
 /suzuri.exe
+/suzuri-transfer
+/suzuri-transfer.exe
 *.exe
 dist/
 .idea/
@@ -9,4 +11,7 @@ fyne-cross/
 
 suzuri.exe~
 *.exe~
+
+# Rust engines under libs/*
+libs/**/target/
 

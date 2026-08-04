@@ -39,22 +39,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # P2P transfer engine (iroh) — built from hato as suzuri-transfer.
-      # Path must NOT be "vendor/" — Go treats that as a modules vendor dir.
-      - name: Checkout transfer engine (hato)
-        uses: actions/checkout@v4
-        with:
-          repository: StephenSHorton/hato
-          ref: main
-          path: third_party/hato
-
+      # P2P transfer engine lives in-repo: libs/transfer (Rust/iroh).
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo (transfer engine)
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: third_party/hato -> third_party/hato/target
+          workspaces: libs/transfer -> libs/transfer/target
           shared-key: suzuri-transfer-${{ matrix.goos }}-${{ matrix.goarch }}
           cache-targets: false
 
@@ -71,19 +63,22 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Test transfer engine
+        shell: bash
+        run: cargo test --manifest-path libs/transfer/Cargo.toml --workspace
+
       - name: Build transfer engine
         shell: bash
         run: |
           set -euo pipefail
-          cd third_party/hato
-          cargo build --release -p hato-cli
+          cargo build --release --manifest-path libs/transfer/Cargo.toml -p hato-cli
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            cp target/release/suzuri-transfer.exe ../../suzuri-transfer.exe
+            cp libs/transfer/target/release/suzuri-transfer.exe ./suzuri-transfer.exe
           else
-            cp target/release/suzuri-transfer ../../suzuri-transfer
-            chmod +x ../../suzuri-transfer
+            cp libs/transfer/target/release/suzuri-transfer ./suzuri-transfer
+            chmod +x ./suzuri-transfer
           fi
-          ls -la ../../suzuri-transfer*
+          ls -la ./suzuri-transfer*
 
       - name: Build
         shell: bash
