@@ -11,7 +11,11 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
+html, body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
 body {
   min-height: 100vh;
   font-family: var(--mono);
@@ -20,31 +24,64 @@ body {
   line-height: 1.55;
   font-size: 15px;
 }
-#matrix {
-  position: fixed;
+
+/* --- Canvas UI Glyph Rain host --- */
+.glyph-rain-root {
+  position: relative;
+  min-height: 100vh;
+  width: 100%;
+  isolation: isolate;
+  background: var(--bg);
+}
+.glyph-rain-source {
+  position: absolute;
   inset: 0;
-  z-index: 0;
   width: 100%;
   height: 100%;
-  pointer-events: none;
-  opacity: 0.85;
+  display: block;
+  /* Source is the capture target; pointer events hit content descendants. */
+  z-index: 0;
 }
-.bg {
-  position: fixed;
-  inset: 0;
+.glyph-rain-content {
+  position: relative;
   z-index: 1;
-  /* Soft vignette so text stays readable over the rain */
+  width: 100%;
+  min-height: 100vh;
+  overflow: auto;
+  /* Soft vignette so body text stays readable under rain */
   background:
-    radial-gradient(ellipse 90% 70% at 50% 40%, transparent 20%, #050806ee 75%),
-    linear-gradient(180deg, #050806cc 0%, transparent 18%, transparent 70%, #050806f0 100%);
-  pointer-events: none;
+    radial-gradient(ellipse 90% 70% at 50% 40%, transparent 15%, #050806d8 78%),
+    linear-gradient(180deg, #050806e0 0%, transparent 16%, transparent 72%, #050806f2 100%);
 }
+.glyph-rain-output {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+  display: block;
+}
+/* Overlay mode: rain paints transparent glyphs over normal HTML. */
+.glyph-rain-root[data-mode="overlay"] .glyph-rain-source {
+  display: none !important;
+}
+.glyph-rain-root[data-mode="overlay"] .glyph-rain-output {
+  mix-blend-mode: screen;
+  opacity: 0.92;
+}
+/* Full mode: WebGL composite sits on top; DOM remains for hit-testing + capture. */
+.glyph-rain-root[data-mode="html-in-canvas"] .glyph-rain-source {
+  /* Match Canvas UI demo: source hosts layoutsubtree DOM at full size. */
+  pointer-events: auto;
+}
+.glyph-rain-root.glyph-rain-failed .glyph-rain-output {
+  display: none;
+}
+
 .wrap {
   position: relative;
-  z-index: 2;
-}
-/* .wrap positioning is set above with z-index */
-.wrap {
+  z-index: 1;
   width: min(920px, 92vw);
   margin: 0 auto;
 }
@@ -86,6 +123,13 @@ nav a:hover { color: var(--accent); }
 .hero {
   padding: 3.5rem 0 2.5rem;
 }
+.eyebrow {
+  margin: 0 0 0.85rem;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
 .hero h1 {
   font-family: var(--serif);
   font-weight: 700;
@@ -93,6 +137,7 @@ nav a:hover { color: var(--accent); }
   line-height: 1.15;
   margin: 0 0 1.25rem;
   letter-spacing: 0.01em;
+  text-shadow: 0 0 40px rgba(0, 230, 118, 0.12);
 }
 .hero h1 em {
   font-style: normal;
@@ -115,14 +160,18 @@ nav a:hover { color: var(--accent); }
   font-weight: 600;
   font-size: 0.92rem;
   border: 1px solid var(--border);
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  transition: border-color 0.15s, background 0.15s, color 0.15s, box-shadow 0.15s;
 }
 .btn.primary {
   background: var(--prim);
   border-color: var(--accent);
   color: #e8fff0;
+  box-shadow: 0 0 0 0 rgba(0, 230, 118, 0);
 }
-.btn.primary:hover { background: #0d7a42; }
+.btn.primary:hover {
+  background: #0d7a42;
+  box-shadow: 0 0 24px rgba(0, 230, 118, 0.18);
+}
 .btn.ghost {
   color: var(--mute);
   background: transparent;
@@ -137,15 +186,15 @@ nav a:hover { color: var(--accent); }
   border-radius: 3px;
 }
 
-/* First-launch / unsigned-build note under CTAs */
+/* First-launch note under CTAs */
 .notice {
   margin: 1.35rem 0 0;
   max-width: 40rem;
   padding: 0.95rem 1.1rem;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: rgba(14, 20, 16, 0.88);
-  backdrop-filter: blur(4px);
+  background: rgba(14, 20, 16, 0.9);
+  backdrop-filter: blur(6px);
 }
 .notice h2 {
   margin: 0 0 0.45rem;
@@ -169,11 +218,6 @@ nav a:hover { color: var(--accent); }
 .notice li { margin: 0.35rem 0; }
 .notice li strong { color: var(--fg); font-weight: 600; }
 .notice em { font-style: normal; color: var(--fg); }
-/* Cards slightly more opaque over rain */
-.grid article {
-  background: rgba(14, 20, 16, 0.92);
-  backdrop-filter: blur(4px);
-}
 
 .grid {
   display: grid;
@@ -185,6 +229,13 @@ nav a:hover { color: var(--accent); }
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 1.15rem 1.2rem;
+  background: rgba(14, 20, 16, 0.92);
+  backdrop-filter: blur(6px);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.grid article:hover {
+  border-color: #245a3a;
+  box-shadow: 0 0 28px rgba(0, 230, 118, 0.06);
 }
 .grid h2 {
   font-size: 0.95rem;
@@ -234,6 +285,11 @@ footer a { color: var(--accent); text-decoration: none; }
 footer a:hover { text-decoration: underline; }
 .fine { opacity: 0.75; margin-top: 0.35rem; }
 footer code { font-size: 0.8em; }
+
+@media (prefers-reduced-motion: reduce) {
+  .glyph-rain-output { opacity: 0.35; }
+  .btn.primary { box-shadow: none; }
+}
 
 @media (max-width: 560px) {
   nav a { margin-left: 0.75rem; }

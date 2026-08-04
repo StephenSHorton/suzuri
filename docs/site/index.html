@@ -24,121 +24,147 @@
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Shippori+Mincho:wght@500;700&display=swap" rel="stylesheet" />
 </head>
 <body>
-  <canvas id="matrix" aria-hidden="true"></canvas>
-  <div class="bg" aria-hidden="true"></div>
-
-  <header class="wrap">
-    <p class="brand">
-      <img class="brand-mark" src="icons/favicon-32.png" width="28" height="28" alt="" />
-      <span class="kanji">硯</span> suzuri
-    </p>
-    <nav>
-      <a href="https://github.com/StephenSHorton/suzuri">GitHub</a>
-      <a href="https://github.com/StephenSHorton/suzuri/releases/latest">Download</a>
-      <a href="https://github.com/StephenSHorton/suzuri#readme">Docs</a>
-    </nav>
-  </header>
-
-  <main class="wrap">
-    <section class="hero">
-      <h1>Your window.<br />Your PTY.<br /><em>Real terminal host.</em></h1>
-      <p class="lede">
-        <strong>suzuri（硯）</strong> means <em>inkstone</em> — where ink is ground before writing.
-        A native terminal host for <strong>Windows</strong> and <strong>macOS (Apple Silicon)</strong>:
-        your window, ConPTY / POSIX PTY, VT cells, Charm chrome, Warp-style input.
-        Not a TUI inside someone else’s emulator. Not a Warp fork.
-      </p>
-      <div class="cta">
-        <a class="btn primary" id="download-win" href="https://github.com/StephenSHorton/suzuri/releases/latest">
-          Download for Windows
-        </a>
-        <a class="btn primary" id="download-mac" href="https://github.com/StephenSHorton/suzuri/releases/latest">
-          Download for macOS
-        </a>
-        <a class="btn ghost" href="https://github.com/StephenSHorton/suzuri">
-          Source on GitHub
-        </a>
-      </div>
-      <p class="meta" id="release-meta">Windows amd64 · macOS arm64 · MIT License</p>
-      <p class="meta fine-inline">Linux not yet supported as a host build.</p>
-      <aside class="notice" aria-label="First launch notes">
-        <h2>First launch</h2>
-        <p>
-          Release builds are <strong>not code-signed</strong> (no paid Apple or Microsoft certs).
-          That is expected for this open-source project — source is public, hashes ship with each release.
+  <!--
+    Canvas UI Glyph Rain (https://canvasui.dev) — wraps the page so WebGL rain
+    can light the content when html-in-canvas is available; otherwise rain is a
+    transparent overlay and HTML stays fully interactive.
+  -->
+  <div id="glyph-rain" class="glyph-rain-root">
+    <canvas id="gr-source" layoutsubtree="true" class="glyph-rain-source"></canvas>
+    <div id="gr-content" class="glyph-rain-content">
+      <header class="wrap">
+        <p class="brand">
+          <img class="brand-mark" src="icons/favicon-32.png" width="28" height="28" alt="" />
+          <span class="kanji">硯</span> suzuri
         </p>
-        <ul>
-          <li>
-            <strong>Windows:</strong> SmartScreen may say “Windows protected your PC.”
-            Choose <em>More info</em> → <em>Run anyway</em> (or install the setup from GitHub Releases).
-          </li>
-          <li>
-            <strong>macOS:</strong> You may see <em>“suzuri” Not Opened</em> —
-            Apple could not verify it is free of malware (unsigned, not notarized).
-            Click <em>Done</em> (not Move to Trash), then either
-            <em>System Settings → Privacy &amp; Security</em> → <em>Open Anyway</em>,
-            or right-click the app → <em>Open</em> → <em>Open</em>.
-            After the first allow, it opens normally.
-          </li>
-        </ul>
-      </aside>
-    </section>
+        <nav>
+          <a href="https://github.com/StephenSHorton/suzuri">GitHub</a>
+          <a href="https://github.com/StephenSHorton/suzuri/releases/latest">Download</a>
+          <a href="https://github.com/StephenSHorton/suzuri#readme">Docs</a>
+        </nav>
+      </header>
 
-    <section class="grid">
-      <article>
-        <h2>Host, not guest</h2>
-        <p>Owns the window, the PTY, selection, scrollback, and fonts. Shells run for real — PowerShell, cmd, zsh, bash — not a fake pipe.</p>
-      </article>
-      <article>
-        <h2>Charm chrome</h2>
-        <p>Tabs, command palette, settings, themes, and help are Bubble Tea + Lip Gloss — composited over a dimmed shell, Crush-inspired without the AI product.</p>
-      </article>
-      <article>
-        <h2>Warp-style bar</h2>
-        <p>Local line edit, multiline, history, echo suppression. Full-screen apps reclaim the bottom. Quiet prompts keep the shell clean.</p>
-      </article>
-      <article>
-        <h2>Polish that sticks</h2>
-        <p>Window placement, high-contrast themes, matrix/ripple intros, MCP diagnostics for agents, and GitHub Releases auto-update.</p>
-      </article>
-    </section>
+      <main class="wrap">
+        <section class="hero">
+          <p class="eyebrow">terminal host · Windows &amp; macOS</p>
+          <h1>Your window.<br />Your PTY.<br /><em>Real terminal host.</em></h1>
+          <p class="lede">
+            <strong>suzuri（硯）</strong> means <em>inkstone</em> — where ink is ground before writing.
+            A native terminal host for <strong>Windows</strong> and <strong>macOS (Apple Silicon)</strong>:
+            your window, ConPTY / POSIX PTY, VT cells, Charm chrome, Warp-style input.
+            Not a TUI inside someone else’s emulator. Not a Warp fork.
+          </p>
+          <div class="cta">
+            <a class="btn primary" id="download-win" href="https://github.com/StephenSHorton/suzuri/releases/latest">
+              Download for Windows
+            </a>
+            <a class="btn primary" id="download-mac" href="https://github.com/StephenSHorton/suzuri/releases/latest">
+              Download for macOS
+            </a>
+            <a class="btn ghost" href="https://github.com/StephenSHorton/suzuri">
+              Source on GitHub
+            </a>
+          </div>
+          <p class="meta" id="release-meta">Windows amd64 · macOS arm64 · MIT License</p>
+          <p class="meta fine-inline">Linux not yet supported as a host build.</p>
+          <aside class="notice" aria-label="First launch notes">
+            <h2>First launch</h2>
+            <p>
+              <strong>macOS</strong> release builds are signed with a Developer ID Application certificate
+              and notarized when GitHub secrets are configured — Gatekeeper should accept the app after
+              a normal first open (or Open Anyway if a previous unsigned build was cached).
+            </p>
+            <ul>
+              <li>
+                <strong>Windows:</strong> builds are currently unsigned (no code-signing cert).
+                SmartScreen may say “Windows protected your PC.”
+                Choose <em>More info</em> → <em>Run anyway</em> (or install the setup from GitHub Releases).
+              </li>
+              <li>
+                <strong>macOS:</strong> if you still see <em>“suzuri” Not Opened</em> from an older
+                unsigned download, use <em>System Settings → Privacy &amp; Security</em> →
+                <em>Open Anyway</em>, or right-click → <em>Open</em>. Prefer the latest Release DMG.
+              </li>
+            </ul>
+          </aside>
+        </section>
 
-    <section class="keys">
-      <h2>Essentials</h2>
-      <table>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Command palette</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>Settings</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd></td><td>New tab</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>/</kbd></td><td>Help</td></tr>
-      </table>
-    </section>
-  </main>
+        <section class="grid">
+          <article>
+            <h2>Host, not guest</h2>
+            <p>Owns the window, the PTY, selection, scrollback, and fonts. Shells run for real — PowerShell, cmd, zsh, bash — not a fake pipe.</p>
+          </article>
+          <article>
+            <h2>Charm chrome</h2>
+            <p>Tabs, command palette, settings, themes, and help are Bubble Tea + Lip Gloss — composited over a dimmed shell, Crush-inspired without the AI product.</p>
+          </article>
+          <article>
+            <h2>Warp-style bar</h2>
+            <p>Local line edit, multiline, history, echo suppression. Full-screen apps reclaim the bottom. Quiet prompts keep the shell clean.</p>
+          </article>
+          <article>
+            <h2>Polish that sticks</h2>
+            <p>Window placement, high-contrast themes, matrix/ripple intros, MCP diagnostics for agents, and GitHub Releases auto-update.</p>
+          </article>
+        </section>
 
-  <footer class="wrap">
-    <p>MIT © Stephen S. Horton · <a href="https://github.com/StephenSHorton/suzuri">StephenSHorton/suzuri</a></p>
-    <p class="fine">GohuFont uni14 Nerd Font Mono is bundled under WTFPL (see <code>assets/fonts</code>).</p>
-  </footer>
+        <section class="keys">
+          <h2>Essentials</h2>
+          <table>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Command palette</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>Settings</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd></td><td>New tab</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>/</kbd></td><td>Help</td></tr>
+          </table>
+        </section>
+      </main>
 
-  <script>
+      <footer class="wrap">
+        <p>MIT © Stephen S. Horton · <a href="https://github.com/StephenSHorton/suzuri">StephenSHorton/suzuri</a></p>
+        <p class="fine">
+          Background effect:
+          <a href="https://canvasui.dev/docs/components/glyph-rain">Canvas UI Glyph Rain</a>
+          · GohuFont uni14 Nerd Font Mono is bundled under WTFPL (see <code>assets/fonts</code>).
+        </p>
+      </footer>
+    </div>
+    <canvas id="gr-output" class="glyph-rain-output" aria-hidden="true"></canvas>
+  </div>
+
+  <script type="module">
+    import { createGlyphRain, supportsHtmlInCanvas } from "./vendor/glyph-rain.js";
+
     // --- Latest release links ---
-    fetch('https://api.github.com/repos/StephenSHorton/suzuri/releases/latest')
-      .then(r => r.ok ? r.json() : null)
-      .then(rel => {
+    fetch("https://api.github.com/repos/StephenSHorton/suzuri/releases/latest")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((rel) => {
         if (!rel || !rel.tag_name) return;
-        const meta = document.getElementById('release-meta');
+        const meta = document.getElementById("release-meta");
         meta.innerHTML = `Latest <strong>${rel.tag_name}</strong> · Windows amd64 · macOS arm64 · MIT`;
         const assets = rel.assets || [];
-        const win = assets.find(x => /windows-amd64-setup\.exe$/i.test(x.name))
-          || assets.find(x => /windows-amd64(\.exe|\.zip)?$/i.test(x.name) && x.name.endsWith('.exe'))
-          || assets.find(x => /windows-amd64/i.test(x.name));
-        // Prefer DMG installer, then .app.zip, then portable binary.
-        const mac = assets.find(x => /darwin-arm64\.dmg$/i.test(x.name))
-          || assets.find(x => /darwin-arm64\.app\.zip$/i.test(x.name))
-          || assets.find(x => /darwin-arm64(\.zip)?$/i.test(x.name) && !x.name.endsWith('.zip') && !/\.app/i.test(x.name))
-          || assets.find(x => /darwin-arm64\.zip$/i.test(x.name) && !/\.app/i.test(x.name))
-          || assets.find(x => /darwin-arm64/i.test(x.name));
-        const winA = document.getElementById('download-win');
-        const macA = document.getElementById('download-mac');
+        const win =
+          assets.find((x) => /windows-amd64-setup\.exe$/i.test(x.name)) ||
+          assets.find(
+            (x) =>
+              /windows-amd64(\.exe|\.zip)?$/i.test(x.name) &&
+              x.name.endsWith(".exe"),
+          ) ||
+          assets.find((x) => /windows-amd64/i.test(x.name));
+        const mac =
+          assets.find((x) => /darwin-arm64\.dmg$/i.test(x.name)) ||
+          assets.find((x) => /darwin-arm64\.app\.zip$/i.test(x.name)) ||
+          assets.find(
+            (x) =>
+              /darwin-arm64(\.zip)?$/i.test(x.name) &&
+              !x.name.endsWith(".zip") &&
+              !/\.app/i.test(x.name),
+          ) ||
+          assets.find(
+            (x) => /darwin-arm64\.zip$/i.test(x.name) && !/\.app/i.test(x.name),
+          ) ||
+          assets.find((x) => /darwin-arm64/i.test(x.name));
+        const winA = document.getElementById("download-win");
+        const macA = document.getElementById("download-mac");
         if (win) winA.href = win.browser_download_url;
         else winA.href = rel.html_url;
         if (mac) macA.href = mac.browser_download_url;
@@ -146,87 +172,57 @@
       })
       .catch(() => {});
 
-    // --- Matrix rain (suzuri intro vibe) ---
-    (function () {
-      const canvas = document.getElementById('matrix');
-      if (!canvas) return;
-      const ctx = canvas.getContext('2d');
-      // Half-width katakana + digits — same spirit as the app intro.
-      const glyphs = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789:.=*+-<>|';
-      const fontSize = 14;
-      // Fall speed in cells/frame — keep this low; 60fps makes even 0.3 feel frantic.
-      const speedMin = 0.06;
-      const speedRange = 0.10; // → ~0.06–0.16 cells/frame
-      let cols = 0;
-      let drops = [];
-      let speeds = [];
-      let dpr = 1;
-      let lastTs = 0;
+    // --- Canvas UI Glyph Rain (suzuri green) ---
+    const source = document.getElementById("gr-source");
+    const content = document.getElementById("gr-content");
+    const output = document.getElementById("gr-output");
+    const root = document.getElementById("glyph-rain");
+    if (!source || !content || !output || !root) throw new Error("glyph rain mounts missing");
 
-      function randSpeed() {
-        return speedMin + Math.random() * speedRange;
-      }
+    // Canvas UI: live HTML must live *inside* the layoutsubtree canvas for
+    // drawElementImage; otherwise keep content as a normal sibling (overlay rain).
+    const native = supportsHtmlInCanvas();
+    root.dataset.mode = native ? "html-in-canvas" : "overlay";
+    if (native) {
+      source.appendChild(content);
+      source.style.display = "";
+    } else {
+      source.style.display = "none";
+    }
 
-      function resize() {
-        dpr = Math.min(window.devicePixelRatio || 1, 2);
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        canvas.width = Math.floor(w * dpr);
-        canvas.height = Math.floor(h * dpr);
-        canvas.style.width = w + 'px';
-        canvas.style.height = h + 'px';
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        cols = Math.ceil(w / fontSize);
-        drops = new Array(cols);
-        speeds = new Array(cols);
-        for (let i = 0; i < cols; i++) {
-          drops[i] = Math.random() * -40;
-          speeds[i] = randSpeed();
-        }
-      }
+    // Match the app matrix vibe: half-width katakana + digits, inkstone green.
+    const rain = createGlyphRain(
+      { source, content, output },
+      {
+        charset:
+          "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789:.=*+-<>|",
+        cell: 14,
+        // suzuri accent greens (0–1)
+        color: [0.0, 0.55, 0.28],
+        headColor: [0.91, 1.0, 0.94],
+        speed: 0.18,
+        speedVariance: 0.55,
+        density: 0.14,
+        trail: 0.7,
+        glow: 1.6,
+        mutate: 0.35,
+        flicker: 0.12,
+        layers: 2,
+        dim: native ? 0.42 : 0.15,
+        light: 2.4,
+        lightRadius: 220,
+        lightHeight: 160,
+        relief: 0.08,
+        stir: 0.75,
+        stirRadius: 280,
+        settle: 0.95,
+      },
+    );
 
-      function frame(ts) {
-        // Cap effective rate so high-refresh displays don't race.
-        if (lastTs && ts - lastTs < 32) {
-          requestAnimationFrame(frame);
-          return;
-        }
-        lastTs = ts || 0;
-
-        const w = window.innerWidth;
-        const h = window.innerHeight;
-        // Longer trails (slower wash) — calmer matrix feel.
-        ctx.fillStyle = 'rgba(5, 8, 6, 0.045)';
-        ctx.fillRect(0, 0, w, h);
-
-        ctx.font = fontSize + 'px "IBM Plex Mono", ui-monospace, monospace';
-        for (let i = 0; i < cols; i++) {
-          const ch = glyphs[(Math.random() * glyphs.length) | 0];
-          const x = i * fontSize;
-          const y = drops[i] * fontSize;
-          // Head brighter accent, body primary green.
-          const head = Math.random() > 0.94;
-          ctx.fillStyle = head ? '#e8fff0' : (Math.random() > 0.6 ? '#00e676' : '#0a5c32');
-          ctx.globalAlpha = head ? 0.5 : 0.18 + Math.random() * 0.14;
-          ctx.fillText(ch, x, y);
-          ctx.globalAlpha = 1;
-
-          if (y > h && Math.random() > 0.985) {
-            drops[i] = Math.random() * -24;
-            speeds[i] = randSpeed();
-          }
-          drops[i] += speeds[i];
-        }
-        requestAnimationFrame(frame);
-      }
-
-      resize();
-      // Initial clear so first frame isn't transparent junk.
-      ctx.fillStyle = '#050806';
-      ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
-      window.addEventListener('resize', resize);
-      requestAnimationFrame(frame);
-    })();
+    if (!rain) {
+      console.warn("Glyph rain WebGL2 init failed; static page only.");
+      root.classList.add("glyph-rain-failed");
+    }
   </script>
 </body>
 </html>
