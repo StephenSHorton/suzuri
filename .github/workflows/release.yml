@@ -1,6 +1,7 @@
 name: Release
 
-# Cut a release: git tag v0.6.0 && git push origin v0.6.0
+# Cut an app release: git tag v0.6.0 && git push origin v0.6.0
+# Site deploys use a different line: v0.1.0-site / site-v0.1.0 (pages.yml only).
 # Or Actions → Release → Run workflow with tag input.
 on:
   push:
@@ -16,6 +17,12 @@ permissions:
 
 jobs:
   build:
+    # GitHub's v*.*.* glob also matches v1.2.3-site — skip those (site line).
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.ref_type == 'tag' &&
+       !endsWith(github.ref_name, '-site') &&
+       !startsWith(github.ref_name, 'site-'))
     strategy:
       fail-fast: false
       matrix:
@@ -225,6 +232,8 @@ jobs:
 
   release:
     needs: build
+    # Skip when build was skipped (e.g. site tags like v0.1.0-site).
+    if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
