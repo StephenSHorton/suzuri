@@ -2,6 +2,8 @@ package ui
 
 import (
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/hinshun/vt10x"
 )
@@ -11,6 +13,136 @@ type cellSel struct {
 	active bool
 	x0, y0 int // anchor (absolute line, col)
 	x1, y1 int // focus
+}
+
+// multiClick tracks double/triple clicks for word/line selection (terminal + notes).
+// count is 1 on a fresh click, 2 within the window on the same cell, 3 on the next, then wraps to 1.
+type multiClick struct {
+	count int
+	x, y  int
+	at    time.Time
+}
+
+const multiClickWindow = 500 * time.Millisecond
+
+func absInt(a int) int {
+	if a < 0 {
+		return -a
+	}
+	return a
+}
+
+// bump records a click at (x, y) and returns the multi-click count (1–3).
+func (m *multiClick) bump(x, y int, now time.Time) int {
+	same := m.count > 0 &&
+		absInt(x-m.x) <= 1 &&
+		absInt(y-m.y) <= 1 &&
+		now.Sub(m.at) <= multiClickWindow
+	if same {
+		m.count++
+		if m.count > 3 {
+			m.count = 1
+		}
+	} else {
+		m.count = 1
+	}
+	m.x, m.y = x, y
+	m.at = now
+	return m.count
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// wordBounds returns inclusive start/end columns for the word (or whitespace/punct run) at col.
+func wordBounds(line string, col int) (start, end int) {
+	rs := []rune(line)
+	if len(rs) == 0 {
+		return 0, 0
+	}
+	if col < 0 {
+		col = 0
+	}
+	if col >= len(rs) {
+		col = len(rs) - 1
+	}
+	r := rs[col]
+	if isWordRune(r) {
+		start, end = col, col
+		for start > 0 && isWordRune(rs[start-1]) {
+			start--
+		}
+		for end+1 < len(rs) && isWordRune(rs[end+1]) {
+			end++
+		}
+		return start, end
+	}
+	if r == ' ' || r == '\t' {
+		start, end = col, col
+		for start > 0 && (rs[start-1] == ' ' || rs[start-1] == '\t') {
+			start--
+		}
+		for end+1 < len(rs) && (rs[end+1] == ' ' || rs[end+1] == '\t') {
+			end++
+		}
+		return start, end
+	}
+	// Punctuation / other: contiguous non-word non-space.
+	start, end = col, col
+	for start > 0 {
+		p := rs[start-1]
+		if isWordRune(p) || p == ' ' || p == '\t' {
+			break
+		}
+		start--
+	}
+	for end+1 < len(rs) {
+		p := rs[end+1]
+		if isWordRune(p) || p == ' ' || p == '\t' {
+			break
+		}
+		end++
+	}
+	return start, end
+}
+
+// applyShellMultiClick sets tab.sel for a 1/2/3 click on cell (x, absY).
+// click 1: caret cell; 2: word; 3: whole line (0..cols-1).
+func applyShellMultiClick(sel *cellSel, sb *scrollback, term vt10x.Terminal, x, absY, clickCount int) {
+	if sel == nil || term == nil {
+		return
+	}
+	cols, _ := term.Size()
+	if cols < 1 {
+		cols = 1
+	}
+	sel.active = true
+	switch {
+	case clickCount >= 3:
+		sel.x0, sel.y0 = 0, absY
+		sel.x1, sel.y1 = cols-1, absY
+	case clickCount == 2:
+		line := ""
+		if sb != nil {
+			line = sb.lineText(absY, term)
+		}
+		x0, x1 := wordBounds(line, x)
+		if x1 >= cols {
+			x1 = cols - 1
+		}
+		sel.x0, sel.y0 = x0, absY
+		sel.x1, sel.y1 = x1, absY
+	default:
+		if x < 0 {
+			x = 0
+		}
+		if x >= cols {
+			x = cols - 1
+		}
+		sel.x0, sel.y0 = x, absY
+		sel.x1, sel.y1 = x, absY
+	}
 }
 
 func (s *cellSel) clear() {

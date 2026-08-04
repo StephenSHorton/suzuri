@@ -180,6 +180,9 @@ type macUI struct {
 
 	// Mouse
 	mouseDown bool
+	// shellMulti / notesMulti: double-click word, triple-click line selection.
+	shellMulti multiClick
+	notesMulti multiClick
 	// notesDragging: left button down after a notes body click (extend selection).
 	notesDragging bool
 	// Link hover: http(s)/www under the cursor in the shell grid.
@@ -2751,8 +2754,9 @@ func (u *macUI) handleMouse() {
 			if cellX, cellY, ok := u.overlayCellAt(int32(mx), int32(my)); ok {
 				// Notes: route click into list / title / editor (start drag-select).
 				if u.chrome.NotesOpen {
+					n := u.notesMulti.bump(cellX, cellY, time.Now())
 					r := u.chrome.UpdateChrome(chrome.NotesClickMsg{
-						CellX: cellX, CellY: cellY, Cols: u.cols,
+						CellX: cellX, CellY: cellY, Cols: u.cols, ClickCount: n,
 					})
 					u.chrome = r.Model
 					u.overlayDirty = true
@@ -2829,11 +2833,11 @@ func (u *macUI) handleMouse() {
 		}
 		x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
 		absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
-		tab.sel.active = true
-		tab.sel.x0, tab.sel.y0 = x, absY
-		tab.sel.x1, tab.sel.y1 = x, absY
+		n := u.shellMulti.bump(x, absY, time.Now())
+		applyShellMultiClick(&tab.sel, tab.sb, tab.term, x, absY, n)
 		u.selecting = true
 		u.mouseDown = true
+		u.markShellDirty()
 		return
 	}
 

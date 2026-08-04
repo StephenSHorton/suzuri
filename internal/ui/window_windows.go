@@ -166,6 +166,9 @@ type winUI struct {
 	alive         atomic.Bool
 	lastBackspace time.Time // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
 	selecting     bool
+	// shellMulti / notesMulti: double-click word, triple-click line selection.
+	shellMulti multiClick
+	notesMulti multiClick
 	statusUntil   time.Time // clear toast Status after this (zero = none)
 	showSplash    bool      // open first-run card after window is ready
 	spinTick      uint64    // blink-loop counter for tab braille spinner
@@ -3008,8 +3011,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
 					cx := int(px / cw)
 					cy := int((py - oy) / ch)
+					nClick := u.notesMulti.bump(cx, cy, time.Now())
 					r := u.chrome.UpdateChrome(chrome.NotesClickMsg{
-						CellX: cx, CellY: cy, Cols: u.cols,
+						CellX: cx, CellY: cy, Cols: u.cols, ClickCount: nClick,
 					})
 					u.chrome = r.Model
 					u.overlayDirty = true
@@ -3145,9 +3149,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		x, y, viewRows := u.pixelToCellInPane(px, py, tab)
 		absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
-		tab.sel.active = true
-		tab.sel.x0, tab.sel.y0 = x, absY
-		tab.sel.x1, tab.sel.y1 = x, absY
+		n := u.shellMulti.bump(x, absY, time.Now())
+		applyShellMultiClick(&tab.sel, tab.sb, tab.term, x, absY, n)
 		u.selecting = true
 		win.SetCapture(hwnd)
 		win.InvalidateRect(hwnd, nil, false)

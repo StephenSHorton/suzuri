@@ -409,7 +409,11 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 				cols = m.Width
 			}
 			m.computeNotesLayout(cols)
-			startNotesDrag = m.handleNotesClick(msg.CellX, msg.CellY, cols)
+			n := msg.ClickCount
+			if n < 1 {
+				n = 1
+			}
+			startNotesDrag = m.handleNotesClick(msg.CellX, msg.CellY, cols, n)
 		}
 	case NotesDragMsg:
 		if m.NotesOpen {

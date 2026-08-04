@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -66,10 +67,13 @@ type NotesDeleteMsg struct {
 
 // NotesClickMsg is a host mouse click on the notes overlay grid (cell coords).
 // Places the caret in the editor body (or handles list/title hits).
+// ClickCount is 1 for a single click, 2 for double (word), 3 for triple (line).
+// Zero is treated as 1.
 type NotesClickMsg struct {
-	CellX int
-	CellY int
-	Cols  int
+	CellX      int
+	CellY      int
+	Cols       int
+	ClickCount int
 }
 
 // NotesDragMsg is a host mouse-drag while the button is held after a body click.
@@ -386,6 +390,86 @@ func (m *Model) notesClearSel() {
 	m.notesSel = -1
 }
 
+// notesApplyMultiClick places the caret / word / line selection at rune index idx.
+// Selection is half-open [notesSel, notesCursor).
+func (m *Model) notesApplyMultiClick(idx, clickCount int) {
+	rs := m.notesRunes
+	n := len(rs)
+	if idx < 0 {
+		idx = 0
+	}
+	if idx > n {
+		idx = n
+	}
+	m.notesClearSel()
+	switch {
+	case clickCount >= 3:
+		// Logical line containing idx (between '\n's).
+		start, end := idx, idx
+		for start > 0 && rs[start-1] != '\n' {
+			start--
+		}
+		for end < n && rs[end] != '\n' {
+			end++
+		}
+		m.notesSel = start
+		m.notesCursor = end
+	case clickCount == 2:
+		if n == 0 {
+			m.notesCursor = 0
+			return
+		}
+		// Word (or space/punct run) at idx, like terminal selection.
+		i := idx
+		if i >= n {
+			i = n - 1
+		}
+		isWord := func(r rune) bool {
+			return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+		}
+		r := rs[i]
+		start, end := i, i
+		if isWord(r) {
+			for start > 0 && isWord(rs[start-1]) {
+				start--
+			}
+			for end+1 < n && isWord(rs[end+1]) {
+				end++
+			}
+			end++ // half-open
+		} else if r == ' ' || r == '\t' {
+			for start > 0 && (rs[start-1] == ' ' || rs[start-1] == '\t') {
+				start--
+			}
+			for end+1 < n && (rs[end+1] == ' ' || rs[end+1] == '\t') {
+				end++
+			}
+			end++
+		} else {
+			// punct run
+			for start > 0 {
+				p := rs[start-1]
+				if isWord(p) || p == ' ' || p == '\t' || p == '\n' {
+					break
+				}
+				start--
+			}
+			for end+1 < n {
+				p := rs[end+1]
+				if isWord(p) || p == ' ' || p == '\t' || p == '\n' {
+					break
+				}
+				end++
+			}
+			end++
+		}
+		m.notesSel = start
+		m.notesCursor = end
+	default:
+		m.notesCursor = idx
+	}
+}
+
 // notesDeleteSel removes the selection if any. Returns true if it did.
 func (m *Model) notesDeleteSel() bool {
 	if !m.notesHasSel() {
@@ -619,10 +703,14 @@ func (m *Model) handleNotesEditorKey(msg tea.KeyMsg) {
 
 // handleNotesClick maps an overlay cell click into list / title / editor.
 // In the body, places the caret and clears selection (drag extends via NotesDragMsg).
+// clickCount: 1 = caret, 2 = word, 3 = line (half-open selection [sel, cursor)).
 // Returns true when the host should start a body drag-select.
-func (m *Model) handleNotesClick(cellX, cellY, cols int) bool {
+func (m *Model) handleNotesClick(cellX, cellY, cols, clickCount int) bool {
 	if !m.NotesOpen {
 		return false
+	}
+	if clickCount < 1 {
+		clickCount = 1
 	}
 	m.computeNotesLayout(cols)
 	lay := m.notesLayout
@@ -644,8 +732,7 @@ func (m *Model) handleNotesClick(cellX, cellY, cols int) bool {
 		}
 		m.notesFocus = notesFocusEditor
 		if idx, ok := m.notesIndexAtCell(cellX, cellY, cols); ok {
-			m.notesCursor = idx
-			m.notesClearSel()
+			m.notesApplyMultiClick(idx, clickCount)
 			m.notesEnsureCursorVisible(0)
 			return true // host may drag-select from here
 		}
