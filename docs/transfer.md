@@ -1,6 +1,11 @@
 # Transfer
 
-Peer-to-peer file transfer inside suzuri. The **engine** is Rust (`suzuri-transfer`, same code as [hato](https://github.com/StephenSHorton/hato)); the **host** is Go.
+Peer-to-peer file transfer inside suzuri.
+
+| Layer | Location |
+|-------|----------|
+| **Host** (Go) | `internal/transfer`, palette chrome, `suzuri send|receive` |
+| **Engine** (Rust/iroh) | [`libs/transfer`](../libs/transfer/) → binary `suzuri-transfer` |
 
 ## CLI
 
@@ -20,8 +25,11 @@ Peer-to-peer file transfer inside suzuri. The **engine** is Rust (`suzuri-transf
 Dev example:
 
 ```sh
-cargo build -p hato-cli --manifest-path ~/projects/hato/Cargo.toml
-cp ~/projects/hato/target/debug/suzuri-transfer ./suzuri-transfer
+./tools/build-transfer.sh --dev --copy ./suzuri
+# or
+cargo build --manifest-path libs/transfer/Cargo.toml -p hato-cli
+cp libs/transfer/target/debug/suzuri-transfer ./suzuri-transfer
+
 go build -o suzuri ./cmd/suzuri
 ./suzuri send ./file.bin
 ```
@@ -47,7 +55,7 @@ HATO_CONFIG_DIR=/tmp/suzuri-b suzuri receive "$TICKET" /tmp/out
 
 ## Protocol
 
-Host ↔ engine uses NDJSON (`--json`). See [hato machine-mode](https://github.com/StephenSHorton/hato/blob/main/docs/machine-mode.md).
+Host ↔ engine uses NDJSON (`--json`). See [`libs/transfer/docs/machine-mode.md`](../libs/transfer/docs/machine-mode.md).
 
 ## GUI (command palette)
 
@@ -62,6 +70,7 @@ Keep suzuri open while serving. Engine missing → toast from host when start fa
 
 - [x] CLI send / receive (raw tickets)
 - [x] Palette / progress panel in the GUI
+- [x] Engine in monorepo (`libs/transfer`)
 - [x] Bundle `suzuri-transfer` in release installers + multi-file updater
 - [ ] Contacts / pair / listen (needs mailbox)
 - [ ] Short codes

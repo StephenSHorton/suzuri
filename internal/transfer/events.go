@@ -1,5 +1,5 @@
-// Package transfer shells out to the suzuri-transfer (hato) engine over NDJSON.
-// See https://github.com/StephenSHorton/hato/blob/main/docs/machine-mode.md
+// Package transfer shells out to the suzuri-transfer engine over NDJSON.
+// Engine source: libs/transfer (Rust/iroh). Protocol: libs/transfer/docs/machine-mode.md
 package transfer
 
 import (
