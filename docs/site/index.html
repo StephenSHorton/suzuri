@@ -6,7 +6,6 @@
   <title>suzuri（硯）— terminal host for Windows &amp; macOS</title>
   <meta name="description" content="suzuri is a real terminal host for Windows and macOS: native window, PTY, VT grid, Charm chrome, Warp-style input bar. Not a TUI inside someone else's emulator." />
   <meta name="theme-color" content="#050806" />
-  <!-- App mark: same glowy 硯 as Windows .ico / macOS .icns -->
   <link rel="icon" href="favicon.ico" sizes="any" />
   <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png" />
   <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
@@ -25,9 +24,8 @@
 </head>
 <body>
   <!--
-    Canvas UI Glyph Rain (https://canvasui.dev) — wraps the page so WebGL rain
-    can light the content when html-in-canvas is available; otherwise rain is a
-    transparent overlay and HTML stays fully interactive.
+    Canvas UI effects (https://canvasui.dev): Glyph Rain page backdrop, Glitch hero,
+    Liquid download strip, Decrypt Reveal dossier. Vendored vanilla runtimes — no React.
   -->
   <div id="glyph-rain" class="glyph-rain-root">
     <canvas id="gr-source" layoutsubtree="true" class="glyph-rain-source"></canvas>
@@ -47,26 +45,46 @@
       <main class="wrap">
         <section class="hero">
           <p class="eyebrow">terminal host · Windows &amp; macOS</p>
-          <h1>Your window.<br />Your PTY.<br /><em>Real terminal host.</em></h1>
+
+          <!-- Canvas UI Glitch on the headline -->
+          <div class="cui-mount cui-glitch" id="hero-glitch" data-label="glitch">
+            <canvas class="cui-source" layoutsubtree="true"></canvas>
+            <div class="cui-content">
+              <h1>Your window.<br />Your PTY.<br /><em>Real terminal host.</em></h1>
+            </div>
+            <canvas class="cui-output" aria-hidden="true"></canvas>
+          </div>
+
           <p class="lede">
             <strong>suzuri（硯）</strong> means <em>inkstone</em> — where ink is ground before writing.
             A native terminal host for <strong>Windows</strong> and <strong>macOS (Apple Silicon)</strong>:
             your window, ConPTY / POSIX PTY, VT cells, Charm chrome, Warp-style input.
             Not a TUI inside someone else’s emulator. Not a Warp fork.
           </p>
-          <div class="cta">
-            <a class="btn primary" id="download-win" href="https://github.com/StephenSHorton/suzuri/releases/latest">
-              Download for Windows
-            </a>
-            <a class="btn primary" id="download-mac" href="https://github.com/StephenSHorton/suzuri/releases/latest">
-              Download for macOS
-            </a>
-            <a class="btn ghost" href="https://github.com/StephenSHorton/suzuri">
-              Source on GitHub
-            </a>
+
+          <!-- Canvas UI Liquid under the download CTAs -->
+          <div class="cui-mount cui-liquid" id="cta-liquid" data-label="liquid">
+            <canvas class="cui-source" layoutsubtree="true"></canvas>
+            <div class="cui-content">
+              <div class="cta-panel">
+                <div class="cta">
+                  <a class="btn primary" id="download-win" href="https://github.com/StephenSHorton/suzuri/releases/latest">
+                    Download for Windows
+                  </a>
+                  <a class="btn primary" id="download-mac" href="https://github.com/StephenSHorton/suzuri/releases/latest">
+                    Download for macOS
+                  </a>
+                  <a class="btn ghost" href="https://github.com/StephenSHorton/suzuri">
+                    Source on GitHub
+                  </a>
+                </div>
+                <p class="meta" id="release-meta">Windows amd64 · macOS arm64 · MIT License</p>
+                <p class="meta fine-inline">Linux not yet supported as a host build.</p>
+              </div>
+            </div>
+            <canvas class="cui-output" aria-hidden="true"></canvas>
           </div>
-          <p class="meta" id="release-meta">Windows amd64 · macOS arm64 · MIT License</p>
-          <p class="meta fine-inline">Linux not yet supported as a host build.</p>
+
           <aside class="notice" aria-label="First launch notes">
             <h2>First launch</h2>
             <p>
@@ -108,6 +126,63 @@
           </article>
         </section>
 
+        <!-- Canvas UI Decrypt Reveal — terminal dossier -->
+        <section class="dossier" aria-labelledby="dossier-title">
+          <div class="dossier-head">
+            <h2 id="dossier-title">Session dossier</h2>
+            <p class="dossier-hint" id="dossier-hint">Move your cursor over the panel to decrypt.</p>
+          </div>
+          <div class="cui-mount cui-decrypt" id="dossier-decrypt" data-label="decrypt-reveal">
+            <canvas class="cui-source" layoutsubtree="true"></canvas>
+            <div class="cui-content">
+              <div class="dossier-card">
+                <header class="dossier-card-top">
+                  <span class="pill">CLASSIFIED // SUZURI</span>
+                  <span class="pill dim">clearance · operator</span>
+                </header>
+                <dl class="dossier-dl">
+                  <div>
+                    <dt>Codename</dt>
+                    <dd>硯 · inkstone</dd>
+                  </div>
+                  <div>
+                    <dt>Role</dt>
+                    <dd>Native terminal host</dd>
+                  </div>
+                  <div>
+                    <dt>Targets</dt>
+                    <dd>Windows amd64 · macOS arm64</dd>
+                  </div>
+                  <div>
+                    <dt>Shells</dt>
+                    <dd>PowerShell · cmd · zsh · bash</dd>
+                  </div>
+                  <div>
+                    <dt>Chrome</dt>
+                    <dd>Bubble Tea + Lip Gloss overlays</dd>
+                  </div>
+                  <div>
+                    <dt>Input</dt>
+                    <dd>Warp-style local line editor</dd>
+                  </div>
+                  <div class="wide">
+                    <dt>Mission</dt>
+                    <dd>
+                      Own the window and the PTY. Render a real VT grid. Compose Charm UI over a live
+                      shell — not a fake pipe, not a TUI guest inside someone else’s emulator.
+                    </dd>
+                  </div>
+                </dl>
+                <footer class="dossier-card-foot">
+                  <span>// encrypt with cursor leave</span>
+                  <a href="https://github.com/StephenSHorton/suzuri">open source · MIT</a>
+                </footer>
+              </div>
+            </div>
+            <canvas class="cui-output" aria-hidden="true"></canvas>
+          </div>
+        </section>
+
         <section class="keys">
           <h2>Essentials</h2>
           <table>
@@ -122,8 +197,12 @@
       <footer class="wrap">
         <p>MIT © Stephen S. Horton · <a href="https://github.com/StephenSHorton/suzuri">StephenSHorton/suzuri</a></p>
         <p class="fine">
-          Background effect:
-          <a href="https://canvasui.dev/docs/components/glyph-rain">Canvas UI Glyph Rain</a>
+          Effects by
+          <a href="https://canvasui.dev">Canvas UI</a>
+          (<a href="https://canvasui.dev/docs/components/glyph-rain">Glyph Rain</a>,
+          <a href="https://canvasui.dev/docs/components/glitch">Glitch</a>,
+          <a href="https://canvasui.dev/docs/components/liquid">Liquid</a>,
+          <a href="https://canvasui.dev/docs/components/decrypt-reveal">Decrypt Reveal</a>)
           · GohuFont uni14 Nerd Font Mono is bundled under WTFPL (see <code>assets/fonts</code>).
         </p>
       </footer>
@@ -133,6 +212,9 @@
 
   <script type="module">
     import { createGlyphRain, supportsHtmlInCanvas } from "./vendor/glyph-rain.js";
+    import { createGlitch } from "./vendor/glitch.js";
+    import { createLiquid } from "./vendor/liquid.js";
+    import { createDecryptReveal } from "./vendor/decrypt-reveal.js";
 
     // --- Latest release links ---
     fetch("https://api.github.com/repos/StephenSHorton/suzuri/releases/latest")
@@ -172,57 +254,132 @@
       })
       .catch(() => {});
 
-    // --- Canvas UI Glyph Rain (suzuri green) ---
-    const source = document.getElementById("gr-source");
-    const content = document.getElementById("gr-content");
-    const output = document.getElementById("gr-output");
-    const root = document.getElementById("glyph-rain");
-    if (!source || !content || !output || !root) throw new Error("glyph rain mounts missing");
+    /** Shared Canvas UI mount: reparent content into source when html-in-canvas works. */
+    function mountCanvasUI(root, createFn, options = {}) {
+      if (!root) return null;
+      const source = root.querySelector(".cui-source");
+      const content = root.querySelector(".cui-content");
+      const output = root.querySelector(".cui-output");
+      if (!source || !content || !output) return null;
 
-    // Canvas UI: live HTML must live *inside* the layoutsubtree canvas for
-    // drawElementImage; otherwise keep content as a normal sibling (overlay rain).
+      const native = supportsHtmlInCanvas();
+      root.dataset.mode = native ? "html-in-canvas" : "fallback";
+      if (native) {
+        source.appendChild(content);
+        source.style.display = "";
+      } else {
+        source.style.display = "none";
+      }
+
+      const instance = createFn({ source, content, output }, options);
+      if (!instance) {
+        root.classList.add("cui-failed");
+        root.dataset.mode = "fallback";
+      }
+      return instance;
+    }
+
     const native = supportsHtmlInCanvas();
-    root.dataset.mode = native ? "html-in-canvas" : "overlay";
-    if (native) {
-      source.appendChild(content);
-      source.style.display = "";
-    } else {
-      source.style.display = "none";
+    document.documentElement.dataset.canvasUi = native ? "html-in-canvas" : "fallback";
+
+    // Update dossier hint when full decrypt effect isn't available.
+    const hint = document.getElementById("dossier-hint");
+    if (hint && !native) {
+      hint.textContent =
+        "Full decrypt effect needs Chrome html-in-canvas (origin trial or flag). Content stays readable.";
     }
 
-    // Match the app matrix vibe: half-width katakana + digits, inkstone green.
-    const rain = createGlyphRain(
-      { source, content, output },
-      {
-        charset:
-          "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789:.=*+-<>|",
-        cell: 14,
-        // suzuri accent greens (0–1)
-        color: [0.0, 0.55, 0.28],
-        headColor: [0.91, 1.0, 0.94],
-        speed: 0.18,
-        speedVariance: 0.55,
-        density: 0.14,
-        trail: 0.7,
-        glow: 1.6,
-        mutate: 0.35,
-        flicker: 0.12,
-        layers: 2,
-        dim: native ? 0.42 : 0.15,
-        light: 2.4,
-        lightRadius: 220,
-        lightHeight: 160,
-        relief: 0.08,
-        stir: 0.75,
-        stirRadius: 280,
-        settle: 0.95,
-      },
-    );
-
-    if (!rain) {
-      console.warn("Glyph rain WebGL2 init failed; static page only.");
-      root.classList.add("glyph-rain-failed");
+    // --- Glyph Rain (page backdrop) ---
+    {
+      const source = document.getElementById("gr-source");
+      const content = document.getElementById("gr-content");
+      const output = document.getElementById("gr-output");
+      const root = document.getElementById("glyph-rain");
+      if (source && content && output && root) {
+        root.dataset.mode = native ? "html-in-canvas" : "overlay";
+        if (native) {
+          source.appendChild(content);
+          source.style.display = "";
+        } else {
+          source.style.display = "none";
+        }
+        const rain = createGlyphRain(
+          { source, content, output },
+          {
+            charset:
+              "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789:.=*+-<>|",
+            cell: 14,
+            color: [0.0, 0.55, 0.28],
+            headColor: [0.91, 1.0, 0.94],
+            speed: 0.18,
+            speedVariance: 0.55,
+            density: 0.14,
+            trail: 0.7,
+            glow: 1.6,
+            mutate: 0.35,
+            flicker: 0.12,
+            layers: 2,
+            dim: native ? 0.42 : 0.15,
+            light: 2.4,
+            lightRadius: 220,
+            lightHeight: 160,
+            relief: 0.08,
+            stir: 0.75,
+            stirRadius: 280,
+            settle: 0.95,
+          },
+        );
+        if (!rain) root.classList.add("glyph-rain-failed");
+      }
     }
+
+    // --- Glitch (hero title) ---
+    mountCanvasUI(document.getElementById("hero-glitch"), createGlitch, {
+      intensity: 0.85,
+      interval: 2.4,
+      duration: 0.35,
+      slices: 18,
+      shift: 22,
+      rgbShift: 3,
+      blocks: 0.35,
+      noise: 0.28,
+    });
+
+    // --- Liquid (download strip, suzuri green) ---
+    mountCanvasUI(document.getElementById("cta-liquid"), createLiquid, {
+      color: [0.0, 0.9, 0.46],
+      rainbow: false,
+      intensity: 1.6,
+      distortion: 0.35,
+      blend: 4,
+      force: 1.0,
+      radius: 0.28,
+      densityDissipation: 0.97,
+      velocityDissipation: 0.98,
+    });
+
+    // --- Decrypt Reveal (dossier) ---
+    mountCanvasUI(document.getElementById("dossier-decrypt"), createDecryptReveal, {
+      radius: 280,
+      softness: 0.55,
+      cell: 11,
+      aspect: 0.72,
+      color: "#00e676",
+      background: "#050806",
+      colored: 0.85,
+      brightness: 1.1,
+      legibility: 1,
+      scramble: 0.12,
+      scrambleSpeed: 7,
+      edgeWidth: 0.22,
+      edgeFlicker: 0.9,
+      edgeGlow: 1.8,
+      edgeTint: 0.8,
+      aberration: 8,
+      passthrough: 0.08,
+      threshold: 0.03,
+      smoothing: 0.18,
+    });
   </script>
 </body>
 </html>
