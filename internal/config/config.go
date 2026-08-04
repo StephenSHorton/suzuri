@@ -601,13 +601,13 @@ func AmbientLabel(id string) string {
 func AmbientDesc(id string) string {
 	switch strings.ToLower(strings.TrimSpace(id)) {
 	case AmbientGrain:
-		return "Paper/film grain under empty cells. Quiet texture; freezes while you type in the Warp bar."
+		return "Very sparse, nearly static paper grain (not TV snow). Subtle texture under empty cells."
 	case AmbientWaves:
 		return "Slow seigaiha-style waves in theme colors. Calm motion under the shell."
 	case AmbientFireflies:
-		return "Sparse drifting sparks. Night-coding vibe; very cheap."
+		return "A few slow-drifting sparks (not glitter). Quiet night-coding vibe."
 	case AmbientCRT:
-		return "Horizontal scanlines + soft edge vignette. Great with Amber CRT or High contrast."
+		return "Scanlines + edge vignette painted over the shell (and a slow bright band). Pair with Amber CRT."
 	case AmbientNone:
 		return "No always-on underlay. Intro curtains and Settings previews are unchanged."
 	default:

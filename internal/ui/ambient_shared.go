@@ -55,27 +55,31 @@ func ambientGlyphCells(kind string, cols, rows int, t0 time.Time, now time.Time,
 }
 
 func grainCells(cols, rows int, t float64, col ambientColors, intensity float64) []rainCell {
-	// Slow-changing film grain: reseed every ~80ms so it shimmers without
-	// thrashing every frame.
-	epoch := int(t * 12)
+	// Nearly static paper grain: epoch advances ~once every 4s (not TV static).
+	// Sparse · only, very dim mute→soft mix.
+	epoch := int(t / 4.0)
 	var out []rainCell
-	// Density ~3% of cells at full intensity.
+	// ~0.6% of cells at full intensity (was ~3% and reseeded 12×/s).
+	thresh := int(6 * intensity)
+	if thresh < 1 {
+		thresh = 1
+	}
 	for y := 0; y < rows; y++ {
 		for x := 0; x < cols; x++ {
 			h := hash2(x, y, epoch)
-			if h%1000 > int(30*intensity) {
+			if h%1000 >= thresh {
 				continue
 			}
-			// Mix mute → soft with hash.
-			a := float64(h%40) / 100.0
+			// Keep brightness very low so it reads as texture, not noise.
+			a := 0.12 + float64(h%20)/200.0 // 0.12–0.22
 			r := blendB(col.mr, col.sr, a)
 			g := blendB(col.mg, col.sg, a)
 			b := blendB(col.mb, col.sb, a)
-			ch := rune('·')
-			if h%5 == 0 {
-				ch = '•'
-			}
-			out = append(out, rainCell{X: x, Y: y, Ch: ch, FR: scaleB(r, intensity), FG: scaleB(g, intensity), FB: scaleB(b, intensity)})
+			// Dim further by intensity.
+			r = scaleB(r, 0.35*intensity+0.15)
+			g = scaleB(g, 0.35*intensity+0.15)
+			b = scaleB(b, 0.35*intensity+0.15)
+			out = append(out, rainCell{X: x, Y: y, Ch: '·', FR: r, FG: g, FB: b})
 		}
 	}
 	return out
@@ -115,41 +119,38 @@ func waveCells(cols, rows int, t float64, col ambientColors, intensity float64) 
 }
 
 func fireflyCells(cols, rows int, t float64, col ambientColors, intensity float64) []rainCell {
-	// Fixed count of sparks that wander with smooth noise.
-	n := 8 + int(12*intensity)
-	if n < 4 {
-		n = 4
+	// Few slow-drifting sparks (not a glitter storm). Soft ·/• only.
+	n := 3 + int(4*intensity) // 3–7
+	if n < 3 {
+		n = 3
 	}
-	if n > 28 {
-		n = 28
+	if n > 8 {
+		n = 8
 	}
 	out := make([]rainCell, 0, n)
 	for i := 0; i < n; i++ {
-		// Phase-offset orbits.
 		seed := float64(i*97 + 13)
-		px := (math.Sin(t*0.35+seed) + 1) * 0.5
-		py := (math.Cos(t*0.28+seed*1.3) + 1) * 0.5
-		// Drift
-		px = math.Mod(px+float64(i%5)*0.07, 1)
-		py = math.Mod(py+float64(i%3)*0.05+t*0.02, 1)
+		// Very slow orbits (~30–50s period).
+		px := (math.Sin(t*0.08+seed) + 1) * 0.5
+		py := (math.Cos(t*0.06+seed*1.3) + 1) * 0.5
+		px = math.Mod(px+float64(i%5)*0.11, 1)
+		py = math.Mod(py+float64(i%3)*0.09+t*0.004, 1)
 		x := int(px * float64(cols))
 		y := int(py * float64(rows))
 		if x < 0 || x >= cols || y < 0 || y >= rows {
 			continue
 		}
-		// Blink
-		pulse := 0.35 + 0.65*(0.5+0.5*math.Sin(t*2.2+seed))
+		// Slow gentle pulse (not stroboscopic).
+		pulse := 0.25 + 0.45*(0.5+0.5*math.Sin(t*0.55+seed))
 		pulse *= intensity
-		if pulse < 0.12 {
+		if pulse < 0.1 {
 			continue
 		}
-		r := blendB(col.mr, col.pr, pulse)
-		g := blendB(col.mg, col.pg, pulse)
-		b := blendB(col.mb, col.pb, pulse)
+		r := blendB(col.mr, col.pr, pulse*0.7)
+		g := blendB(col.mg, col.pg, pulse*0.7)
+		b := blendB(col.mb, col.pb, pulse*0.7)
 		ch := rune('·')
-		if pulse > 0.65 {
-			ch = '✦'
-		} else if pulse > 0.4 {
+		if pulse > 0.45 {
 			ch = '•'
 		}
 		out = append(out, rainCell{X: x, Y: y, Ch: ch, FR: r, FG: g, FB: b})

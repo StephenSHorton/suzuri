@@ -54,10 +54,23 @@ func (u *winUI) paintShellAmbient(hdc win.HDC, rect win.RECT, padY, bot int32) {
 	case config.AmbientRain:
 		u.paintDimMatrixIntensity(hdc, rect, padY, bot, matrixLoop, u.blinkStart, 0, intensity)
 	case config.AmbientCRT:
-		u.paintCRTAmbient(hdc, rect, padY, bot, intensity)
+		// CRT is drawn AFTER the cell grid (see paint path) so it is not
+		// covered by default-black cell backgrounds.
 	default:
 		u.paintAmbientGlyphs(hdc, rect, padY, bot, amb, intensity)
 	}
+}
+
+// paintShellAmbientOver draws effects that must sit above the cell grid (CRT).
+func (u *winUI) paintShellAmbientOver(hdc win.HDC, rect win.RECT, padY, bot int32) {
+	if u == nil || !u.shellAmbientOn() || u.cfg.ShellAmbient != config.AmbientCRT {
+		return
+	}
+	alt := false
+	if t := u.activeTab(); t != nil {
+		alt = t.altScreen()
+	}
+	u.paintCRTAmbient(hdc, rect, padY, bot, effectiveAmbientIntensity(u.cfg, alt))
 }
 
 func (u *winUI) paintAmbientGlyphs(hdc win.HDC, rect win.RECT, padY, bot int32, kind string, intensity float64) {
@@ -108,48 +121,94 @@ func (u *winUI) paintAmbientGlyphs(hdc win.HDC, rect win.RECT, padY, bot int32, 
 	}
 }
 
-// paintCRTAmbient draws scanlines + soft side vignette (pixel level).
+// paintCRTAmbient draws visible scanlines + side vignette over the shell field.
+// Painted AFTER the cell grid so default-black cells do not hide the effect.
 func (u *winUI) paintCRTAmbient(hdc win.HDC, rect win.RECT, padY, bot int32, intensity float64) {
 	defer applog.Recover("paintCRTAmbient", false)
-	if intensity <= 0 {
+	if intensity <= 0 || bot <= padY {
 		return
 	}
-	// Scanlines every 2px — dim toward void.
-	lineA := intensity * 0.22
-	if lineA > 0.35 {
-		lineA = 0.35
+	// Stronger than the first pass: dark phosphor lines every other pixel row,
+	// tinted with theme primary so they read on inkstone/high-contrast voids.
+	lineA := 0.28 + intensity*0.35 // 0.28–0.63
+	if lineA > 0.7 {
+		lineA = 0.7
 	}
-	lr := byte(float64(chrome.VoidR) * (1 - lineA))
-	lg := byte(float64(chrome.VoidG) * (1 - lineA))
-	lb := byte(float64(chrome.VoidB) * (1 - lineA))
-	// Slight primary tint on scanlines.
-	lr = blendB(lr, chrome.PrimR, lineA*0.25)
-	lg = blendB(lg, chrome.PrimG, lineA*0.25)
-	lb = blendB(lb, chrome.PrimB, lineA*0.25)
+	// Blend black toward primary for a "lit tube" look.
+	lr := blendB(0, chrome.PrimR, 0.15+intensity*0.2)
+	lg := blendB(0, chrome.PrimG, 0.15+intensity*0.2)
+	lb := blendB(0, chrome.PrimB, 0.15+intensity*0.2)
+	// Alpha via dither: draw full-opacity lines but dim color by lineA.
+	lr = scaleB(lr, lineA)
+	lg = scaleB(lg, lineA)
+	lb = scaleB(lb, lineA)
 	br := createSolidBrushRGB(win.RGB(lr, lg, lb))
 	if br != 0 {
-		for y := padY; y < bot; y += 2 {
-			fillRect(hdc, win.RECT{Left: 0, Top: y, Right: rect.Right, Bottom: y + 1}, br)
+		// Every 3px: one lit line + gap (classic CRT density).
+		for y := padY; y < bot; y += 3 {
+			fillRect(hdc, win.RECT{Left: rect.Left, Top: y, Right: rect.Right, Bottom: y + 1}, br)
 		}
 		win.DeleteObject(win.HGDIOBJ(br))
 	}
-	// Soft left/right vignette strips.
-	vigW := rect.Right / 18
-	if vigW < 8 {
-		vigW = 8
+	// Rolling bright band (slow) so motion is obvious when ambient is CRT.
+	t0 := u.blinkStart
+	if t0.IsZero() {
+		t0 = time.Now()
 	}
-	if vigW > 48 {
-		vigW = 48
+	bandY := padY + int32(mathMod(time.Since(t0).Seconds()*18, float64(bot-padY+1)))
+	bandH := int32(3)
+	if bandY+bandH > bot {
+		bandH = bot - bandY
 	}
-	va := intensity * 0.35
-	vr := byte(float64(chrome.VoidR) * (1 - va*0.5))
-	vg := byte(float64(chrome.VoidG) * (1 - va*0.5))
-	vb := byte(float64(chrome.VoidB) * (1 - va*0.5))
+	if bandH > 0 {
+		br2 := createSolidBrushRGB(win.RGB(
+			scaleB(chrome.PrimR, 0.25+intensity*0.25),
+			scaleB(chrome.PrimG, 0.25+intensity*0.25),
+			scaleB(chrome.PrimB, 0.25+intensity*0.25),
+		))
+		if br2 != 0 {
+			fillRect(hdc, win.RECT{Left: rect.Left, Top: bandY, Right: rect.Right, Bottom: bandY + bandH}, br2)
+			win.DeleteObject(win.HGDIOBJ(br2))
+		}
+	}
+	// Side vignette (darker edges).
+	vigW := rect.Right / 14
+	if vigW < 12 {
+		vigW = 12
+	}
+	if vigW > 64 {
+		vigW = 64
+	}
+	va := 0.25 + intensity*0.35
+	vr := scaleB(0, va)
+	vg := scaleB(0, va)
+	vb := scaleB(0, va)
+	// Darken by painting near-black strips (visible over shell).
 	if vbr := createSolidBrushRGB(win.RGB(vr, vg, vb)); vbr != 0 {
-		fillRect(hdc, win.RECT{Left: 0, Top: padY, Right: vigW, Bottom: bot}, vbr)
-		fillRect(hdc, win.RECT{Left: rect.Right - vigW, Top: padY, Right: rect.Right, Bottom: bot}, vbr)
+		// Soft stepped vignette.
+		for i := int32(0); i < vigW; i += 2 {
+			// Outer steps darker.
+			a := va * (1 - float64(i)/float64(vigW))
+			c := scaleB(20, a)
+			if b := createSolidBrushRGB(win.RGB(c, c, c)); b != 0 {
+				fillRect(hdc, win.RECT{Left: rect.Left + i, Top: padY, Right: rect.Left + i + 2, Bottom: bot}, b)
+				fillRect(hdc, win.RECT{Left: rect.Right - i - 2, Top: padY, Right: rect.Right - i, Bottom: bot}, b)
+				win.DeleteObject(win.HGDIOBJ(b))
+			}
+		}
 		win.DeleteObject(win.HGDIOBJ(vbr))
 	}
+}
+
+func mathMod(a, b float64) float64 {
+	if b <= 0 {
+		return 0
+	}
+	v := a - b*float64(int(a/b))
+	if v < 0 {
+		v += b
+	}
+	return v
 }
 
 // paintInkWashIntro draws expanding ink blot curtain.

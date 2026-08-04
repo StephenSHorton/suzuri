@@ -187,13 +187,10 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		fillRectRGBA(dst, 0, padY, w, shellBot-padY, 0, 0, 0)
 	}
 
-	// Always-on shell ambient under glyphs (Windows paintShellAmbient order).
-	// Skip when a dim modal matte will cover the field.
+	// Always-on shell ambient under glyphs (grain/waves/fireflies/rain).
+	// CRT scanlines paint AFTER the grid so empty cells don't hide them.
 	if len(o.ShellMatrixCells) > 0 && !o.DimShell {
 		p.paintMatrixRain(dst, padY, shellBot, o.ShellMatrixCells)
-	}
-	if o.CRTScanlines > 0.01 && !o.DimShell {
-		p.paintCRTScanlines(dst, padY, shellBot, o.CRTScanlines)
 	}
 
 	// Center 硯 UNDER shell cells (Windows blitGrid order). Only ink pixels
@@ -272,6 +269,11 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	// Host-rendered scrollback images (Windows GDI StretchBlt parity).
 	if len(o.Images) > 0 && !o.DimShell {
 		p.paintShellImages(dst, o, padY, shellBot, yShift)
+	}
+
+	// CRT scanlines over the grid (must not be covered by cell fills).
+	if o.CRTScanlines > 0.01 && !o.DimShell {
+		p.paintCRTScanlines(dst, padY, shellBot, o.CRTScanlines)
 	}
 
 	// Matrix rain (intro or settings underlay) over the shell field.
@@ -1031,7 +1033,7 @@ func isTransparentOverlayBG(r, g, b byte) bool {
 	return false
 }
 
-// paintCRTScanlines draws horizontal scanlines + soft side vignette.
+// paintCRTScanlines draws horizontal scanlines + soft side vignette over the grid.
 func (p *softwarePainter) paintCRTScanlines(dst *image.RGBA, padY, shellBot int, intensity float64) {
 	if dst == nil || intensity <= 0 || shellBot <= padY {
 		return
@@ -1040,12 +1042,12 @@ func (p *softwarePainter) paintCRTScanlines(dst *image.RGBA, padY, shellBot int,
 		intensity = 1
 	}
 	w := dst.Bounds().Dx()
-	// Scanline darken every other row.
-	lineA := intensity * 0.22
-	if lineA > 0.35 {
-		lineA = 0.35
+	// Darken every 3rd row (visible phosphor lines).
+	lineA := 0.25 + intensity*0.35
+	if lineA > 0.65 {
+		lineA = 0.65
 	}
-	for y := padY; y < shellBot; y += 2 {
+	for y := padY; y < shellBot; y += 3 {
 		for x := 0; x < w; x++ {
 			i := dst.PixOffset(x, y)
 			dst.Pix[i+0] = byte(float64(dst.Pix[i+0]) * (1 - lineA))
@@ -1054,14 +1056,14 @@ func (p *softwarePainter) paintCRTScanlines(dst *image.RGBA, padY, shellBot int,
 		}
 	}
 	// Side vignette
-	vigW := w / 18
-	if vigW < 8 {
-		vigW = 8
+	vigW := w / 14
+	if vigW < 12 {
+		vigW = 12
 	}
-	if vigW > 48 {
-		vigW = 48
+	if vigW > 64 {
+		vigW = 64
 	}
-	va := intensity * 0.28
+	va := 0.22 + intensity*0.3
 	for y := padY; y < shellBot; y++ {
 		for x := 0; x < vigW; x++ {
 			a := va * (1 - float64(x)/float64(vigW))

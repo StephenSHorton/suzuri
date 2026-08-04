@@ -283,6 +283,8 @@ func (u *winUI) monitorWorkArea() (left, top, right, bottom int, ok bool) {
 // Falls back to a full paint when a floating overlay is open (palette/notes/…).
 // chromeDirty alone is fine: the input-only paint path re-draws the strip
 // without re-blitting the shell grid (same idea as macOS tryPaintInputOnly).
+// While ambient is on, blink periodically clears sticky input-only so rain/CRT
+// keep moving (see wmSuzuriBlink).
 func (u *winUI) requestInputPaint() {
 	if u == nil || u.hwnd == 0 {
 		return
@@ -294,6 +296,23 @@ func (u *winUI) requestInputPaint() {
 	}
 	u.inputOnlyDirty = true
 	u.requestPaint()
+}
+
+// warpBarInsertNewline adds a soft line break in the Warp bar (Shift/Alt+Enter).
+func (u *winUI) warpBarInsertNewline(in *inputBar) {
+	if u == nil || in == nil {
+		return
+	}
+	cols := u.inputContentCols()
+	prevRows := in.visualRows(cols)
+	in.insertNewline()
+	if in.visualRows(cols) != prevRows {
+		u.maybeResizeForInput()
+		u.markShellDirty()
+		u.requestPaint()
+		return
+	}
+	u.requestInputPaint()
 }
 
 // markShellDirty forces a full shell repaint on the next paint cycle.
@@ -1992,22 +2011,22 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.markShellDirty()
 				u.requestPaint()
 			} else if u.inputOnlyDirty {
-				// Sticky bar-only after typing; caret keeps pulsing here.
+				// Sticky bar-only after typing. If ambient is on, unstick every
+				// few ticks so underlays keep animating on the normal shell
+				// (not only under Grok) without full-painting every keystroke.
+				if u.shellAmbientOn() && u.spinTick%uint64(tabSpinEveryNTicks*3) == 0 {
+					u.markShellDirty()
+				}
 				u.requestPaint()
 			} else if u.chrome.OverlayOpen() {
 				// Palette/help float over a live shell — need full composite.
 				u.requestPaint()
 			} else if u.needsShellAnimPaint() {
-				// Rain / alt caret / intro: full paint, but rain-only ticks are
-				// halved so the UI thread stays responsive to keystrokes.
-				if u.shellAmbientOn() && !u.matrixIntroActive() && !u.anyAltScreenCursor() &&
-					u.spinTick%2 != 0 {
-					u.requestInputPaint()
-				} else {
-					u.requestPaint()
-				}
+				// Ambient / alt caret / intro: always full paint.
+				// Never call requestInputPaint here — sticky input-only freezes ambient.
+				u.requestPaint()
 			} else {
-				// Idle shell: only pulse the Warp caret (input-only path).
+				// Idle shell, no ambient: only pulse the Warp caret.
 				u.requestInputPaint()
 			}
 		}
@@ -2555,6 +2574,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			u.pasteClipboard()
 			return 0
 		}
+		// Shift+Enter / Alt+Enter → multiline in Warp bar BEFORE activeInput nil
+		// checks and before any path that might DefWindowProc (system beep).
+		// Use L/R shift bits too — some layouts report VK_SHIFT flaky mid-chord.
+		shiftDown := shift || win.GetKeyState(win.VK_LSHIFT) < 0 || win.GetKeyState(win.VK_RSHIFT) < 0
+		if !u.appOwnsKeyboard() && !ctrl && wParam == win.VK_RETURN && (shiftDown || alt) {
+			if in := u.activeInput(); in != nil {
+				u.warpBarInsertNewline(in)
+				return 0
+			}
+		}
 		if tab == nil {
 			return 0
 		}
@@ -2601,17 +2630,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		switch wParam {
 		case win.VK_RETURN:
-			if shift {
+			if shiftDown {
 				// Shift+Enter — new line in the bar (multiline script).
-				prevRows := in.visualRows(cols)
-				in.insertNewline()
-				if in.visualRows(cols) != prevRows {
-					u.maybeResizeForInput()
-					u.markShellDirty()
-					u.requestPaint()
-				} else {
-					u.requestInputPaint()
-				}
+				u.warpBarInsertNewline(in)
 				return 0
 			}
 			line := in.submit()
@@ -2697,21 +2718,34 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_SYSKEYDOWN:
-		// Alt+key arrives as SYSKEYDOWN. Forward modified Enter (and other app
-		// keys) to alt-screen TUIs so Grok gets Alt+Enter as newline.
+		// Alt+key arrives as SYSKEYDOWN. Never DefWindowProc for keys we own —
+		// that is what plays the Windows "ding" on Alt+Enter.
+		ctrl := win.GetKeyState(win.VK_CONTROL) < 0
+		shift := win.GetKeyState(win.VK_SHIFT) < 0 || win.GetKeyState(win.VK_LSHIFT) < 0 || win.GetKeyState(win.VK_RSHIFT) < 0
+		alt := win.GetKeyState(win.VK_MENU) < 0
+		// Alt+Enter in Warp bar → multiline (same as Shift+Enter).
+		if alt && !ctrl && wParam == win.VK_RETURN && !u.appOwnsKeyboard() {
+			if in := u.activeInput(); in != nil {
+				u.warpBarInsertNewline(in)
+				return 0
+			}
+		}
+		// Alt+Enter (and other app keys) → alt-screen TUIs (Grok newline).
 		if u.appOwnsKeyboard() {
 			tab := u.activeTab()
 			if tab != nil {
-				ctrl := win.GetKeyState(win.VK_CONTROL) < 0
-				shift := win.GetKeyState(win.VK_SHIFT) < 0
-				alt := win.GetKeyState(win.VK_MENU) < 0
 				if b := ptyKeyFromWin(tab.term, &tab.kitty, wParam, ctrl, shift, alt); len(b) > 0 {
 					u.sendKey(b)
 					return 0
 				}
 			}
 		}
-		return win.DefWindowProc(hwnd, msg, wParam, lParam)
+		// Swallow unhandled syskeys so Windows does not beep.
+		return 0
+
+	case win.WM_SYSCHAR:
+		// Companion to SYSKEYDOWN — DefWindowProc would beep on Alt+letter/Enter.
+		return 0
 
 	case win.WM_MOUSEWHEEL:
 		// Prefer the pane under the cursor so split layouts scroll the hovered leaf.
@@ -3339,6 +3373,10 @@ func (u *winUI) paint(hwnd win.HWND) {
 				}
 				// Grok prompt image previews (Kitty graphics APC) — over the cell grid.
 				u.paintKittyPlacements(dest, rect, g.pane, g.y, g.y+g.h)
+			}
+			// CRT scanlines over the grid so empty cells don't hide them.
+			if u.shellAmbientOn() && !u.matrixIntroActive() {
+				u.paintShellAmbientOver(dest, rect, padY, shellBot)
 			}
 			if len(layouts) > 1 {
 				u.paintPaneTitles(dest, layouts)
