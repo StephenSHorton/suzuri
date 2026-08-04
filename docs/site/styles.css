@@ -132,13 +132,6 @@ header.wrap {
   align-items: center;
   gap: 0.45rem;
 }
-.brand-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  image-rendering: auto;
-  flex-shrink: 0;
-}
 .kanji {
   font-family: var(--serif);
   color: var(--accent);
