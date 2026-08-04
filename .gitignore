@@ -15,3 +15,6 @@ suzuri.exe~
 # Rust engines under libs/*
 libs/**/target/
 
+
+# Generated at Pages deploy
+docs/site/version.json

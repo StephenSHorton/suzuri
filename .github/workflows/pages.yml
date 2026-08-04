@@ -1,12 +1,21 @@
 name: GitHub Pages
 
+# Site deploys are intentionally separate from app releases.
+#   App:  git tag v0.9.78 && git push origin v0.9.78
+#   Site: git tag v0.1.0-site && git push origin v0.1.0-site
+#
+# Also accepts site-v0.1.0. Manual: Actions → GitHub Pages → Run workflow.
 on:
   push:
-    branches: [master, main]
-    paths:
-      - "docs/site/**"
-      - ".github/workflows/pages.yml"
+    tags:
+      - "v*.*.*-site"
+      - "site-v*.*.*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label for the footer (e.g. v0.1.0-site). Leave empty to use run id."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -25,6 +34,57 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve site version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            version="${{ github.ref_name }}"
+            source="tag"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            version="${{ github.event.inputs.version }}"
+            source="manual"
+          else
+            version="manual-${GITHUB_SHA::7}"
+            source="manual"
+          fi
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+          echo "built_at=$built_at" >> "$GITHUB_OUTPUT"
+          echo "Site version: $version ($source) at $built_at"
+
+      - name: Stamp version into site
+        shell: bash
+        run: |
+          set -euo pipefail
+          v='${{ steps.ver.outputs.version }}'
+          built='${{ steps.ver.outputs.built_at }}'
+          src='${{ steps.ver.outputs.source }}'
+          # JSON for optional fetch; also embed so the footer works offline/cached HTML.
+          cat > docs/site/version.json <<EOF
+          {
+            "version": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$v"),
+            "built_at": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$built"),
+            "source": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$src"),
+            "commit": "${GITHUB_SHA}"
+          }
+          EOF
+          # Replace placeholders in the checked-in HTML.
+          python3 <<'PY'
+          from pathlib import Path
+          import os
+          path = Path("docs/site/index.html")
+          text = path.read_text()
+          text = text.replace("__SITE_VERSION__", os.environ["SITE_V"])
+          text = text.replace("__SITE_BUILT__", os.environ["SITE_BUILT"])
+          path.write_text(text)
+          PY
+        env:
+          SITE_V: ${{ steps.ver.outputs.version }}
+          SITE_BUILT: ${{ steps.ver.outputs.built_at }}
 
       - uses: actions/configure-pages@v5
 

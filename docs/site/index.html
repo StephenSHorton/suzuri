@@ -205,6 +205,11 @@
           <a href="https://canvasui.dev/docs/components/decrypt-reveal">Decrypt Reveal</a>)
           · GohuFont uni14 Nerd Font Mono is bundled under WTFPL (see <code>assets/fonts</code>).
         </p>
+        <!-- Stamped by Pages deploy from a site tag (vX.Y.Z-site), not app release tags. -->
+        <p class="site-version" id="site-version" title="GitHub Pages site build">
+          site <strong id="site-version-label">__SITE_VERSION__</strong>
+          <span class="site-version-built" id="site-version-built">· __SITE_BUILT__</span>
+        </p>
       </footer>
     </div>
     <canvas id="gr-output" class="glyph-rain-output" aria-hidden="true"></canvas>
@@ -215,6 +220,39 @@
     import { createGlitch } from "./vendor/glitch.js";
     import { createLiquid } from "./vendor/liquid.js";
     import { createDecryptReveal } from "./vendor/decrypt-reveal.js";
+
+    // --- Site version (stamped at Pages deploy from vX.Y.Z-site tags) ---
+    {
+      const label = document.getElementById("site-version-label");
+      const built = document.getElementById("site-version-built");
+      const row = document.getElementById("site-version");
+      const isPlaceholder = (s) => !s || s.includes("__SITE_");
+      // Prefer stamped HTML; fall back to version.json if present.
+      if (label && isPlaceholder(label.textContent.trim())) {
+        fetch(`version.json?_=${Date.now()}`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((j) => {
+            if (!j || !j.version) {
+              if (label) {
+                label.textContent = "local / unstamped";
+                label.dataset.missing = "1";
+              }
+              if (built) built.textContent = "";
+              return;
+            }
+            label.textContent = j.version;
+            if (built && j.built_at) built.textContent = `· ${j.built_at}`;
+            if (row) row.title = `source=${j.source || "?"} commit=${(j.commit || "").slice(0, 7)}`;
+          })
+          .catch(() => {
+            if (label) {
+              label.textContent = "local / unstamped";
+              label.dataset.missing = "1";
+            }
+            if (built) built.textContent = "";
+          });
+      }
+    }
 
     // --- Latest release links ---
     fetch("https://api.github.com/repos/StephenSHorton/suzuri/releases/latest")

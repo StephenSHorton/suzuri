@@ -442,6 +442,25 @@ footer a { color: var(--accent); text-decoration: none; }
 footer a:hover { text-decoration: underline; }
 .fine { opacity: 0.75; margin-top: 0.35rem; }
 footer code { font-size: 0.8em; }
+.site-version {
+  margin: 0.65rem 0 0;
+  font-size: 0.78rem;
+  color: var(--mute);
+  letter-spacing: 0.02em;
+}
+.site-version strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+.site-version-built {
+  opacity: 0.75;
+  margin-left: 0.15rem;
+}
+/* Unstamped local / pre-deploy HTML still shows the placeholder literally — hide noise. */
+.site-version:has(strong:is(:empty)),
+.site-version strong:is([data-missing="1"]) {
+  /* no-op; JS marks missing stamps */
+}
 
 @media (prefers-reduced-motion: reduce) {
   .glyph-rain-output { opacity: 0.35; }
