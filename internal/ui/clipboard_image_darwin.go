@@ -80,13 +80,3 @@ func applescriptEscape(s string) string {
 	s = strings.ReplaceAll(s, "\"", "\\\"")
 	return s
 }
-
-// bracketedPaste frames text for terminals that enable DECSET 2004.
-// Grok always has bracketed paste on and routes Event::Paste through the
-// image / drop-path classifier.
-func bracketedPaste(text string) []byte {
-	// Normalize newlines the way host terminals do inside paste brackets.
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\n", "\r")
-	return []byte("\x1b[200~" + text + "\x1b[201~")
-}

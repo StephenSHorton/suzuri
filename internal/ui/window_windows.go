@@ -200,6 +200,11 @@ type winUI struct {
 	// lastCaffeineHint drives chrome dirty when the timed label ticks down.
 	lastCaffeineHint string
 
+	// Async alt-screen paste (clipboard image dump must not block the UI thread).
+	pasteBusy      atomic.Bool
+	pendingPasteMu sync.Mutex
+	pendingPaste   []pendingPaste
+
 	// User is dragging or resizing the frame (WM_ENTERSIZEMOVE … EXITSIZEMOVE).
 	// During this window we must not thrash ConPTY / GDI: every WM_SIZE used to
 	// resize all tabs + recreate the backbuffer, which hard-crashed mid-drag.
@@ -1462,8 +1467,22 @@ func (u *winUI) drainAndParse(tabID int) {
 	}
 	// Answer Kitty keyboard / DA probes before VT parse (Grok Shift+Enter).
 	t.handleHostQueries(data)
+	// Unwrap OSC 8 hyperlinks so markdown link labels stay visible.
 	data = vt.StripOSC8Hyperlinks(data)
-	_, _ = t.term.Write(data)
+	// Kitty graphics APCs (Grok image previews): strip + apply against live
+	// cursor between VT segments so a=p places at the CSI-H position.
+	if t.kittyGfx == nil {
+		t.kittyGfx = newKittyGfx()
+	}
+	data = feedKittyAPCs(t.kittyGfx, data, func(b []byte) {
+		_, _ = t.term.Write(b)
+	}, func() (col, row int) {
+		c := t.term.Cursor()
+		return c.X, c.Y
+	})
+	if len(data) > 0 {
+		_, _ = t.term.Write(data)
+	}
 	t.sb.noteScreen(t.term)
 	u.markShellDirty()
 	// No host image injection on alt-screen (Grok) — use click → modal instead.
@@ -1498,6 +1517,7 @@ func (u *winUI) drainAndParse(tabID int) {
 			if t.kittyGfx != nil {
 				t.kittyGfx.clear()
 			}
+			clearKittyHBMCache(t.id)
 			t.markShellIdle()
 		}
 		t.wasAlt = nowAlt
@@ -1900,6 +1920,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
 			u.clearToastIfDue()
+			// Inject async clipboard paste results (image dump runs off-thread).
+			u.drainPendingPaste()
 			for _, t := range u.allPanes() {
 				if t != nil && !t.altScreen() && t.queueLen() > 0 {
 					u.tryFlushCmdQueue(t)
@@ -2470,14 +2492,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				return 0
 			}
 			// Ctrl+V / Shift+Insert paste into the PTY, not the bar.
+			// Route through pasteClipboard so image + bracketed paste match darwin.
 			if (ctrl && !shift && (wParam == 'V' || wParam == 'v')) ||
 				(shift && !ctrl && wParam == win.VK_INSERT) {
-				if text, err := getClipboardText(hwnd); err == nil && text != "" {
-					// Normalize newlines for PTY paste.
-					payload := strings.ReplaceAll(text, "\r\n", "\n")
-					payload = strings.ReplaceAll(payload, "\n", "\r")
-					u.sendKey([]byte(payload))
-				}
+				u.pasteClipboard()
 				return 0
 			}
 			if b := ptyKeyFromWin(tab.term, &tab.kitty, wParam, ctrl, shift, alt); len(b) > 0 {
@@ -3288,6 +3306,8 @@ func (u *winUI) paint(hwnd win.HWND) {
 				if !g.pane.altScreen() {
 					u.paintPaneImages(dest, rect, g)
 				}
+				// Grok prompt image previews (Kitty graphics APC) — over the cell grid.
+				u.paintKittyPlacements(dest, rect, g.pane, g.y, g.y+g.h)
 			}
 			if len(layouts) > 1 {
 				u.paintPaneTitles(dest, layouts)
@@ -4640,15 +4660,17 @@ func (u *winUI) copySelection() {
 }
 
 func (u *winUI) pasteClipboard() {
-	text, err := getClipboardText(u.hwnd)
-	if err != nil || text == "" {
+	// Alt-screen (Grok, …): host delivers images. Clipboard PNG/DIB dump can be
+	// slow — never block the UI thread; finish on a worker and inject on blink.
+	if u.appOwnsKeyboard() {
+		if u.pasteBusy.Swap(true) {
+			return // already dumping a clipboard image
+		}
+		go u.pasteAltScreenAsync()
 		return
 	}
-	// Full-screen app: paste straight into ConPTY.
-	if u.appOwnsKeyboard() {
-		payload := strings.ReplaceAll(text, "\r\n", "\n")
-		payload = strings.ReplaceAll(payload, "\n", "\r")
-		u.sendKey([]byte(payload))
+	text, err := getClipboardText(u.hwnd)
+	if err != nil || text == "" {
 		return
 	}
 	in := u.activeInput()
@@ -4665,6 +4687,61 @@ func (u *winUI) pasteClipboard() {
 		return
 	}
 	u.requestInputPaint()
+}
+
+// pasteAltScreenAsync reads the clipboard off-thread and queues PTY inject.
+func (u *winUI) pasteAltScreenAsync() {
+	defer u.pasteBusy.Store(false)
+	if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
+		log.Info("paste clipboard image", "path", imgPath)
+		u.pendingPasteMu.Lock()
+		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(imgPath), toast: "image pasted"})
+		u.pendingPasteMu.Unlock()
+		return
+	} else if err != nil {
+		log.Debug("clipboard image read failed", "err", err)
+	}
+	text, _ := getClipboardText(u.hwnd)
+	var payload []byte
+	var toast string
+	if strings.TrimSpace(text) != "" {
+		payload = bracketedPaste(text)
+	} else {
+		// Empty board: Super+V CSI-u so Grok can still probe, else empty bracketed.
+		payload = bracketedPaste("")
+		toast = ""
+	}
+	u.pendingPasteMu.Lock()
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{
+		payload: payload, toast: toast,
+		preferSuperV: strings.TrimSpace(text) == "",
+	})
+	u.pendingPasteMu.Unlock()
+}
+
+// drainPendingPaste injects async paste results on the UI thread.
+func (u *winUI) drainPendingPaste() {
+	if u == nil {
+		return
+	}
+	u.pendingPasteMu.Lock()
+	batch := u.pendingPaste
+	u.pendingPaste = nil
+	u.pendingPasteMu.Unlock()
+	for _, p := range batch {
+		if p.preferSuperV {
+			if t := u.activeTab(); t != nil && t.kitty.active() {
+				t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
+				continue
+			}
+		}
+		if len(p.payload) > 0 {
+			u.sendKey(p.payload)
+		}
+		if p.toast != "" {
+			u.toast(p.toast)
+		}
+	}
 }
 
 // handleInputBackspace edits the Warp bar (rate-limited while held).

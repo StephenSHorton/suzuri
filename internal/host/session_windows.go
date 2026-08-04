@@ -122,13 +122,13 @@ func StartSession(commandLine string, cols, rows int, workDir string, extraEnv .
 	} else if st, err := os.Stat(wd); err != nil || !st.IsDir() {
 		wd = mustWd()
 	}
+	// Always pass a full env block so Grok/Kitty graphics branding applies even
+	// when callers pass no extraEnv (newTab currently starts bare shells).
+	env := sessionEnv(os.Environ(), extraEnv...)
 	opts := []conpty.ConPtyOption{
 		conpty.ConPtyDimensions(cols, rows),
 		conpty.ConPtyWorkDir(wd),
-	}
-	if len(extraEnv) > 0 {
-		env := mergeEnv(os.Environ(), extraEnv)
-		opts = append(opts, conpty.ConPtyEnv(env))
+		conpty.ConPtyEnv(env),
 	}
 	cpty, err := conpty.Start(commandLine, opts...)
 	if err != nil {
@@ -137,9 +137,58 @@ func StartSession(commandLine string, cols, rows int, workDir string, extraEnv .
 	return &Session{cpty: cpty}, nil
 }
 
+// sessionEnv builds the ConPTY process environment: base + extra, then
+// set-if-empty Kitty/Ghostty-class branding so Grok emits graphics APCs.
+func sessionEnv(base []string, extra ...string) []string {
+	env := mergeEnv(base, extra)
+	return applyGraphicsBrandEnv(env)
+}
+
+// applyGraphicsBrandEnv sets TERM / COLORTERM / TERM_PROGRAM / KITTY_WINDOW_ID
+// only when absent (matches unix quietShellEnv). User or extraEnv values win.
+func applyGraphicsBrandEnv(env []string) []string {
+	env = setEnvIfEmpty(env, "TERM", "xterm-256color")
+	env = setEnvIfEmpty(env, "COLORTERM", "truecolor")
+	// Advertise Kitty/Ghostty-class graphics so Grok emits pixel previews
+	// (Kitty APC) instead of metadata-only image chips.
+	env = setEnvIfEmpty(env, "TERM_PROGRAM", "ghostty")
+	env = setEnvIfEmpty(env, "TERM_PROGRAM_VERSION", "1.0.0")
+	env = setEnvIfEmpty(env, "KITTY_WINDOW_ID", "1")
+	return env
+}
+
+// setEnvIfEmpty appends KEY=val when KEY is missing or empty (case-insensitive).
+func setEnvIfEmpty(env []string, key, val string) []string {
+	want := strings.ToUpper(key)
+	for i, e := range env {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(k, key) || strings.ToUpper(k) == want {
+			if strings.TrimSpace(v) != "" {
+				return env
+			}
+			env[i] = key + "=" + val
+			return env
+		}
+	}
+	return append(env, key+"="+val)
+}
+
+// getenvEnv returns the value for KEY in an env block (case-insensitive).
+func getenvEnv(env []string, key string) string {
+	for _, e := range env {
+		k, v, ok := strings.Cut(e, "=")
+		if ok && strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
+
 // mergeEnv overlays KEY=VAL pairs onto a base environment block.
 func mergeEnv(base, extra []string) []string {
-	type kv struct{ k, v string }
 	m := map[string]string{}
 	order := make([]string, 0, len(base)+len(extra))
 	put := func(e string) {

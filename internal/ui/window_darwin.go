@@ -2974,12 +2974,6 @@ func (u *macUI) pasteAltScreenAsync() {
 	u.pendingPasteMu.Unlock()
 }
 
-type pendingPaste struct {
-	payload      []byte
-	toast        string
-	preferSuperV bool // empty board: try Kitty Super+V first
-}
-
 // drainPendingPaste injects async paste results on the UI thread.
 func (u *macUI) drainPendingPaste() {
 	if u == nil {
