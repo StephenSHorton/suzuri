@@ -150,8 +150,7 @@ func helpSectionsLeft(colW int) []helpSectionBlock {
 		{
 			title: "Terminal",
 			rows: [][2]string{
-				{KeyCtrlShift("C"), "Copy selection"},
-				{"Double/triple-click", "Select word / line"},
+				{KeyCtrlShift("C"), "Copy · dbl-click word · tpl-click line"},
 				{"Wheel", "Scrollback"},
 				{"⌘/Ctrl-click", "Open URL"},
 				{"Hover link", "Highlight"},
