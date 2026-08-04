@@ -124,6 +124,43 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 	}
 }
 
+func TestAmbientAndIntroIDs(t *testing.T) {
+	if len(IntroIDs()) < 5 {
+		t.Fatalf("intro ids: %v", IntroIDs())
+	}
+	if len(AmbientIDs()) < 5 {
+		t.Fatalf("ambient ids: %v", AmbientIDs())
+	}
+	for _, id := range IntroIDs() {
+		if !ValidIntro(id) || IntroLabel(id) == "" || IntroDesc(id) == "" {
+			t.Fatalf("intro %q", id)
+		}
+	}
+	for _, id := range AmbientIDs() {
+		if !ValidAmbient(id) || AmbientLabel(id) == "" || AmbientDesc(id) == "" {
+			t.Fatalf("ambient %q", id)
+		}
+	}
+	// Legacy shell_matrix=true → rain ambient
+	c := Normalize(Config{ShellMatrix: true})
+	if c.ShellAmbient != AmbientRain {
+		t.Fatalf("legacy matrix true → ambient %q", c.ShellAmbient)
+	}
+	c = Normalize(Config{ShellMatrix: false, ShellAmbient: ""})
+	// empty ambient + false matrix
+	if c.ShellAmbient != AmbientNone {
+		t.Fatalf("legacy matrix false → ambient %q", c.ShellAmbient)
+	}
+	// Explicit ambient wins
+	c = Normalize(Config{ShellAmbient: AmbientWaves, ShellMatrix: true})
+	if c.ShellAmbient != AmbientWaves {
+		t.Fatalf("explicit ambient lost: %q", c.ShellAmbient)
+	}
+	if c.ShellMatrix {
+		t.Fatal("ShellMatrix should be false when ambient is waves")
+	}
+}
+
 func TestThemeIDsUniqueAndValid(t *testing.T) {
 	ids := ThemeIDs()
 	if len(ids) < 10 {

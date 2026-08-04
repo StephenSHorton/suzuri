@@ -1139,15 +1139,15 @@ func (u *winUI) beginIntro(replay bool) {
 	now := time.Now()
 	style := config.Normalize(u.cfg).Intro
 	// Persistent shell rain + matrix intro would play the same effect twice.
-	if style == config.IntroMatrix && u.cfg.ShellMatrix {
+	if style == config.IntroMatrix && u.shellMatrixOn() {
 		u.matrixIntroStart = now
 		u.matrixIntroSpawnEnd = now
 		u.matrixIntroDone = true
 		u.matrixIntroClearAt = now // watermark at full opacity immediately
 		if replay {
-			log.Info("replay intro skipped", "reason", "shell matrix on", "style", style)
+			log.Info("replay intro skipped", "reason", "shell rain ambient on", "style", style)
 		} else {
-			log.Info("startup intro skipped", "reason", "shell matrix on", "style", style)
+			log.Info("startup intro skipped", "reason", "shell rain ambient on", "style", style)
 		}
 		return
 	}
@@ -2000,7 +2000,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			} else if u.needsShellAnimPaint() {
 				// Rain / alt caret / intro: full paint, but rain-only ticks are
 				// halved so the UI thread stays responsive to keystrokes.
-				if u.shellMatrixOn() && !u.matrixIntroActive() && !u.anyAltScreenCursor() &&
+				if u.shellAmbientOn() && !u.matrixIntroActive() && !u.anyAltScreenCursor() &&
 					u.spinTick%2 != 0 {
 					u.requestInputPaint()
 				} else {
@@ -3314,8 +3314,8 @@ func (u *winUI) paint(hwnd win.HWND) {
 			// Shared dim rain under the whole shell region (not per-pane).
 			// Also under alt-screen TUIs (Grok/vim): default-bg cells leave the
 			// underlay visible (same as the 硯 watermark).
-			if u.shellMatrixOn() && !u.matrixIntroActive() {
-				u.paintShellMatrix(dest, rect, padY, shellBot)
+			if u.shellAmbientOn() && !u.matrixIntroActive() {
+				u.paintShellAmbient(dest, rect, padY, shellBot)
 			}
 			u.paintShellWatermark(dest, rect, padY, shellBot)
 
@@ -3349,6 +3349,10 @@ func (u *winUI) paint(hwnd win.HWND) {
 					switch strings.ToLower(strings.TrimSpace(u.cfg.Intro)) {
 					case config.IntroRipple:
 						u.paintRippleIntro(dest, rect)
+					case config.IntroInkWash:
+						u.paintInkWashIntro(dest, rect)
+					case config.IntroCRT:
+						u.paintCRTIntro(dest, rect)
 					case config.IntroNone:
 						if time.Now().After(u.matrixIntroSpawnEnd) {
 							u.finishMatrixIntro()
@@ -3409,6 +3413,8 @@ func configVisualEqual(a, b config.Config) bool {
 		a.ShellANSIMap == b.ShellANSIMap &&
 		a.Cursor == b.Cursor &&
 		strings.EqualFold(a.Intro, b.Intro) &&
+		strings.EqualFold(a.ShellAmbient, b.ShellAmbient) &&
+		a.ShellMatrixOpacity == b.ShellMatrixOpacity &&
 		strings.EqualFold(a.ActiveProfile, b.ActiveProfile)
 }
 
@@ -3745,8 +3751,8 @@ func (u *winUI) blitGrid(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX, cur
 	// calls blitGrid directly).
 	fillRect(hdc, rect, win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)))
 	shellBot := u.shellBottomY(rect.Bottom - rect.Top)
-	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() {
-		u.paintShellMatrix(hdc, rect, padY, shellBot)
+	if u.shellAmbientOn() && !u.matrixIntroActive() && !u.dimShellModal() {
+		u.paintShellAmbient(hdc, rect, padY, shellBot)
 	}
 	u.paintShellWatermark(hdc, rect, padY, shellBot)
 	u.blitGridPane(hdc, rect, grid, curX, curY, curVis, g)
@@ -4923,18 +4929,13 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	return true
 }
 
-// shellMatrixOn is true when settings ask for always-on shell rain.
-func (u *winUI) shellMatrixOn() bool {
-	return u != nil && u.cfg.ShellMatrix
-}
-
 // needsShellAnimPaint is true when the shell underlay or alt-screen caret must
 // animate (full paint). Idle normal shells only need the Warp-bar caret.
 func (u *winUI) needsShellAnimPaint() bool {
 	if u == nil {
 		return false
 	}
-	if u.matrixIntroActive() || u.shellMatrixOn() {
+	if u.matrixIntroActive() || u.shellAmbientOn() {
 		return true
 	}
 	return u.anyAltScreenCursor()
@@ -4954,21 +4955,9 @@ func (u *winUI) anyAltScreenCursor() bool {
 	return false
 }
 
-// paintShellMatrix draws quiet looping rain under the shell (not over glyphs).
+// paintShellMatrix is a rain-only alias kept for call-site clarity in comments/tests.
 func (u *winUI) paintShellMatrix(hdc win.HDC, rect win.RECT, padY, bot int32) {
-	if bot <= padY {
-		return
-	}
-	// Use blinkStart so rain keeps moving with the animation clock.
-	t0 := u.blinkStart
-	if t0.IsZero() {
-		t0 = time.Now()
-	}
-	alt := false
-	if t := u.activeTab(); t != nil {
-		alt = t.altScreen()
-	}
-	u.paintDimMatrixIntensity(hdc, rect, padY, bot, matrixLoop, t0, 0, effectiveShellMatrixIntensity(u.cfg, alt))
+	u.paintShellAmbient(hdc, rect, padY, bot)
 }
 
 // matrixIntroActive is true while startup rain is spawning or winding down.

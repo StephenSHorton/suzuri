@@ -52,9 +52,21 @@ const (
 
 // Startup intro styles (shell curtain after launch).
 const (
-	IntroMatrix = "matrix" // digital rain
-	IntroRipple = "ripple" // 猫咪 puddle from center mark
-	IntroNone   = "none"   // skip curtain
+	IntroMatrix  = "matrix"   // digital rain
+	IntroRipple  = "ripple"   // 猫咪 puddle from center mark
+	IntroInkWash = "ink_wash" // ink blot from 硯
+	IntroCRT     = "crt"      // scanline / phosphor boot
+	IntroNone    = "none"     // skip curtain
+)
+
+// Always-on shell ambient under empty cells (settings "Ambient").
+const (
+	AmbientNone      = "none"
+	AmbientRain      = "rain"      // matrix-style digital rain (legacy ShellMatrix)
+	AmbientGrain     = "grain"     // paper/film noise
+	AmbientWaves     = "waves"     // slow seigaiha-like waves
+	AmbientFireflies = "fireflies" // sparse drifting sparks
+	AmbientCRT       = "crt"       // scanlines + soft vignette
 )
 
 // Profile is a named shell launch recipe (cwd + command + optional theme).
@@ -75,13 +87,17 @@ type Config struct {
 	Profiles      []Profile
 	ActiveProfile string // name of default profile for new tabs
 	FirstRunDone  bool
-	// Intro is the post-launch shell curtain (matrix | ripple | none).
+	// Intro is the post-launch shell curtain (matrix | ripple | ink_wash | crt | none).
 	Intro string
-	// ShellMatrix draws quiet digital rain under the shell viewport (always-on).
+	// ShellAmbient is the always-on underlay under empty shell cells
+	// (none | rain | grain | waves | fireflies | crt).
+	ShellAmbient string
+	// ShellMatrix is retained for older configs/code: true when ambient is rain.
+	// Prefer ShellAmbient. Normalize keeps them in sync.
 	ShellMatrix bool
-	// ShellMatrixOpacity is 0–100 strength for always-on rain (multiplies the
-	// host base intensity). 100 = shipping default brightness; 0 = invisible
-	// rain while still "on". Missing JSON loads as 100.
+	// ShellMatrixOpacity is 0–100 intensity for any always-on ambient
+	// (multiplies host base strength). 100 = designed default; 0 = invisible.
+	// JSON key stays shell_matrix_opacity for backward compatibility.
 	ShellMatrixOpacity int
 	// AnimateUnfocused keeps the paint clock running when another app has focus
 	// (matrix rain, tab spinner, caret). Off freezes chrome animation in background.
@@ -125,6 +141,7 @@ type fileDTO struct {
 	ActiveProfile string           `json:"active_profile,omitempty"`
 	FirstRunDone  bool            `json:"first_run_done,omitempty"`
 	Intro         string          `json:"intro,omitempty"`
+	ShellAmbient  string          `json:"shell_ambient,omitempty"`
 	// Ptr fields distinguish "missing" from false / 0 when loading JSON.
 	ShellMatrixPtr         *bool           `json:"shell_matrix,omitempty"`
 	ShellMatrixOpacityPtr  *int            `json:"shell_matrix_opacity,omitempty"`
@@ -149,9 +166,10 @@ func Default() Config {
 		Theme:         ThemeHighContrast,
 		ShellANSIMap:  ANSIMapSoft,
 		Intro:                IntroMatrix,
-		ShellMatrix:          true, // quiet always-on rain under shell cells
-		ShellMatrixOpacity:   100,  // full designed strength
-		AnimateUnfocused:     true, // keep rain/spinners smooth in the background
+		ShellAmbient:         AmbientRain, // quiet always-on rain under shell cells
+		ShellMatrix:          true,        // mirrors ambient==rain for legacy
+		ShellMatrixOpacity:   100,         // full designed intensity
+		AnimateUnfocused:     true,        // keep ambient/spinners smooth in the background
 		Profiles:             DefaultProfiles(),
 		ActiveProfile:        "Default",
 		FirstRunDone:         false,
@@ -266,14 +284,29 @@ func Normalize(c Config) Config {
 	default:
 		c.ShellANSIMap = ANSIMapSoft
 	}
-	switch strings.ToLower(strings.TrimSpace(c.Intro)) {
-	case IntroMatrix, IntroRipple, IntroNone:
-		c.Intro = strings.ToLower(strings.TrimSpace(c.Intro))
-	case "":
+	if id := strings.ToLower(strings.TrimSpace(c.Intro)); ValidIntro(id) {
+		c.Intro = id
+	} else if strings.TrimSpace(c.Intro) == "" {
 		c.Intro = d.Intro
-	default:
+	} else {
 		c.Intro = IntroMatrix
 	}
+	// Ambient: prefer shell_ambient; migrate legacy shell_matrix bool.
+	amb := strings.ToLower(strings.TrimSpace(c.ShellAmbient))
+	if ValidAmbient(amb) {
+		c.ShellAmbient = amb
+	} else if amb == "" {
+		// No ambient key — derive from ShellMatrix (old configs).
+		if c.ShellMatrix {
+			c.ShellAmbient = AmbientRain
+		} else {
+			c.ShellAmbient = AmbientNone
+		}
+	} else {
+		c.ShellAmbient = AmbientRain
+	}
+	// Keep ShellMatrix in sync so older code paths (matrix intro skip) still work.
+	c.ShellMatrix = c.ShellAmbient == AmbientRain
 	if len(c.Profiles) == 0 {
 		c.Profiles = DefaultProfiles()
 	}
@@ -486,7 +519,17 @@ func ANSIMapLabel(id string) string {
 
 // IntroIDs lists selectable startup intros.
 func IntroIDs() []string {
-	return []string{IntroMatrix, IntroRipple, IntroNone}
+	return []string{IntroMatrix, IntroRipple, IntroInkWash, IntroCRT, IntroNone}
+}
+
+// ValidIntro is true for a known intro id.
+func ValidIntro(id string) bool {
+	for _, x := range IntroIDs() {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }
 
 // IntroLabel is a human title for a startup intro id.
@@ -494,11 +537,87 @@ func IntroLabel(id string) string {
 	switch strings.ToLower(strings.TrimSpace(id)) {
 	case IntroRipple:
 		return "Ripple"
+	case IntroInkWash:
+		return "Ink wash"
+	case IntroCRT:
+		return "CRT boot"
 	case IntroNone:
 		return "None"
 	default:
 		return "Matrix"
 	}
+}
+
+// IntroDesc is settings help for an intro id.
+func IntroDesc(id string) string {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case IntroRipple:
+		return "Puddle of 猫/咪 rings expanding from the center mark. Save & relaunch (or replay intro) to preview."
+	case IntroInkWash:
+		return "Ink blot blooms from the 硯 mark, then soaks into the void. On-brand for suzuri."
+	case IntroCRT:
+		return "Scanline phosphor boot — green/amber flash settles into the shell. Pairs with Amber CRT theme."
+	case IntroNone:
+		return "Skip the startup curtain. The center 硯 still fades in quietly."
+	default:
+		return "Digital rain over the shell for ~2s, then streams fall off. Skipped when Ambient is Rain (no double curtain)."
+	}
+}
+
+// AmbientIDs lists always-on shell underlays.
+func AmbientIDs() []string {
+	return []string{AmbientRain, AmbientGrain, AmbientWaves, AmbientFireflies, AmbientCRT, AmbientNone}
+}
+
+// ValidAmbient is true for a known ambient id.
+func ValidAmbient(id string) bool {
+	for _, x := range AmbientIDs() {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
+// AmbientLabel is a human title for a shell ambient id.
+func AmbientLabel(id string) string {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case AmbientGrain:
+		return "Grain"
+	case AmbientWaves:
+		return "Waves"
+	case AmbientFireflies:
+		return "Fireflies"
+	case AmbientCRT:
+		return "CRT"
+	case AmbientNone:
+		return "Off"
+	default:
+		return "Rain"
+	}
+}
+
+// AmbientDesc is settings help for a shell ambient id.
+func AmbientDesc(id string) string {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case AmbientGrain:
+		return "Paper/film grain under empty cells. Quiet texture; freezes while you type in the Warp bar."
+	case AmbientWaves:
+		return "Slow seigaiha-style waves in theme colors. Calm motion under the shell."
+	case AmbientFireflies:
+		return "Sparse drifting sparks. Night-coding vibe; very cheap."
+	case AmbientCRT:
+		return "Horizontal scanlines + soft edge vignette. Great with Amber CRT or High contrast."
+	case AmbientNone:
+		return "No always-on underlay. Intro curtains and Settings previews are unchanged."
+	default:
+		return "Always-on digital rain under empty/default-bg cells — dim so text stays readable. Shows through TUIs that leave cells transparent."
+	}
+}
+
+// AmbientActive is true when an always-on underlay should paint.
+func (c Config) AmbientActive() bool {
+	return ValidAmbient(c.ShellAmbient) && c.ShellAmbient != AmbientNone
 }
 
 // MonoFontFaces are preferred faces for the settings cycle.
@@ -540,13 +659,17 @@ func fromDTO(d fileDTO) Config {
 		ActiveProfile: d.ActiveProfile,
 		FirstRunDone:  d.FirstRunDone,
 		Intro:         d.Intro,
+		ShellAmbient:  d.ShellAmbient,
 		Window:        d.Window,
 	}
 	dflt := Default()
 	if d.ShellMatrixPtr != nil {
 		c.ShellMatrix = *d.ShellMatrixPtr
 	} else {
-		c.ShellMatrix = dflt.ShellMatrix
+		// Only default ShellMatrix when ambient also missing (legacy).
+		if strings.TrimSpace(d.ShellAmbient) == "" {
+			c.ShellMatrix = dflt.ShellMatrix
+		}
 	}
 	if d.ShellMatrixOpacityPtr != nil {
 		c.ShellMatrixOpacity = *d.ShellMatrixOpacityPtr
@@ -562,7 +685,9 @@ func fromDTO(d fileDTO) Config {
 }
 
 func toDTO(c Config) fileDTO {
-	sm := c.ShellMatrix
+	// Keep shell_matrix true only for rain so older builds don't invent rain
+	// when ambient is grain/waves/etc.
+	sm := c.ShellAmbient == AmbientRain || (c.ShellAmbient == "" && c.ShellMatrix)
 	op := c.ShellMatrixOpacity
 	au := c.AnimateUnfocused
 	return fileDTO{
@@ -575,6 +700,7 @@ func toDTO(c Config) fileDTO {
 		ActiveProfile:         c.ActiveProfile,
 		FirstRunDone:          c.FirstRunDone,
 		Intro:                 c.Intro,
+		ShellAmbient:          c.ShellAmbient,
 		ShellMatrixPtr:        &sm,
 		ShellMatrixOpacityPtr: &op,
 		AnimateUnfocusedPtr:   &au,

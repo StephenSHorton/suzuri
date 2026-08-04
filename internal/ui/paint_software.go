@@ -138,9 +138,11 @@ type paintOpts struct {
 	SettingsOpen bool
 	// Intro / underlay (MatrixCells paint over the shell field after the grid).
 	MatrixCells   []rainCell
-	// ShellMatrixCells: quiet always-on rain UNDER shell glyphs (Windows ShellMatrix).
+	// ShellMatrixCells: quiet always-on rain/grain/waves UNDER shell glyphs.
 	ShellMatrixCells []rainCell
-	WatermarkFade    float64
+	// CRTScanlines: 0..1 intensity for horizontal scanlines + soft side vignette.
+	CRTScanlines  float64
+	WatermarkFade float64
 	// Sub-line smooth scroll (0..1): shift shell content up by frac*cellH.
 	ScrollFrac float64
 	// Scrollbar (host-drawn; Charm has no native host scrollbar).
@@ -185,10 +187,13 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		fillRectRGBA(dst, 0, padY, w, shellBot-padY, 0, 0, 0)
 	}
 
-	// Always-on shell rain under glyphs (Windows paintShellMatrix order).
+	// Always-on shell ambient under glyphs (Windows paintShellAmbient order).
 	// Skip when a dim modal matte will cover the field.
 	if len(o.ShellMatrixCells) > 0 && !o.DimShell {
 		p.paintMatrixRain(dst, padY, shellBot, o.ShellMatrixCells)
+	}
+	if o.CRTScanlines > 0.01 && !o.DimShell {
+		p.paintCRTScanlines(dst, padY, shellBot, o.CRTScanlines)
 	}
 
 	// Center 硯 UNDER shell cells (Windows blitGrid order). Only ink pixels
@@ -1024,4 +1029,50 @@ func isTransparentOverlayBG(r, g, b byte) bool {
 		return true
 	}
 	return false
+}
+
+// paintCRTScanlines draws horizontal scanlines + soft side vignette.
+func (p *softwarePainter) paintCRTScanlines(dst *image.RGBA, padY, shellBot int, intensity float64) {
+	if dst == nil || intensity <= 0 || shellBot <= padY {
+		return
+	}
+	if intensity > 1 {
+		intensity = 1
+	}
+	w := dst.Bounds().Dx()
+	// Scanline darken every other row.
+	lineA := intensity * 0.22
+	if lineA > 0.35 {
+		lineA = 0.35
+	}
+	for y := padY; y < shellBot; y += 2 {
+		for x := 0; x < w; x++ {
+			i := dst.PixOffset(x, y)
+			dst.Pix[i+0] = byte(float64(dst.Pix[i+0]) * (1 - lineA))
+			dst.Pix[i+1] = byte(float64(dst.Pix[i+1]) * (1 - lineA))
+			dst.Pix[i+2] = byte(float64(dst.Pix[i+2]) * (1 - lineA))
+		}
+	}
+	// Side vignette
+	vigW := w / 18
+	if vigW < 8 {
+		vigW = 8
+	}
+	if vigW > 48 {
+		vigW = 48
+	}
+	va := intensity * 0.28
+	for y := padY; y < shellBot; y++ {
+		for x := 0; x < vigW; x++ {
+			a := va * (1 - float64(x)/float64(vigW))
+			i := dst.PixOffset(x, y)
+			dst.Pix[i+0] = byte(float64(dst.Pix[i+0]) * (1 - a))
+			dst.Pix[i+1] = byte(float64(dst.Pix[i+1]) * (1 - a))
+			dst.Pix[i+2] = byte(float64(dst.Pix[i+2]) * (1 - a))
+			j := dst.PixOffset(w-1-x, y)
+			dst.Pix[j+0] = byte(float64(dst.Pix[j+0]) * (1 - a))
+			dst.Pix[j+1] = byte(float64(dst.Pix[j+1]) * (1 - a))
+			dst.Pix[j+2] = byte(float64(dst.Pix[j+2]) * (1 - a))
+		}
+	}
 }

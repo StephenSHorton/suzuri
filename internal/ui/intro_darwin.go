@@ -89,13 +89,6 @@ func dimRainCells(cells []rainCell, intensity float64) []rainCell {
 	return out
 }
 
-// rainCell is one painted matrix glyph in cell coordinates.
-type rainCell struct {
-	X, Y       int
-	Ch         rune
-	FR, FG, FB byte
-}
-
 // matrixRainCells computes a frame of digital rain for the shell band.
 func matrixRainCells(cols, rows int, mode matrixPaintMode, t0 time.Time, spawnFor time.Duration, now time.Time) []rainCell {
 	initMatrixRainRunes()

@@ -1347,15 +1347,15 @@ func (u *macUI) beginIntro(replay bool) {
 	now := time.Now()
 	style := config.Normalize(u.cfg).Intro
 	// Persistent shell rain + matrix intro would play the same effect twice.
-	if style == config.IntroMatrix && u.cfg.ShellMatrix {
+	if style == config.IntroMatrix && u.shellMatrixOn() {
 		u.matrixIntroStart = now
 		u.matrixIntroSpawnEnd = now
 		u.matrixIntroDone = true
 		u.matrixIntroClearAt = now // watermark at full opacity immediately
 		if replay {
-			log.Info("replay intro skipped", "reason", "shell matrix on", "style", style)
+			log.Info("replay intro skipped", "reason", "shell rain ambient on", "style", style)
 		} else {
-			log.Info("startup intro skipped", "reason", "shell matrix on", "style", style)
+			log.Info("startup intro skipped", "reason", "shell rain ambient on", "style", style)
 		}
 		return
 	}
@@ -1379,9 +1379,23 @@ func (u *macUI) replayIntro() {
 	u.beginIntro(true)
 }
 
-// shellMatrixOn is true when settings ask for always-on shell rain.
+// shellMatrixOn is true when ambient is classic rain.
 func (u *macUI) shellMatrixOn() bool {
-	return u != nil && u.cfg.ShellMatrix
+	return u != nil && u.cfg.ShellAmbient == config.AmbientRain
+}
+
+// shellAmbientOn is true for any always-on underlay.
+func (u *macUI) shellAmbientOn() bool {
+	return u != nil && u.cfg.AmbientActive()
+}
+
+func (u *macUI) themeAmbientColors() ambientColors {
+	return ambientColors{
+		pr: byte(chrome.PrimR), pg: byte(chrome.PrimG), pb: byte(chrome.PrimB),
+		sr: byte(chrome.SoftR), sg: byte(chrome.SoftG), sb: byte(chrome.SoftB),
+		mr: byte(chrome.MuteR), mg: byte(chrome.MuteG), mb: byte(chrome.MuteB),
+		tr: byte(chrome.TextR), tg: byte(chrome.TextG), tb: byte(chrome.TextB),
+	}
 }
 
 // dimShellModal is true for overlays that replace the live shell (not palette/help).
@@ -1449,6 +1463,8 @@ func configVisualEqual(a, b config.Config) bool {
 		a.ShellANSIMap == b.ShellANSIMap &&
 		a.Cursor == b.Cursor &&
 		strings.EqualFold(a.Intro, b.Intro) &&
+		strings.EqualFold(a.ShellAmbient, b.ShellAmbient) &&
+		a.ShellMatrixOpacity == b.ShellMatrixOpacity &&
 		strings.EqualFold(a.ActiveProfile, b.ActiveProfile)
 }
 
@@ -3115,12 +3131,14 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 
 	// Intro underlay: startup curtain, or settings preview of the chosen style.
-	// Always-on shell rain is separate (ShellMatrixCells, under glyphs).
+	// Always-on shell ambient is separate (ShellMatrixCells / CRT scanlines).
 	var rain []rainCell
 	var shellRain []rainCell
+	crtIntensity := 0.0
 	introStyle := config.Normalize(u.cfg).Intro
 	now := time.Now()
 	cwPx, chPx := cw, ch
+	col := u.themeAmbientColors()
 	if u.chrome.SettingsOpen {
 		t0, active := u.settingsUnderlayClock(now)
 		if active {
@@ -3137,6 +3155,18 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 				}
 				if now.Sub(t0) > matrixIntroMaxTotal {
 					u.settingsUnderlayFinished(now)
+				}
+			case config.IntroInkWash:
+				rain = inkWashCells(shellCols, shellRows, t0, matrixIntroSpawn, now, col)
+				if now.Sub(t0) > matrixIntroSpawn && len(rain) == 0 {
+					u.settingsUnderlayFinished(now)
+				}
+			case config.IntroCRT:
+				rain = crtIntroCells(shellCols, shellRows, t0, matrixIntroSpawn, now, col)
+				crtIntensity = 0.45
+				if now.Sub(t0) > matrixIntroSpawn {
+					u.settingsUnderlayFinished(now)
+					crtIntensity = 0
 				}
 			case config.IntroNone:
 			default:
@@ -3159,6 +3189,18 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 			if mode == matrixWindDown && !drew {
 				u.finishMatrixIntro()
 			}
+		case config.IntroInkWash:
+			rain = inkWashCells(shellCols, shellRows, u.matrixIntroStart, matrixIntroSpawn, now, col)
+			if mode == matrixWindDown && len(rain) == 0 {
+				u.finishMatrixIntro()
+			}
+		case config.IntroCRT:
+			rain = crtIntroCells(shellCols, shellRows, u.matrixIntroStart, matrixIntroSpawn, now, col)
+			crtIntensity = 0.55
+			if mode == matrixWindDown && len(rain) == 0 {
+				u.finishMatrixIntro()
+				crtIntensity = 0
+			}
 		default:
 			rain = matrixRainCells(shellCols, shellRows, mode, u.matrixIntroStart, matrixIntroSpawn, now)
 			if mode == matrixWindDown && len(rain) == 0 {
@@ -3170,21 +3212,25 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 			u.finishMatrixIntro()
 		}
 	}
-	// Quiet looping rain under the shell while sitting open (settings Rain = On).
-	// Not during intro curtain or settings/splash/confirm modals.
-	// Also runs under alt-screen TUIs (Grok/vim/etc.): empty/default-bg cells
-	// skip the opaque fill so rain shows through (same path as the 硯 watermark).
-	// Rain is cheap glyph stamps; the full-grid paint already happens for the TUI.
-	if u.shellMatrixOn() && !u.matrixIntroActive() && !u.dimShellModal() {
+	// Always-on ambient under empty/default-bg cells (settings Ambient).
+	// Freezes while input-only typing path is sticky (tryPaintInputOnly).
+	if u.shellAmbientOn() && !u.matrixIntroActive() && !u.dimShellModal() {
 		t0 := u.blinkStart
 		if t0.IsZero() {
 			t0 = now
 		}
-		intensity := effectiveShellMatrixIntensity(u.cfg, tab.altScreen())
-		shellRain = dimRainCells(
-			matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now),
-			intensity,
-		)
+		intensity := effectiveAmbientIntensity(u.cfg, tab.altScreen())
+		switch u.cfg.ShellAmbient {
+		case config.AmbientRain:
+			shellRain = dimRainCells(
+				matrixRainCells(shellCols, shellRows, matrixLoop, t0, 0, now),
+				intensity,
+			)
+		case config.AmbientCRT:
+			crtIntensity = intensity * 0.9
+		default:
+			shellRain = ambientGlyphCells(u.cfg.ShellAmbient, shellCols, shellRows, t0, now, col, intensity)
+		}
 	}
 
 	// Paint focused pane as primary shell (watermark/intro/chrome/overlay via paintFrame).
@@ -3238,6 +3284,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		SettingsOpen:     u.chrome.SettingsOpen,
 		MatrixCells:      rain,
 		ShellMatrixCells: shellRain,
+		CRTScanlines:     crtIntensity,
 		WatermarkFade:    u.watermarkFade(),
 		ScrollFrac:       tab.sb.scrollFrac(),
 		ScrollThumbY:     thumbY,

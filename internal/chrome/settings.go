@@ -18,8 +18,8 @@ const (
 	fieldTheme
 	fieldANSIMap
 	fieldIntro
-	fieldShellMatrix
-	fieldRainOpacity
+	fieldShellAmbient
+	fieldRainOpacity // ambient intensity (JSON: shell_matrix_opacity)
 	fieldAnimateUnfocused
 	fieldProfile
 	settingsFieldCount
@@ -125,8 +125,15 @@ func (s *settingsState) nudge(delta int) {
 		}
 		i = (i + delta + len(ids)) % len(ids)
 		s.edit.Intro = ids[i]
-	case fieldShellMatrix:
-		s.edit.ShellMatrix = !s.edit.ShellMatrix
+	case fieldShellAmbient:
+		ids := config.AmbientIDs()
+		i := indexFold(ids, s.edit.ShellAmbient)
+		if i < 0 {
+			i = 0
+		}
+		i = (i + delta + len(ids)) % len(ids)
+		s.edit.ShellAmbient = ids[i]
+		s.edit = config.Normalize(s.edit)
 	case fieldRainOpacity:
 		// Slider: left/right steps by 5%. Charm has no native slider widget;
 		// we render a block bar and nudge like font size.
@@ -166,11 +173,8 @@ func (s settingsState) valueLabel(f settingsField) string {
 		return config.ANSIMapLabel(s.edit.ShellANSIMap)
 	case fieldIntro:
 		return config.IntroLabel(s.edit.Intro)
-	case fieldShellMatrix:
-		if s.edit.ShellMatrix {
-			return "On"
-		}
-		return "Off"
+	case fieldShellAmbient:
+		return config.AmbientLabel(s.edit.ShellAmbient)
 	case fieldRainOpacity:
 		return formatRainOpacitySlider(s.edit.ShellMatrixOpacity, rainOpacityBarCells)
 	case fieldAnimateUnfocused:
@@ -202,10 +206,10 @@ func (s settingsState) fieldLabel(f settingsField) string {
 		return "ANSI"
 	case fieldIntro:
 		return "Intro"
-	case fieldShellMatrix:
-		return "Rain"
+	case fieldShellAmbient:
+		return "Ambient"
 	case fieldRainOpacity:
-		return "Opacity"
+		return "Intensity"
 	case fieldAnimateUnfocused:
 		return "Bg anim"
 	case fieldProfile:
@@ -345,35 +349,18 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		}
 	case fieldIntro:
 		title = "Intro · " + val
-		switch s.edit.Intro {
-		case config.IntroRipple:
-			paras = []string{
-				"Puddle of 猫/咪 rings expanding from the center mark.",
-				"Wave colors: theme → white → theme → black. Save & relaunch to preview.",
-			}
-		case config.IntroNone:
-			paras = []string{"Skip the startup curtain. The center 硯 still fades in quietly."}
-		default:
-			paras = []string{
-				"Digital rain (Matrix-style) over the shell for ~2s, then streams fall off.",
-				"Skipped automatically when Rain (always-on shell matrix) is On — no double curtain.",
-			}
-		}
-	case fieldShellMatrix:
-		title = "Rain · " + val
-		if s.edit.ShellMatrix {
-			paras = []string{
-				"Always-on digital rain under empty / default-bg shell cells — very dim so text stays readable.",
-				"Shows through fullscreen TUIs (Grok, vim, etc.) where those apps leave the canvas transparent. Paused while the startup intro is playing or a dim modal is open. Use Opacity to dim or strengthen it.",
-			}
-		} else {
-			paras = []string{"No background rain in the shell. Intro and Settings rain are unchanged."}
+		paras = []string{config.IntroDesc(s.edit.Intro)}
+	case fieldShellAmbient:
+		title = "Ambient · " + val
+		paras = []string{
+			config.AmbientDesc(s.edit.ShellAmbient),
+			"Left/right cycles styles. Freezes while typing in the Warp bar so input stays snappy. Use Intensity below to dim or strengthen.",
 		}
 	case fieldRainOpacity:
-		title = "Opacity · " + fmt.Sprintf("%d%%", s.edit.ShellMatrixOpacity)
+		title = "Intensity · " + fmt.Sprintf("%d%%", s.edit.ShellMatrixOpacity)
 		paras = []string{
-			"Strength of always-on shell rain (left/right, 5% steps). 100% is the designed default; lower values fade the rain under text and TUIs.",
-			"Only applies when Rain is On. Live-previews as you change it — Enter saves.",
+			"Strength of always-on Ambient underlay (left/right, 5% steps). 100% is the designed default; lower values fade the effect under text and TUIs.",
+			"Only applies when Ambient is not Off. Live-previews as you change it — Enter saves.",
 		}
 	case fieldAnimateUnfocused:
 		title = "Bg anim · " + val
