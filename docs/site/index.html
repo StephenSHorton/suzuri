@@ -85,25 +85,13 @@
             <canvas class="cui-output" aria-hidden="true"></canvas>
           </div>
 
-          <aside class="notice" aria-label="First launch notes">
-            <h2>First launch</h2>
+          <aside class="notice" aria-label="Windows note">
+            <h2>Windows</h2>
             <p>
-              <strong>macOS</strong> release builds are signed with a Developer ID Application certificate
-              and notarized when GitHub secrets are configured — Gatekeeper should accept the app after
-              a normal first open (or Open Anyway if a previous unsigned build was cached).
+              Windows builds are not code-signed yet. SmartScreen may say
+              “Windows protected your PC” — choose <em>More info</em> → <em>Run anyway</em>
+              (or install the setup from GitHub Releases).
             </p>
-            <ul>
-              <li>
-                <strong>Windows:</strong> builds are currently unsigned (no code-signing cert).
-                SmartScreen may say “Windows protected your PC.”
-                Choose <em>More info</em> → <em>Run anyway</em> (or install the setup from GitHub Releases).
-              </li>
-              <li>
-                <strong>macOS:</strong> if you still see <em>“suzuri” Not Opened</em> from an older
-                unsigned download, use <em>System Settings → Privacy &amp; Security</em> →
-                <em>Open Anyway</em>, or right-click → <em>Open</em>. Prefer the latest Release DMG.
-              </li>
-            </ul>
           </aside>
         </section>
 

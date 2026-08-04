@@ -11,13 +11,18 @@
 }
 
 * { box-sizing: border-box; }
+/*
+  Viewport shell: page scroll lives on .glyph-rain-content, not document.
+  Required when content is reparented into an absolute html-in-canvas source —
+  otherwise the document has no in-flow height and cannot scroll.
+*/
 html, body {
   margin: 0;
   padding: 0;
-  min-height: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 body {
-  min-height: 100vh;
   font-family: var(--mono);
   color: var(--fg);
   background: var(--bg);
@@ -28,10 +33,11 @@ body {
 /* --- Canvas UI Glyph Rain host --- */
 .glyph-rain-root {
   position: relative;
-  min-height: 100vh;
+  height: 100%;
   width: 100%;
   isolation: isolate;
   background: var(--bg);
+  overflow: hidden;
 }
 .glyph-rain-source {
   position: absolute;
@@ -39,15 +45,17 @@ body {
   width: 100%;
   height: 100%;
   display: block;
-  /* Source is the capture target; pointer events hit content descendants. */
   z-index: 0;
 }
 .glyph-rain-content {
   position: relative;
   z-index: 1;
   width: 100%;
-  min-height: 100vh;
-  overflow: auto;
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   /* Soft vignette so body text stays readable under rain */
   background:
     radial-gradient(ellipse 90% 70% at 50% 40%, transparent 15%, #050806d8 78%),
@@ -70,10 +78,16 @@ body {
   mix-blend-mode: screen;
   opacity: 0.92;
 }
-/* Full mode: WebGL composite sits on top; DOM remains for hit-testing + capture. */
+/* Full mode: source hosts layoutsubtree DOM; keep it interactive for hit-testing. */
 .glyph-rain-root[data-mode="html-in-canvas"] .glyph-rain-source {
-  /* Match Canvas UI demo: source hosts layoutsubtree DOM at full size. */
   pointer-events: auto;
+}
+/* When content lives inside the source canvas, it must still be the scrollport. */
+.glyph-rain-root[data-mode="html-in-canvas"] .glyph-rain-source .glyph-rain-content {
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .glyph-rain-root.glyph-rain-failed .glyph-rain-output {
   display: none;
@@ -251,7 +265,7 @@ nav a:hover { color: var(--accent); }
   border-radius: 3px;
 }
 
-/* First-launch note under CTAs */
+/* Windows signing note under CTAs */
 .notice {
   margin: 1.35rem 0 0;
   max-width: 40rem;
@@ -269,19 +283,11 @@ nav a:hover { color: var(--accent); }
   letter-spacing: 0.02em;
 }
 .notice p {
-  margin: 0 0 0.55rem;
+  margin: 0;
   color: var(--mute);
   font-size: 0.82rem;
 }
 .notice p strong { color: var(--fg); font-weight: 600; }
-.notice ul {
-  margin: 0;
-  padding-left: 1.1rem;
-  color: var(--mute);
-  font-size: 0.82rem;
-}
-.notice li { margin: 0.35rem 0; }
-.notice li strong { color: var(--fg); font-weight: 600; }
 .notice em { font-style: normal; color: var(--fg); }
 
 .grid {
