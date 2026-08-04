@@ -10,6 +10,7 @@ import (
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/mcpsrv"
+	"github.com/StephenSHorton/suzuri/internal/transfer"
 	"github.com/StephenSHorton/suzuri/internal/ui"
 	"github.com/StephenSHorton/suzuri/internal/update"
 	"github.com/StephenSHorton/suzuri/internal/winconsole"
@@ -42,6 +43,12 @@ func main() {
 		winconsole.AttachParent()
 		fmt.Println(version)
 		return
+	}
+	// P2P transfer CLI (shells out to suzuri-transfer / hato engine).
+	// AttachConsole so windowsgui builds can talk to a parent terminal.
+	if len(os.Args) > 1 && transfer.IsTransferArg(os.Args[1]) {
+		winconsole.AttachParent()
+		os.Exit(transfer.RunCLI(os.Args[1:]))
 	}
 
 	defer func() {
