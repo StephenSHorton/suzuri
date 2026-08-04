@@ -301,9 +301,22 @@ func splitReplace(n *splitNode, id int, dir splitDir, newPane *tab, ok *bool) *s
 //
 // When the page collapses back to a single pane, stickyTitle is cleared so the
 // strip follows that pane again (Grok/OSC renames the only visible title).
+//
+// Focus after close (tmux-style tree neighbor): if the closed pane was focused,
+// move focus to a leaf of its immediate split sibling — not the first leaf of
+// the whole page. That matches "nearest pane" for the usual 2–3 pane layouts
+// without needing live geometry at remove time.
 func (p *page) removePane(id int) (closed *tab, empty bool, newFocus int) {
 	if p == nil || p.root == nil {
 		return nil, true, -1
+	}
+	// Capture sibling leaves before the tree mutates (only needed if focus moves).
+	var siblingFocus []*tab
+	needRefocus := p.focusID == id || findPane(p.root, p.focusID) == nil
+	if needRefocus {
+		if leaves, ok := siblingLeavesOf(p.root, id); ok && len(leaves) > 0 {
+			siblingFocus = leaves
+		}
 	}
 	var removed *tab
 	p.root = removeLeaf(p.root, id, &removed)
@@ -321,12 +334,49 @@ func (p *page) removePane(id int) (closed *tab, empty bool, newFocus int) {
 		p.stickyTitle = ""
 		return removed, true, -1
 	}
-	// If we closed the focused pane, pick a remaining leaf.
+	// If we closed the focused pane (or focus is gone), pick nearest remaining.
 	if p.focusID == id || findPane(p.root, p.focusID) == nil {
-		p.focusID = leaves[0].id
+		p.focusID = pickFocusAfterClose(siblingFocus, leaves)
 	}
 	p.clearStickyTitleIfSolo()
 	return removed, false, p.focusID
+}
+
+// pickFocusAfterClose prefers a still-present sibling leaf, else first remaining.
+func pickFocusAfterClose(sibling, remaining []*tab) int {
+	for _, t := range sibling {
+		if t == nil {
+			continue
+		}
+		for _, r := range remaining {
+			if r != nil && r.id == t.id {
+				return t.id
+			}
+		}
+	}
+	if len(remaining) > 0 && remaining[0] != nil {
+		return remaining[0].id
+	}
+	return -1
+}
+
+// siblingLeavesOf finds the leaf with id and returns the leaves of its immediate
+// split sibling subtree. ok is false when id is not found (or is the only leaf).
+// This is the tree-neighbor used when closing a pane (like tmux kill-pane focus).
+func siblingLeavesOf(n *splitNode, id int) (leaves []*tab, ok bool) {
+	if n == nil || n.isLeaf() {
+		return nil, false
+	}
+	if n.a != nil && n.a.isLeaf() && n.a.pane != nil && n.a.pane.id == id {
+		return collectLeaves(n.b), true
+	}
+	if n.b != nil && n.b.isLeaf() && n.b.pane != nil && n.b.pane.id == id {
+		return collectLeaves(n.a), true
+	}
+	if leaves, ok = siblingLeavesOf(n.a, id); ok {
+		return leaves, true
+	}
+	return siblingLeavesOf(n.b, id)
 }
 
 // removeLeaf returns the updated subtree (nil if empty) and sets *removed.

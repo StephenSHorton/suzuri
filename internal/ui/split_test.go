@@ -36,7 +36,10 @@ func TestSplitFocusedAndRemove(t *testing.T) {
 	if p.leafCount() != 2 {
 		t.Fatalf("want 2 after remove, got %d", p.leafCount())
 	}
-	_ = focus
+	// c was focused under a horizontal split with a → focus returns to sibling a.
+	if focus != 0 || p.focusID != 0 {
+		t.Fatalf("after remove c focus want sibling a(0), got focus=%d page=%d", focus, p.focusID)
+	}
 	closed, empty, _ = p.removePane(0)
 	if closed != a || empty {
 		t.Fatalf("remove a: closed=%v empty=%v", closed, empty)
@@ -47,6 +50,70 @@ func TestSplitFocusedAndRemove(t *testing.T) {
 	closed, empty, _ = p.removePane(1)
 	if closed != b || !empty {
 		t.Fatalf("remove last: closed=%v empty=%v", closed, empty)
+	}
+}
+
+// TestRemovePaneFocusesSibling ensures closing a focused pane moves focus to its
+// split neighbor, not the first leaf of the whole page (leaves[0] trap).
+//
+// Layout after setup:
+//
+//	  V
+//	 / \
+//	a   H
+//	   / \
+//	  b   c   ← focused
+//
+// Closing c must focus b (sibling), not a (DFS first leaf).
+func TestRemovePaneFocusesSibling(t *testing.T) {
+	a := &tab{id: 0, title: "a"}
+	b := &tab{id: 1, title: "b"}
+	c := &tab{id: 2, title: "c"}
+	p := newPage(a)
+	if !p.splitFocused(splitVert, b) {
+		t.Fatal("split vert b")
+	}
+	// Focus is on b; split it down so c is sibling of b under the right branch.
+	if !p.splitFocused(splitHoriz, c) {
+		t.Fatal("split horiz c")
+	}
+	if p.focusID != 2 {
+		t.Fatalf("focus want c(2), got %d", p.focusID)
+	}
+	closed, empty, focus := p.removePane(2)
+	if closed != c || empty {
+		t.Fatalf("remove c: closed=%v empty=%v", closed, empty)
+	}
+	if focus != 1 || p.focusID != 1 {
+		t.Fatalf("want sibling b(1), got focus=%d page=%d (must not jump to a)", focus, p.focusID)
+	}
+
+	// Close b while focused on b → sibling of the right branch is a.
+	closed, empty, focus = p.removePane(1)
+	if closed != b || empty {
+		t.Fatalf("remove b: closed=%v empty=%v", closed, empty)
+	}
+	if focus != 0 || p.focusID != 0 {
+		t.Fatalf("want sibling a(0), got focus=%d page=%d", focus, p.focusID)
+	}
+}
+
+// TestRemovePaneKeepsFocusWhenClosingOther ensures closing a non-focused pane
+// does not steal keyboard focus.
+func TestRemovePaneKeepsFocusWhenClosingOther(t *testing.T) {
+	a := &tab{id: 0}
+	b := &tab{id: 1}
+	c := &tab{id: 2}
+	p := newPage(a)
+	_ = p.splitFocused(splitVert, b)
+	_ = p.splitFocused(splitHoriz, c) // focus c
+	p.setFocus(0)                     // focus a
+	closed, empty, focus := p.removePane(2)
+	if closed != c || empty {
+		t.Fatalf("remove c: closed=%v empty=%v", closed, empty)
+	}
+	if focus != 0 || p.focusID != 0 {
+		t.Fatalf("focus should stay on a(0), got focus=%d page=%d", focus, p.focusID)
 	}
 }
 
