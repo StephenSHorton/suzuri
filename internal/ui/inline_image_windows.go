@@ -4,6 +4,7 @@ package ui
 
 import (
 	"image"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -144,8 +145,11 @@ func (u *winUI) paintTabImages(hdc win.HDC, rect win.RECT) {
 }
 
 // kittyHBMCache holds GDI bitmaps for Kitty graphics images (tabID, imageID).
+// Guarded: clear can run on alt-screen exit while a paint is mid-flight if we
+// ever move work off the UI thread; keep mutex cheap for UI-thread use too.
 var kittyHBMCache = struct {
-	m map[kittyHBMKey]*imgBitmap
+	mu sync.Mutex
+	m  map[kittyHBMKey]*imgBitmap
 }{m: map[kittyHBMKey]*imgBitmap{}}
 
 type kittyHBMKey struct {
@@ -154,6 +158,8 @@ type kittyHBMKey struct {
 }
 
 func clearKittyHBMCache(tabID int) {
+	kittyHBMCache.mu.Lock()
+	defer kittyHBMCache.mu.Unlock()
 	for k, b := range kittyHBMCache.m {
 		if k.tabID != tabID {
 			continue
@@ -170,18 +176,25 @@ func kittyEnsureBitmap(hdc win.HDC, tabID int, imgID uint32, src image.Image) *i
 		return nil
 	}
 	k := kittyHBMKey{tabID: tabID, imgID: imgID}
+	kittyHBMCache.mu.Lock()
 	if b, ok := kittyHBMCache.m[k]; ok && b != nil && b.hbm != 0 {
+		kittyHBMCache.mu.Unlock()
 		return b
 	}
+	kittyHBMCache.mu.Unlock()
+
+	// Build outside the lock — CreateDIBSection can be expensive on large PNGs.
 	b := rgbaToHBITMAP(hdc, src)
 	if b == nil {
 		return nil
 	}
-	// Drop previous for this key if any.
+	kittyHBMCache.mu.Lock()
+	// Drop previous for this key if any (race: another paint won).
 	if old, ok := kittyHBMCache.m[k]; ok && old != nil && old.hbm != 0 {
 		procDeleteObj.Call(uintptr(old.hbm))
 	}
 	kittyHBMCache.m[k] = b
+	kittyHBMCache.mu.Unlock()
 	return b
 }
 

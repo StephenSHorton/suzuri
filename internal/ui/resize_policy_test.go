@@ -4,25 +4,44 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	"github.com/hinshun/vt10x"
 )
 
-// Regression: alt-screen TUIs (Grok, vim) used to permanently block PTY resize,
-// so after a pane split the app kept the full-window cols×rows (letterboxed).
-func TestConPtyResizeOKAllowsBusyAltScreen(t *testing.T) {
+// Regression: alt-screen alone must not permanently block PTY resize (letterbox
+// after split). Only recent PTY I/O defers ResizePseudoConsole.
+func TestConPtyResizeOKAltScreenWithoutRecentIO(t *testing.T) {
 	term := vt10x.New(vt10x.WithSize(100, 40))
 	if _, err := term.Write([]byte("\x1b[?1049h")); err != nil {
 		t.Fatal(err)
 	}
 	tab := &tab{term: term}
 	tab.alive.Store(true)
-	tab.noteIO() // recent I/O must not block layout resize either
+	// Stale I/O + titleBusy must still allow resize (Grok spinner lasts forever).
+	tab.lastIOUnixNano.Store(time.Now().Add(-5 * time.Second).UnixNano())
+	tab.titleBusy.Store(true)
 	if !tab.altScreen() {
 		t.Fatal("expected alt screen")
 	}
 	if !tab.conPtyResizeOK() {
-		t.Fatal("conPtyResizeOK must allow resize while alt-screen (split reflow)")
+		t.Fatal("conPtyResizeOK must allow resize when alt-screen but I/O quiet")
+	}
+}
+
+func TestConPtyResizeOKBlocksRecentIO(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(100, 40))
+	if _, err := term.Write([]byte("\x1b[?1049h")); err != nil {
+		t.Fatal(err)
+	}
+	tab := &tab{term: term}
+	tab.alive.Store(true)
+	tab.noteIO() // hot stream — host should defer settle
+	if tab.conPtyResizeOK() {
+		t.Fatal("conPtyResizeOK must block while PTY I/O is recent")
+	}
+	if !paneHasRecentIO(tab, conPtyIOQuiet) {
+		t.Fatal("paneHasRecentIO should be true right after noteIO")
 	}
 }
 

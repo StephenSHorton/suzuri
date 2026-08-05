@@ -59,6 +59,17 @@ func readClipboardImageFile() (path string, err error) {
 	// 1) PNG clipboard format (Chrome, Edge, many apps).
 	if pngFmt := registerClipboardFormat("PNG"); pngFmt != 0 && isClipboardFormatAvailable(pngFmt) {
 		if data := getClipboardBytes(uint(pngFmt)); len(data) >= 32 && bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G'}) {
+			if len(data) > maxImageFileBytes {
+				return "", fmt.Errorf("clipboard png too large: %d", len(data))
+			}
+			// Re-encode via load path so huge screenshots are downscaled before
+			// Grok (and later Kitty preview paint) sees a multi-megapixel file.
+			if ti, err := loadImageBytes("clip.png", data); err == nil && ti != nil && ti.img != nil {
+				if werr := writePNGFile(out, ti.img); werr != nil {
+					return "", werr
+				}
+				return out, nil
+			}
 			if werr := os.WriteFile(out, data, 0o600); werr != nil {
 				return "", werr
 			}

@@ -35,6 +35,12 @@ type kittyTxMeta struct {
 	place  bool
 }
 
+const (
+	// Base64 of a maxImageFileBytes payload is ~4/3; cap open stream below that.
+	maxKittyOpenBuf = (maxImageFileBytes * 4 / 3) + 4096
+	maxKittyImages  = 16
+)
+
 type kittyGfxState struct {
 	mu         sync.Mutex
 	images     map[uint32]image.Image
@@ -149,6 +155,14 @@ func (k *kittyGfxState) handleAPC(body []byte, cursor func() (col, row int)) {
 			k.mu.Unlock()
 			return
 		}
+		if len(k.openBuf)+len(payload) > maxKittyOpenBuf {
+			// Drop oversized stream (hostile / runaway Grok preview).
+			k.open = false
+			k.openBuf = nil
+			k.mu.Unlock()
+			log.Debug("kitty graphics open buf overflow", "id", id)
+			return
+		}
 		k.openBuf = append(k.openBuf, payload...)
 		done := !more
 		buf := append([]byte(nil), k.openBuf...)
@@ -174,6 +188,10 @@ func (k *kittyGfxState) handleAPC(body []byte, cursor func() (col, row int)) {
 			rows:   atoiDef(kv["r"], 0),
 			z:      atoiDef(kv["z"], 1),
 			place:  action == "T",
+		}
+		if len(payload) > maxKittyOpenBuf {
+			log.Debug("kitty graphics payload too large", "id", id, "n", len(payload))
+			return
 		}
 		k.mu.Lock()
 		k.open = true
@@ -255,12 +273,33 @@ func (k *kittyGfxState) finishTransmit(id uint32, b64 []byte, meta kittyTxMeta, 
 		log.Debug("kitty graphics b64 failed", "id", id, "err", err, "n", len(b64))
 		return
 	}
+	if len(raw) > maxImageFileBytes {
+		log.Debug("kitty graphics too large", "id", id, "bytes", len(raw))
+		return
+	}
 	ti, err := loadImageBytes("kitty.png", raw)
 	if err != nil || ti == nil || ti.img == nil {
 		log.Debug("kitty graphics png failed", "id", id, "err", err)
 		return
 	}
 	k.mu.Lock()
+	if len(k.images) >= maxKittyImages {
+		// Evict an arbitrary old entry (map iteration order is fine).
+		for oldID := range k.images {
+			if oldID == id {
+				continue
+			}
+			delete(k.images, oldID)
+			filtered := k.placements[:0]
+			for _, p := range k.placements {
+				if p.id != oldID {
+					filtered = append(filtered, p)
+				}
+			}
+			k.placements = filtered
+			break
+		}
+	}
 	k.images[id] = ti.img
 	k.mu.Unlock()
 	log.Info("kitty graphics ready", "id", id, "bytes", len(raw),

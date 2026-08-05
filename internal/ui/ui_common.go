@@ -31,6 +31,14 @@ const (
 	// Advance braille spinner every N blink ticks (40ms → ~80ms/frame).
 	tabSpinEveryNTicks = 2
 
+	// conPtyIOQuiet: do not ResizePseudoConsole while a pane has recent I/O.
+	// Dual alt-screen Grok + mid-stream resize hard-crashes the Windows host
+	// (no Go panic). Title spinners alone must NOT block forever — only bytes.
+	conPtyIOQuiet = 300 * time.Millisecond
+	// layoutDeferMaxWait: after this, force settle even if I/O is still hot so
+	// split/window resize reflows (avoids permanent letterbox under Grok).
+	layoutDeferMaxWait = 1500 * time.Millisecond
+
 	cellW = 9
 	cellH = 18
 

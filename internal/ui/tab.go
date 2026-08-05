@@ -221,18 +221,31 @@ func (t *tab) noteIO() {
 	t.lastIOUnixNano.Store(time.Now().UnixNano())
 }
 
-// conPtyResizeOK reports whether a ConPTY/PTY resize may proceed.
+// conPtyResizeOK reports whether a ConPTY/PTY resize may proceed for this pane.
 //
-// History: dual alt-screen Grok + ResizePseudoConsole thrash (every-frame
-// settle) hard-crashed the Windows host. That led to a permanent ban on
-// resizing while ModeAltScreen was set — which left Grok/vim letterboxed
-// after split or window resize (TUI kept the old cols×rows forever).
-//
-// Storm prevention lives in the host (layoutDeferred, coalesced settle,
-// same-size no-op in tab.resize, resizeMu). Alt-screen apps must receive
-// the new size so they reflow. Always OK here; hosts may still coalesce.
+// History: dual alt-screen Grok + ResizePseudoConsole thrash hard-crashed the
+// Windows host (no Go panic). A permanent ban on alt-screen resize then left
+// Grok letterboxed after split. Policy now:
+//   - Block only while this pane has recent PTY I/O (streaming).
+//   - Do NOT block on titleBusy alone (Grok spinners last forever).
+//   - Host forces settle after layoutDeferMaxWait so splits still reflow.
 func (t *tab) conPtyResizeOK() bool {
-	return true
+	if t == nil || !t.alive.Load() {
+		return true
+	}
+	return !paneHasRecentIO(t, conPtyIOQuiet)
+}
+
+// paneHasRecentIO is true when ResizePseudoConsole would race live stream data.
+func paneHasRecentIO(t *tab, quiet time.Duration) bool {
+	if t == nil || !t.alive.Load() || quiet <= 0 {
+		return false
+	}
+	ns := t.lastIOUnixNano.Load()
+	if ns == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, ns)) < quiet
 }
 
 // altScreen is true when the tab's VT is on the alternate screen buffer.
