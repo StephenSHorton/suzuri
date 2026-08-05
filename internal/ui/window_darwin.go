@@ -1944,13 +1944,19 @@ func (u *macUI) handleKeys() {
 		return
 	}
 
-	// Overlay owns navigation / editor keys (palette, notes, rename, …).
+	// Overlay owns navigation / editor keys (palette, notes, rename, transfer, …).
 	if u.chrome.OverlayOpen() {
 		// Notes clipboard + bank shortcuts need host clipboard (atotto).
 		if u.chrome.NotesOpen && ctrl && !alt {
 			if u.handleNotesHostChord(shift) {
 				return
 			}
+		}
+		// Transfer path/ticket prompt: Cmd/Ctrl+V paste (tickets are long).
+		if u.chrome.TransferPromptOpen && !alt &&
+			(meta || realCtrl) && !shift && inpututil.IsKeyJustPressed(ebiten.KeyV) {
+			u.pasteClipboard()
+			return
 		}
 		// Notes: Option/Ctrl word-jump; Cmd line ends; ⌘⌥ is host pane focus (outside).
 		if u.chrome.NotesOpen {
@@ -1961,8 +1967,9 @@ func (u *macUI) handleKeys() {
 		if km := teaKeyFromEbiten(realCtrl || meta, shift, alt, u.keyRep, now); km != nil {
 			r := u.chrome.UpdateChrome(*km)
 			u.chrome = r.Model
-			// Palette / rename / notes: only dirty overlay.
-			if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen {
+			// Text-entry overlays: only dirty the floating card.
+			if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
+				u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen {
 				u.overlayDirty = true
 				u.overlayCells = nil
 			} else {
@@ -2397,8 +2404,9 @@ func (u *macUI) handleTextInput() {
 	}
 
 	if u.chrome.OverlayOpen() {
-		// Palette filter, rename, and notes body/title all accept runes.
-		if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen {
+		// Palette filter, rename, notes, and transfer path/ticket accept runes.
+		if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
+			u.chrome.TransferPromptOpen {
 			for _, ch := range chars {
 				if ch >= 32 && ch != 0x7f {
 					km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
@@ -3046,6 +3054,15 @@ func (u *macUI) pasteClipboard() {
 	}
 	text, err := clipboard.ReadAll()
 	if err != nil || text == "" {
+		return
+	}
+	// Transfer send/receive prompt owns clipboard paste while open.
+	if u.chrome.TransferPromptOpen {
+		m := u.chrome
+		m.TransferPaste(text)
+		u.chrome = m
+		u.overlayDirty = true
+		u.overlayCells = nil
 		return
 	}
 	in := u.activeInput()

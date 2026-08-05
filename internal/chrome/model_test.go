@@ -188,6 +188,38 @@ func TestTransferSendFromPalette(t *testing.T) {
 	}
 }
 
+func TestTransferPromptTypeAndPaste(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(OpenTransferPromptMsg{Mode: TransferModeReceive})
+	m = r.Model
+	if !m.TransferPromptOpen {
+		t.Fatal("expected receive prompt open")
+	}
+	// Simulated host KeyRunes path (what mac/win should forward).
+	for _, ch := range "blob" {
+		r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}})
+		m = r.Model
+	}
+	if m.transferBuf != "blob" {
+		t.Fatalf("typed buf=%q want blob", m.transferBuf)
+	}
+	// Host clipboard paste (Cmd/Ctrl+V).
+	m.TransferPaste("abc\nxyz  ")
+	if m.transferBuf != "blobabc xyz" {
+		t.Fatalf("after paste buf=%q", m.transferBuf)
+	}
+	// Paste is a no-op when prompt closed.
+	closed := New(80)
+	closed.TransferPaste("nope")
+	if closed.transferBuf != "" {
+		t.Fatalf("paste into closed prompt leaked: %q", closed.transferBuf)
+	}
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyEnter})
+	if r.Action != ActionTransferStart || r.Name != "blobabc xyz" {
+		t.Fatalf("start action=%v name=%q", r.Action, r.Name)
+	}
+}
+
 func TestStatusToastRow(t *testing.T) {
 	m := New(80)
 	if m.RowCount() != 1 {

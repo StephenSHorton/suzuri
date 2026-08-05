@@ -61,8 +61,10 @@ Host ↔ engine uses NDJSON (`--json`). See [`libs/transfer/docs/machine-mode.md
 
 | Command | Flow |
 |---------|------|
-| **Send file (ticket)…** | Path prompt → prepare → ticket panel (`c` copy, `esc` stop) |
-| **Receive ticket…** | Ticket prompt → download into `~/Downloads` (or home) with progress |
+| **Send file (ticket)…** | Path prompt (type, paste, or drop) → prepare → ticket panel (`c` copy, `esc` stop) |
+| **Receive ticket…** | Ticket prompt (type or paste) → download into `~/Downloads` (or home) with progress |
+
+While a path/ticket prompt is open, printable keys and clipboard paste (`⌘V` / `Ctrl+V`) go to that field.
 
 ### Drag and drop (send only)
 

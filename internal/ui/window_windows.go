@@ -2338,13 +2338,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_CHAR:
 		ch := rune(wParam)
-		// Charm overlay (palette filter) owns printable text while open.
+		// Charm overlay (palette filter, rename, notes, transfer) owns printable text.
 		if u.chrome.OverlayOpen() {
-			if (u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen) && ch >= 32 && ch != 0x7f {
+			if (u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
+				u.chrome.TransferPromptOpen) && ch >= 32 && ch != 0x7f {
 				km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 				r := u.chrome.UpdateChrome(km)
 				u.chrome = r.Model
-				// Filter / rename / notes typing: only dirty the overlay.
+				// Filter / rename / notes / transfer typing: only dirty the overlay.
 				u.overlayDirty = true
 				u.overlayCells = nil
 				if u.chrome.NotesOpen || u.chrome.NotesDirty() {
@@ -2412,7 +2413,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
-		// Charm palette / settings own keys while open (text via WM_CHAR).
+		// Charm palette / settings / transfer own keys while open (text via WM_CHAR).
 		if u.chrome.OverlayOpen() {
 			// Notes clipboard + bank shortcuts need host (CF_UNICODETEXT / chords).
 			if u.chrome.NotesOpen && ctrl && !alt {
@@ -2494,6 +2495,12 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 						return 0
 					}
 				}
+			}
+			// Transfer path/ticket prompt: Ctrl+V paste (tickets are long).
+			if u.chrome.TransferPromptOpen && ctrl && !alt && !shift &&
+				(wParam == 'V' || wParam == 'v') {
+				u.pasteClipboard()
+				return 0
 			}
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
 				r := u.chrome.UpdateChrome(*km)
@@ -4899,6 +4906,16 @@ func (u *winUI) pasteClipboard() {
 	}
 	text, err := getClipboardText(u.hwnd)
 	if err != nil || text == "" {
+		return
+	}
+	// Transfer send/receive prompt owns clipboard paste while open.
+	if u.chrome.TransferPromptOpen {
+		m := u.chrome
+		m.TransferPaste(text)
+		u.chrome = m
+		u.overlayDirty = true
+		u.overlayCells = nil
+		win.InvalidateRect(u.hwnd, nil, false)
 		return
 	}
 	in := u.activeInput()

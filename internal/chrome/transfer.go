@@ -160,6 +160,22 @@ func (m *Model) handleTransferPromptKey(msg tea.KeyMsg) (act HostAction, value s
 	}
 }
 
+// TransferPaste inserts clipboard text into the path/ticket prompt.
+// Newlines are collapsed to spaces (paths and tickets are single-line).
+func (m *Model) TransferPaste(s string) {
+	if !m.TransferPromptOpen || s == "" {
+		return
+	}
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return
+	}
+	m.transferBuf += s
+}
+
 func (m *Model) handleTransferPanelKey(msg tea.KeyMsg) HostAction {
 	switch msg.String() {
 	case "esc", "ctrl+c", "q":
