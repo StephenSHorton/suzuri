@@ -31,11 +31,19 @@ jobs:
             goos: windows
             goarch: amd64
             ext: .exe
+            # Hosted-runner flakes ("job was not acquired…") and real Windows
+            # build breaks must not block shipping a macOS release. Windows
+            # assets are best-effort; re-run or re-tag to fill them in later.
+            optional: true
           - os: macos-latest
             goos: darwin
             goarch: arm64
             ext: ""
+            optional: false
     runs-on: ${{ matrix.os }}
+    # continue-on-error only for the optional matrix leg so needs.build can
+    # still be success when Windows never gets a runner.
+    continue-on-error: ${{ matrix.optional }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -232,8 +240,12 @@ jobs:
 
   release:
     needs: build
-    # Skip when build was skipped (e.g. site tags like v0.1.0-site).
-    if: ${{ always() && needs.build.result == 'success' }}
+    # Publish whatever matrix legs produced artifacts. Skipped only when the
+    # whole build job was skipped (site tags) or cancelled. Windows is
+    # continue-on-error, so a runner flake still leaves needs.build=success
+    # when macOS succeeded; if macOS itself fails we still try to ship any
+    # surviving artifacts (and require at least one file below).
+    if: ${{ always() && needs.build.result != 'skipped' && needs.build.result != 'cancelled' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -241,18 +253,32 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          # Partial matrix success is expected (e.g. Windows never ran).
+          # Empty is handled by the next step.
+          pattern: suzuri-*
 
       - name: Checksums
         working-directory: dist
         run: |
-          ls -laR
+          set -euo pipefail
+          ls -laR || true
           find . -type f -name 'suzuri-*' ! -path './SHA256SUMS' -exec mv -n {} . \; 2>/dev/null || true
+          shopt -s nullglob
+          files=(suzuri-*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::No suzuri-* release artifacts from any platform build"
+            exit 1
+          fi
           rm -f SHA256SUMS
-          for f in suzuri-*; do
+          for f in "${files[@]}"; do
             [ -f "$f" ] || continue
             sha256sum "$f" | tee -a SHA256SUMS
           done
           cat SHA256SUMS
+          # Surface a soft warning when Windows is missing (optional leg).
+          if ! compgen -G 'suzuri-*-windows-*' >/dev/null; then
+            echo "::warning::Windows artifacts missing — shipping macOS-only release"
+          fi
 
       - name: Resolve tag
         id: ver
@@ -266,6 +292,8 @@ jobs:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: suzuri ${{ steps.ver.outputs.tag }}
           generate_release_notes: true
+          # Allow re-running after a partial failure without clobbering.
+          # softprops updates an existing release for the same tag.
           files: |
             dist/suzuri-*
             dist/SHA256SUMS
