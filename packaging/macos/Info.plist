@@ -44,5 +44,15 @@
 	<string>suzuri needs access when your shell or tools work with files on removable volumes.</string>
 	<key>NSNetworkVolumesUsageDescription</key>
 	<string>suzuri needs access when your shell or tools work with files on network volumes.</string>
+	<!-- TCC microphone: child tools (e.g. Grok /voice) open CoreAudio; macOS
+	     attributes the grant to this host terminal. Required for a prompt under
+	     Hardened Runtime — without it, capture is often silent denial. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>suzuri needs microphone access when tools like Grok use voice dictation.</string>
+	<!-- Apple Events / Automation: suzuri runs osascript for clipboard image
+	     paste (and child tools may use AppleScript). Hardened Runtime needs the
+	     matching automation.apple-events entitlement. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>suzuri uses AppleScript for clipboard image paste and when tools need Automation.</string>
 </dict>
 </plist>

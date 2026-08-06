@@ -10,7 +10,7 @@ import (
 )
 
 func TestEncodeArrowAltLeft(t *testing.T) {
-	// Option+Left → CSI 1;3D (xterm Alt+Left) for Bubble Tea word motion.
+	// Option+Left → CSI 1;3D (xterm/Kitty Alt+Left) for Grok word motion.
 	got := encodeArrow(nil, 'D', false, false, true, false, false)
 	want := []byte("\x1b[1;3D")
 	if !bytes.Equal(got, want) {
@@ -20,6 +20,27 @@ func TestEncodeArrowAltLeft(t *testing.T) {
 	got = encodeArrow(nil, 'D', true, false, false, false, false)
 	if !bytes.Equal(got, []byte("\x1bOD")) {
 		t.Fatalf("app cursor left: %q", got)
+	}
+}
+
+func TestEncodeArrowAltLeftWithKittyActive(t *testing.T) {
+	// Progressive enhancement must not switch arrows to CSI-u PUA codes
+	// (those were wrong and broke Option+arrows in Grok).
+	var kk kittyKeyboard
+	kk.push(kittyDisambiguate | kittyEventTypes)
+	got := encodeArrow(&kk, 'D', false, false, true, false, false)
+	want := []byte("\x1b[1;3D")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("kitty-active Option+Left: got %q want %q", got, want)
+	}
+	got = encodeArrow(&kk, 'C', false, false, true, false, false)
+	if !bytes.Equal(got, []byte("\x1b[1;3C")) {
+		t.Fatalf("kitty-active Option+Right: got %q", got)
+	}
+	// Ctrl+Left (word jump synonym) also stays legacy form.
+	got = encodeArrow(&kk, 'D', false, false, false, true, false)
+	if !bytes.Equal(got, []byte("\x1b[1;5D")) {
+		t.Fatalf("kitty-active Ctrl+Left: got %q", got)
 	}
 }
 

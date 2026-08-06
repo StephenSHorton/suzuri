@@ -12,9 +12,15 @@ import (
 // dir is the CSI final letter: A=up B=down C=right D=left.
 //
 // Bare arrows use app-cursor (SS3) when the app requested it. Modified arrows
-// always use CSI 1;mods X (xterm) or Kitty CSI-u when progressive keyboard
-// is active — Bubble Tea / Grok use Ctrl+Left (and Alt+Left) for word motion.
+// always use CSI 1;mods X (xterm / Kitty legacy functional form).
+//
+// Do not emit CSI-u PUA codes for arrows: Kitty's functional-key table maps
+// LEFT/RIGHT/UP/DOWN to `CSI 1;mods [ABCD]`, not private-use codepoints.
+// Crossterm only recognizes those legacy forms as KeyCode::Left/etc. An earlier
+// CSI-u path used 57350–57353 (Home/End/…), so Option+← under an active Kitty
+// progressive-enhancement session never reached Grok's word-jump bindings.
 func encodeArrow(kk *kittyKeyboard, dir byte, appCursor, shift, alt, ctrl, super bool) []byte {
+	_ = kk // arrows stay on legacy CSI form even when KKP is active
 	if dir != 'A' && dir != 'B' && dir != 'C' && dir != 'D' {
 		return nil
 	}
@@ -24,23 +30,8 @@ func encodeArrow(kk *kittyKeyboard, dir byte, appCursor, shift, alt, ctrl, super
 		}
 		return []byte{0x1b, '[', dir}
 	}
+	// xterm + Kitty: CSI 1 ; mods A/B/C/D
 	mods := kittyMods(shift, alt, ctrl, super)
-	if kk != nil && kk.active() {
-		// Kitty functional key codes for arrows.
-		var code int
-		switch dir {
-		case 'A':
-			code = 57352 // UP
-		case 'B':
-			code = 57353 // DOWN
-		case 'C':
-			code = 57351 // RIGHT
-		case 'D':
-			code = 57350 // LEFT
-		}
-		return kittyCSIU(code, mods)
-	}
-	// xterm: CSI 1 ; mods A/B/C/D
 	return []byte(fmt.Sprintf("\x1b[1;%d%c", mods, dir))
 }
 
