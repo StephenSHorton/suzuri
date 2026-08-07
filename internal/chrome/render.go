@@ -22,17 +22,26 @@ func RenderOverlayToTerm(m Model, cols int) vt10x.Terminal {
 	if rows < 2 {
 		rows = 2
 	}
-	// Cap relative to terminal height when known; allow tall workspace modals.
+	// Cap relative to terminal height; workspace is near-full-height.
 	maxRows := 48
+	if m.WorkspaceOpen {
+		maxRows = 96
+	}
 	if m.Height > 0 {
-		// leave room for tab strip; never exceed ~90% of host rows
-		capH := int(float64(m.Height) * 0.9)
-		if capH > maxRows {
-			maxRows = capH
+		capH := m.Height - 1 // leave tab strip
+		if m.WorkspaceOpen {
+			if capH > maxRows {
+				maxRows = capH
+			}
+		} else {
+			capH = int(float64(m.Height) * 0.9)
+			if capH > maxRows {
+				maxRows = capH
+			}
 		}
 	}
-	if maxRows > 80 {
-		maxRows = 80
+	if maxRows > 120 {
+		maxRows = 120
 	}
 	if rows > maxRows {
 		rows = maxRows
