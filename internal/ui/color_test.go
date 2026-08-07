@@ -121,3 +121,47 @@ func TestBoldBrightTruecolorNoSelectionBand(t *testing.T) {
 		t.Fatalf("bright bold must not paint a selection field BR=%d,%d,%d", c.BR, c.BG, c.BB)
 	}
 }
+
+// Grok /resume selection is a themed truecolor band (bg_visual ~#363636), not
+// reverse. Paint must keep a non-default field so rain hosts do not skip fill.
+func TestThemedSelectionBandVisibleOverRain(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(20, 2))
+	// Light ink on GrokNight-ish selection slate + bold (real picker contract).
+	if _, err := term.Write([]byte("\x1b[38;2;225;225;225m\x1b[48;2;54;54;54m\x1b[1mROW\x1b[0m")); err != nil {
+		t.Fatal(err)
+	}
+	c := glyphToCell(term.Cell(0, 0))
+	if c.BR == 0 && c.BG == 0 && c.BB == 0 {
+		t.Fatalf("selection band became default black (invisible under rain)")
+	}
+	mean := (int(c.BR) + int(c.BG) + int(c.BB)) / 3
+	if mean < rainVisibleBGFloor {
+		t.Fatalf("selection band too dim for rain mean=%d BR=%d,%d,%d", mean, c.BR, c.BG, c.BB)
+	}
+}
+
+// Default-black cells stay pure black so paint can leave rain visible.
+func TestDefaultBGStaysTransparentForRain(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(8, 2))
+	if _, err := term.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	c := glyphToCell(term.Cell(0, 0))
+	if c.BR != 0 || c.BG != 0 || c.BB != 0 {
+		t.Fatalf("default BG must stay 0,0,0 for rain skip, got %d,%d,%d", c.BR, c.BG, c.BB)
+	}
+}
+
+func TestEnsureRainVisibleBG(t *testing.T) {
+	if r, g, b := ensureRainVisibleBG(0, 0, 0); r != 0 || g != 0 || b != 0 {
+		t.Fatalf("pure black must stay 0,0,0 got %d,%d,%d", r, g, b)
+	}
+	r, g, b := ensureRainVisibleBG(54, 54, 54)
+	mean := (int(r) + int(g) + int(b)) / 3
+	if mean < rainVisibleBGFloor {
+		t.Fatalf("dim slate not lifted: %d,%d,%d mean=%d", r, g, b, mean)
+	}
+	if r2, g2, b2 := ensureRainVisibleBG(120, 120, 120); r2 != 120 || g2 != 120 || b2 != 120 {
+		t.Fatalf("already-bright BG changed: %d,%d,%d", r2, g2, b2)
+	}
+}

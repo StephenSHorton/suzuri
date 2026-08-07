@@ -212,6 +212,9 @@ type macUI struct {
 	pasteBusy      atomic.Bool
 	pendingPasteMu sync.Mutex
 	pendingPaste   []pendingPaste
+	// prevPasteChord: edge-detect Meta/Ctrl+V. IsKeyJustPressed can miss
+	// Command+letter on some macOS/GLFW frames; IsKeyPressed still goes true.
+	prevPasteChord bool
 }
 
 func (u *macUI) queueBytes(tabID int) {
@@ -1953,8 +1956,7 @@ func (u *macUI) handleKeys() {
 			}
 		}
 		// Transfer path/ticket prompt: Cmd/Ctrl+V paste (tickets are long).
-		if u.chrome.TransferPromptOpen && !alt &&
-			(meta || realCtrl) && !shift && inpututil.IsKeyJustPressed(ebiten.KeyV) {
+		if u.chrome.TransferPromptOpen && u.pasteChordJustPressed(meta || realCtrl, shift, alt) {
 			u.pasteClipboard()
 			return
 		}
@@ -2037,12 +2039,13 @@ func (u *macUI) handleKeys() {
 				return
 			}
 		}
-		if !shift && inpututil.IsKeyJustPressed(ebiten.KeyV) {
-			// Ctrl+V or Cmd+V → paste into the alt-screen app (Grok, vim, …).
-			if (realCtrl && !super) || (super && !realCtrl) {
-				u.pasteClipboard()
-				return
-			}
+		// Ctrl+V or Cmd+V → host paste (images need Suzuri's Apple Events
+		// entitlement; Grok's own osascript probe fails under Hardened Runtime).
+		// Edge-detect with IsKeyPressed: IsKeyJustPressed alone can miss
+		// Command+letter on some macOS/GLFW frames while Control+V still fires.
+		if u.pasteChordJustPressed(meta || realCtrl, shift, alt) {
+			u.pasteClipboard()
+			return
 		}
 		// Hold-to-repeat for arrows / backspace / delete (Grok text fields).
 		for _, key := range specialKeys {
@@ -2080,7 +2083,8 @@ func (u *macUI) handleKeys() {
 		}
 		return
 	}
-	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyV) {
+	// Bar mode: same Cmd/Ctrl+V edge as alt-screen (image → path when app owns kb).
+	if u.pasteChordJustPressed(ctrl, shift, alt) {
 		u.pasteClipboard()
 		return
 	}
@@ -3079,6 +3083,22 @@ func (u *macUI) pasteClipboard() {
 	u.markInputDirty()
 }
 
+// pasteChordJustPressed is true on the rising edge of Meta/Ctrl+V (no Shift/Alt).
+// Updates prevPasteChord so a held chord does not re-fire every frame.
+func (u *macUI) pasteChordJustPressed(mod, shift, alt bool) bool {
+	if u == nil {
+		return false
+	}
+	held := mod && !shift && !alt && ebiten.IsKeyPressed(ebiten.KeyV)
+	just := held && !u.prevPasteChord
+	// Also accept IsKeyJustPressed for the common case (and tests).
+	if !just && mod && !shift && !alt && inpututil.IsKeyJustPressed(ebiten.KeyV) {
+		just = true
+	}
+	u.prevPasteChord = held
+	return just
+}
+
 // pasteAltScreenAsync reads the pasteboard off-thread and queues PTY inject.
 func (u *macUI) pasteAltScreenAsync() {
 	defer u.pasteBusy.Store(false)
@@ -3092,17 +3112,14 @@ func (u *macUI) pasteAltScreenAsync() {
 		log.Debug("clipboard image read failed", "err", err)
 	}
 	text, _ := clipboard.ReadAll()
-	var payload []byte
-	var toast string
-	if strings.TrimSpace(text) != "" {
-		payload = bracketedPaste(text)
-	} else {
-		// Empty board: Super+V so Grok can still probe, else empty bracketed.
-		payload = bracketedPaste("")
-		toast = ""
-	}
+	// No host raster: Super+V so Grok can probe image+text (dual boards,
+	// browser "Copy Image" with a URL caption). Text payload is the fallback
+	// when Kitty keyboard is not active.
+	payload := bracketedPaste(text)
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: payload, toast: toast, preferSuperV: strings.TrimSpace(text) == ""})
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{
+		payload: payload, preferSuperV: true,
+	})
 	u.pendingPasteMu.Unlock()
 }
 
@@ -3796,10 +3813,16 @@ func applySelectionTint(grid [][]cellPix, tab *tab, viewRows int) {
 		absY := tab.sb.absLine(y, viewRows, live)
 		for x := range row {
 			if tab.sel.containsAbs(x, absY) {
-				// Soft blue selection.
+				// Soft blue selection field + white ink (Windows blitGrid
+				// parity). Tint-only BG left reverse-video / dark-ink cells
+				// unreadable — multi-line selections looked like a solid bar
+				// with the top line "missing".
 				row[x].BR = 40
 				row[x].BG = 70
 				row[x].BB = 120
+				row[x].FR = 255
+				row[x].FG = 255
+				row[x].FB = 255
 			}
 		}
 		grid[y] = row
