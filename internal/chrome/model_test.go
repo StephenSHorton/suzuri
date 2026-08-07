@@ -220,6 +220,53 @@ func TestTransferPromptTypeAndPaste(t *testing.T) {
 	}
 }
 
+func TestTransferPanelCopyKeyAndClick(t *testing.T) {
+	m := New(80)
+	r := m.UpdateChrome(TransferStatusMsg{
+		Active:  true,
+		Phase:   "ready",
+		Ticket:  "blob-test-ticket-xyz",
+		Message: "share this ticket",
+	})
+	m = r.Model
+	if !m.TransferPanelOpen {
+		t.Fatal("expected transfer panel open")
+	}
+	if m.transferTicket != "blob-test-ticket-xyz" {
+		t.Fatalf("ticket=%q", m.transferTicket)
+	}
+	// KeyRunes "c" (Windows WM_CHAR / mac InputChars path).
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if r.Action != ActionTransferCopyTicket || r.Name != "blob-test-ticket-xyz" {
+		t.Fatalf("c action=%v name=%q", r.Action, r.Name)
+	}
+	m = r.Model
+	if m.transferCopyFlash != "Copied!" {
+		t.Fatalf("flash=%q want Copied!", m.transferCopyFlash)
+	}
+	// Capital C also copies.
+	m.transferCopyFlash = ""
+	r = m.UpdateChrome(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	if r.Action != ActionTransferCopyTicket {
+		t.Fatalf("C action=%v", r.Action)
+	}
+	// Click on panel copies too.
+	m = r.Model
+	m.transferCopyFlash = ""
+	r = m.UpdateChrome(TransferClickMsg{})
+	if r.Action != ActionTransferCopyTicket || r.Name != "blob-test-ticket-xyz" {
+		t.Fatalf("click action=%v name=%q", r.Action, r.Name)
+	}
+	if r.Model.transferCopyFlash != "Copied!" {
+		t.Fatalf("click flash=%q", r.Model.transferCopyFlash)
+	}
+	// Panel view should mention the button / flash.
+	view := r.Model.renderTransferPanel(80)
+	if !strings.Contains(view, "Copied!") {
+		t.Fatalf("panel view missing Copied!: %q", view)
+	}
+}
+
 func TestStatusToastRow(t *testing.T) {
 	m := New(80)
 	if m.RowCount() != 1 {

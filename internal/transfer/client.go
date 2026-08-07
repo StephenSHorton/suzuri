@@ -61,16 +61,32 @@ func (c *Client) Run(ctx context.Context, args ...string) error {
 	cmd := exec.Command(bin, full...)
 	cmd.Env = append(os.Environ(), "HATO_CONFIG_DIR="+cfg, "HATO_OUTPUT=json")
 	cmd.Stdin = nil
+	// Engine is a console-subsystem binary. From the GUI host we must not
+	// inherit/create a visible console (Windows would open a separate terminal).
+	configureEngineCmd(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
 	}
-	cmd.Stderr = os.Stderr
+	// Keep stderr off the parent's console handles; drain for diagnostics.
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %s: %w", bin, err)
 	}
+	go func() {
+		sc := bufio.NewScanner(stderr)
+		buf := make([]byte, 0, 4*1024)
+		sc.Buffer(buf, 256*1024)
+		for sc.Scan() {
+			// Host already surfaces engine errors via NDJSON; stderr is noise.
+			_ = sc.Text()
+		}
+	}()
 
 	// Forward cancel → SIGINT so the engine can emit "stopped" and exit 130.
 	stopFwd := make(chan struct{})

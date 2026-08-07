@@ -2410,11 +2410,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		ch := rune(wParam)
 		// Charm overlay (palette, rename, notes, workspace, transfer) owns printable text.
 		if u.chrome.OverlayOpen() {
+			// Transfer *panel* needs runes too (c = copy ticket). Prompt typing
+			// already used this path; panel was missing → c silently did nothing.
+			// Workspace compose also needs runes (keys never reached handleWorkspaceKey).
 			if (u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
-				u.chrome.WorkspaceOpen || u.chrome.TransferPromptOpen) && ch >= 32 && ch != 0x7f {
+				u.chrome.WorkspaceOpen || u.chrome.TransferPromptOpen ||
+				u.chrome.TransferPanelOpen) && ch >= 32 && ch != 0x7f {
 				km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 				r := u.chrome.UpdateChrome(km)
 				u.chrome = r.Model
+				// Copy-ticket (and any other host action from a printable key).
+				if r.Action != chrome.ActionNone {
+					u.applyChromeAction(r)
+				}
 				// Filter / rename / notes / workspace / transfer typing: only dirty the overlay.
 				u.overlayDirty = true
 				u.overlayCells = nil
@@ -3133,6 +3141,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					}
 					u.persistNotesIfDirty()
 					win.InvalidateRect(hwnd, nil, false)
+					return 0
+				}
+				// Transfer panel: click card (Copy ticket button / ticket) → clipboard.
+				if u.chrome.TransferPanelOpen {
+					r := u.chrome.UpdateChrome(chrome.TransferClickMsg{})
+					u.chrome = r.Model
+					if r.Action != chrome.ActionNone {
+						u.applyChromeAction(r)
+					}
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+					return 0
 				}
 				return 0
 			}

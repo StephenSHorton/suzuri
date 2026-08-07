@@ -2487,10 +2487,12 @@ func (u *macUI) handleTextInput() {
 	}
 
 	if u.chrome.OverlayOpen() {
-		// Palette filter, rename, notes, workspace compose, transfer accept runes.
-		// Workspace was missing here — keys never reached handleWorkspaceKey.
+		// Palette filter, rename, notes, workspace compose, transfer prompt
+		// *and* progress panel (c = copy ticket) accept runes.
+		// Workspace was missing here historically — keys never reached handleWorkspaceKey.
 		if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
-			u.chrome.WorkspaceOpen || u.chrome.TransferPromptOpen {
+			u.chrome.WorkspaceOpen || u.chrome.TransferPromptOpen ||
+			u.chrome.TransferPanelOpen {
 			for _, ch := range chars {
 				if ch >= 32 && ch != 0x7f {
 					km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
@@ -2878,6 +2880,17 @@ func (u *macUI) handleMouse() {
 					u.overlayCells = nil
 					u.notesDragging = r.StartNotesDrag
 					u.persistNotesIfDirty()
+					return
+				}
+				// Transfer panel: click card → copy ticket (button + ticket line).
+				if u.chrome.TransferPanelOpen {
+					_ = cellX
+					_ = cellY
+					r := u.chrome.UpdateChrome(chrome.TransferClickMsg{})
+					u.chrome = r.Model
+					u.overlayDirty = true
+					u.overlayCells = nil
+					u.applyChromeAction(r)
 					return
 				}
 				// Other overlays: keep open when clicking the card band.
