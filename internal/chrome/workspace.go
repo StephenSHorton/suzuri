@@ -53,6 +53,7 @@ func (m *Model) openWorkspace() {
 	m.wsStatus = ""
 	m.wsMode = wsModeCompose
 	m.wsStickBtm = true
+	m.wsMentionIdx = 0
 	if m.wsChannel == "" {
 		m.wsChannel = workspace.DefaultChannel
 	}
@@ -70,6 +71,31 @@ func (m *Model) closeWorkspace() {
 	m.wsCompose = ""
 	m.wsStatus = ""
 	m.wsMode = wsModeCompose
+	m.wsMentionIdx = 0
+}
+
+// WorkspacePaste inserts clipboard text into the compose line (single-line).
+func (m *Model) WorkspacePaste(s string) {
+	if !m.WorkspaceOpen || s == "" {
+		return
+	}
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	if s == "" {
+		return
+	}
+	m.wsPushUndo()
+	for _, r := range s {
+		if r < 32 {
+			continue
+		}
+		if utf8.RuneCountInString(m.wsCompose) >= wsComposeMax {
+			break
+		}
+		m.wsCompose += string(r)
+	}
+	m.wsClampMentionIdx()
 }
 
 func (m *Model) ensureWorkspaceViewport() {
@@ -140,18 +166,33 @@ func (m *Model) syncWorkspaceViewport(refreshContent bool) {
 
 func (m Model) workspaceMessageContent(innerW int) string {
 	me := m.humanName()
+	names := m.wsMemberNameSet()
 	if len(m.wsMessages) == 0 {
 		return workspaceEmptyState(innerW, m.wsChannel)
 	}
 	var allLines []string
 	for _, msg := range m.wsMessages {
-		allLines = append(allLines, formatChatBubble(msg, innerW, me)...)
+		allLines = append(allLines, formatChatBubble(msg, innerW, me, names)...)
 		allLines = append(allLines, "") // gap between bubbles
 	}
 	if len(allLines) > 0 && allLines[len(allLines)-1] == "" {
 		allLines = allLines[:len(allLines)-1]
 	}
 	return strings.Join(allLines, "\n")
+}
+
+// wsMemberNameSet lowercased member names for @mention highlighting.
+func (m Model) wsMemberNameSet() map[string]string {
+	// map lower → display name
+	out := make(map[string]string, len(m.wsMembers))
+	for _, mem := range m.wsMembers {
+		n := strings.TrimSpace(mem.Name)
+		if n == "" {
+			continue
+		}
+		out[strings.ToLower(n)] = n
+	}
+	return out
 }
 
 func workspaceEmptyState(width int, channel string) string {
@@ -353,8 +394,18 @@ func (m *Model) wsApplyCompose(s textedit.Snapshot) {
 
 func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 	msgRows := m.workspaceMsgRows()
+	// Live @mention picker takes Tab / arrows when active.
+	mentionCands := m.wsMentionCandidates()
+	mentionActive := m.wsMode == wsModeCompose && len(mentionCands) > 0
+
 	switch msg.String() {
 	case "esc":
+		if mentionActive {
+			// Dismiss mention by completing nothing — drop trailing partial @query? keep text.
+			m.wsMentionIdx = 0
+			m.wsStatus = ""
+			return
+		}
 		if m.wsMode != wsModeCompose {
 			m.wsMode = wsModeCompose
 			m.wsCompose = ""
@@ -371,15 +422,21 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 		if m.wsHist != nil {
 			if prev, ok := m.wsHist.Undo(m.wsComposeSnapshot()); ok {
 				m.wsApplyCompose(prev)
+				m.wsClampMentionIdx()
 			}
 		}
 	case "ctrl+y", "ctrl+shift+z":
 		if m.wsHist != nil {
 			if next, ok := m.wsHist.Redo(m.wsComposeSnapshot()); ok {
 				m.wsApplyCompose(next)
+				m.wsClampMentionIdx()
 			}
 		}
 	case "enter":
+		if mentionActive {
+			m.wsCompleteMention(mentionCands)
+			return
+		}
 		switch m.wsMode {
 		case wsModeNewChannel:
 			m.workspaceCreateChannel()
@@ -389,10 +446,23 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 			m.workspacePostCompose()
 		}
 	case "tab":
+		if mentionActive {
+			m.wsCompleteMention(mentionCands)
+			return
+		}
 		if m.wsMode == wsModeCompose {
 			m.workspaceCycleChannel(1)
 		}
 	case "shift+tab":
+		if mentionActive {
+			// Cycle mention selection backwards.
+			if m.wsMentionIdx <= 0 {
+				m.wsMentionIdx = len(mentionCands) - 1
+			} else {
+				m.wsMentionIdx--
+			}
+			return
+		}
 		if m.wsMode == wsModeCompose {
 			m.workspaceCycleChannel(-1)
 		}
@@ -418,11 +488,23 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 		m.wsStatus = "refreshed"
 		m.wsMode = wsModeCompose
 	case "up":
+		if mentionActive {
+			if m.wsMentionIdx <= 0 {
+				m.wsMentionIdx = len(mentionCands) - 1
+			} else {
+				m.wsMentionIdx--
+			}
+			return
+		}
 		m.syncWorkspaceViewport(true)
 		m.wsVP.ScrollUp(1)
 		m.wsStickBtm = m.wsVP.AtBottom()
 		m.wsScroll++
 	case "down":
+		if mentionActive {
+			m.wsMentionIdx = (m.wsMentionIdx + 1) % len(mentionCands)
+			return
+		}
 		m.syncWorkspaceViewport(true)
 		m.wsVP.ScrollDown(1)
 		m.wsStickBtm = m.wsVP.AtBottom()
@@ -447,11 +529,13 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 			m.wsPushUndo()
 			rs := []rune(m.wsCompose)
 			m.wsCompose = string(rs[:len(rs)-1])
+			m.wsClampMentionIdx()
 		}
 	case "ctrl+u":
 		if m.wsCompose != "" {
 			m.wsPushUndo()
 			m.wsCompose = ""
+			m.wsMentionIdx = 0
 		}
 	default:
 		if msg.Type == tea.KeyRunes {
@@ -469,8 +553,124 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 				}
 				m.wsCompose += string(r)
 			}
+			if added {
+				m.wsClampMentionIdx()
+			}
 		}
 	}
+}
+
+// wsMentionQuery returns the active @query at the end of compose (partial name).
+// ok is false when not in a mention context.
+func (m Model) wsMentionQuery() (query string, atStart int, ok bool) {
+	if m.wsMode != wsModeCompose {
+		return "", 0, false
+	}
+	rs := []rune(m.wsCompose)
+	// Find last '@' that starts a mention (start of string or after whitespace).
+	at := -1
+	for i := len(rs) - 1; i >= 0; i-- {
+		if rs[i] == '@' {
+			if i == 0 || isMentionBoundary(rs[i-1]) {
+				at = i
+			}
+			break
+		}
+		// Only allow name-ish chars after @.
+		if !isMentionNameRune(rs[i]) {
+			return "", 0, false
+		}
+	}
+	if at < 0 {
+		return "", 0, false
+	}
+	q := string(rs[at+1:])
+	// If query contains a space we already returned above; bare "@" is active.
+	return q, at, true
+}
+
+func isMentionBoundary(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '(' || r == '[' || r == '{' ||
+		r == ',' || r == ':' || r == ';'
+}
+
+func isMentionNameRune(r rune) bool {
+	if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+		return true
+	}
+	return r == '_' || r == '-' || r == '.'
+}
+
+// wsMentionCandidates members matching the trailing @query (prefix, then contains).
+func (m Model) wsMentionCandidates() []workspace.Member {
+	q, _, ok := m.wsMentionQuery()
+	if !ok {
+		return nil
+	}
+	ql := strings.ToLower(q)
+	var prefix, rest []workspace.Member
+	seen := map[string]bool{}
+	for _, mem := range m.wsMembers {
+		name := strings.TrimSpace(mem.Name)
+		if name == "" || seen[strings.ToLower(name)] {
+			continue
+		}
+		nl := strings.ToLower(name)
+		if ql == "" || strings.HasPrefix(nl, ql) {
+			prefix = append(prefix, mem)
+			seen[nl] = true
+		} else if strings.Contains(nl, ql) {
+			rest = append(rest, mem)
+			seen[nl] = true
+		}
+	}
+	out := append(prefix, rest...)
+	if len(out) > 8 {
+		out = out[:8]
+	}
+	return out
+}
+
+func (m *Model) wsClampMentionIdx() {
+	cands := m.wsMentionCandidates()
+	if len(cands) == 0 {
+		m.wsMentionIdx = 0
+		return
+	}
+	if m.wsMentionIdx < 0 {
+		m.wsMentionIdx = 0
+	}
+	if m.wsMentionIdx >= len(cands) {
+		m.wsMentionIdx = len(cands) - 1
+	}
+}
+
+// wsCompleteMention replaces the trailing @query with @Name .
+func (m *Model) wsCompleteMention(cands []workspace.Member) {
+	if len(cands) == 0 {
+		return
+	}
+	idx := m.wsMentionIdx
+	if idx < 0 || idx >= len(cands) {
+		idx = 0
+	}
+	_, atStart, ok := m.wsMentionQuery()
+	if !ok {
+		return
+	}
+	name := strings.TrimSpace(cands[idx].Name)
+	if name == "" {
+		return
+	}
+	m.wsPushUndo()
+	rs := []rune(m.wsCompose)
+	if atStart < 0 || atStart > len(rs) {
+		return
+	}
+	// Keep text before @, then @Name + space.
+	m.wsCompose = string(rs[:atStart]) + "@" + name + " "
+	m.wsMentionIdx = 0
+	m.wsStatus = ""
 }
 
 func (m Model) renderWorkspace(w int) string {
@@ -519,25 +719,81 @@ func (m Model) renderWorkspace(w int) string {
 	if lipgloss.Width(compVisible) > innerW-4 {
 		compVisible = ansi.Truncate(compVisible, innerW-4, "…")
 	}
-	compLine := prompt + lipgloss.NewStyle().Foreground(colText).Render(compVisible)
+	compLine := prompt + lipgloss.NewStyle().Foreground(colText).Background(colPanel).Render(compVisible)
+
+	// @mention picker (when typing @query).
+	mentionLine := m.renderMentionPicker(innerW)
 
 	// Status: ephemeral action feedback only — path demoted to footer when idle.
 	statusLine := ""
 	if m.wsStatus != "" {
-		statusLine = lipgloss.NewStyle().Foreground(colSoft).Render(ansi.Truncate(m.wsStatus, innerW, "…"))
+		statusLine = lipgloss.NewStyle().Foreground(colSoft).Background(colPanel).
+			Render(ansi.Truncate(m.wsStatus, innerW, "…"))
 	}
 
-	parts := []string{tabs, presence, "", body, "", compLine}
+	parts := []string{tabs, presence, "", body, ""}
+	if mentionLine != "" {
+		parts = append(parts, mentionLine)
+	}
+	parts = append(parts, compLine)
 	if statusLine != "" {
 		parts = append(parts, statusLine)
 	}
 
 	footer := styleDialogHintKey().Render("enter") + styleDialogHint().Render(" send  ") +
+		styleDialogHintKey().Render("@") + styleDialogHint().Render(" mention  ") +
 		styleDialogHintKey().Render("tab") + styleDialogHint().Render(" ch  ") +
 		styleDialogHintKey().Render("⌃n") + styleDialogHint().Render(" new  ") +
-		styleDialogHintKey().Render("⌃d") + styleDialogHint().Render(" del  ") +
 		styleDialogHintKey().Render("esc")
 	return renderWorkspaceCard(outer, "Workspace", parts, footer)
+}
+
+// renderMentionPicker paints live @candidates above the compose line.
+func (m Model) renderMentionPicker(width int) string {
+	cands := m.wsMentionCandidates()
+	if len(cands) == 0 {
+		return ""
+	}
+	idx := m.wsMentionIdx
+	if idx < 0 || idx >= len(cands) {
+		idx = 0
+	}
+	var chips []string
+	used := 0
+	for i, mem := range cands {
+		label := "@" + mem.Name
+		var chip string
+		if i == idx {
+			chip = lipgloss.NewStyle().
+				Background(colPrimary).
+				Foreground(colOnPrimary).
+				Bold(true).
+				Padding(0, 1).
+				Render(label)
+		} else {
+			chip = lipgloss.NewStyle().
+				Foreground(colCyan).
+				Background(colPanel).
+				Padding(0, 1).
+				Render(label)
+		}
+		w := lipgloss.Width(chip)
+		if used > 0 && used+1+w > width {
+			break
+		}
+		if used > 0 {
+			used++
+		}
+		chips = append(chips, chip)
+		used += w
+	}
+	hint := lipgloss.NewStyle().Foreground(colMute).Background(colPanel).
+		Render("  tab/enter insert")
+	line := strings.Join(chips, " ")
+	if lipgloss.Width(line)+lipgloss.Width(hint) <= width {
+		line += hint
+	}
+	return line
 }
 
 // renderChannelTabs paints a Lip Gloss tab strip (active filled, inactive soft).
@@ -782,7 +1038,8 @@ func renderWorkspaceCard(outerWidth int, title string, body []string, footer str
 // Fills are always opaque (colPanel): the host treats default-bg VT cells as
 // transparent so rain/shell shows through — never leave bubble guts or side
 // gutters without an explicit panel background.
-func formatChatBubble(msg workspace.Message, width int, me string) []string {
+// memberNames maps lowercased name → display name for @highlight.
+func formatChatBubble(msg workspace.Message, width int, me string, memberNames map[string]string) []string {
 	if width < 20 {
 		width = 20
 	}
@@ -845,20 +1102,26 @@ func formatChatBubble(msg workspace.Message, width int, me string) []string {
 		Background(fill).
 		Render(fmt.Sprintf("%s  %s", label, ts))
 
+	// Highlight @mentions then wrap (wrap on plain; re-style per line is lossy for
+	// multi-span — paint each wrap line with styled mentions on that slice).
+	styledBody := styleMentionsInText(bodyText, memberNames, fill)
+	// For wrapping we use plain text; then re-apply mention style per line.
 	var bodyLines []string
 	if wl := wrapWords(bodyText, textW); len(wl) > 0 {
 		bodyLines = wl
 	} else {
 		bodyLines = []string{""}
 	}
-	// Paint body lines with fill so wrap rows stay opaque.
+	// Paint body lines with fill; re-highlight mentions per visual line.
+	_ = styledBody
 	for i, bl := range bodyLines {
+		bodyLines[i] = styleMentionsInText(bl, memberNames, fill)
+		// Ensure line spans textW with opaque fill (styleMentions may be short).
 		bodyLines[i] = lipgloss.NewStyle().
-			Foreground(colText).
 			Background(fill).
 			Width(textW).
 			MaxHeight(1).
-			Render(bl)
+			Render(bodyLines[i])
 	}
 	inner := header + "\n" + strings.Join(bodyLines, "\n")
 
@@ -888,6 +1151,47 @@ func formatChatBubble(msg workspace.Message, width int, me string) []string {
 	// Place with opaque panel padding — lipgloss.PlaceHorizontal uses default-bg
 	// spaces that paint as transparent holes in the modal.
 	return strings.Split(placeOpaque(width, align, bubble, fill), "\n")
+}
+
+// styleMentionsInText highlights @Name tokens that match known members.
+func styleMentionsInText(text string, memberNames map[string]string, fill lipgloss.Color) string {
+	if text == "" {
+		return lipgloss.NewStyle().Foreground(colText).Background(fill).Render("")
+	}
+	if len(memberNames) == 0 {
+		return lipgloss.NewStyle().Foreground(colText).Background(fill).Render(text)
+	}
+	rs := []rune(text)
+	var b strings.Builder
+	i := 0
+	plain := lipgloss.NewStyle().Foreground(colText).Background(fill)
+	mention := lipgloss.NewStyle().Foreground(colCyan).Background(fill).Bold(true)
+	for i < len(rs) {
+		if rs[i] == '@' {
+			// Parse @name
+			j := i + 1
+			for j < len(rs) && isMentionNameRune(rs[j]) {
+				j++
+			}
+			if j > i+1 {
+				cand := string(rs[i+1 : j])
+				if disp, ok := memberNames[strings.ToLower(cand)]; ok {
+					// Prefer stored display casing.
+					b.WriteString(mention.Render("@" + disp))
+					i = j
+					continue
+				}
+			}
+		}
+		// Emit one plain rune (batch consecutive non-@ for fewer styles).
+		start := i
+		i++
+		for i < len(rs) && rs[i] != '@' {
+			i++
+		}
+		b.WriteString(plain.Render(string(rs[start:i])))
+	}
+	return b.String()
 }
 
 // placeOpaque left/right-aligns content within width using Background(fill) pads.

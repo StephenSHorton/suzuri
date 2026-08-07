@@ -2408,14 +2408,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_CHAR:
 		ch := rune(wParam)
-		// Charm overlay (palette filter, rename, notes, transfer) owns printable text.
+		// Charm overlay (palette, rename, notes, workspace, transfer) owns printable text.
 		if u.chrome.OverlayOpen() {
 			if (u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
-				u.chrome.TransferPromptOpen) && ch >= 32 && ch != 0x7f {
+				u.chrome.WorkspaceOpen || u.chrome.TransferPromptOpen) && ch >= 32 && ch != 0x7f {
 				km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
 				r := u.chrome.UpdateChrome(km)
 				u.chrome = r.Model
-				// Filter / rename / notes / transfer typing: only dirty the overlay.
+				// Filter / rename / notes / workspace / transfer typing: only dirty the overlay.
 				u.overlayDirty = true
 				u.overlayCells = nil
 				if u.chrome.NotesOpen || u.chrome.NotesDirty() {
@@ -2597,13 +2597,20 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.pasteClipboard()
 				return 0
 			}
+			// Workspace compose: Ctrl+V paste into message field.
+			if u.chrome.WorkspaceOpen && ctrl && !alt && !shift &&
+				(wParam == 'V' || wParam == 'v') {
+				u.pasteClipboard()
+				return 0
+			}
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
 				r := u.chrome.UpdateChrome(*km)
 				u.chrome = r.Model
 				u.applyChromeAction(r)
 				u.syncFileDropAccept()
-				// Palette / rename / notes: only dirty overlay.
+				// Palette / rename / notes / workspace: only dirty overlay.
 				if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
+					u.chrome.WorkspaceOpen ||
 					u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen {
 					u.overlayDirty = true
 					u.overlayCells = nil
@@ -5109,6 +5116,16 @@ func (u *winUI) pasteClipboard() {
 	if u.chrome.TransferPromptOpen {
 		m := u.chrome
 		m.TransferPaste(text)
+		u.chrome = m
+		u.overlayDirty = true
+		u.overlayCells = nil
+		win.InvalidateRect(u.hwnd, nil, false)
+		return
+	}
+	// Workspace compose line.
+	if u.chrome.WorkspaceOpen {
+		m := u.chrome
+		m.WorkspacePaste(text)
 		u.chrome = m
 		u.overlayDirty = true
 		u.overlayCells = nil
