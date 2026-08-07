@@ -14,6 +14,30 @@ import (
 
 const macBundleID = "com.stephenshorton.suzuri"
 
+// Default Hardened Runtime entitlements when Resources/entitlements.plist is
+// missing (older installs). Keep in sync with packaging/macos/entitlements.plist.
+const embeddedEntitlementsPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>
+`
+
 // resignMacExecutable re-signs a replaced Mach-O (and its .app parent when
 // present) after an in-app update.
 //
@@ -24,6 +48,10 @@ const macBundleID = "com.stephenshorton.suzuri"
 //
 // TCC folder grants survive updates only when (1)/(2) is a stable certificate
 // with a Team ID. Ad-hoc always gets a new CDHash and macOS re-prompts.
+//
+// Developer ID re-sign always applies entitlements (mic, Apple Events, etc.).
+// Without --entitlements, codesign drops Hardened Runtime capability grants
+// and child tools like Grok /voice fail with silent TCC denial.
 func resignMacExecutable(exePath string) {
 	if exePath == "" {
 		return
@@ -97,10 +125,16 @@ func codesignIdentityOf(path string) string {
 func runCodesign(identity, identifier, path string) error {
 	args := []string{"--force", "--sign", identity, "--identifier", identifier, "--timestamp"}
 	// Hardened runtime + entitlements for Developer ID (matches packaging/macos/build-app.sh).
-	if identity != "-" && strings.HasPrefix(identity, "Developer ID") {
+	if identity != "-" && (strings.HasPrefix(identity, "Developer ID") || strings.Contains(identity, "Developer ID")) {
 		args = append(args, "--options", "runtime")
-		if ent := findEntitlementsPlist(); ent != "" {
+		ent, cleanup := resolveEntitlementsPlist(path)
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if ent != "" {
 			args = append(args, "--entitlements", ent)
+		} else {
+			log.Warn("update: codesign without entitlements — mic/Automation may fail")
 		}
 	}
 	if strings.HasSuffix(path, ".app") {
@@ -116,16 +150,51 @@ func runCodesign(identity, identifier, path string) error {
 	return nil
 }
 
-// findEntitlementsPlist looks for the shipping entitlements next to a
-// development checkout, then next to the running binary (not usually present).
-func findEntitlementsPlist() string {
-	candidates := []string{
-		"packaging/macos/entitlements.plist",
+// resolveEntitlementsPlist returns a path to an entitlements file for codesign.
+// Search order: env, app Resources, packaging checkout, embedded fallback (temp file).
+func resolveEntitlementsPlist(signedPath string) (path string, cleanup func()) {
+	if env := strings.TrimSpace(os.Getenv("SUZURI_ENTITLEMENTS")); env != "" {
+		if st, err := os.Stat(env); err == nil && !st.IsDir() {
+			return env, nil
+		}
+	}
+	if p := findEntitlementsPlist(signedPath); p != "" {
+		return p, nil
+	}
+	// Write embedded defaults so Developer ID re-sign never drops audio-input.
+	f, err := os.CreateTemp("", "suzuri-entitlements-*.plist")
+	if err != nil {
+		return "", nil
+	}
+	name := f.Name()
+	if _, err := f.WriteString(embeddedEntitlementsPlist); err != nil {
+		_ = f.Close()
+		_ = os.Remove(name)
+		return "", nil
+	}
+	_ = f.Close()
+	return name, func() { _ = os.Remove(name) }
+}
+
+// findEntitlementsPlist looks for shipping entitlements: app Resources (update
+// path), then a development checkout path.
+func findEntitlementsPlist(signedPath string) string {
+	var candidates []string
+	if app := appBundleRoot(signedPath); app != "" {
+		candidates = append(candidates, filepath.Join(app, "Contents", "Resources", "entitlements.plist"))
+	}
+	// signedPath may be the binary inside MacOS.
+	if strings.HasSuffix(signedPath, ".app") {
+		candidates = append(candidates, filepath.Join(signedPath, "Contents", "Resources", "entitlements.plist"))
+	} else if dir := filepath.Dir(signedPath); filepath.Base(dir) == "MacOS" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(dir), "Resources", "entitlements.plist"))
 	}
 	if exe, err := os.Executable(); err == nil {
-		// .../suzuri.app/Contents/MacOS/suzuri → not useful; skip
-		_ = exe
+		if app := appBundleRoot(exe); app != "" {
+			candidates = append(candidates, filepath.Join(app, "Contents", "Resources", "entitlements.plist"))
+		}
 	}
+	candidates = append(candidates, "packaging/macos/entitlements.plist")
 	for _, c := range candidates {
 		if st, err := os.Stat(c); err == nil && !st.IsDir() {
 			if abs, err := filepath.Abs(c); err == nil {

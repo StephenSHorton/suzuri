@@ -194,9 +194,16 @@ func (s *Service) DownloadAndApply(info Info) error {
 		_ = os.Rename(old, self)
 		return fmt.Errorf("install new exe: %w", err)
 	}
+	// macOS .app: portable zip only swaps the Mach-O. Patch Info.plist so
+	// version + TCC usage strings (mic, Apple Events) stay current — otherwise
+	// Hardened Runtime silently denies microphone with no system prompt.
+	if runtime.GOOS == "darwin" {
+		patchAppInfoPlist(self, info.Version)
+	}
 	// macOS: re-apply a stable codesign identity so TCC folder grants can
 	// stick across updates when a real cert is used. Ad-hoc still changes
 	// CDHash (re-prompts), but at least binds CFBundleIdentifier instead of a.out.
+	// Always pass entitlements on Developer ID re-sign (audio-input, etc.).
 	resignMacExecutable(self)
 
 	cmd := exec.Command(self)

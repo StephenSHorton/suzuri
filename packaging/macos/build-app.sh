@@ -74,6 +74,14 @@ fi
 # Info.plist with version stamped
 sed "s/VERSION_PLACEHOLDER/${VERSION//\//\\/}/g" "$SCRIPT_DIR/Info.plist" > "$CONTENTS/Info.plist"
 
+# Ship entitlements in Resources so in-app updates can re-sign with the same
+# Hardened Runtime set (mic, Apple Events, network, JIT). Without this,
+# findEntitlementsPlist only works from a source checkout.
+if [[ -f "$SCRIPT_DIR/entitlements.plist" ]]; then
+  cp "$SCRIPT_DIR/entitlements.plist" "$RES_DIR/entitlements.plist"
+  echo "==> bundled Resources/entitlements.plist for update re-sign"
+fi
+
 # Build .icns from PNG set (sips + iconutil — macOS only)
 ICONSET="$OUT_DIR/suzuri.iconset"
 rm -rf "$ICONSET"
