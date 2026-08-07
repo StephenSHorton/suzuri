@@ -122,11 +122,13 @@ func TestBoldBrightTruecolorNoSelectionBand(t *testing.T) {
 	}
 }
 
-// Grok /resume selection is a themed truecolor band (bg_visual ~#363636), not
-// reverse. Paint must keep a non-default field so rain hosts do not skip fill.
+// Grok /resume selection is a themed truecolor band (not reverse). Host must
+// paint the explicit RGB as-is so multi-tone hierarchy from the TUI is kept.
+// Floor-lifting here would collapse paste chips / code / prompt bands.
 func TestThemedSelectionBandVisibleOverRain(t *testing.T) {
 	term := vt10x.New(vt10x.WithSize(20, 2))
 	// Light ink on GrokNight-ish selection slate + bold (real picker contract).
+	// Fork floor-lifts selection to ~96; native 54 still must paint non-zero.
 	if _, err := term.Write([]byte("\x1b[38;2;225;225;225m\x1b[48;2;54;54;54m\x1b[1mROW\x1b[0m")); err != nil {
 		t.Fatal(err)
 	}
@@ -134,9 +136,21 @@ func TestThemedSelectionBandVisibleOverRain(t *testing.T) {
 	if c.BR == 0 && c.BG == 0 && c.BB == 0 {
 		t.Fatalf("selection band became default black (invisible under rain)")
 	}
-	mean := (int(c.BR) + int(c.BG) + int(c.BB)) / 3
-	if mean < rainVisibleBGFloor {
-		t.Fatalf("selection band too dim for rain mean=%d BR=%d,%d,%d", mean, c.BR, c.BG, c.BB)
+	if c.BR != 54 || c.BG != 54 || c.BB != 54 {
+		t.Fatalf("host must not recolor themed BG, got %d,%d,%d", c.BR, c.BG, c.BB)
+	}
+}
+
+// Sunken paste chip (Grok paste_bg ~#111111) must stay darker than elevated
+// panels — no host floor that equalizes all dark BGs.
+func TestPasteChipBGPreserved(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(20, 2))
+	if _, err := term.Write([]byte("\x1b[38;2;200;200;200m\x1b[48;2;17;17;17m[Image #1]\x1b[0m")); err != nil {
+		t.Fatal(err)
+	}
+	c := glyphToCell(term.Cell(0, 0))
+	if c.BR != 17 || c.BG != 17 || c.BB != 17 {
+		t.Fatalf("paste chip BG must stay 17,17,17 got %d,%d,%d", c.BR, c.BG, c.BB)
 	}
 }
 
@@ -149,19 +163,5 @@ func TestDefaultBGStaysTransparentForRain(t *testing.T) {
 	c := glyphToCell(term.Cell(0, 0))
 	if c.BR != 0 || c.BG != 0 || c.BB != 0 {
 		t.Fatalf("default BG must stay 0,0,0 for rain skip, got %d,%d,%d", c.BR, c.BG, c.BB)
-	}
-}
-
-func TestEnsureRainVisibleBG(t *testing.T) {
-	if r, g, b := ensureRainVisibleBG(0, 0, 0); r != 0 || g != 0 || b != 0 {
-		t.Fatalf("pure black must stay 0,0,0 got %d,%d,%d", r, g, b)
-	}
-	r, g, b := ensureRainVisibleBG(54, 54, 54)
-	mean := (int(r) + int(g) + int(b)) / 3
-	if mean < rainVisibleBGFloor {
-		t.Fatalf("dim slate not lifted: %d,%d,%d mean=%d", r, g, b, mean)
-	}
-	if r2, g2, b2 := ensureRainVisibleBG(120, 120, 120); r2 != 120 || g2 != 120 || b2 != 120 {
-		t.Fatalf("already-bright BG changed: %d,%d,%d", r2, g2, b2)
 	}
 }

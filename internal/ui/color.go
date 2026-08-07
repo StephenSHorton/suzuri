@@ -121,14 +121,11 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 		br, bg, bb = 220, 220, 224
 		fr, fg, fb = 18, 18, 22
 	}
-	// Explicit (non-default) backgrounds: floor-lift so themed selection /
-	// dim bands (Grok bg_visual ~#363636, prompt strips, code panels) stay
-	// visible over ambient rain. Pure default black (0,0,0) is unchanged so
-	// rain still shows through empty cells. Never invent a BG for bold-only
-	// emphasis — those cells keep default black and skip fill in paint.
-	if g.Mode&attrReverse == 0 {
-		br, bg, bb = ensureRainVisibleBG(br, bg, bb)
-	}
+	// Explicit non-default BGs paint as-is (no host floor-lift). Absolute
+	// floors collapse multi-tone hierarchy (paste chips, code panels, prompt
+	// bands) into one mid-gray. Grok list selection floor-lifts on the TUI
+	// side; pure default black (0,0,0) still skips fill so rain shows through.
+	// Bold alone never invents a band.
 	return cellPix{
 		Ch:   displayRune(g.Char),
 		FR:   fr,
@@ -139,33 +136,6 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 		BB:   bb,
 		Bold: bold,
 	}
-}
-
-// rainVisibleBGFloor is the minimum mean RGB for an explicit cell background
-// when shell rain/ambient is under the grid. Below this, a non-zero slate
-// still "paints" but reads as no highlight on busy underlays.
-const rainVisibleBGFloor = 72
-
-// ensureRainVisibleBG raises very dark non-default backgrounds to a floor
-// that remains readable over ambient rain. Default pure-black stays 0,0,0
-// so paint can skip the fill (rain shows through).
-func ensureRainVisibleBG(r, g, b byte) (byte, byte, byte) {
-	if r == 0 && g == 0 && b == 0 {
-		return r, g, b
-	}
-	mean := (int(r) + int(g) + int(b)) / 3
-	if mean >= rainVisibleBGFloor {
-		return r, g, b
-	}
-	boost := rainVisibleBGFloor - mean
-	lift := func(c byte) byte {
-		v := int(c) + boost
-		if v > 255 {
-			return 255
-		}
-		return byte(v)
-	}
-	return lift(r), lift(g), lift(b)
 }
 
 func nearBlackRGB(r, g, b byte) bool {
