@@ -1991,7 +1991,7 @@ func (u *winUI) newTabUI(profileName string) {
 }
 
 // closeTabUI closes the chrome tab that owns pane/page id.
-// id may be a page id or a pane id (Ctrl+W from focused pane).
+// id may be a page id or a pane id (strip × / palette close tab).
 func (u *winUI) closeTabUI(id int) {
 	// Prefer page id match (chrome strip).
 	for i, p := range u.pages {
@@ -2702,11 +2702,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			case 'E', 'e':
 				u.splitActive(splitHoriz)
 				return 0
-			case 'W', 'w':
-				if tab != nil {
-					u.closePaneUI(tab.id, true)
-				}
-				return 0
 			}
 		}
 		// Pane focus: Alt+arrows (Windows Terminal style). Word-jump is Ctrl+arrows
@@ -2727,12 +2722,12 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				return 0
 			}
 		}
+		// Ctrl+W closes the focused pane. Last pane in a multi-pane tab
+		// collapses the chrome tab; last pane of the last tab arms confirm-quit
+		// (see closePaneUI → closePageAt). No separate "close tab" chord.
 		if ctrl && !shift && (wParam == 'W' || wParam == 'w') {
-			// Close whole chrome tab (all panes in page).
-			if p := u.activePage(); p != nil {
-				u.closePageAt(u.active, true)
-			} else if tab != nil {
-				u.closeTabUI(tab.id)
+			if tab != nil {
+				u.closePaneUI(tab.id, true)
 			}
 			return 0
 		}
