@@ -15,15 +15,27 @@ func RenderToTerm(m Model, cols int) vt10x.Terminal {
 
 // RenderOverlayToTerm writes the floating palette/settings card.
 // Row count follows the actual Lip Gloss height so tall views (settings +
-// help caption) are not clipped by a fixed estimate / paint cap.
+// help caption / large workspace) are not clipped by a fixed estimate.
 func RenderOverlayToTerm(m Model, cols int) vt10x.Terminal {
 	view := m.OverlayView()
 	rows := lipgloss.Height(view)
 	if rows < 2 {
 		rows = 2
 	}
-	if rows > 48 {
-		rows = 48
+	// Cap relative to terminal height when known; allow tall workspace modals.
+	maxRows := 48
+	if m.Height > 0 {
+		// leave room for tab strip; never exceed ~90% of host rows
+		capH := int(float64(m.Height) * 0.9)
+		if capH > maxRows {
+			maxRows = capH
+		}
+	}
+	if maxRows > 80 {
+		maxRows = 80
+	}
+	if rows > maxRows {
+		rows = maxRows
 	}
 	return renderString(view, cols, rows)
 }

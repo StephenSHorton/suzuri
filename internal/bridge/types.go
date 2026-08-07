@@ -140,10 +140,12 @@ const (
 	WorkspaceOpMembers       WorkspaceOp = "members"
 	WorkspaceOpChannels      WorkspaceOp = "channels"
 	WorkspaceOpChannelCreate WorkspaceOp = "channel_create"
+	WorkspaceOpChannelDelete WorkspaceOp = "channel_delete"
 	WorkspaceOpPost          WorkspaceOp = "post"
 	WorkspaceOpHistory       WorkspaceOp = "history"
 	WorkspaceOpUpload        WorkspaceOp = "upload"
 	WorkspaceOpDownload      WorkspaceOp = "download"
+	WorkspaceOpSetStatus     WorkspaceOp = "set_status"
 )
 
 // WorkspaceRequest mutates or reads the shared workspace (channels / messages).
@@ -160,16 +162,22 @@ type WorkspaceRequest struct {
 	Limit     int         `json:"limit,omitempty"`
 	FilePath  string      `json:"file_path,omitempty"` // local source for upload
 	FileID    string      `json:"file_id,omitempty"`   // stored file or message id for download
+	// Status is availability for set_status (idle|working|waiting|blocked|away).
+	Status string `json:"status,omitempty"`
+	// StatusNote optional free text; nil leaves unchanged when set_status runs.
+	StatusNote *string `json:"status_note,omitempty"`
 }
 
 // WorkspaceMember is one human or agent in the workspace.
 type WorkspaceMember struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Kind      string    `json:"kind"`
-	SessionID string    `json:"session_id,omitempty"`
-	JoinedAt  time.Time `json:"joined_at"`
-	LastSeen  time.Time `json:"last_seen"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Kind       string    `json:"kind"`
+	SessionID  string    `json:"session_id,omitempty"`
+	Status     string    `json:"status,omitempty"`
+	StatusNote string    `json:"status_note,omitempty"`
+	JoinedAt   time.Time `json:"joined_at"`
+	LastSeen   time.Time `json:"last_seen"`
 }
 
 // WorkspaceChannel is a named room.

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -85,10 +86,14 @@ type Model struct {
 	wsMessages  []workspace.Message
 	wsMembers   []workspace.Member
 	wsCompose   string
-	wsScroll    int
+	wsScroll    int // line offset from bottom (kept for simple scroll; viewport preferred)
 	wsStatus    string
 	wsHumanName string
 	wsMode      wsInputMode
+	// wsVP is a Charm viewport used sync-only (SetContent/View/Scroll*; no tea.Cmd).
+	wsVP       viewport.Model
+	wsVPInit   bool
+	wsStickBtm bool // pin scroll to latest messages after post/reload
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
 
@@ -484,6 +489,9 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.WorkspaceOpen = false
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
+		if msg.Height > 0 {
+			m.Height = msg.Height
+		}
 	case tea.KeyMsg:
 		if m.SplashOpen {
 			if keyDismiss(msg) || msg.String() == " " {
@@ -995,7 +1003,7 @@ func (m Model) OverlayRowCount() int {
 		// List/editor card + gap + contextual keys companion.
 		return notesListRows + 18
 	case m.WorkspaceOpen:
-		return wsMsgRows + 12
+		return m.WorkspaceOverlayRows()
 	case m.PaletteOpen:
 		return 14
 	default:

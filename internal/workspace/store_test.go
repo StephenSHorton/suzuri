@@ -155,3 +155,92 @@ func TestChannelCreateAndUploadOp(t *testing.T) {
 		t.Fatalf("upload: %+v", r)
 	}
 }
+
+func TestSetStatusAvailability(t *testing.T) {
+	dir := t.TempDir()
+	s := New(filepath.Join(dir, "ws"))
+	m, err := s.Join("implementer", KindAgent, "sess-status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Status != AvailIdle {
+		t.Fatalf("join default status=%q want idle", m.Status)
+	}
+	note := "reviewing auth PR"
+	updated, err := s.SetStatus(m.ID, "", AvailWorking, &note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != AvailWorking || updated.StatusNote != note {
+		t.Fatalf("set: %+v", updated)
+	}
+	// Alias normalization
+	waiting, err := s.SetStatus("", "implementer", Availability("pending"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waiting.Status != AvailWaiting {
+		t.Fatalf("pending→waiting got %q", waiting.Status)
+	}
+	// Note unchanged when nil
+	if waiting.StatusNote != note {
+		t.Fatalf("note should remain %q, got %q", note, waiting.StatusNote)
+	}
+	// Clear note
+	empty := ""
+	cleared, err := s.SetStatus(m.ID, "", AvailIdle, &empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.StatusNote != "" || cleared.Status != AvailIdle {
+		t.Fatalf("clear: %+v", cleared)
+	}
+	// Apply op
+	r := Apply(s, Request{Op: OpSetStatus, MemberID: m.ID, Status: "blocked", StatusNote: strPtr("missing env")})
+	if !r.OK || r.Member == nil || r.Member.Status != AvailBlocked {
+		t.Fatalf("apply set_status: %+v", r)
+	}
+	if r.Member.StatusNote != "missing env" {
+		t.Fatalf("note: %+v", r.Member)
+	}
+	// NormalizeAvailability unit checks
+	if NormalizeAvailability("busy") != AvailWorking {
+		t.Fatal("busy alias")
+	}
+	if NormalizeAvailability("offline") != AvailAway {
+		t.Fatal("offline alias")
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func TestDeleteChannelCleansHistory(t *testing.T) {
+	dir := t.TempDir()
+	s := New(filepath.Join(dir, "ws"))
+	_, err := s.CreateChannel("temp-room", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Post("temp-room", "bye soon", "", "alice", KindHuman, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := s.History("temp-room", 10)
+	if len(h) < 1 {
+		t.Fatal("expected history")
+	}
+	if _, err := s.DeleteChannel("temp-room"); err != nil {
+		t.Fatal(err)
+	}
+	// Directory gone
+	chs, _ := s.ListChannels()
+	for _, c := range chs {
+		if c.ID == "temp-room" {
+			t.Fatal("channel still listed")
+		}
+	}
+	// Cannot delete general
+	if _, err := s.DeleteChannel("general"); err == nil {
+		t.Fatal("expected error deleting general")
+	}
+}
