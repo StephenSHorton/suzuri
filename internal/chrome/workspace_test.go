@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
 
 func TestOpenWorkspacePanel(t *testing.T) {
@@ -66,5 +68,26 @@ func TestWorkspaceNewChannelMode(t *testing.T) {
 	}
 	if m.wsMode != wsModeCompose {
 		t.Fatalf("mode=%v", m.wsMode)
+	}
+}
+
+func TestWorkspaceDialogWidth(t *testing.T) {
+	w := workspaceDialogWidth(100)
+	if w < 70 || w > 96 {
+		t.Fatalf("80%% of 100 should be ~80, got %d", w)
+	}
+}
+
+func TestFormatWorkspaceMsgWraps(t *testing.T) {
+	msg := workspace.Message{
+		FromName: "alice",
+		FromKind: workspace.KindHuman,
+		Kind:     "text",
+		Body:     "this is a fairly long message that should wrap across multiple lines instead of being truncated with an ellipsis",
+	}
+	// zero time ok
+	lines := formatWorkspaceMsgWrapped(msg, 40)
+	if len(lines) < 2 {
+		t.Fatalf("expected multi-line wrap, got %#v", lines)
 	}
 }

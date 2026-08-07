@@ -14,10 +14,14 @@ import (
 )
 
 const (
-	wsDialogWant   = 64
-	wsMsgRows      = 14
 	wsComposeMax   = 2000
-	wsHistoryLimit = 80
+	wsHistoryLimit = 120
+	// Fraction of host terminal used by the workspace modal (width and height).
+	wsModalFrac = 0.80
+	// Fixed chrome rows inside the card (title, header, gaps, compose, status, footer).
+	wsChromeRows = 10
+	wsMsgRowsMin = 8
+	wsMsgRowsMax = 56
 )
 
 // wsInputMode is what the compose line is for.
@@ -100,6 +104,48 @@ func (m *Model) humanName() string {
 	return m.wsHumanName
 }
 
+// workspaceDialogWidth is ~80% of the host width, with margin from the edges.
+func workspaceDialogWidth(windowCols int) int {
+	if windowCols < 24 {
+		windowCols = 24
+	}
+	// Leave ~10% margin total (~5% each side) → 80% content.
+	w := int(float64(windowCols) * wsModalFrac)
+	// Hard margins so it still reads as a floating modal.
+	maxW := windowCols - 4
+	if maxW < 28 {
+		maxW = 28
+	}
+	if w > maxW {
+		w = maxW
+	}
+	if w < 36 && windowCols >= 40 {
+		w = 36
+	}
+	if w < 28 {
+		w = 28
+	}
+	return w
+}
+
+// workspaceMsgRows is how many message *lines* fit at ~80% of host height.
+func (m Model) workspaceMsgRows() int {
+	h := m.Height
+	if h < 12 {
+		h = 24
+	}
+	// Use 80% of host rows for the whole card, then subtract chrome.
+	card := int(float64(h) * wsModalFrac)
+	rows := card - wsChromeRows
+	if rows < wsMsgRowsMin {
+		rows = wsMsgRowsMin
+	}
+	if rows > wsMsgRowsMax {
+		rows = wsMsgRowsMax
+	}
+	return rows
+}
+
 func (m *Model) workspacePostCompose() {
 	body := strings.TrimSpace(m.wsCompose)
 	if body == "" {
@@ -131,7 +177,6 @@ func (m *Model) workspaceCreateChannel() {
 		m.wsStatus = err.Error()
 		return
 	}
-	// Announce in the new channel.
 	_, _ = workspace.Default.Post(ch.ID, "channel created", "", m.humanName(), workspace.KindHuman, "")
 	m.wsChannel = ch.ID
 	m.wsCompose = ""
@@ -147,7 +192,6 @@ func (m *Model) workspaceAttachFile() {
 		m.wsStatus = "file path required"
 		return
 	}
-	// Strip surrounding quotes if user pasted a quoted path.
 	path = strings.Trim(path, `"'`)
 	msg, err := workspace.Default.Upload(m.wsChannel, path, "", m.humanName(), workspace.KindHuman, "")
 	if err != nil {
@@ -184,6 +228,7 @@ func (m *Model) workspaceCycleChannel(delta int) {
 }
 
 func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
+	msgRows := m.workspaceMsgRows()
 	switch msg.String() {
 	case "esc":
 		if m.wsMode != wsModeCompose {
@@ -232,12 +277,12 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 			m.wsScroll--
 		}
 	case "pgup":
-		m.wsScroll += wsMsgRows
+		m.wsScroll += msgRows
 		if m.wsScroll > max(0, len(m.wsMessages)-1) {
 			m.wsScroll = max(0, len(m.wsMessages)-1)
 		}
 	case "pgdown":
-		m.wsScroll -= wsMsgRows
+		m.wsScroll -= msgRows
 		if m.wsScroll < 0 {
 			m.wsScroll = 0
 		}
@@ -264,51 +309,92 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 }
 
 func (m Model) renderWorkspace(w int) string {
-	outer := clampDialogWidth(wsDialogWant, w)
+	outer := workspaceDialogWidth(w)
+	// Bypass clampDialogWidth's 68-col global max for this modal only.
 	innerW := dialogInnerWidth(outer)
 	if innerW < 24 {
 		innerW = 24
 	}
+	msgRows := m.workspaceMsgRows()
 
-	var chParts []string
-	for _, ch := range m.wsChannels {
-		label := "#" + ch.ID
+	// Channel strip: plain text for width safety, then style active separately.
+	var chPlain []string
+	activeIdx := -1
+	for i, ch := range m.wsChannels {
+		chPlain = append(chPlain, "#"+ch.ID)
 		if ch.ID == m.wsChannel {
+			activeIdx = i
+		}
+	}
+	if len(chPlain) == 0 {
+		chPlain = []string{"#" + workspace.DefaultChannel}
+		activeIdx = 0
+	}
+	// Build styled channel line without truncating mid-ANSI incorrectly.
+	var chParts []string
+	for i, label := range chPlain {
+		if i == activeIdx {
 			chParts = append(chParts, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42")).Render(label))
 		} else {
 			chParts = append(chParts, lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render(label))
 		}
 	}
 	chLine := strings.Join(chParts, "  ")
-	if chLine == "" {
-		chLine = "#" + workspace.DefaultChannel
-	}
-	chLine = ansi.Truncate(chLine, innerW, "…")
-
+	// Truncate plain version for measure, then re-style if needed.
+	plainJoin := strings.Join(chPlain, "  ")
 	memN := len(m.wsMembers)
-	header := fmt.Sprintf("%s · %d members", chLine, memN)
+	memPlain := fmt.Sprintf(" · %d members", memN)
+	if lipgloss.Width(plainJoin)+lipgloss.Width(memPlain) > innerW {
+		// Prefer keeping active channel + member count.
+		budget := innerW - lipgloss.Width(memPlain) - 1
+		if budget < 8 {
+			budget = 8
+		}
+		chLine = ansi.Truncate(chLine, budget, "…")
+	}
+	header := chLine + lipgloss.NewStyle().Faint(true).Render(memPlain)
 
-	msgs := m.wsMessages
-	end := len(msgs) - m.wsScroll
+	// Messages: build wrapped lines, then take a window of msgRows lines.
+	var allLines []string
+	if len(m.wsMessages) == 0 {
+		allLines = append(allLines, lipgloss.NewStyle().Faint(true).Render("(no messages yet — say hello)"))
+	} else {
+		for _, msg := range m.wsMessages {
+			allLines = append(allLines, formatWorkspaceMsgWrapped(msg, innerW)...)
+		}
+	}
+	// Scroll is in *message* units historically; map to line scroll from the end.
+	// Keep last msgRows lines, offset by approximate lines-per-message * wsScroll.
+	end := len(allLines)
+	// Use wsScroll as line-scroll from bottom when wrapping (smoother UX).
+	lineScroll := m.wsScroll
+	// If user scrolled by messages, multiply — treat wsScroll as line offset from bottom.
+	if lineScroll > end {
+		lineScroll = end
+	}
+	end -= lineScroll
 	if end < 0 {
 		end = 0
 	}
-	if end > len(msgs) {
-		end = len(msgs)
+	if end > len(allLines) {
+		end = len(allLines)
 	}
-	start := end - wsMsgRows
+	start := end - msgRows
 	if start < 0 {
 		start = 0
 	}
 	var lines []string
 	if start == 0 && end == 0 {
 		lines = append(lines, lipgloss.NewStyle().Faint(true).Render("(no messages yet — say hello)"))
+	} else {
+		lines = append(lines, allLines[start:end]...)
 	}
-	for _, msg := range msgs[start:end] {
-		lines = append(lines, formatWorkspaceMsg(msg, innerW))
-	}
-	for len(lines) < wsMsgRows {
+	for len(lines) < msgRows {
 		lines = append([]string{""}, lines...)
+	}
+	// Cap if wrap overshot (shouldn't).
+	if len(lines) > msgRows {
+		lines = lines[len(lines)-msgRows:]
 	}
 	body := strings.Join(lines, "\n")
 
@@ -323,7 +409,12 @@ func (m Model) renderWorkspace(w int) string {
 	default:
 		prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Render("› ")
 	}
-	compLine := prompt + ansi.Truncate(compose+caret, innerW-4, "…")
+	// Wrap compose on display if long (single-line input still, show tail).
+	compVisible := compose + caret
+	if lipgloss.Width(compVisible) > innerW-4 {
+		compVisible = ansi.Truncate(compVisible, innerW-4, "…")
+	}
+	compLine := prompt + compVisible
 
 	status := m.wsStatus
 	if status == "" {
@@ -332,7 +423,7 @@ func (m Model) renderWorkspace(w int) string {
 	status = ansi.Truncate(status, innerW, "…")
 
 	parts := []string{
-		lipgloss.NewStyle().Faint(true).Render(header),
+		header,
 		"",
 		body,
 		"",
@@ -345,10 +436,56 @@ func (m Model) renderWorkspace(w int) string {
 		styleDialogHintKey().Render("⌃f") + styleDialogHint().Render(" file  ") +
 		styleDialogHintKey().Render("⌃r") + styleDialogHint().Render("  ") +
 		styleDialogHintKey().Render("esc")
-	return renderDialogCard(outer, "Workspace", parts, footer)
+	// renderDialogCardEx clamps outer via clampDialogWidth(outer, outer+8) which
+	// re-applies the 68-col max — pass a synthetic high window width by using
+	// a dedicated render path that respects our outer width.
+	return renderWorkspaceCard(outer, "Workspace", parts, footer)
 }
 
-func formatWorkspaceMsg(msg workspace.Message, width int) string {
+// renderWorkspaceCard is like renderDialogCard but does not re-clamp to 68 cols.
+func renderWorkspaceCard(outerWidth int, title string, body []string, footer string) string {
+	if outerWidth < 28 {
+		outerWidth = 28
+	}
+	inner := dialogInnerWidth(outerWidth)
+	var lines []string
+	if title != "" {
+		lines = append(lines, styleDialogTitle().
+			Background(colPanel).
+			Width(inner).
+			MaxHeight(1).
+			Render(title))
+	}
+	if title != "" && len(body) > 0 {
+		lines = append(lines, dialogRuleLine(inner))
+	}
+	for _, b := range body {
+		if b == "" {
+			lines = append(lines, panelFillLine(inner, ""))
+			continue
+		}
+		if strings.Contains(b, "\n") {
+			for _, line := range strings.Split(b, "\n") {
+				lines = append(lines, panelFillLine(inner, line))
+			}
+			continue
+		}
+		lines = append(lines, panelFillLine(inner, b))
+	}
+	if footer != "" {
+		lines = append(lines, dialogRuleLine(inner))
+		lines = append(lines, panelFillLine(inner, footer))
+	}
+	content := joinLines(lines)
+	return styleDialogView().Width(outerWidth).Render(content)
+}
+
+// formatWorkspaceMsgWrapped returns one or more display lines for a message
+// (word-wrap, no mid-word hard cut when possible).
+func formatWorkspaceMsgWrapped(msg workspace.Message, width int) []string {
+	if width < 16 {
+		width = 16
+	}
 	ts := msg.TS.Local().Format("15:04")
 	name := msg.FromName
 	if name == "" {
@@ -358,10 +495,27 @@ func formatWorkspaceMsg(msg workspace.Message, width int) string {
 	if msg.FromKind == workspace.KindAgent {
 		kindMark = "·ai"
 	}
+
 	if msg.Kind == "system" {
-		line := fmt.Sprintf("%s  %s", ts, msg.Body)
-		return lipgloss.NewStyle().Faint(true).Italic(true).Render(ansi.Truncate(line, width, "…"))
+		// Indent wrap under timestamp.
+		prefix := ts + "  "
+		body := strings.ReplaceAll(msg.Body, "\n", " ")
+		wrapped := wrapWords(body, width-lipgloss.Width(prefix))
+		if len(wrapped) == 0 {
+			return []string{lipgloss.NewStyle().Faint(true).Italic(true).Render(prefix)}
+		}
+		var out []string
+		for i, w := range wrapped {
+			if i == 0 {
+				out = append(out, lipgloss.NewStyle().Faint(true).Italic(true).Render(prefix+w))
+			} else {
+				pad := strings.Repeat(" ", lipgloss.Width(prefix))
+				out = append(out, lipgloss.NewStyle().Faint(true).Italic(true).Render(pad+w))
+			}
+		}
+		return out
 	}
+
 	bodyText := strings.ReplaceAll(msg.Body, "\n", " ")
 	if msg.Kind == "file" && msg.File != nil {
 		bodyText = fmt.Sprintf("📎 %s (%s)", msg.File.Name, humanBytes(uint64(msg.File.Bytes)))
@@ -369,21 +523,43 @@ func formatWorkspaceMsg(msg workspace.Message, width int) string {
 			bodyText += " — " + msg.Body
 		}
 	}
+
 	nameStyle := lipgloss.NewStyle().Bold(true)
 	if msg.FromKind == workspace.KindAgent {
 		nameStyle = nameStyle.Foreground(lipgloss.Color("80"))
 	} else {
 		nameStyle = nameStyle.Foreground(lipgloss.Color("229"))
 	}
-	prefix := ts + "  " + name + kindMark + ": "
-	prefixW := lipgloss.Width(prefix)
+	prefixPlain := ts + "  " + name + kindMark + ": "
+	prefixW := lipgloss.Width(prefixPlain)
 	bodyW := width - prefixW
-	if bodyW < 8 {
-		bodyW = 8
+	if bodyW < 12 {
+		// Narrow: stack body under name.
+		first := lipgloss.NewStyle().Faint(true).Render(ts+"  ") +
+			nameStyle.Render(name+kindMark) + ":"
+		wrapped := wrapWords(bodyText, width-2)
+		out := []string{first}
+		for _, w := range wrapped {
+			out = append(out, "  "+w)
+		}
+		return out
 	}
-	return lipgloss.NewStyle().Faint(true).Render(ts+"  ") +
-		nameStyle.Render(name+kindMark) +
-		": " + ansi.Truncate(bodyText, bodyW, "…")
+	wrapped := wrapWords(bodyText, bodyW)
+	var out []string
+	for i, w := range wrapped {
+		if i == 0 {
+			out = append(out, lipgloss.NewStyle().Faint(true).Render(ts+"  ")+
+				nameStyle.Render(name+kindMark)+
+				": "+w)
+		} else {
+			pad := strings.Repeat(" ", prefixW)
+			out = append(out, pad+w)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{lipgloss.NewStyle().Faint(true).Render(ts+"  ") + nameStyle.Render(name+kindMark) + ":"}
+	}
+	return out
 }
 
 func localHumanName() string {
@@ -400,3 +576,8 @@ func localHumanName() string {
 
 // WorkspaceChannel returns the active channel id (for tests / host).
 func (m Model) WorkspaceChannel() string { return m.wsChannel }
+
+// WorkspaceOverlayRows estimates paint rows for the large workspace modal.
+func (m Model) WorkspaceOverlayRows() int {
+	return m.workspaceMsgRows() + wsChromeRows + 4
+}

@@ -33,6 +33,7 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | `suzuri_notes_create` | Create a note (`title?`, `body?`); becomes active |
 | `suzuri_notes_update` | Partial update (`id?`, `title?`, `body?`, `set_active?`) |
 | `suzuri_notes_delete` | Delete by `id` (omit = active; last note is cleared, not removed). **No UI confirm** — agents skip the interactive prompt. |
+| `workspace_guide` | **Start here** — how the shared room works + paste-ready agent/user phrases |
 | `workspace_status` | Shared workspace path + channel/member counts (offline OK) |
 | `workspace_join` | Register as agent/human in the shared workspace |
 | `workspace_leave` | Leave workspace |

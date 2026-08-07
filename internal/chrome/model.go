@@ -484,6 +484,9 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.WorkspaceOpen = false
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
+		if msg.Height > 0 {
+			m.Height = msg.Height
+		}
 	case tea.KeyMsg:
 		if m.SplashOpen {
 			if keyDismiss(msg) || msg.String() == " " {
@@ -995,7 +998,7 @@ func (m Model) OverlayRowCount() int {
 		// List/editor card + gap + contextual keys companion.
 		return notesListRows + 18
 	case m.WorkspaceOpen:
-		return wsMsgRows + 12
+		return m.WorkspaceOverlayRows()
 	case m.PaletteOpen:
 		return 14
 	default:

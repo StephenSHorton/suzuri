@@ -4026,8 +4026,19 @@ func (u *winUI) applyClientSize(w, h int32) {
 	if cols > maxTermCols {
 		cols = maxTermCols
 	}
+	shellHApprox := h - int32(chrome.TabStripRows())*ch
+	if shellHApprox < ch {
+		shellHApprox = ch
+	}
+	rowsApprox := int(shellHApprox / ch)
+	if rowsApprox < 1 {
+		rowsApprox = 1
+	}
+	if rowsApprox > maxTermRows {
+		rowsApprox = maxTermRows
+	}
 	u.chrome.Width = cols
-	u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: 24}).Model
+	u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: rowsApprox}).Model
 	u.markChromeDirty()
 	u.chromePx = u.chromePixelHeight()
 	// Full height under chrome — per-pane bars are inside each leaf.
@@ -4041,6 +4052,9 @@ func (u *winUI) applyClientSize(w, h int32) {
 	}
 	if rows > maxTermRows {
 		rows = maxTermRows
+	}
+	if rows != rowsApprox {
+		u.chrome = u.chrome.UpdateChrome(tea.WindowSizeMsg{Width: cols, Height: rows}).Model
 	}
 	// u.cols / u.rows track the full shell grid (chrome width + primary geometry).
 	u.cols = cols
