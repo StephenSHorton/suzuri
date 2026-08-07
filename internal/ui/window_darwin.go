@@ -68,6 +68,7 @@ func Run() error {
 	ui.bridge = bridge.NewHost()
 	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
 	ui.bridge.BindNotes(ui.enqueueMCPNotes)
+	ui.bridge.BindWorkspace(ui.enqueueMCPWorkspace)
 	if ui.painter != nil {
 		ui.metricW, ui.metricH = int32(ui.painter.cellW), int32(ui.painter.cellH)
 	}
@@ -105,6 +106,10 @@ type mcpJob struct {
 	notes    bool
 	notesReq bridge.NotesRequest
 	notesOut chan bridge.NotesResult
+	// Shared workspace
+	workspace    bool
+	workspaceReq bridge.WorkspaceRequest
+	workspaceOut chan bridge.WorkspaceResult
 }
 
 type macUI struct {
@@ -639,6 +644,16 @@ func (u *macUI) Update() error {
 				if job.notesOut != nil {
 					job.notesOut <- res
 				}
+			} else if job.workspace {
+				res := runWorkspaceOnChrome(&u.chrome, job.workspaceReq)
+				if u.chrome.WorkspaceOpen {
+					u.overlayDirty = true
+					u.overlayCells = nil
+				}
+				u.markChromeDirty()
+				if job.workspaceOut != nil {
+					job.workspaceOut <- res
+				}
 			} else {
 				u.submitOnUIThread(job.tabID, job.line, job.done)
 			}
@@ -1029,6 +1044,25 @@ func (u *macUI) enqueueMCPNotes(req bridge.NotesRequest) bridge.NotesResult {
 		return res
 	case <-time.After(5 * time.Second):
 		return bridge.NotesResult{OK: false, Error: "mcp notes timed out"}
+	}
+}
+
+func (u *macUI) enqueueMCPWorkspace(req bridge.WorkspaceRequest) bridge.WorkspaceResult {
+	if !u.alive.Load() {
+		return bridge.WorkspaceResult{OK: false, Error: "ui not alive"}
+	}
+	out := make(chan bridge.WorkspaceResult, 1)
+	job := mcpJob{workspace: true, workspaceReq: req, workspaceOut: out}
+	select {
+	case u.mcpJobs <- job:
+	default:
+		return bridge.WorkspaceResult{OK: false, Error: "mcp workspace queue full"}
+	}
+	select {
+	case res := <-out:
+		return res
+	case <-time.After(5 * time.Second):
+		return bridge.WorkspaceResult{OK: false, Error: "mcp workspace timed out"}
 	}
 }
 

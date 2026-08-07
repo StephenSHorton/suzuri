@@ -1,0 +1,1071 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Suzuri Workspace — Shared Collab Design</title>
+  <style>
+    :root {
+      --bg: #0f1410;
+      --bg-elevated: #161c18;
+      --bg-code: #0a0e0c;
+      --border: #2a3830;
+      --border-soft: #1e2a24;
+      --text: #e6efe8;
+      --text-muted: #8fa396;
+      --text-dim: #6b7d72;
+      --accent: #5dbe8a;
+      --accent-soft: rgba(93, 190, 138, 0.12);
+      --accent-border: rgba(93, 190, 138, 0.35);
+      --warn: #e0b45a;
+      --warn-soft: rgba(224, 180, 90, 0.12);
+      --link: #7ec8a3;
+      --table-stripe: rgba(255, 255, 255, 0.02);
+      --shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 8px 32px rgba(0, 0, 0, 0.35);
+      --radius: 10px;
+      --font: "SF Pro Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+      --mono: "SF Mono", "Menlo", "Consolas", ui-monospace, monospace;
+      --max: 52rem;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f8f6;
+        --bg-elevated: #ffffff;
+        --bg-code: #eef2ef;
+        --border: #d0dbd4;
+        --border-soft: #e2eae5;
+        --text: #152019;
+        --text-muted: #4a5c52;
+        --text-dim: #6b7d72;
+        --accent: #1a7a48;
+        --accent-soft: rgba(26, 122, 72, 0.08);
+        --accent-border: rgba(26, 122, 72, 0.28);
+        --warn: #9a6b10;
+        --warn-soft: rgba(154, 107, 16, 0.1);
+        --link: #16653c;
+        --table-stripe: rgba(0, 0, 0, 0.02);
+        --shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset, 0 8px 28px rgba(20, 40, 28, 0.08);
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      font-size: 17px;
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--font);
+      background:
+        radial-gradient(ellipse 80% 50% at 50% -20%, rgba(93, 190, 138, 0.08), transparent),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .layout {
+      max-width: calc(var(--max) + 14rem);
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 13rem 1fr;
+      gap: 2rem;
+      padding: 2.5rem 1.5rem 5rem;
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+        padding: 1.25rem 1rem 4rem;
+      }
+      nav.toc { position: static !important; }
+    }
+
+    nav.toc {
+      position: sticky;
+      top: 1.5rem;
+      align-self: start;
+      font-size: 0.82rem;
+      line-height: 1.4;
+    }
+
+    nav.toc .toc-title {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+      margin-bottom: 0.75rem;
+      font-weight: 600;
+    }
+
+    nav.toc a {
+      display: block;
+      color: var(--text-muted);
+      text-decoration: none;
+      padding: 0.28rem 0.5rem;
+      border-radius: 6px;
+      border-left: 2px solid transparent;
+      margin-bottom: 0.1rem;
+    }
+
+    nav.toc a:hover {
+      color: var(--text);
+      background: var(--accent-soft);
+      border-left-color: var(--accent);
+    }
+
+    main {
+      max-width: var(--max);
+      min-width: 0;
+    }
+
+    header.doc-header {
+      margin-bottom: 2.5rem;
+      padding-bottom: 1.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border: 1px solid var(--accent-border);
+      padding: 0.3rem 0.65rem;
+      border-radius: 999px;
+      margin-bottom: 1rem;
+    }
+
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      margin: 0 0 0.75rem;
+    }
+
+    .lede {
+      font-size: 1.1rem;
+      color: var(--text-muted);
+      margin: 0;
+      max-width: 42rem;
+    }
+
+    .meta {
+      margin-top: 1.25rem;
+      font-size: 0.85rem;
+      color: var(--text-dim);
+    }
+
+    h2 {
+      font-size: 1.35rem;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+      margin: 2.75rem 0 0.9rem;
+      padding-top: 0.5rem;
+      scroll-margin-top: 1.5rem;
+    }
+
+    h3 {
+      font-size: 1.05rem;
+      font-weight: 650;
+      margin: 1.75rem 0 0.6rem;
+      scroll-margin-top: 1.5rem;
+    }
+
+    p { margin: 0 0 1rem; }
+    a { color: var(--link); }
+
+    ul, ol {
+      margin: 0 0 1.1rem;
+      padding-left: 1.35rem;
+    }
+
+    li { margin-bottom: 0.35rem; }
+    li::marker { color: var(--text-dim); }
+    strong { font-weight: 650; color: var(--text); }
+
+    code {
+      font-family: var(--mono);
+      font-size: 0.86em;
+      background: var(--bg-code);
+      border: 1px solid var(--border-soft);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+    }
+
+    pre {
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.1rem;
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      line-height: 1.5;
+      margin: 0 0 1.25rem;
+      box-shadow: var(--shadow);
+    }
+
+    pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      font-size: inherit;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      margin: 0 0 1.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      background: var(--bg-elevated);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 0.7rem 0.9rem;
+      border-bottom: 1px solid var(--border-soft);
+      vertical-align: top;
+    }
+
+    th {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-dim);
+      font-weight: 600;
+      background: var(--accent-soft);
+    }
+
+    tr:last-child td { border-bottom: none; }
+    tbody tr:nth-child(even) { background: var(--table-stripe); }
+
+    .callout {
+      border-radius: var(--radius);
+      padding: 1rem 1.15rem;
+      margin: 0 0 1.25rem;
+      border: 1px solid var(--border);
+      background: var(--bg-elevated);
+    }
+
+    .callout.accent {
+      border-color: var(--accent-border);
+      background: var(--accent-soft);
+    }
+
+    .callout.warn {
+      border-color: rgba(224, 180, 90, 0.35);
+      background: var(--warn-soft);
+    }
+
+    .callout .label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 0.35rem;
+    }
+
+    .callout.warn .label { color: var(--warn); }
+    .callout p:last-child { margin-bottom: 0; }
+
+    .card-grid {
+      display: grid;
+      gap: 0.85rem;
+      margin: 0 0 1.25rem;
+    }
+
+    @media (min-width: 640px) {
+      .card-grid.two { grid-template-columns: 1fr 1fr; }
+      .card-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+    }
+
+    .card {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.1rem;
+      box-shadow: var(--shadow);
+    }
+
+    .card h3 {
+      margin: 0 0 0.4rem;
+      font-size: 0.95rem;
+    }
+
+    .card p {
+      margin: 0;
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    .card .phase {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 0.35rem;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2.5rem 0;
+    }
+
+    footer {
+      margin-top: 3rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--text-dim);
+    }
+
+    .diagram {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      line-height: 1.5;
+      white-space: pre;
+      overflow-x: auto;
+    }
+
+    ol.decisions > li { margin-bottom: 0.75rem; }
+
+    .rev-note {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      border-left: 3px solid var(--accent);
+      padding: 0.5rem 0 0.5rem 1rem;
+      margin: 0 0 1.5rem;
+    }
+
+    .tag {
+      display: inline-block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid var(--accent-border);
+    }
+
+    .strike { text-decoration: line-through; opacity: 0.65; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <nav class="toc" aria-label="Table of contents">
+      <div class="toc-title">Contents</div>
+      <a href="#summary">Summary</a>
+      <a href="#not-plugin">Not a Grok plugin</a>
+      <a href="#metaphor">Product metaphor</a>
+      <a href="#who">Who is a participant</a>
+      <a href="#workspace">Shared working area</a>
+      <a href="#layers">Architecture</a>
+      <a href="#existing">What we build on</a>
+      <a href="#surfaces">Surfaces</a>
+      <a href="#mcp">Suzuri MCP</a>
+      <a href="#transport">Transport (iroh + local)</a>
+      <a href="#messages">Messages &amp; files</a>
+      <a href="#ai">How AIs participate</a>
+      <a href="#trust">Trust</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="#non-goals">Non-goals</a>
+      <a href="#open">Open decisions</a>
+      <a href="#bottom">Bottom line</a>
+    </nav>
+
+    <main>
+      <header class="doc-header">
+        <div class="eyebrow">Design note · Suzuri product</div>
+        <h1>Suzuri Workspace</h1>
+        <p class="lede">
+          A mini Slack/Discord inside the terminal host: a shared working area
+          where <strong>humans and AI sessions</strong> post messages, share
+          files, and coordinate. The medium is suzuri — not a Grok plugin.
+        </p>
+        <p class="meta">
+          Revised · 2026-08-07 · Product: suzuri · Agent access: existing
+          <code>suzuri mcp</code> · Transport: local workspace + iroh peers
+        </p>
+      </header>
+
+      <p class="rev-note">
+        <strong>Revision history:</strong> Started as “Grok sessions message
+        each other” → briefly a plugin named <code>grok-session-bus</code> →
+        then suzuri-first collab over iroh. This draft drops the plugin frame
+        entirely: the product is a <strong>shared workspace chat</strong> in
+        suzuri; MCP is just how AIs post into that medium.
+      </p>
+
+      <section id="summary">
+        <h2>Summary</h2>
+        <div class="callout accent">
+          <div class="label">One-liner</div>
+          <p>
+            Build a <strong>shared working area</strong> in suzuri — channels,
+            messages, file drops — that humans use from the UI and AIs use via
+            the existing <strong>suzuri MCP</strong>. Same room, same history,
+            same files. Optional peer connectivity via the iroh transfer stack
+            when the workspace spans machines or people.
+          </p>
+        </div>
+        <div class="card-grid three">
+          <div class="card">
+            <div class="phase">What it is</div>
+            <h3>Medium</h3>
+            <p>A place messages and files go. Slack/Discord-shaped, terminal-native.</p>
+          </div>
+          <div class="card">
+            <div class="phase">Who posts</div>
+            <h3>Humans + AIs</h3>
+            <p>You type in chrome; Grok (or any MCP client) posts with tools.</p>
+          </div>
+          <div class="card">
+            <div class="phase">Where it lives</div>
+            <h3>Suzuri</h3>
+            <p>Host UI + store + MCP. No separate agent product to install.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="not-plugin">
+        <h2>Why this is not a Grok plugin</h2>
+        <p>A plugin only makes sense if Grok owns the product. It doesn’t:</p>
+        <ul>
+          <li>Humans need the UI without any agent running</li>
+          <li>Any MCP client should be able to post (Grok, others later)</li>
+          <li>The source of truth is the <strong>workspace</strong>, not a session’s context window</li>
+          <li>Files, channels, and history outlive any one LLM conversation</li>
+          <li>You already have <code>suzuri mcp</code> + bridge — append tools there</li>
+        </ul>
+        <p>
+          Grok is a <strong>participant</strong> (and a client of MCP), same as
+          a human is a participant (and a client of the UI). Neither is the bus.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Idea we dropped</th>
+                <th>Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="strike"><code>grok-session-bus</code> plugin</td>
+                <td>Implies Grok-owned product; duplicates host responsibility</td>
+              </tr>
+              <tr>
+                <td class="strike">Local mailbox under <code>~/.grok/bus/</code> only</td>
+                <td>Hides history from humans; ties store to one agent vendor</td>
+              </tr>
+              <tr>
+                <td class="strike">Agent-only addressing by Grok session UUID</td>
+                <td>Channels and display names are the right unit of “room”</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="metaphor">
+        <h2>Product metaphor</h2>
+        <p>
+          Think <strong>mini Slack / Discord</strong>, scoped to work happening
+          in and around the terminal — not a general social network.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Slack / Discord</th>
+                <th>Suzuri workspace</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Workspace / server</td>
+                <td>A <strong>workspace</strong> (local by default; peer-linked later)</td>
+              </tr>
+              <tr>
+                <td>Channels</td>
+                <td><strong>Channels</strong> (<code>#pr-142</code>, <code>#general</code>, <code>#agent-standup</code>)</td>
+              </tr>
+              <tr>
+                <td>DMs</td>
+                <td>Optional 1:1 threads between participants</td>
+              </tr>
+              <tr>
+                <td>People</td>
+                <td><strong>Humans</strong> (signed in as local user / display name)</td>
+              </tr>
+              <tr>
+                <td>Bots</td>
+                <td><strong>AI sessions</strong> (joined with a name + session id)</td>
+              </tr>
+              <tr>
+                <td>Messages</td>
+                <td>Text posts in a channel</td>
+              </tr>
+              <tr>
+                <td>File upload</td>
+                <td>File attach / transfer into the channel (iroh when remote)</td>
+              </tr>
+              <tr>
+                <td>Slack API / bot token</td>
+                <td><strong>suzuri MCP</strong> tools</td>
+              </tr>
+              <tr>
+                <td>Desktop app</td>
+                <td>Suzuri chrome (panel / palette / badges)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <div class="label">Mental model</div>
+          <p>
+            The workspace is the shared whiteboard. Humans and AIs are members.
+            Messaging is posting to the board — not “inject into another model’s brain.”
+          </p>
+        </div>
+      </section>
+
+      <section id="who">
+        <h2>Who is a participant</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Kind</th>
+                <th>How they join</th>
+                <th>How they post</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Human</strong></td>
+                <td>Using suzuri; display name from OS / settings</td>
+                <td>Chat compose in UI; drag file</td>
+              </tr>
+              <tr>
+                <td><strong>AI session</strong></td>
+                <td>MCP <code>workspace_join</code> with name + optional grok session id</td>
+                <td>MCP <code>workspace_post</code>, <code>workspace_upload</code></td>
+              </tr>
+              <tr>
+                <td><strong>Remote human / host</strong> (later)</td>
+                <td>Pair via iroh contacts</td>
+                <td>Their suzuri UI on their machine</td>
+              </tr>
+              <tr>
+                <td><strong>Remote AI</strong> (later)</td>
+                <td>Joined on a peer that is linked into the workspace</td>
+                <td>Their MCP → their host → fabric</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Participants have a stable <code>member_id</code>, a display
+          <code>name</code>, a <code>kind</code> (<code>human</code> |
+          <code>agent</code>), and optional metadata (cwd, model, pane id).
+        </p>
+      </section>
+
+      <section id="workspace">
+        <h2>Shared working area</h2>
+        <p>
+          Default: one <strong>local workspace</strong> per machine (or per
+          suzuri config), stored under the suzuri app support directory — e.g.
+        </p>
+        <pre>~/Library/Application Support/suzuri/workspace/
+  workspace.json      # id, title, settings
+  members.json
+  channels/
+    general/
+      meta.json
+      messages.jsonl
+      files/
+  …</pre>
+        <p>
+          Everyone on that host who opens the workspace UI — or joins via MCP —
+          sees the <strong>same channels and history</strong>. That is the
+          whole point: one shared working area, not per-agent inboxes only.
+        </p>
+        <h3>Channels (v1)</h3>
+        <ul>
+          <li><code>#general</code> — default room</li>
+          <li>User-created channels for a task / PR / topic</li>
+          <li>Optional system channel for “agent joined / left” events</li>
+        </ul>
+        <h3>What “shared work” looks like</h3>
+        <ol>
+          <li>You open <code>#fix-auth</code> and write the goal</li>
+          <li>Two Grok sessions join as <code>implementer</code> and <code>reviewer</code></li>
+          <li>They post plans, questions, and “done” notes into the channel</li>
+          <li>Someone drops a log file or patch into the channel</li>
+          <li>You read the thread in suzuri without jumping between agent UIs</li>
+        </ol>
+      </section>
+
+      <section id="layers">
+        <h2>Architecture</h2>
+        <pre class="diagram">┌─────────────────────────────────────────────────────────────┐
+│  Suzuri UI                                                  │
+│  Workspace panel · channels · compose · files · badges      │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│  Workspace service (Go host)                                │
+│  members · channels · posts · file refs · permissions       │
+│  local store under Application Support/suzuri/workspace     │
+└───────────────┬─────────────────────────────┬───────────────┘
+                │                             │
+                │ loopback bridge             │ optional peer sync
+                │                             │
+┌───────────────▼───────────────┐   ┌─────────▼─────────────────┐
+│  suzuri mcp (stdio)           │   │  transfer / iroh engine   │
+│  workspace_* tools            │   │  remote peers · file bytes│
+│  (+ existing diag/notes/…)    │   │  pair / contacts          │
+└───────────────▲───────────────┘   └───────────────────────────┘
+                │
+         Grok / other MCP clients
+         (participants, not owners)</pre>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Layer</th>
+                <th>Responsibility</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Workspace service</strong></td>
+                <td>Source of truth for channels, messages, membership, file metadata</td>
+              </tr>
+              <tr>
+                <td><strong>Suzuri UI</strong></td>
+                <td>Human client</td>
+              </tr>
+              <tr>
+                <td><strong>suzuri mcp</strong></td>
+                <td>AI client API (append tools; same process model as today)</td>
+              </tr>
+              <tr>
+                <td><strong>iroh transfer</strong></td>
+                <td>Moving file bytes / linking remote workspaces — not the chat store itself</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <div class="label">Important split</div>
+          <p>
+            <strong>Chat/history is local workspace state.</strong>
+            Iroh is how you connect <em>elsewhere</em> and how you move large
+            files. Don’t force every keystroke through iroh on one machine.
+          </p>
+        </div>
+      </section>
+
+      <section id="existing">
+        <h2>What we build on</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Existing piece</th>
+                <th>Reuse</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>suzuri mcp</code> + loopback bridge</td>
+                <td>Add <code>workspace_*</code> tools; same spawn-on-demand model</td>
+              </tr>
+              <tr>
+                <td>Notes bank MCP</td>
+                <td>Pattern for host-owned structured data agents can CRUD</td>
+              </tr>
+              <tr>
+                <td>Transfer / iroh</td>
+                <td>File payloads, later multi-device workspace link, pair/contacts</td>
+              </tr>
+              <tr>
+                <td>Palette / chrome / toasts</td>
+                <td>Open workspace, switch channel, notify on new posts</td>
+              </tr>
+              <tr>
+                <td>Tabs / panes</td>
+                <td>Optional: show which agent pane is which member</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="surfaces">
+        <h2>Surfaces</h2>
+
+        <h3>Human (suzuri UI)</h3>
+        <ul>
+          <li>Palette: <strong>Open workspace</strong>, <strong>Channels</strong>, <strong>New channel…</strong></li>
+          <li>Side panel or dedicated chrome: channel list + message stream + compose</li>
+          <li>File attach / drop when compose or channel is focused</li>
+          <li>Member list: humans + joined agents (name, kind, online)</li>
+          <li>Badges/toasts when you’re not looking at the channel</li>
+        </ul>
+
+        <h3>AI (MCP)</h3>
+        <ul>
+          <li>No special Grok packaging required beyond configuring <code>suzuri mcp</code> (already documented)</li>
+          <li>Agent skill (optional, can live in-repo or user skills): “how to use the workspace without spamming”</li>
+          <li>That skill is documentation for participants — not a separate product</li>
+        </ul>
+
+        <h3>CLI (optional)</h3>
+        <ul>
+          <li><code>suzuri workspace post '#general' '…'</code></li>
+          <li><code>suzuri workspace tail '#general'</code></li>
+          <li>Useful for scripts and debugging; UI + MCP are primary</li>
+        </ul>
+      </section>
+
+      <section id="mcp">
+        <h2>Suzuri MCP — append workspace tools</h2>
+        <p>
+          Extend the existing server (<code>suzuri mcp</code>). Do not invent a
+          second MCP product for this.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>workspace_status</code></td>
+                <td>Workspace up? path? channel count? (alongside <code>suzuri_status</code>)</td>
+              </tr>
+              <tr>
+                <td><code>workspace_join</code></td>
+                <td>Register this agent: display name, optional session id, tags</td>
+              </tr>
+              <tr>
+                <td><code>workspace_leave</code></td>
+                <td>Unregister</td>
+              </tr>
+              <tr>
+                <td><code>workspace_members</code></td>
+                <td>Who is in the workspace / channel</td>
+              </tr>
+              <tr>
+                <td><code>workspace_channels</code></td>
+                <td>List channels</td>
+              </tr>
+              <tr>
+                <td><code>workspace_channel_create</code></td>
+                <td>Create a channel (permissioned)</td>
+              </tr>
+              <tr>
+                <td><code>workspace_post</code></td>
+                <td>Post text to a channel (optional <code>reply_to</code>, <code>kind</code>)</td>
+              </tr>
+              <tr>
+                <td><code>workspace_history</code></td>
+                <td>Read messages (cursor / since / limit)</td>
+              </tr>
+              <tr>
+                <td><code>workspace_upload</code></td>
+                <td>Attach a local file to a channel (host stores + announces)</td>
+              </tr>
+              <tr>
+                <td><code>workspace_download</code></td>
+                <td>Resolve a file ref to a local path (trigger transfer if remote)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Keep existing tools (<code>suzuri_diag</code>, notes, submit, …).
+          Workspace is additive.
+        </p>
+        <pre class="diagram">Grok  --stdio-->  suzuri mcp  --HTTP 127.0.0.1-->  suzuri GUI
+                  (workspace_* + existing tools)</pre>
+        <p>
+          If the GUI is down, decide deliberately: read-only offline access to
+          the workspace store (like notes) vs require live host for post. Notes
+          already support offline — workspace can follow that pattern for local
+          history.
+        </p>
+      </section>
+
+      <section id="transport">
+        <h2>Transport: local first, iroh when it earns its keep</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Case</th>
+                <th>Mechanism</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Humans + AIs on <strong>one computer</strong></td>
+                <td>Local workspace store only — no iroh required</td>
+              </tr>
+              <tr>
+                <td>File attach on same machine</td>
+                <td>Copy or ref into workspace <code>files/</code>; announce in channel</td>
+              </tr>
+              <tr>
+                <td>File to a <strong>remote</strong> peer</td>
+                <td>Existing iroh transfer; message carries ticket / offer metadata</td>
+              </tr>
+              <tr>
+                <td>Shared workspace across <strong>two machines</strong></td>
+                <td>Later: peer-linked workspace sync or “remote channel bridge” over iroh</td>
+              </tr>
+              <tr>
+                <td>Meet a new person</td>
+                <td>Transfer roadmap: contacts / pair / short codes / mailbox</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          This resolves the earlier tension: iroh is still part of the story for
+          <strong>real peer and file transfer</strong>, but the product heart is
+          the <strong>shared room</strong>, which is mostly local state + UI + MCP.
+        </p>
+      </section>
+
+      <section id="messages">
+        <h2>Messages &amp; files</h2>
+        <h3>Message envelope</h3>
+        <pre><code>{
+  "v": 1,
+  "id": "msg_…",
+  "channel": "fix-auth",
+  "ts": "2026-08-07T…",
+  "from": {
+    "member_id": "…",
+    "name": "implementer",
+    "kind": "agent"
+  },
+  "kind": "text|file|system",
+  "body": "PR is green; please review auth middleware.",
+  "reply_to": null,
+  "file": null
+}</code></pre>
+        <h3>File attachment</h3>
+        <pre><code>"file": {
+  "name": "auth.diff",
+  "bytes": 12044,
+  "sha256": "…",
+  "local_path": "…/workspace/channels/fix-auth/files/…",
+  "transfer": null
+}</code></pre>
+        <p>
+          Remote case: <code>transfer</code> holds ticket / offer state; UI and
+          MCP <code>workspace_download</code> complete the receive via the
+          existing engine.
+        </p>
+      </section>
+
+      <section id="ai">
+        <h2>How AIs participate</h2>
+        <p>
+          AIs do not get a private backplane. They join the same channels humans
+          see.
+        </p>
+        <div class="card-grid two">
+          <div class="card">
+            <div class="phase">Posting</div>
+            <h3>Write path</h3>
+            <p>
+              Agent calls <code>workspace_post</code>. Message appears in UI
+              immediately. Human and other agents see it in history.
+            </p>
+          </div>
+          <div class="card">
+            <div class="phase">Reading</div>
+            <h3>Read path</h3>
+            <p>
+              Agent calls <code>workspace_history</code> (or polls). Nothing is
+              silently injected into the model unless the user or agent asks.
+            </p>
+          </div>
+        </div>
+        <h3>Wake policy (unchanged hard problem)</h3>
+        <ul>
+          <li><strong>Default:</strong> history is passive; agent reads when it chooses or when the user says “check the workspace”</li>
+          <li><strong>Better:</strong> agent runs a light poll/monitor while working</li>
+          <li><strong>Human notify:</strong> suzuri toast when agents post and you’re idle</li>
+          <li><strong>Hard inject into Grok:</strong> out of scope for suzuri; would be a Grok-side feature later if ever</li>
+        </ul>
+        <p>
+          Suzuri’s job is to be a reliable medium. Waking an idle LLM is the
+          agent host’s job.
+        </p>
+      </section>
+
+      <section id="trust">
+        <h2>Trust</h2>
+        <ol>
+          <li>Posts from agents are labeled <code>kind: agent</code> — never look like the human user</li>
+          <li>MCP post/upload should respect host permissions (confirm destructive or large file ops if needed)</li>
+          <li>Channel history is shared: don’t paste secrets casually; optional channel-level policy later</li>
+          <li>Remote pair remains consent-based (short codes / accept)</li>
+          <li>Treat remote/agent text as untrusted when an agent uses it to decide tool calls</li>
+        </ol>
+      </section>
+
+      <section id="roadmap">
+        <h2>Roadmap</h2>
+        <div class="card-grid">
+          <div class="card">
+            <div class="phase">Phase 0</div>
+            <h3>Local workspace core</h3>
+            <p>
+              Store, default <code>#general</code>, post/history APIs in the
+              host, minimal UI (panel + compose). No iroh required.
+            </p>
+          </div>
+          <div class="card">
+            <div class="phase">Phase 1</div>
+            <h3>MCP tools</h3>
+            <p>
+              Append <code>workspace_join/post/history/members/channels</code>
+              to <code>suzuri mcp</code>. Two Grok sessions + you in one channel.
+            </p>
+          </div>
+          <div class="card">
+            <div class="phase">Phase 2</div>
+            <h3>Files in channel</h3>
+            <p>
+              Local attach + download. UI drop zone. MCP upload.
+            </p>
+          </div>
+          <div class="card">
+            <div class="phase">Phase 3</div>
+            <h3>Remote files / peers</h3>
+            <p>
+              Wire channel file offers through transfer/iroh; finish
+              contacts/pair as needed for multi-machine.
+            </p>
+          </div>
+          <div class="card">
+            <div class="phase">Phase 4</div>
+            <h3>Linked workspaces</h3>
+            <p>
+              Optional: sync or bridge a channel to a remote suzuri. True
+              multiplayer room.
+            </p>
+          </div>
+        </div>
+        <p>
+          <strong>First demo that proves the product:</strong> you + two agents
+          in <code>#general</code> on one Mac, all messages visible in suzuri
+          chrome, agents posting only via MCP.
+        </p>
+      </section>
+
+      <section id="non-goals">
+        <h2>Non-goals (near term)</h2>
+        <ul>
+          <li>A Grok marketplace plugin as the product</li>
+          <li>Replacing Slack/Discord for general life chat</li>
+          <li>Shared LLM context (only explicit posts cross the medium)</li>
+          <li>Forcing iroh for same-machine messaging</li>
+          <li>Auto-running agent turns on every new message</li>
+          <li>End-to-end encrypted messenger feature parity</li>
+        </ul>
+      </section>
+
+      <section id="open">
+        <h2>Open decisions</h2>
+        <ol class="decisions">
+          <li>
+            <strong>UI form factor?</strong><br />
+            Side panel vs tab vs full-screen workspace mode.
+          </li>
+          <li>
+            <strong>One workspace per machine vs many?</strong><br />
+            Start with one; multi-workspace if you need home/work split.
+          </li>
+          <li>
+            <strong>Offline MCP posts without GUI?</strong><br />
+            Follow notes pattern (yes, write through to store) vs require bridge.
+          </li>
+          <li>
+            <strong>Channel permissions?</strong><br />
+            Open by default; lock down later.
+          </li>
+          <li>
+            <strong>Naming in UI?</strong><br />
+            “Workspace”, “Channels”, “Room” — pick one vocabulary and stick to it.
+          </li>
+        </ol>
+      </section>
+
+      <section id="bottom">
+        <h2>Bottom line</h2>
+        <p>
+          We’re not building a Grok plugin. We’re building a
+          <strong>shared working medium inside suzuri</strong> — mini
+          Slack/Discord for humans and AI sessions. Messages and files go to
+          channels; everyone reads the same history.
+        </p>
+        <p>
+          <strong>Humans</strong> use suzuri chrome.
+          <strong>AIs</strong> use <code>suzuri mcp</code> tools.
+          <strong>Iroh</strong> carries remote/file weight when needed.
+          The workspace store is the source of truth.
+        </p>
+        <hr />
+        <p><strong>Next concrete steps</strong></p>
+        <ol>
+          <li>Spec local workspace store + message schema</li>
+          <li>Minimal UI: channel list + stream + compose</li>
+          <li>MCP: <code>workspace_join</code>, <code>workspace_post</code>, <code>workspace_history</code></li>
+          <li>Demo: human + 2 agents in <code>#general</code></li>
+          <li>Then files; then remote/iroh</li>
+        </ol>
+      </section>
+
+      <footer>
+        Saved at <code>~/projects/suzuri/docs/session-bus-design.html</code>
+        · Suzuri workspace design · Filename historical · Not an implementation commitment
+      </footer>
+    </main>
+  </div>
+</body>
+</html>

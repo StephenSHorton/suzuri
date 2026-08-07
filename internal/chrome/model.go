@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
 
 // Tab is a chrome-level tab descriptor (no PTY — host owns sessions).
@@ -40,7 +41,8 @@ type Model struct {
 	HelpOpen     bool
 	SplashOpen   bool
 	RenameOpen   bool
-	NotesOpen    bool
+	NotesOpen     bool
+	WorkspaceOpen bool
 	// Transfer: path/ticket prompt, then progress panel while engine runs.
 	TransferPromptOpen bool
 	TransferPanelOpen  bool
@@ -77,6 +79,16 @@ type Model struct {
 	notesDirty  bool
 	// notesLayout is filled by renderNotes for host click hit-testing.
 	notesLayout notesLayout
+	// Shared workspace panel (channels + messages; disk under …/workspace/).
+	wsChannel   string
+	wsChannels  []workspace.Channel
+	wsMessages  []workspace.Message
+	wsMembers   []workspace.Member
+	wsCompose   string
+	wsScroll    int
+	wsStatus    string
+	wsHumanName string
+	wsMode      wsInputMode
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
 
@@ -193,6 +205,8 @@ const (
 	ActionTransferCancel
 	// ActionTransferCopyTicket copies the active ticket to the clipboard.
 	ActionTransferCopyTicket
+	// ActionOpenWorkspace opens the shared workspace panel (channels / chat).
+	ActionOpenWorkspace
 )
 
 // Result pairs the new model with an optional host action.
@@ -269,7 +283,7 @@ func (m Model) Init() tea.Cmd { return nil }
 // OverlayOpen is true when any modal owns keyboard focus.
 func (m Model) OverlayOpen() bool {
 	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen || m.HelpOpen ||
-		m.SplashOpen || m.RenameOpen || m.NotesOpen ||
+		m.SplashOpen || m.RenameOpen || m.NotesOpen || m.WorkspaceOpen ||
 		m.TransferPromptOpen || m.TransferPanelOpen
 }
 
@@ -389,6 +403,18 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.openNotes()
 	case ToggleNotesMsg:
 		m.toggleNotes()
+	case OpenWorkspaceMsg:
+		m.openWorkspace()
+	case ToggleWorkspaceMsg:
+		if m.WorkspaceOpen {
+			m.closeWorkspace()
+		} else {
+			m.openWorkspace()
+		}
+	case RefreshWorkspaceMsg:
+		if m.WorkspaceOpen {
+			m.reloadWorkspaceFromDisk()
+		}
 	case LoadNotesMsg:
 		// Prefer disk bank; keep dirty flag clear after load.
 		if len(msg.Bank.Notes) > 0 || msg.Bank.ActiveID != "" {
@@ -455,6 +481,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		}
 		// Notes: put away only — flush active body into bank (host persists).
 		m.putAwayNotes()
+		m.WorkspaceOpen = false
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 	case tea.KeyMsg:
@@ -512,6 +539,10 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			m.handleNotesKey(msg)
 			return Result{Model: m}
 		}
+		if m.WorkspaceOpen {
+			m.handleWorkspaceKey(msg)
+			return Result{Model: m}
+		}
 		if m.PaletteOpen {
 			// Sync filter/nav — never tea.Cmd (Win32 key path must not block).
 			act, profileName, minutes = m.handlePaletteKey(msg)
@@ -520,6 +551,10 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 			}
 			if act == ActionOpenNotes {
 				m.openNotes()
+				act = ActionNone
+			}
+			if act == ActionOpenWorkspace {
+				m.openWorkspace()
 				act = ActionNone
 			}
 			if act == ActionOpenTransferSend {
@@ -592,6 +627,9 @@ func (m *Model) closeModalsExcept(keep string) {
 			m.flushActiveNote()
 		}
 		m.NotesOpen = false // bank kept
+	}
+	if keep != "workspace" {
+		m.WorkspaceOpen = false
 	}
 	if keep != "help" {
 		m.HelpOpen = false
@@ -751,6 +789,8 @@ func (m Model) OverlayView() string {
 		main := m.renderNotes(w)
 		keys := m.renderNotesContextKeys(lipgloss.Width(main), w)
 		card = lipgloss.JoinVertical(lipgloss.Center, main, keys)
+	case m.WorkspaceOpen:
+		card = m.renderWorkspace(w)
 	case m.PaletteOpen:
 		// Crush commands: outer min(70, area), inner = outer − frame.
 		// Sync render — no bubbles list layout/filter on the key path.
@@ -954,6 +994,8 @@ func (m Model) OverlayRowCount() int {
 	case m.NotesOpen:
 		// List/editor card + gap + contextual keys companion.
 		return notesListRows + 18
+	case m.WorkspaceOpen:
+		return wsMsgRows + 12
 	case m.PaletteOpen:
 		return 14
 	default:

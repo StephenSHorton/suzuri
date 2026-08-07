@@ -16,6 +16,7 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/bridge"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
+	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
 
 // RunStdio starts the MCP server on stdin/stdout. Logs go to stderr only.
@@ -205,6 +206,166 @@ func RunStdio() error {
 		return notesTool(bridge.NotesRequest{Op: bridge.NotesOpDelete, ID: args.ID}), nil, nil
 	})
 
+	// --- Shared workspace (channels / humans + AIs) ---
+	// Store is local under Application Support/suzuri/workspace/.
+	// Prefers live GUI (refreshes open panel); falls back to disk.
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_status",
+		Description: "Shared suzuri workspace status: path, title, channel/member counts. Local store under Application Support/suzuri/workspace (works offline).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{Op: bridge.WorkspaceOpStatus}), nil, nil
+	})
+
+	type wsJoinArgs struct {
+		Name      string `json:"name" jsonschema:"display name for this agent (e.g. implementer)"`
+		SessionID string `json:"session_id,omitempty" jsonschema:"optional Grok/session id for re-join"`
+		Kind      string `json:"kind,omitempty" jsonschema:"human or agent (default agent)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_join",
+		Description: "Join the shared suzuri workspace as a named participant (usually an agent). Posts a system line to #general. Returns member_id for later posts.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsJoinArgs) (*mcp.CallToolResult, any, error) {
+		kind := args.Kind
+		if kind == "" {
+			kind = "agent"
+		}
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:        bridge.WorkspaceOpJoin,
+			Name:      args.Name,
+			SessionID: args.SessionID,
+			Kind:      kind,
+		}), nil, nil
+	})
+
+	type wsLeaveArgs struct {
+		MemberID string `json:"member_id,omitempty" jsonschema:"member id from workspace_join"`
+		Name     string `json:"name,omitempty" jsonschema:"display name if member_id omitted"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_leave",
+		Description: "Leave the shared workspace (by member_id or name).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsLeaveArgs) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:       bridge.WorkspaceOpLeave,
+			MemberID: args.MemberID,
+			Name:     args.Name,
+		}), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_members",
+		Description: "List humans and agents currently registered in the shared workspace.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{Op: bridge.WorkspaceOpMembers}), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_channels",
+		Description: "List channels in the shared workspace (e.g. general, pr-142).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{Op: bridge.WorkspaceOpChannels}), nil, nil
+	})
+
+	type wsChannelCreateArgs struct {
+		Name  string `json:"name" jsonschema:"channel name (e.g. pr-142 or #fix-auth)"`
+		Topic string `json:"topic,omitempty" jsonschema:"optional short topic"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_channel_create",
+		Description: "Create a channel in the shared workspace (idempotent if it already exists).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsChannelCreateArgs) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:      bridge.WorkspaceOpChannelCreate,
+			Channel: args.Name,
+			Topic:   args.Topic,
+		}), nil, nil
+	})
+
+	type wsPostArgs struct {
+		Body     string `json:"body" jsonschema:"message text to post"`
+		Channel  string `json:"channel,omitempty" jsonschema:"channel slug (default general)"`
+		Name     string `json:"name,omitempty" jsonschema:"poster name if not using member_id (auto-joins as agent)"`
+		MemberID string `json:"member_id,omitempty" jsonschema:"member id from workspace_join (preferred)"`
+		ReplyTo  string `json:"reply_to,omitempty" jsonschema:"optional message id to reply to"`
+		Kind     string `json:"kind,omitempty" jsonschema:"human or agent (default agent)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_post",
+		Description: "Post a message to a shared workspace channel. Humans see it in the Workspace UI; other agents see it via workspace_history. Prefer workspace_join first.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsPostArgs) (*mcp.CallToolResult, any, error) {
+		kind := args.Kind
+		if kind == "" {
+			kind = "agent"
+		}
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:       bridge.WorkspaceOpPost,
+			Channel:  args.Channel,
+			Body:     args.Body,
+			Name:     args.Name,
+			MemberID: args.MemberID,
+			ReplyTo:  args.ReplyTo,
+			Kind:     kind,
+		}), nil, nil
+	})
+
+	type wsHistoryArgs struct {
+		Channel string `json:"channel,omitempty" jsonschema:"channel slug (default general)"`
+		Limit   int    `json:"limit,omitempty" jsonschema:"max messages (default 50, max 200)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_history",
+		Description: "Read recent messages from a shared workspace channel (oldest first). Poll this to see human and agent posts.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsHistoryArgs) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:      bridge.WorkspaceOpHistory,
+			Channel: args.Channel,
+			Limit:   args.Limit,
+		}), nil, nil
+	})
+
+	type wsUploadArgs struct {
+		Path     string `json:"path" jsonschema:"absolute or ~/ path to a local file to attach"`
+		Channel  string `json:"channel,omitempty" jsonschema:"channel slug (default general)"`
+		Caption  string `json:"caption,omitempty" jsonschema:"optional message body (defaults to file name)"`
+		Name     string `json:"name,omitempty" jsonschema:"poster name if not using member_id"`
+		MemberID string `json:"member_id,omitempty" jsonschema:"member id from workspace_join"`
+		Kind     string `json:"kind,omitempty" jsonschema:"human or agent (default agent)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_upload",
+		Description: "Attach a local file to a workspace channel (copied into the workspace store, max 64MiB). Posts a file message visible to humans and other agents.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsUploadArgs) (*mcp.CallToolResult, any, error) {
+		kind := args.Kind
+		if kind == "" {
+			kind = "agent"
+		}
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:       bridge.WorkspaceOpUpload,
+			Channel:  args.Channel,
+			FilePath: args.Path,
+			Body:     args.Caption,
+			Name:     args.Name,
+			MemberID: args.MemberID,
+			Kind:     kind,
+		}), nil, nil
+	})
+
+	type wsDownloadArgs struct {
+		FileID  string `json:"file_id" jsonschema:"file id or message id from workspace_history"`
+		Channel string `json:"channel,omitempty" jsonschema:"channel slug (default general)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_download",
+		Description: "Resolve a workspace file attachment to an absolute local path (and metadata). Use file_id from a history message's file.id.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsDownloadArgs) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:      bridge.WorkspaceOpDownload,
+			Channel: args.Channel,
+			FileID:  args.FileID,
+		}), nil, nil
+	})
+
 	logf("stdio MCP ready (attach to GUI via %s)", bridge.EndpointPath())
 	return server.Run(context.Background(), &mcp.StdioTransport{})
 }
@@ -220,6 +381,31 @@ func notesTool(req bridge.NotesRequest) *mcp.CallToolResult {
 	}
 	off := chrome.ApplyNotesDiskOp(string(req.Op), req.ID, req.Title, req.Body, req.SetActive)
 	return textResult(off)
+}
+
+// workspaceTool prefers the live bridge (refreshes open panel); falls back to disk store.
+func workspaceTool(req bridge.WorkspaceRequest) *mcp.CallToolResult {
+	if c, err := bridge.Dial(); err == nil {
+		res, err := c.Workspace(req)
+		if err == nil {
+			return textResult(res)
+		}
+	}
+	r := workspace.Apply(nil, workspace.Request{
+		Op:        workspace.Op(req.Op),
+		Channel:   req.Channel,
+		Body:      req.Body,
+		Name:      req.Name,
+		Kind:      req.Kind,
+		MemberID:  req.MemberID,
+		SessionID: req.SessionID,
+		ReplyTo:   req.ReplyTo,
+		Topic:     req.Topic,
+		Limit:     req.Limit,
+		FilePath:  req.FilePath,
+		FileID:    req.FileID,
+	})
+	return textResult(r.ToMap())
 }
 
 func textResult(v any) *mcp.CallToolResult {
