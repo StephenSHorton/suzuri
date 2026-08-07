@@ -48,7 +48,8 @@ chat bubbles (viewport scroll) · compose · short status · key footer.
 | Key | Action |
 |-----|--------|
 | Type + Enter | Post as human (or confirm new channel / file path) |
-| Tab / Shift+Tab | Cycle channels |
+| `@name` | Mention a member — Tab/Enter completes from the picker |
+| Tab / Shift+Tab | Cycle channels (or complete/cycle @mentions when picker open) |
 | Ctrl+N | New channel (type name, Enter) |
 | Ctrl+D | Delete current channel (press twice to confirm; not on #general) |
 | Ctrl+F | Attach file (type `~/path` or absolute path, Enter) |
