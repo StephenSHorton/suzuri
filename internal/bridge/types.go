@@ -140,6 +140,7 @@ const (
 	WorkspaceOpMembers       WorkspaceOp = "members"
 	WorkspaceOpChannels      WorkspaceOp = "channels"
 	WorkspaceOpChannelCreate WorkspaceOp = "channel_create"
+	WorkspaceOpChannelDelete WorkspaceOp = "channel_delete"
 	WorkspaceOpPost          WorkspaceOp = "post"
 	WorkspaceOpHistory       WorkspaceOp = "history"
 	WorkspaceOpUpload        WorkspaceOp = "upload"

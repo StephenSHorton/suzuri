@@ -16,6 +16,7 @@ const (
 	OpMembers       Op = "members"
 	OpChannels      Op = "channels"
 	OpChannelCreate Op = "channel_create"
+	OpChannelDelete Op = "channel_delete"
 	OpPost          Op = "post"
 	OpHistory       Op = "history"
 	OpUpload        Op = "upload"
@@ -119,6 +120,20 @@ func Apply(s *Store, req Request) Result {
 			return Result{OK: false, Path: path, Error: err.Error()}
 		}
 		return Result{OK: true, Path: path, Channel: &ch}
+
+	case OpChannelDelete:
+		name := req.Channel
+		if name == "" {
+			name = req.Name
+		}
+		slug, err := s.DeleteChannel(name)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Status: map[string]any{
+			"deleted": slug,
+			"note":    "channel directory removed (messages + files)",
+		}}
 
 	case OpPost:
 		kind := MemberKind(strings.ToLower(req.Kind))

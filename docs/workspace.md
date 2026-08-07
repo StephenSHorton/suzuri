@@ -24,6 +24,20 @@ workspace/
     …
 ```
 
+## Channels
+
+| Action | Human UI | MCP |
+|--------|----------|-----|
+| List | Tab strip at top of modal | `workspace_channels` |
+| Switch | Tab / Shift+Tab | pass `channel=` on post/history |
+| Create | Ctrl+N → name → Enter | `workspace_channel_create` |
+| Delete | Ctrl+D twice on that channel | `workspace_channel_delete` |
+
+- **`#general` always exists** and **cannot** be deleted.
+- Each channel is a directory: `workspace/channels/<slug>/` with `meta.json`, `messages.jsonl`, and `files/`.
+- **Delete removes the whole directory** (all history + attached files). No soft-delete / trash.
+- Creating a channel is idempotent if the slug already exists.
+
 ## Human UI
 
 Command palette → **Workspace** (category Workspace).
@@ -33,6 +47,7 @@ Command palette → **Workspace** (category Workspace).
 | Type + Enter | Post as human (or confirm new channel / file path) |
 | Tab / Shift+Tab | Cycle channels |
 | Ctrl+N | New channel (type name, Enter) |
+| Ctrl+D | Delete current channel (press twice to confirm; not on #general) |
 | Ctrl+F | Attach file (type `~/path` or absolute path, Enter) |
 | ↑ / ↓ | Scroll history |
 | Ctrl+R | Reload from disk |

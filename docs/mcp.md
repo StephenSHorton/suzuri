@@ -40,6 +40,7 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | `workspace_members` | List members |
 | `workspace_channels` | List channels |
 | `workspace_channel_create` | Create a channel |
+| `workspace_channel_delete` | Delete a channel + history + files (not #general) |
 | `workspace_post` | Post a message to a channel |
 | `workspace_history` | Read recent messages from a channel |
 | `workspace_upload` | Attach a local file to a channel (max 64MiB) |

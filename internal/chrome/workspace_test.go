@@ -78,16 +78,25 @@ func TestWorkspaceDialogWidth(t *testing.T) {
 	}
 }
 
-func TestFormatWorkspaceMsgWraps(t *testing.T) {
+func TestFormatChatBubble(t *testing.T) {
 	msg := workspace.Message{
 		FromName: "alice",
 		FromKind: workspace.KindHuman,
 		Kind:     "text",
-		Body:     "this is a fairly long message that should wrap across multiple lines instead of being truncated with an ellipsis",
+		Body:     "this is a fairly long message that should wrap across multiple lines inside a chat bubble",
 	}
-	// zero time ok
-	lines := formatWorkspaceMsgWrapped(msg, 40)
+	lines := formatChatBubble(msg, 48, "alice")
 	if len(lines) < 2 {
-		t.Fatalf("expected multi-line wrap, got %#v", lines)
+		t.Fatalf("expected multi-line bubble, got %#v", lines)
+	}
+	// mine → right-ish content should still render
+	agent := workspace.Message{
+		FromName: "bot",
+		FromKind: workspace.KindAgent,
+		Kind:     "text",
+		Body:     "hello from the left",
+	}
+	if al := formatChatBubble(agent, 48, "alice"); len(al) < 1 {
+		t.Fatal("agent bubble empty")
 	}
 }

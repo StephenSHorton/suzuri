@@ -278,6 +278,34 @@ func (s *Store) CreateChannel(name, topic string) (Channel, error) {
 	return ch, nil
 }
 
+// DeleteChannel removes a channel directory (meta, messages.jsonl, files/).
+// #general cannot be deleted. Returns the slug that was removed.
+func (s *Store) DeleteChannel(name string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLocked(); err != nil {
+		return "", err
+	}
+	slug := NormalizeChannel(name)
+	if slug == "" {
+		return "", fmt.Errorf("invalid channel name")
+	}
+	if slug == DefaultChannel {
+		return "", fmt.Errorf("cannot delete #%s", DefaultChannel)
+	}
+	dir := filepath.Join(s.rootLocked(), "channels", slug)
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("channel %q not found", slug)
+		}
+		return "", err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return "", err
+	}
+	return slug, nil
+}
+
 // Join registers or updates a member.
 func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, error) {
 	s.mu.Lock()

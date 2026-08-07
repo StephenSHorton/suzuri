@@ -31,6 +31,7 @@ const (
 	wsModeCompose wsInputMode = iota
 	wsModeNewChannel
 	wsModeAttach
+	wsModeDeleteConfirm // second Ctrl+D confirms delete of current channel
 )
 
 // OpenWorkspaceMsg opens the shared workspace panel.
@@ -209,6 +210,31 @@ func (m *Model) workspaceAttachFile() {
 	m.reloadWorkspaceFromDisk()
 }
 
+func (m *Model) workspaceDeleteCurrentChannel() {
+	ch := m.wsChannel
+	if ch == "" || ch == workspace.DefaultChannel {
+		m.wsStatus = "cannot delete #general"
+		m.wsMode = wsModeCompose
+		return
+	}
+	if m.wsMode != wsModeDeleteConfirm {
+		m.wsMode = wsModeDeleteConfirm
+		m.wsStatus = fmt.Sprintf("delete #%s? press Ctrl+D again to confirm (esc cancel)", ch)
+		return
+	}
+	slug, err := workspace.Default.DeleteChannel(ch)
+	if err != nil {
+		m.wsStatus = err.Error()
+		m.wsMode = wsModeCompose
+		return
+	}
+	m.wsChannel = workspace.DefaultChannel
+	m.wsMode = wsModeCompose
+	m.wsScroll = 0
+	m.wsStatus = "deleted #" + slug + " (history + files removed)"
+	m.reloadWorkspaceFromDisk()
+}
+
 func (m *Model) workspaceCycleChannel(delta int) {
 	if len(m.wsChannels) == 0 {
 		return
@@ -265,9 +291,12 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 		m.wsMode = wsModeAttach
 		m.wsCompose = ""
 		m.wsStatus = "path to attach"
+	case "ctrl+d":
+		m.workspaceDeleteCurrentChannel()
 	case "ctrl+r":
 		m.reloadWorkspaceFromDisk()
 		m.wsStatus = "refreshed"
+		m.wsMode = wsModeCompose
 	case "up":
 		if m.wsScroll < max(0, len(m.wsMessages)-1) {
 			m.wsScroll++
@@ -354,13 +383,19 @@ func (m Model) renderWorkspace(w int) string {
 	}
 	header := chLine + lipgloss.NewStyle().Faint(true).Render(memPlain)
 
-	// Messages: build wrapped lines, then take a window of msgRows lines.
+	// Messages as chat bubbles; take a window of msgRows lines.
+	me := m.humanName()
 	var allLines []string
 	if len(m.wsMessages) == 0 {
 		allLines = append(allLines, lipgloss.NewStyle().Faint(true).Render("(no messages yet — say hello)"))
 	} else {
 		for _, msg := range m.wsMessages {
-			allLines = append(allLines, formatWorkspaceMsgWrapped(msg, innerW)...)
+			allLines = append(allLines, formatChatBubble(msg, innerW, me)...)
+			allLines = append(allLines, "") // gap between bubbles
+		}
+		// drop trailing gap
+		if len(allLines) > 0 && allLines[len(allLines)-1] == "" {
+			allLines = allLines[:len(allLines)-1]
 		}
 	}
 	// Scroll is in *message* units historically; map to line scroll from the end.
@@ -433,12 +468,9 @@ func (m Model) renderWorkspace(w int) string {
 	footer := styleDialogHintKey().Render("enter") + styleDialogHint().Render(" send  ") +
 		styleDialogHintKey().Render("tab") + styleDialogHint().Render(" ch  ") +
 		styleDialogHintKey().Render("⌃n") + styleDialogHint().Render(" new  ") +
+		styleDialogHintKey().Render("⌃d") + styleDialogHint().Render(" del  ") +
 		styleDialogHintKey().Render("⌃f") + styleDialogHint().Render(" file  ") +
-		styleDialogHintKey().Render("⌃r") + styleDialogHint().Render("  ") +
 		styleDialogHintKey().Render("esc")
-	// renderDialogCardEx clamps outer via clampDialogWidth(outer, outer+8) which
-	// re-applies the 68-col max — pass a synthetic high window width by using
-	// a dedicated render path that respects our outer width.
 	return renderWorkspaceCard(outer, "Workspace", parts, footer)
 }
 
@@ -480,40 +512,26 @@ func renderWorkspaceCard(outerWidth int, title string, body []string, footer str
 	return styleDialogView().Width(outerWidth).Render(content)
 }
 
-// formatWorkspaceMsgWrapped returns one or more display lines for a message
-// (word-wrap, no mid-word hard cut when possible).
-func formatWorkspaceMsgWrapped(msg workspace.Message, width int) []string {
-	if width < 16 {
-		width = 16
+// formatChatBubble renders a message as a chat-style bubble.
+// Human messages (matching me) sit on the right; agents/others on the left.
+func formatChatBubble(msg workspace.Message, width int, me string) []string {
+	if width < 20 {
+		width = 20
 	}
 	ts := msg.TS.Local().Format("15:04")
 	name := msg.FromName
 	if name == "" {
 		name = "?"
 	}
-	kindMark := ""
-	if msg.FromKind == workspace.KindAgent {
-		kindMark = "·ai"
-	}
 
 	if msg.Kind == "system" {
-		// Indent wrap under timestamp.
-		prefix := ts + "  "
 		body := strings.ReplaceAll(msg.Body, "\n", " ")
-		wrapped := wrapWords(body, width-lipgloss.Width(prefix))
-		if len(wrapped) == 0 {
-			return []string{lipgloss.NewStyle().Faint(true).Italic(true).Render(prefix)}
+		line := fmt.Sprintf("— %s · %s —", body, ts)
+		if lipgloss.Width(line) > width {
+			line = ansi.Truncate(line, width, "…")
 		}
-		var out []string
-		for i, w := range wrapped {
-			if i == 0 {
-				out = append(out, lipgloss.NewStyle().Faint(true).Italic(true).Render(prefix+w))
-			} else {
-				pad := strings.Repeat(" ", lipgloss.Width(prefix))
-				out = append(out, lipgloss.NewStyle().Faint(true).Italic(true).Render(pad+w))
-			}
-		}
-		return out
+		return []string{lipgloss.NewStyle().Faint(true).Italic(true).
+			Width(width).Align(lipgloss.Center).Render(line)}
 	}
 
 	bodyText := strings.ReplaceAll(msg.Body, "\n", " ")
@@ -524,42 +542,64 @@ func formatWorkspaceMsgWrapped(msg workspace.Message, width int) []string {
 		}
 	}
 
-	nameStyle := lipgloss.NewStyle().Bold(true)
+	mine := msg.FromKind == workspace.KindHuman &&
+		strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(me))
+
+	// Bubble max ~72% of row so it reads as a bubble, not full width.
+	bubbleW := width * 72 / 100
+	if bubbleW < 18 {
+		bubbleW = min(width-2, 28)
+	}
+	if bubbleW > width-2 {
+		bubbleW = width - 2
+	}
+	// Inner text width after padding (1 each side) and border (2).
+	textW := bubbleW - 4
+	if textW < 10 {
+		textW = 10
+	}
+
+	label := name
 	if msg.FromKind == workspace.KindAgent {
-		nameStyle = nameStyle.Foreground(lipgloss.Color("80"))
+		label = name + " · ai"
+	}
+	header := fmt.Sprintf("%s  %s", label, ts)
+
+	var bodyLines []string
+	if wl := wrapWords(bodyText, textW); len(wl) > 0 {
+		bodyLines = wl
 	} else {
-		nameStyle = nameStyle.Foreground(lipgloss.Color("229"))
+		bodyLines = []string{""}
 	}
-	prefixPlain := ts + "  " + name + kindMark + ": "
-	prefixW := lipgloss.Width(prefixPlain)
-	bodyW := width - prefixW
-	if bodyW < 12 {
-		// Narrow: stack body under name.
-		first := lipgloss.NewStyle().Faint(true).Render(ts+"  ") +
-			nameStyle.Render(name+kindMark) + ":"
-		wrapped := wrapWords(bodyText, width-2)
-		out := []string{first}
-		for _, w := range wrapped {
-			out = append(out, "  "+w)
-		}
-		return out
+	inner := header + "\n" + strings.Join(bodyLines, "\n")
+
+	var borderFg lipgloss.Color
+	var fg lipgloss.Color
+	if mine {
+		borderFg = lipgloss.Color("42")  // green
+		fg = lipgloss.Color("229")      // soft yellow name band feel
+	} else if msg.FromKind == workspace.KindAgent {
+		borderFg = lipgloss.Color("80") // cyan
+		fg = lipgloss.Color("252")
+	} else {
+		borderFg = lipgloss.Color("245")
+		fg = lipgloss.Color("252")
 	}
-	wrapped := wrapWords(bodyText, bodyW)
-	var out []string
-	for i, w := range wrapped {
-		if i == 0 {
-			out = append(out, lipgloss.NewStyle().Faint(true).Render(ts+"  ")+
-				nameStyle.Render(name+kindMark)+
-				": "+w)
-		} else {
-			pad := strings.Repeat(" ", prefixW)
-			out = append(out, pad+w)
-		}
+
+	bubble := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(borderFg).
+		Foreground(fg).
+		Padding(0, 1).
+		Width(bubbleW).
+		Render(inner)
+
+	align := lipgloss.Left
+	if mine {
+		align = lipgloss.Right
 	}
-	if len(out) == 0 {
-		out = []string{lipgloss.NewStyle().Faint(true).Render(ts+"  ") + nameStyle.Render(name+kindMark) + ":"}
-	}
-	return out
+	placed := lipgloss.PlaceHorizontal(width, align, bubble)
+	return strings.Split(placed, "\n")
 }
 
 func localHumanName() string {

@@ -155,3 +155,34 @@ func TestChannelCreateAndUploadOp(t *testing.T) {
 		t.Fatalf("upload: %+v", r)
 	}
 }
+
+func TestDeleteChannelCleansHistory(t *testing.T) {
+	dir := t.TempDir()
+	s := New(filepath.Join(dir, "ws"))
+	_, err := s.CreateChannel("temp-room", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Post("temp-room", "bye soon", "", "alice", KindHuman, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := s.History("temp-room", 10)
+	if len(h) < 1 {
+		t.Fatal("expected history")
+	}
+	if _, err := s.DeleteChannel("temp-room"); err != nil {
+		t.Fatal(err)
+	}
+	// Directory gone
+	chs, _ := s.ListChannels()
+	for _, c := range chs {
+		if c.ID == "temp-room" {
+			t.Fatal("channel still listed")
+		}
+	}
+	// Cannot delete general
+	if _, err := s.DeleteChannel("general"); err == nil {
+		t.Fatal("expected error deleting general")
+	}
+}
