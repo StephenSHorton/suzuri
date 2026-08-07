@@ -101,6 +101,10 @@ func main() {
 	// Leftover from a previous portable update (renamed running image).
 	update.CleanupOldBinary()
 
+	// macOS .app: repair Info.plist / entitlements broken by older portable-zip
+	// updates (mic TCC silent deny). May re-sign and relaunch once, then exit.
+	update.HealMacAppBundle(version)
+
 	// Updater is wired for UI-driven checks (startup toast + confirm before install).
 	// Never silent-apply: host offers a modal; user must confirm restart.
 	upd := update.New("StephenSHorton/suzuri", version)
