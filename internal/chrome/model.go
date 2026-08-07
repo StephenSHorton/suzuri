@@ -814,9 +814,8 @@ func (m Model) OverlayView() string {
 		keys := m.renderNotesContextKeys(lipgloss.Width(main), w)
 		card = lipgloss.JoinVertical(lipgloss.Center, main, keys)
 	case m.WorkspaceOpen:
-		// Full-bleed card: width already ≈ host; do not leave transparent
-		// PlaceHorizontal gutters (those read as "holes" next to the modal).
-		return m.renderWorkspace(w)
+		// Centered modal (80% / max caps) — not full-bleed.
+		card = m.renderWorkspace(w)
 	case m.PaletteOpen:
 		// Crush commands: outer min(70, area), inner = outer − frame.
 		// Sync render — no bubbles list layout/filter on the key path.

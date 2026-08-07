@@ -225,6 +225,8 @@ type macUI struct {
 	// prevPasteChord: edge-detect Meta/Ctrl+V. IsKeyJustPressed can miss
 	// Command+letter on some macOS/GLFW frames; IsKeyPressed still goes true.
 	prevPasteChord bool
+	// lastPasteAt debounces double-fire from overlapping chord edge paths.
+	lastPasteAt time.Time
 }
 
 func (u *macUI) queueBytes(tabID int) {
@@ -1554,17 +1556,14 @@ func (u *macUI) themeAmbientColors() ambientColors {
 }
 
 // dimShellModal is true for overlays that replace the live shell with a dim
-// matte (not palette/help, which float over a live terminal).
-// Workspace and notes are full focus modals — live Grok must not show through
-// the side gutters.
+// matte. Palette, help, notes, transfer, rename float over the live shell.
+// Workspace dims so side gutters don't show Grok through the card margins.
 func (u *macUI) dimShellModal() bool {
 	if u == nil {
 		return false
 	}
 	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen ||
-		u.chrome.WorkspaceOpen || u.chrome.NotesOpen ||
-		u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen ||
-		u.chrome.RenameOpen
+		u.chrome.WorkspaceOpen
 }
 
 func (u *macUI) matrixIntroActive() bool {
@@ -3171,6 +3170,11 @@ func (u *macUI) copySelection() {
 }
 
 func (u *macUI) pasteClipboard() {
+	// Debounce: chord edge detection can fire twice in one keypress.
+	if !u.lastPasteAt.IsZero() && time.Since(u.lastPasteAt) < 280*time.Millisecond {
+		return
+	}
+	u.lastPasteAt = time.Now()
 	// Alt-screen (Grok, …): host delivers images. osascript PNG dump is slow
 	// (~300–800ms) — never block the ebiten UI thread; finish on a worker
 	// and inject bracketed paste when ready.
@@ -3224,23 +3228,17 @@ func (u *macUI) pasteChordJustPressed(mod, shift, alt bool) bool {
 	if u == nil {
 		return false
 	}
-	// Require an actual V key with the modifier. Also treat Super+V via
-	// ebiten input chars path is not used — V is a chord key.
+	if shift || alt {
+		u.prevPasteChord = false
+		return false
+	}
+	// Treat Meta as held even when caller passed a slightly stale mod flag
+	// (Command+letter can lag one frame on GLFW).
+	metaHeld := mod || modMeta() || ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight)
 	vDown := ebiten.IsKeyPressed(ebiten.KeyV)
-	justV := inpututil.IsKeyJustPressed(ebiten.KeyV)
-	held := mod && !shift && !alt && vDown
+	held := metaHeld && vDown
 	just := held && !u.prevPasteChord
-	// IsKeyJustPressed alone can miss Command+letter on some frames; rising
-	// edge on held covers that. Also fire when V just-pressed while mod held.
-	if !just && mod && !shift && !alt && justV {
-		just = true
-	}
-	// Some ebiten builds report Meta delayed vs V; if Meta is held and V just
-	// pressed, still treat as paste chord.
-	if !just && !shift && !alt && justV && (modMeta() || ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight)) {
-		just = true
-	}
-	u.prevPasteChord = held || (mod && vDown)
+	u.prevPasteChord = held
 	return just
 }
 
@@ -3250,6 +3248,7 @@ func (u *macUI) pasteAltScreenAsync() {
 	if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
 		log.Info("paste clipboard image", "path", imgPath)
 		u.pendingPasteMu.Lock()
+		// Host path only — never Super+V here (that double-pasted images).
 		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(imgPath), toast: "image pasted"})
 		u.pendingPasteMu.Unlock()
 		return
@@ -3257,14 +3256,12 @@ func (u *macUI) pasteAltScreenAsync() {
 		log.Debug("clipboard image read failed", "err", err)
 	}
 	text, _ := clipboard.ReadAll()
-	// Host always injects text (bracketed paste). Prefer Super+V first when
-	// Kitty is active so Grok can attach dual-board images; host text is the
-	// reliable fallback for plain clipboard strings.
-	payload := bracketedPaste(text)
+	if text == "" {
+		return
+	}
+	// Host bracketed paste only. Super+V + payload double-injected into Grok.
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{
-		payload: payload, preferSuperV: true,
-	})
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text)})
 	u.pendingPasteMu.Unlock()
 }
 
@@ -3278,14 +3275,8 @@ func (u *macUI) drainPendingPaste() {
 	u.pendingPaste = nil
 	u.pendingPasteMu.Unlock()
 	for _, p := range batch {
-		// Image path pastes: always inject host payload (path in bracketed paste).
-		// Text: optional Super+V probe first when Kitty is active, then host text
-		// so Cmd+V never silently no-ops if Grok ignores Super+V.
-		if p.preferSuperV {
-			if t := u.activeTab(); t != nil && t.kitty.active() {
-				t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
-			}
-		}
+		// Single inject: host payload only (image path or text). No Super+V
+		// dual-path — that caused Cmd+V to paste twice into Grok.
 		if len(p.payload) > 0 {
 			u.sendKey(p.payload)
 		}

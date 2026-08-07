@@ -219,6 +219,7 @@ type winUI struct {
 	pasteBusy      atomic.Bool
 	pendingPasteMu sync.Mutex
 	pendingPaste   []pendingPaste
+	lastPasteAt    time.Time
 
 	// User is dragging or resizing the frame (WM_ENTERSIZEMOVE … EXITSIZEMOVE).
 	// During this window we must not thrash ConPTY / GDI: every WM_SIZE used to
@@ -5124,6 +5125,10 @@ func (u *winUI) copySelection() {
 }
 
 func (u *winUI) pasteClipboard() {
+	if !u.lastPasteAt.IsZero() && time.Since(u.lastPasteAt) < 280*time.Millisecond {
+		return
+	}
+	u.lastPasteAt = time.Now()
 	// Alt-screen (Grok, …): host delivers images. Clipboard PNG/DIB dump can be
 	// slow — never block the UI thread; finish on a worker and inject on blink.
 	if u.appOwnsKeyboard() {
@@ -5186,20 +5191,12 @@ func (u *winUI) pasteAltScreenAsync() {
 		log.Debug("clipboard image read failed", "err", err)
 	}
 	text, _ := getClipboardText(u.hwnd)
-	var payload []byte
-	var toast string
-	if strings.TrimSpace(text) != "" {
-		payload = bracketedPaste(text)
-	} else {
-		// Empty board: Super+V CSI-u so Grok can still probe, else empty bracketed.
-		payload = bracketedPaste("")
-		toast = ""
+	if strings.TrimSpace(text) == "" {
+		return
 	}
+	// Host bracketed paste only — Super+V + payload double-pasted into Grok.
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{
-		payload: payload, toast: toast,
-		preferSuperV: strings.TrimSpace(text) == "",
-	})
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text)})
 	u.pendingPasteMu.Unlock()
 }
 
@@ -5213,12 +5210,7 @@ func (u *winUI) drainPendingPaste() {
 	u.pendingPaste = nil
 	u.pendingPasteMu.Unlock()
 	for _, p := range batch {
-		if p.preferSuperV {
-			if t := u.activeTab(); t != nil && t.kitty.active() {
-				t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
-				continue
-			}
-		}
+		// Single inject: host payload only (no Super+V dual-path).
 		if len(p.payload) > 0 {
 			u.sendKey(p.payload)
 		}
@@ -5304,16 +5296,14 @@ func (u *winUI) releaseBackbuffer() {
 }
 
 // dimShellModal is true when a modal replaces the live terminal with a dim
-// matte. Palette and shortcuts (help) float over the live shell instead.
-// Workspace/notes/transfer are full-focus — live shell must not show through.
+// matte. Palette, help, notes, transfer, rename float over the live shell.
+// Workspace dims so gutters don't show Grok through card margins.
 func (u *winUI) dimShellModal() bool {
 	if u == nil {
 		return false
 	}
 	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen ||
-		u.chrome.WorkspaceOpen || u.chrome.NotesOpen ||
-		u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen ||
-		u.chrome.RenameOpen
+		u.chrome.WorkspaceOpen
 }
 
 // staticDimUnderlay is true for dim modals that don't animate (splash/confirm).
@@ -5326,12 +5316,13 @@ func (u *winUI) staticDimUnderlay() bool {
 }
 
 // floatOverLiveShell is true when a card paints over the live terminal
-// (palette / help only). Workspace, notes, rename, transfer use dimShellModal.
+// (palette/help/notes/rename/transfer). Workspace uses dimShellModal.
 func (u *winUI) floatOverLiveShell() bool {
 	if u == nil || u.dimShellModal() {
 		return false
 	}
-	return u.chrome.PaletteOpen || u.chrome.HelpOpen
+	return u.chrome.PaletteOpen || u.chrome.HelpOpen || u.chrome.RenameOpen ||
+		u.chrome.NotesOpen || u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen
 }
 
 func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {

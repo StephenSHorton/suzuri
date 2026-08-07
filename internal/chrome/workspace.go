@@ -18,14 +18,17 @@ import (
 const (
 	wsComposeMax   = 2000
 	wsHistoryLimit = 120
-	// Horizontal margin (cols each side). Modal content fills the rest.
-	wsMarginCols = 1
-	// Vertical: leave tab strip + small gap; modal uses nearly all remaining rows.
-	wsMarginRows = 1
+	// Modal size: 80% of host, capped so large windows stay "dialog" not full-screen.
+	wsModalFrac  = 0.80
+	wsMaxOuterW  = 120 // cols
+	wsMaxOuterH  = 40  // rows including card chrome
+	wsMinOuterW  = 48
 	// Fixed chrome rows inside the card (title, tabs, presence, gaps, compose, status, footer).
 	wsChromeRows = 12
 	wsMsgRowsMin = 8
-	wsMsgRowsMax = 72
+	wsMsgRowsMax = 48
+	// Chat bubble max width (cols); content-sized up to this.
+	wsBubbleMaxW = 72
 )
 
 // wsInputMode is what the compose line is for.
@@ -225,31 +228,41 @@ func (m *Model) humanName() string {
 	return m.wsHumanName
 }
 
-// workspaceDialogWidth fills the host width minus a thin margin.
-// Earlier 80%-centered cards left a huge empty gutter the dim matte could not fix.
+// workspaceDialogWidth is min(80% of host, wsMaxOuterW), floored for tiny windows.
 func workspaceDialogWidth(windowCols int) int {
 	if windowCols < 24 {
 		windowCols = 24
 	}
-	w := windowCols - 2*wsMarginCols
-	if w < 28 {
-		w = 28
+	w := int(float64(windowCols) * wsModalFrac)
+	if w > wsMaxOuterW {
+		w = wsMaxOuterW
 	}
-	if w > windowCols {
-		w = windowCols
+	minW := wsMinOuterW
+	if minW > windowCols-2 {
+		minW = windowCols - 2
+	}
+	if minW < 28 {
+		minW = 28
+	}
+	if w < minW {
+		w = minW
+	}
+	if w > windowCols-2 {
+		w = windowCols - 2
 	}
 	return w
 }
 
-// workspaceMsgRows is how many message lines fit after card chrome, using nearly
-// the full host height (not a short 80% card floating in empty space).
+// workspaceMsgRows is message lines after chrome: min(80% host, wsMaxOuterH) − chrome.
 func (m Model) workspaceMsgRows() int {
 	h := m.Height
 	if h < 12 {
 		h = 24
 	}
-	// Host height minus margin; subtract card chrome (title/tabs/compose/footer).
-	card := h - 2*wsMarginRows
+	card := int(float64(h) * wsModalFrac)
+	if card > wsMaxOuterH {
+		card = wsMaxOuterH
+	}
 	if card < 12 {
 		card = 12
 	}
@@ -1094,16 +1107,20 @@ func formatChatBubble(msg workspace.Message, width int, me string, memberNames m
 	mine := msg.FromKind == workspace.KindHuman &&
 		strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(me))
 
-	// Bubbles use most of the (now full-width) row; leave a small indent.
-	bubbleW := width * 88 / 100
-	if bubbleW < 18 {
-		bubbleW = min(width-2, 28)
+	// Content-sized bubbles up to a max — never force full modal width
+	// (that made short "hello human" fill the whole row as an empty green box).
+	maxBubbleW := width * 72 / 100
+	if maxBubbleW > wsBubbleMaxW {
+		maxBubbleW = wsBubbleMaxW
 	}
-	if bubbleW > width-2 {
-		bubbleW = width - 2
+	if maxBubbleW < 18 {
+		maxBubbleW = min(width-2, 28)
+	}
+	if maxBubbleW > width-2 {
+		maxBubbleW = width - 2
 	}
 	// Inner text width after padding (1 each side) and border (2).
-	textW := bubbleW - 4
+	textW := maxBubbleW - 4
 	if textW < 10 {
 		textW = 10
 	}
@@ -1119,26 +1136,16 @@ func formatChatBubble(msg workspace.Message, width int, me string, memberNames m
 		Background(fill).
 		Render(fmt.Sprintf("%s  %s", label, ts))
 
-	// Highlight @mentions then wrap (wrap on plain; re-style per line is lossy for
-	// multi-span — paint each wrap line with styled mentions on that slice).
-	styledBody := styleMentionsInText(bodyText, memberNames, fill)
-	// For wrapping we use plain text; then re-apply mention style per line.
+	// Wrap on plain text; re-apply mention style per visual line (no forced Width —
+	// short lines stay short so the bubble hugs content).
 	var bodyLines []string
 	if wl := wrapWords(bodyText, textW); len(wl) > 0 {
 		bodyLines = wl
 	} else {
 		bodyLines = []string{""}
 	}
-	// Paint body lines with fill; re-highlight mentions per visual line.
-	_ = styledBody
 	for i, bl := range bodyLines {
 		bodyLines[i] = styleMentionsInText(bl, memberNames, fill)
-		// Ensure line spans textW with opaque fill (styleMentions may be short).
-		bodyLines[i] = lipgloss.NewStyle().
-			Background(fill).
-			Width(textW).
-			MaxHeight(1).
-			Render(bodyLines[i])
 	}
 	inner := header + "\n" + strings.Join(bodyLines, "\n")
 
@@ -1151,6 +1158,7 @@ func formatChatBubble(msg workspace.Message, width int, me string, memberNames m
 		borderFg = colDim
 	}
 
+	// MaxWidth (not Width): bubble grows with content up to the cap.
 	bubble := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderFg).
@@ -1158,7 +1166,7 @@ func formatChatBubble(msg workspace.Message, width int, me string, memberNames m
 		Background(fill).
 		Foreground(colText).
 		Padding(0, 1).
-		Width(bubbleW).
+		MaxWidth(maxBubbleW).
 		Render(inner)
 
 	align := lipgloss.Left
