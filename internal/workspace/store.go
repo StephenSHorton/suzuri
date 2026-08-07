@@ -47,14 +47,52 @@ const (
 	KindAgent MemberKind = "agent"
 )
 
+// Availability is a member's presence in the shared room.
+type Availability string
+
+const (
+	AvailIdle    Availability = "idle"    // present, not doing work
+	AvailWorking Availability = "working" // busy on a task
+	AvailWaiting Availability = "waiting" // blocked on human/agent reply
+	AvailBlocked Availability = "blocked" // cannot proceed (error / missing info)
+	AvailAway    Availability = "away"    // not watching the channel
+)
+
+// NormalizeAvailability maps free text to a known code (empty → idle).
+func NormalizeAvailability(s string) Availability {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "idle", "online", "available", "ready":
+		return AvailIdle
+	case "working", "busy", "active", "in_progress", "in-progress":
+		return AvailWorking
+	case "waiting", "waiting_for", "waiting-for", "pending":
+		return AvailWaiting
+	case "blocked", "stuck", "error":
+		return AvailBlocked
+	case "away", "offline", "dnd", "brb":
+		return AvailAway
+	default:
+		// Unknown codes still accepted as opaque short labels (truncated later).
+		a := Availability(strings.ToLower(strings.TrimSpace(s)))
+		if len(a) > 24 {
+			a = a[:24]
+		}
+		return a
+	}
+}
+
 // Member is a workspace participant.
 type Member struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Kind      MemberKind `json:"kind"`
-	SessionID string     `json:"session_id,omitempty"`
-	JoinedAt  time.Time  `json:"joined_at"`
-	LastSeen  time.Time  `json:"last_seen"`
+	ID        string       `json:"id"`
+	Name      string       `json:"name"`
+	Kind      MemberKind   `json:"kind"`
+	SessionID string       `json:"session_id,omitempty"`
+	// Status is a short code (idle|working|waiting|blocked|away|custom).
+	Status Availability `json:"status,omitempty"`
+	// StatusNote is optional free text (e.g. "waiting on review from bob").
+	StatusNote string    `json:"status_note,omitempty"`
+	JoinedAt   time.Time `json:"joined_at"`
+	LastSeen   time.Time `json:"last_seen"`
 }
 
 // Channel is a named room inside the workspace.
@@ -331,6 +369,9 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 			members[i].Name = name
 			members[i].Kind = kind
 			members[i].LastSeen = now
+			if members[i].Status == "" {
+				members[i].Status = AvailIdle
+			}
 			if err := s.writeMembersLocked(members); err != nil {
 				return Member{}, err
 			}
@@ -338,6 +379,9 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 		}
 		if sessionID == "" && m.Name == name && m.Kind == kind {
 			members[i].LastSeen = now
+			if members[i].Status == "" {
+				members[i].Status = AvailIdle
+			}
 			if err := s.writeMembersLocked(members); err != nil {
 				return Member{}, err
 			}
@@ -352,6 +396,7 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 		Name:      name,
 		Kind:      kind,
 		SessionID: sessionID,
+		Status:    AvailIdle,
 		JoinedAt:  now,
 		LastSeen:  now,
 	}
@@ -362,6 +407,41 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 	// System line in #general.
 	_, _ = s.postLocked(DefaultChannel, m, "system", fmt.Sprintf("%s joined the workspace", name), "", nil)
 	return m, nil
+}
+
+// SetStatus updates a member's availability. Identify by memberID or name.
+// note is optional; pass nil to leave note unchanged, empty string to clear.
+func (s *Store) SetStatus(memberID, name string, status Availability, note *string) (Member, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLocked(); err != nil {
+		return Member{}, err
+	}
+	status = NormalizeAvailability(string(status))
+	members, err := s.readMembersLocked()
+	if err != nil {
+		return Member{}, err
+	}
+	now := time.Now().UTC()
+	for i, m := range members {
+		if (memberID != "" && m.ID == memberID) || (name != "" && m.Name == name && memberID == "") {
+			members[i].Status = status
+			members[i].LastSeen = now
+			if note != nil {
+				n := strings.TrimSpace(*note)
+				if utf8.RuneCountInString(n) > 120 {
+					rs := []rune(n)
+					n = string(rs[:120])
+				}
+				members[i].StatusNote = n
+			}
+			if err := s.writeMembersLocked(members); err != nil {
+				return Member{}, err
+			}
+			return members[i], nil
+		}
+	}
+	return Member{}, fmt.Errorf("member not found")
 }
 
 // Leave removes a member by id or name.

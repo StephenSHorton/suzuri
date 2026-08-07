@@ -15,18 +15,20 @@ func runWorkspaceOnChrome(m *chrome.Model, req bridge.WorkspaceRequest) bridge.W
 		return bridge.WorkspaceResult{OK: false, Error: "no chrome model"}
 	}
 	r := workspace.Apply(nil, workspace.Request{
-		Op:        workspace.Op(req.Op),
-		Channel:   req.Channel,
-		Body:      req.Body,
-		Name:      req.Name,
-		Kind:      req.Kind,
-		MemberID:  req.MemberID,
-		SessionID: req.SessionID,
-		ReplyTo:   req.ReplyTo,
-		Topic:     req.Topic,
-		Limit:     req.Limit,
-		FilePath:  req.FilePath,
-		FileID:    req.FileID,
+		Op:         workspace.Op(req.Op),
+		Channel:    req.Channel,
+		Body:       req.Body,
+		Name:       req.Name,
+		Kind:       req.Kind,
+		MemberID:   req.MemberID,
+		SessionID:  req.SessionID,
+		ReplyTo:    req.ReplyTo,
+		Topic:      req.Topic,
+		Limit:      req.Limit,
+		FilePath:   req.FilePath,
+		FileID:     req.FileID,
+		Status:     req.Status,
+		StatusNote: req.StatusNote,
 	})
 	if m.WorkspaceOpen {
 		*m = m.UpdateChrome(chrome.RefreshWorkspaceMsg{}).Model
@@ -44,27 +46,13 @@ func workspaceResultToBridge(r workspace.Result) bridge.WorkspaceResult {
 		LocalPath: r.LocalPath,
 	}
 	if r.Member != nil {
-		m := bridge.WorkspaceMember{
-			ID:        r.Member.ID,
-			Name:      r.Member.Name,
-			Kind:      string(r.Member.Kind),
-			SessionID: r.Member.SessionID,
-			JoinedAt:  r.Member.JoinedAt,
-			LastSeen:  r.Member.LastSeen,
-		}
+		m := mapMember(*r.Member)
 		out.Member = &m
 	}
 	if r.Members != nil {
 		out.Members = make([]bridge.WorkspaceMember, 0, len(r.Members))
 		for _, m := range r.Members {
-			out.Members = append(out.Members, bridge.WorkspaceMember{
-				ID:        m.ID,
-				Name:      m.Name,
-				Kind:      string(m.Kind),
-				SessionID: m.SessionID,
-				JoinedAt:  m.JoinedAt,
-				LastSeen:  m.LastSeen,
-			})
+			out.Members = append(out.Members, mapMember(m))
 		}
 	}
 	if r.Channel != nil {
@@ -102,6 +90,23 @@ func workspaceResultToBridge(r workspace.Result) bridge.WorkspaceResult {
 		}
 	}
 	return out
+}
+
+func mapMember(m workspace.Member) bridge.WorkspaceMember {
+	st := string(m.Status)
+	if st == "" {
+		st = string(workspace.AvailIdle)
+	}
+	return bridge.WorkspaceMember{
+		ID:         m.ID,
+		Name:       m.Name,
+		Kind:       string(m.Kind),
+		SessionID:  m.SessionID,
+		Status:     st,
+		StatusNote: m.StatusNote,
+		JoinedAt:   m.JoinedAt,
+		LastSeen:   m.LastSeen,
+	}
 }
 
 func mapFileRef(f workspace.FileRef) bridge.WorkspaceFile {

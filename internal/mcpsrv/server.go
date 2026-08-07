@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -221,22 +222,36 @@ func RunStdio() error {
 			"product": "suzuri Workspace",
 			"what": "A local shared room (like Slack/Discord channels) for humans and AI agents. " +
 				"Not Grok's conversation history. Not session events. Messages live on disk under the suzuri config dir.",
-			"ui": "Human: command palette → Workspace. Tab cycles channels; Enter posts; Ctrl+N new channel; Ctrl+F attach file.",
+			"ui": "Human: command palette → Workspace. Top channel tabs + presence strip (member availability). " +
+				"Tab cycles channels; Enter posts; Ctrl+N new channel; Ctrl+D delete; Ctrl+F attach file.",
 			"store": map[string]string{
 				"macos":   "~/Library/Application Support/suzuri/workspace/",
 				"windows": "%LOCALAPPDATA%\\suzuri\\workspace\\",
 			},
 			"agent_workflow": []string{
 				"1. workspace_join with a short display name (e.g. implementer, reviewer)",
-				"2. workspace_history channel=general (or the channel the user named)",
-				"3. workspace_post to reply (prefer member_id from join)",
-				"4. Poll with workspace_history when the user asks you to check the room — do not invent file watchers",
+				"2. workspace_set_status status=working note=\"…\" so humans/peers see what you are doing",
+				"3. workspace_history channel=general (or the channel the user named)",
+				"4. workspace_post to reply (prefer member_id from join)",
+				"5. Update status when blocked/waiting (waiting|blocked) or when idle/away",
+				"6. Poll with workspace_history when the user asks you to check the room — do not invent file watchers",
+			},
+			"availability": map[string]any{
+				"tool": "workspace_set_status",
+				"codes": []string{"idle", "working", "waiting", "blocked", "away"},
+				"aliases": map[string]string{
+					"busy": "working", "online": "idle", "pending": "waiting",
+					"stuck": "blocked", "offline": "away",
+				},
+				"note": "Optional short free text (e.g. \"waiting on review from bob\"). " +
+					"Visible next to your name in the Workspace UI presence strip.",
+				"example": "workspace_set_status member_id=… status=waiting note=\"need human decision on API shape\"",
 			},
 			"tools": []string{
 				"workspace_guide", "workspace_status", "workspace_join", "workspace_leave",
-				"workspace_members", "workspace_channels", "workspace_channel_create",
-				"workspace_channel_delete", "workspace_post", "workspace_history",
-				"workspace_upload", "workspace_download",
+				"workspace_set_status", "workspace_members", "workspace_channels",
+				"workspace_channel_create", "workspace_channel_delete", "workspace_post",
+				"workspace_history", "workspace_upload", "workspace_download",
 			},
 			"channels": map[string]any{
 				"what": "#general always exists. Create more for topics (e.g. #pr-142). " +
@@ -309,9 +324,40 @@ func RunStdio() error {
 		}), nil, nil
 	})
 
+	type wsSetStatusArgs struct {
+		Status   string `json:"status" jsonschema:"availability: idle|working|waiting|blocked|away (aliases: busy, pending, stuck, offline)"`
+		MemberID string `json:"member_id,omitempty" jsonschema:"member id from workspace_join (preferred)"`
+		Name     string `json:"name,omitempty" jsonschema:"display name if member_id omitted"`
+		Note     string `json:"note,omitempty" jsonschema:"optional short free text (e.g. waiting on review from bob)"`
+		// ClearNote clears an existing note without setting a new one.
+		ClearNote bool `json:"clear_note,omitempty" jsonschema:"if true, clear status_note even when note is empty"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "workspace_set_status",
+		Description: "Publish your availability in the shared workspace so humans and other agents can see it. " +
+			"Codes: idle (ready), working (busy), waiting (blocked on a reply), blocked (cannot proceed), away. " +
+			"Optional note explains what you are doing or waiting on. Updates last_seen. Prefer after workspace_join.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsSetStatusArgs) (*mcp.CallToolResult, any, error) {
+		var note *string
+		if args.ClearNote {
+			empty := ""
+			note = &empty
+		} else if strings.TrimSpace(args.Note) != "" {
+			n := strings.TrimSpace(args.Note)
+			note = &n
+		}
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:         bridge.WorkspaceOpSetStatus,
+			MemberID:   args.MemberID,
+			Name:       args.Name,
+			Status:     args.Status,
+			StatusNote: note,
+		}), nil, nil
+	})
+
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "workspace_members",
-		Description: "List humans and agents currently registered in the shared workspace.",
+		Description: "List humans and agents in the shared workspace (includes status + status_note availability).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
 		return workspaceTool(bridge.WorkspaceRequest{Op: bridge.WorkspaceOpMembers}), nil, nil
 	})
@@ -462,18 +508,20 @@ func workspaceTool(req bridge.WorkspaceRequest) *mcp.CallToolResult {
 		}
 	}
 	r := workspace.Apply(nil, workspace.Request{
-		Op:        workspace.Op(req.Op),
-		Channel:   req.Channel,
-		Body:      req.Body,
-		Name:      req.Name,
-		Kind:      req.Kind,
-		MemberID:  req.MemberID,
-		SessionID: req.SessionID,
-		ReplyTo:   req.ReplyTo,
-		Topic:     req.Topic,
-		Limit:     req.Limit,
-		FilePath:  req.FilePath,
-		FileID:    req.FileID,
+		Op:         workspace.Op(req.Op),
+		Channel:    req.Channel,
+		Body:       req.Body,
+		Name:       req.Name,
+		Kind:       req.Kind,
+		MemberID:   req.MemberID,
+		SessionID:  req.SessionID,
+		ReplyTo:    req.ReplyTo,
+		Topic:      req.Topic,
+		Limit:      req.Limit,
+		FilePath:   req.FilePath,
+		FileID:     req.FileID,
+		Status:     req.Status,
+		StatusNote: req.StatusNote,
 	})
 	return textResult(r.ToMap())
 }

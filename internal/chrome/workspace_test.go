@@ -1,6 +1,7 @@
 package chrome
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -68,6 +69,39 @@ func TestWorkspaceNewChannelMode(t *testing.T) {
 	}
 	if m.wsMode != wsModeCompose {
 		t.Fatalf("mode=%v", m.wsMode)
+	}
+}
+
+func TestRenderChannelTabsShowsActive(t *testing.T) {
+	chs := []workspace.Channel{
+		{ID: "general"},
+		{ID: "pr-1"},
+		{ID: "pr-2"},
+	}
+	out := renderChannelTabs(chs, "pr-1", 80)
+	if !strings.Contains(out, "#pr-1") {
+		t.Fatalf("missing active tab: %q", out)
+	}
+	if !strings.Contains(out, "#general") {
+		t.Fatalf("missing sibling tab: %q", out)
+	}
+}
+
+func TestAvailabilityStyleCodes(t *testing.T) {
+	g, _ := availabilityStyle(workspace.AvailWorking)
+	if g == "" {
+		t.Fatal("empty glyph")
+	}
+	chip := formatMemberChip(workspace.Member{
+		Name: "bot", Kind: workspace.KindAgent,
+		Status: workspace.AvailWaiting, StatusNote: "need human",
+	})
+	if !strings.Contains(chip, "bot") {
+		t.Fatalf("chip=%q", chip)
+	}
+	// Note should appear for waiting
+	if !strings.Contains(chip, "need human") {
+		t.Fatalf("expected note in chip: %q", chip)
 	}
 }
 

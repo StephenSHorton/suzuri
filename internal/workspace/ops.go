@@ -21,6 +21,7 @@ const (
 	OpHistory       Op = "history"
 	OpUpload        Op = "upload"
 	OpDownload      Op = "download"
+	OpSetStatus     Op = "set_status" // member availability (idle|working|waiting|blocked|away)
 )
 
 // Request is the unified workspace RPC body.
@@ -39,6 +40,11 @@ type Request struct {
 	FilePath string `json:"file_path,omitempty"`
 	// FileID is a stored file id (or message id) for download.
 	FileID string `json:"file_id,omitempty"`
+	// Status is availability for OpSetStatus (idle|working|waiting|blocked|away|custom).
+	Status string `json:"status,omitempty"`
+	// StatusNote is optional free text for OpSetStatus.
+	// Nil = leave note unchanged; non-nil (incl. empty) = set/clear.
+	StatusNote *string `json:"status_note,omitempty"`
 }
 
 // Result is a JSON-friendly workspace response.
@@ -93,6 +99,13 @@ func Apply(s *Store, req Request) Result {
 			return Result{OK: false, Path: path, Error: err.Error()}
 		}
 		return Result{OK: true, Path: path}
+
+	case OpSetStatus:
+		m, err := s.SetStatus(req.MemberID, req.Name, Availability(req.Status), req.StatusNote)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Member: &m}
 
 	case OpMembers:
 		list, err := s.Members()

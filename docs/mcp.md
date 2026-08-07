@@ -37,7 +37,8 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | `workspace_status` | Shared workspace path + channel/member counts (offline OK) |
 | `workspace_join` | Register as agent/human in the shared workspace |
 | `workspace_leave` | Leave workspace |
-| `workspace_members` | List members |
+| `workspace_set_status` | Publish availability: `idle` / `working` / `waiting` / `blocked` / `away` (+ optional note) |
+| `workspace_members` | List members (includes `status` + `status_note`) |
 | `workspace_channels` | List channels |
 | `workspace_channel_create` | Create a channel |
 | `workspace_channel_delete` | Delete a channel + history + files (not #general) |
