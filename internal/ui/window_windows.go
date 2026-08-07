@@ -217,14 +217,12 @@ type winUI struct {
 	// layoutSettlePosted coalesces deferred post-resize layout messages.
 	layoutSettlePosted bool
 	// layoutDeferred: ConPTY resize needed but panes are mid-stream (dual Grok).
-	// Paint-only relayout runs now; full settle when I/O is quiet (or after
-	// layoutDeferMaxWait). Paint must not re-post settle every frame while set.
+	// Paint-only relayout runs now; full settle only when I/O is quiet.
+	// Paint must not re-post settle every frame while set.
 	layoutDeferred bool
-	// layoutDeferredAt is when layoutDeferred first became true (for max wait).
+	// layoutDeferredAt is when layoutDeferred first became true (for max-wait
+	// paint-only refresh; never forces ConPTY under load).
 	layoutDeferredAt time.Time
-	// layoutForceSettle: blink max-wait asks applyLayoutAfterSizeMove to resize
-	// even if I/O is still hot (split reflow under sustained dual Grok).
-	layoutForceSettle bool
 	// saveFinishPosted / saveNeedFontLayout: deferred settings-save cleanup.
 	saveFinishPosted   bool
 	saveNeedFontLayout bool
@@ -2124,17 +2122,25 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.chromeDirty = true
 				u.syncChrome()
 			}
-			// Flush a deferred ConPTY settle when I/O is quiet, or force after
-			// layoutDeferMaxWait so split/window resize still reflows under Grok.
+			// Flush deferred ConPTY settle only when I/O is quiet.
+			// Max-wait under load: paint-only reflow (never ResizePseudoConsole
+			// mid-stream — force=true hard-killed 0.9.82 under Grok).
 			// At most every N blink ticks so we don't thrash PostMessage.
 			if u.layoutDeferred && u.spinTick%uint64(tabSpinEveryNTicks*4) == 0 {
-				force := !u.layoutDeferredAt.IsZero() &&
-					time.Since(u.layoutDeferredAt) >= layoutDeferMaxWait
-				if force || !u.anyPaneConPtyBusy() {
-					if force {
-						u.layoutForceSettle = true
-					}
+				if !u.anyPaneConPtyBusy() {
 					u.postLayoutSettle()
+				} else if !u.layoutDeferredAt.IsZero() &&
+					time.Since(u.layoutDeferredAt) >= layoutDeferMaxWait {
+					u.relayoutActivePaintOnly()
+					u.requestPaint()
+					// Re-arm max-wait so we keep refreshing paint, not ConPTY.
+					u.layoutDeferredAt = time.Now()
+					if u.spinTick%64 == 0 {
+						log.Info("layout max-wait paint-only (still busy, skip ConPTY)",
+							"w", u.width, "h", u.height, "panes", u.trailPaneSummary())
+						applog.Trail("layout max-wait paint-only",
+							"w", u.width, "h", u.height, "panes", u.trailPaneSummary())
+					}
 				}
 			}
 			// Paint policy (macOS input-only parity):
@@ -3800,18 +3806,43 @@ func (u *winUI) clearLayoutDeferred() {
 	}
 	u.layoutDeferred = false
 	u.layoutDeferredAt = time.Time{}
-	u.layoutForceSettle = false
+}
+
+// trailPaneSummary is a compact pane state string for durable crash trails.
+func (u *winUI) trailPaneSummary() string {
+	if u == nil {
+		return ""
+	}
+	var b strings.Builder
+	for i, t := range u.allPanes() {
+		if t == nil {
+			continue
+		}
+		if i > 0 {
+			b.WriteByte(';')
+		}
+		fmt.Fprintf(&b, "t%d:alive=%v,alt=%v,hot=%v,sz=%dx%d",
+			t.id, t.alive.Load(), t.altScreen(), paneHasRecentIO(t, conPtyIOQuiet),
+			t.lastCols, t.lastRows)
+	}
+	return b.String()
 }
 
 // onAltScreenToggled reflows when a TUI enters/leaves alt-screen (bar hide/show
 // changes usable rows). Paint-only while panes stream; ConPTY settle when idle
-// (or forced after layoutDeferMaxWait) so dual Grok does not hard-crash.
+// so dual Grok does not hard-crash.
 func (u *winUI) onAltScreenToggled(t *tab) {
 	if u == nil {
 		return
 	}
 	u.relayoutActivePaintOnly()
-	if u.anyPaneConPtyBusy() {
+	busy := u.anyPaneConPtyBusy()
+	applog.Trail("alt-screen toggle",
+		"tab", tabIDOrNeg(t),
+		"busy", busy,
+		"panes", u.trailPaneSummary(),
+	)
+	if busy {
 		u.markLayoutDeferred()
 		if t != nil {
 			log.Debug("alt screen: paint-only, ConPTY settle deferred", "tab", t.id)
@@ -3820,6 +3851,13 @@ func (u *winUI) onAltScreenToggled(t *tab) {
 		u.postLayoutSettle()
 	}
 	u.requestPaint()
+}
+
+func tabIDOrNeg(t *tab) int {
+	if t == nil {
+		return -1
+	}
+	return t.id
 }
 
 // relayoutActivePaintOnly recomputes leaf geometry (bars/titles) for the active
@@ -3864,22 +3902,24 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 		return
 	}
 	// If panes are mid-stream (dual Grok), paint-only and try again later —
-	// never ResizePseudoConsole under load unless forced after max wait.
+	// never ResizePseudoConsole under load (force-under-load hard-killed 0.9.82).
 	// Do not requestPaint here: the paint path used to re-post settle every
 	// frame → log flood → crash.
-	force := u.layoutForceSettle
-	if !force && u.anyPaneConPtyBusy() {
+	if u.anyPaneConPtyBusy() {
 		u.markLayoutDeferred()
 		u.relayoutActivePaintOnly()
 		u.layoutSettlePosted = false // allow blink to re-post when idle
 		if u.spinTick%32 == 0 {
 			log.Debug("layout settle deferred (pane busy)", "w", w, "h", h)
+			applog.Trail("layout settle deferred", "w", w, "h", h, "panes", u.trailPaneSummary())
 		}
 		return
 	}
 
 	log.Info("layout settle begin", "w", w, "h", h, "cols", u.cols, "rows", u.rows,
-		"force", force)
+		"force", false, "panes", u.trailPaneSummary())
+	applog.Trail("layout settle begin", "w", w, "h", h, "cols", u.cols, "rows", u.rows,
+		"panes", u.trailPaneSummary())
 	applog.Sync()
 
 	// Prefer last-known cell metrics; remeasure if we have a window DC.
@@ -3908,10 +3948,12 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 
 	// Apply including alt-screen TUIs so split/window resize reflows Grok.
 	// Coalesced settle + same-size no-op prevent ResizePseudoConsole storms.
+	// Only reached when no pane has recent PTY I/O.
 	u.applyClientSize(w, h)
 	u.clearLayoutDeferred()
 	log.Info("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows,
 		"deferred", u.layoutDeferred)
+	applog.Trail("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
 	applog.Sync()
 
 	if u.alive.Load() {

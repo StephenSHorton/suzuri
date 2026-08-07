@@ -12,6 +12,8 @@ import (
 	"sync"
 
 	"github.com/UserExistsError/conpty"
+
+	"github.com/StephenSHorton/suzuri/internal/applog"
 )
 
 // Session is a live shell attached to a Windows ConPTY.
@@ -262,7 +264,15 @@ func (s *Session) Resize(cols, rows int) error {
 	}
 	s.resizeMu.Lock()
 	defer s.resizeMu.Unlock()
-	return s.cpty.Resize(cols, rows)
+	// Breadcrumb around the native call: hard deaths leave no Go panic trail.
+	applog.Trail("conpty.Resize enter", "cols", cols, "rows", rows, "pid", s.cpty.Pid())
+	err := s.cpty.Resize(cols, rows)
+	if err != nil {
+		applog.Trail("conpty.Resize fail", "cols", cols, "rows", rows, "err", err)
+	} else {
+		applog.Trail("conpty.Resize leave", "cols", cols, "rows", rows)
+	}
+	return err
 }
 
 // Pid of the attached console process.

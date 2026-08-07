@@ -35,8 +35,9 @@ const (
 	// Dual alt-screen Grok + mid-stream resize hard-crashes the Windows host
 	// (no Go panic). Title spinners alone must NOT block forever — only bytes.
 	conPtyIOQuiet = 300 * time.Millisecond
-	// layoutDeferMaxWait: after this, force settle even if I/O is still hot so
-	// split/window resize reflows (avoids permanent letterbox under Grok).
+	// layoutDeferMaxWait: after this, re-run paint-only layout so chrome/bars
+	// reflow under sustained Grok. NEVER force ResizePseudoConsole while I/O
+	// is hot — that force path was still hard-killing the host (0.9.82).
 	layoutDeferMaxWait = 1500 * time.Millisecond
 
 	cellW = 9

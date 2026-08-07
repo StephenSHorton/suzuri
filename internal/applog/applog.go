@@ -24,6 +24,14 @@ var (
 	file *os.File
 	// Path is the active log file, if any.
 	Path string
+
+	// trail is a tiny durable breadcrumb file (synced every write) so native
+	// hard deaths that skip Go's logger still leave a last-op trail.
+	trail   *os.File
+	// TrailPath is the breadcrumb file, if open.
+	TrailPath string
+	// CrashPath is where runtime fatal output (panic/throw) is mirrored.
+	CrashPath string
 )
 
 // Init opens the log file, sets the package default Charm logger, and returns
@@ -46,6 +54,10 @@ func Init() (string, error) {
 	file = f
 	Path = path
 
+	// Durable trail + runtime crash output (best-effort; never fail Init).
+	openTrailLocked(dir)
+	openCrashOutputLocked(dir)
+
 	level := log.InfoLevel
 	if v := strings.TrimSpace(os.Getenv("SUZURI_LOG_LEVEL")); v != "" {
 		if lv, perr := log.ParseLevel(v); perr == nil {
@@ -63,6 +75,37 @@ func Init() (string, error) {
 	}
 	setup(w, level)
 	return path, nil
+}
+
+func openTrailLocked(dir string) {
+	tp := filepath.Join(dir, "suzuri-trail.log")
+	tf, err := os.OpenFile(tp, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	trail = tf
+	TrailPath = tp
+}
+
+func openCrashOutputLocked(dir string) {
+	cp := filepath.Join(dir, "suzuri-crash.txt")
+	cf, err := os.OpenFile(cp, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	// runtime/debug.SetCrashOutput duplicates the fd; we keep cf open for Sync.
+	if err := debug.SetCrashOutput(cf, debug.CrashOptions{}); err != nil {
+		_ = cf.Close()
+		return
+	}
+	CrashPath = cp
+	// Keep the file open via trail-adjacent note — store on trail's sibling by
+	// writing a startup marker (cf is owned by runtime after SetCrashOutput
+	// but we still hold our handle for the path record).
+	_ = cf // fd duplicated; leaving open is fine for append lifecycle
+	_, _ = fmt.Fprintf(cf, "\n--- crash-output open pid=%d t=%s ---\n",
+		os.Getpid(), time.Now().Format(time.RFC3339))
+	_ = cf.Sync()
 }
 
 func dataDir() (string, error) {
@@ -139,6 +182,36 @@ func Sync() {
 	if file != nil {
 		_ = file.Sync()
 	}
+	if trail != nil {
+		_ = trail.Sync()
+	}
+}
+
+// Trail writes a single durable breadcrumb line and fsyncs. Use immediately
+// before/after native-risk ops (ConPTY ResizePseudoConsole, full layout settle).
+// Format: RFC3339 pid=N where msg key=val...
+// Never panics; safe from any goroutine.
+func Trail(where string, kvs ...any) {
+	mu.Lock()
+	defer mu.Unlock()
+	if trail == nil {
+		return
+	}
+	var b strings.Builder
+	b.WriteString(time.Now().Format(time.RFC3339))
+	b.WriteString(" pid=")
+	b.WriteString(fmt.Sprint(os.Getpid()))
+	b.WriteByte(' ')
+	b.WriteString(where)
+	for i := 0; i+1 < len(kvs); i += 2 {
+		b.WriteByte(' ')
+		b.WriteString(fmt.Sprint(kvs[i]))
+		b.WriteByte('=')
+		b.WriteString(fmt.Sprint(kvs[i+1]))
+	}
+	b.WriteByte('\n')
+	_, _ = trail.WriteString(b.String())
+	_ = trail.Sync()
 }
 
 // Close flushes and closes the log file.
@@ -149,6 +222,11 @@ func Close() {
 		_ = file.Sync()
 		_ = file.Close()
 		file = nil
+	}
+	if trail != nil {
+		_ = trail.Sync()
+		_ = trail.Close()
+		trail = nil
 	}
 }
 

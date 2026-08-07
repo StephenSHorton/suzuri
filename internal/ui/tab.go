@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/hinshun/vt10x"
 
+	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/host"
 )
 
@@ -517,6 +518,16 @@ func (t *tab) resize(cols, rows int) {
 	if cols == t.lastCols && rows == t.lastRows && t.lastCols > 0 {
 		return
 	}
+	alt := t.altScreen()
+	hot := paneHasRecentIO(t, conPtyIOQuiet)
+	applog.Trail("tab.resize",
+		"tab", t.id,
+		"from", fmt.Sprintf("%dx%d", t.lastCols, t.lastRows),
+		"to", fmt.Sprintf("%dx%d", cols, rows),
+		"alt", alt,
+		"hotIO", hot,
+		"ok", t.conPtyResizeOK(),
+	)
 	if t.term != nil {
 		t.term.Resize(cols, rows)
 	}

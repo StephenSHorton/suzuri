@@ -69,6 +69,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "suzuri: log init: %v (continuing with stderr)\n", err)
 	} else {
 		log.Info("logging to file", "path", path)
+		if applog.TrailPath != "" {
+			log.Info("crash trail", "path", applog.TrailPath)
+		}
+		if applog.CrashPath != "" {
+			log.Info("runtime crash output", "path", applog.CrashPath)
+		}
 	}
 
 	switch runtime.GOOS {
