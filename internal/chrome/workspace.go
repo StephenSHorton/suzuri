@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/StephenSHorton/suzuri/internal/textedit"
 	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
 
@@ -327,6 +328,22 @@ func (m *Model) workspaceCycleChannel(delta int) {
 	m.reloadWorkspaceFromDisk()
 }
 
+func (m *Model) wsComposeSnapshot() textedit.Snapshot {
+	rs := []rune(m.wsCompose)
+	return textedit.Snapshot{Text: rs, Cursor: len(rs), Sel: -1}
+}
+
+func (m *Model) wsPushUndo() {
+	if m.wsHist == nil {
+		m.wsHist = textedit.NewHistory(100)
+	}
+	m.wsHist.Push(m.wsComposeSnapshot())
+}
+
+func (m *Model) wsApplyCompose(s textedit.Snapshot) {
+	m.wsCompose = string(s.Text)
+}
+
 func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 	msgRows := m.workspaceMsgRows()
 	switch msg.String() {
@@ -335,11 +352,26 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 			m.wsMode = wsModeCompose
 			m.wsCompose = ""
 			m.wsStatus = ""
+			if m.wsHist != nil {
+				m.wsHist.Clear()
+			}
 			return
 		}
 		m.closeWorkspace()
 	case "ctrl+c":
 		m.closeWorkspace()
+	case "ctrl+z":
+		if m.wsHist != nil {
+			if prev, ok := m.wsHist.Undo(m.wsComposeSnapshot()); ok {
+				m.wsApplyCompose(prev)
+			}
+		}
+	case "ctrl+y", "ctrl+shift+z":
+		if m.wsHist != nil {
+			if next, ok := m.wsHist.Redo(m.wsComposeSnapshot()); ok {
+				m.wsApplyCompose(next)
+			}
+		}
 	case "enter":
 		switch m.wsMode {
 		case wsModeNewChannel:
@@ -361,10 +393,16 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 		m.wsMode = wsModeNewChannel
 		m.wsCompose = ""
 		m.wsStatus = "new channel name"
+		if m.wsHist != nil {
+			m.wsHist.Clear()
+		}
 	case "ctrl+f":
 		m.wsMode = wsModeAttach
 		m.wsCompose = ""
 		m.wsStatus = "path to attach"
+		if m.wsHist != nil {
+			m.wsHist.Clear()
+		}
 	case "ctrl+d":
 		m.workspaceDeleteCurrentChannel()
 	case "ctrl+r":
@@ -399,19 +437,28 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 		}
 	case "backspace":
 		if m.wsCompose != "" {
+			m.wsPushUndo()
 			rs := []rune(m.wsCompose)
 			m.wsCompose = string(rs[:len(rs)-1])
 		}
 	case "ctrl+u":
-		m.wsCompose = ""
+		if m.wsCompose != "" {
+			m.wsPushUndo()
+			m.wsCompose = ""
+		}
 	default:
 		if msg.Type == tea.KeyRunes {
+			var added bool
 			for _, r := range msg.Runes {
 				if r == '\n' || r == '\r' {
 					continue
 				}
 				if utf8.RuneCountInString(m.wsCompose) >= wsComposeMax {
 					break
+				}
+				if !added {
+					m.wsPushUndo()
+					added = true
 				}
 				m.wsCompose += string(r)
 			}

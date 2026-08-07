@@ -1,15 +1,20 @@
 package chrome
 
-import "sync"
+import (
+	"runtime"
+	"sync"
+)
 
-// Key glyph mode: prefer compact Unicode (⌃⇧) when the host font has them;
-// otherwise fall back to ASCII "Ctrl+" / "Shift+" so we never show □.
+// Key glyph mode: prefer compact Unicode (⌃⇧⌘) when the host font has them;
+// otherwise fall back to ASCII "Ctrl+" / "Cmd+" / "Shift+" so we never show □.
 //
-// The UI probes the active HFONT (GetGlyphIndicesW) and calls SetKeyGlyphSupport.
+// Primary modifier is platform-aware: macOS → Cmd/⌘, Windows/Linux → Ctrl/⌃.
+// The UI probes the active font (GetGlyphIndicesW / Core Text) and calls
+// SetKeyGlyphSupport.
 
 var (
 	keyMu     sync.RWMutex
-	keyFancy  bool // ⌃ ⇧ available
+	keyFancy  bool // ⌃ ⇧ ⌘ available
 	keyArrows bool // ↑ ↓ available
 )
 
@@ -34,13 +39,42 @@ func keyArrowsOn() bool {
 	return keyArrows
 }
 
+func isDarwin() bool { return runtime.GOOS == "darwin" }
+
+// primaryMod is the host "command" key: Cmd on macOS, Ctrl elsewhere.
+func primaryMod() string {
+	if isDarwin() {
+		if keyFancyOn() {
+			return "⌘"
+		}
+		return "Cmd+"
+	}
+	if keyFancyOn() {
+		return "⌃"
+	}
+	return "Ctrl+"
+}
+
+// primaryShift is primary+Shift (⌘⇧ / Cmd+Shift+ / ⌃⇧ / Ctrl+Shift+).
+func primaryShift() string {
+	if isDarwin() {
+		if keyFancyOn() {
+			return "⌘⇧"
+		}
+		return "Cmd+Shift+"
+	}
+	if keyFancyOn() {
+		return "⌃⇧"
+	}
+	return "Ctrl+Shift+"
+}
+
 // --- Labeled chords used in help, splash, and host placeholder ---
 
+// KeyCtrl labels the platform primary modifier + key (Cmd on macOS, Ctrl else).
+// Named KeyCtrl for historical call sites; the string is platform-correct.
 func KeyCtrl(s string) string {
-	if keyFancyOn() {
-		return "⌃" + s
-	}
-	return "Ctrl+" + s
+	return primaryMod() + s
 }
 
 func KeyShift(s string) string {
@@ -51,10 +85,32 @@ func KeyShift(s string) string {
 }
 
 func KeyCtrlShift(s string) string {
-	if keyFancyOn() {
-		return "⌃⇧" + s
+	return primaryShift() + s
+}
+
+// KeyAlt is Option on macOS, Alt elsewhere.
+func KeyAlt(s string) string {
+	if isDarwin() {
+		if keyFancyOn() {
+			return "⌥" + s
+		}
+		return "Opt+" + s
 	}
-	return "Ctrl+Shift+" + s
+	return "Alt+" + s
+}
+
+// KeyCtrlAlt is Cmd+Opt on macOS, Ctrl+Alt elsewhere.
+func KeyCtrlAlt(s string) string {
+	if isDarwin() {
+		if keyFancyOn() {
+			return "⌘⌥" + s
+		}
+		return "Cmd+Opt+" + s
+	}
+	if keyFancyOn() {
+		return "⌃⎇" + s
+	}
+	return "Ctrl+Alt+" + s
 }
 
 func KeyUpDown() string {

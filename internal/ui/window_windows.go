@@ -77,7 +77,12 @@ func Run() error {
 		chrome:     chrome.New(cols),
 		caffeine:   caffeine.New(),
 	}
+	// Caffeine on by default so long sessions don't sleep under the user.
+	if ui.caffeine != nil {
+		_ = ui.caffeine.Activate(0)
+	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
+	ui.chrome = syncCaffeineChrome(ui.chrome, ui.caffeine)
 	if bank, err := chrome.LoadNotesBank(); err != nil {
 		log.Warn("notes load failed; using empty bank", "err", err)
 	} else {
@@ -2482,6 +2487,31 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if u.chrome.OverlayOpen() {
 			// Notes clipboard + bank shortcuts need host (CF_UNICODETEXT / chords).
 			if u.chrome.NotesOpen && ctrl && !alt {
+				// Undo / redo before the !shift gate (redo uses Shift+Z).
+				if wParam == 'Z' || wParam == 'z' {
+					m := u.chrome
+					if shift {
+						_ = m.NotesRedo()
+					} else {
+						_ = m.NotesUndo()
+					}
+					u.chrome = m
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+					u.persistNotesIfDirty()
+					return 0
+				}
+				if !shift && (wParam == 'Y' || wParam == 'y') {
+					m := u.chrome
+					_ = m.NotesRedo()
+					u.chrome = m
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+					u.persistNotesIfDirty()
+					return 0
+				}
 				if !shift {
 					switch wParam {
 					case 'C', 'c':
@@ -2766,6 +2796,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if (ctrl && !shift && (wParam == 'V' || wParam == 'v')) ||
 				(shift && !ctrl && wParam == win.VK_INSERT) {
 				u.pasteClipboard()
+				return 0
+			}
+			// Escape: ignore auto-repeat (lParam bit 30 = previous key state).
+			// Hold-Esc after notes/palette dismiss must not flood the PTY.
+			if wParam == win.VK_ESCAPE && (lParam&(1<<30)) != 0 {
 				return 0
 			}
 			if b := ptyKeyFromWin(tab.term, &tab.kitty, wParam, ctrl, shift, alt); len(b) > 0 {

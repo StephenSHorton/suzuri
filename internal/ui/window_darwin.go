@@ -58,7 +58,12 @@ func Run() error {
 		mcpJobs:    make(chan mcpJob, 8),
 		caffeine:   caffeine.New(),
 	}
+	// Caffeine on by default so long sessions don't sleep under the user.
+	if ui.caffeine != nil {
+		_ = ui.caffeine.Activate(0)
+	}
 	ui.chrome = ui.chrome.UpdateChrome(chrome.SyncConfigMsg{Config: cfg}).Model
+	ui.chrome = syncCaffeineChrome(ui.chrome, ui.caffeine)
 	if bank, err := chrome.LoadNotesBank(); err != nil {
 		log.Warn("notes load failed; using empty bank", "err", err)
 	} else {
@@ -2071,6 +2076,18 @@ func (u *macUI) handleKeys() {
 		// ⌘⌥ is pane focus (above); Option/Ctrl+arrows word-jump via encodeArrow.
 		super := meta
 		opt := alt // Option+arrows → CSI Alt (Grok word jump)
+		// Escape: JustPressed only — never hold-repeat into the PTY.
+		// Holding Esc after notes/palette dismiss used to leak ESC into Grok.
+		if inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
+			if b := ptyKeyFromEbiten(tab.term, &tab.kitty, ebiten.KeyEscape, realCtrl, shift, opt, super); len(b) > 0 {
+				if t := u.activeTab(); t != nil {
+					t.sendKey(b)
+				} else {
+					u.sendKey(b)
+				}
+			}
+			return
+		}
 		if !shift && inpututil.IsKeyJustPressed(ebiten.KeyC) {
 			if realCtrl && !super {
 				if !tab.sel.empty() {
@@ -2435,8 +2452,11 @@ func (u *macUI) handleNotesNavKeys(now time.Time, realCtrl, meta, alt, shift boo
 	return false
 }
 
+// specialKeys are hold-to-repeat keys for alt-screen apps.
+// Escape is intentionally omitted — it is sent once on JustPressed only
+// so dismissing notes/palette never auto-repeats ESC into the PTY.
 var specialKeys = []ebiten.Key{
-	ebiten.KeyEnter, ebiten.KeyEscape, ebiten.KeyTab, ebiten.KeyBackspace,
+	ebiten.KeyEnter, ebiten.KeyTab, ebiten.KeyBackspace,
 	ebiten.KeyDelete, ebiten.KeyInsert, ebiten.KeyHome, ebiten.KeyEnd,
 	ebiten.KeyPageUp, ebiten.KeyPageDown,
 	ebiten.KeyArrowUp, ebiten.KeyArrowDown, ebiten.KeyArrowLeft, ebiten.KeyArrowRight,
@@ -2621,6 +2641,29 @@ func teaKeyFromEbiten(ctrl, shift, alt bool, rep *keyRepeat, now time.Time) *tea
 // handleNotesHostChord processes Ctrl/Cmd chords that need the host clipboard
 // or explicit tea.KeyCtrl* messages. Returns true if the chord was handled.
 func (u *macUI) handleNotesHostChord(shift bool) bool {
+	// Undo / redo (Cmd+Z / Cmd+Shift+Z / Cmd+Y) — allow shift for redo.
+	if inpututil.IsKeyJustPressed(ebiten.KeyZ) {
+		m := u.chrome
+		if shift {
+			_ = m.NotesRedo()
+		} else {
+			_ = m.NotesUndo()
+		}
+		u.chrome = m
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
+	if !shift && inpututil.IsKeyJustPressed(ebiten.KeyY) {
+		m := u.chrome
+		_ = m.NotesRedo()
+		u.chrome = m
+		u.overlayDirty = true
+		u.overlayCells = nil
+		u.persistNotesIfDirty()
+		return true
+	}
 	if shift {
 		return false
 	}

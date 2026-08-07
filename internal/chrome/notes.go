@@ -9,6 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/StephenSHorton/suzuri/internal/textedit"
 )
 
 // Notes: two screens — full list, then full editor (Esc back to list).
@@ -99,6 +101,58 @@ func (m *Model) initNotesBank(bank NotesBank) {
 	m.loadActiveNoteIntoEditor()
 }
 
+func (m *Model) notesSnapshot() textedit.Snapshot {
+	return textedit.Snapshot{
+		Text:   append([]rune(nil), m.notesRunes...),
+		Cursor: m.notesCursor,
+		Sel:    m.notesSel,
+	}
+}
+
+func (m *Model) notesPushUndo() {
+	if m.notesHist == nil {
+		m.notesHist = textedit.NewHistory(200)
+	}
+	m.notesHist.Push(m.notesSnapshot())
+}
+
+func (m *Model) notesApplySnapshot(s textedit.Snapshot) {
+	m.notesRunes = append([]rune(nil), s.Text...)
+	m.notesCursor = s.Cursor
+	m.notesSel = s.Sel
+	m.notesClampCursor()
+	m.notesDirty = true
+	m.notesEnsureCursorVisible(0)
+}
+
+func (m *Model) notesUndo() bool {
+	if m.notesHist == nil {
+		return false
+	}
+	prev, ok := m.notesHist.Undo(m.notesSnapshot())
+	if !ok {
+		return false
+	}
+	m.notesApplySnapshot(prev)
+	return true
+}
+
+func (m *Model) notesRedo() bool {
+	if m.notesHist == nil {
+		return false
+	}
+	next, ok := m.notesHist.Redo(m.notesSnapshot())
+	if !ok {
+		return false
+	}
+	m.notesApplySnapshot(next)
+	return true
+}
+
+// NotesUndo / NotesRedo are host-facing (Cmd/Ctrl+Z / Shift+Z / Y).
+func (m *Model) NotesUndo() bool { return m.notesUndo() }
+func (m *Model) NotesRedo() bool { return m.notesRedo() }
+
 func (m *Model) loadActiveNoteIntoEditor() {
 	if len(m.notesBank) == 0 {
 		m.notesBank = []NoteDoc{newNoteDoc("Scratch", "")}
@@ -111,6 +165,9 @@ func (m *Model) loadActiveNoteIntoEditor() {
 	m.notesCursor = len(m.notesRunes)
 	m.notesSel = -1
 	m.notesScroll = 0
+	if m.notesHist != nil {
+		m.notesHist.Clear()
+	}
 }
 
 // flushActiveNote writes the editor buffer into notesBank[active].
@@ -471,7 +528,18 @@ func (m *Model) notesApplyMultiClick(idx, clickCount int) {
 }
 
 // notesDeleteSel removes the selection if any. Returns true if it did.
+// Pushes undo before the mutation.
 func (m *Model) notesDeleteSel() bool {
+	if !m.notesHasSel() {
+		return false
+	}
+	m.notesPushUndo()
+	return m.notesDeleteSelNoUndo()
+}
+
+// notesDeleteSelNoUndo is used when the caller already pushed undo
+// (e.g. notesInsert replaces selection as one edit).
+func (m *Model) notesDeleteSelNoUndo() bool {
 	if !m.notesHasSel() {
 		return false
 	}
@@ -606,6 +674,12 @@ func (m *Model) handleNotesEditorKey(msg tea.KeyMsg) {
 	case "ctrl+n":
 		m.notesNew()
 		return
+	case "ctrl+z":
+		_ = m.notesUndo()
+		return
+	case "ctrl+y", "ctrl+shift+z":
+		_ = m.notesRedo()
+		return
 	case "ctrl+a":
 		if len(m.notesRunes) == 0 {
 			m.notesSel = -1
@@ -630,13 +704,15 @@ func (m *Model) handleNotesEditorKey(msg tea.KeyMsg) {
 		m.notesInsert("\t")
 		return
 	case "backspace":
-		if m.notesDeleteSel() {
+		if m.notesHasSel() {
+			_ = m.notesDeleteSel()
 			return
 		}
 		m.notesBackspace()
 		return
 	case "delete", "ctrl+d":
-		if m.notesDeleteSel() {
+		if m.notesHasSel() {
+			_ = m.notesDeleteSel()
 			return
 		}
 		m.notesDelete()
@@ -838,7 +914,8 @@ func (m *Model) NotesDeleteWord(dir int) {
 }
 
 func (m *Model) notesDeleteWord(dir int) {
-	if m.notesDeleteSel() {
+	if m.notesHasSel() {
+		_ = m.notesDeleteSel()
 		return
 	}
 	cur := m.notesCursor
@@ -852,6 +929,7 @@ func (m *Model) notesDeleteWord(dir int) {
 	if lo >= hi {
 		return
 	}
+	m.notesPushUndo()
 	m.notesRunes = append(m.notesRunes[:lo], m.notesRunes[hi:]...)
 	m.notesCursor = lo
 	m.notesSel = -1
@@ -863,7 +941,8 @@ func (m *Model) notesInsert(s string) {
 	if s == "" {
 		return
 	}
-	_ = m.notesDeleteSel()
+	m.notesPushUndo()
+	_ = m.notesDeleteSelNoUndo()
 	rs := []rune(s)
 	if len(m.notesRunes)+len(rs) > notesMaxRunes {
 		room := notesMaxRunes - len(m.notesRunes)
@@ -894,6 +973,7 @@ func (m *Model) notesBackspace() {
 	if m.notesCursor <= 0 {
 		return
 	}
+	m.notesPushUndo()
 	i := m.notesCursor
 	m.notesRunes = append(m.notesRunes[:i-1], m.notesRunes[i:]...)
 	m.notesCursor = i - 1
@@ -906,6 +986,7 @@ func (m *Model) notesDelete() {
 	if m.notesCursor >= len(m.notesRunes) {
 		return
 	}
+	m.notesPushUndo()
 	i := m.notesCursor
 	m.notesRunes = append(m.notesRunes[:i], m.notesRunes[i+1:]...)
 	m.notesSel = -1
@@ -1320,9 +1401,10 @@ func (m Model) renderNotesContextKeys(mainWidth, windowCols int) string {
 			{"Esc", "Back to list"},
 			{"↑ (top) / F2 / click title", "Edit name (above divider)"},
 			{"Click · drag", "Place caret · select"},
+			{KeyCtrl("Z") + " / " + KeyCtrlShift("Z"), "Undo / redo"},
 			{KeyCtrl("A"), "Select all"},
 			{KeyCtrl("C") + " / " + KeyCtrl("X") + " / " + KeyCtrl("V"), "Copy / cut / paste"},
-			{"⌥/Ctrl+←→", "Word jump"},
+			{KeyAlt("←→") + " · word", "Word jump"},
 			{"Tab", "Insert tab"},
 			{KeyCtrlShift("M"), "Hide notes"},
 		}

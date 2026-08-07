@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/textedit"
 	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
 
@@ -78,6 +79,8 @@ type Model struct {
 	notesScroll int
 	notesWrapW  int
 	notesDirty  bool
+	// notesHist is undo/redo for the body editor (shared textedit package).
+	notesHist *textedit.History
 	// notesLayout is filled by renderNotes for host click hit-testing.
 	notesLayout notesLayout
 	// Shared workspace panel (channels + messages; disk under …/workspace/).
@@ -90,6 +93,8 @@ type Model struct {
 	wsStatus    string
 	wsHumanName string
 	wsMode      wsInputMode
+	// wsHist is undo/redo for the compose line (shared with notes).
+	wsHist *textedit.History
 	// wsVP is a Charm viewport used sync-only (SetContent/View/Scroll*; no tea.Cmd).
 	wsVP       viewport.Model
 	wsVPInit   bool
@@ -272,11 +277,13 @@ func (i paletteItem) FilterValue() string { return i.title + " " + i.desc }
 func New(width int) Model {
 	cfg := config.Default()
 	m := Model{
-		Width:    width,
-		Height:   TabStripRows(),
-		Status:   "",
-		lastCfg:  cfg,
-		notesSel: -1,
+		Width:     width,
+		Height:    TabStripRows(),
+		Status:    "",
+		lastCfg:   cfg,
+		notesSel:  -1,
+		notesHist: textedit.NewHistory(200),
+		wsHist:    textedit.NewHistory(100),
 	}
 	m.initNotesBank(defaultNotesBank())
 	m.rebuildPalette()

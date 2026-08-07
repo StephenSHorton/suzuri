@@ -122,6 +122,18 @@ type helpSectionBlock struct {
 
 func helpSectionsLeft(colW int) []helpSectionBlock {
 	_ = colW
+	clearLine := KeyCtrl("⌫") + " · Esc"
+	if !isDarwin() {
+		clearLine = "Esc · " + KeyCtrl("U")
+	}
+	openURL := "Ctrl-click"
+	if isDarwin() {
+		if keyFancyOn() {
+			openURL = "⌘-click"
+		} else {
+			openURL = "Cmd-click"
+		}
+	}
 	// Balanced with right (~19 rows compact).
 	return []helpSectionBlock{
 		{
@@ -142,7 +154,7 @@ func helpSectionsLeft(colW int) []helpSectionBlock {
 				{KeyShift("Enter"), "New line"},
 				{KeyUpDown(), "Line / history"},
 				{"→ / Tab", "Accept suggest · complete"},
-				{"⌘⌫ · Esc", "Clear line / to start"},
+				{clearLine, "Clear line / to start"},
 				{KeyCtrl("C"), "Clear / interrupt"},
 				{KeyCtrl("V"), "Paste into bar"},
 			},
@@ -152,7 +164,7 @@ func helpSectionsLeft(colW int) []helpSectionBlock {
 			rows: [][2]string{
 				{KeyCtrlShift("C"), "Copy · dbl-click word · tpl-click line"},
 				{"Wheel", "Scrollback"},
-				{"⌘/Ctrl-click", "Open URL"},
+				{openURL, "Open URL"},
 				{"Hover link", "Highlight"},
 			},
 		},
@@ -161,16 +173,27 @@ func helpSectionsLeft(colW int) []helpSectionBlock {
 
 func helpSectionsRight(colW int) []helpSectionBlock {
 	_ = colW
+	focusPanes := KeyCtrlAlt("arrows")
+	wordJump := KeyAlt("←→")
+	if !isDarwin() {
+		focusPanes = "Alt+arrows"
+		wordJump = "Ctrl+←→"
+	}
+	lineEnds := "Home / End"
+	if isDarwin() {
+		lineEnds = KeyCtrl("←→") + " · Home/End"
+	}
+	zoomInOut := KeyCtrl("+") + " / " + KeyCtrl("-")
+	zoomReset := KeyCtrl("0")
 	return []helpSectionBlock{
 		{
 			title: "Panes",
 			rows: [][2]string{
 				{KeyCtrlShift("D"), "Split right"},
 				{KeyCtrlShift("E"), "Split down"},
-				{"⌘⌥+arrows", "Focus pane (macOS)"},
-				{"Alt+arrows", "Focus pane (Windows)"},
-				{"⌥/Ctrl+←→", "Word jump"},
-				{"⌘←→ · Home/End", "Line ends (macOS)"},
+				{focusPanes, "Focus pane"},
+				{wordJump, "Word jump"},
+				{lineEnds, "Line ends"},
 				{"Hold ←→ / ⌫", "Key repeat"},
 				{"F2", "Rename pane"},
 				{"Double-click", "Rename tab / pane"},
@@ -185,8 +208,8 @@ func helpSectionsRight(colW int) []helpSectionBlock {
 				{KeyCtrl("/"), "Help (this window)"},
 				{KeyCtrlShift("M"), "Notes"},
 				{"☕ top-right", "Toggle caffeine"},
-				{"⌘+/⌘- · Ctrl++/−", "Zoom in / out"},
-				{"⌘0 · Ctrl+0", "Reset zoom"},
+				{zoomInOut, "Zoom in / out"},
+				{zoomReset, "Reset zoom"},
 				{"Esc", "Dismiss overlay"},
 			},
 		},
