@@ -159,13 +159,20 @@ func workspaceEmptyState(width int, channel string) string {
 	if ch == "" {
 		ch = workspace.DefaultChannel
 	}
-	title := lipgloss.NewStyle().Foreground(colText).Bold(true).Render("No messages yet")
-	hint1 := lipgloss.NewStyle().Foreground(colSoft).Render(
+	// Every span sets Background(colPanel) — host skips default-bg cells.
+	title := lipgloss.NewStyle().Foreground(colText).Background(colPanel).Bold(true).Render("No messages yet")
+	hint1 := lipgloss.NewStyle().Foreground(colSoft).Background(colPanel).Render(
 		fmt.Sprintf("Say hello in #%s — humans type below; agents use workspace_post.", ch))
-	hint2 := lipgloss.NewStyle().Foreground(colMute).Render(
+	hint2 := lipgloss.NewStyle().Foreground(colMute).Background(colPanel).Render(
 		"Agents: workspace_join → workspace_set_status → workspace_history → workspace_post")
-	block := title + "\n\n" + hint1 + "\n" + hint2
-	return lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Render(block)
+	blank := lipgloss.NewStyle().Background(colPanel).Width(width).MaxHeight(1).Render("")
+	block := title + "\n" + blank + "\n" + hint1 + "\n" + hint2
+	// placeOpaque so centered empty-state doesn't leave transparent side gutters.
+	var lines []string
+	for _, line := range strings.Split(block, "\n") {
+		lines = append(lines, placeOpaque(width, lipgloss.Center, line, colPanel))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) humanName() string {
@@ -551,8 +558,9 @@ func renderChannelTabs(channels []workspace.Channel, active string, width int) s
 		Padding(0, 1)
 	idleStyle := lipgloss.NewStyle().
 		Foreground(colSoft).
+		Background(colPanel).
 		Padding(0, 1)
-	moreStyle := lipgloss.NewStyle().Foreground(colMute).Padding(0, 1)
+	moreStyle := lipgloss.NewStyle().Foreground(colMute).Background(colPanel).Padding(0, 1)
 
 	// Prefer showing the active channel; pack as many others as fit.
 	type tabItem struct {
@@ -634,7 +642,7 @@ func renderPresenceStrip(members []workspace.Member, width int) string {
 		width = 12
 	}
 	if len(members) == 0 {
-		return lipgloss.NewStyle().Foreground(colMute).Render("no members yet")
+		return lipgloss.NewStyle().Foreground(colMute).Background(colPanel).Render("no members yet")
 	}
 
 	// Sort humans first, then agents; keep stable order otherwise.
@@ -712,7 +720,7 @@ func formatMemberChip(m workspace.Member) string {
 		}
 		chip += " · " + note
 	}
-	return lipgloss.NewStyle().Foreground(color).Render(chip)
+	return lipgloss.NewStyle().Foreground(color).Background(colPanel).Render(chip)
 }
 
 func availabilityStyle(st workspace.Availability) (glyph string, color lipgloss.Color) {
@@ -770,6 +778,10 @@ func renderWorkspaceCard(outerWidth int, title string, body []string, footer str
 
 // formatChatBubble renders a message as a chat-style bubble.
 // Human messages (matching me) sit on the right; agents/others on the left.
+//
+// Fills are always opaque (colPanel): the host treats default-bg VT cells as
+// transparent so rain/shell shows through — never leave bubble guts or side
+// gutters without an explicit panel background.
 func formatChatBubble(msg workspace.Message, width int, me string) []string {
 	if width < 20 {
 		width = 20
@@ -779,6 +791,8 @@ func formatChatBubble(msg workspace.Message, width int, me string) []string {
 	if name == "" {
 		name = "?"
 	}
+	// Solid fill for every bubble cell (same surface as the dialog body).
+	fill := colPanel
 
 	if msg.Kind == "system" {
 		body := strings.ReplaceAll(msg.Body, "\n", " ")
@@ -788,6 +802,7 @@ func formatChatBubble(msg workspace.Message, width int, me string) []string {
 		}
 		return []string{lipgloss.NewStyle().
 			Foreground(colMute).
+			Background(fill).
 			Italic(true).
 			Width(width).
 			Align(lipgloss.Center).
@@ -823,7 +838,12 @@ func formatChatBubble(msg workspace.Message, width int, me string) []string {
 	if msg.FromKind == workspace.KindAgent {
 		label = name + " · ai"
 	}
-	header := lipgloss.NewStyle().Foreground(colSoft).Render(fmt.Sprintf("%s  %s", label, ts))
+	// Nested spans must also set Background — bare Foreground SGR clears fill
+	// on the host paint path (default bg → transparent).
+	header := lipgloss.NewStyle().
+		Foreground(colSoft).
+		Background(fill).
+		Render(fmt.Sprintf("%s  %s", label, ts))
 
 	var bodyLines []string
 	if wl := wrapWords(bodyText, textW); len(wl) > 0 {
@@ -831,27 +851,32 @@ func formatChatBubble(msg workspace.Message, width int, me string) []string {
 	} else {
 		bodyLines = []string{""}
 	}
-	// Body uses theme text; join with unstyled newlines.
-	bodyJoined := strings.Join(bodyLines, "\n")
-	inner := header + "\n" + bodyJoined
+	// Paint body lines with fill so wrap rows stay opaque.
+	for i, bl := range bodyLines {
+		bodyLines[i] = lipgloss.NewStyle().
+			Foreground(colText).
+			Background(fill).
+			Width(textW).
+			MaxHeight(1).
+			Render(bl)
+	}
+	inner := header + "\n" + strings.Join(bodyLines, "\n")
 
 	var borderFg lipgloss.Color
-	var fg lipgloss.Color
 	if mine {
 		borderFg = colPrimary
-		fg = colText
 	} else if msg.FromKind == workspace.KindAgent {
 		borderFg = colCyan
-		fg = colText
 	} else {
 		borderFg = colDim
-		fg = colText
 	}
 
 	bubble := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderFg).
-		Foreground(fg).
+		BorderBackground(fill).
+		Background(fill).
+		Foreground(colText).
 		Padding(0, 1).
 		Width(bubbleW).
 		Render(inner)
@@ -860,8 +885,35 @@ func formatChatBubble(msg workspace.Message, width int, me string) []string {
 	if mine {
 		align = lipgloss.Right
 	}
-	placed := lipgloss.PlaceHorizontal(width, align, bubble)
-	return strings.Split(placed, "\n")
+	// Place with opaque panel padding — lipgloss.PlaceHorizontal uses default-bg
+	// spaces that paint as transparent holes in the modal.
+	return strings.Split(placeOpaque(width, align, bubble, fill), "\n")
+}
+
+// placeOpaque left/right-aligns content within width using Background(fill) pads.
+func placeOpaque(width int, align lipgloss.Position, content string, fill lipgloss.Color) string {
+	cw := lipgloss.Width(content)
+	if width < 1 {
+		width = 1
+	}
+	if cw >= width {
+		return content
+	}
+	pad := width - cw
+	// Width-only render of empty string → pad spaces carrying fill.
+	padStr := lipgloss.NewStyle().Background(fill).Width(pad).MaxHeight(1).Render("")
+	if align == lipgloss.Right {
+		return padStr + content
+	}
+	// Center: split pad; default left for everything else.
+	if align == lipgloss.Center {
+		left := pad / 2
+		right := pad - left
+		l := lipgloss.NewStyle().Background(fill).Width(left).MaxHeight(1).Render("")
+		r := lipgloss.NewStyle().Background(fill).Width(right).MaxHeight(1).Render("")
+		return l + content + r
+	}
+	return content + padStr
 }
 
 func localHumanName() string {
