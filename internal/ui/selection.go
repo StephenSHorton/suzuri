@@ -150,8 +150,10 @@ func (s *cellSel) clear() {
 	s.x0, s.y0, s.x1, s.y1 = 0, 0, 0, 0
 }
 
+// empty is true when there is no active selection. A one-cell selection
+// (single-char word double-click) is non-empty so paint/copy work.
 func (s *cellSel) empty() bool {
-	return !s.active || (s.x0 == s.x1 && s.y0 == s.y1)
+	return !s.active
 }
 
 func (s *cellSel) norm() (minX, minY, maxX, maxY int) {
