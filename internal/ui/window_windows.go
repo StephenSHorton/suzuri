@@ -6145,7 +6145,10 @@ func (u *winUI) ensureOverlayCells() {
 		return
 	}
 	ccols, crows := ct.Size()
-	const maxOverlayRows = 48
+	maxOverlayRows := 48
+	if u.chrome.WorkspaceOpen {
+		maxOverlayRows = 96
+	}
 	if crows > maxOverlayRows {
 		crows = maxOverlayRows
 	}
