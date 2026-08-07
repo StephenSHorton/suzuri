@@ -151,14 +151,14 @@ func TestAvailabilityStyleCodes(t *testing.T) {
 }
 
 func TestWorkspaceDialogWidth(t *testing.T) {
-	// Near-full width: 100 - 2*margin.
+	// 80% of 100 = 80, under max 120.
 	w := workspaceDialogWidth(100)
-	want := 100 - 2*wsMarginCols
-	if w != want {
-		t.Fatalf("workspaceDialogWidth(100)=%d want %d", w, want)
+	if w != 80 {
+		t.Fatalf("workspaceDialogWidth(100)=%d want 80", w)
 	}
-	if workspaceDialogWidth(20) < 28 {
-		// floor at 28 when host is tiny after margin
+	// Huge window: cap at wsMaxOuterW.
+	if got := workspaceDialogWidth(200); got != wsMaxOuterW {
+		t.Fatalf("workspaceDialogWidth(200)=%d want %d", got, wsMaxOuterW)
 	}
 }
 
