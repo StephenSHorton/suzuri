@@ -38,13 +38,15 @@ That does **not** mean Windows is fine overall:
 - CUI child `suzuri-transfer.exe` opening a **second console** (fixed in this PR)
   felt like “suzuri opened another terminal / crashed the UX” even when the host stayed up.
 
-## Recommendations
+## Recommendations (shipped in this PR where possible)
 
 1. **Never force-kill install-dir suzuri from agents** to replace the binary.
-   Prefer side-by-side launch: `.\suzuri-transfer-ux.exe` from the worktree, or
-   close the app from the UI first, then copy.
-2. Keep a single instance when testing (close the other tree’s build).
-3. Ship transfer UX (this PR) so serve no longer pops a console window, and
-   ticket copy works with in-panel **Copied!** feedback.
-4. Continue ConPTY/resize hardening separately when a real trail + dump points at
-   a resize path under alt-screen load.
+   Prefer side-by-side launch with `SUZURI_ALLOW_MULTI=1`, or close the app
+   from the UI first, then copy.
+2. **Single-instance GUI (Windows)** — second launch activates the existing
+   window via `Local\SuzuriTerminalSingleInstance` mutex + `FindWindow`.
+   Override with `SUZURI_ALLOW_MULTI=1`.
+3. Ship transfer UX so serve no longer pops a console window, and ticket copy
+   works with in-panel **Copied!** feedback.
+4. Continue ConPTY/resize hardening when a real trail + dump points at a
+   resize path under alt-screen load (already paint-only under hot I/O on master).
