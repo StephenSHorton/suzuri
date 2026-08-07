@@ -57,11 +57,33 @@ func resignMacExecutable(exePath string) {
 		return
 	}
 	identity := strings.TrimSpace(os.Getenv("SUZURI_CODESIGN_IDENTITY"))
+	// Prefer the current binary's identity (before we clobber it), then .old.
+	if identity == "" {
+		identity = codesignIdentityOf(exePath)
+	}
 	if identity == "" {
 		identity = codesignIdentityOf(exePath + ".old")
 	}
 	if identity == "" {
-		identity = "-" // ad-hoc
+		if app := appBundleRoot(exePath); app != "" {
+			identity = codesignIdentityOf(app)
+		}
+	}
+	if identity == "" {
+		identity = "-" // ad-hoc — last resort; loses Team ID / stable TCC
+	}
+
+	// Never replace a notarized Developer ID seal with ad-hoc: Gatekeeper then
+	// reports “damaged and can’t be opened” (0.9.87 portable-update incident).
+	if identity == "-" {
+		if app := appBundleRoot(exePath); app != "" && appHasDeveloperID(app) {
+			log.Warn("update: skip ad-hoc re-sign of Developer ID app; install .app.zip/.dmg for a full signed update")
+			return
+		}
+		if appHasDeveloperID(exePath) {
+			log.Warn("update: skip ad-hoc re-sign of Developer ID binary")
+			return
+		}
 	}
 
 	// Prefer signing the .app bundle when we live inside Contents/MacOS.
@@ -78,6 +100,11 @@ func resignMacExecutable(exePath string) {
 		return
 	}
 	log.Info("update: re-signed", "target", target, "identity", identity)
+}
+
+func appHasDeveloperID(path string) bool {
+	id := codesignIdentityOf(path)
+	return id != "" && strings.Contains(id, "Developer ID")
 }
 
 func appBundleRoot(exePath string) string {
@@ -123,19 +150,26 @@ func codesignIdentityOf(path string) string {
 }
 
 func runCodesign(identity, identifier, path string) error {
-	args := []string{"--force", "--sign", identity, "--identifier", identifier, "--timestamp"}
-	// Hardened runtime + entitlements for Developer ID (matches packaging/macos/build-app.sh).
+	args := []string{"--force", "--sign", identity, "--identifier", identifier}
+	// Timestamp requires a network identity (not ad-hoc).
+	if identity != "-" {
+		args = append(args, "--timestamp")
+	}
+	// Always attach shipping entitlements when we have them. Portable updates
+	// often re-sign ad-hoc; without --entitlements, audio-input is dropped and
+	// older heals looped forever trying to restore it.
+	ent, cleanup := resolveEntitlementsPlist(path)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if ent != "" {
+		args = append(args, "--entitlements", ent)
+	} else {
+		log.Warn("update: codesign without entitlements — mic/Automation may fail")
+	}
+	// Hardened Runtime for real certs (matches packaging/macos/build-app.sh).
 	if identity != "-" && (strings.HasPrefix(identity, "Developer ID") || strings.Contains(identity, "Developer ID")) {
 		args = append(args, "--options", "runtime")
-		ent, cleanup := resolveEntitlementsPlist(path)
-		if cleanup != nil {
-			defer cleanup()
-		}
-		if ent != "" {
-			args = append(args, "--entitlements", ent)
-		} else {
-			log.Warn("update: codesign without entitlements — mic/Automation may fail")
-		}
 	}
 	if strings.HasSuffix(path, ".app") {
 		args = append(args, "--deep")
