@@ -18,12 +18,14 @@ import (
 const (
 	wsComposeMax   = 2000
 	wsHistoryLimit = 120
-	// Fraction of host terminal used by the workspace modal (width and height).
-	wsModalFrac = 0.80
+	// Horizontal margin (cols each side). Modal content fills the rest.
+	wsMarginCols = 1
+	// Vertical: leave tab strip + small gap; modal uses nearly all remaining rows.
+	wsMarginRows = 1
 	// Fixed chrome rows inside the card (title, tabs, presence, gaps, compose, status, footer).
 	wsChromeRows = 12
 	wsMsgRowsMin = 8
-	wsMsgRowsMax = 56
+	wsMsgRowsMax = 72
 )
 
 // wsInputMode is what the compose line is for.
@@ -223,38 +225,34 @@ func (m *Model) humanName() string {
 	return m.wsHumanName
 }
 
-// workspaceDialogWidth is ~80% of the host width, with margin from the edges.
+// workspaceDialogWidth fills the host width minus a thin margin.
+// Earlier 80%-centered cards left a huge empty gutter the dim matte could not fix.
 func workspaceDialogWidth(windowCols int) int {
 	if windowCols < 24 {
 		windowCols = 24
 	}
-	// Leave ~10% margin total (~5% each side) → 80% content.
-	w := int(float64(windowCols) * wsModalFrac)
-	// Hard margins so it still reads as a floating modal.
-	maxW := windowCols - 4
-	if maxW < 28 {
-		maxW = 28
-	}
-	if w > maxW {
-		w = maxW
-	}
-	if w < 36 && windowCols >= 40 {
-		w = 36
-	}
+	w := windowCols - 2*wsMarginCols
 	if w < 28 {
 		w = 28
+	}
+	if w > windowCols {
+		w = windowCols
 	}
 	return w
 }
 
-// workspaceMsgRows is how many message *lines* fit at ~80% of host height.
+// workspaceMsgRows is how many message lines fit after card chrome, using nearly
+// the full host height (not a short 80% card floating in empty space).
 func (m Model) workspaceMsgRows() int {
 	h := m.Height
 	if h < 12 {
 		h = 24
 	}
-	// Use 80% of host rows for the whole card, then subtract chrome.
-	card := int(float64(h) * wsModalFrac)
+	// Host height minus margin; subtract card chrome (title/tabs/compose/footer).
+	card := h - 2*wsMarginRows
+	if card < 12 {
+		card = 12
+	}
 	rows := card - wsChromeRows
 	if rows < wsMsgRowsMin {
 		rows = wsMsgRowsMin
@@ -698,10 +696,12 @@ func (m Model) renderWorkspace(w int) string {
 	if atBottom {
 		vp.GotoBottom()
 	}
-	body := vp.View()
+	// Viewport lines often lack full-width panel bg (Charm leaves default-bg
+	// cells → host paints them transparent = "holes"). Solidify every row.
+	body := solidifyOverlayLines(vp.View(), innerW)
 
-	tabs := renderChannelTabs(m.wsChannels, m.wsChannel, innerW)
-	presence := renderPresenceStrip(m.wsMembers, innerW)
+	tabs := solidifyOverlayLines(renderChannelTabs(m.wsChannels, m.wsChannel, innerW), innerW)
+	presence := solidifyOverlayLines(renderPresenceStrip(m.wsMembers, innerW), innerW)
 
 	compose := m.wsCompose
 	caret := "▌"
@@ -719,19 +719,23 @@ func (m Model) renderWorkspace(w int) string {
 	if lipgloss.Width(compVisible) > innerW-4 {
 		compVisible = ansi.Truncate(compVisible, innerW-4, "…")
 	}
-	compLine := prompt + lipgloss.NewStyle().Foreground(colText).Background(colPanel).Render(compVisible)
+	compLine := panelFillLine(innerW, prompt+lipgloss.NewStyle().
+		Foreground(colText).Background(colPanel).Render(compVisible))
 
 	// @mention picker (when typing @query).
 	mentionLine := m.renderMentionPicker(innerW)
+	if mentionLine != "" {
+		mentionLine = solidifyOverlayLines(mentionLine, innerW)
+	}
 
 	// Status: ephemeral action feedback only — path demoted to footer when idle.
 	statusLine := ""
 	if m.wsStatus != "" {
-		statusLine = lipgloss.NewStyle().Foreground(colSoft).Background(colPanel).
-			Render(ansi.Truncate(m.wsStatus, innerW, "…"))
+		statusLine = panelFillLine(innerW, lipgloss.NewStyle().Foreground(colSoft).Background(colPanel).
+			Render(ansi.Truncate(m.wsStatus, innerW, "…")))
 	}
 
-	parts := []string{tabs, presence, "", body, ""}
+	parts := []string{tabs, presence, panelFillLine(innerW, ""), body, panelFillLine(innerW, "")}
 	if mentionLine != "" {
 		parts = append(parts, mentionLine)
 	}
@@ -746,6 +750,19 @@ func (m Model) renderWorkspace(w int) string {
 		styleDialogHintKey().Render("⌃n") + styleDialogHint().Render(" new  ") +
 		styleDialogHintKey().Render("esc")
 	return renderWorkspaceCard(outer, "Workspace", parts, footer)
+}
+
+// solidifyOverlayLines forces every line to full width with panel background so
+// the host never treats default-bg cells as transparent holes inside the card.
+func solidifyOverlayLines(s string, width int) string {
+	if s == "" {
+		return panelFillLine(width, "")
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = panelFillLine(width, line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderMentionPicker paints live @candidates above the compose line.
@@ -1077,8 +1094,8 @@ func formatChatBubble(msg workspace.Message, width int, me string, memberNames m
 	mine := msg.FromKind == workspace.KindHuman &&
 		strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(me))
 
-	// Bubble max ~72% of row so it reads as a bubble, not full width.
-	bubbleW := width * 72 / 100
+	// Bubbles use most of the (now full-width) row; leave a small indent.
+	bubbleW := width * 88 / 100
 	if bubbleW < 18 {
 		bubbleW = min(width-2, 28)
 	}

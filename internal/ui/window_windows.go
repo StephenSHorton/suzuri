@@ -5943,9 +5943,13 @@ func isTransparentOverlayBG(r, g, b byte) bool {
 
 // paintChromeCells paints a cached cell grid at pixel origin (ox, oy).
 // defaultBar=true: tab strip — empty cells use bar fill, edge runs span the window.
-// defaultBar=false: floating overlay — empty default-bg cells are transparent so the
-// dimmed shell shows through around the dialog (no full-width panel/void stripes).
+// defaultBar=false: floating overlay. When solidPanel (dim modals), default-bg
+// holes fill with panel; otherwise gutters stay transparent (palette/help).
 func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, ox, oy int32, defaultBar bool) {
+	u.paintChromeCellsEx(hdc, rect, cells, ox, oy, defaultBar, false)
+}
+
+func (u *winUI) paintChromeCellsEx(hdc win.HDC, rect win.RECT, cells [][]cellPix, ox, oy int32, defaultBar, solidPanel bool) {
 	cw, ch := u.metricW, u.metricH
 	if cw < 1 {
 		cw = cellW
@@ -5964,16 +5968,19 @@ func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, 
 			cell := row[x]
 			br, bg, bb := cell.BR, cell.BG, cell.BB
 			empty := cell.Ch == 0 || cell.Ch == ' '
-			// Overlay: transparent gutters so dim+猫 shows left/right of the card.
-			// Default black OR theme void (PlaceHorizontal used to fill sides with void).
-			if !defaultBar && empty && (isTransparentOverlayBG(br, bg, bb)) {
-				continue
+			// Overlay: transparent gutters for palette/help only.
+			if !defaultBar && empty && isTransparentOverlayBG(br, bg, bb) {
+				if solidPanel {
+					br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
+				} else {
+					continue
+				}
 			}
 			if br == 0 && bg == 0 && bb == 0 {
 				if defaultBar {
 					br, bg, bb = chrome.BarR, chrome.BarG, chrome.BarB
 				} else {
-					// Non-empty glyph with default bg (rare) — use panel so it stays readable.
+					// Non-empty glyph with default bg — panel so it stays readable.
 					br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
 				}
 			}
@@ -6252,7 +6259,11 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 				return
 			}
 			ccols, crows := ct.Size()
-			const maxOverlayRows = 48
+			// Workspace is near-full-height; don't clip the message viewport.
+			maxOverlayRows := 48
+			if u.chrome.WorkspaceOpen {
+				maxOverlayRows = 96
+			}
 			if crows > maxOverlayRows {
 				crows = maxOverlayRows
 			}
@@ -6285,7 +6296,8 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 	// Place in the shell region. Prefer slight top bias; if the stack is tall
 	// (settings + help), shift up so the bottom caption is not clipped.
 	oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
-	u.paintChromeCells(hdc, rect, u.overlayCells, 0, oy, false)
+	// Dim modals (workspace, …): fill default-bg holes with panel, not skip.
+	u.paintChromeCellsEx(hdc, rect, u.overlayCells, 0, oy, false, u.dimShellModal())
 	// Notes editor caret: same block/underline/bar as the terminal cursor.
 	u.paintNotesCaret(hdc, oy)
 }

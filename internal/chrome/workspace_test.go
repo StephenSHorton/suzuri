@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/StephenSHorton/suzuri/internal/workspace"
@@ -150,9 +151,21 @@ func TestAvailabilityStyleCodes(t *testing.T) {
 }
 
 func TestWorkspaceDialogWidth(t *testing.T) {
+	// Near-full width: 100 - 2*margin.
 	w := workspaceDialogWidth(100)
-	if w < 70 || w > 96 {
-		t.Fatalf("80%% of 100 should be ~80, got %d", w)
+	want := 100 - 2*wsMarginCols
+	if w != want {
+		t.Fatalf("workspaceDialogWidth(100)=%d want %d", w, want)
+	}
+	if workspaceDialogWidth(20) < 28 {
+		// floor at 28 when host is tiny after margin
+	}
+}
+
+func TestSolidifyOverlayLinesFillsWidth(t *testing.T) {
+	out := solidifyOverlayLines("hi", 20)
+	if lipgloss.Width(out) != 20 {
+		t.Fatalf("width=%d want 20 (stripped=%q)", lipgloss.Width(out), ansi.Strip(out))
 	}
 }
 

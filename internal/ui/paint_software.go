@@ -313,7 +313,7 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	if len(o.Chrome) > 0 {
 		chromeH = len(o.Chrome) * ch
 		fillRectRGBA(dst, 0, 0, w, chromeH, chrome.BarR, chrome.BarG, chrome.BarB)
-		paintCellStrip(p, dst, o.Chrome, padX, 0, true)
+		paintCellStrip(p, dst, o.Chrome, padX, 0, true, false)
 	}
 
 	// Themed Warp input bar.
@@ -321,22 +321,25 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		p.paintInputBar(dst, o, shellBot, h)
 	}
 
-	// Overlay card — full-width cell grid with transparent gutters (same as
-	// Windows). Lip gloss PlaceHorizontal already centers the card; painting
-	// a solid matte over the full measured width blocked matrix rain on the
-	// left/right and made the dialog look off-center.
+	// Overlay card. Palette/help keep transparent gutters (float over live shell).
+	// DimShell modals (workspace, settings, …) fill default-bg "holes" with panel
+	// so nested lipgloss resets never punch see-through gaps in the card.
 	if len(o.Overlay) > 0 {
 		oh := len(o.Overlay) * ch
 		shellH := shellBot - padY
 		oy := padY + (shellH-oh)/4
+		if o.DimShell {
+			// Full-height focus modals: pin near top with small inset, not a
+			// floating short card in the upper third.
+			oy = padY + ch/2
+		}
 		if oy+oh > shellBot {
 			oy = shellBot - oh
 		}
 		if oy < padY {
 			oy = padY
 		}
-		// ox=0: gutter cells are transparent so rain/neko shows through.
-		paintCellStrip(p, dst, o.Overlay, 0, oy, false)
+		paintCellStrip(p, dst, o.Overlay, 0, oy, false /* bar */, o.DimShell /* solidPanel */)
 	}
 }
 
@@ -462,8 +465,11 @@ func (p *softwarePainter) paintInputCaret(dst *image.RGBA, x, y, style int, alph
 	}
 }
 
-// paintCellStrip paints a cell grid. barMode fills default-black empty cells as bar.
-func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, oy int, barMode bool) {
+// paintCellStrip paints a cell grid.
+// barMode fills default-black empty cells as bar.
+// solidPanel (dim modals): default-bg / void cells paint as panel instead of
+// skipping — closes transparent holes inside workspace/settings cards.
+func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, oy int, barMode bool, solidPanel bool) {
 	if p == nil || len(cells) == 0 {
 		return
 	}
@@ -482,10 +488,22 @@ func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, 
 			br, bg, bb := cell.BR, cell.BG, cell.BB
 			empty := cell.Ch == 0 || cell.Ch == ' '
 			if !barMode && empty && isTransparentOverlayBG(br, bg, bb) {
+				if solidPanel {
+					// Hole fill: panel surface, not see-through to shell/dim rain.
+					fillRectRGBA(dst, px, py, cw, ch, chrome.PanelR, chrome.PanelG, chrome.PanelB)
+					if cell.Ch != 0 && cell.Ch != ' ' {
+						p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
+					}
+					continue
+				}
 				if cell.Ch != 0 && cell.Ch != ' ' {
 					p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
 				}
 				continue
+			}
+			// Non-empty glyph with transparent/default bg on solid modals → panel under ink.
+			if !barMode && solidPanel && isTransparentOverlayBG(br, bg, bb) {
+				br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
 			}
 			if barMode && br == 0 && bg == 0 && bb == 0 {
 				// Leave bar underlay (already filled).
@@ -733,7 +751,8 @@ func (p *softwarePainter) paintPaneSashes(dst *image.RGBA, sashes []sashGeom, sh
 }
 
 // paintOverlayOnly re-draws a floating card strip over existing shell content.
-func (p *softwarePainter) paintOverlayOnly(dst *image.RGBA, overlay [][]cellPix, padY, shellBot int) {
+// solidPanel fills default-bg holes (workspace / other dim modals).
+func (p *softwarePainter) paintOverlayOnly(dst *image.RGBA, overlay [][]cellPix, padY, shellBot int, solidPanel bool) {
 	if dst == nil || p == nil || len(overlay) == 0 {
 		return
 	}
@@ -744,13 +763,16 @@ func (p *softwarePainter) paintOverlayOnly(dst *image.RGBA, overlay [][]cellPix,
 	oh := len(overlay) * ch
 	shellH := shellBot - padY
 	oy := padY + (shellH-oh)/4
+	if solidPanel {
+		oy = padY + ch/2
+	}
 	if oy+oh > shellBot {
 		oy = shellBot - oh
 	}
 	if oy < padY {
 		oy = padY
 	}
-	paintCellStrip(p, dst, overlay, 0, oy, false)
+	paintCellStrip(p, dst, overlay, 0, oy, false, solidPanel)
 }
 
 // paintPaneInputBar draws one pane's command line into g.barY/g.barH.

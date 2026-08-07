@@ -3661,7 +3661,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	// Re-paint overlay on top of pane content (paintFrame already drew it once
 	// before multi-pane grids; draw again so cards float above shells).
 	if len(layouts) > 1 && len(overlay) > 0 {
-		u.painter.paintOverlayOnly(u.fb, overlay, padY, shellBot)
+		u.painter.paintOverlayOnly(u.fb, overlay, padY, shellBot, u.dimShellModal())
 	}
 
 	// Notes caret (block/underline/bar) over the overlay grid.
