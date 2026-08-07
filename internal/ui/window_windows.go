@@ -3242,8 +3242,20 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
+		x, y, viewRows := u.pixelToCellInPane(px, py, tab)
+		absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
+		n := u.shellMulti.bump(x, absY, time.Now())
+		// Alt-screen (Grok): double/triple-click = host word/line selection.
+		// Single-click still forwards to the TUI when mouse tracking is on.
 		if tab.altScreen() {
-			// Forward left-click to the TUI when mouse tracking is on (buttons).
+			if n >= 2 {
+				applyShellMultiClick(&tab.sel, tab.sb, tab.term, x, absY, n)
+				u.selecting = true
+				win.SetCapture(hwnd)
+				win.InvalidateRect(hwnd, nil, false)
+				return 0
+			}
+			tab.sel.clear()
 			if mouseTracking(tab.term) {
 				cx, cy, _ := u.pixelToCellInPane(px, py, tab)
 				col, row := cx+1, cy+1
@@ -3256,9 +3268,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 			return 0
 		}
-		x, y, viewRows := u.pixelToCellInPane(px, py, tab)
-		absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
-		n := u.shellMulti.bump(x, absY, time.Now())
 		applyShellMultiClick(&tab.sel, tab.sb, tab.term, x, absY, n)
 		u.selecting = true
 		win.SetCapture(hwnd)
@@ -5274,13 +5283,16 @@ func (u *winUI) releaseBackbuffer() {
 }
 
 // dimShellModal is true when a modal replaces the live terminal with a dim
-// matte (settings rain / splash / confirm). Palette and shortcuts (help) float
-// over the live shell instead — no dim 猫咪, Warp bars stay visible on top.
+// matte. Palette and shortcuts (help) float over the live shell instead.
+// Workspace/notes/transfer are full-focus — live shell must not show through.
 func (u *winUI) dimShellModal() bool {
 	if u == nil {
 		return false
 	}
-	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
+	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen ||
+		u.chrome.WorkspaceOpen || u.chrome.NotesOpen ||
+		u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen ||
+		u.chrome.RenameOpen
 }
 
 // staticDimUnderlay is true for dim modals that don't animate (splash/confirm).
@@ -5293,12 +5305,12 @@ func (u *winUI) staticDimUnderlay() bool {
 }
 
 // floatOverLiveShell is true when a card paints over the live terminal
-// (palette, shortcuts, rename) rather than a dim modal matte.
+// (palette / help only). Workspace, notes, rename, transfer use dimShellModal.
 func (u *winUI) floatOverLiveShell() bool {
 	if u == nil || u.dimShellModal() {
 		return false
 	}
-	return u.chrome.PaletteOpen || u.chrome.HelpOpen || u.chrome.RenameOpen || u.chrome.NotesOpen
+	return u.chrome.PaletteOpen || u.chrome.HelpOpen
 }
 
 func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {

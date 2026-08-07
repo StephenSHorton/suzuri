@@ -1553,12 +1553,18 @@ func (u *macUI) themeAmbientColors() ambientColors {
 	}
 }
 
-// dimShellModal is true for overlays that replace the live shell (not palette/help).
+// dimShellModal is true for overlays that replace the live shell with a dim
+// matte (not palette/help, which float over a live terminal).
+// Workspace and notes are full focus modals — live Grok must not show through
+// the side gutters.
 func (u *macUI) dimShellModal() bool {
 	if u == nil {
 		return false
 	}
-	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
+	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen ||
+		u.chrome.WorkspaceOpen || u.chrome.NotesOpen ||
+		u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen ||
+		u.chrome.RenameOpen
 }
 
 func (u *macUI) matrixIntroActive() bool {
@@ -2089,15 +2095,9 @@ func (u *macUI) handleKeys() {
 			}
 			return
 		}
+		// macOS clipboard chords are Cmd-only so Ctrl+C / Ctrl+V reach Grok
+		// (interrupt / cancel-turn). Host image paste needs Apple Events — Cmd+V.
 		if !shift && inpututil.IsKeyJustPressed(ebiten.KeyC) {
-			if realCtrl && !super {
-				if !tab.sel.empty() {
-					u.copySelection()
-				} else {
-					u.sendKey([]byte{0x03})
-				}
-				return
-			}
 			if super && !realCtrl {
 				// Cmd+C: copy selection only (never send interrupt as ⌘C).
 				if !tab.sel.empty() {
@@ -2105,12 +2105,15 @@ func (u *macUI) handleKeys() {
 				}
 				return
 			}
+			if realCtrl && !super {
+				// Ctrl+C → always PTY interrupt (^C). Copy is Cmd+C only.
+				u.sendKey([]byte{0x03})
+				return
+			}
 		}
-		// Ctrl+V or Cmd+V → host paste (images need Suzuri's Apple Events
-		// entitlement; Grok's own osascript probe fails under Hardened Runtime).
-		// Edge-detect with IsKeyPressed: IsKeyJustPressed alone can miss
-		// Command+letter on some macOS/GLFW frames while Control+V still fires.
-		if u.pasteChordJustPressed(meta || realCtrl, shift, alt) {
+		// Cmd+V only (not Ctrl+V). Ctrl+V passes through so Grok can cancel a turn.
+		// Edge-detect with IsKeyPressed: IsKeyJustPressed alone can miss Command+letter.
+		if u.pasteChordJustPressed(meta, shift, alt) {
 			u.pasteClipboard()
 			return
 		}
@@ -2131,27 +2134,33 @@ func (u *macUI) handleKeys() {
 		return
 	}
 
-	// Ctrl+C / Ctrl+V in bar mode.
-	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyC) {
+	// Bar mode: Cmd+C copies; Ctrl+C interrupts (or clears bar). Cmd+V pastes.
+	if !shift && inpututil.IsKeyJustPressed(ebiten.KeyC) {
 		in := u.activeInput()
-		if tab != nil && !tab.sel.empty() {
-			u.copySelection()
-		} else if in != nil && len(in.runes) > 0 {
-			in.clear()
-			u.maybeResizeForInput()
-		} else {
-			// Interrupt + drop queued bar lines so they don't fire after ^C.
-			if tab != nil {
-				if n := tab.clearCmdQueue(); n > 0 {
-					u.toast(fmt.Sprintf("cleared %d queued", n))
-				}
+		if meta && !realCtrl {
+			if tab != nil && !tab.sel.empty() {
+				u.copySelection()
 			}
-			u.sendKey([]byte{0x03})
+			return
 		}
-		return
+		if realCtrl && !meta {
+			// Ctrl+C: clear bar or interrupt — never host-copy (that's Cmd+C).
+			if in != nil && len(in.runes) > 0 {
+				in.clear()
+				u.maybeResizeForInput()
+			} else {
+				if tab != nil {
+					if n := tab.clearCmdQueue(); n > 0 {
+						u.toast(fmt.Sprintf("cleared %d queued", n))
+					}
+				}
+				u.sendKey([]byte{0x03})
+			}
+			return
+		}
 	}
-	// Bar mode: same Cmd/Ctrl+V edge as alt-screen (image → path when app owns kb).
-	if u.pasteChordJustPressed(ctrl, shift, alt) {
+	// Bar mode: Cmd+V paste (not Ctrl+V — matches alt-screen Grok cancel).
+	if u.pasteChordJustPressed(meta, shift, alt) {
 		u.pasteClipboard()
 		return
 	}
@@ -2930,16 +2939,25 @@ func (u *macUI) handleMouse() {
 			u.markShellDirty()
 			return
 		}
-		// Alt-screen TUIs: forward mouse clicks (buttons, lists) when tracking is on.
+		x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
+		absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
+		n := u.shellMulti.bump(x, absY, time.Now())
+		// Alt-screen (Grok): double/triple-click = host word/line selection.
+		// Single-click still forwards to the TUI when mouse tracking is on.
 		if tab.altScreen() {
+			if n >= 2 {
+				applyShellMultiClick(&tab.sel, tab.sb, tab.term, x, absY, n)
+				u.selecting = true
+				u.mouseDown = true
+				u.markShellDirty()
+				return
+			}
+			tab.sel.clear()
 			if u.sendAltMouse(tab, mx, my, true) {
 				u.altMouseDown = true
 			}
 			return
 		}
-		x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
-		absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
-		n := u.shellMulti.bump(x, absY, time.Now())
 		applyShellMultiClick(&tab.sel, tab.sb, tab.term, x, absY, n)
 		u.selecting = true
 		u.mouseDown = true
@@ -3186,19 +3204,30 @@ func (u *macUI) pasteClipboard() {
 	u.markInputDirty()
 }
 
-// pasteChordJustPressed is true on the rising edge of Meta/Ctrl+V (no Shift/Alt).
+// pasteChordJustPressed is true on the rising edge of mod+V (no Shift/Alt).
 // Updates prevPasteChord so a held chord does not re-fire every frame.
+// On macOS callers pass Meta (Cmd) only so Ctrl+V reaches the PTY (Grok cancel).
 func (u *macUI) pasteChordJustPressed(mod, shift, alt bool) bool {
 	if u == nil {
 		return false
 	}
-	held := mod && !shift && !alt && ebiten.IsKeyPressed(ebiten.KeyV)
+	// Require an actual V key with the modifier. Also treat Super+V via
+	// ebiten input chars path is not used — V is a chord key.
+	vDown := ebiten.IsKeyPressed(ebiten.KeyV)
+	justV := inpututil.IsKeyJustPressed(ebiten.KeyV)
+	held := mod && !shift && !alt && vDown
 	just := held && !u.prevPasteChord
-	// Also accept IsKeyJustPressed for the common case (and tests).
-	if !just && mod && !shift && !alt && inpututil.IsKeyJustPressed(ebiten.KeyV) {
+	// IsKeyJustPressed alone can miss Command+letter on some frames; rising
+	// edge on held covers that. Also fire when V just-pressed while mod held.
+	if !just && mod && !shift && !alt && justV {
 		just = true
 	}
-	u.prevPasteChord = held
+	// Some ebiten builds report Meta delayed vs V; if Meta is held and V just
+	// pressed, still treat as paste chord.
+	if !just && !shift && !alt && justV && (modMeta() || ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight)) {
+		just = true
+	}
+	u.prevPasteChord = held || (mod && vDown)
 	return just
 }
 
@@ -3215,9 +3244,9 @@ func (u *macUI) pasteAltScreenAsync() {
 		log.Debug("clipboard image read failed", "err", err)
 	}
 	text, _ := clipboard.ReadAll()
-	// No host raster: Super+V so Grok can probe image+text (dual boards,
-	// browser "Copy Image" with a URL caption). Text payload is the fallback
-	// when Kitty keyboard is not active.
+	// Host always injects text (bracketed paste). Prefer Super+V first when
+	// Kitty is active so Grok can attach dual-board images; host text is the
+	// reliable fallback for plain clipboard strings.
 	payload := bracketedPaste(text)
 	u.pendingPasteMu.Lock()
 	u.pendingPaste = append(u.pendingPaste, pendingPaste{
@@ -3236,10 +3265,12 @@ func (u *macUI) drainPendingPaste() {
 	u.pendingPaste = nil
 	u.pendingPasteMu.Unlock()
 	for _, p := range batch {
+		// Image path pastes: always inject host payload (path in bracketed paste).
+		// Text: optional Super+V probe first when Kitty is active, then host text
+		// so Cmd+V never silently no-ops if Grok ignores Super+V.
 		if p.preferSuperV {
 			if t := u.activeTab(); t != nil && t.kitty.active() {
 				t.sendKey(kittyCSIU(118, kittyMods(false, false, false, true)))
-				continue
 			}
 		}
 		if len(p.payload) > 0 {
@@ -3545,8 +3576,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		CurY:             cur.Y,
 		CurVis:           curVis,
 		CurAlpha:         curAlpha,
-		// Dim matte only for settings/confirm/splash — palette, help, notes,
-		// rename float over the live shell (Windows dimShellModal parity).
+		// Dim matte for workspace/notes/settings/…; palette + help float live.
 		DimShell:         u.dimShellModal(),
 		SettingsOpen:     u.chrome.SettingsOpen,
 		MatrixCells:      rain,
