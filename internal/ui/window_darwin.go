@@ -1947,17 +1947,12 @@ func (u *macUI) handleKeys() {
 		u.splitActive(splitHoriz)
 		return
 	}
-	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
+	// ⌘W / Ctrl+W closes the focused pane. Last pane in a multi-pane tab
+	// collapses the chrome tab; last pane of the last tab arms confirm-quit
+	// (see closePaneUI → closePageAt). There is no separate "close tab" chord.
+	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
 		if t := u.activeTab(); t != nil {
 			u.closePaneUI(t.id, true)
-		}
-		return
-	}
-	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
-		if p := u.activePage(); p != nil {
-			u.closePageAt(u.active, true)
-		} else if t := u.activeTab(); t != nil {
-			u.closeTabUI(t.id)
 		}
 		return
 	}
@@ -2014,6 +2009,11 @@ func (u *macUI) handleKeys() {
 			u.pasteClipboard()
 			return
 		}
+		// Workspace compose: Cmd/Ctrl+V paste into message field.
+		if u.chrome.WorkspaceOpen && u.pasteChordJustPressed(meta || realCtrl, shift, alt) {
+			u.pasteClipboard()
+			return
+		}
 		// Notes: Option/Ctrl word-jump; Cmd line ends; ⌘⌥ is host pane focus (outside).
 		if u.chrome.NotesOpen {
 			if u.handleNotesNavKeys(now, realCtrl, meta, alt, shift) {
@@ -2025,6 +2025,7 @@ func (u *macUI) handleKeys() {
 			u.chrome = r.Model
 			// Text-entry overlays: only dirty the floating card.
 			if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
+				u.chrome.WorkspaceOpen ||
 				u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen {
 				u.overlayDirty = true
 				u.overlayCells = nil
@@ -2477,9 +2478,10 @@ func (u *macUI) handleTextInput() {
 	}
 
 	if u.chrome.OverlayOpen() {
-		// Palette filter, rename, notes, and transfer path/ticket accept runes.
+		// Palette filter, rename, notes, workspace compose, transfer accept runes.
+		// Workspace was missing here — keys never reached handleWorkspaceKey.
 		if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
-			u.chrome.TransferPromptOpen {
+			u.chrome.WorkspaceOpen || u.chrome.TransferPromptOpen {
 			for _, ch := range chars {
 				if ch >= 32 && ch != 0x7f {
 					km := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{ch}}
@@ -3156,6 +3158,15 @@ func (u *macUI) pasteClipboard() {
 	if u.chrome.TransferPromptOpen {
 		m := u.chrome
 		m.TransferPaste(text)
+		u.chrome = m
+		u.overlayDirty = true
+		u.overlayCells = nil
+		return
+	}
+	// Workspace compose line.
+	if u.chrome.WorkspaceOpen {
+		m := u.chrome
+		m.WorkspacePaste(text)
 		u.chrome = m
 		u.overlayDirty = true
 		u.overlayCells = nil

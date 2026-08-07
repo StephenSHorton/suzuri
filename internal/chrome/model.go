@@ -99,6 +99,8 @@ type Model struct {
 	wsVP       viewport.Model
 	wsVPInit   bool
 	wsStickBtm bool // pin scroll to latest messages after post/reload
+	// wsMentionIdx is the selected index in the live @mention picker (-1 = none).
+	wsMentionIdx int
 	// lastCfg is the host's applied config (for reopening settings).
 	lastCfg config.Config
 

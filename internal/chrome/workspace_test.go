@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
@@ -72,6 +73,49 @@ func TestWorkspaceNewChannelMode(t *testing.T) {
 	}
 }
 
+func TestWorkspaceComposeAcceptsRunes(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	m := New(80)
+	m = m.UpdateChrome(OpenWorkspaceMsg{}).Model
+	m.handleWorkspaceKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h', 'i'}})
+	if m.wsCompose != "hi" {
+		t.Fatalf("compose=%q want hi", m.wsCompose)
+	}
+}
+
+func TestWorkspaceMentionComplete(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	m := New(80)
+	m = m.UpdateChrome(OpenWorkspaceMsg{}).Model
+	m.wsMembers = []workspace.Member{
+		{Name: "build-session", Kind: workspace.KindAgent},
+		{Name: "alice", Kind: workspace.KindHuman},
+	}
+	m.wsCompose = "hey @bu"
+	m.wsClampMentionIdx()
+	cands := m.wsMentionCandidates()
+	if len(cands) < 1 || cands[0].Name != "build-session" {
+		t.Fatalf("cands=%+v", cands)
+	}
+	m.wsCompleteMention(cands)
+	if m.wsCompose != "hey @build-session " {
+		t.Fatalf("compose=%q", m.wsCompose)
+	}
+}
+
+func TestStyleMentionsInText(t *testing.T) {
+	names := map[string]string{"alice": "alice"}
+	out := styleMentionsInText("hi @alice there", names, colPanel)
+	if !strings.Contains(out, "alice") {
+		t.Fatalf("out=%q", out)
+	}
+	// Plain (no members) still returns something printable-stripped nonempty.
+	plain := ansi.Strip(styleMentionsInText("nope", nil, colPanel))
+	if plain != "nope" {
+		t.Fatalf("plain=%q", plain)
+	}
+}
+
 func TestRenderChannelTabsShowsActive(t *testing.T) {
 	chs := []workspace.Channel{
 		{ID: "general"},
@@ -119,7 +163,8 @@ func TestFormatChatBubble(t *testing.T) {
 		Kind:     "text",
 		Body:     "this is a fairly long message that should wrap across multiple lines inside a chat bubble",
 	}
-	lines := formatChatBubble(msg, 48, "alice")
+	names := map[string]string{"alice": "alice", "bot": "bot"}
+	lines := formatChatBubble(msg, 48, "alice", names)
 	if len(lines) < 2 {
 		t.Fatalf("expected multi-line bubble, got %#v", lines)
 	}
@@ -128,9 +173,9 @@ func TestFormatChatBubble(t *testing.T) {
 		FromName: "bot",
 		FromKind: workspace.KindAgent,
 		Kind:     "text",
-		Body:     "hello from the left",
+		Body:     "hello from the left @alice",
 	}
-	if al := formatChatBubble(agent, 48, "alice"); len(al) < 1 {
+	if al := formatChatBubble(agent, 48, "alice", names); len(al) < 1 {
 		t.Fatal("agent bubble empty")
 	}
 }

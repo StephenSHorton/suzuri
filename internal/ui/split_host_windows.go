@@ -225,8 +225,9 @@ func (u *winUI) splitActive(dir splitDir) {
 	log.Info("split pane", "dir", dir, "new", t.id, "page", pg.id, "leaves", pg.leafCount())
 }
 
-// closePaneUI closes a single pane. Last pane in page closes the page (tab).
-// Last page uses the same confirm-quit path as close tab when interactive.
+// closePaneUI closes a single pane (Ctrl+W).
+// Last pane in a page closes that chrome tab; last pane of the last tab
+// arms confirm-quit when interactive (same as closing the last strip tab).
 // Safe to call more than once for the same id (Wait + Read both notify).
 func (u *winUI) closePaneUI(paneID int, interactive bool) {
 	defer applog.Recover("closePaneUI", false)
