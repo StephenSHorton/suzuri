@@ -216,7 +216,9 @@ func (u *macUI) splitActive(dir splitDir) {
 	log.Info("split pane", "dir", dir, "new", t.id, "page", pg.id, "leaves", pg.leafCount())
 }
 
-// closePaneUI closes a single pane. Last pane in page closes the page (tab).
+// closePaneUI closes a single pane (⌘W / Ctrl+W).
+// Last pane in a page closes that chrome tab; last pane of the last tab
+// arms confirm-quit when interactive (same as closing the last strip tab).
 func (u *macUI) closePaneUI(paneID int, interactive bool) {
 	defer applog.Recover("closePaneUI", false)
 	if u.tabByID(paneID) == nil && findPaneAcrossPages(u, paneID) == nil {

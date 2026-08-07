@@ -60,14 +60,14 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		})
 	}
 	cmds = append(cmds,
-		Command{ID: "close_tab", Title: "Close tab", Desc: KeyCtrl("W") + " · Tabs", Category: "Tabs", Action: ActionCloseTab},
+		Command{ID: "close_tab", Title: "Close tab", Desc: "Strip × · palette · Tabs", Category: "Tabs", Action: ActionCloseTab},
 		Command{ID: "rename_tab", Title: "Rename tab", Desc: "Double-click tab · custom strip name · Tabs", Category: "Tabs", Action: ActionOpenRenameTab},
 		Command{ID: "next_tab", Title: "Next tab", Desc: KeyCtrl("Tab") + " · Tabs", Category: "Tabs", Action: ActionNextTab},
 		Command{ID: "prev_tab", Title: "Previous tab", Desc: KeyCtrlShift("Tab") + " · Tabs", Category: "Tabs", Action: ActionPrevTab},
 		Command{ID: "split_right", Title: "Split right", Desc: splitRight, Category: "Panes", Action: ActionSplitRight},
 		Command{ID: "split_down", Title: "Split down", Desc: splitDown, Category: "Panes", Action: ActionSplitDown},
 		Command{ID: "rename_pane", Title: "Rename pane", Desc: "F2 · double-click title · Panes", Category: "Panes", Action: ActionOpenRenamePane},
-		Command{ID: "close_pane", Title: "Close pane", Desc: KeyCtrlShift("W") + " · Panes", Category: "Panes", Action: ActionClosePane},
+		Command{ID: "close_pane", Title: "Close pane", Desc: KeyCtrl("W") + " · Panes", Category: "Panes", Action: ActionClosePane},
 		Command{ID: "focus_left", Title: "Focus pane left", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneLeft},
 		Command{ID: "focus_right", Title: "Focus pane right", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneRight},
 		Command{ID: "focus_up", Title: "Focus pane up", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneUp},

@@ -1947,17 +1947,12 @@ func (u *macUI) handleKeys() {
 		u.splitActive(splitHoriz)
 		return
 	}
-	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
+	// ⌘W / Ctrl+W closes the focused pane. Last pane in a multi-pane tab
+	// collapses the chrome tab; last pane of the last tab arms confirm-quit
+	// (see closePaneUI → closePageAt). There is no separate "close tab" chord.
+	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
 		if t := u.activeTab(); t != nil {
 			u.closePaneUI(t.id, true)
-		}
-		return
-	}
-	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
-		if p := u.activePage(); p != nil {
-			u.closePageAt(u.active, true)
-		} else if t := u.activeTab(); t != nil {
-			u.closeTabUI(t.id)
 		}
 		return
 	}
