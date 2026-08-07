@@ -19,12 +19,13 @@ import (
 
 // Host is the in-GUI side of the bridge: loopback HTTP + snapshot store.
 type Host struct {
-	mu     sync.RWMutex
-	snap   Snapshot
-	submit func(tabID int, line string) error // must be UI-safe (posted by UI layer)
-	notes  func(NotesRequest) NotesResult     // UI-thread notes bank CRUD
-	srv    *http.Server
-	ep     Endpoint
+	mu        sync.RWMutex
+	snap      Snapshot
+	submit    func(tabID int, line string) error    // must be UI-safe (posted by UI layer)
+	notes     func(NotesRequest) NotesResult        // UI-thread notes bank CRUD
+	workspace func(WorkspaceRequest) WorkspaceResult // UI-thread workspace + refresh
+	srv       *http.Server
+	ep        Endpoint
 }
 
 // NewHost creates a bridge host. submit may be nil until BindSubmit.
@@ -44,6 +45,13 @@ func (h *Host) BindNotes(fn func(NotesRequest) NotesResult) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.notes = fn
+}
+
+// BindWorkspace sets the UI-thread workspace handler (channels/messages).
+func (h *Host) BindWorkspace(fn func(WorkspaceRequest) WorkspaceResult) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.workspace = fn
 }
 
 
@@ -92,6 +100,7 @@ func (h *Host) Start() (Endpoint, error) {
 	mux.HandleFunc("/v1/submit", h.auth(h.handleSubmit))
 	mux.HandleFunc("/v1/logs", h.auth(h.handleLogs))
 	mux.HandleFunc("/v1/notes", h.auth(h.handleNotes))
+	mux.HandleFunc("/v1/workspace", h.auth(h.handleWorkspace))
 
 	h.srv = &http.Server{
 		Handler:           mux,
@@ -247,6 +256,37 @@ func (h *Host) handleNotes(w http.ResponseWriter, r *http.Request) {
 	h.mu.RUnlock()
 	if fn == nil {
 		writeJSON(w, NotesResult{OK: false, Error: "notes not bound"})
+		return
+	}
+	writeJSON(w, fn(req))
+}
+
+func (h *Host) handleWorkspace(w http.ResponseWriter, r *http.Request) {
+	var req WorkspaceRequest
+	switch r.Method {
+	case http.MethodGet:
+		req.Op = WorkspaceOpStatus
+		if ch := r.URL.Query().Get("channel"); ch != "" {
+			req.Op = WorkspaceOpHistory
+			req.Channel = ch
+		}
+	case http.MethodPost:
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Op == "" {
+			req.Op = WorkspaceOpStatus
+		}
+	default:
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	h.mu.RLock()
+	fn := h.workspace
+	h.mu.RUnlock()
+	if fn == nil {
+		writeJSON(w, WorkspaceResult{OK: false, Error: "workspace not bound"})
 		return
 	}
 	writeJSON(w, fn(req))

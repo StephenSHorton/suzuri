@@ -33,6 +33,16 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | `suzuri_notes_create` | Create a note (`title?`, `body?`); becomes active |
 | `suzuri_notes_update` | Partial update (`id?`, `title?`, `body?`, `set_active?`) |
 | `suzuri_notes_delete` | Delete by `id` (omit = active; last note is cleared, not removed). **No UI confirm** — agents skip the interactive prompt. |
+| `workspace_status` | Shared workspace path + channel/member counts (offline OK) |
+| `workspace_join` | Register as agent/human in the shared workspace |
+| `workspace_leave` | Leave workspace |
+| `workspace_members` | List members |
+| `workspace_channels` | List channels |
+| `workspace_channel_create` | Create a channel |
+| `workspace_post` | Post a message to a channel |
+| `workspace_history` | Read recent messages from a channel |
+| `workspace_upload` | Attach a local file to a channel (max 64MiB) |
+| `workspace_download` | Resolve a file attachment to a local path |
 
 **Shell output vs app log vs notes**
 
@@ -43,6 +53,7 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | Full-screen TUI (bar hidden) | `suzuri_diag` → `tabs[].alt_screen` |
 | Host events (tabs, bridge, panics, key path) | `suzuri_logs` |
 | User scratch notes (Ctrl+Shift+M) | `suzuri_notes_*` |
+| Shared channels (humans + AIs) | `workspace_*` — see [`workspace.md`](workspace.md) |
 
 ### Notes bank details
 

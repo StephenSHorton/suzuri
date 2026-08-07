@@ -135,3 +135,32 @@ func (c *Client) Notes(req NotesRequest) (NotesResult, error) {
 	}
 	return out, nil
 }
+
+// Workspace runs a workspace op on the live GUI (refreshes open panel).
+func (c *Client) Workspace(req WorkspaceRequest) (WorkspaceResult, error) {
+	payload, _ := json.Marshal(req)
+	httpReq, err := http.NewRequest(http.MethodPost, c.ep.URL+"/v1/workspace", bytes.NewReader(payload))
+	if err != nil {
+		return WorkspaceResult{}, err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.ep.Token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	client := c.http
+	if client.Timeout < 8*time.Second {
+		client = &http.Client{Timeout: 8 * time.Second}
+	}
+	res, err := client.Do(httpReq)
+	if err != nil {
+		return WorkspaceResult{}, fmt.Errorf("suzuri bridge unreachable: %w", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	if res.StatusCode != http.StatusOK {
+		return WorkspaceResult{}, fmt.Errorf("workspace: %s: %s", res.Status, string(body))
+	}
+	var out WorkspaceResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		return WorkspaceResult{}, err
+	}
+	return out, nil
+}

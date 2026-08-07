@@ -129,3 +129,93 @@ type NotesResult struct {
 	Count int        `json:"count,omitempty"`
 	Error string     `json:"error,omitempty"`
 }
+
+// WorkspaceOp is the workspace action for POST /v1/workspace.
+type WorkspaceOp string
+
+const (
+	WorkspaceOpStatus        WorkspaceOp = "status"
+	WorkspaceOpJoin          WorkspaceOp = "join"
+	WorkspaceOpLeave         WorkspaceOp = "leave"
+	WorkspaceOpMembers       WorkspaceOp = "members"
+	WorkspaceOpChannels      WorkspaceOp = "channels"
+	WorkspaceOpChannelCreate WorkspaceOp = "channel_create"
+	WorkspaceOpPost          WorkspaceOp = "post"
+	WorkspaceOpHistory       WorkspaceOp = "history"
+	WorkspaceOpUpload        WorkspaceOp = "upload"
+	WorkspaceOpDownload      WorkspaceOp = "download"
+)
+
+// WorkspaceRequest mutates or reads the shared workspace (channels / messages).
+type WorkspaceRequest struct {
+	Op        WorkspaceOp `json:"op"`
+	Channel   string      `json:"channel,omitempty"`
+	Body      string      `json:"body,omitempty"`
+	Name      string      `json:"name,omitempty"`
+	Kind      string      `json:"kind,omitempty"` // human | agent
+	MemberID  string      `json:"member_id,omitempty"`
+	SessionID string      `json:"session_id,omitempty"`
+	ReplyTo   string      `json:"reply_to,omitempty"`
+	Topic     string      `json:"topic,omitempty"`
+	Limit     int         `json:"limit,omitempty"`
+	FilePath  string      `json:"file_path,omitempty"` // local source for upload
+	FileID    string      `json:"file_id,omitempty"`   // stored file or message id for download
+}
+
+// WorkspaceMember is one human or agent in the workspace.
+type WorkspaceMember struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`
+	SessionID string    `json:"session_id,omitempty"`
+	JoinedAt  time.Time `json:"joined_at"`
+	LastSeen  time.Time `json:"last_seen"`
+}
+
+// WorkspaceChannel is a named room.
+type WorkspaceChannel struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	Topic     string    `json:"topic,omitempty"`
+}
+
+// WorkspaceFile is an attachment on a message.
+type WorkspaceFile struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Bytes   int64  `json:"bytes"`
+	SHA256  string `json:"sha256,omitempty"`
+	RelPath string `json:"rel_path"`
+}
+
+// WorkspaceMessage is one post.
+type WorkspaceMessage struct {
+	ID       string         `json:"id"`
+	Channel  string         `json:"channel"`
+	TS       time.Time      `json:"ts"`
+	FromID   string         `json:"from_id"`
+	FromName string         `json:"from_name"`
+	FromKind string         `json:"from_kind"`
+	Kind     string         `json:"kind"`
+	Body     string         `json:"body"`
+	ReplyTo  string         `json:"reply_to,omitempty"`
+	File     *WorkspaceFile `json:"file,omitempty"`
+}
+
+// WorkspaceResult is the response from workspace ops.
+type WorkspaceResult struct {
+	OK        bool               `json:"ok"`
+	Path      string             `json:"path,omitempty"`
+	Error     string             `json:"error,omitempty"`
+	Status    map[string]any     `json:"status,omitempty"`
+	Member    *WorkspaceMember   `json:"member,omitempty"`
+	Members   []WorkspaceMember  `json:"members,omitempty"`
+	Channel   *WorkspaceChannel  `json:"channel,omitempty"`
+	Channels  []WorkspaceChannel `json:"channels,omitempty"`
+	Message   *WorkspaceMessage  `json:"message,omitempty"`
+	Messages  []WorkspaceMessage `json:"messages,omitempty"`
+	File      *WorkspaceFile     `json:"file,omitempty"`
+	LocalPath string             `json:"local_path,omitempty"`
+	Count     int                `json:"count,omitempty"`
+}

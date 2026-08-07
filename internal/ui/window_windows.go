@@ -88,6 +88,7 @@ func Run() error {
 	ui.mcpJobs = make(chan mcpJob, 8)
 	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
 	ui.bridge.BindNotes(ui.enqueueMCPNotes)
+	ui.bridge.BindWorkspace(ui.enqueueMCPWorkspace)
 	prof := config.FindProfile(cfg, cfg.ActiveProfile)
 	opts := tabOpts{}
 	if prof != nil {
@@ -121,6 +122,10 @@ type mcpJob struct {
 	notes    bool
 	notesReq bridge.NotesRequest
 	notesOut chan bridge.NotesResult
+	// Shared workspace
+	workspace    bool
+	workspaceReq bridge.WorkspaceRequest
+	workspaceOut chan bridge.WorkspaceResult
 }
 
 
@@ -1776,6 +1781,31 @@ func (u *winUI) enqueueMCPNotes(req bridge.NotesRequest) bridge.NotesResult {
 	}
 }
 
+func (u *winUI) enqueueMCPWorkspace(req bridge.WorkspaceRequest) bridge.WorkspaceResult {
+	if u == nil || !u.alive.Load() || u.hwnd == 0 {
+		return bridge.WorkspaceResult{OK: false, Error: "suzuri UI not ready"}
+	}
+	job := mcpJob{
+		workspace:    true,
+		workspaceReq: req,
+		workspaceOut: make(chan bridge.WorkspaceResult, 1),
+	}
+	select {
+	case u.mcpJobs <- job:
+	default:
+		return bridge.WorkspaceResult{OK: false, Error: "mcp workspace queue full"}
+	}
+	if win.PostMessage(u.hwnd, wmSuzuriMCP, 0, 0) == 0 {
+		return bridge.WorkspaceResult{OK: false, Error: "post mcp workspace job failed"}
+	}
+	select {
+	case res := <-job.workspaceOut:
+		return res
+	case <-time.After(5 * time.Second):
+		return bridge.WorkspaceResult{OK: false, Error: "mcp workspace timed out"}
+	}
+}
+
 func (u *winUI) drainMCPJobs() {
 	for {
 		select {
@@ -1790,6 +1820,16 @@ func (u *winUI) drainMCPJobs() {
 				u.requestPaint()
 				if job.notesOut != nil {
 					job.notesOut <- res
+				}
+			} else if job.workspace {
+				res := runWorkspaceOnChrome(&u.chrome, job.workspaceReq)
+				if u.chrome.WorkspaceOpen {
+					u.overlayDirty = true
+				}
+				u.markChromeDirty()
+				u.requestPaint()
+				if job.workspaceOut != nil {
+					job.workspaceOut <- res
 				}
 			} else {
 				err := u.submitOnUIThread(job.tabID, job.line)
