@@ -49,6 +49,10 @@ type TransferDropPathsMsg struct {
 	Paths []string
 }
 
+// TransferClickMsg is a host mouse click on the transfer progress panel card.
+// Copies the ticket when one is shown (button / ticket line / card click).
+type TransferClickMsg struct{}
+
 // AcceptsFileDrop reports whether the host should accept OS file drops as
 // transfer-send input. False when not on the Send file prompt so drops are
 // not stolen for transfer (other apps / normal window behavior).
@@ -64,6 +68,7 @@ func (m *Model) openTransferPrompt(mode TransferMode, seed string) {
 	m.transferBuf = strings.TrimSpace(seed)
 	m.transferDropHover = false
 	m.transferDropHint = ""
+	m.transferCopyFlash = ""
 }
 
 // applyTransferDropPaths fills the send path from a drop. Returns TransferStart
@@ -107,6 +112,7 @@ func (m *Model) applyTransferStatus(msg TransferStatusMsg) {
 		m.transferDone = 0
 		m.transferTotal = 0
 		m.transferMsg = ""
+		m.transferCopyFlash = ""
 		return
 	}
 	// Progress panel owns focus over the prompt once transfer starts.
@@ -114,6 +120,10 @@ func (m *Model) applyTransferStatus(msg TransferStatusMsg) {
 	m.transferBuf = ""
 	m.TransferPanelOpen = true
 	if msg.Phase != "" {
+		// New phase (e.g. ready → progress) clears a stale "Copied!" flash.
+		if msg.Phase != m.transferPhase && msg.Phase != "ready" {
+			m.transferCopyFlash = ""
+		}
 		m.transferPhase = msg.Phase
 	}
 	if msg.Ticket != "" {
@@ -126,6 +136,15 @@ func (m *Model) applyTransferStatus(msg TransferStatusMsg) {
 	if msg.Message != "" {
 		m.transferMsg = msg.Message
 	}
+}
+
+// markTicketCopied sets in-panel "Copied!" feedback and returns the copy action.
+func (m *Model) markTicketCopied() HostAction {
+	if m.transferTicket == "" {
+		return ActionNone
+	}
+	m.transferCopyFlash = "Copied!"
+	return ActionTransferCopyTicket
 }
 
 func (m *Model) handleTransferPromptKey(msg tea.KeyMsg) (act HostAction, value string) {
@@ -177,27 +196,34 @@ func (m *Model) TransferPaste(s string) {
 }
 
 func (m *Model) handleTransferPanelKey(msg tea.KeyMsg) HostAction {
-	switch msg.String() {
+	switch strings.ToLower(msg.String()) {
 	case "esc", "ctrl+c", "q":
 		// Close panel + ask host to cancel engine.
 		m.TransferPanelOpen = false
+		m.transferCopyFlash = ""
 		return ActionTransferCancel
 	case "c":
 		// Copy ticket — host handles clipboard if ticket present.
-		if m.transferTicket != "" {
-			return ActionTransferCopyTicket
-		}
-		return ActionNone
+		return m.markTicketCopied()
 	case "enter":
 		// Dismiss completed/error panel.
 		if m.transferPhase == "done" || m.transferPhase == "error" || m.transferPhase == "stopped" {
 			m.TransferPanelOpen = false
+			m.transferCopyFlash = ""
 			return ActionNone
 		}
 		return ActionNone
 	default:
 		return ActionNone
 	}
+}
+
+// handleTransferClick copies the ticket when the user clicks the progress panel.
+func (m *Model) handleTransferClick() HostAction {
+	if !m.TransferPanelOpen {
+		return ActionNone
+	}
+	return m.markTicketCopied()
 }
 
 func (m Model) renderTransferPrompt(windowCols int) string {
@@ -343,6 +369,29 @@ func (m Model) renderTransferPanel(windowCols int) string {
 			}
 		}
 		lines = append(lines, styleDialogValue().Width(inner).MaxHeight(1).Render(padFit(t, inner)))
+
+		// Explicit copy control — click the panel or press c.
+		btnLabel := " Copy ticket "
+		if m.transferCopyFlash != "" {
+			btnLabel = " " + m.transferCopyFlash + " "
+		}
+		btn := styleDialogActive().Render(btnLabel)
+		// Center the button within the inner width.
+		pad := (inner - lipgloss.Width(btn)) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		btnLine := strings.Repeat(" ", pad) + btn
+		if lipgloss.Width(btnLine) < inner {
+			btnLine = padFit(btnLine, inner)
+		}
+		lines = append(lines, styleDialogHint().Width(inner).MaxHeight(1).Render(btnLine))
+		if m.transferCopyFlash != "" {
+			// Keep flash visible as its own status line too (easy to spot).
+			lines = append(lines, styleDialogActive().Width(inner).MaxHeight(1).Render(
+				padFit(m.transferCopyFlash, inner),
+			))
+		}
 	}
 
 	// Progress bar
@@ -386,11 +435,11 @@ func (m Model) renderTransferPanel(windowCols int) string {
 		if m.transferTicket != "" {
 			footer += styleDialogHint().Render("  ") +
 				styleDialogHintKey().Render("c") +
-				styleDialogHint().Render(" copy ticket")
+				styleDialogHint().Render(" / click copy")
 		}
 	case "ready":
 		footer = styleDialogHintKey().Render("c") +
-			styleDialogHint().Render(" copy ticket  ") +
+			styleDialogHint().Render(" / click copy  ") +
 			styleDialogHintKey().Render("esc") +
 			styleDialogHint().Render(" stop")
 	default:
@@ -399,7 +448,7 @@ func (m Model) renderTransferPanel(windowCols int) string {
 		if m.transferTicket != "" {
 			footer += styleDialogHint().Render("  ") +
 				styleDialogHintKey().Render("c") +
-				styleDialogHint().Render(" copy")
+				styleDialogHint().Render(" / click copy")
 		}
 	}
 	return renderDialogCard(outer, title, lines, footer)

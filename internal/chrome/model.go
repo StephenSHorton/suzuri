@@ -66,8 +66,9 @@ type Model struct {
 	transferDone      uint64
 	transferTotal     uint64
 	transferMsg       string
-	transferDropHover bool   // OS file drag over window (send prompt)
-	transferDropHint  string // short feedback under drop zone
+	transferDropHover  bool   // OS file drag over window (send prompt)
+	transferDropHint   string // short feedback under drop zone
+	transferCopyFlash  string // in-panel "Copied!" after c / click copy
 	// Notes bank (persisted to notes.json; editor mirrors active note).
 	notesBank   []NoteDoc
 	notesActive int // index into notesBank
@@ -407,12 +408,18 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		if act == ActionTransferStart {
 			return Result{Model: m, Action: act, Name: dropPath, TransferMode: TransferModeSend}
 		}
+	case TransferClickMsg:
+		act = m.handleTransferClick()
+		if act == ActionTransferCopyTicket {
+			return Result{Model: m, Action: act, Name: m.transferTicket}
+		}
 	case CloseTransferMsg:
 		m.TransferPromptOpen = false
 		m.TransferPanelOpen = false
 		m.transferBuf = ""
 		m.transferDropHover = false
 		m.transferDropHint = ""
+		m.transferCopyFlash = ""
 	case OpenNotesMsg:
 		m.openNotes()
 	case ToggleNotesMsg:

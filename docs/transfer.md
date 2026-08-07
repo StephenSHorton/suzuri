@@ -61,10 +61,12 @@ Host ↔ engine uses NDJSON (`--json`). See [`libs/transfer/docs/machine-mode.md
 
 | Command | Flow |
 |---------|------|
-| **Send file (ticket)…** | Path prompt (type, paste, or drop) → prepare → ticket panel (`c` copy, `esc` stop) |
+| **Send file (ticket)…** | Path prompt (type, paste, or drop) → prepare → ticket panel (`c` / click **Copy ticket**, `esc` stop) |
 | **Receive ticket…** | Ticket prompt (type or paste) → download into `~/Downloads` (or home) with progress |
 
 While a path/ticket prompt is open, printable keys and clipboard paste (`⌘V` / `Ctrl+V`) go to that field.
+
+While the **progress panel** is open with a ticket: press **`c`** or **click the panel / Copy ticket button** — the panel shows **Copied!** in place (and the host also toasts). The engine runs as a hidden subprocess of suzuri (no extra terminal window).
 
 ### Drag and drop (send only)
 

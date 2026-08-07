@@ -105,6 +105,15 @@ func main() {
 	// updates (mic TCC silent deny). May re-sign and relaunch once, then exit.
 	update.HealMacAppBundle(version)
 
+	// Windows: one interactive GUI per session. A second double-click activates
+	// the existing window instead of stacking processes (agent installs and
+	// Start Menu launches used to spawn N hosts and thrash ConPTY).
+	// SUZURI_ALLOW_MULTI=1 skips this. CLI subcommands (mcp/send/…) exit above.
+	if !ui.EnsureSingleInstance() {
+		log.Info("exiting; existing instance activated", "pid", os.Getpid())
+		return
+	}
+
 	// Updater is wired for UI-driven checks (startup toast + confirm before install).
 	// Never silent-apply: host offers a modal; user must confirm restart.
 	upd := update.New("StephenSHorton/suzuri", version)
