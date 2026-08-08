@@ -1565,13 +1565,15 @@ func (u *macUI) dimShellModal() bool {
 	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
 }
 
-// solidOverlayPanel fills default-bg holes inside floating cards that must stay
-// opaque (workspace). Does not dim the shell under the card.
+// solidOverlayPanel fills default-bg cells with panel. Only for true dim
+// modals (settings/splash/confirm). Never for workspace: the overlay grid is
+// full terminal width with PlaceHorizontal gutters — painting those as panel
+// draws horizontal bars left/right of the card.
 func (u *macUI) solidOverlayPanel() bool {
 	if u == nil {
 		return false
 	}
-	return u.dimShellModal() || u.chrome.WorkspaceOpen
+	return u.dimShellModal()
 }
 
 func (u *macUI) matrixIntroActive() bool {
