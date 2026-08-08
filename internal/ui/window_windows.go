@@ -5296,14 +5296,22 @@ func (u *winUI) releaseBackbuffer() {
 }
 
 // dimShellModal is true when a modal replaces the live terminal with a dim
-// matte. Palette, help, notes, transfer, rename float over the live shell.
-// Workspace dims so gutters don't show Grok through card margins.
+// matte (settings / splash / confirm only). Workspace floats over the live
+// shell — no full-window dim under the card.
 func (u *winUI) dimShellModal() bool {
 	if u == nil {
 		return false
 	}
-	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen ||
-		u.chrome.WorkspaceOpen
+	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
+}
+
+// solidOverlayPanel fills default-bg holes inside the workspace card without
+// dimming the shell under it.
+func (u *winUI) solidOverlayPanel() bool {
+	if u == nil {
+		return false
+	}
+	return u.dimShellModal() || u.chrome.WorkspaceOpen
 }
 
 // staticDimUnderlay is true for dim modals that don't animate (splash/confirm).
@@ -5316,13 +5324,14 @@ func (u *winUI) staticDimUnderlay() bool {
 }
 
 // floatOverLiveShell is true when a card paints over the live terminal
-// (palette/help/notes/rename/transfer). Workspace uses dimShellModal.
+// without a dim matte (palette/help/notes/rename/transfer/workspace).
 func (u *winUI) floatOverLiveShell() bool {
 	if u == nil || u.dimShellModal() {
 		return false
 	}
 	return u.chrome.PaletteOpen || u.chrome.HelpOpen || u.chrome.RenameOpen ||
-		u.chrome.NotesOpen || u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen
+		u.chrome.NotesOpen || u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen ||
+		u.chrome.WorkspaceOpen
 }
 
 func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
@@ -6311,8 +6320,8 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 	// Place in the shell region. Prefer slight top bias; if the stack is tall
 	// (settings + help), shift up so the bottom caption is not clipped.
 	oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
-	// Dim modals (workspace, …): fill default-bg holes with panel, not skip.
-	u.paintChromeCellsEx(hdc, rect, u.overlayCells, 0, oy, false, u.dimShellModal())
+	// Workspace (and dim settings): fill default-bg holes with panel, not skip.
+	u.paintChromeCellsEx(hdc, rect, u.overlayCells, 0, oy, false, u.solidOverlayPanel())
 	// Notes editor caret: same block/underline/bar as the terminal cursor.
 	u.paintNotesCaret(hdc, oy)
 }

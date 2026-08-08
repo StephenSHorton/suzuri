@@ -1556,14 +1556,22 @@ func (u *macUI) themeAmbientColors() ambientColors {
 }
 
 // dimShellModal is true for overlays that replace the live shell with a dim
-// matte. Palette, help, notes, transfer, rename float over the live shell.
-// Workspace dims so side gutters don't show Grok through the card margins.
+// matte (settings rain / splash / confirm only). Workspace, palette, notes,
+// transfer float over the live shell — no full-window dim under the card.
 func (u *macUI) dimShellModal() bool {
 	if u == nil {
 		return false
 	}
-	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen ||
-		u.chrome.WorkspaceOpen
+	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
+}
+
+// solidOverlayPanel fills default-bg holes inside floating cards that must stay
+// opaque (workspace). Does not dim the shell under the card.
+func (u *macUI) solidOverlayPanel() bool {
+	if u == nil {
+		return false
+	}
+	return u.dimShellModal() || u.chrome.WorkspaceOpen
 }
 
 func (u *macUI) matrixIntroActive() bool {
@@ -3580,8 +3588,9 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		CurY:             cur.Y,
 		CurVis:           curVis,
 		CurAlpha:         curAlpha,
-		// Dim matte for workspace/notes/settings/…; palette + help float live.
+		// Dim matte: settings/splash/confirm only. Workspace floats live shell.
 		DimShell:         u.dimShellModal(),
+		SolidPanel:       u.solidOverlayPanel(),
 		SettingsOpen:     u.chrome.SettingsOpen,
 		MatrixCells:      rain,
 		ShellMatrixCells: shellRain,
@@ -3665,7 +3674,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	// Re-paint overlay on top of pane content (paintFrame already drew it once
 	// before multi-pane grids; draw again so cards float above shells).
 	if len(layouts) > 1 && len(overlay) > 0 {
-		u.painter.paintOverlayOnly(u.fb, overlay, padY, shellBot, u.dimShellModal())
+		u.painter.paintOverlayOnly(u.fb, overlay, padY, shellBot, u.solidOverlayPanel())
 	}
 
 	// Notes caret (block/underline/bar) over the overlay grid.
