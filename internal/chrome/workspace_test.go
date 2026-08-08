@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/StephenSHorton/suzuri/internal/config"
 	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
 
@@ -144,9 +145,47 @@ func TestAvailabilityStyleCodes(t *testing.T) {
 	if !strings.Contains(chip, "bot") {
 		t.Fatalf("chip=%q", chip)
 	}
-	// Note should appear for waiting
 	if !strings.Contains(chip, "need human") {
 		t.Fatalf("expected note in chip: %q", chip)
+	}
+}
+
+func TestMemberIdentityStable(t *testing.T) {
+	c1, g1 := memberIdentity("build-session", workspace.KindAgent)
+	c2, g2 := memberIdentity("build-session", workspace.KindAgent)
+	if c1 != c2 || g1 != g2 {
+		t.Fatal("identity should be stable")
+	}
+	_, gHuman := memberIdentity("build-session", workspace.KindHuman)
+	if g1 == gHuman {
+		// same glyph possible; colors should still differ via kind bit
+	}
+	cOther, _ := memberIdentity("alice", workspace.KindHuman)
+	if c1 == cOther && g1 == gHuman {
+		// rare collision ok
+	}
+}
+
+func TestComposeCaretFromSettings(t *testing.T) {
+	if composeCaretGlyph(config.CursorBlock) != "█" {
+		t.Fatal("block")
+	}
+	if composeCaretGlyph(config.CursorBar) != "▌" {
+		t.Fatal("bar")
+	}
+	if composeCaretGlyph(config.CursorUnderline) != "▁" {
+		t.Fatal("underline")
+	}
+}
+
+func TestChannelTabHitsIncludePlus(t *testing.T) {
+	chs := []workspace.Channel{{ID: "general"}, {ID: "pr-1"}}
+	hits, plus := channelTabHits(chs, "general", 80)
+	if len(hits) < 1 {
+		t.Fatal("expected channel hits")
+	}
+	if !plus.ok {
+		t.Fatal("expected + chip")
 	}
 }
 

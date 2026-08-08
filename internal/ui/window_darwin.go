@@ -1565,18 +1565,22 @@ func (u *macUI) dimShellModal() bool {
 	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
 }
 
-// solidOverlayPanel fills ALL default-bg cells (dim settings/splash/confirm only).
+// solidOverlayPanel fills ALL default-bg cells. Only splash/confirm (no wide
+// gutters). Settings uses solidInterior instead so L/R panel bars don't appear.
 func (u *macUI) solidOverlayPanel() bool {
 	if u == nil {
 		return false
 	}
-	return u.dimShellModal()
+	return u.chrome.ConfirmOpen || u.chrome.SplashOpen
 }
 
 // solidOverlayInterior fills default-bg holes only inside the card bbox
-// (workspace). Side gutters from PlaceHorizontal stay transparent.
+// (workspace / settings). Side gutters stay transparent — no panel side bars.
 func (u *macUI) solidOverlayInterior() bool {
-	return u != nil && u.chrome.WorkspaceOpen
+	if u == nil {
+		return false
+	}
+	return u.chrome.WorkspaceOpen || u.chrome.SettingsOpen
 }
 
 func (u *macUI) matrixIntroActive() bool {
@@ -2768,6 +2772,24 @@ func (u *macUI) persistNotes() {
 func (u *macUI) handleMouse() {
 	_, wheelY := ebiten.Wheel()
 	if wheelY != 0 {
+		// Workspace owns the wheel while open — do not scroll the shell/Grok under it.
+		if u.chrome.WorkspaceOpen {
+			steps := int(wheelY * 3)
+			if steps == 0 {
+				if wheelY > 0 {
+					steps = 1
+				} else {
+					steps = -1
+				}
+			}
+			// ebiten: positive wheel = away = older messages = viewport ScrollUp.
+			m := u.chrome
+			m.WorkspaceScroll(steps)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			return
+		}
 		mx, my := ebiten.CursorPosition()
 		// Scroll the pane under the cursor (not only the focused one).
 		t := u.tabUnderPoint(int32(mx), int32(my))
@@ -2903,6 +2925,16 @@ func (u *macUI) handleMouse() {
 					u.overlayDirty = true
 					u.overlayCells = nil
 					u.applyChromeAction(r)
+					return
+				}
+				// Workspace: channel tabs / + new channel.
+				if u.chrome.WorkspaceOpen {
+					r := u.chrome.UpdateChrome(chrome.WorkspaceClickMsg{
+						CellX: cellX, CellY: cellY, Cols: u.cols,
+					})
+					u.chrome = r.Model
+					u.overlayDirty = true
+					u.overlayCells = nil
 					return
 				}
 				// Other overlays: keep open when clicking the card band.

@@ -50,12 +50,15 @@ chat bubbles (viewport scroll) · compose · short status · key footer.
 | Type + Enter | Post as human (or confirm new channel / file path) |
 | `@name` | Mention a member — Tab/Enter completes from the picker |
 | Tab / Shift+Tab | Cycle channels (or complete/cycle @mentions when picker open) |
-| Ctrl+N | New channel (type name, Enter) |
+| **+** chip (or Ctrl+N) | New channel — type name, Enter |
+| Click channel tab | Switch channel |
 | Ctrl+D | Delete current channel (press twice to confirm; not on #general) |
 | Ctrl+F | Attach file (type `~/path` or absolute path, Enter) |
-| ↑ / ↓ / PgUp / PgDn | Scroll message viewport |
+| ↑ / ↓ / wheel / PgUp / PgDn | Scroll **chat** history (not the terminal under the modal) |
 | Ctrl+R | Reload from disk |
 | Esc | Cancel mode, or close panel |
+
+Members get a stable color + symbol in the presence strip and on message headers.
 
 File messages show as `📎 name (size)` in the stream. Files are **copied** into
 `channels/<slug>/files/` (max 64 MiB).

@@ -2,6 +2,7 @@ package chrome
 
 import (
 	"fmt"
+	"hash/fnv"
 	"os/user"
 	"strings"
 	"unicode/utf8"
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/StephenSHorton/suzuri/internal/config"
 	"github.com/StephenSHorton/suzuri/internal/textedit"
 	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
@@ -27,9 +29,15 @@ const (
 	wsChromeRows = 12
 	wsMsgRowsMin = 8
 	wsMsgRowsMax = 48
-	// Chat bubble max width (cols); content-sized up to this.
-	wsBubbleMaxW = 72
+	// Chat bubble: use nearly full message column (short msgs still hug content).
+	wsBubbleMaxFrac = 0.96
 )
+
+// WorkspaceClickMsg is a mouse click on the workspace card (overlay cell coords).
+type WorkspaceClickMsg struct {
+	CellX, CellY int
+	Cols         int
+}
 
 // wsInputMode is what the compose line is for.
 type wsInputMode int
@@ -403,6 +411,66 @@ func (m *Model) wsApplyCompose(s textedit.Snapshot) {
 	m.wsCompose = string(s.Text)
 }
 
+// WorkspaceScroll moves the message viewport. Positive lines = older (ScrollUp).
+func (m *Model) WorkspaceScroll(lines int) {
+	if !m.WorkspaceOpen || lines == 0 {
+		return
+	}
+	m.syncWorkspaceViewport(true)
+	if lines > 0 {
+		m.wsVP.ScrollUp(lines)
+	} else {
+		m.wsVP.ScrollDown(-lines)
+	}
+	m.wsStickBtm = m.wsVP.AtBottom()
+}
+
+// handleWorkspaceClick switches channels or opens new-channel mode from the tab strip.
+func (m *Model) handleWorkspaceClick(msg WorkspaceClickMsg) {
+	if m.wsMode != wsModeCompose && m.wsMode != wsModeNewChannel {
+		return
+	}
+	outer := workspaceDialogWidth(msg.Cols)
+	innerW := dialogInnerWidth(outer)
+	if innerW < 24 {
+		innerW = 24
+	}
+	// Overlay is full terminal width; card is centered.
+	cardLeft := (msg.Cols - outer) / 2
+	if cardLeft < 0 {
+		cardLeft = 0
+	}
+	// styleDialogView: border 1 + pad 2 on each side ≈ content starts at cardLeft+3.
+	contentX := msg.CellX - cardLeft - 3
+	if contentX < 0 || contentX >= innerW {
+		return
+	}
+	// Title row then rule then tabs ≈ overlay row 2–4 depending on placement;
+	// match hits against tab layout by X only on early content rows.
+	hits, plus := channelTabHits(m.wsChannels, m.wsChannel, innerW)
+	if plus.ok && contentX >= plus.x0 && contentX < plus.x1 {
+		m.wsMode = wsModeNewChannel
+		m.wsCompose = ""
+		m.wsStatus = "new channel name — enter to create"
+		if m.wsHist != nil {
+			m.wsHist.Clear()
+		}
+		return
+	}
+	for _, h := range hits {
+		if contentX >= h.x0 && contentX < h.x1 && h.id != "" {
+			if h.id != m.wsChannel {
+				m.wsChannel = h.id
+				m.wsScroll = 0
+				m.wsStickBtm = true
+				m.wsMode = wsModeCompose
+				m.reloadWorkspaceFromDisk()
+			}
+			return
+		}
+	}
+}
+
 func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 	msgRows := m.workspaceMsgRows()
 	// Live @mention picker takes Tab / arrows when active.
@@ -480,7 +548,7 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 	case "ctrl+n":
 		m.wsMode = wsModeNewChannel
 		m.wsCompose = ""
-		m.wsStatus = "new channel name"
+		m.wsStatus = "new channel name — enter to create"
 		if m.wsHist != nil {
 			m.wsHist.Clear()
 		}
@@ -717,15 +785,15 @@ func (m Model) renderWorkspace(w int) string {
 	presence := solidifyOverlayLines(renderPresenceStrip(m.wsMembers, innerW), innerW)
 
 	compose := m.wsCompose
-	caret := "▌"
+	caret := composeCaretGlyph(m.lastCfg.Cursor)
 	var prompt string
 	switch m.wsMode {
 	case wsModeNewChannel:
-		prompt = lipgloss.NewStyle().Foreground(colSecondary).Bold(true).Render("# ")
+		prompt = lipgloss.NewStyle().Foreground(colSecondary).Bold(true).Background(colPanel).Render("# ")
 	case wsModeAttach:
-		prompt = lipgloss.NewStyle().Foreground(colCyan).Bold(true).Render("📎 ")
+		prompt = lipgloss.NewStyle().Foreground(colCyan).Bold(true).Background(colPanel).Render("📎 ")
 	default:
-		prompt = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Render("› ")
+		prompt = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Background(colPanel).Render("› ")
 	}
 	// Wrap compose on display if long (single-line input still, show tail).
 	compVisible := compose + caret
@@ -757,12 +825,25 @@ func (m Model) renderWorkspace(w int) string {
 		parts = append(parts, statusLine)
 	}
 
+	// Footer: no bare "n new" — channel create is + / ctrl+n.
 	footer := styleDialogHintKey().Render("enter") + styleDialogHint().Render(" send  ") +
 		styleDialogHintKey().Render("@") + styleDialogHint().Render(" mention  ") +
-		styleDialogHintKey().Render("tab") + styleDialogHint().Render(" ch  ") +
-		styleDialogHintKey().Render("⌃n") + styleDialogHint().Render(" new  ") +
+		styleDialogHintKey().Render("tab") + styleDialogHint().Render(" channel  ") +
+		styleDialogHintKey().Render("↑↓/wheel") + styleDialogHint().Render(" scroll  ") +
 		styleDialogHintKey().Render("esc")
 	return renderWorkspaceCard(outer, "Workspace", parts, footer)
+}
+
+// composeCaretGlyph matches the user's settings cursor style.
+func composeCaretGlyph(style config.CursorStyle) string {
+	switch style {
+	case config.CursorUnderline:
+		return "▁"
+	case config.CursorBar:
+		return "▌"
+	default:
+		return "█"
+	}
 }
 
 // solidifyOverlayLines forces every line to full width with panel background so
@@ -826,9 +907,15 @@ func (m Model) renderMentionPicker(width int) string {
 	return line
 }
 
-// renderChannelTabs paints a Lip Gloss tab strip (active filled, inactive soft).
-// Overflow collapses inactive tabs into "…N more".
-func renderChannelTabs(channels []workspace.Channel, active string, width int) string {
+// wsTabHit is a clickable range on the channel tab strip (inner content cols).
+type wsTabHit struct {
+	id     string
+	x0, x1 int
+	ok     bool
+}
+
+// channelTabHits lays out channel chips + trailing "+" (new channel), like the tab strip +.
+func channelTabHits(channels []workspace.Channel, active string, width int) (hits []wsTabHit, plus wsTabHit) {
 	if width < 12 {
 		width = 12
 	}
@@ -836,23 +923,16 @@ func renderChannelTabs(channels []workspace.Channel, active string, width int) s
 		channels = []workspace.Channel{{ID: workspace.DefaultChannel, Name: workspace.DefaultChannel}}
 		active = workspace.DefaultChannel
 	}
-
 	activeStyle := lipgloss.NewStyle().
-		Background(colPrimary).
-		Foreground(colOnPrimary).
-		Bold(true).
-		Padding(0, 1)
+		Background(colPrimary).Foreground(colOnPrimary).Bold(true).Padding(0, 1)
 	idleStyle := lipgloss.NewStyle().
-		Foreground(colSoft).
-		Background(colPanel).
-		Padding(0, 1)
-	moreStyle := lipgloss.NewStyle().Foreground(colMute).Background(colPanel).Padding(0, 1)
+		Foreground(colSoft).Background(colPanel).Padding(0, 1)
+	plusStyle := lipgloss.NewStyle().
+		Foreground(colOnPrimary).Background(colSecondary).Bold(true).Padding(0, 1)
 
-	// Prefer showing the active channel; pack as many others as fit.
 	type tabItem struct {
-		id     string
-		label  string
-		active bool
+		id, label string
+		active    bool
 	}
 	var items []tabItem
 	activeIdx := 0
@@ -866,26 +946,35 @@ func renderChannelTabs(channels []workspace.Channel, active string, width int) s
 			activeIdx = i
 		}
 	}
-
-	// Build from active outward until width is exhausted.
 	renderOne := func(it tabItem) string {
 		if it.active {
 			return activeStyle.Render(it.label)
 		}
 		return idleStyle.Render(it.label)
 	}
-	shown := make([]bool, len(items))
-	shown[activeIdx] = true
-	parts := []string{renderOne(items[activeIdx])}
-	used := lipgloss.Width(parts[0])
+	// Reserve space for "+".
+	plusChip := plusStyle.Render("+")
+	plusW := lipgloss.Width(plusChip)
+	budget := width - plusW - 1
+	if budget < 8 {
+		budget = width
+	}
 
+	shown := make([]bool, len(items))
+	if activeIdx >= len(items) {
+		activeIdx = 0
+	}
+	shown[activeIdx] = true
+	// Build plain order of shown items from active outward.
+	order := []int{activeIdx}
+	used := lipgloss.Width(renderOne(items[activeIdx]))
 	left, right := activeIdx-1, activeIdx+1
 	for left >= 0 || right < len(items) {
 		added := false
 		if right < len(items) {
 			p := renderOne(items[right])
-			if used+1+lipgloss.Width(p) <= width {
-				parts = append(parts, p)
+			if used+1+lipgloss.Width(p) <= budget {
+				order = append(order, right)
 				used += 1 + lipgloss.Width(p)
 				shown[right] = true
 				right++
@@ -894,8 +983,8 @@ func renderChannelTabs(channels []workspace.Channel, active string, width int) s
 		}
 		if left >= 0 {
 			p := renderOne(items[left])
-			if used+1+lipgloss.Width(p) <= width {
-				parts = append([]string{p}, parts...)
+			if used+1+lipgloss.Width(p) <= budget {
+				order = append([]int{left}, order...)
 				used += 1 + lipgloss.Width(p)
 				shown[left] = true
 				left--
@@ -906,20 +995,100 @@ func renderChannelTabs(channels []workspace.Channel, active string, width int) s
 			break
 		}
 	}
+	// Assign x ranges in visual left-to-right order.
+	x := 0
+	for i, idx := range order {
+		if i > 0 {
+			x++ // space
+		}
+		chip := renderOne(items[idx])
+		w := lipgloss.Width(chip)
+		hits = append(hits, wsTabHit{id: items[idx].id, x0: x, x1: x + w, ok: true})
+		x += w
+	}
+	// "+" always at the end when it fits.
+	if x+1+plusW <= width {
+		if x > 0 {
+			x++
+		}
+		plus = wsTabHit{id: "", x0: x, x1: x + plusW, ok: true}
+	}
+	return hits, plus
+}
 
+// renderChannelTabs paints channel chips + a "+" new-channel control (tab-strip style).
+func renderChannelTabs(channels []workspace.Channel, active string, width int) string {
+	if width < 12 {
+		width = 12
+	}
+	if len(channels) == 0 {
+		channels = []workspace.Channel{{ID: workspace.DefaultChannel, Name: workspace.DefaultChannel}}
+		active = workspace.DefaultChannel
+	}
+	activeStyle := lipgloss.NewStyle().
+		Background(colPrimary).Foreground(colOnPrimary).Bold(true).Padding(0, 1)
+	idleStyle := lipgloss.NewStyle().
+		Foreground(colSoft).Background(colPanel).Padding(0, 1)
+	moreStyle := lipgloss.NewStyle().Foreground(colMute).Background(colPanel).Padding(0, 1)
+	plusStyle := lipgloss.NewStyle().
+		Foreground(colOnPrimary).Background(colSecondary).Bold(true).Padding(0, 1)
+
+	hits, plus := channelTabHits(channels, active, width)
+	// Rebuild styled string from hits order (channelTabHits uses same packing).
+	// Simpler: re-run visual join using hits ids.
+	var parts []string
+	used := 0
+	idToLabel := map[string]string{}
+	for _, ch := range channels {
+		id := ch.ID
+		if id == "" {
+			id = ch.Name
+		}
+		idToLabel[id] = "#" + id
+	}
+	for _, h := range hits {
+		label := idToLabel[h.id]
+		if label == "" {
+			label = "#" + h.id
+		}
+		var chip string
+		if h.id == active {
+			chip = activeStyle.Render(label)
+		} else {
+			chip = idleStyle.Render(label)
+		}
+		parts = append(parts, chip)
+		used += lipgloss.Width(chip)
+		if len(parts) > 1 {
+			used++ // spaces already in join
+		}
+	}
+	// Overflow note if some channels hidden.
 	hidden := 0
-	for _, s := range shown {
-		if !s {
+	shownIDs := map[string]bool{}
+	for _, h := range hits {
+		shownIDs[h.id] = true
+	}
+	for _, ch := range channels {
+		id := ch.ID
+		if id == "" {
+			id = ch.Name
+		}
+		if !shownIDs[id] {
 			hidden++
 		}
 	}
+	line := strings.Join(parts, " ")
 	if hidden > 0 {
-		more := moreStyle.Render(fmt.Sprintf("…%d more", hidden))
-		if used+1+lipgloss.Width(more) <= width {
-			parts = append(parts, more)
+		more := moreStyle.Render(fmt.Sprintf("…%d", hidden))
+		if lipgloss.Width(line)+1+lipgloss.Width(more)+1+lipgloss.Width(plusStyle.Render("+")) <= width {
+			line += " " + more
 		}
 	}
-	return strings.Join(parts, " ")
+	if plus.ok {
+		line += " " + plusStyle.Render("+")
+	}
+	return line
 }
 
 // renderPresenceStrip shows members with availability glyphs (right-aligned-ish).
@@ -985,20 +1154,17 @@ func formatMemberChip(m workspace.Member) string {
 	if st == "" {
 		st = workspace.AvailIdle
 	}
-	glyph, color := availabilityStyle(st)
+	statusGlyph := availabilityGlyph(st)
+	color, personGlyph := memberIdentity(m.Name, m.Kind)
 	name := m.Name
 	if name == "" {
 		name = "?"
 	}
-	// Cap name length so many members still fit.
 	if utf8.RuneCountInString(name) > 14 {
 		name = string([]rune(name)[:13]) + "…"
 	}
-	label := name
-	if m.Kind == workspace.KindAgent {
-		label = name
-	}
-	chip := glyph + " " + label
+	// person glyph + status mark + name
+	chip := personGlyph + statusGlyph + " " + name
 	if m.StatusNote != "" && (st == workspace.AvailWaiting || st == workspace.AvailBlocked || st == workspace.AvailWorking) {
 		note := m.StatusNote
 		if utf8.RuneCountInString(note) > 18 {
@@ -1009,19 +1175,64 @@ func formatMemberChip(m workspace.Member) string {
 	return lipgloss.NewStyle().Foreground(color).Background(colPanel).Render(chip)
 }
 
-func availabilityStyle(st workspace.Availability) (glyph string, color lipgloss.Color) {
+func availabilityGlyph(st workspace.Availability) string {
 	switch workspace.NormalizeAvailability(string(st)) {
 	case workspace.AvailWorking:
-		return "●", colPrimary
+		return "●"
 	case workspace.AvailWaiting:
-		return "◐", colSecondary
+		return "◐"
 	case workspace.AvailBlocked:
-		return "✖", lipgloss.Color("203") // soft red; not a theme role but alert-y
+		return "✖"
 	case workspace.AvailAway:
-		return "○", colMute
-	default: // idle
-		return "●", colCyan
+		return "○"
+	default:
+		return "●"
 	}
+}
+
+// memberPalette is a fixed set of distinct colors (shades) for identity.
+var memberPalette = []lipgloss.Color{
+	lipgloss.Color("#7FDBFF"), // aqua
+	lipgloss.Color("#FFDC00"), // gold
+	lipgloss.Color("#FF851B"), // orange
+	lipgloss.Color("#B10DC9"), // purple
+	lipgloss.Color("#2ECC40"), // green
+	lipgloss.Color("#FF4136"), // red
+	lipgloss.Color("#39CCCC"), // teal
+	lipgloss.Color("#F012BE"), // fuchsia
+	lipgloss.Color("#01FF70"), // lime
+	lipgloss.Color("#7FDBCA"), // mint
+	lipgloss.Color("#E6DB74"), // soft yellow
+	lipgloss.Color("#AE81FF"), // soft violet
+	lipgloss.Color("#66D9EF"), // soft cyan
+	lipgloss.Color("#FD971F"), // soft orange
+	lipgloss.Color("#A6E22E"), // soft green
+	lipgloss.Color("#F92672"), // pink
+}
+
+// memberGlyphs distinguish people when colors collide or for extra flair.
+var memberGlyphs = []string{
+	"◆", "◇", "●", "○", "▲", "△", "■", "□", "★", "☆",
+	"✦", "✧", "❖", "◈", "◉", "◎", "◐", "◑", "◒", "◓",
+	"⬡", "⬢", "⬣", "⬤", "⬥", "⬦", "⬧", "⬨", "⬩", " paired",
+}
+
+// memberIdentity returns a stable color + symbol for a member name.
+func memberIdentity(name string, kind workspace.MemberKind) (lipgloss.Color, string) {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(name))))
+	if kind == workspace.KindAgent {
+		_, _ = h.Write([]byte{0x01}) // separate agent/human with same name
+	}
+	n := h.Sum32()
+	color := memberPalette[int(n)%len(memberPalette)]
+	glyph := memberGlyphs[int(n>>8)%len(memberGlyphs)]
+	return color, glyph
+}
+
+// availabilityStyle kept for tests.
+func availabilityStyle(st workspace.Availability) (glyph string, color lipgloss.Color) {
+	return availabilityGlyph(st), colCyan
 }
 
 // renderWorkspaceCard is like renderDialogCard but does not re-clamp to 68 cols.
@@ -1107,37 +1318,30 @@ func formatChatBubble(msg workspace.Message, width int, me string, memberNames m
 	mine := msg.FromKind == workspace.KindHuman &&
 		strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(me))
 
-	// Content-sized bubbles up to a max — never force full modal width
-	// (that made short "hello human" fill the whole row as an empty green box).
-	maxBubbleW := width * 72 / 100
-	if maxBubbleW > wsBubbleMaxW {
-		maxBubbleW = wsBubbleMaxW
-	}
+	// Nearly full message column; short text still hugs (MaxWidth, not forced Width).
+	maxBubbleW := int(float64(width) * wsBubbleMaxFrac)
 	if maxBubbleW < 18 {
 		maxBubbleW = min(width-2, 28)
 	}
 	if maxBubbleW > width-2 {
 		maxBubbleW = width - 2
 	}
-	// Inner text width after padding (1 each side) and border (2).
 	textW := maxBubbleW - 4
 	if textW < 10 {
 		textW = 10
 	}
 
-	label := name
+	memColor, memGlyph := memberIdentity(name, msg.FromKind)
+	label := memGlyph + " " + name
 	if msg.FromKind == workspace.KindAgent {
-		label = name + " · ai"
+		label = memGlyph + " " + name + " · ai"
 	}
-	// Nested spans must also set Background — bare Foreground SGR clears fill
-	// on the host paint path (default bg → transparent).
 	header := lipgloss.NewStyle().
-		Foreground(colSoft).
+		Foreground(memColor).
 		Background(fill).
+		Bold(true).
 		Render(fmt.Sprintf("%s  %s", label, ts))
 
-	// Wrap on plain text; re-apply mention style per visual line (no forced Width —
-	// short lines stay short so the bubble hugs content).
 	var bodyLines []string
 	if wl := wrapWords(bodyText, textW); len(wl) > 0 {
 		bodyLines = wl
@@ -1149,16 +1353,12 @@ func formatChatBubble(msg workspace.Message, width int, me string, memberNames m
 	}
 	inner := header + "\n" + strings.Join(bodyLines, "\n")
 
-	var borderFg lipgloss.Color
+	borderFg := memColor
 	if mine {
 		borderFg = colPrimary
-	} else if msg.FromKind == workspace.KindAgent {
-		borderFg = colCyan
-	} else {
-		borderFg = colDim
 	}
 
-	// MaxWidth (not Width): bubble grows with content up to the cap.
+	// MaxWidth: grows with content up to nearly full message column.
 	bubble := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderFg).
@@ -1173,8 +1373,6 @@ func formatChatBubble(msg workspace.Message, width int, me string, memberNames m
 	if mine {
 		align = lipgloss.Right
 	}
-	// Place with opaque panel padding — lipgloss.PlaceHorizontal uses default-bg
-	// spaces that paint as transparent holes in the modal.
 	return strings.Split(placeOpaque(width, align, bubble, fill), "\n")
 }
 

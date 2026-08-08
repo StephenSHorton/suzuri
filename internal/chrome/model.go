@@ -436,6 +436,10 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		if m.WorkspaceOpen {
 			m.reloadWorkspaceFromDisk()
 		}
+	case WorkspaceClickMsg:
+		if m.WorkspaceOpen {
+			m.handleWorkspaceClick(msg)
+		}
 	case LoadNotesMsg:
 		// Prefer disk bank; keep dirty flag clear after load.
 		if len(msg.Bank.Notes) > 0 || msg.Bank.ActiveID != "" {
