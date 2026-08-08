@@ -3019,6 +3019,26 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_MOUSEWHEEL:
+		delta := int16(wParam >> 16)
+		steps := int(delta) / 120
+		if steps == 0 {
+			if delta > 0 {
+				steps = 1
+			} else {
+				steps = -1
+			}
+		}
+		// Workspace owns the wheel while open — do not scroll the shell under it.
+		if u.chrome.WorkspaceOpen {
+			m := u.chrome
+			// Win32: positive delta = wheel away = older messages = ScrollUp.
+			m.WorkspaceScroll(steps * 3)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
 		// Prefer the pane under the cursor so split layouts scroll the hovered leaf.
 		var pt win.POINT
 		if win.GetCursorPos(&pt) {
@@ -3030,15 +3050,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		if tab == nil {
 			return 0
-		}
-		delta := int16(wParam >> 16)
-		steps := int(delta) / 120
-		if steps == 0 {
-			if delta > 0 {
-				steps = 1
-			} else {
-				steps = -1
-			}
 		}
 		// Win32: positive delta = wheel away = scroll up.
 		viewRows := u.rows
@@ -3151,6 +3162,29 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 					if r.Action != chrome.ActionNone {
 						u.applyChromeAction(r)
 					}
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+					return 0
+				}
+				// Workspace: channel tabs / + new channel.
+				if u.chrome.WorkspaceOpen {
+					cw, ch := u.metricW, u.metricH
+					if cw < 1 {
+						cw = cellW
+					}
+					if ch < 1 {
+						ch = cellH
+					}
+					var rect win.RECT
+					win.GetClientRect(hwnd, &rect)
+					oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
+					cx := int(px / cw)
+					cy := int((py - oy) / ch)
+					r := u.chrome.UpdateChrome(chrome.WorkspaceClickMsg{
+						CellX: cx, CellY: cy, Cols: u.cols,
+					})
+					u.chrome = r.Model
 					u.overlayDirty = true
 					u.overlayCells = nil
 					win.InvalidateRect(hwnd, nil, false)
@@ -5305,17 +5339,20 @@ func (u *winUI) dimShellModal() bool {
 	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
 }
 
-// solidOverlayPanel fills ALL default-bg cells (dim settings/splash/confirm).
+// solidOverlayPanel fills ALL default-bg cells (splash/confirm only — no wide gutters).
 func (u *winUI) solidOverlayPanel() bool {
 	if u == nil {
 		return false
 	}
-	return u.dimShellModal()
+	return u.chrome.ConfirmOpen || u.chrome.SplashOpen
 }
 
-// solidOverlayInterior fills holes only inside the card bbox (workspace).
+// solidOverlayInterior fills holes only inside the card bbox (workspace/settings).
 func (u *winUI) solidOverlayInterior() bool {
-	return u != nil && u.chrome.WorkspaceOpen
+	if u == nil {
+		return false
+	}
+	return u.chrome.WorkspaceOpen || u.chrome.SettingsOpen
 }
 
 // staticDimUnderlay is true for dim modals that don't animate (splash/confirm).
