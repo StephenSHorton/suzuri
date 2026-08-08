@@ -5305,13 +5305,17 @@ func (u *winUI) dimShellModal() bool {
 	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
 }
 
-// solidOverlayPanel fills default-bg cells with panel. Only for true dim
-// modals. Never workspace: full-width overlay gutters would paint as side bars.
+// solidOverlayPanel fills ALL default-bg cells (dim settings/splash/confirm).
 func (u *winUI) solidOverlayPanel() bool {
 	if u == nil {
 		return false
 	}
 	return u.dimShellModal()
+}
+
+// solidOverlayInterior fills holes only inside the card bbox (workspace).
+func (u *winUI) solidOverlayInterior() bool {
+	return u != nil && u.chrome.WorkspaceOpen
 }
 
 // staticDimUnderlay is true for dim modals that don't animate (splash/confirm).
@@ -5967,16 +5971,41 @@ func isTransparentOverlayBG(r, g, b byte) bool {
 // defaultBar=false: floating overlay. When solidPanel (dim modals), default-bg
 // holes fill with panel; otherwise gutters stay transparent (palette/help).
 func (u *winUI) paintChromeCells(hdc win.HDC, rect win.RECT, cells [][]cellPix, ox, oy int32, defaultBar bool) {
-	u.paintChromeCellsEx(hdc, rect, cells, ox, oy, defaultBar, false)
+	u.paintChromeCellsEx(hdc, rect, cells, ox, oy, defaultBar, false, false)
 }
 
-func (u *winUI) paintChromeCellsEx(hdc win.HDC, rect win.RECT, cells [][]cellPix, ox, oy int32, defaultBar, solidPanel bool) {
+func (u *winUI) paintChromeCellsEx(hdc win.HDC, rect win.RECT, cells [][]cellPix, ox, oy int32, defaultBar, solidPanel, solidInterior bool) {
 	cw, ch := u.metricW, u.metricH
 	if cw < 1 {
 		cw = cellW
 	}
 	if ch < 1 {
 		ch = cellH
+	}
+	// Card bbox for interior-only hole fill (workspace).
+	cardL, cardR, cardTop, cardBot := -1, -1, -1, -1
+	if solidInterior && !defaultBar {
+		for y := 0; y < len(cells); y++ {
+			row := cells[y]
+			for x := 0; x < len(row); x++ {
+				cell := row[x]
+				solid := !isTransparentOverlayBG(cell.BR, cell.BG, cell.BB) ||
+					(cell.Ch != 0 && cell.Ch != ' ')
+				if !solid {
+					continue
+				}
+				if cardL < 0 || x < cardL {
+					cardL = x
+				}
+				if x > cardR {
+					cardR = x
+				}
+				if cardTop < 0 {
+					cardTop = y
+				}
+				cardBot = y
+			}
+		}
 	}
 	type bgRun struct {
 		x0, x1  int
@@ -5989,9 +6018,12 @@ func (u *winUI) paintChromeCellsEx(hdc win.HDC, rect win.RECT, cells [][]cellPix
 			cell := row[x]
 			br, bg, bb := cell.BR, cell.BG, cell.BB
 			empty := cell.Ch == 0 || cell.Ch == ' '
-			// Overlay: transparent gutters for palette/help only.
+			inInterior := solidInterior && cardL >= 0 &&
+				y >= cardTop && y <= cardBot && x >= cardL && x <= cardR
+			fillHoles := solidPanel || inInterior
+			// Overlay: transparent gutters stay open; holes only inside card bbox.
 			if !defaultBar && empty && isTransparentOverlayBG(br, bg, bb) {
-				if solidPanel {
+				if fillHoles {
 					br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
 				} else {
 					continue
@@ -6320,8 +6352,8 @@ func (u *winUI) paintOverlay(hdc win.HDC, rect win.RECT) {
 	// Place in the shell region. Prefer slight top bias; if the stack is tall
 	// (settings + help), shift up so the bottom caption is not clipped.
 	oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
-	// Workspace (and dim settings): fill default-bg holes with panel, not skip.
-	u.paintChromeCellsEx(hdc, rect, u.overlayCells, 0, oy, false, u.solidOverlayPanel())
+	// Dim settings: full solid panel. Workspace: interior holes only (no side bars).
+	u.paintChromeCellsEx(hdc, rect, u.overlayCells, 0, oy, false, u.solidOverlayPanel(), u.solidOverlayInterior())
 	// Notes editor caret: same block/underline/bar as the terminal cursor.
 	u.paintNotesCaret(hdc, oy)
 }

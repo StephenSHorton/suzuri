@@ -1565,15 +1565,18 @@ func (u *macUI) dimShellModal() bool {
 	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
 }
 
-// solidOverlayPanel fills default-bg cells with panel. Only for true dim
-// modals (settings/splash/confirm). Never for workspace: the overlay grid is
-// full terminal width with PlaceHorizontal gutters — painting those as panel
-// draws horizontal bars left/right of the card.
+// solidOverlayPanel fills ALL default-bg cells (dim settings/splash/confirm only).
 func (u *macUI) solidOverlayPanel() bool {
 	if u == nil {
 		return false
 	}
 	return u.dimShellModal()
+}
+
+// solidOverlayInterior fills default-bg holes only inside the card bbox
+// (workspace). Side gutters from PlaceHorizontal stay transparent.
+func (u *macUI) solidOverlayInterior() bool {
+	return u != nil && u.chrome.WorkspaceOpen
 }
 
 func (u *macUI) matrixIntroActive() bool {
@@ -3593,6 +3596,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		// Dim matte: settings/splash/confirm only. Workspace floats live shell.
 		DimShell:         u.dimShellModal(),
 		SolidPanel:       u.solidOverlayPanel(),
+		SolidInterior:    u.solidOverlayInterior(),
 		SettingsOpen:     u.chrome.SettingsOpen,
 		MatrixCells:      rain,
 		ShellMatrixCells: shellRain,
@@ -3676,7 +3680,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	// Re-paint overlay on top of pane content (paintFrame already drew it once
 	// before multi-pane grids; draw again so cards float above shells).
 	if len(layouts) > 1 && len(overlay) > 0 {
-		u.painter.paintOverlayOnly(u.fb, overlay, padY, shellBot, u.solidOverlayPanel())
+		u.painter.paintOverlayOnly(u.fb, overlay, padY, shellBot, u.solidOverlayPanel(), u.solidOverlayInterior())
 	}
 
 	// Notes caret (block/underline/bar) over the overlay grid.
