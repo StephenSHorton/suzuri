@@ -134,7 +134,8 @@ type paintOpts struct {
 	CurX, CurY   int
 	CurVis       bool
 	CurAlpha     float64
-	DimShell     bool
+	DimShell     bool // full-shell dim matte (settings/splash/confirm)
+	SolidPanel   bool // fill default-bg overlay cells with panel (workspace holes)
 	SettingsOpen bool
 	// Intro / underlay (MatrixCells paint over the shell field after the grid).
 	MatrixCells   []rainCell
@@ -322,24 +323,19 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	}
 
 	// Overlay card. Palette/help keep transparent gutters (float over live shell).
-	// DimShell modals (workspace, settings, …) fill default-bg "holes" with panel
-	// so nested lipgloss resets never punch see-through gaps in the card.
+	// SolidPanel (workspace) fills default-bg holes with panel without dimming.
 	if len(o.Overlay) > 0 {
 		oh := len(o.Overlay) * ch
 		shellH := shellBot - padY
+		// Slight top bias; centered floating modal (not full-bleed pin).
 		oy := padY + (shellH-oh)/4
-		if o.DimShell {
-			// Full-height focus modals: pin near top with small inset, not a
-			// floating short card in the upper third.
-			oy = padY + ch/2
-		}
 		if oy+oh > shellBot {
 			oy = shellBot - oh
 		}
 		if oy < padY {
 			oy = padY
 		}
-		paintCellStrip(p, dst, o.Overlay, 0, oy, false /* bar */, o.DimShell /* solidPanel */)
+		paintCellStrip(p, dst, o.Overlay, 0, oy, false /* bar */, o.SolidPanel)
 	}
 }
 
@@ -762,10 +758,8 @@ func (p *softwarePainter) paintOverlayOnly(dst *image.RGBA, overlay [][]cellPix,
 	}
 	oh := len(overlay) * ch
 	shellH := shellBot - padY
+	// Same placement as floating palette/help — no dim-modal top pin.
 	oy := padY + (shellH-oh)/4
-	if solidPanel {
-		oy = padY + ch/2
-	}
 	if oy+oh > shellBot {
 		oy = shellBot - oh
 	}
