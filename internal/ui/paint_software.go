@@ -135,7 +135,7 @@ type paintOpts struct {
 	CurVis       bool
 	CurAlpha     float64
 	DimShell     bool // full-shell dim matte (settings/splash/confirm)
-	SolidPanel   bool // fill default-bg overlay cells with panel (workspace holes)
+	SolidPanel   bool // fill default-bg overlay cells with panel (dim modals only)
 	SettingsOpen bool
 	// Intro / underlay (MatrixCells paint over the shell field after the grid).
 	MatrixCells   []rainCell
@@ -322,8 +322,8 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		p.paintInputBar(dst, o, shellBot, h)
 	}
 
-	// Overlay card. Palette/help keep transparent gutters (float over live shell).
-	// SolidPanel (workspace) fills default-bg holes with panel without dimming.
+	// Overlay card. Gutters stay transparent so the live shell shows left/right.
+	// SolidPanel is only for dim modals — never workspace (would paint side bars).
 	if len(o.Overlay) > 0 {
 		oh := len(o.Overlay) * ch
 		shellH := shellBot - padY

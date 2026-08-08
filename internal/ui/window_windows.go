@@ -5305,13 +5305,13 @@ func (u *winUI) dimShellModal() bool {
 	return u.chrome.SettingsOpen || u.chrome.ConfirmOpen || u.chrome.SplashOpen
 }
 
-// solidOverlayPanel fills default-bg holes inside the workspace card without
-// dimming the shell under it.
+// solidOverlayPanel fills default-bg cells with panel. Only for true dim
+// modals. Never workspace: full-width overlay gutters would paint as side bars.
 func (u *winUI) solidOverlayPanel() bool {
 	if u == nil {
 		return false
 	}
-	return u.dimShellModal() || u.chrome.WorkspaceOpen
+	return u.dimShellModal()
 }
 
 // staticDimUnderlay is true for dim modals that don't animate (splash/confirm).
