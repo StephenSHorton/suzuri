@@ -1895,22 +1895,29 @@ func (u *macUI) handleKeys() {
 		u.keyRep = newKeyRepeat()
 	}
 
+	// Host chrome letter/punctuation chords (palette, settings, help, close pane).
+	// Same policy as Cmd-only clipboard paste: when an alt-screen app (Grok)
+	// owns the keyboard, only Cmd triggers host — bare Ctrl must reach the PTY
+	// for Grok's Ctrl+K/P/W/,/… bindings. Outside alt-screen, Cmd or Ctrl both
+	// drive suzuri chrome (shell / Warp bar).
+	hostMod := meta || (realCtrl && !u.appOwnsKeyboard())
+
 	// Meta/Ctrl shortcuts (just pressed).
-	if inpututil.IsKeyJustPressed(ebiten.KeyComma) && ctrl && !shift {
+	if inpututil.IsKeyJustPressed(ebiten.KeyComma) && hostMod && !shift {
 		r := u.chrome.UpdateChrome(chrome.OpenSettingsMsg{Config: u.cfg})
 		u.chrome = r.Model
 		u.markChromeDirty()
 		u.applyChromeAction(r)
 		return
 	}
-	if ctrl && !shift && (inpututil.IsKeyJustPressed(ebiten.KeyK) || inpututil.IsKeyJustPressed(ebiten.KeyP)) {
+	if hostMod && !shift && (inpututil.IsKeyJustPressed(ebiten.KeyK) || inpututil.IsKeyJustPressed(ebiten.KeyP)) {
 		r := u.chrome.UpdateChrome(chrome.OpenPaletteMsg{})
 		u.chrome = r.Model
 		u.markChromeDirty()
 		u.applyChromeAction(r)
 		return
 	}
-	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeySlash) {
+	if hostMod && !shift && inpututil.IsKeyJustPressed(ebiten.KeySlash) {
 		r := u.chrome.UpdateChrome(chrome.OpenHelpMsg{})
 		u.chrome = r.Model
 		u.markChromeDirty()
@@ -1969,10 +1976,9 @@ func (u *macUI) handleKeys() {
 		u.splitActive(splitHoriz)
 		return
 	}
-	// ⌘W / Ctrl+W closes the focused pane. Last pane in a multi-pane tab
-	// collapses the chrome tab; last pane of the last tab arms confirm-quit
-	// (see closePaneUI → closePageAt). There is no separate "close tab" chord.
-	if ctrl && !shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
+	// ⌘W closes the focused pane (Ctrl+W only outside alt-screen — Grok uses
+	// Ctrl+W for delete-word / shell-mode exit). Last pane of last tab confirms quit.
+	if hostMod && !shift && inpututil.IsKeyJustPressed(ebiten.KeyW) {
 		if t := u.activeTab(); t != nil {
 			u.closePaneUI(t.id, true)
 		}
@@ -1980,6 +1986,7 @@ func (u *macUI) handleKeys() {
 	}
 	// Pane focus is after the overlay block: when notes/palette is open,
 	// arrows stay with the dialog. ⌘⌥+arrows focus panes; bare Option is word-jump.
+	// Tab switch stays Cmd|Ctrl always (Grok does not bind Ctrl+Tab).
 	if ctrl && inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		if shift {
 			u.switchTab(-1)
@@ -1988,7 +1995,7 @@ func (u *macUI) handleKeys() {
 		}
 		return
 	}
-	// Ctrl+1..9
+	// Cmd/Ctrl+1..9 — host tab select (Grok does not use these).
 	nTabs := len(u.pages)
 	if nTabs == 0 {
 		nTabs = len(u.tabs)
@@ -2142,10 +2149,30 @@ func (u *macUI) handleKeys() {
 			u.pasteClipboard()
 			return
 		}
-		// Ctrl+A..Z → C0 (incl. Ctrl+Z Grok draft undo, Ctrl+U wipe, Ctrl+V cancel).
+		// Grok draft undo accepts Ctrl+Z *or* Cmd+Z (is_undo_input). Map Cmd+Z →
+		// C0 SUB so undo works without Kitty Super reporting. Cmd+Shift+Z → redo
+		// via CSI-u (Super|Shift) when possible.
+		if super && !realCtrl && !opt && inpututil.IsKeyJustPressed(ebiten.KeyZ) {
+			var b []byte
+			if shift {
+				b = encodeKittyChar('z', true, false, false, true)
+			} else {
+				b = []byte{0x1a} // same as Ctrl+Z
+			}
+			if len(b) > 0 {
+				if t := u.activeTab(); t != nil {
+					t.sendKey(b)
+				} else {
+					u.sendKey(b)
+				}
+			}
+			return
+		}
+		// Ctrl+A..Z → C0 (Grok: undo Z, wipe U, cancel V, scroll J/K, palette P,
+		// YOLO O, quit Q, model M, sessions S, todos T, …).
 		// specialKeys only covers arrows/F-keys/etc.; without this loop those chords
 		// were dropped on macOS while Windows ptyKeyFromWin already forwarded them.
-		// Cmd+letter is never a C0 control (clipboard / host chords use Meta above).
+		// Host chrome no longer steals bare Ctrl under alt-screen (hostMod above).
 		if realCtrl && !super && !shift && !opt {
 			for key := ebiten.KeyA; key <= ebiten.KeyZ; key++ {
 				if !inpututil.IsKeyJustPressed(key) {
@@ -2161,6 +2188,66 @@ func (u *macUI) handleKeys() {
 					} else {
 						u.sendKey(b)
 					}
+				}
+				return
+			}
+			// Ctrl+Space → NUL (Grok completions / some editors).
+			if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+				if b := ptyKeyFromEbiten(tab.term, &tab.kitty, ebiten.KeySpace, true, false, false, false); len(b) > 0 {
+					u.sendKey(b)
+				}
+				return
+			}
+			// Ctrl+\ → FS (0x1c). Grok dashboard toggle.
+			if inpututil.IsKeyJustPressed(ebiten.KeyBackslash) {
+				u.sendKey([]byte{0x1c})
+				return
+			}
+			// Ctrl+; / Ctrl+' / Ctrl+. need Kitty CSI-u (not classic C0).
+			// Grok: queue pane (; / '), shortcuts cheatsheet (.).
+			if inpututil.IsKeyJustPressed(ebiten.KeySemicolon) {
+				if b := encodeKittyChar(';', false, false, true, false); len(b) > 0 {
+					u.sendKey(b)
+				}
+				return
+			}
+			if inpututil.IsKeyJustPressed(ebiten.KeyApostrophe) {
+				if b := encodeKittyChar('\'', false, false, true, false); len(b) > 0 {
+					u.sendKey(b)
+				}
+				return
+			}
+			if inpututil.IsKeyJustPressed(ebiten.KeyPeriod) {
+				if b := encodeKittyChar('.', false, false, true, false); len(b) > 0 {
+					u.sendKey(b)
+				}
+				return
+			}
+			// Ctrl+, → Grok settings (host settings is Cmd+, under alt-screen).
+			if inpututil.IsKeyJustPressed(ebiten.KeyComma) {
+				if b := encodeKittyChar(',', false, false, true, false); len(b) > 0 {
+					u.sendKey(b)
+				}
+				return
+			}
+			// Ctrl+/ → Grok dashboard search / filter (host help is Cmd+/).
+			if inpututil.IsKeyJustPressed(ebiten.KeySlash) {
+				if b := encodeKittyChar('/', false, false, true, false); len(b) > 0 {
+					u.sendKey(b)
+				}
+				return
+			}
+		}
+		// Ctrl+Shift+letter → CSI-u (Grok redo / welcome Ctrl+Shift+I / inline paste
+		// Ctrl+Shift+V). Classic C0 cannot encode Shift.
+		if realCtrl && !super && shift && !opt {
+			for key := ebiten.KeyA; key <= ebiten.KeyZ; key++ {
+				if !inpututil.IsKeyJustPressed(key) {
+					continue
+				}
+				ch := rune('a' + (key - ebiten.KeyA))
+				if b := encodeKittyChar(ch, true, false, true, false); len(b) > 0 {
+					u.sendKey(b)
 				}
 				return
 			}
