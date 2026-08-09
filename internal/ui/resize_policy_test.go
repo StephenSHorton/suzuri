@@ -63,3 +63,23 @@ func TestTabResizeUpdatesLastSize(t *testing.T) {
 		t.Fatalf("no-op changed size to %d×%d", tab.lastCols, tab.lastRows)
 	}
 }
+
+// Without a live ConPTY session, hot I/O must not block VT size updates
+// (paint path). ConPTY skip only applies when sess != nil — see tab.resize.
+func TestTabResizeNoSessionUpdatesVTWhenHot(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(100, 40))
+	tab := &tab{term: term, lastCols: 100, lastRows: 40}
+	tab.alive.Store(true)
+	tab.noteIO()
+	if tab.conPtyResizeOK() {
+		t.Fatal("expected hot I/O to block ConPTY OK")
+	}
+	tab.resize(80, 24)
+	if tab.lastCols != 80 || tab.lastRows != 24 {
+		t.Fatalf("no-sess resize should update last size, got %d×%d", tab.lastCols, tab.lastRows)
+	}
+	c, r := term.Size()
+	if c != 80 || r != 24 {
+		t.Fatalf("term size %d×%d want 80×24", c, r)
+	}
+}
