@@ -956,6 +956,7 @@ func (u *winUI) appOwnsKeyboard() bool {
 
 // maybeResizeForInput recomputes shell rows when a pane bar height changes.
 // No-ops when geometry is unchanged (avoids ConPTY resize thrash on every Enter).
+// When panes stream, paint-only + defer ConPTY settle (never ResizePseudoConsole hot).
 func (u *winUI) maybeResizeForInput() {
 	if u == nil || u.width < 1 || u.height < 1 {
 		return
@@ -982,6 +983,11 @@ func (u *winUI) maybeResizeForInput() {
 		need = true
 	}
 	if !need {
+		return
+	}
+	if u.anyPaneConPtyBusy() {
+		u.markLayoutDeferred()
+		u.relayoutActivePaintOnly()
 		return
 	}
 	u.applyClientSize(u.width, u.height)
@@ -3344,12 +3350,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		} else {
 			u.altMouseCol, u.altMouseRow = 0, 0
 		}
-		// Live sash resize: update ratio, reflow (no-op resize when size stable).
+		// Live sash resize: paint-only mid-drag always. ConPTY only on LBUTTONUP
+		// settle — quiet-path ConPTY thrash during drag still hard-crashed under
+		// Grok in production (ResizePseudoConsole storms).
 		if u.sashDrag != nil && (wParam&win.MK_LBUTTON) != 0 {
 			applySashDrag(*u.sashDrag, px, py)
 			// Keep sash geom parent bounds from last layout; node.ratio is live.
 			if u.width > 0 && u.height > 0 {
-				u.applyClientSize(u.width, u.height)
+				u.markLayoutDeferred()
+				u.relayoutActivePaintOnly()
 			}
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
@@ -3930,6 +3939,37 @@ func (u *winUI) anyPaneConPtyBusy() bool {
 	return false
 }
 
+// anyPaneSizeMismatch is true when a live leaf's ConPTY/VT last size does not
+// match current layout geometry (hot skip left lastCols sticky).
+func (u *winUI) anyPaneSizeMismatch() bool {
+	if u == nil || u.width < 1 || u.height < 1 {
+		return false
+	}
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	sx, sy, sw, sh := u.shellRect(u.width, u.height)
+	for _, pg := range u.pages {
+		if pg == nil || pg.root == nil {
+			continue
+		}
+		for _, g := range layoutPage(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID).leaves {
+			t := g.pane
+			if t == nil || !t.alive.Load() {
+				continue
+			}
+			if t.lastCols != g.cols || t.lastRows != g.rows {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // markLayoutDeferred records that ConPTY settle must wait (paint-only for now).
 func (u *winUI) markLayoutDeferred() {
 	if u == nil {
@@ -4090,12 +4130,24 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 
 	// Apply including alt-screen TUIs so split/window resize reflows Grok.
 	// Coalesced settle + same-size no-op prevent ResizePseudoConsole storms.
-	// Only reached when no pane has recent PTY I/O.
+	// Only reached when no pane has recent PTY I/O at settle *entry*; a leaf
+	// may still skip ConPTY if I/O arrived mid-apply (host ErrResizeBusy).
 	u.applyClientSize(w, h)
-	u.clearLayoutDeferred()
-	log.Info("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows,
-		"deferred", u.layoutDeferred)
-	applog.Trail("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
+	// Keep deferred while any leaf still needs ConPTY (sticky lastCols) so
+	// quiet blink re-settles. Clear only when all panes match layout.
+	if u.anyPaneConPtyBusy() || u.anyPaneSizeMismatch() {
+		u.markLayoutDeferred()
+		u.layoutSettlePosted = false
+		log.Info("layout settle partial (retry when quiet)", "w", w, "h", h,
+			"cols", u.cols, "rows", u.rows, "busy", u.anyPaneConPtyBusy(),
+			"panes", u.trailPaneSummary())
+		applog.Trail("layout settle partial", "w", w, "h", h, "panes", u.trailPaneSummary())
+	} else {
+		u.clearLayoutDeferred()
+		log.Info("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows,
+			"deferred", u.layoutDeferred)
+		applog.Trail("layout settle done", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
+	}
 	applog.Sync()
 
 	if u.alive.Load() {

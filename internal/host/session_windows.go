@@ -10,19 +10,29 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/UserExistsError/conpty"
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 )
 
+// sessionIOQuiet mirrors ui.conPtyIOQuiet — keep in sync. Host-level fail-closed
+// gate so a UI bug cannot call ResizePseudoConsole mid-stream.
+const sessionIOQuiet = 300 * time.Millisecond
+
 // Session is a live shell attached to a Windows ConPTY.
 type Session struct {
 	cpty *conpty.ConPty
 	once sync.Once
-	// resizeMu serializes ResizePseudoConsole — concurrent Resize while I/O is
-	// in flight has hard-crashed the host process (no Go panic trail).
+	// resizeMu serializes ResizePseudoConsole and ClosePseudoConsole.
+	// Concurrent Resize while I/O is in flight has hard-crashed the host
+	// (no Go panic trail). Read/Write stay unlocked (blocking Read would hang
+	// all resizes if they shared the mutex); lastIO is the fail-closed gate.
 	resizeMu sync.Mutex
+	// lastIOUnixNano is updated on successful Read/Write with n>0.
+	lastIOUnixNano atomic.Int64
 }
 
 // DefaultShell returns a sensible Windows shell command line.
@@ -238,18 +248,45 @@ func mustWd() string {
 
 // Read implements io.Reader (PTY → host).
 func (s *Session) Read(p []byte) (int, error) {
-	return s.cpty.Read(p)
+	if s == nil || s.cpty == nil {
+		return 0, io.EOF
+	}
+	n, err := s.cpty.Read(p)
+	if n > 0 {
+		s.lastIOUnixNano.Store(time.Now().UnixNano())
+	}
+	return n, err
 }
 
 // Write implements io.Writer (host → PTY).
 func (s *Session) Write(p []byte) (int, error) {
-	return s.cpty.Write(p)
+	if s == nil || s.cpty == nil {
+		return 0, fmt.Errorf("session closed")
+	}
+	n, err := s.cpty.Write(p)
+	if n > 0 {
+		s.lastIOUnixNano.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+// recentIO is true when ResizePseudoConsole would race live stream data.
+func (s *Session) recentIO() bool {
+	if s == nil {
+		return false
+	}
+	ns := s.lastIOUnixNano.Load()
+	if ns == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, ns)) < sessionIOQuiet
 }
 
 // Resize updates the ConPTY dimensions.
-// Serialized: never call ResizePseudoConsole from multiple goroutines at once.
+// Serialized with Close. Fail-closed if recent Read/Write activity (defense in
+// depth on top of the UI conPtyResizeOK gate). Never blocks waiting for quiet.
 func (s *Session) Resize(cols, rows int) error {
-	if s == nil || s.cpty == nil {
+	if s == nil {
 		return nil
 	}
 	if cols < 1 || rows < 1 {
@@ -264,6 +301,14 @@ func (s *Session) Resize(cols, rows int) error {
 	}
 	s.resizeMu.Lock()
 	defer s.resizeMu.Unlock()
+	if s.cpty == nil {
+		return nil
+	}
+	// Re-check under lock so a chunk that landed after the UI gate still denies.
+	if s.recentIO() {
+		applog.Trail("conpty.Resize skip", "cols", cols, "rows", rows, "reason", "recentIO")
+		return ErrResizeBusy
+	}
 	// Breadcrumb around the native call: hard deaths leave no Go panic trail.
 	applog.Trail("conpty.Resize enter", "cols", cols, "rows", rows, "pid", s.cpty.Pid())
 	err := s.cpty.Resize(cols, rows)
@@ -277,19 +322,35 @@ func (s *Session) Resize(cols, rows int) error {
 
 // Pid of the attached console process.
 func (s *Session) Pid() int {
+	if s == nil || s.cpty == nil {
+		return 0
+	}
 	return s.cpty.Pid()
 }
 
 // Wait blocks until the process exits.
 func (s *Session) Wait(ctx context.Context) (uint32, error) {
+	if s == nil || s.cpty == nil {
+		return 0, fmt.Errorf("session closed")
+	}
 	return s.cpty.Wait(ctx)
 }
 
 // Close tears down the ConPTY and process.
+// Holds resizeMu so an in-flight Resize cannot race ClosePseudoConsole.
 func (s *Session) Close() error {
+	if s == nil {
+		return nil
+	}
 	var err error
 	s.once.Do(func() {
+		s.resizeMu.Lock()
+		defer s.resizeMu.Unlock()
+		if s.cpty == nil {
+			return
+		}
 		err = s.cpty.Close()
+		s.cpty = nil
 	})
 	return err
 }

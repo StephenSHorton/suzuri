@@ -4,6 +4,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -229,7 +230,7 @@ func (t *tab) noteIO() {
 // Grok letterboxed after split. Policy now:
 //   - Block only while this pane has recent PTY I/O (streaming).
 //   - Do NOT block on titleBusy alone (Grok spinners last forever).
-//   - Host forces settle after layoutDeferMaxWait so splits still reflow.
+//   - Max-wait under load is paint-only; ConPTY settle only when quiet.
 func (t *tab) conPtyResizeOK() bool {
 	if t == nil || !t.alive.Load() {
 		return true
@@ -520,19 +521,41 @@ func (t *tab) resize(cols, rows int) {
 	}
 	alt := t.altScreen()
 	hot := paneHasRecentIO(t, conPtyIOQuiet)
+	ok := t.conPtyResizeOK()
 	applog.Trail("tab.resize",
 		"tab", t.id,
 		"from", fmt.Sprintf("%dx%d", t.lastCols, t.lastRows),
 		"to", fmt.Sprintf("%dx%d", cols, rows),
 		"alt", alt,
 		"hotIO", hot,
-		"ok", t.conPtyResizeOK(),
+		"ok", ok,
 	)
+	// Always update the VT grid so paint matches leaf geometry (letterbox-free).
 	if t.term != nil {
 		t.term.Resize(cols, rows)
 	}
+	// Windows: ResizePseudoConsole while a pane streams (Grok alt-screen) has
+	// hard-killed the host with no Go panic. Skip ConPTY and leave lastCols/
+	// lastRows unchanged so a later quiet layout settle retries the native call.
+	// Production 0.9.104 logged ok=false then still called conpty.Resize — never again.
 	if t.sess != nil {
+		if !ok {
+			log.Info("tab.resize skip ConPTY (hot I/O)",
+				"tab", t.id, "cols", cols, "rows", rows,
+				"from", fmt.Sprintf("%dx%d", t.lastCols, t.lastRows),
+				"alt", alt)
+			applog.Trail("tab.resize skip",
+				"tab", t.id, "cols", cols, "rows", rows, "reason", "hotIO")
+			return
+		}
 		if err := t.sess.Resize(cols, rows); err != nil {
+			if errors.Is(err, host.ErrResizeBusy) {
+				log.Info("tab.resize skip ConPTY (session busy)",
+					"tab", t.id, "cols", cols, "rows", rows)
+				applog.Trail("tab.resize skip",
+					"tab", t.id, "cols", cols, "rows", rows, "reason", "sessionBusy")
+				return
+			}
 			log.Warn("pty resize failed", "tab", t.id, "cols", cols, "rows", rows, "err", err)
 		}
 	}
