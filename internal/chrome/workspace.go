@@ -1418,19 +1418,41 @@ func styleMentionsInText(text string, memberNames map[string]string, fill lipglo
 }
 
 // placeOpaque left/right-aligns content within width using Background(fill) pads.
+//
+// Multi-line content (chat bubbles) is placed line-by-line. Prepending a single
+// pad to a "\n"-joined block only shifts the first line — human bubbles then
+// look like the top border flew to the far right while the body stayed left.
 func placeOpaque(width int, align lipgloss.Position, content string, fill lipgloss.Color) string {
-	cw := lipgloss.Width(content)
+	if width < 1 {
+		width = 1
+	}
+	if content == "" {
+		return lipgloss.NewStyle().Background(fill).Width(width).MaxHeight(1).Render("")
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) == 1 {
+		return placeOpaqueLine(width, align, lines[0], fill)
+	}
+	for i, line := range lines {
+		lines[i] = placeOpaqueLine(width, align, line, fill)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// placeOpaqueLine pads a single visual line (no embedded newlines).
+func placeOpaqueLine(width int, align lipgloss.Position, line string, fill lipgloss.Color) string {
+	cw := lipgloss.Width(line)
 	if width < 1 {
 		width = 1
 	}
 	if cw >= width {
-		return content
+		return line
 	}
 	pad := width - cw
 	// Width-only render of empty string → pad spaces carrying fill.
 	padStr := lipgloss.NewStyle().Background(fill).Width(pad).MaxHeight(1).Render("")
 	if align == lipgloss.Right {
-		return padStr + content
+		return padStr + line
 	}
 	// Center: split pad; default left for everything else.
 	if align == lipgloss.Center {
@@ -1438,9 +1460,9 @@ func placeOpaque(width int, align lipgloss.Position, content string, fill lipglo
 		right := pad - left
 		l := lipgloss.NewStyle().Background(fill).Width(left).MaxHeight(1).Render("")
 		r := lipgloss.NewStyle().Background(fill).Width(right).MaxHeight(1).Render("")
-		return l + content + r
+		return l + line + r
 	}
-	return content + padStr
+	return line + padStr
 }
 
 func localHumanName() string {

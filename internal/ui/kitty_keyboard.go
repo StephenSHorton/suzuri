@@ -106,6 +106,22 @@ func kittyCSIU(key, mods int) []byte {
 	return []byte(fmt.Sprintf("\x1b[%d;%du", key, mods))
 }
 
+// encodeKittyChar emits CSI-u for a unicode code point with modifiers.
+// Used for Ctrl/Cmd+Shift+letter and Ctrl+punctuation that have no classic C0.
+// Always CSI-u (Grok enables Kitty progressive enhancement; legacy terminals
+// ignore unknown CSI-u and lose the chord either way).
+func encodeKittyChar(ch rune, shift, alt, ctrl, super bool) []byte {
+	if ch < 0 || ch > 0x10ffff {
+		return nil
+	}
+	mods := kittyMods(shift, alt, ctrl, super)
+	if mods <= 1 {
+		// Bare character should go through rune path, not CSI-u.
+		return nil
+	}
+	return kittyCSIU(int(ch), mods)
+}
+
 // encodeEnter returns PTY bytes for Enter with modifiers.
 //
 // When the Kitty protocol is active, modified Enter uses CSI-u so Grok and

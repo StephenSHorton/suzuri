@@ -14,9 +14,9 @@ import (
 // readClipboardImageFile writes the macOS pasteboard raster (if any) to a
 // temp PNG and returns its path. Empty / non-image pasteboards return "".
 //
-// Screenshots and "Copy Image" often expose «class PNGf» (or can be coerced
-// to it). We avoid linking AppKit: osascript + a temp file is enough and
-// matches how Grok itself falls back when native reads fail.
+// Prefer in-process NSPasteboard (AppKit) so Hardened Runtime / re-sign does
+// not block image paste the way osascript Apple Events can. Fall back to
+// osascript «class PNGf» when native dump finds nothing (or is unavailable).
 func readClipboardImageFile() (path string, err error) {
 	dir := filepath.Join(os.TempDir(), "suzuri-paste")
 	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
@@ -26,8 +26,20 @@ func readClipboardImageFile() (path string, err error) {
 	name := fmt.Sprintf("clip-%d.png", time.Now().UnixNano())
 	out := filepath.Join(dir, name)
 
-	// AppleScript: coerce clipboard → PNG bytes, write to out.
-	// Paths must be escaped for AppleScript string literals.
+	if ok, nerr := writeClipboardPNGNative(out); nerr != nil {
+		_ = os.Remove(out)
+		// Fall through to osascript — do not fail the whole paste yet.
+	} else if ok {
+		if valid, verr := clipboardPNGLooksValid(out); verr != nil || !valid {
+			_ = os.Remove(out)
+		} else {
+			return out, nil
+		}
+	} else {
+		_ = os.Remove(out)
+	}
+
+	// Fallback: AppleScript coerce clipboard → PNG (needs Automation on some builds).
 	script := fmt.Sprintf(`
 try
   set pngData to the clipboard as «class PNGf»
@@ -53,25 +65,32 @@ end try
 		_ = os.Remove(out)
 		return "", nil // no image — not an error
 	}
-	st, statErr := os.Stat(out)
-	if statErr != nil || st.Size() < 32 {
+	if valid, verr := clipboardPNGLooksValid(out); verr != nil {
+		_ = os.Remove(out)
+		return "", verr
+	} else if !valid {
 		_ = os.Remove(out)
 		return "", nil
 	}
-	// Sanity: PNG magic
-	f, openErr := os.Open(out)
+	return out, nil
+}
+
+func clipboardPNGLooksValid(path string) (bool, error) {
+	st, statErr := os.Stat(path)
+	if statErr != nil || st.Size() < 32 {
+		return false, nil
+	}
+	f, openErr := os.Open(path)
 	if openErr != nil {
-		_ = os.Remove(out)
-		return "", openErr
+		return false, openErr
 	}
 	var magic [8]byte
 	_, _ = f.Read(magic[:])
 	_ = f.Close()
 	if string(magic[:4]) != "\x89PNG" {
-		_ = os.Remove(out)
-		return "", nil
+		return false, nil
 	}
-	return out, nil
+	return true, nil
 }
 
 func applescriptEscape(s string) string {

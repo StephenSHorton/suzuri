@@ -85,6 +85,25 @@ func TestWorkspaceComposeAcceptsRunes(t *testing.T) {
 	}
 }
 
+func TestWorkspaceComposeUndoCtrlZ(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	m := New(80)
+	m = m.UpdateChrome(OpenWorkspaceMsg{}).Model
+	m.handleWorkspaceKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h', 'i'}})
+	if m.wsCompose != "hi" {
+		t.Fatalf("compose=%q", m.wsCompose)
+	}
+	// Host delivers KeyCtrlZ (macOS Cmd/Ctrl+Z chord path).
+	m.handleWorkspaceKey(tea.KeyMsg{Type: tea.KeyCtrlZ})
+	if m.wsCompose != "" {
+		t.Fatalf("after undo compose=%q want empty", m.wsCompose)
+	}
+	m.handleWorkspaceKey(tea.KeyMsg{Type: tea.KeyCtrlY})
+	if m.wsCompose != "hi" {
+		t.Fatalf("after redo compose=%q want hi", m.wsCompose)
+	}
+}
+
 func TestWorkspaceMentionComplete(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	m := New(80)
@@ -230,4 +249,56 @@ func TestFormatChatBubble(t *testing.T) {
 	if al := formatChatBubble(agent, 48, "alice", names); len(al) < 1 {
 		t.Fatal("agent bubble empty")
 	}
+}
+
+func TestPlaceOpaqueMultiLineRightAlign(t *testing.T) {
+	// Equal-width rows (as lipgloss borders produce). Bug was: only line 0 got
+	// left pad; body stayed left → "top half far right".
+	bubble := "########\n########\n########"
+	out := placeOpaque(40, lipgloss.Right, bubble, colPanel)
+	lines := strings.Split(out, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("lines=%d want 3: %#v", len(lines), lines)
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got != 40 {
+			t.Fatalf("line %d width=%d want 40 stripped=%q", i, got, ansi.Strip(line))
+		}
+	}
+	// Every line's first non-space must share the same column (full block right-aligned).
+	lead := func(s string) int {
+		for i, r := range s {
+			if r != ' ' {
+				return i
+			}
+		}
+		return len(s)
+	}
+	strip0 := ansi.Strip(lines[0])
+	strip1 := ansi.Strip(lines[1])
+	strip2 := ansi.Strip(lines[2])
+	if lead(strip0) != lead(strip1) || lead(strip0) != lead(strip2) {
+		t.Fatalf("right-align lead mismatch: %q / %q / %q", strip0, strip1, strip2)
+	}
+	if lead(strip0) != 32 { // 40 - 8
+		t.Fatalf("lead=%d want 32", lead(strip0))
+	}
+
+	// Regression: single pad prepend only shifts line 0.
+	broken := placeOpaqueBrokenOnce(40, bubble)
+	bl := strings.Split(broken, "\n")
+	if lead(ansi.Strip(bl[0])) == lead(ansi.Strip(bl[1])) {
+		t.Fatal("sanity: broken single-pad prepend should misalign lines")
+	}
+}
+
+// placeOpaqueBrokenOnce is the pre-fix algorithm (pad once, prepend to block).
+func placeOpaqueBrokenOnce(width int, content string) string {
+	cw := lipgloss.Width(content)
+	if cw >= width {
+		return content
+	}
+	pad := width - cw
+	padStr := lipgloss.NewStyle().Width(pad).MaxHeight(1).Render("")
+	return padStr + content
 }
