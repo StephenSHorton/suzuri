@@ -11,35 +11,46 @@ import (
 	"time"
 )
 
-// readClipboardImageFile writes the macOS pasteboard raster (if any) to a
-// temp PNG and returns its path. Empty / non-image pasteboards return "".
-//
-// Prefer in-process NSPasteboard (AppKit) so Hardened Runtime / re-sign does
-// not block image paste the way osascript Apple Events can. Fall back to
-// osascript «class PNGf» when native dump finds nothing (or is unavailable).
-func readClipboardImageFile() (path string, err error) {
+// readClipboardImageFileUI writes the macOS pasteboard raster to a temp PNG.
+// Must run on the ebiten/AppKit UI thread — NSPasteboard is not thread-safe.
+// Empty / non-image pasteboards return "".
+func readClipboardImageFileUI() (path string, err error) {
 	dir := filepath.Join(os.TempDir(), "suzuri-paste")
 	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
 		return "", mkErr
 	}
-	// Unique name so rapid pastes don't clobber each other.
 	name := fmt.Sprintf("clip-%d.png", time.Now().UnixNano())
 	out := filepath.Join(dir, name)
 
-	if ok, nerr := writeClipboardPNGNative(out); nerr != nil {
+	ok, nerr := writeClipboardPNGNative(out)
+	if nerr != nil {
 		_ = os.Remove(out)
-		// Fall through to osascript — do not fail the whole paste yet.
-	} else if ok {
-		if valid, verr := clipboardPNGLooksValid(out); verr != nil || !valid {
-			_ = os.Remove(out)
-		} else {
-			return out, nil
-		}
-	} else {
-		_ = os.Remove(out)
+		return "", nerr
 	}
+	if !ok {
+		_ = os.Remove(out)
+		return "", nil
+	}
+	if valid, verr := clipboardPNGLooksValid(out); verr != nil {
+		_ = os.Remove(out)
+		return "", verr
+	} else if !valid {
+		_ = os.Remove(out)
+		return "", nil
+	}
+	return out, nil
+}
 
-	// Fallback: AppleScript coerce clipboard → PNG (needs Automation on some builds).
+// readClipboardImageFileOsascript is safe off-thread (no AppKit). Used when
+// the UI-thread native dump finds nothing. May need Automation on hardened builds.
+func readClipboardImageFileOsascript() (path string, err error) {
+	dir := filepath.Join(os.TempDir(), "suzuri-paste")
+	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
+		return "", mkErr
+	}
+	name := fmt.Sprintf("clip-%d.png", time.Now().UnixNano())
+	out := filepath.Join(dir, name)
+
 	script := fmt.Sprintf(`
 try
   set pngData to the clipboard as «class PNGf»
@@ -63,7 +74,7 @@ end try
 	}
 	if !strings.HasPrefix(result, "ok") {
 		_ = os.Remove(out)
-		return "", nil // no image — not an error
+		return "", nil
 	}
 	if valid, verr := clipboardPNGLooksValid(out); verr != nil {
 		_ = os.Remove(out)
@@ -73,6 +84,17 @@ end try
 		return "", nil
 	}
 	return out, nil
+}
+
+// readClipboardImageFile is kept for tests / callers that run on the UI thread.
+// Prefer readClipboardImageFileUI explicitly in host code.
+func readClipboardImageFile() (path string, err error) {
+	if p, e := readClipboardImageFileUI(); e != nil {
+		return "", e
+	} else if p != "" {
+		return p, nil
+	}
+	return readClipboardImageFileOsascript()
 }
 
 func clipboardPNGLooksValid(path string) (bool, error) {
