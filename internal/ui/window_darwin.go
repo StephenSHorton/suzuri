@@ -2036,6 +2036,10 @@ func (u *macUI) handleKeys() {
 			u.pasteClipboard()
 			return
 		}
+		// Workspace undo/redo (Cmd/Ctrl+Z) — teaKeyFromEbiten has no ctrl-letter map.
+		if u.chrome.WorkspaceOpen && u.handleWorkspaceHostChord(meta || realCtrl, shift, alt) {
+			return
+		}
 		// Notes: Option/Ctrl word-jump; Cmd line ends; ⌘⌥ is host pane focus (outside).
 		if u.chrome.NotesOpen {
 			if u.handleNotesNavKeys(now, realCtrl, meta, alt, shift) {
@@ -2058,6 +2062,11 @@ func (u *macUI) handleKeys() {
 			}
 			u.applyChromeAction(r)
 			u.persistNotesIfDirty()
+			// Overlay just closed (Esc) — reclaim OS focus so Grok typing works
+			// without requiring alt-tab (modal dismiss / paste osascript can unfocus).
+			if !u.chrome.OverlayOpen() {
+				reclaimWindowFocus()
+			}
 		}
 		return
 	}
@@ -2127,11 +2136,34 @@ func (u *macUI) handleKeys() {
 				return
 			}
 		}
-		// Cmd+V only (not Ctrl+V). Ctrl+V passes through so Grok can cancel a turn.
+		// Cmd+V only (not Ctrl+V). Ctrl+V is a C0 control below so Grok can cancel.
 		// Edge-detect with IsKeyPressed: IsKeyJustPressed alone can miss Command+letter.
 		if u.pasteChordJustPressed(meta, shift, alt) {
 			u.pasteClipboard()
 			return
+		}
+		// Ctrl+A..Z → C0 (incl. Ctrl+Z Grok draft undo, Ctrl+U wipe, Ctrl+V cancel).
+		// specialKeys only covers arrows/F-keys/etc.; without this loop those chords
+		// were dropped on macOS while Windows ptyKeyFromWin already forwarded them.
+		// Cmd+letter is never a C0 control (clipboard / host chords use Meta above).
+		if realCtrl && !super && !shift && !opt {
+			for key := ebiten.KeyA; key <= ebiten.KeyZ; key++ {
+				if !inpututil.IsKeyJustPressed(key) {
+					continue
+				}
+				// Ctrl+C handled above (interrupt).
+				if key == ebiten.KeyC {
+					continue
+				}
+				if b := ptyKeyFromEbiten(tab.term, &tab.kitty, key, true, false, false, false); len(b) > 0 {
+					if t := u.activeTab(); t != nil {
+						t.sendKey(b)
+					} else {
+						u.sendKey(b)
+					}
+				}
+				return
+			}
 		}
 		// Hold-to-repeat for arrows / backspace / delete (Grok text fields).
 		for _, key := range specialKeys {
@@ -2667,6 +2699,36 @@ func teaKeyFromEbiten(ctrl, shift, alt bool, rep *keyRepeat, now time.Time) *tea
 	return nil
 }
 
+// handleWorkspaceHostChord processes Cmd/Ctrl chords for workspace compose
+// that teaKeyFromEbiten does not emit (ctrl+letter). Returns true if handled.
+func (u *macUI) handleWorkspaceHostChord(mod, shift, alt bool) bool {
+	if u == nil || !mod || alt {
+		return false
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyZ) {
+		// Undo; Shift+Z → redo (same as notes / common macOS).
+		var km tea.KeyMsg
+		if shift {
+			km = tea.KeyMsg{Type: tea.KeyCtrlY}
+		} else {
+			km = tea.KeyMsg{Type: tea.KeyCtrlZ}
+		}
+		r := u.chrome.UpdateChrome(km)
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		return true
+	}
+	if !shift && inpututil.IsKeyJustPressed(ebiten.KeyY) {
+		r := u.chrome.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlY})
+		u.chrome = r.Model
+		u.overlayDirty = true
+		u.overlayCells = nil
+		return true
+	}
+	return false
+}
+
 // handleNotesHostChord processes Ctrl/Cmd chords that need the host clipboard
 // or explicit tea.KeyCtrl* messages. Returns true if the chord was handled.
 func (u *macUI) handleNotesHostChord(shift bool) bool {
@@ -2949,6 +3011,8 @@ func (u *macUI) handleMouse() {
 			u.applyChromeAction(r)
 			u.syncChrome()
 			u.persistNotesIfDirty()
+			// Outside-click dismiss — reclaim key focus for Grok/shell.
+			reclaimWindowFocus()
 			return
 		}
 		if int32(my) < chromeH {
@@ -3294,19 +3358,42 @@ func (u *macUI) pasteAltScreenAsync() {
 		log.Info("paste clipboard image", "path", imgPath)
 		u.pendingPasteMu.Lock()
 		// Host path only — never Super+V here (that double-pasted images).
-		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(imgPath), toast: "image pasted"})
+		// reclaimFocus: osascript can leave the ebiten window without key focus.
+		u.pendingPaste = append(u.pendingPaste, pendingPaste{
+			payload: bracketedPaste(imgPath), toast: "image pasted", reclaimFocus: true,
+		})
 		u.pendingPasteMu.Unlock()
 		return
 	} else if err != nil {
-		log.Debug("clipboard image read failed", "err", err)
+		log.Warn("clipboard image read failed", "err", err)
+		// Still try text; if both fail, toast so Cmd+V is not silent.
+		text, _ := clipboard.ReadAll()
+		if text == "" {
+			u.pendingPasteMu.Lock()
+			u.pendingPaste = append(u.pendingPaste, pendingPaste{
+				toast: "paste failed (no image/text on clipboard)", reclaimFocus: true,
+			})
+			u.pendingPasteMu.Unlock()
+			return
+		}
+		u.pendingPasteMu.Lock()
+		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text), reclaimFocus: true})
+		u.pendingPasteMu.Unlock()
+		return
 	}
 	text, _ := clipboard.ReadAll()
 	if text == "" {
+		// Empty pasteboard or image type we could not coerce — surface it.
+		u.pendingPasteMu.Lock()
+		u.pendingPaste = append(u.pendingPaste, pendingPaste{
+			toast: "clipboard empty", reclaimFocus: true,
+		})
+		u.pendingPasteMu.Unlock()
 		return
 	}
 	// Host bracketed paste only. Super+V + payload double-injected into Grok.
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text)})
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text), reclaimFocus: true})
 	u.pendingPasteMu.Unlock()
 }
 
@@ -3319,6 +3406,7 @@ func (u *macUI) drainPendingPaste() {
 	batch := u.pendingPaste
 	u.pendingPaste = nil
 	u.pendingPasteMu.Unlock()
+	needFocus := false
 	for _, p := range batch {
 		// Single inject: host payload only (image path or text). No Super+V
 		// dual-path — that caused Cmd+V to paste twice into Grok.
@@ -3328,6 +3416,12 @@ func (u *macUI) drainPendingPaste() {
 		if p.toast != "" {
 			u.toast(p.toast)
 		}
+		if p.reclaimFocus {
+			needFocus = true
+		}
+	}
+	if needFocus {
+		reclaimWindowFocus()
 	}
 }
 

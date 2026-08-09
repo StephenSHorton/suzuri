@@ -16,7 +16,8 @@ func bracketedPaste(text string) []byte {
 
 // pendingPaste is an async alt-screen paste result drained on the UI thread.
 type pendingPaste struct {
-	payload      []byte
-	toast        string
-	preferSuperV bool // empty board: try Kitty Super+V first
+	payload       []byte
+	toast         string
+	preferSuperV  bool // empty board: try Kitty Super+V first
+	reclaimFocus  bool // macOS: re-activate window after osascript paste
 }

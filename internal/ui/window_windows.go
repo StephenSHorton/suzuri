@@ -2612,6 +2612,31 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.pasteClipboard()
 				return 0
 			}
+			// Workspace undo/redo — teaKeyFromWin has no ctrl-letter map.
+			if u.chrome.WorkspaceOpen && ctrl && !alt {
+				if wParam == 'Z' || wParam == 'z' {
+					var km tea.KeyMsg
+					if shift {
+						km = tea.KeyMsg{Type: tea.KeyCtrlY}
+					} else {
+						km = tea.KeyMsg{Type: tea.KeyCtrlZ}
+					}
+					r := u.chrome.UpdateChrome(km)
+					u.chrome = r.Model
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+					return 0
+				}
+				if !shift && (wParam == 'Y' || wParam == 'y') {
+					r := u.chrome.UpdateChrome(tea.KeyMsg{Type: tea.KeyCtrlY})
+					u.chrome = r.Model
+					u.overlayDirty = true
+					u.overlayCells = nil
+					win.InvalidateRect(hwnd, nil, false)
+					return 0
+				}
+			}
 			if km := teaKeyFromWin(wParam, ctrl, shift); km != nil {
 				r := u.chrome.UpdateChrome(*km)
 				u.chrome = r.Model
