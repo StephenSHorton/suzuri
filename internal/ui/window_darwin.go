@@ -2981,8 +2981,13 @@ func (u *macUI) handleMouse() {
 	justReleased := inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonLeft)
 	rightUp := inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonRight)
 
+	// Right-click paste (Windows muscle memory). Never fire under chrome overlays
+	// — workspace channel tabs used to hit paste → async AppKit → hard crash.
+	// Overlay text paste is Cmd+V only.
 	if rightUp {
-		u.pasteClipboard()
+		if !u.chrome.OverlayOpen() {
+			u.pasteClipboard()
+		}
 		return
 	}
 
@@ -3371,36 +3376,70 @@ func (u *macUI) pasteClipboard() {
 		return
 	}
 	u.lastPasteAt = time.Now()
-	// Alt-screen (Grok, …): host delivers images. osascript PNG dump is slow
-	// (~300–800ms) — never block the ebiten UI thread; finish on a worker
-	// and inject bracketed paste when ready.
-	if u.appOwnsKeyboard() {
-		if u.pasteBusy.Swap(true) {
-			return // already dumping a clipboard image
+
+	// Chrome overlays own paste even when Grok is alt-screen underneath.
+	// (Old order checked appOwnsKeyboard first → right-click on workspace
+	// pasted an image into Grok and crashed via off-thread AppKit.)
+	if u.chrome.TransferPromptOpen || u.chrome.WorkspaceOpen || u.chrome.NotesOpen {
+		text, err := clipboard.ReadAll()
+		if err != nil || text == "" {
+			return
 		}
-		go u.pasteAltScreenAsync()
+		if u.chrome.TransferPromptOpen {
+			m := u.chrome
+			m.TransferPaste(text)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			return
+		}
+		if u.chrome.WorkspaceOpen {
+			m := u.chrome
+			m.WorkspacePaste(text)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			return
+		}
+		if u.chrome.NotesOpen {
+			m := u.chrome
+			m.NotesPaste(text)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			u.persistNotesIfDirty()
+			return
+		}
+	}
+
+	// Alt-screen (Grok, …): host delivers images.
+	// NSPasteboard is AppKit — must run on the UI thread only. Native dump is
+	// fast; only fall back to off-thread osascript when native finds nothing.
+	if u.appOwnsKeyboard() {
+		if u.pasteBusy.Load() {
+			return
+		}
+		if imgPath, err := readClipboardImageFileUI(); err == nil && imgPath != "" {
+			log.Info("paste clipboard image", "path", imgPath)
+			u.sendKey(bracketedPaste(imgPath))
+			u.toast("image pasted")
+			return
+		} else if err != nil {
+			log.Warn("clipboard image (native) failed", "err", err)
+		}
+		// No image via NSPasteboard — text now, or slow osascript image fallback.
+		if text, _ := clipboard.ReadAll(); text != "" {
+			u.sendKey(bracketedPaste(text))
+			return
+		}
+		if u.pasteBusy.Swap(true) {
+			return
+		}
+		go u.pasteAltScreenAsyncOsascript()
 		return
 	}
 	text, err := clipboard.ReadAll()
 	if err != nil || text == "" {
-		return
-	}
-	// Transfer send/receive prompt owns clipboard paste while open.
-	if u.chrome.TransferPromptOpen {
-		m := u.chrome
-		m.TransferPaste(text)
-		u.chrome = m
-		u.overlayDirty = true
-		u.overlayCells = nil
-		return
-	}
-	// Workspace compose line.
-	if u.chrome.WorkspaceOpen {
-		m := u.chrome
-		m.WorkspacePaste(text)
-		u.chrome = m
-		u.overlayDirty = true
-		u.overlayCells = nil
 		return
 	}
 	in := u.activeInput()
@@ -3438,49 +3477,32 @@ func (u *macUI) pasteChordJustPressed(mod, shift, alt bool) bool {
 	return just
 }
 
-// pasteAltScreenAsync reads the pasteboard off-thread and queues PTY inject.
-func (u *macUI) pasteAltScreenAsync() {
+// pasteAltScreenAsyncOsascript is the off-thread fallback when the UI-thread
+// NSPasteboard dump found no image and no text. Must not call AppKit.
+func (u *macUI) pasteAltScreenAsyncOsascript() {
 	defer u.pasteBusy.Store(false)
-	if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
-		log.Info("paste clipboard image", "path", imgPath)
+	if imgPath, err := readClipboardImageFileOsascript(); err == nil && imgPath != "" {
+		log.Info("paste clipboard image (osascript)", "path", imgPath)
 		u.pendingPasteMu.Lock()
-		// Host path only — never Super+V here (that double-pasted images).
-		// reclaimFocus: osascript can leave the ebiten window without key focus.
 		u.pendingPaste = append(u.pendingPaste, pendingPaste{
-			payload: bracketedPaste(imgPath), toast: "image pasted", reclaimFocus: true,
+			payload: bracketedPaste(imgPath), toast: "image pasted",
 		})
 		u.pendingPasteMu.Unlock()
 		return
 	} else if err != nil {
-		log.Warn("clipboard image read failed", "err", err)
-		// Still try text; if both fail, toast so Cmd+V is not silent.
-		text, _ := clipboard.ReadAll()
-		if text == "" {
-			u.pendingPasteMu.Lock()
-			u.pendingPaste = append(u.pendingPaste, pendingPaste{
-				toast: "paste failed (no image/text on clipboard)", reclaimFocus: true,
-			})
-			u.pendingPasteMu.Unlock()
-			return
-		}
-		u.pendingPasteMu.Lock()
-		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text), reclaimFocus: true})
-		u.pendingPasteMu.Unlock()
-		return
+		log.Warn("clipboard image (osascript) failed", "err", err)
 	}
 	text, _ := clipboard.ReadAll()
 	if text == "" {
-		// Empty pasteboard or image type we could not coerce — surface it.
 		u.pendingPasteMu.Lock()
 		u.pendingPaste = append(u.pendingPaste, pendingPaste{
-			toast: "clipboard empty", reclaimFocus: true,
+			toast: "clipboard empty",
 		})
 		u.pendingPasteMu.Unlock()
 		return
 	}
-	// Host bracketed paste only. Super+V + payload double-injected into Grok.
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text), reclaimFocus: true})
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text)})
 	u.pendingPasteMu.Unlock()
 }
 
@@ -3493,22 +3515,17 @@ func (u *macUI) drainPendingPaste() {
 	batch := u.pendingPaste
 	u.pendingPaste = nil
 	u.pendingPasteMu.Unlock()
-	needFocus := false
 	for _, p := range batch {
 		// Single inject: host payload only (image path or text). No Super+V
 		// dual-path — that caused Cmd+V to paste twice into Grok.
+		// Do not reclaim AppKit focus here: activateIgnoringOtherApps during
+		// an ebiten frame (and after off-thread paste) hard-crashed on macOS.
 		if len(p.payload) > 0 {
 			u.sendKey(p.payload)
 		}
 		if p.toast != "" {
 			u.toast(p.toast)
 		}
-		if p.reclaimFocus {
-			needFocus = true
-		}
-	}
-	if needFocus {
-		reclaimWindowFocus()
 	}
 }
 

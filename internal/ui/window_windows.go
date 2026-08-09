@@ -3475,7 +3475,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_RBUTTONUP:
-		u.pasteClipboard()
+		// Right-click paste — not under chrome overlays (workspace tabs etc.).
+		if !u.chrome.OverlayOpen() {
+			u.pasteClipboard()
+		}
 		return 0
 
 	case win.WM_PAINT:
@@ -5240,6 +5243,41 @@ func (u *winUI) pasteClipboard() {
 		return
 	}
 	u.lastPasteAt = time.Now()
+	// Overlays own paste even when Grok is alt-screen underneath.
+	if u.chrome.TransferPromptOpen || u.chrome.WorkspaceOpen || u.chrome.NotesOpen {
+		text, err := getClipboardText(u.hwnd)
+		if err != nil || text == "" {
+			return
+		}
+		if u.chrome.TransferPromptOpen {
+			m := u.chrome
+			m.TransferPaste(text)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			win.InvalidateRect(u.hwnd, nil, false)
+			return
+		}
+		if u.chrome.WorkspaceOpen {
+			m := u.chrome
+			m.WorkspacePaste(text)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			win.InvalidateRect(u.hwnd, nil, false)
+			return
+		}
+		if u.chrome.NotesOpen {
+			m := u.chrome
+			m.NotesPaste(text)
+			u.chrome = m
+			u.overlayDirty = true
+			u.overlayCells = nil
+			win.InvalidateRect(u.hwnd, nil, false)
+			u.persistNotesIfDirty()
+			return
+		}
+	}
 	// Alt-screen (Grok, …): host delivers images. Clipboard PNG/DIB dump can be
 	// slow — never block the UI thread; finish on a worker and inject on blink.
 	if u.appOwnsKeyboard() {
@@ -5251,26 +5289,6 @@ func (u *winUI) pasteClipboard() {
 	}
 	text, err := getClipboardText(u.hwnd)
 	if err != nil || text == "" {
-		return
-	}
-	// Transfer send/receive prompt owns clipboard paste while open.
-	if u.chrome.TransferPromptOpen {
-		m := u.chrome
-		m.TransferPaste(text)
-		u.chrome = m
-		u.overlayDirty = true
-		u.overlayCells = nil
-		win.InvalidateRect(u.hwnd, nil, false)
-		return
-	}
-	// Workspace compose line.
-	if u.chrome.WorkspaceOpen {
-		m := u.chrome
-		m.WorkspacePaste(text)
-		u.chrome = m
-		u.overlayDirty = true
-		u.overlayCells = nil
-		win.InvalidateRect(u.hwnd, nil, false)
 		return
 	}
 	in := u.activeInput()

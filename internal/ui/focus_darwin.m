@@ -3,20 +3,20 @@
 #import <Foundation/Foundation.h>
 
 void suzuri_reclaim_focus(void) {
+	// Must only run on the main/UI thread. Avoid activateIgnoringOtherApps —
+	// it raced with GLFW/ebiten mid-frame and SIGSEGV'd after image paste /
+	// overlay dismiss (right-click paste crash trail).
 	@autoreleasepool {
 		NSApplication *app = [NSApplication sharedApplication];
 		if (app == nil) {
 			return;
 		}
-		// activateIgnoringOtherApps so we regain key window after paste or
-		// when a dismiss path left us unfocused (user had to alt-tab).
-		[app activateIgnoringOtherApps:YES];
 		NSWindow *key = [app keyWindow];
 		if (key == nil) {
 			key = [app mainWindow];
 		}
-		if (key != nil) {
-			[key makeKeyAndOrderFront:nil];
+		if (key != nil && ![key isKeyWindow]) {
+			[key makeKeyWindow];
 		}
 	}
 }
