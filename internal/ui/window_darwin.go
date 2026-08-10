@@ -756,10 +756,24 @@ func (u *macUI) Layout(outsideWidth, outsideHeight int) (int, int) {
 	if outsideHeight < 2 {
 		outsideHeight = 2
 	}
+	// Drive content geometry from the drawable (outside) size.
+	// ebiten.WindowSize() returns the *pre-fullscreen* window size while the
+	// app is fullscreen (see ebiten.WindowSize docs). Using that for paint
+	// left the terminal letterboxed at the old size after green-button /
+	// Ctrl+Cmd+F fullscreen on macOS.
+	if int32(outsideWidth) != u.width || int32(outsideHeight) != u.height {
+		u.applyClientSize(int32(outsideWidth), int32(outsideHeight))
+	}
 	return outsideWidth, outsideHeight
 }
 
 func (u *macUI) handleResize() {
+	// Soft magnetic snap only while windowed. Skip maximize/fullscreen:
+	// SetWindowSize during fullscreen mutates the restored windowed size
+	// (ebiten docs), and content size is already applied in Layout.
+	if ebiten.IsFullscreen() || ebiten.IsWindowMaximized() {
+		return
+	}
 	w, h := ebiten.WindowSize()
 	if w < 2 || h < 2 {
 		return
@@ -770,14 +784,9 @@ func (u *macUI) handleResize() {
 		nw, nh := softSnapSize(w, h, monW, monH, softSnapThresholdPx)
 		if nw != w || nh != h {
 			ebiten.SetWindowSize(nw, nh)
-			w, h = nw, nh
+			// Content geometry follows on the next Layout from the drawable size.
 		}
 	}
-	if int32(w) == u.width && int32(h) == u.height {
-		return
-	}
-	u.width, u.height = int32(w), int32(h)
-	u.applyClientSize(u.width, u.height)
 }
 
 // monitorWorkSize is the current window's monitor size in pixels (best-effort
