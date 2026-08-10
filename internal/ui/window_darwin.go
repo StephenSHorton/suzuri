@@ -1996,6 +1996,8 @@ func (u *macUI) handleKeys() {
 	// Pane focus is after the overlay block: when notes/palette is open,
 	// arrows stay with the dialog. ⌘⌥+arrows focus panes; bare Option is word-jump.
 	// Tab switch stays Cmd|Ctrl always (Grok does not bind Ctrl+Tab).
+	// Also Cmd/Ctrl+Shift+[ ] and ← → — easier left/right on macOS where
+	// Ctrl+Tab is easy to miss or flaky with some keyboards / ebiten.
 	if ctrl && inpututil.IsKeyJustPressed(ebiten.KeyTab) {
 		if shift {
 			u.switchTab(-1)
@@ -2003,6 +2005,22 @@ func (u *macUI) handleKeys() {
 			u.switchTab(1)
 		}
 		return
+	}
+	if ctrl && shift && !alt {
+		leftTab := inpututil.IsKeyJustPressed(ebiten.KeyLeftBracket) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyLeft)
+		rightTab := inpututil.IsKeyJustPressed(ebiten.KeyRightBracket) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyRight)
+		if leftTab {
+			u.switchTab(-1)
+			return
+		}
+		if rightTab {
+			u.switchTab(1)
+			return
+		}
 	}
 	// Cmd/Ctrl+1..9 — host tab select (Grok does not use these).
 	nTabs := len(u.pages)

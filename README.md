@@ -103,6 +103,7 @@ Go 1.26+ recommended (see `go.mod`). Supported hosts: **Windows** (ConPTY) and *
 | `Ctrl+Shift+T` | New tab |
 | `Ctrl+Shift+N` | New window |
 | `Ctrl+W` / `⌘W` | Close pane (last pane closes the tab; last tab confirms quit) |
+| `Ctrl+Shift+←` / `→` · `Ctrl+Shift+[` / `]` | Previous / next tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+1`…`9` | Jump to tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
