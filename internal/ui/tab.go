@@ -260,6 +260,17 @@ func (t *tab) altScreen() bool {
 
 const maxPtyTail = 8192
 
+// PTY read / input buffer sizing for full-screen apps that flood Kitty
+// graphics (Grok paste previews). Grok chunks base64 at 4096 bytes per APC;
+// a full maxImageFileBytes PNG is ~4/3 that as base64 (~maxKittyOpenBuf).
+// The old 4KiB read + 1MiB hard truncate mid-stream chopped APCs and painted
+// base64 as terminal text.
+const (
+	ptyReadSize = 64 << 10 // 64 KiB per Read
+	// Cap above one max-sized Kitty transmit stream + a little VT headroom.
+	maxInBuf = maxKittyOpenBuf + (256 << 10)
+)
+
 // tabOpts optional launch recipe (profile).
 type tabOpts struct {
 	shell string // empty → DefaultShell
@@ -383,7 +394,7 @@ func (t *tab) handleHostQueries(data []byte) {
 }
 
 func (t *tab) readLoop(u tabHost) {
-	buf := make([]byte, 4096)
+	buf := make([]byte, ptyReadSize)
 	for {
 		n, err := t.sess.Read(buf)
 		if n > 0 {
@@ -391,8 +402,10 @@ func (t *tab) readLoop(u tabHost) {
 			t.noteIO()
 			t.inMu.Lock()
 			t.inBuf = append(t.inBuf, chunk...)
-			if len(t.inBuf) > 1<<20 {
-				t.inBuf = t.inBuf[len(t.inBuf)-1<<19:]
+			if len(t.inBuf) > maxInBuf {
+				// Prefer aligning to a Kitty APC start so we drop whole
+				// graphics chunks rather than dumping mid-base64 as text.
+				t.inBuf = trimInBufPreferKitty(t.inBuf, maxInBuf/2)
 			}
 			t.ptyTail = append(t.ptyTail, chunk...)
 			if len(t.ptyTail) > maxPtyTail {
@@ -408,6 +421,22 @@ func (t *tab) readLoop(u tabHost) {
 			return
 		}
 	}
+}
+
+// trimInBufPreferKitty keeps the trailing keep bytes of buf, then advances to
+// the next ESC_G if present so a mid-stream drop does not leave orphan base64
+// that the VT parser would print as cells.
+func trimInBufPreferKitty(buf []byte, keep int) []byte {
+	if keep < 1 || len(buf) <= keep {
+		return buf
+	}
+	start := len(buf) - keep
+	for i := start; i+2 < len(buf); i++ {
+		if buf[i] == 0x1b && buf[i+1] == '_' && buf[i+2] == 'G' {
+			return append([]byte(nil), buf[i:]...)
+		}
+	}
+	return append([]byte(nil), buf[start:]...)
 }
 
 // waitLoop closes the pane when the shell process exits (e.g. user typed `exit`).
