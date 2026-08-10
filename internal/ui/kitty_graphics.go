@@ -50,6 +50,10 @@ type kittyGfxState struct {
 	openBuf  []byte
 	openMeta kittyTxMeta
 	open     bool
+	// pendingAPC holds an incomplete Kitty graphics APC (ESC _ G …) spanning
+	// PTY drains. Must never be written to the VT grid as text — that is what
+	// turned large Grok paste previews into base64 snow on the screen.
+	pendingAPC []byte
 }
 
 func newKittyGfx() *kittyGfxState {
@@ -69,6 +73,7 @@ func (k *kittyGfxState) clear() {
 	k.open = false
 	k.openBuf = nil
 	k.openID = 0
+	k.pendingAPC = nil
 }
 
 func (k *kittyGfxState) snapshotPlacements() []kittyPlace {
@@ -96,41 +101,88 @@ func (k *kittyGfxState) image(id uint32) image.Image {
 
 // feedKittyAPCs strips Kitty graphics APCs, applies them after writing
 // preceding VT bytes (so a=p sees the correct cursor), returns residual VT.
+//
+// Incomplete APCs (and trailing ESC / ESC_ prefixes that may become ESC_G)
+// are held on k.pendingAPC across calls — never returned as residual text.
 func feedKittyAPCs(k *kittyGfxState, data []byte, writeVT func([]byte), cursor func() (col, row int)) []byte {
-	if len(data) == 0 {
-		return data
-	}
 	if k == nil {
 		k = newKittyGfx()
+	}
+	if len(k.pendingAPC) > 0 {
+		combined := make([]byte, 0, len(k.pendingAPC)+len(data))
+		combined = append(combined, k.pendingAPC...)
+		combined = append(combined, data...)
+		k.pendingAPC = nil
+		data = combined
+	}
+	if len(data) == 0 {
+		return data
 	}
 	var out []byte
 	i := 0
 	for i < len(data) {
-		if data[i] == 0x1b && i+2 < len(data) && data[i+1] == '_' && data[i+2] == 'G' {
-			if len(out) > 0 {
-				if writeVT != nil {
-					writeVT(out)
-				}
-				out = out[:0]
+		if data[i] == 0x1b {
+			// Hold a trailing ESC or ESC_ that may start ESC_G on the next chunk.
+			if i+1 >= len(data) {
+				k.holdPendingAPC(data[i:])
+				break
 			}
-			j := i + 3
-			for j+1 < len(data) {
-				if data[j] == 0x1b && data[j+1] == '\\' {
-					k.handleAPC(data[i+3:j], cursor)
-					i = j + 2
-					goto cont
+			if data[i+1] == '_' {
+				if i+2 >= len(data) {
+					k.holdPendingAPC(data[i:])
+					break
 				}
-				j++
+				if data[i+2] == 'G' {
+					if len(out) > 0 {
+						if writeVT != nil {
+							writeVT(out)
+						}
+						out = out[:0]
+					}
+					j := i + 3
+					for j+1 < len(data) {
+						if data[j] == 0x1b && data[j+1] == '\\' {
+							k.handleAPC(data[i+3:j], cursor)
+							i = j + 2
+							goto cont
+						}
+						j++
+					}
+					// Incomplete APC body — never emit base64 as VT cells.
+					k.holdPendingAPC(data[i:])
+					break
+				}
 			}
-			// Incomplete — keep for next read.
-			out = append(out, data[i:]...)
-			break
 		}
 		out = append(out, data[i])
 		i++
 	cont:
 	}
 	return out
+}
+
+// holdPendingAPC stores an incomplete Kitty APC (or ESC/_ prefix). Oversized
+// streams are dropped so a runaway producer cannot pin unbounded RAM.
+func (k *kittyGfxState) holdPendingAPC(p []byte) {
+	if k == nil {
+		return
+	}
+	if len(p) == 0 {
+		k.pendingAPC = nil
+		return
+	}
+	// One APC chunk is header + ≤4KiB base64 from Grok; a pathological single
+	// APC without ST must not grow past the open-stream cap.
+	if len(p) > maxKittyOpenBuf {
+		k.pendingAPC = nil
+		k.mu.Lock()
+		k.open = false
+		k.openBuf = nil
+		k.mu.Unlock()
+		log.Debug("kitty graphics pending APC overflow", "n", len(p))
+		return
+	}
+	k.pendingAPC = append(k.pendingAPC[:0], p...)
 }
 
 func (k *kittyGfxState) handleAPC(body []byte, cursor func() (col, row int)) {
