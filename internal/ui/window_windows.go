@@ -2779,6 +2779,18 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 			return 0
 		}
+		// Ctrl+Shift+[ / ] and Ctrl+Shift+← / → — prev/next tab (browser-style).
+		// Complements Ctrl+Tab; directional chords are easier to discover.
+		if ctrl && shift && !alt {
+			switch wParam {
+			case win.VK_OEM_4, win.VK_LEFT: // [ or Left
+				u.switchTab(-1)
+				return 0
+			case win.VK_OEM_6, win.VK_RIGHT: // ] or Right
+				u.switchTab(1)
+				return 0
+			}
+		}
 		if ctrl && wParam >= '1' && wParam <= '9' {
 			i := int(wParam - '1')
 			n := len(u.pages)

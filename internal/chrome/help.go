@@ -141,7 +141,7 @@ func helpSectionsLeft(colW int) []helpSectionBlock {
 			rows: [][2]string{
 				{KeyCtrlShift("T"), "New tab"},
 				{KeyCtrlShift("N"), "New window"},
-				{KeyCtrl("Tab"), "Next / prev"},
+				{KeyCtrlShift("←→") + " · " + KeyCtrlShift("[ ]") + " · " + KeyCtrl("Tab"), "Prev / next"},
 				{KeyCtrl("1-9"), "Jump"},
 				{"Rename tab", "Palette · double-click"},
 				{"Close tab", "Strip × · palette"},
