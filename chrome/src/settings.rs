@@ -12,11 +12,43 @@
 
 use crate::layout::Rect;
 
-/// Whether the settings modal is open, plus presentation springs.
+/// Default glass face darken (matches product look). Renderer uses prefs at runtime.
+pub const GLASS_DARKEN_DEFAULT: f32 = 0.82;
+
+/// User-tunable chrome prefs (persist for the session; settings modal edits these).
+#[derive(Clone, Debug)]
+pub struct ChromePrefs {
+    /// Canvas UI glyph rain under glass.
+    pub rain: bool,
+    /// Mouse glass lens.
+    pub lens: bool,
+    /// Shared glass face darken 0..1 (panes / chips / modal).
+    pub glass_darken: f32,
+}
+
+impl Default for ChromePrefs {
+    fn default() -> Self {
+        Self {
+            rain: true,
+            lens: true,
+            glass_darken: GLASS_DARKEN_DEFAULT,
+        }
+    }
+}
+
+impl ChromePrefs {
+    pub fn nudge_darken(&mut self, delta: f32) {
+        self.glass_darken = (self.glass_darken + delta).clamp(0.0, 0.95);
+    }
+}
+
+/// Whether the settings modal is open, plus presentation springs + prefs.
 #[derive(Clone, Debug)]
 pub struct SettingsState {
     /// Desired open/closed.
     pub open: bool,
+    /// Session prefs (rain / lens / darken).
+    pub prefs: ChromePrefs,
     /// Spring position 0..1 for content (present).
     present: f32,
     present_vel: f32,
@@ -36,10 +68,34 @@ impl SettingsState {
     pub fn new() -> Self {
         Self {
             open: false,
+            prefs: ChromePrefs::default(),
             present: 0.0,
             present_vel: 0.0,
             overlay: 0.0,
             lines: Vec::new(),
+        }
+    }
+
+    /// Toggle rain / lens, or nudge darken, from a key while the modal is open.
+    pub fn handle_hotkey(&mut self, key: &str) -> bool {
+        match key {
+            "1" => {
+                self.prefs.rain = !self.prefs.rain;
+                true
+            }
+            "2" => {
+                self.prefs.lens = !self.prefs.lens;
+                true
+            }
+            "[" | "-" => {
+                self.prefs.nudge_darken(-0.05);
+                true
+            }
+            "]" | "=" | "+" => {
+                self.prefs.nudge_darken(0.05);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -161,17 +217,20 @@ impl SettingsState {
         let shell = if pty_active {
             "PTY: active (live shell)"
         } else {
-            "PTY: mock fallback (no live shell yet)"
+            "PTY: mock fallback (no live shell)"
         };
+        let rain = if self.prefs.rain { "on" } else { "off" };
+        let lens = if self.prefs.lens { "on" } else { "off" };
+        let darken_pct = (self.prefs.glass_darken * 100.0).round() as i32;
 
         vec![
-            "suzuri-chrome".into(),
+            "suzuri-chrome 1.0.0".into(),
             "native GPU shell · winit + wgpu · no React / HTML / Chromium".into(),
             String::new(),
-            "architecture".into(),
-            "  chrome  — smooth UI (tabs, title, warp, glass, rain)".into(),
-            "  cell pane — shell / TUI only (snaps to character cells)".into(),
-            "  rule: anything that isn't shell output never snaps to a cell".into(),
+            "toggles".into(),
+            format!("  [1] glyph rain     {rain}"),
+            format!("  [2] mouse lens     {lens}"),
+            format!("  [ / ]  glass darken  {darken_pct}%"),
             String::new(),
             "status".into(),
             format!("  {shell}"),
@@ -179,8 +238,12 @@ impl SettingsState {
             format!("  tabs  {tab_count}"),
             String::new(),
             "keys".into(),
-            "  Esc     close settings".into(),
-            "  ⌘/,     toggle settings (Ctrl+, on non-mac)".into(),
+            "  Esc       close settings".into(),
+            "  ⌘/,       toggle settings".into(),
+            "  ⌘T / ⌘W  new / close tab".into(),
+            "  ⌘V       paste".into(),
+            "  wheel    scrollback".into(),
+            "  ↑/↓      warp history (warp focused)".into(),
         ]
     }
 }
@@ -232,15 +295,28 @@ mod tests {
         let s = SettingsState::new();
         let mock = s.display_lines(false, 80, 24, 2).join("\n");
         assert!(mock.contains("suzuri-chrome"));
-        assert!(mock.contains("cell pane"));
+        assert!(mock.contains("1.0.0"));
         assert!(mock.contains("mock fallback"));
         assert!(mock.contains("80×24"));
         assert!(mock.contains("tabs  2"));
+        assert!(mock.contains("glyph rain"));
         assert!(mock.contains("Esc"));
-        assert!(mock.contains("⌘/,"));
 
         let live = s.display_lines(true, 120, 40, 1).join("\n");
         assert!(live.contains("PTY: active"));
         assert!(live.contains("120×40"));
+    }
+
+    #[test]
+    fn hotkeys_toggle_prefs() {
+        let mut s = SettingsState::new();
+        assert!(s.prefs.rain);
+        assert!(s.handle_hotkey("1"));
+        assert!(!s.prefs.rain);
+        assert!(s.handle_hotkey("2"));
+        assert!(!s.prefs.lens);
+        let d0 = s.prefs.glass_darken;
+        assert!(s.handle_hotkey("]"));
+        assert!(s.prefs.glass_darken > d0);
     }
 }

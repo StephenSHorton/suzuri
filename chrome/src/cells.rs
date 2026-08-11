@@ -63,7 +63,10 @@ pub struct Cursor {
     pub row: u16,
 }
 
-/// Fixed-size cell buffer with a logical cursor.
+/// Max scrollback rows retained when the viewport scrolls.
+const MAX_SCROLLBACK: usize = 2000;
+
+/// Fixed-size cell buffer with a logical cursor + scrollback.
 #[derive(Clone, Debug)]
 pub struct CellGrid {
     cols: u16,
@@ -73,6 +76,10 @@ pub struct CellGrid {
     /// Active pen color for subsequent `put_*` calls.
     fg: [f32; 3],
     bg: Option<[f32; 3]>,
+    /// Rows scrolled off the top (oldest first). Each row is `cols` cells.
+    scrollback: Vec<Vec<Cell>>,
+    /// How many rows above the live viewport the user is viewing (0 = live).
+    view_offset: usize,
 }
 
 impl CellGrid {
@@ -87,6 +94,8 @@ impl CellGrid {
             cursor: Cursor::default(),
             fg: theme::FG,
             bg: None,
+            scrollback: Vec::new(),
+            view_offset: 0,
         }
     }
 
@@ -100,6 +109,62 @@ impl CellGrid {
 
     pub fn cursor(&self) -> Cursor {
         self.cursor
+    }
+
+    /// Rows the user has scrolled up from the live bottom.
+    pub fn view_offset(&self) -> usize {
+        self.view_offset
+    }
+
+    /// Scroll the view into history (positive = up into scrollback).
+    pub fn scroll_view(&mut self, delta_rows: i32) {
+        if delta_rows == 0 {
+            return;
+        }
+        let max = self.scrollback.len();
+        if delta_rows > 0 {
+            self.view_offset = (self.view_offset + delta_rows as usize).min(max);
+        } else {
+            let down = (-delta_rows) as usize;
+            self.view_offset = self.view_offset.saturating_sub(down);
+        }
+    }
+
+    /// Jump back to the live bottom of the viewport.
+    pub fn scroll_to_bottom(&mut self) {
+        self.view_offset = 0;
+    }
+
+    /// Cells for a visible row accounting for `view_offset` (scrollback + live).
+    pub fn visible_row_cells(&self, row: u16) -> Vec<Cell> {
+        let cols = self.cols as usize;
+        let blank = vec![Cell::blank(); cols];
+        if row >= self.rows {
+            return blank;
+        }
+        let top = self.scrollback.len().saturating_sub(self.view_offset);
+        let abs = top + row as usize;
+        if abs < self.scrollback.len() {
+            let mut r = self.scrollback[abs].clone();
+            r.resize(cols, Cell::blank());
+            r
+        } else {
+            let live = abs - self.scrollback.len();
+            if live < self.rows as usize {
+                self.row_cells(live as u16).to_vec()
+            } else {
+                blank
+            }
+        }
+    }
+
+    fn push_scrollback_row(&mut self, row: Vec<Cell>) {
+        self.scrollback.push(row);
+        if self.scrollback.len() > MAX_SCROLLBACK {
+            let drop_n = self.scrollback.len() - MAX_SCROLLBACK;
+            self.scrollback.drain(0..drop_n);
+            self.view_offset = self.view_offset.saturating_sub(drop_n);
+        }
     }
 
     pub fn set_cursor(&mut self, col: u16, row: u16) {
@@ -159,11 +224,16 @@ impl CellGrid {
     }
 
     /// Resize, preserving overlapping content from the top-left origin.
+    /// Scrollback is cleared when columns change (no reflow yet).
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let cols = cols.max(1);
         let rows = rows.max(1);
         if cols == self.cols && rows == self.rows {
             return;
+        }
+        if cols != self.cols {
+            self.scrollback.clear();
+            self.view_offset = 0;
         }
         let mut next = vec![Cell::blank(); (cols as usize) * (rows as usize)];
         let copy_cols = (self.cols.min(cols)) as usize;
@@ -182,16 +252,18 @@ impl CellGrid {
         self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
     }
 
-    /// Fill all cells with blanks; cursor to origin; reset pen.
+    /// Fill all cells with blanks; cursor to origin; reset pen. Keeps scrollback.
     pub fn clear(&mut self) {
         for cell in &mut self.cells {
             *cell = Cell::blank();
         }
         self.cursor = Cursor::default();
         self.reset_pen();
+        self.view_offset = 0;
     }
 
     /// Scroll the buffer up by `n` rows (content moves up; blank lines at bottom).
+    /// Rows leaving the top are appended to scrollback.
     pub fn scroll(&mut self, n: usize) {
         if n == 0 || self.rows == 0 {
             return;
@@ -199,6 +271,15 @@ impl CellGrid {
         let n = n.min(self.rows as usize);
         let cols = self.cols as usize;
         let total = self.cells.len();
+        for r in 0..n {
+            let start = r * cols;
+            let row = self.cells[start..start + cols].to_vec();
+            self.push_scrollback_row(row);
+        }
+        if self.view_offset > 0 {
+            // Keep relative position when history grows while scrolled up.
+            self.view_offset = (self.view_offset + n).min(self.scrollback.len());
+        }
         if n >= self.rows as usize {
             self.cells.fill(Cell::blank());
         } else {
@@ -213,6 +294,7 @@ impl CellGrid {
     }
 
     /// Scroll rows `top..=bottom` (0-based inclusive) up by `n`. Cursor unchanged.
+    /// When the region starts at row 0, rows leaving the top enter scrollback.
     pub fn scroll_region_up(&mut self, top: u16, bottom: u16, n: usize) {
         if n == 0 || self.rows == 0 || self.cols == 0 {
             return;
@@ -225,6 +307,16 @@ impl CellGrid {
         let height = bottom - top + 1;
         let n = n.min(height);
         let cols = self.cols as usize;
+        if top == 0 {
+            for r in 0..n.min(height) {
+                let start = r * cols;
+                let row = self.cells[start..start + cols].to_vec();
+                self.push_scrollback_row(row);
+            }
+            if self.view_offset > 0 {
+                self.view_offset = (self.view_offset + n).min(self.scrollback.len());
+            }
+        }
         if n >= height {
             for r in top..=bottom {
                 let start = r * cols;

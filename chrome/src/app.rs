@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition},
-    event::{DeviceEvent, ElementState, MouseButton, WindowEvent},
+    event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowAttributes, WindowId},
@@ -39,6 +40,9 @@ pub struct ChromeApp {
     /// One PTY + ANSI decoder per tab id.
     runtimes: HashMap<u64, TabRuntime>,
     settings: SettingsState,
+    /// Wall clock for cursor blink phase.
+    started: Instant,
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl Default for ChromeApp {
@@ -51,6 +55,7 @@ impl Default for ChromeApp {
             (g.cols(), g.rows())
         };
         let rt = spawn_tab_runtime(cols, rows, &mut session, id);
+        let pty_ok = rt.pty.is_some();
         runtimes.insert(id, rt);
 
         Self {
@@ -60,11 +65,14 @@ impl Default for ChromeApp {
             metrics: Metrics::default(),
             cursor: LogicalPosition::new(0.0, 0.0),
             pointer_inside: false,
-            warp_focused: true,
-            terminal_focused: false,
+            // Prefer live terminal when PTY is up; warp otherwise.
+            warp_focused: !pty_ok,
+            terminal_focused: pty_ok,
             modifiers: ModifiersState::empty(),
             runtimes,
             settings: SettingsState::new(),
+            started: Instant::now(),
+            clipboard: arboard::Clipboard::new().ok(),
         }
     }
 }
@@ -111,10 +119,41 @@ impl ChromeApp {
     }
 
     fn active_cursor_visible(&self) -> bool {
-        self.runtimes
+        let ansi_on = self
+            .runtimes
             .get(&self.session.active_id)
             .map(|rt| rt.ansi.cursor_visible)
-            .unwrap_or(true)
+            .unwrap_or(true);
+        // ~530ms blink duty (classic terminal feel).
+        let phase = self.started.elapsed().as_secs_f32();
+        let blink_on = (phase * 1.9).fract() < 0.55;
+        ansi_on && blink_on
+    }
+
+    fn paste_clipboard(&mut self) {
+        let Some(cb) = self.clipboard.as_mut() else {
+            return;
+        };
+        let Ok(text) = cb.get_text() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        if self.warp_focused {
+            self.session.paste_draft(&text);
+            return;
+        }
+        // Terminal focus → send to active PTY (bracketed paste not yet).
+        let id = self.session.active_id;
+        if let Some(rt) = self.runtimes.get_mut(&id) {
+            if let Some(pty) = &mut rt.pty {
+                let _ = pty.write_all(text.as_bytes());
+                return;
+            }
+        }
+        // Mock fallback
+        self.session.paste_draft(&text);
     }
 
     fn current_layout(&self) -> FrameLayout {
@@ -234,6 +273,14 @@ impl ChromeApp {
                 if let Some(tab) = self.session.tabs.get(i) {
                     let id = tab.id;
                     self.session.select_tab(id);
+                    // Focus terminal when the tab has a live PTY.
+                    let pty = self
+                        .runtimes
+                        .get(&id)
+                        .and_then(|rt| rt.pty.as_ref())
+                        .is_some();
+                    self.terminal_focused = pty;
+                    self.warp_focused = !pty;
                 }
             }
             HitTarget::NewTab => {
@@ -243,7 +290,10 @@ impl ChromeApp {
                 };
                 let id = self.session.new_tab(cols, rows);
                 let rt = spawn_tab_runtime(cols, rows, &mut self.session, id);
+                let pty = rt.pty.is_some();
                 self.runtimes.insert(id, rt);
+                self.terminal_focused = pty;
+                self.warp_focused = !pty;
             }
             HitTarget::Settings => {
                 self.settings.toggle();
@@ -259,9 +309,34 @@ impl ChromeApp {
             HitTarget::None => {}
         }
 
-        // Middle-click or future: close tab — for now Cmd+W
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    fn handle_middle_click(&mut self, event_loop: &ActiveEventLoop) {
+        let layout = self.current_layout();
+        let target = hit_test(
+            &layout,
+            &self.metrics,
+            self.cursor.x,
+            self.cursor.y,
+            is_mac(),
+        );
+        if let HitTarget::Tab(i) = target {
+            if let Some(tab) = self.session.tabs.get(i) {
+                let id = tab.id;
+                if self.session.tabs.len() <= 1 {
+                    event_loop.exit();
+                    return;
+                }
+                if self.session.close_tab(id) {
+                    self.runtimes.remove(&id);
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
         }
     }
 
@@ -308,14 +383,16 @@ impl ChromeApp {
                         return;
                     }
                     "t" | "T" => {
-                        // New tab
                         let (cols, rows) = {
                             let g = self.session.active_grid();
                             (g.cols(), g.rows())
                         };
                         let id = self.session.new_tab(cols, rows);
                         let rt = spawn_tab_runtime(cols, rows, &mut self.session, id);
+                        let pty = rt.pty.is_some();
                         self.runtimes.insert(id, rt);
+                        self.terminal_focused = pty;
+                        self.warp_focused = !pty;
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -325,12 +402,27 @@ impl ChromeApp {
                         self.close_active_tab_or_quit(event_loop);
                         return;
                     }
+                    "v" | "V" => {
+                        self.paste_clipboard();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     _ => {}
                 }
             }
         }
 
+        // Settings open: number keys toggle prefs; arrows / [ ] adjust darken.
         if self.settings.open {
+            if let Key::Character(ref s) = event.logical_key {
+                if self.settings.handle_hotkey(s.as_str()) {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
             return;
         }
 
@@ -377,27 +469,28 @@ impl ChromeApp {
             }
         }
 
-        if !(self.warp_focused || self.terminal_focused) {
-            return;
-        }
-
-        match &event.logical_key {
-            Key::Named(NamedKey::Backspace) => self.session.backspace(),
-            Key::Named(NamedKey::Enter) => self.submit_line(),
-            Key::Character(s) => {
-                if super_or_ctrl {
-                    return;
+        // Warp-focused (or mock terminal): edit draft + history.
+        if self.warp_focused || !self.terminal_focused {
+            match &event.logical_key {
+                Key::Named(NamedKey::Backspace) => self.session.backspace(),
+                Key::Named(NamedKey::Enter) => self.submit_line(),
+                Key::Named(NamedKey::ArrowUp) => self.session.history_up(),
+                Key::Named(NamedKey::ArrowDown) => self.session.history_down(),
+                Key::Character(s) => {
+                    if super_or_ctrl {
+                        return;
+                    }
+                    for c in s.chars() {
+                        self.session.type_char(c);
+                    }
                 }
-                for c in s.chars() {
-                    self.session.type_char(c);
-                }
-            }
-            _ => {
-                if let Some(text) = &event.text {
-                    if !super_or_ctrl {
-                        for c in text.chars() {
-                            if !c.is_control() {
-                                self.session.type_char(c);
+                _ => {
+                    if let Some(text) = &event.text {
+                        if !super_or_ctrl {
+                            for c in text.chars() {
+                                if !c.is_control() {
+                                    self.session.type_char(c);
+                                }
                             }
                         }
                     }
@@ -415,6 +508,7 @@ impl ChromeApp {
         if line.is_empty() {
             return;
         }
+        self.session.push_history(&line);
         self.session.draft.clear();
         let id = self.session.active_id;
 
@@ -435,6 +529,7 @@ impl ChromeApp {
             if let Some(tab) = self.session.tabs.iter_mut().find(|t| t.id == id) {
                 tab.busy = true;
             }
+            // After warp submit into live PTY, keep warp focused so ↑ history works.
         } else {
             self.session.draft = line;
             self.session.submit_draft_mock();
@@ -556,6 +651,45 @@ impl ApplicationHandler for ChromeApp {
                 ..
             } => {
                 self.handle_click(event_loop);
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                self.handle_middle_click(event_loop);
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        if y > 0.0 {
+                            3
+                        } else if y < 0.0 {
+                            -3
+                        } else {
+                            0
+                        }
+                    }
+                    MouseScrollDelta::PixelDelta(p) => {
+                        let y = p.y as f32;
+                        if y > 2.0 {
+                            3
+                        } else if y < -2.0 {
+                            -3
+                        } else {
+                            0
+                        }
+                    }
+                };
+                if lines != 0 {
+                    // Positive lines = scroll up into history.
+                    self.session.active_grid_mut().scroll_view(lines);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
             }
 
             WindowEvent::KeyboardInput { event, .. } => {

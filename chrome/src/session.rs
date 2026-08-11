@@ -27,6 +27,12 @@ pub struct ChromeSession {
     pub active_id: u64,
     /// Shared warp-bar command draft (not yet submitted).
     pub draft: String,
+    /// Warp command history (newest at the end).
+    pub history: Vec<String>,
+    /// Index into history while browsing with ↑/↓ (`None` = editing live draft).
+    pub history_idx: Option<usize>,
+    /// Draft saved when the user first steps into history.
+    history_stash: String,
     next_tab_id: u64,
 }
 
@@ -43,6 +49,9 @@ impl ChromeSession {
             tabs: vec![tab],
             active_id: 1,
             draft: String::new(),
+            history: Vec::new(),
+            history_idx: None,
+            history_stash: String::new(),
             next_tab_id: 2,
         }
     }
@@ -158,12 +167,86 @@ impl ChromeSession {
         if c.is_control() {
             return;
         }
+        self.leave_history_browse();
         self.draft.push(c);
     }
 
     /// Delete the last draft character.
     pub fn backspace(&mut self) {
+        self.leave_history_browse();
         self.draft.pop();
+    }
+
+    /// Paste text into the warp draft (control chars stripped).
+    pub fn paste_draft(&mut self, text: &str) {
+        self.leave_history_browse();
+        for c in text.chars() {
+            if !c.is_control() {
+                self.draft.push(c);
+            } else if c == '\n' || c == '\r' {
+                // single-line warp: stop at first newline
+                break;
+            }
+        }
+    }
+
+    /// Push a non-empty line onto warp history (dedup consecutive).
+    pub fn push_history(&mut self, line: &str) {
+        let line = line.trim_end();
+        if line.is_empty() {
+            return;
+        }
+        if self.history.last().map(|s| s.as_str()) != Some(line) {
+            self.history.push(line.to_string());
+            if self.history.len() > 200 {
+                self.history.drain(0..self.history.len() - 200);
+            }
+        }
+        self.history_idx = None;
+        self.history_stash.clear();
+    }
+
+    /// Browse older history (↑).
+    pub fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        match self.history_idx {
+            None => {
+                self.history_stash = self.draft.clone();
+                let i = self.history.len() - 1;
+                self.history_idx = Some(i);
+                self.draft = self.history[i].clone();
+            }
+            Some(i) if i > 0 => {
+                let i = i - 1;
+                self.history_idx = Some(i);
+                self.draft = self.history[i].clone();
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Browse newer history (↓).
+    pub fn history_down(&mut self) {
+        let Some(i) = self.history_idx else {
+            return;
+        };
+        if i + 1 < self.history.len() {
+            let i = i + 1;
+            self.history_idx = Some(i);
+            self.draft = self.history[i].clone();
+        } else {
+            self.history_idx = None;
+            self.draft = std::mem::take(&mut self.history_stash);
+        }
+    }
+
+    fn leave_history_browse(&mut self) {
+        if self.history_idx.is_some() {
+            self.history_idx = None;
+            self.history_stash.clear();
+        }
     }
 
     /// Submit the draft via mock shell into the **active** grid.
@@ -173,6 +256,7 @@ impl ChromeSession {
         if line.is_empty() {
             return;
         }
+        self.push_history(&line);
 
         // Echo the submitted line on the current prompt row (cursor already after ❯ ).
         self.active_grid_mut().writeln(&line);

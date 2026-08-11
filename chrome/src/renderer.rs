@@ -66,9 +66,6 @@ const GLASS_ABERRATION: f32 = 1.0;
 const GLASS_BLUR: f32 = 0.0;
 const GLASS_REFLECTION: f32 = 1.0;
 const GLASS_SHINE: f32 = 0.01;
-/// Shared face darken for every optical glass surface (terminal, warp, chips, modal).
-/// 0 = fully clear (rain only); 1 = solid black. Multiplies face brightness.
-const GLASS_DARKEN: f32 = 0.82;
 /// Canvas UI default lens size (radius, CSS px).
 const LENS_RADIUS: f32 = 120.0;
 /// Canvas UI follow feel (~follow 0.2).
@@ -312,7 +309,7 @@ impl Renderer {
             label: Some("frame uniforms"),
             contents: bytemuck::bytes_of(&FrameUniforms {
                 size: [1.0, 1.0, 1.0, 1.0],
-                misc: [0.0, 1.0, 0.0, GLASS_DARKEN],
+                misc: [0.0, 1.0, 0.0, crate::settings::GLASS_DARKEN_DEFAULT],
                 glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
                 glass2: [
                     GLASS_ABERRATION,
@@ -617,10 +614,14 @@ impl Renderer {
         let logical_w = fw / self.scale_factor;
         let logical_h = fh / self.scale_factor;
 
-        // Pointer from app every frame
+        // Pointer from app every frame; lens can be disabled in prefs
+        let lens_on = settings.prefs.lens;
         match pointer {
-            Some((px, py)) => self.set_pointer(px, py, true),
-            None => self.set_pointer(self.lens_target[0], self.lens_target[1], false),
+            Some((px, py)) if lens_on => self.set_pointer(px, py, true),
+            _ => self.set_pointer(self.lens_target[0], self.lens_target[1], false),
+        }
+        if !lens_on {
+            self.lens_presence_target = 0.0;
         }
 
         // Smooth follow (Canvas UI follow ≈ 0.2)
@@ -630,7 +631,9 @@ impl Renderer {
         self.lens_pos[1] += (self.lens_target[1] - self.lens_pos[1]) * k_pos;
         self.lens_presence += (self.lens_presence_target - self.lens_presence) * k_pres;
 
-        self.rain_time += dt;
+        if settings.prefs.rain {
+            self.rain_time += dt;
+        }
         self.queue.write_buffer(
             &self.rain_uniform_buf,
             0,
@@ -717,7 +720,12 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&FrameUniforms {
                 size: [logical_w, logical_h, fw, fh],
-                misc: [t, self.scale_factor, count as f32, GLASS_DARKEN],
+                misc: [
+                    t,
+                    self.scale_factor,
+                    count as f32,
+                    settings.prefs.glass_darken.clamp(0.0, 0.95),
+                ],
                 // Same glass constants as the cursor lens (panes match lens look)
                 glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
                 glass2: [
@@ -814,9 +822,11 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.rain_pipeline);
-            pass.set_bind_group(0, &rain_bind, &[]);
-            pass.draw(0..3, 0..1);
+            if settings.prefs.rain {
+                pass.set_pipeline(&self.rain_pipeline);
+                pass.set_bind_group(0, &rain_bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
 
         // Pass 1: composite glass chrome → scene RT (not swapchain)
@@ -1062,6 +1072,7 @@ fn chrome_labels(
 }
 
 /// Emit one monospace label per non-empty terminal row (run-length color segments).
+/// Uses scrollback-aware visible rows; cursor only when at live bottom.
 fn push_terminal_labels(
     labels: &mut Vec<TextLabel>,
     layout: &FrameLayout,
@@ -1074,16 +1085,17 @@ fn push_terminal_labels(
     let origin_y = layout.terminal.y + inset;
     let grid = session.active_grid();
     let cursor = grid.cursor();
+    let live_view = grid.view_offset() == 0;
 
     for row in 0..grid.rows() {
-        let cells = grid.row_cells(row);
+        let cells = grid.visible_row_cells(row);
         if cells.is_empty() {
             continue;
         }
 
         // Skip fully blank rows (no cursor either).
         let has_content = cells.iter().any(|c| c.ch != ' ' || c.bg.is_some());
-        let has_cursor = cursor_visible && cursor.row == row;
+        let has_cursor = cursor_visible && live_view && cursor.row == row;
         if !has_content && !has_cursor {
             continue;
         }
@@ -1104,7 +1116,7 @@ fn push_terminal_labels(
                 continue;
             }
             // Keep internal spaces; trim only pure trailing blank runs at EOL.
-            let end_col = start + text.len();
+            let end_col = start + text.chars().count();
             if end_col == cells.len() {
                 while text.ends_with(' ') {
                     text.pop();
@@ -1131,7 +1143,7 @@ fn push_terminal_labels(
             labels.push(TextLabel::mono(text, x, y, mono_size, color));
         }
 
-        // Cursor block (block style) when on this row.
+        // Cursor block (block style) when on this row (live view only).
         if has_cursor {
             let cx = origin_x + cursor.col as f32 * CELL_W;
             let cy = origin_y + row as f32 * CELL_H;
