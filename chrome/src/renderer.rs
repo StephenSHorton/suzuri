@@ -33,6 +33,8 @@ struct FrameUniforms {
     glass: [f32; 4],
     /// aberration, blur, reflection, shine
     glass2: [f32; 4],
+    /// cursor lens: xy center logical, z radius, w presence 0..1
+    lens: [f32; 4],
 }
 
 /// Canvas UI `GlassVanilla` DEFAULTS — https://github.com/DavidHDev/canvas-ui
@@ -44,6 +46,10 @@ const GLASS_ABERRATION: f32 = 1.0;
 const GLASS_BLUR: f32 = 0.0;
 const GLASS_REFLECTION: f32 = 1.0;
 const GLASS_SHINE: f32 = 0.01;
+/// Canvas UI default lens size (radius, CSS px).
+const LENS_RADIUS: f32 = 120.0;
+/// Canvas UI follow feel (~follow 0.2).
+const LENS_FOLLOW: f32 = 0.2;
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -68,9 +74,17 @@ pub struct Renderer {
 
     metrics: Metrics,
     start: std::time::Instant,
+    last_frame: std::time::Instant,
 
     /// Chrome + terminal text labels.
     text: TextLayer,
+
+    /// Cursor glass lens (Canvas UI style).
+    lens_pos: [f32; 2],
+    lens_target: [f32; 2],
+    lens_presence: f32,
+    lens_presence_target: f32,
+    pointer_inside: bool,
 }
 
 impl Renderer {
@@ -221,6 +235,7 @@ impl Renderer {
                     GLASS_REFLECTION,
                     GLASS_SHINE,
                 ],
+                lens: [0.0, 0.0, LENS_RADIUS, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -330,8 +345,29 @@ impl Renderer {
             sampler,
             metrics: Metrics::default(),
             start: std::time::Instant::now(),
+            last_frame: std::time::Instant::now(),
             text,
+            lens_pos: [size.width as f32 * 0.5, size.height as f32 * 0.5],
+            lens_target: [size.width as f32 * 0.5, size.height as f32 * 0.5],
+            lens_presence: 0.0,
+            lens_presence_target: 0.0,
+            pointer_inside: false,
         }
+    }
+
+    /// Update cursor lens target (logical px, top-left origin).
+    pub fn set_pointer(&mut self, x: f32, y: f32, inside: bool) {
+        if inside {
+            if !self.pointer_inside {
+                // Snap on enter so the lens doesn't lag in from the last leave pos
+                self.lens_pos = [x, y];
+            }
+            self.lens_target = [x, y];
+            self.lens_presence_target = 1.0;
+        } else {
+            self.lens_presence_target = 0.0;
+        }
+        self.pointer_inside = inside;
     }
 
     pub fn metrics(&self) -> Metrics {
@@ -383,11 +419,22 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        let now = std::time::Instant::now();
+        let dt = (now - self.last_frame).as_secs_f32().min(1.0 / 30.0);
+        self.last_frame = now;
         let t = self.start.elapsed().as_secs_f32();
         let fw = self.size.width as f32;
         let fh = self.size.height as f32;
         let logical_w = fw / self.scale_factor;
         let logical_h = fh / self.scale_factor;
+
+        // Smooth lens follow (Canvas UI follow ≈ 0.2)
+        let k_pos = 1.0 - (-dt * (4.0 + LENS_FOLLOW * 26.0)).exp();
+        let k_pres = 1.0 - (-dt * 11.0).exp();
+        self.lens_pos[0] += (self.lens_target[0] - self.lens_pos[0]) * k_pos;
+        self.lens_pos[1] += (self.lens_target[1] - self.lens_pos[1]) * k_pos;
+        self.lens_presence +=
+            (self.lens_presence_target - self.lens_presence) * k_pres;
 
         self.queue.write_buffer(
             &self.rain_uniform_buf,
@@ -437,6 +484,12 @@ impl Renderer {
                     GLASS_BLUR,
                     GLASS_REFLECTION,
                     GLASS_SHINE,
+                ],
+                lens: [
+                    self.lens_pos[0],
+                    self.lens_pos[1],
+                    LENS_RADIUS,
+                    self.lens_presence,
                 ],
             }),
         );

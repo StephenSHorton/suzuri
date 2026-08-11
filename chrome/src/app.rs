@@ -464,6 +464,15 @@ impl ApplicationHandler for ChromeApp {
                     .unwrap_or(1.0);
                 let logical: LogicalPosition<f64> = position.to_logical(scale);
                 self.cursor = LogicalPosition::new(logical.x as f32, logical.y as f32);
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_pointer(self.cursor.x, self.cursor.y, true);
+                }
+            }
+
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_pointer(self.cursor.x, self.cursor.y, false);
+                }
             }
 
             WindowEvent::MouseInput {
