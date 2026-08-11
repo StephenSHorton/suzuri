@@ -1,0 +1,28 @@
+[package]
+name = "suzuri-chrome"
+version = "0.1.0"
+edition = "2021"
+description = "Native GPU chrome for suzuri — Kussetsu ideas in Rust (no React, no webview)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "suzuri_chrome"
+path = "src/lib.rs"
+
+[[bin]]
+name = "suzuri-chrome"
+path = "src/main.rs"
+
+[dependencies]
+bytemuck = { version = "1.22", features = ["derive"] }
+# glyphon 0.8.x is the last line that depends on wgpu ^24 (0.9+ jumps to 25+)
+glyphon = "0.8"
+pollster = "0.4"
+portable-pty = "0.9"
+wgpu = "24.0"
+winit = "0.30"
+
+[profile.dev]
+# Faster link while iterating shaders
+opt-level = 1

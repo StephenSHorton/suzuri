@@ -1,0 +1,746 @@
+//! wgpu renderer: rain pass → glass composite → surface.
+
+use std::sync::Arc;
+
+use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt;
+use winit::window::Window;
+
+use crate::input::{is_mac, traffic_light_rects};
+use crate::layout::{FrameLayout, Metrics, PanelInstance};
+use crate::session::ChromeSession;
+use crate::settings::SettingsState;
+use crate::text::{TextLabel, TextLayer};
+
+/// Approximate mono cell metrics used for grid resize + terminal paint.
+pub const CELL_W: f32 = 7.8;
+pub const CELL_H: f32 = 15.0;
+/// Inset padding inside the terminal glass panel for cell text.
+pub const TERM_PAD: f32 = 10.0;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct RainUniforms {
+    res_time: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FrameUniforms {
+    size: [f32; 4],
+    misc: [f32; 4],
+}
+
+pub struct Renderer {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    size: winit::dpi::PhysicalSize<u32>,
+    scale_factor: f32,
+
+    rain_tex: wgpu::Texture,
+    rain_view: wgpu::TextureView,
+    rain_pipeline: wgpu::RenderPipeline,
+    rain_bind: wgpu::BindGroup,
+    rain_uniform_buf: wgpu::Buffer,
+
+    composite_pipeline: wgpu::RenderPipeline,
+    composite_bgl: wgpu::BindGroupLayout,
+    frame_uniform_buf: wgpu::Buffer,
+    panel_buf: wgpu::Buffer,
+    panel_capacity: u64,
+    sampler: wgpu::Sampler,
+
+    metrics: Metrics,
+    start: std::time::Instant,
+
+    /// Chrome + terminal text labels.
+    text: TextLayer,
+}
+
+impl Renderer {
+    pub async fn new(window: Arc<Window>) -> Self {
+        let size = window.inner_size();
+        let scale_factor = window.scale_factor() as f32;
+
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..Default::default()
+        });
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("create surface");
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .expect("no suitable GPU adapter");
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("suzuri-chrome"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: Default::default(),
+                },
+                None,
+            )
+            .await
+            .expect("request_device");
+
+        let caps = surface.get_capabilities(&adapter);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &config);
+
+        let rain_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rain"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/rain.wgsl").into()),
+        });
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("composite"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/composite.wgsl").into()),
+        });
+
+        let rain_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rain uniforms"),
+            contents: bytemuck::bytes_of(&RainUniforms {
+                res_time: [1.0, 1.0, 0.0, 0.0],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let rain_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rain bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let rain_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rain bg"),
+            layout: &rain_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: rain_uniform_buf.as_entire_binding(),
+            }],
+        });
+
+        let rain_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rain pipeline"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("rain pl"),
+                    bind_group_layouts: &[&rain_bgl],
+                    push_constant_ranges: &[],
+                }),
+            ),
+            vertex: wgpu::VertexState {
+                module: &rain_shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &rain_shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let (rain_tex, rain_view) = create_rain_target(&device, config.width, config.height);
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("rain sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let frame_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("frame uniforms"),
+            contents: bytemuck::bytes_of(&FrameUniforms {
+                size: [1.0, 1.0, 1.0, 1.0],
+                misc: [0.0, 1.0, 0.0, 0.0],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let panel_capacity = 32u64;
+        let panel_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("panels"),
+            size: panel_capacity * std::mem::size_of::<PanelInstance>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composite bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite pipeline"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("composite pl"),
+                    bind_group_layouts: &[&composite_bgl],
+                    push_constant_ranges: &[],
+                }),
+            ),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let mut text = TextLayer::new(&device, &queue, format);
+        text.resize(size, scale_factor);
+
+        Self {
+            surface,
+            device,
+            queue,
+            config,
+            size,
+            scale_factor,
+            rain_tex,
+            rain_view,
+            rain_pipeline,
+            rain_bind,
+            rain_uniform_buf,
+            composite_pipeline,
+            composite_bgl,
+            frame_uniform_buf,
+            panel_buf,
+            panel_capacity,
+            sampler,
+            metrics: Metrics::default(),
+            start: std::time::Instant::now(),
+            text,
+        }
+    }
+
+    pub fn metrics(&self) -> Metrics {
+        self.metrics
+    }
+
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
+    pub fn logical_size(&self) -> (f32, f32) {
+        (
+            self.size.width as f32 / self.scale_factor,
+            self.size.height as f32 / self.scale_factor,
+        )
+    }
+
+    /// Compute layout for the current surface size and tab count.
+    pub fn layout(&self, tab_count: usize) -> FrameLayout {
+        let (w, h) = self.logical_size();
+        FrameLayout::compute(w, h, self.metrics, tab_count)
+    }
+
+    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>, scale_factor: f32) {
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
+        }
+        self.size = new_size;
+        self.scale_factor = scale_factor;
+        self.config.width = new_size.width;
+        self.config.height = new_size.height;
+        self.surface.configure(&self.device, &self.config);
+
+        let (tex, view) = create_rain_target(&self.device, self.config.width, self.config.height);
+        self.rain_tex = tex;
+        self.rain_view = view;
+        self.text.resize(new_size, scale_factor);
+    }
+
+    pub fn render(
+        &mut self,
+        session: &ChromeSession,
+        settings: &SettingsState,
+        pty_active: bool,
+        cursor_visible: bool,
+    ) -> Result<(), wgpu::SurfaceError> {
+        let frame = self.surface.get_current_texture()?;
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let t = self.start.elapsed().as_secs_f32();
+        let fw = self.size.width as f32;
+        let fh = self.size.height as f32;
+        let logical_w = fw / self.scale_factor;
+        let logical_h = fh / self.scale_factor;
+
+        self.queue.write_buffer(
+            &self.rain_uniform_buf,
+            0,
+            bytemuck::bytes_of(&RainUniforms {
+                res_time: [fw, fh, t, 0.0],
+            }),
+        );
+
+        let layout = FrameLayout::compute(logical_w, logical_h, self.metrics, session.tabs.len());
+        let active_idx = session
+            .tabs
+            .iter()
+            .position(|tab| tab.id == session.active_id)
+            .unwrap_or(0);
+        let lights = if is_mac() {
+            Some(traffic_light_rects(&self.metrics))
+        } else {
+            None
+        };
+        let panels = layout.glass_panels(self.metrics, active_idx, lights);
+        let count = panels.len() as u32;
+
+        let need = (panels.len() as u64) * std::mem::size_of::<PanelInstance>() as u64;
+        if need > self.panel_capacity * std::mem::size_of::<PanelInstance>() as u64 {
+            self.panel_capacity = panels.len() as u64 + 4;
+            self.panel_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("panels"),
+                size: self.panel_capacity * std::mem::size_of::<PanelInstance>() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        self.queue
+            .write_buffer(&self.panel_buf, 0, bytemuck::cast_slice(&panels));
+
+        self.queue.write_buffer(
+            &self.frame_uniform_buf,
+            0,
+            bytemuck::bytes_of(&FrameUniforms {
+                size: [logical_w, logical_h, fw, fh],
+                misc: [t, self.scale_factor, count as f32, 0.0],
+            }),
+        );
+
+        let composite_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite bg"),
+            layout: &self.composite_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.frame_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.rain_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.panel_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame"),
+            });
+
+        // Pass 0: rain into offscreen
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rain"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.rain_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.04,
+                            b: 0.03,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.rain_pipeline);
+            pass.set_bind_group(0, &self.rain_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Pass 1: composite glass chrome onto surface
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.composite_pipeline);
+            pass.set_bind_group(0, &composite_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Pass 2: text overlay (title, tabs, terminal cells, warp, settings)
+        let labels = chrome_labels(
+            &layout,
+            self.metrics,
+            session,
+            active_idx,
+            settings,
+            pty_active,
+            cursor_visible,
+        );
+        self.text.prepare(&self.device, &self.queue, &labels);
+        self.text.render(&self.device, &mut encoder, &view);
+
+        self.queue.submit(Some(encoder.finish()));
+        frame.present();
+        self.text.trim_atlas();
+        Ok(())
+    }
+}
+
+/// Derive grid cols/rows from a terminal rect (logical px).
+pub fn terminal_grid_size(terminal: &crate::layout::Rect) -> (u16, u16) {
+    let inner_w = (terminal.w - TERM_PAD * 2.0).max(CELL_W);
+    let inner_h = (terminal.h - TERM_PAD * 2.0).max(CELL_H);
+    let cols = (inner_w / CELL_W).floor().max(1.0) as u16;
+    let rows = (inner_h / CELL_H).floor().max(1.0) as u16;
+    (cols, rows)
+}
+
+/// Chrome + terminal strings for the current frame (logical px).
+fn chrome_labels(
+    layout: &FrameLayout,
+    m: Metrics,
+    session: &ChromeSession,
+    active_idx: usize,
+    settings: &SettingsState,
+    pty_active: bool,
+    cursor_visible: bool,
+) -> Vec<TextLabel> {
+    let muted = [0.75, 0.90, 0.80, 0.85];
+    let bright = [0.90, 1.0, 0.92, 0.95];
+    let dim = [0.55, 0.70, 0.60, 0.75];
+
+    let mut labels = Vec::with_capacity(48 + session.active_grid().rows() as usize);
+
+    // Title (right of traffic lights on mac).
+    let title_size = 13.0;
+    let title_y = (m.title_h - title_size) * 0.5;
+    let title_x = if is_mac() { m.pad + 72.0 } else { m.pad + 8.0 };
+    labels.push(TextLabel::new(
+        "suzuri · chrome",
+        title_x,
+        title_y,
+        title_size,
+        muted,
+    ));
+
+    // Logo 「硯」 left of tab chips.
+    let logo_size = 16.0;
+    labels.push(TextLabel::new(
+        "硯",
+        layout.logo.x + 4.0,
+        layout.logo.y + (layout.logo.h - logo_size) * 0.5 - 1.0,
+        logo_size,
+        bright,
+    ));
+
+    // Tab chip labels.
+    let tab_size = 12.0;
+    for (i, chip) in layout.tab_chips.iter().enumerate() {
+        let title = session
+            .tabs
+            .get(i)
+            .map(|t| t.title.as_str())
+            .unwrap_or("?");
+        let color = if i == active_idx { bright } else { dim };
+        labels.push(TextLabel::new(
+            title,
+            chip.x + 12.0,
+            chip.y + (chip.h - tab_size) * 0.5 - 1.0,
+            tab_size,
+            color,
+        ));
+    }
+
+    // New-tab 「+」
+    let plus_size = 16.0;
+    labels.push(TextLabel::new(
+        "+",
+        layout.tab_new.x + 7.0,
+        layout.tab_new.y + (layout.tab_new.h - plus_size) * 0.5 - 1.0,
+        plus_size,
+        dim,
+    ));
+
+    // Settings
+    labels.push(TextLabel::new(
+        "settings",
+        layout.settings.x + 14.0,
+        layout.settings.y + (layout.settings.h - tab_size) * 0.5 - 1.0,
+        tab_size,
+        dim,
+    ));
+
+    // Terminal cell lines (mono ~13) inside the glass well.
+    push_terminal_labels(&mut labels, layout, session, cursor_visible);
+
+    // Warp draft or placeholder.
+    let warp_size = 13.0;
+    let warp_text = if session.draft.is_empty() {
+        "warp · type a command…".to_string()
+    } else {
+        format!("❯ {}", session.draft)
+    };
+    let warp_color = if session.draft.is_empty() { dim } else { bright };
+    labels.push(TextLabel::new(
+        warp_text,
+        layout.warp.x + 16.0,
+        layout.warp.y + 14.0,
+        warp_size,
+        warp_color,
+    ));
+
+    // Settings overlay (text over the terminal well).
+    if settings.open {
+        let grid = session.active_grid();
+        let lines = settings.display_lines(
+            pty_active,
+            grid.cols(),
+            grid.rows(),
+            session.tabs.len(),
+        );
+        let mut y = layout.terminal.y + 20.0;
+        let x = layout.terminal.x + 20.0;
+        labels.push(TextLabel::new("settings", x, y, 16.0, bright));
+        y += 28.0;
+        for line in lines {
+            if line.is_empty() {
+                y += 10.0;
+                continue;
+            }
+            let color = if line.starts_with("  ") { dim } else { muted };
+            labels.push(TextLabel::new(line, x, y, 12.5, color));
+            y += 16.0;
+        }
+    }
+
+    labels
+}
+
+/// Emit one monospace label per non-empty terminal row (run-length color segments).
+fn push_terminal_labels(
+    labels: &mut Vec<TextLabel>,
+    layout: &FrameLayout,
+    session: &ChromeSession,
+    cursor_visible: bool,
+) {
+    let mono_size = 13.0;
+    let origin_x = layout.terminal.x + TERM_PAD;
+    let origin_y = layout.terminal.y + TERM_PAD;
+    let grid = session.active_grid();
+    let cursor = grid.cursor();
+
+    for row in 0..grid.rows() {
+        let cells = grid.row_cells(row);
+        if cells.is_empty() {
+            continue;
+        }
+
+        // Skip fully blank rows (no cursor either).
+        let has_content = cells.iter().any(|c| c.ch != ' ' || c.bg.is_some());
+        let has_cursor = cursor_visible && cursor.row == row;
+        if !has_content && !has_cursor {
+            continue;
+        }
+
+        // Walk color runs (fg + bg) to preserve SGR without one atlas entry per cell.
+        let mut col = 0usize;
+        while col < cells.len() {
+            let start = col;
+            let fg = cells[col].fg;
+            let bg = cells[col].bg;
+            let mut text = String::new();
+            while col < cells.len() && cells[col].fg == fg && cells[col].bg == bg {
+                text.push(cells[col].ch);
+                col += 1;
+            }
+            // Trim trailing spaces on the last run of a content-less end.
+            if !text.chars().any(|c| c != ' ') {
+                continue;
+            }
+            // Keep internal spaces; trim only pure trailing blank runs at EOL.
+            let end_col = start + text.len();
+            if end_col == cells.len() {
+                while text.ends_with(' ') {
+                    text.pop();
+                }
+            }
+            if text.is_empty() {
+                continue;
+            }
+
+            let x = origin_x + start as f32 * CELL_W;
+            let y = origin_y + row as f32 * CELL_H;
+            // Background: full-block run under the glyphs (approx; true cell quads later).
+            if let Some(bg) = bg {
+                let blocks: String = "█".repeat(text.chars().count().max(1));
+                labels.push(TextLabel::mono(
+                    blocks,
+                    x,
+                    y,
+                    mono_size,
+                    [bg[0], bg[1], bg[2], 0.85],
+                ));
+            }
+            let color = [fg[0], fg[1], fg[2], 0.95];
+            labels.push(TextLabel::mono(text, x, y, mono_size, color));
+        }
+
+        // Cursor block (block style) when on this row.
+        if has_cursor {
+            let cx = origin_x + cursor.col as f32 * CELL_W;
+            let cy = origin_y + row as f32 * CELL_H;
+            labels.push(TextLabel::mono(
+                "█",
+                cx,
+                cy,
+                mono_size,
+                [0.0, 0.90, 0.46, 0.55],
+            ));
+        }
+    }
+}
+
+fn create_rain_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("rain target"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}

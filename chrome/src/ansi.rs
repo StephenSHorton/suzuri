@@ -1,0 +1,673 @@
+//! Minimal ANSI / VT stream → [`CellGrid`].
+//!
+//! Enough for interactive shells (prompt, colors, cursor, clear, alt screen).
+//! Not a full VT100 / xterm.
+
+use crate::cells::{theme, CellGrid};
+
+/// Stateful decoder for a byte stream from a PTY.
+#[derive(Debug)]
+pub struct AnsiDecoder {
+    /// Incomplete UTF-8 sequence held across reads.
+    pending: Vec<u8>,
+    /// CSI / ESC parser state.
+    esc: EscState,
+    /// SGR params while parsing CSI.
+    csi_params: Vec<u16>,
+    csi_num: u16,
+    csi_has_num: bool,
+    /// Private CSI (`?`) marker.
+    csi_priv: bool,
+    /// Whether the hardware/cursor should be drawn (`CSI ? 25 h/l`).
+    pub cursor_visible: bool,
+    /// Saved primary buffer while on the alternate screen.
+    primary_backup: Option<CellGrid>,
+    /// Scroll region as 1-based inclusive `(top, bottom)`. `None` = full screen.
+    scroll_region: Option<(u16, u16)>,
+    /// SGR reverse video active (`7` / `27`).
+    reverse: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum EscState {
+    #[default]
+    Ground,
+    Esc,
+    Csi,
+    /// Skip OSC until BEL or ST
+    Osc,
+}
+
+impl Default for AnsiDecoder {
+    fn default() -> Self {
+        Self {
+            pending: Vec::new(),
+            esc: EscState::Ground,
+            csi_params: Vec::new(),
+            csi_num: 0,
+            csi_has_num: false,
+            csi_priv: false,
+            cursor_visible: true,
+            primary_backup: None,
+            scroll_region: None,
+            reverse: false,
+        }
+    }
+}
+
+impl AnsiDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True while the alternate screen buffer is active (`CSI ? 1049 h` / `? 47 h`).
+    pub fn on_alt_screen(&self) -> bool {
+        self.primary_backup.is_some()
+    }
+
+    /// Feed raw PTY bytes into the grid.
+    pub fn feed(&mut self, grid: &mut CellGrid, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+        let data = std::mem::take(&mut self.pending);
+        let mut i = 0;
+        while i < data.len() {
+            // UTF-8
+            let b = data[i];
+            if self.esc == EscState::Ground && b < 0x80 {
+                self.byte(grid, b);
+                i += 1;
+                continue;
+            }
+            if self.esc != EscState::Ground {
+                self.byte(grid, b);
+                i += 1;
+                continue;
+            }
+            // multi-byte UTF-8
+            let width = utf8_width(b);
+            if width == 0 {
+                i += 1;
+                continue;
+            }
+            if i + width > data.len() {
+                self.pending = data[i..].to_vec();
+                break;
+            }
+            if let Ok(s) = std::str::from_utf8(&data[i..i + width]) {
+                for ch in s.chars() {
+                    grid.put_char(ch);
+                }
+            }
+            i += width;
+        }
+    }
+
+    fn byte(&mut self, grid: &mut CellGrid, b: u8) {
+        match self.esc {
+            EscState::Ground => match b {
+                0x1b => self.esc = EscState::Esc,
+                0x08 => {
+                    // backspace
+                    let c = grid.cursor();
+                    if c.col > 0 {
+                        grid.set_cursor(c.col - 1, c.row);
+                        grid.put_char(' ');
+                        let c2 = grid.cursor();
+                        grid.set_cursor(c2.col.saturating_sub(1), c2.row);
+                    }
+                }
+                0x09 => grid.put_char('\t'),
+                0x0a => self.linefeed(grid),
+                0x0d => grid.put_char('\r'),
+                0x07 => {} // bell
+                c if c < 0x20 => {}
+                c => grid.put_char(c as char),
+            },
+            EscState::Esc => match b {
+                b'[' => {
+                    self.esc = EscState::Csi;
+                    self.csi_params.clear();
+                    self.csi_num = 0;
+                    self.csi_has_num = false;
+                    self.csi_priv = false;
+                }
+                b']' => {
+                    self.esc = EscState::Osc;
+                }
+                // IND — index (move down / scroll)
+                b'D' => self.index_down(grid),
+                // RI — reverse index
+                b'M' => self.index_up(grid),
+                _ => self.esc = EscState::Ground,
+            },
+            EscState::Osc => {
+                // BEL or ESC \ ends OSC
+                if b == 0x07 {
+                    self.esc = EscState::Ground;
+                } else if b == 0x1b {
+                    self.esc = EscState::Esc; // might be ST
+                }
+            }
+            EscState::Csi => match b {
+                b'?' if !self.csi_has_num && self.csi_params.is_empty() => {
+                    self.csi_priv = true;
+                }
+                b'0'..=b'9' => {
+                    self.csi_has_num = true;
+                    self.csi_num = self.csi_num.saturating_mul(10).saturating_add((b - b'0') as u16);
+                }
+                b';' => {
+                    self.csi_params.push(if self.csi_has_num { self.csi_num } else { 0 });
+                    self.csi_num = 0;
+                    self.csi_has_num = false;
+                }
+                b'A'..=b'Z' | b'a'..=b'z' => {
+                    self.csi_params.push(if self.csi_has_num { self.csi_num } else { 0 });
+                    let params = std::mem::take(&mut self.csi_params);
+                    let priv_ = self.csi_priv;
+                    self.esc = EscState::Ground;
+                    if priv_ {
+                        self.exec_priv_csi(grid, b, &params);
+                    } else {
+                        self.exec_csi(grid, b, &params);
+                    }
+                }
+                _ => self.esc = EscState::Ground,
+            },
+        }
+    }
+
+    fn exec_priv_csi(&mut self, grid: &mut CellGrid, final_byte: u8, params: &[u16]) {
+        match final_byte {
+            b'h' => {
+                for &p in params {
+                    self.set_priv_mode(grid, p, true);
+                }
+            }
+            b'l' => {
+                for &p in params {
+                    self.set_priv_mode(grid, p, false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn set_priv_mode(&mut self, grid: &mut CellGrid, mode: u16, set: bool) {
+        match mode {
+            // Show / hide cursor
+            25 => self.cursor_visible = set,
+            // Alternate screen (xterm 1049 saves cursor; 47 is classic)
+            47 | 1047 | 1049 => {
+                if set {
+                    self.enter_alt_screen(grid);
+                } else {
+                    self.leave_alt_screen(grid);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn enter_alt_screen(&mut self, grid: &mut CellGrid) {
+        if self.primary_backup.is_none() {
+            self.primary_backup = Some(grid.clone());
+            // Fresh alt buffer (common for full-screen apps).
+            let cols = grid.cols();
+            let rows = grid.rows();
+            *grid = CellGrid::new(cols, rows);
+        }
+    }
+
+    fn leave_alt_screen(&mut self, grid: &mut CellGrid) {
+        if let Some(primary) = self.primary_backup.take() {
+            *grid = primary;
+        }
+        // Scroll region is typically reset when leaving alt, but keep simple.
+    }
+
+    fn exec_csi(&mut self, grid: &mut CellGrid, final_byte: u8, params: &[u16]) {
+        let p = |i: usize, default: u16| {
+            params
+                .get(i)
+                .copied()
+                .filter(|&v| v != 0)
+                .unwrap_or(default)
+        };
+        match final_byte {
+            b'm' => self.sgr(grid, params),
+            b'H' | b'f' => {
+                let row = p(0, 1).saturating_sub(1);
+                let col = p(1, 1).saturating_sub(1);
+                grid.set_cursor(col, row);
+            }
+            b'A' => {
+                let n = p(0, 1);
+                let c = grid.cursor();
+                grid.set_cursor(c.col, c.row.saturating_sub(n));
+            }
+            b'B' => {
+                let n = p(0, 1);
+                let c = grid.cursor();
+                grid.set_cursor(c.col, c.row.saturating_add(n));
+            }
+            b'C' => {
+                let n = p(0, 1);
+                let c = grid.cursor();
+                grid.set_cursor(c.col.saturating_add(n), c.row);
+            }
+            b'D' => {
+                let n = p(0, 1);
+                let c = grid.cursor();
+                grid.set_cursor(c.col.saturating_sub(n), c.row);
+            }
+            b'G' => {
+                // CHA — cursor horizontal absolute (1-based)
+                let col = p(0, 1).saturating_sub(1);
+                let c = grid.cursor();
+                grid.set_cursor(col, c.row);
+            }
+            b'd' => {
+                // VPA — vertical position absolute (1-based)
+                let row = p(0, 1).saturating_sub(1);
+                let c = grid.cursor();
+                grid.set_cursor(c.col, row);
+            }
+            b'J' => {
+                // ED — erase in display
+                let mode = params.first().copied().unwrap_or(0);
+                if mode == 2 || mode == 3 {
+                    // Full clear: blank cells but keep cursor at origin is common for 2J.
+                    // xterm leaves cursor where it is for ED; many apps follow with CUP.
+                    // Preserve prior behavior of CSI 2J resetting cursor via clear().
+                    if mode == 2 {
+                        grid.clear();
+                    } else {
+                        // 3J also clears scrollback (we have none) — blank only.
+                        grid.erase_in_display(3);
+                    }
+                } else {
+                    grid.erase_in_display(mode);
+                }
+            }
+            b'K' => {
+                // EL — erase in line
+                let mode = params.first().copied().unwrap_or(0);
+                grid.erase_in_line(mode);
+            }
+            b'r' => {
+                // DECSTBM — set scroll region (1-based inclusive)
+                let top = p(0, 1);
+                let bottom = params
+                    .get(1)
+                    .copied()
+                    .filter(|&v| v != 0)
+                    .unwrap_or(grid.rows());
+                if top < bottom && bottom <= grid.rows() {
+                    // Full-screen region is stored as None.
+                    if top == 1 && bottom == grid.rows() {
+                        self.scroll_region = None;
+                    } else {
+                        self.scroll_region = Some((top, bottom));
+                    }
+                } else {
+                    self.scroll_region = None;
+                }
+                // Cursor home on region set (VT100).
+                grid.set_cursor(0, 0);
+            }
+            b'S' => {
+                // SU — scroll up within region
+                let n = p(0, 1) as usize;
+                let (top, bottom) = self.region_0based(grid);
+                grid.scroll_region_up(top, bottom, n);
+            }
+            b'T' => {
+                // SD — scroll down within region
+                let n = p(0, 1) as usize;
+                let (top, bottom) = self.region_0based(grid);
+                grid.scroll_region_down(top, bottom, n);
+            }
+            b'L' => {
+                // IL — insert lines at cursor row (within region, simplified: scroll down from cursor)
+                let n = p(0, 1) as usize;
+                let c = grid.cursor();
+                let (top, bottom) = self.region_0based(grid);
+                if c.row >= top && c.row <= bottom {
+                    grid.scroll_region_down(c.row, bottom, n);
+                }
+            }
+            b'M' => {
+                // DL — delete lines at cursor row
+                let n = p(0, 1) as usize;
+                let c = grid.cursor();
+                let (top, bottom) = self.region_0based(grid);
+                if c.row >= top && c.row <= bottom {
+                    grid.scroll_region_up(c.row, bottom, n);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// 0-based inclusive scroll region (full screen when unset).
+    fn region_0based(&self, grid: &CellGrid) -> (u16, u16) {
+        match self.scroll_region {
+            Some((top, bottom)) => {
+                let top = top.saturating_sub(1).min(grid.rows().saturating_sub(1));
+                let bottom = bottom.saturating_sub(1).min(grid.rows().saturating_sub(1));
+                if top <= bottom {
+                    (top, bottom)
+                } else {
+                    (0, grid.rows().saturating_sub(1))
+                }
+            }
+            None => (0, grid.rows().saturating_sub(1)),
+        }
+    }
+
+    /// LF / index: move down; scroll region when at bottom. Column → 0 (matches prior `newline`).
+    fn linefeed(&mut self, grid: &mut CellGrid) {
+        let c = grid.cursor();
+        let (top, bottom) = self.region_0based(grid);
+        if c.row >= bottom {
+            grid.scroll_region_up(top, bottom, 1);
+            grid.set_cursor(0, bottom);
+        } else {
+            let next = (c.row + 1).min(grid.rows().saturating_sub(1));
+            grid.set_cursor(0, next);
+        }
+    }
+
+    fn index_down(&mut self, grid: &mut CellGrid) {
+        let c = grid.cursor();
+        let (top, bottom) = self.region_0based(grid);
+        if c.row >= bottom {
+            grid.scroll_region_up(top, bottom, 1);
+        } else {
+            grid.set_cursor(c.col, c.row + 1);
+        }
+    }
+
+    fn index_up(&mut self, grid: &mut CellGrid) {
+        let c = grid.cursor();
+        let (top, bottom) = self.region_0based(grid);
+        if c.row <= top {
+            grid.scroll_region_down(top, bottom, 1);
+        } else {
+            grid.set_cursor(c.col, c.row.saturating_sub(1));
+        }
+    }
+
+    fn sgr(&mut self, grid: &mut CellGrid, params: &[u16]) {
+        if params.is_empty() || (params.len() == 1 && params[0] == 0) {
+            if self.reverse {
+                // Leave reverse without double-swapping: reset pen fully.
+                self.reverse = false;
+            }
+            grid.reset_pen();
+            return;
+        }
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
+                0 => {
+                    self.reverse = false;
+                    grid.reset_pen();
+                }
+                1 => {} // bold — ignore
+                7 => {
+                    if !self.reverse {
+                        self.reverse = true;
+                        grid.swap_pen_fg_bg();
+                    }
+                }
+                27 => {
+                    if self.reverse {
+                        self.reverse = false;
+                        grid.swap_pen_fg_bg();
+                    }
+                }
+                // Foreground standard
+                30 => self.set_fg(grid, [0.1, 0.1, 0.1]),
+                31 => self.set_fg(grid, theme::ERR),
+                32 => self.set_fg(grid, theme::JADE),
+                33 => self.set_fg(grid, [1.0, 0.72, 0.3]),
+                34 => self.set_fg(grid, [0.4, 0.7, 1.0]),
+                35 => self.set_fg(grid, [0.85, 0.5, 0.9]),
+                36 => self.set_fg(grid, [0.4, 0.9, 0.9]),
+                37 | 39 => self.set_fg(grid, theme::FG),
+                // Bright foreground
+                90 => self.set_fg(grid, theme::DIM),
+                91 => self.set_fg(grid, theme::ERR),
+                92 => self.set_fg(grid, theme::JADE),
+                93 => self.set_fg(grid, [1.0, 0.85, 0.4]),
+                94 => self.set_fg(grid, [0.5, 0.75, 1.0]),
+                95 => self.set_fg(grid, [0.9, 0.6, 0.95]),
+                96 => self.set_fg(grid, [0.5, 0.95, 0.95]),
+                97 => self.set_fg(grid, [1.0, 1.0, 1.0]),
+                // Background standard
+                40 => self.set_bg(grid, Some([0.05, 0.05, 0.05])),
+                41 => self.set_bg(grid, Some(theme::ERR)),
+                42 => self.set_bg(grid, Some(theme::JADE)),
+                43 => self.set_bg(grid, Some([1.0, 0.72, 0.3])),
+                44 => self.set_bg(grid, Some([0.4, 0.7, 1.0])),
+                45 => self.set_bg(grid, Some([0.85, 0.5, 0.9])),
+                46 => self.set_bg(grid, Some([0.4, 0.9, 0.9])),
+                47 => self.set_bg(grid, Some(theme::FG)),
+                49 => self.set_bg(grid, None),
+                // Bright background
+                100 => self.set_bg(grid, Some(theme::DIM)),
+                101 => self.set_bg(grid, Some(theme::ERR)),
+                102 => self.set_bg(grid, Some(theme::JADE)),
+                103 => self.set_bg(grid, Some([1.0, 0.85, 0.4])),
+                104 => self.set_bg(grid, Some([0.5, 0.75, 1.0])),
+                105 => self.set_bg(grid, Some([0.9, 0.6, 0.95])),
+                106 => self.set_bg(grid, Some([0.5, 0.95, 0.95])),
+                107 => self.set_bg(grid, Some([1.0, 1.0, 1.0])),
+                // 38 / 48 extended color
+                38 if params.get(i + 1) == Some(&5) && params.len() > i + 2 => {
+                    let idx = params[i + 2];
+                    self.set_fg(grid, xterm256(idx));
+                    i += 2;
+                }
+                38 if params.get(i + 1) == Some(&2) && params.len() > i + 4 => {
+                    let r = params[i + 2] as f32 / 255.0;
+                    let g = params[i + 3] as f32 / 255.0;
+                    let b = params[i + 4] as f32 / 255.0;
+                    self.set_fg(grid, [r, g, b]);
+                    i += 4;
+                }
+                48 if params.get(i + 1) == Some(&5) && params.len() > i + 2 => {
+                    let idx = params[i + 2];
+                    self.set_bg(grid, Some(xterm256(idx)));
+                    i += 2;
+                }
+                48 if params.get(i + 1) == Some(&2) && params.len() > i + 4 => {
+                    let r = params[i + 2] as f32 / 255.0;
+                    let g = params[i + 3] as f32 / 255.0;
+                    let b = params[i + 4] as f32 / 255.0;
+                    self.set_bg(grid, Some([r, g, b]));
+                    i += 4;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    /// Apply foreground respecting reverse video.
+    fn set_fg(&self, grid: &mut CellGrid, color: [f32; 3]) {
+        if self.reverse {
+            grid.set_bg(Some(color));
+        } else {
+            grid.set_fg(color);
+        }
+    }
+
+    /// Apply background respecting reverse video.
+    fn set_bg(&self, grid: &mut CellGrid, color: Option<[f32; 3]>) {
+        if self.reverse {
+            grid.set_fg(color.unwrap_or(theme::BG));
+        } else {
+            grid.set_bg(color);
+        }
+    }
+}
+
+fn utf8_width(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b & 0xe0 == 0xc0 {
+        2
+    } else if b & 0xf0 == 0xe0 {
+        3
+    } else if b & 0xf8 == 0xf0 {
+        4
+    } else {
+        0
+    }
+}
+
+fn xterm256(idx: u16) -> [f32; 3] {
+    match idx {
+        0 => [0.0, 0.0, 0.0],
+        1 | 9 => theme::ERR,
+        2 | 10 => theme::JADE,
+        7 | 15 => theme::FG,
+        8 => theme::DIM,
+        n if (16..=231).contains(&n) => {
+            let n = n - 16;
+            let r = n / 36;
+            let g = (n % 36) / 6;
+            let b = n % 6;
+            let c = |v: u16| {
+                if v == 0 {
+                    0.0
+                } else {
+                    (v as f32 * 40.0 + 55.0) / 255.0
+                }
+            };
+            [c(r), c(g), c(b)]
+        }
+        n if (232..=255).contains(&n) => {
+            let v = ((n - 232) as f32 * 10.0 + 8.0) / 255.0;
+            [v, v, v]
+        }
+        _ => theme::FG,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cells::theme;
+
+    #[test]
+    fn sgr_bg_41_sets_bg_on_next_chars() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        // ESC[41m = red background, then "hi", then reset
+        dec.feed(&mut grid, b"\x1b[41mhi\x1b[0m");
+        let c0 = grid.cell_at(0, 0).unwrap();
+        let c1 = grid.cell_at(1, 0).unwrap();
+        assert_eq!(c0.ch, 'h');
+        assert_eq!(c1.ch, 'i');
+        assert_eq!(c0.bg, Some(theme::ERR));
+        assert_eq!(c1.bg, Some(theme::ERR));
+        // After reset, next char has no bg
+        dec.feed(&mut grid, b"x");
+        let cx = grid.cell_at(2, 0).unwrap();
+        assert_eq!(cx.ch, 'x');
+        assert_eq!(cx.bg, None);
+    }
+
+    #[test]
+    fn csi_2j_clears_screen() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(10, 3);
+        dec.feed(&mut grid, b"hello\nworld");
+        assert_eq!(grid.snapshot_strings()[0], "hello");
+        dec.feed(&mut grid, b"\x1b[2J");
+        let snap = grid.snapshot_strings();
+        assert!(snap.iter().all(|s| s.is_empty()), "expected blank grid, got {snap:?}");
+        assert_eq!(grid.cursor().col, 0);
+        assert_eq!(grid.cursor().row, 0);
+    }
+
+    #[test]
+    fn alt_screen_enter_leave_restores_content() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        dec.feed(&mut grid, b"primary");
+        assert_eq!(grid.snapshot_strings()[0], "primary");
+        assert!(!dec.on_alt_screen());
+
+        // Enter alt screen
+        dec.feed(&mut grid, b"\x1b[?1049h");
+        assert!(dec.on_alt_screen());
+        // Alt starts clear
+        assert!(grid.snapshot_strings().iter().all(|s| s.is_empty()));
+        dec.feed(&mut grid, b"alt-buf");
+        assert_eq!(grid.snapshot_strings()[0], "alt-buf");
+
+        // Leave alt screen — primary restored
+        dec.feed(&mut grid, b"\x1b[?1049l");
+        assert!(!dec.on_alt_screen());
+        assert_eq!(grid.snapshot_strings()[0], "primary");
+    }
+
+    #[test]
+    fn cursor_visible_decset() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(10, 3);
+        assert!(dec.cursor_visible);
+        dec.feed(&mut grid, b"\x1b[?25l");
+        assert!(!dec.cursor_visible);
+        dec.feed(&mut grid, b"\x1b[?25h");
+        assert!(dec.cursor_visible);
+    }
+
+    #[test]
+    fn scroll_region_up_on_linefeed() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(10, 5);
+        // Region rows 2-4 (1-based) → 0-based 1..=3
+        dec.feed(&mut grid, b"\x1b[2;4r");
+        // Write three lines that fill the region, then one more to scroll
+        // After CSI r cursor is at 0,0 — move into region
+        dec.feed(&mut grid, b"\x1b[2;1H");
+        dec.feed(&mut grid, b"a\nb\nc\nd");
+        let snap = grid.snapshot_strings();
+        // Row 0 untouched (outside region)
+        assert_eq!(snap[0], "");
+        // Region scrolled: a gone, b,c,d in rows 1..=3
+        assert_eq!(snap[1], "b");
+        assert_eq!(snap[2], "c");
+        assert_eq!(snap[3], "d");
+    }
+}
+
+#[cfg(test)]
+mod cell_region_tests {
+    use crate::cells::CellGrid;
+
+    #[test]
+    fn scroll_region_up_blanks_bottom() {
+        let mut g = CellGrid::new(4, 4);
+        g.set_cursor(0, 0);
+        g.put_str("aaaa");
+        g.set_cursor(0, 1);
+        g.put_str("bbbb");
+        g.set_cursor(0, 2);
+        g.put_str("cccc");
+        g.set_cursor(0, 3);
+        g.put_str("dddd");
+        g.scroll_region_up(1, 2, 1);
+        let snap = g.snapshot_strings();
+        assert_eq!(snap[0], "aaaa");
+        assert_eq!(snap[1], "cccc");
+        assert_eq!(snap[2], "");
+        assert_eq!(snap[3], "dddd");
+    }
+}
