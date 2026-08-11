@@ -9,7 +9,8 @@ pub const SPEED: f32 = 0.14;
 pub const SPEED_VARIANCE: f32 = 1.0;
 /// Legacy density (stratified activation in shader owns real coverage now).
 pub const DENSITY: f32 = 0.4;
-pub const TRAIL: f32 = 0.65;
+/// Trail length — Canvas UI default 0.65; ~20% shorter for chrome.
+pub const TRAIL: f32 = 0.52;
 pub const GLOW: f32 = 1.75;
 pub const MUTATE: f32 = 0.0;
 pub const FLICKER: f32 = 0.0;

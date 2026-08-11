@@ -80,10 +80,11 @@ fn glyph_mask(px: vec2f, cell: f32, seed: f32) -> f32 {
 }
 
 // Per-column speed: skewed slow — most crawl, few race.
+// Floor raised so the slowest streams still move (was 0.22×).
 fn col_speed(col: f32, seed: f32) -> f32 {
     let h = hash11(col * 0.37 + seed + 3.1);
     let h_slow = h * h;
-    let variance = mix(0.22, 1.55, h_slow);
+    let variance = mix(0.38, 1.55, h_slow);
     return u.params.y * mix(1.0, variance, u.params.z);
 }
 
@@ -116,8 +117,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     // yn: 1 at top of viewport, 0 at bottom
     let yn = 1.0 - frag.y / res.y;
 
-    var g = 0.0;
-    var head_g = 0.0;
+    var rgb = vec3f(0.0);
     var orb = 0.0;
     // Single layer — multi-scale layers caused cross-column glyph overlap
     let cell = u.params.x;
@@ -136,19 +136,39 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         let T = t * sp + off;
         let phase = fract(yn + T);
         let cyc = floor(yn + T);
-        let b = clamp(trail / (phase * 22.0), 0.0, 1.3) - 0.04;
-        if (b > 0.0) {
+        let cell_yn = max(cell / res.y, 1e-5);
+        // How far behind the head, in whole glyph cells (0 = contact / leading edge)
+        let cells_back = phase / cell_yn;
+
+        // Canvas UI length: long inverse-phase trail (matches GlyphRainVanilla FRAG).
+        //   b = trail / (phase * 22) − 0.04
+        // This is droplet LENGTH — many cells of body jade, not tip color.
+        let b = max(trail / (max(phase, 1e-5) * 22.0) - 0.04, 0.0);
+        // Canvas UI head band: short bright boost at the reveal line only
+        let head = 1.0 - smoothstep(0.0, cell_yn * 1.2, phase);
+
+        if (b > 0.001 || head > 0.001) {
             let flick = 1.0 + flicker * 0.6 *
                 sin(t * 14.0 + hash21(vec2f(col, cyc)) * 40.0 + phase * 30.0);
             let m = glyph_mask(frag, cell, seed + cyc * 0.173);
-            let cell_yn = cell / res.y;
-            let head = 1.0 - smoothstep(0.0, cell_yn * 1.2, phase);
-            g += m * b * flick * (1.0 + head * glow * 0.35);
-            head_g += m * head * glow * 0.35;
+
+            // Brightness: long trail + short head glow (Canvas UI)
+            let brightness = b * (1.0 + head * glow) * flick;
+
+            // Tip COLOR only (not the circular orbs): hot primary at contact,
+            // falls off within ~1 cell. Long trail stays pure body jade —
+            // this is the "light on the end" / glow-board pen tip, separate
+            // from trail length.
+            let tip_col = exp(-cells_back * cells_back * 9.0);
+            let col_rgb = mix(u.color.rgb, u.head_color.rgb, tip_col);
+
+            rgb += col_rgb * m * brightness;
+            // Extra hot spike only on the contact glyph (still not circular orb)
+            rgb += u.head_color.rgb * m * tip_col * (1.4 + glow * 0.35);
         }
     }
 
-    // Soft tip haze — live columns only, ~38.5% of stream tips
+    // Soft circular tip haze — unchanged (separate from glyph tip color)
     {
         let r = cell * 9.5;
         let span = i32(ceil(r / cell)) + 1;
@@ -183,12 +203,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         }
     }
 
-    g = max(g, 0.0);
     orb = clamp(orb, 0.0, 0.18);
-
-    let rain_col = mix(u.color.rgb, u.head_color.rgb, clamp(head_g, 0.0, 1.0));
-    let a = clamp(g, 0.0, 1.0);
-    var rgb = rain_col * a;
     let glow_col = mix(u.color.rgb, u.head_color.rgb, 0.35);
     rgb += glow_col * orb * 0.185;
     rgb = clamp(rgb, vec3f(0.0), vec3f(1.0));
