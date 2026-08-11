@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalPosition, LogicalSize},
-    event::{ElementState, MouseButton, WindowEvent},
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition},
+    event::{DeviceEvent, ElementState, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowAttributes, WindowId},
@@ -445,6 +445,47 @@ impl ApplicationHandler for ChromeApp {
         self.drain_all_ptys();
     }
 
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        // Fallback pointer tracking if WindowEvent::CursorMoved is flaky on
+        // transparent frameless windows (seen on some macOS setups).
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            if !self.pointer_inside {
+                // Seed from window center on first motion when outside flag is wrong
+                if let Some(w) = &self.window {
+                    let s = w.inner_size();
+                    let scale = w.scale_factor();
+                    self.cursor = LogicalPosition::new(
+                        (s.width as f64 / scale) as f32 * 0.5,
+                        (s.height as f64 / scale) as f32 * 0.5,
+                    );
+                }
+            }
+            self.pointer_inside = true;
+            let scale = self
+                .window
+                .as_ref()
+                .map(|w| w.scale_factor())
+                .unwrap_or(1.0) as f32;
+            self.cursor.x = (self.cursor.x + dx as f32 / scale).max(0.0);
+            self.cursor.y = (self.cursor.y + dy as f32 / scale).max(0.0);
+            if let Some(w) = &self.window {
+                let (lw, lh) = {
+                    let s = w.inner_size();
+                    let sc = w.scale_factor();
+                    (s.width as f32 / sc as f32, s.height as f32 / sc as f32)
+                };
+                self.cursor.x = self.cursor.x.clamp(0.0, lw);
+                self.cursor.y = self.cursor.y.clamp(0.0, lh);
+            }
+            let _ = PhysicalPosition::new(0.0, 0.0); // silence unused if optimized
+        }
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -503,6 +544,10 @@ impl ApplicationHandler for ChromeApp {
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
+            }
+
+            WindowEvent::CursorEntered { .. } => {
+                self.pointer_inside = true;
             }
 
             WindowEvent::RedrawRequested => {

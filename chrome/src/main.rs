@@ -10,6 +10,8 @@ mod cells;
 mod input;
 mod layout;
 mod pty;
+mod rain_atlas;
+mod rain_sim;
 mod renderer;
 mod session;
 mod settings;

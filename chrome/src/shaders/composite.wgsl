@@ -63,15 +63,13 @@ fn sd_round_box(p: vec2f, b: vec2f, r: f32) -> f32 {
     return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-// Sample rain RT. logical top-left origin → texture UV.
+// Sample rain RT. logical top-left origin → texture UV (no Y flip:
+// rain is written with WebGPU top-left origin matching the scene).
 fn sample_rain_raw(logical_px: vec2f, lod: f32) -> vec3f {
-    let logical = u.size.xy;
+    let logical = max(u.size.xy, vec2f(1.0));
     var uv = logical_px / logical;
     uv = clamp(uv, vec2f(0.001), vec2f(0.999));
-    // rain pass is top-left in y-down logical; texture y increases down after our flip in rain vs
-    let suv = vec2f(uv.x, 1.0 - uv.y);
-    // Rgba8UnormSrgb samples as linear in wgpu
-    return textureSampleLevel(rain_tex, rain_samp, suv, lod).rgb;
+    return textureSampleLevel(rain_tex, rain_samp, uv, lod).rgb;
 }
 
 fn ign(v: vec2f) -> f32 {
@@ -105,27 +103,8 @@ fn ggx(roughness: f32, n_dot_l: f32, n_dot_v: f32, n_dot_h: f32) -> f32 {
     return n_dot_l * d * v;
 }
 
-/// Canvas UI–style refraction sample through a glass normal.
-fn sample_refraction(
-    base_px: vec2f,
-    rim: f32,
-    normal: vec3f,
-    glass_ior: f32,
-    depth: f32,
-    blur: f32,
-) -> vec3f {
-    var rv = refract(INCIDENT, normal, AIR_IOR / glass_ior);
-    // Scale ray so z-travel equals optical depth (Canvas UI)
-    let z = abs(rv.z);
-    if (z < 1e-4) {
-        return sample_rain_raw(base_px, blur);
-    }
-    rv = rv / (z / max(depth, 1.0));
-    let lod = blur * (1.0 + rim);
-    return sample_rain_raw(base_px + rv.xy, lod);
-}
-
-/// Evaluate optical glass for one panel at fragment `px` (logical).
+/// Evaluate optical glass for one panel — same model as `lens.wgsl` (the good look).
+/// Shape is rounded-rect SDF; optics match the cursor lens 1:1.
 /// Returns (rgb, coverage) — coverage 0 outside.
 fn eval_glass_panel(
     px: vec2f,
@@ -134,17 +113,28 @@ fn eval_glass_panel(
     radius: f32,
     kind: f32,
 ) -> vec4f {
-    let ior = u.glass.x;
+    let ior = max(u.glass.x, 1.01);
     let edge = u.glass.y;
-    let bevel = u.glass.z;
-    // Soft-cap depth on small chips so refraction stays readable
-    let depth_base = u.glass.w;
+    let bevel = max(u.glass.z, 0.5);
     let min_half = min(half.x, half.y);
-    let depth = min(depth_base, max(min_half * 2.2, 40.0));
     let aberration = u.glass2.x;
     let blur = u.glass2.y;
     let reflection = u.glass2.z;
-    let shine = u.glass2.w;
+    // Match lens: gentle shine floor so rim arcs read
+    let shine = max(u.glass2.w, 0.08);
+
+    // --- Optical scale ---
+    // Old path used min_half for depth/edge. Warp is short (~92px) so min_half ≈ 46
+    // while Terminal min_half is hundreds → warp got ~½ the refraction depth and a
+    // thinner bevel, so the two panes never matched. Primary panes (Terminal=0,
+    // Warp=1) share a fixed optical scale (lens radius 120). Chips still soft-cap.
+    let is_primary_pane = kind < 1.5; // Terminal | Warp
+    let optical = select(
+        min(min_half, 48.0), // chips / small chrome: size-capped
+        120.0,               // terminal + warp: same as LENS_RADIUS
+        is_primary_pane,
+    );
+    let depth = min(u.glass.w, max(optical * 2.2, 40.0));
 
     let local = px - center;
     let sd = sd_round_box(local, half, radius);
@@ -155,17 +145,16 @@ fn eval_glass_panel(
         return vec4f(0.0);
     }
 
-    // Flat face then rim bend (Canvas UI edge)
-    let edge_w = max(min_half * (1.0 - clamp(edge, 0.0, 0.98)), 1.0);
-    let rim = pow(linear_step(-edge_w, 0.0, sd), max(bevel, 0.5));
+    let edge_w = max(optical * (1.0 - clamp(edge, 0.0, 0.98)), 1.0);
+    let rim = pow(linear_step(-edge_w, 0.0, sd), bevel);
 
-    // Flat normal with tiny scatter when frosted; rim normal from SDF gradient
+    // Lens-style normals: flat face z=+1, rim from SDF gradient (circle used radial g2)
     let scatter = min(blur, 1.0) * 0.02;
     let rand_angle = ign(px) * PI * 2.0;
     let flat_n = normalize(vec3f(
         sin(rand_angle) * scatter,
         cos(rand_angle) * scatter,
-        -1.0,
+        1.0,
     ));
     let e = 1.0;
     let grad = vec2f(
@@ -174,85 +163,53 @@ fn eval_glass_panel(
         sd_round_box(local + vec2f(0.0, e), half, radius)
             - sd_round_box(local - vec2f(0.0, e), half, radius),
     );
-    let rim_n = vec3f(normalize(grad + vec2f(1e-5)), 0.0);
-    // Canvas UI uses normal.z toward camera for face; mix flat → rim
-    var normal = normalize(mix(flat_n, rim_n, rim));
-    // Face looks into -Z in their space; keep z negative for facing camera
-    if (normal.z > 0.0) {
-        normal = -normal;
-    }
+    let g2 = normalize(grad + vec2f(1e-5));
+    let rim_n = vec3f(g2, 0.0);
+    let normal = normalize(mix(flat_n, rim_n, rim));
 
-    // Base sample under the panel (no zoom for static chrome — zoom was cursor-lens only)
-    let base_px = px;
+    // Lens refraction: incident -Z, disp = rv.xy * (depth / |rv.z|)
+    let eta = AIR_IOR / ior;
+    let incident = vec3f(0.0, 0.0, -1.0);
+    var rv = refract(incident, normal, eta);
+    if (dot(rv, rv) < 1e-8) {
+        rv = vec3f(g2 * rim * 8.0, -1.0);
+    }
+    let z = max(abs(rv.z), 1e-4);
+    let disp = rv.xy * (depth / z);
 
     var refracted: vec3f;
     if (aberration > 0.001) {
-        // Multi-wavelength split (Canvas UI)
-        refracted = sample_refraction(base_px, rim, normal, ior_for_wavelength(ior, aberration, 611.4), depth, blur)
-            * vec3f(1.0, 0.0, 0.0);
-        refracted += sample_refraction(base_px, rim, normal, ior_for_wavelength(ior, aberration, 570.5), depth, blur)
-            * vec3f(1.0, 1.0, 0.0);
-        refracted += sample_refraction(base_px, rim, normal, ior_for_wavelength(ior, aberration, 549.1), depth, blur)
-            * vec3f(0.0, 1.0, 0.0);
-        refracted += sample_refraction(base_px, rim, normal, ior_for_wavelength(ior, aberration, 491.4), depth, blur)
-            * vec3f(0.0, 1.0, 1.0);
-        refracted += sample_refraction(base_px, rim, normal, ior_for_wavelength(ior, aberration, 464.2), depth, blur)
-            * vec3f(0.0, 0.0, 1.0);
-        refracted += sample_refraction(base_px, rim, normal, ior_for_wavelength(ior, aberration, 374.0), depth, blur)
-            * vec3f(1.0, 0.0, 1.0);
-        refracted = refracted / 3.0;
+        // Same 3-channel CA as lens (not the old 6-lobe panel path)
+        let d0 = disp * (ior_for_wavelength(ior, aberration, 611.4) / ior);
+        let d1 = disp * (ior_for_wavelength(ior, aberration, 549.1) / ior);
+        let d2 = disp * (ior_for_wavelength(ior, aberration, 464.2) / ior);
+        let r = sample_rain_raw(px + d0, blur).r;
+        let g = sample_rain_raw(px + d1, blur).g;
+        let b = sample_rain_raw(px + d2, blur).b;
+        refracted = vec3f(r, g, b);
     } else {
-        refracted = sample_refraction(base_px, rim, normal, ior, depth, blur);
+        refracted = sample_rain_raw(px + disp, blur);
     }
 
     var glass = refracted;
 
-    // Fresnel reflection (Canvas UI)
+    // Lens Fresnel: pale sky mix on rim, not GGX scene reflection
     if (reflection > 0.001) {
-        let V = vec3f(0.0, 0.0, -1.0);
-        let n_dot_v = clamp(dot(V, normal), 0.0, 1.0);
+        let n_dot_v = clamp(normal.z, 0.0, 1.0);
         let f0 = pow2((ior - AIR_IOR) / (ior + AIR_IOR));
-        let fresnel_v = fresnel_schlick(n_dot_v, f0) * reflection;
-
-        var reflect_v = reflect(INCIDENT, normal);
-        let L = reflect_v;
-        let H = normalize(L + V);
-        let rz = abs(reflect_v.z);
-        if (rz > 1e-4) {
-            reflect_v = reflect_v / (rz / max(depth, 1.0));
-        }
-        var reflected = sample_rain_raw(base_px + reflect_v.xy, 2.5 + blur);
-        reflected *= ggx(0.5, dot(normal, L), n_dot_v, dot(normal, H));
-        glass = mix(refracted, reflected, clamp(fresnel_v, 0.0, 1.0));
+        let fres = fresnel_schlick(n_dot_v, f0) * reflection;
+        glass = mix(glass, glass * 0.85 + vec3f(0.9, 0.95, 1.0) * 0.28, clamp(fres * rim, 0.0, 0.4));
     }
 
-    // Specular rim shine (keeps glass visible on quiet backgrounds)
-    if (shine > 0.001) {
-        let ldot = dot(rim_n.xy, normalize(vec2f(-0.6, 0.8)));
-        let band = pow(rim, 1.8);
-        let arcs = pow(abs(ldot), 3.0) * select(0.28, 0.5, ldot > 0.0);
-        glass += band * (0.04 + arcs) * shine;
-    }
+    // Lens rim shine / arcs
+    let ldot = dot(g2, normalize(vec2f(-0.6, 0.8)));
+    let band = pow(rim, 1.8);
+    let arcs = pow(abs(ldot), 3.0) * select(0.28, 0.5, ldot > 0.0);
+    glass += band * (0.03 + arcs) * shine;
 
-    // kind < 0 → pure Canvas UI lens (no brand tint)
-    if (kind >= -0.5) {
-        var tint = vec3f(0.75, 0.95, 0.85);
-        var tint_a = 0.08;
-        var dark = 0.06;
-        if (kind > 1.5 && kind < 2.5) {
-            tint = vec3f(0.45, 0.95, 0.65);
-            tint_a = 0.16;
-            dark = 0.04;
-        } else if (kind > 2.5 && kind < 5.5) {
-            tint_a = 0.06;
-            dark = 0.08;
-        } else if (kind < 0.5) {
-            dark = 0.14;
-            tint_a = 0.10;
-        }
-        glass = mix(glass, tint, tint_a);
-        glass = mix(glass, vec3f(0.02, 0.04, 0.03), dark);
-    }
+    // Lens crystal outline on the pane edge
+    let outline = 1.0 - smoothstep(0.0, 2.0, abs(sd));
+    glass += vec3f(0.75, 0.92, 0.88) * outline * 0.22;
 
     return vec4f(glass, mask);
 }

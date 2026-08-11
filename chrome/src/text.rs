@@ -49,6 +49,8 @@ pub struct TextLabel {
     pub color: [f32; 4],
     /// Use monospace family (terminal cell lines).
     pub mono: bool,
+    /// Digital-rain glyph — prefer a CJK face that covers half-width katakana.
+    pub rain: bool,
 }
 
 impl TextLabel {
@@ -60,6 +62,7 @@ impl TextLabel {
             size,
             color,
             mono: false,
+            rain: false,
         }
     }
 
@@ -71,6 +74,7 @@ impl TextLabel {
             size,
             color,
             mono: true,
+            rain: false,
         }
     }
 }
@@ -168,15 +172,26 @@ impl TextLayer {
                 Some(max_w),
                 Some(line_height * 2.0),
             );
-            let family = if label.mono {
-                Family::Monospace
+            // Rain needs half-width katakana — product suzuri uses a CJK face.
+            // Hiragino Sans covers FF61–FF9F on macOS; SansSerif fallback otherwise.
+            let attrs = if label.rain {
+                #[cfg(target_os = "macos")]
+                {
+                    Attrs::new().family(Family::Name("Hiragino Sans"))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    Attrs::new().family(Family::SansSerif)
+                }
+            } else if label.mono {
+                Attrs::new().family(Family::Monospace)
             } else {
-                Family::SansSerif
+                Attrs::new().family(Family::SansSerif)
             };
             buf.set_text(
                 &mut self.font_system,
                 &label.text,
-                Attrs::new().family(family),
+                attrs,
                 Shaping::Advanced,
             );
             buf.shape_until_scroll(&mut self.font_system, false);
