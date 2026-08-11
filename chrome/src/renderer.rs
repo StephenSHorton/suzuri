@@ -33,8 +33,15 @@ struct FrameUniforms {
     glass: [f32; 4],
     /// aberration, blur, reflection, shine
     glass2: [f32; 4],
-    /// cursor lens: xy center logical, z radius, w presence 0..1
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct LensUniforms {
+    size: [f32; 4],
     lens: [f32; 4],
+    glass: [f32; 4],
+    glass2: [f32; 4],
 }
 
 /// Canvas UI `GlassVanilla` DEFAULTS — https://github.com/DavidHDev/canvas-ui
@@ -72,6 +79,13 @@ pub struct Renderer {
     panel_capacity: u64,
     sampler: wgpu::Sampler,
 
+    /// Full-scene RT (composite + text) sampled by the cursor lens.
+    scene_tex: wgpu::Texture,
+    scene_view: wgpu::TextureView,
+    lens_pipeline: wgpu::RenderPipeline,
+    lens_bgl: wgpu::BindGroupLayout,
+    lens_uniform_buf: wgpu::Buffer,
+
     metrics: Metrics,
     start: std::time::Instant,
     last_frame: std::time::Instant,
@@ -85,6 +99,7 @@ pub struct Renderer {
     lens_presence: f32,
     lens_presence_target: f32,
     pointer_inside: bool,
+    surface_format: wgpu::TextureFormat,
 }
 
 impl Renderer {
@@ -235,7 +250,6 @@ impl Renderer {
                     GLASS_REFLECTION,
                     GLASS_SHINE,
                 ],
-                lens: [0.0, 0.0, LENS_RADIUS, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -325,6 +339,94 @@ impl Renderer {
         let mut text = TextLayer::new(&device, &queue, format);
         text.resize(size, scale_factor);
 
+        let (scene_tex, scene_view) =
+            create_scene_target(&device, format, config.width, config.height);
+
+        let lens_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("lens"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/lens.wgsl").into()),
+        });
+        let lens_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lens uniforms"),
+            contents: bytemuck::bytes_of(&LensUniforms {
+                size: [1.0, 1.0, 1.0, 1.0],
+                lens: [0.0, 0.0, LENS_RADIUS, 0.0],
+                glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
+                glass2: [
+                    GLASS_ABERRATION,
+                    GLASS_BLUR,
+                    GLASS_REFLECTION,
+                    GLASS_SHINE,
+                ],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let lens_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lens bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let lens_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("lens pipeline"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("lens pl"),
+                    bind_group_layouts: &[&lens_bgl],
+                    push_constant_ranges: &[],
+                }),
+            ),
+            vertex: wgpu::VertexState {
+                module: &lens_shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &lens_shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let cx = (size.width as f32 / scale_factor) * 0.5;
+        let cy = (size.height as f32 / scale_factor) * 0.5;
+
         Self {
             surface,
             device,
@@ -343,15 +445,22 @@ impl Renderer {
             panel_buf,
             panel_capacity,
             sampler,
+            scene_tex,
+            scene_view,
+            lens_pipeline,
+            lens_bgl,
+            lens_uniform_buf,
             metrics: Metrics::default(),
             start: std::time::Instant::now(),
             last_frame: std::time::Instant::now(),
             text,
-            lens_pos: [size.width as f32 * 0.5, size.height as f32 * 0.5],
-            lens_target: [size.width as f32 * 0.5, size.height as f32 * 0.5],
+            lens_pos: [cx, cy],
+            lens_target: [cx, cy],
+            // Visible immediately so first frame after move is obvious
             lens_presence: 0.0,
             lens_presence_target: 0.0,
             pointer_inside: false,
+            surface_format: format,
         }
     }
 
@@ -359,11 +468,12 @@ impl Renderer {
     pub fn set_pointer(&mut self, x: f32, y: f32, inside: bool) {
         if inside {
             if !self.pointer_inside {
-                // Snap on enter so the lens doesn't lag in from the last leave pos
                 self.lens_pos = [x, y];
             }
             self.lens_target = [x, y];
             self.lens_presence_target = 1.0;
+            // Snap presence quickly so the lens is obvious
+            self.lens_presence = self.lens_presence.max(0.35);
         } else {
             self.lens_presence_target = 0.0;
         }
@@ -404,6 +514,14 @@ impl Renderer {
         let (tex, view) = create_rain_target(&self.device, self.config.width, self.config.height);
         self.rain_tex = tex;
         self.rain_view = view;
+        let (st, sv) = create_scene_target(
+            &self.device,
+            self.surface_format,
+            self.config.width,
+            self.config.height,
+        );
+        self.scene_tex = st;
+        self.scene_view = sv;
         self.text.resize(new_size, scale_factor);
     }
 
@@ -413,6 +531,7 @@ impl Renderer {
         settings: &SettingsState,
         pty_active: bool,
         cursor_visible: bool,
+        pointer: Option<(f32, f32)>,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -428,9 +547,15 @@ impl Renderer {
         let logical_w = fw / self.scale_factor;
         let logical_h = fh / self.scale_factor;
 
+        // Pointer from app every frame (don't rely solely on CursorMoved)
+        match pointer {
+            Some((px, py)) => self.set_pointer(px, py, true),
+            None => self.set_pointer(self.lens_target[0], self.lens_target[1], false),
+        }
+
         // Smooth lens follow (Canvas UI follow ≈ 0.2)
         let k_pos = 1.0 - (-dt * (4.0 + LENS_FOLLOW * 26.0)).exp();
-        let k_pres = 1.0 - (-dt * 11.0).exp();
+        let k_pres = 1.0 - (-dt * 14.0).exp();
         self.lens_pos[0] += (self.lens_target[0] - self.lens_pos[0]) * k_pos;
         self.lens_pos[1] += (self.lens_target[1] - self.lens_pos[1]) * k_pos;
         self.lens_presence +=
@@ -477,7 +602,6 @@ impl Renderer {
             bytemuck::bytes_of(&FrameUniforms {
                 size: [logical_w, logical_h, fw, fh],
                 misc: [t, self.scale_factor, count as f32, 0.0],
-                // Canvas UI GlassVanilla defaults (panel-adapted in shader)
                 glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
                 glass2: [
                     GLASS_ABERRATION,
@@ -485,11 +609,27 @@ impl Renderer {
                     GLASS_REFLECTION,
                     GLASS_SHINE,
                 ],
+            }),
+        );
+
+        self.queue.write_buffer(
+            &self.lens_uniform_buf,
+            0,
+            bytemuck::bytes_of(&LensUniforms {
+                size: [logical_w, logical_h, fw, fh],
                 lens: [
                     self.lens_pos[0],
                     self.lens_pos[1],
                     LENS_RADIUS,
                     self.lens_presence,
+                ],
+                glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
+                glass2: [
+                    GLASS_ABERRATION,
+                    GLASS_BLUR,
+                    GLASS_REFLECTION,
+                    // Boost shine on the cursor lens so the rim is obvious
+                    GLASS_SHINE.max(0.45),
                 ],
             }),
         );
@@ -549,12 +689,12 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // Pass 1: composite glass chrome onto surface
+        // Pass 1: composite glass chrome → scene RT (not swapchain)
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("composite"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.scene_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -570,7 +710,7 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
-        // Pass 2: text overlay (title, tabs, terminal cells, warp, settings)
+        // Pass 2: text overlay onto scene RT
         let labels = chrome_labels(
             &layout,
             self.metrics,
@@ -581,7 +721,47 @@ impl Renderer {
             cursor_visible,
         );
         self.text.prepare(&self.device, &self.queue, &labels);
-        self.text.render(&self.device, &mut encoder, &view);
+        self.text
+            .render(&self.device, &mut encoder, &self.scene_view);
+
+        // Pass 3: cursor glass lens samples full scene → swapchain
+        let lens_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lens bg"),
+            layout: &self.lens_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.lens_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("lens"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.lens_pipeline);
+            pass.set_bind_group(0, &lens_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -820,6 +1000,30 @@ fn create_rain_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
+fn create_scene_target(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("scene target"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });

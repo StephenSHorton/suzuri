@@ -14,8 +14,6 @@ struct FrameUniforms {
     glass: vec4f,
     // x=aberration, y=blur, z=reflection, w=shine
     glass2: vec4f,
-    // Cursor lens (Canvas UI Glass): xy = center logical, z = radius, w = presence 0..1
-    lens: vec4f,
 }
 
 struct Panel {
@@ -300,19 +298,6 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         let g = eval_glass_panel(px, center, half, p.radius, p.kind);
         if (g.a <= 0.001) { continue; }
         col = mix(col, g.rgb, g.a * 0.96);
-    }
-
-    // Cursor-following glass lens (Canvas UI Glass) — on top so you can judge optics
-    let lens_presence = u.lens.w;
-    let lens_r = u.lens.z;
-    if (lens_presence > 0.004 && lens_r > 1.0) {
-        let lens_c = u.lens.xy;
-        let half = vec2f(lens_r, lens_r);
-        // kind = -1 → pure crystal, no jade tint
-        var g = eval_glass_panel(px, lens_c, half, lens_r, -1.0);
-        // Presence fade like Canvas UI (alpha scales with presence)
-        let alpha = min(lens_presence * 5.0, 1.0) * g.a;
-        col = mix(col, g.rgb, alpha * 0.98);
     }
 
     return vec4f(col, 1.0);

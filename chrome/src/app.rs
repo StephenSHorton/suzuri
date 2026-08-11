@@ -32,6 +32,7 @@ pub struct ChromeApp {
     session: ChromeSession,
     metrics: Metrics,
     cursor: LogicalPosition<f32>,
+    pointer_inside: bool,
     warp_focused: bool,
     terminal_focused: bool,
     modifiers: ModifiersState,
@@ -58,6 +59,7 @@ impl Default for ChromeApp {
             session,
             metrics: Metrics::default(),
             cursor: LogicalPosition::new(0.0, 0.0),
+            pointer_inside: false,
             warp_focused: true,
             terminal_focused: false,
             modifiers: ModifiersState::empty(),
@@ -464,15 +466,11 @@ impl ApplicationHandler for ChromeApp {
                     .unwrap_or(1.0);
                 let logical: LogicalPosition<f64> = position.to_logical(scale);
                 self.cursor = LogicalPosition::new(logical.x as f32, logical.y as f32);
-                if let Some(r) = self.renderer.as_mut() {
-                    r.set_pointer(self.cursor.x, self.cursor.y, true);
-                }
+                self.pointer_inside = true;
             }
 
             WindowEvent::CursorLeft { .. } => {
-                if let Some(r) = self.renderer.as_mut() {
-                    r.set_pointer(self.cursor.x, self.cursor.y, false);
-                }
+                self.pointer_inside = false;
             }
 
             WindowEvent::MouseInput {
@@ -512,7 +510,16 @@ impl ApplicationHandler for ChromeApp {
                 let pty_on = self.any_pty_alive();
                 let cursor_vis = self.active_cursor_visible();
                 if let Some(r) = self.renderer.as_mut() {
-                    match r.render(&self.session, &self.settings, pty_on, cursor_vis) {
+                    let pointer = self
+                        .pointer_inside
+                        .then_some((self.cursor.x, self.cursor.y));
+                    match r.render(
+                        &self.session,
+                        &self.settings,
+                        pty_on,
+                        cursor_vis,
+                        pointer,
+                    ) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                             if let Some(w) = &self.window {
