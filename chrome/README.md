@@ -40,11 +40,15 @@ cargo run --release
 title 32 (clear bar + lights + title)
 tabs 40
 stack 8
-[ glass terminal well + mono cell text ]
-stack 8
-[ glass warp bar ]
+┌ single glass well ─────────────────┐
+│  PTY / history (cell grid)         │
+│  ──────────────────── ASCII line   │
+│  ❯ local command input             │
+└────────────────────────────────────┘
 edge 16 bottom / sides
 ```
+
+One glass pane only — input is text at the bottom of the well (not a second refractive panel).
 
 ### Shortcuts
 

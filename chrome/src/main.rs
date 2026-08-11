@@ -7,10 +7,12 @@
 mod ansi;
 mod app;
 mod cells;
+mod commands;
 mod input;
 mod layout;
 #[cfg(target_os = "macos")]
 mod macos_window;
+mod panes;
 mod pty;
 mod rain_atlas;
 mod rain_sim;

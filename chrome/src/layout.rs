@@ -55,8 +55,10 @@ impl Spacing {
 pub struct Metrics {
     pub title_h: f32,
     pub tab_h: f32,
-    pub warp_h: f32,
-    /// Corner radius for primary panes (terminal / warp).
+    /// Reserved height **inside** the single glass pane for ASCII separator +
+    /// local command input (not a second glass pane).
+    pub input_strip_h: f32,
+    /// Corner radius for the primary glass well.
     pub radius: f32,
     /// Corner radius for nav chips (tabs / + / settings).
     pub chip_radius: f32,
@@ -69,7 +71,8 @@ impl Default for Metrics {
         Self {
             title_h: s.unit * 4.0,      // 32 — slim drag bar (lights + title only)
             tab_h: s.unit * 5.0,        // 40
-            warp_h: s.unit * 8.0,       // 64
+            // divider + path + input (~3 mono rows), on the 8pt grid
+            input_strip_h: s.unit * 6.0, // 48
             radius: s.unit * 2.0,       // 16
             chip_radius: s.unit,        // 8
             spacing: s,
@@ -124,40 +127,59 @@ impl Rect {
     }
 }
 
+/// Per-pane geometry inside the workspace (one glass + footer per leaf).
+#[derive(Clone, Debug)]
+pub struct PaneLayout {
+    pub pane_id: u64,
+    pub glass: Rect,
+    pub cells: Rect,
+    pub divider: Rect,
+    pub path: Rect,
+    pub warp: Rect,
+    pub focused: bool,
+}
+
 /// One chrome frame’s computed geometry.
 #[derive(Clone, Debug)]
 #[allow(dead_code)] // tabs / tab_active / tab_idle kept for layout contract + tests
 pub struct FrameLayout {
     pub title: Rect,
     pub tabs: Rect,
+    /// Full workspace rectangle (all panes live inside).
+    pub workspace: Rect,
+    /// Focused pane regions (compat aliases for single-pane callers).
     pub terminal: Rect,
+    pub cells: Rect,
     pub warp: Rect,
+    pub divider: Rect,
+    pub path: Rect,
+    /// One entry per visible leaf pane.
+    pub panes: Vec<PaneLayout>,
     /// Logo slot left of the tab strip (character 「硯」).
     pub logo: Rect,
     /// Dynamic tab chips (left → right).
     pub tab_chips: Vec<Rect>,
-    /// Compat: first chip (or zero rect if none).
     pub tab_active: Rect,
-    /// Compat: second chip (or zero rect if none).
     pub tab_idle: Rect,
     pub tab_new: Rect,
     pub settings: Rect,
 }
 
 impl FrameLayout {
-    /// Compute chrome geometry for `tab_count` open tabs.
-    ///
-    /// ```text
-    /// [ title ]
-    /// [ tabs  ]
-    /// [ stack 8 ]   ← internal
-    /// [ terminal ]
-    /// [ stack 8 ]
-    /// [ warp  ]
-    /// [ edge 16 ]   ← window bottom
-    /// ← edge 16 → panes ← edge 16 →
-    /// ```
+    /// Compute chrome chrome for `tab_count` strip tabs (single full-workspace pane).
     pub fn compute(width: f32, height: f32, m: Metrics, tab_count: usize) -> Self {
+        Self::compute_with_panes(width, height, m, tab_count, &[(1, true)])
+    }
+
+    /// `pane_specs`: (pane_id, focused) in layout order — used when tree layout
+    /// is applied externally via [`Self::apply_pane_rects`].
+    pub fn compute_with_panes(
+        width: f32,
+        height: f32,
+        m: Metrics,
+        tab_count: usize,
+        pane_specs: &[(u64, bool)],
+    ) -> Self {
         let edge = m.edge();
         let stack = m.stack();
 
@@ -167,21 +189,44 @@ impl FrameLayout {
         let term_x = edge;
         let term_y = m.title_h + m.tab_h + stack;
         let term_w = (width - edge * 2.0).max(80.0);
-        // 2× stack (under nav + between panes) + 1× edge (bottom)
-        let term_h =
-            (height - m.title_h - m.tab_h - m.warp_h - stack * 2.0 - edge).max(80.0);
-        let terminal = Rect::new(term_x, term_y, term_w, term_h);
+        let term_h = (height - m.title_h - m.tab_h - stack - edge).max(80.0);
+        let workspace = Rect::new(term_x, term_y, term_w, term_h);
 
-        let warp_y = term_y + term_h + stack;
-        let warp = Rect::new(edge, warp_y, term_w, m.warp_h);
+        // Default: one pane fills the workspace.
+        let specs = if pane_specs.is_empty() {
+            vec![(1u64, true)]
+        } else {
+            pane_specs.to_vec()
+        };
+        let mut panes = Vec::with_capacity(specs.len());
+        if specs.len() == 1 {
+            panes.push(pane_layout_in_glass(specs[0].0, workspace, m, specs[0].1));
+        } else {
+            // Equal columns fallback if caller didn't apply tree layout.
+            let gap = m.stack();
+            let n = specs.len() as f32;
+            let usable = (term_w - gap * (n - 1.0)).max(40.0);
+            let pw = usable / n;
+            for (i, (id, foc)) in specs.iter().enumerate() {
+                let x = term_x + i as f32 * (pw + gap);
+                let glass = Rect::new(x, term_y, pw, term_h);
+                panes.push(pane_layout_in_glass(*id, glass, m, *foc));
+            }
+        }
 
-        // Tab strip: logo · chips · +  …………  settings
-        let chip_h = m.spacing.unit * 4.0; // 32
+        let focused = panes
+            .iter()
+            .find(|p| p.focused)
+            .cloned()
+            .unwrap_or_else(|| panes[0].clone());
+
+        // Tab strip
+        let chip_h = m.spacing.unit * 4.0;
         let chip_y = m.title_h + (m.tab_h - chip_h) * 0.5;
-        let logo_w = m.spacing.unit * 4.0; // 32
+        let logo_w = m.spacing.unit * 4.0;
         let logo = Rect::new(edge, chip_y, logo_w, chip_h);
 
-        let chip_w = m.spacing.unit * 12.0; // 96
+        let chip_w = m.spacing.unit * 12.0;
         let cluster = m.cluster();
         let mut x = edge + logo_w + cluster;
         let mut tab_chips = Vec::with_capacity(tab_count);
@@ -189,7 +234,7 @@ impl FrameLayout {
             tab_chips.push(Rect::new(x, chip_y, chip_w, chip_h));
             x += chip_w + cluster;
         }
-        let tab_new = Rect::new(x, chip_y, chip_h, chip_h); // 32×32
+        let tab_new = Rect::new(x, chip_y, chip_h, chip_h);
 
         let settings_w = chip_w;
         let settings = Rect::new(width - edge - settings_w, chip_y, settings_w, chip_h);
@@ -200,8 +245,13 @@ impl FrameLayout {
         Self {
             title,
             tabs,
-            terminal,
-            warp,
+            workspace,
+            terminal: focused.glass,
+            cells: focused.cells,
+            warp: focused.warp,
+            divider: focused.divider,
+            path: focused.path,
+            panes,
             logo,
             tab_chips,
             tab_active,
@@ -211,17 +261,36 @@ impl FrameLayout {
         }
     }
 
+    /// Replace pane glass rects from a split-tree layout pass.
+    pub fn apply_pane_rects(&mut self, m: Metrics, leaf_rects: &[(u64, Rect)], focus: u64) {
+        self.panes.clear();
+        for (id, glass) in leaf_rects {
+            self.panes
+                .push(pane_layout_in_glass(*id, *glass, m, *id == focus));
+        }
+        if let Some(f) = self.panes.iter().find(|p| p.focused).cloned() {
+            self.terminal = f.glass;
+            self.cells = f.cells;
+            self.warp = f.warp;
+            self.divider = f.divider;
+            self.path = f.path;
+        } else if let Some(f) = self.panes.first().cloned() {
+            self.terminal = f.glass;
+            self.cells = f.cells;
+            self.warp = f.warp;
+            self.divider = f.divider;
+            self.path = f.path;
+        }
+    }
+
     /// Glass / solid panel instances for the composite pass.
-    ///
-    /// `active_tab_index` selects which chip gets the active (bright) style.
-    /// `traffic_lights` are optional solid circle rects (close / min / zoom).
     pub fn glass_panels(
         &self,
         m: Metrics,
         active_tab_index: usize,
         traffic_lights: Option<[Rect; 3]>,
     ) -> Vec<PanelInstance> {
-        let mut out = Vec::with_capacity(8 + self.tab_chips.len());
+        let mut out = Vec::with_capacity(8 + self.tab_chips.len() + self.panes.len());
 
         if let Some(lights) = traffic_lights {
             let r = lights[0].w * 0.5;
@@ -230,12 +299,9 @@ impl FrameLayout {
             out.push(PanelInstance::glass(lights[2], r, PanelKind::SolidZoom));
         }
 
-        out.push(PanelInstance::glass(
-            self.terminal,
-            m.radius,
-            PanelKind::Terminal,
-        ));
-        out.push(PanelInstance::glass(self.warp, m.radius, PanelKind::Warp));
+        for pl in &self.panes {
+            out.push(PanelInstance::glass(pl.glass, m.radius, PanelKind::Terminal));
+        }
 
         for (i, chip) in self.tab_chips.iter().enumerate() {
             let kind = if i == active_tab_index {
@@ -260,11 +326,44 @@ impl FrameLayout {
     }
 }
 
+fn pane_layout_in_glass(pane_id: u64, glass: Rect, m: Metrics, focused: bool) -> PaneLayout {
+    let inset = m.inset();
+    let strip = m.input_strip_h.min((glass.h - inset * 2.0).max(0.0));
+    let inner_x = glass.x + inset;
+    let inner_w = (glass.w - inset * 2.0).max(40.0);
+    let inner_top = glass.y + inset;
+    let inner_bottom = glass.y + glass.h - inset;
+    let cells_h = (inner_bottom - inner_top - strip).max(CELL_H_MIN);
+    let cells = Rect::new(inner_x, inner_top, inner_w, cells_h);
+
+    let div_h = (strip * 0.22).max(m.spacing.half());
+    let path_h = (strip * 0.34).max(m.spacing.unit);
+    let input_h = (strip - div_h - path_h).max(m.spacing.unit);
+    let divider = Rect::new(inner_x, cells.y + cells.h, inner_w, div_h);
+    let path = Rect::new(inner_x, divider.y + divider.h, inner_w, path_h);
+    let warp = Rect::new(inner_x, path.y + path.h, inner_w, input_h);
+
+    PaneLayout {
+        pane_id,
+        glass,
+        cells,
+        divider,
+        path,
+        warp,
+        focused,
+    }
+}
+
+/// Minimum cell-area height so grid math never collapses.
+const CELL_H_MIN: f32 = 40.0;
+
 /// Panel kinds drawn with the glass pass.
 #[derive(Clone, Copy, Debug)]
 #[repr(u32)]
 pub enum PanelKind {
     Terminal = 0,
+    /// Reserved (input is no longer a glass pane; kept for shader kind table).
+    #[allow(dead_code)]
     Warp = 1,
     ChipActive = 2,
     ChipIdle = 3,
@@ -343,19 +442,29 @@ mod tests {
         let stack = m.stack();
         let l = FrameLayout::compute(800.0, 600.0, m, 2);
 
-        // nav → terminal == stack (8), not edge
-        let under_nav = l.terminal.y - (m.title_h + m.tab_h);
-        assert!((under_nav - stack).abs() < 0.01, "nav→terminal {under_nav}");
+        // nav → workspace == stack (8), not edge
+        let under_nav = l.workspace.y - (m.title_h + m.tab_h);
+        assert!((under_nav - stack).abs() < 0.01, "nav→workspace {under_nav}");
 
-        // terminal → warp == stack
-        let between = l.warp.y - (l.terminal.y + l.terminal.h);
-        assert!((between - stack).abs() < 0.01, "terminal→warp {between}");
-        assert!((between - under_nav).abs() < 0.01);
+        assert!(l.cells.y >= l.terminal.y);
+        assert!(l.warp.y + l.warp.h <= l.terminal.y + l.terminal.h + 0.01);
+        assert!(l.path.y >= l.divider.y + l.divider.h - 0.5);
+        assert!(l.warp.y >= l.path.y + l.path.h - 0.5);
+        assert!((l.cells.y + l.cells.h - l.divider.y).abs() < 0.5);
 
-        // left / right / bottom == edge (16)
-        assert!((l.terminal.x - edge).abs() < 0.01);
-        assert!((800.0 - l.terminal.x - l.terminal.w - edge).abs() < 0.01);
-        assert!((600.0 - (l.warp.y + l.warp.h) - edge).abs() < 0.01);
+        assert!((l.workspace.x - edge).abs() < 0.01);
+        assert!((800.0 - l.workspace.x - l.workspace.w - edge).abs() < 0.01);
+        assert!((600.0 - (l.workspace.y + l.workspace.h) - edge).abs() < 0.01);
+    }
+
+    #[test]
+    fn single_glass_no_second_pane_gap() {
+        let m = Metrics::default();
+        let l = FrameLayout::compute(1120.0, 740.0, m, 1);
+        assert!(l.warp.y > l.terminal.y);
+        assert!(l.warp.y + l.warp.h <= l.terminal.y + l.terminal.h + 0.01);
+        assert!(l.cells.h > 100.0);
+        assert_eq!(l.panes.len(), 1);
     }
 
     #[test]

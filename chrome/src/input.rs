@@ -12,8 +12,10 @@ pub enum HitTarget {
     Tab(usize),
     NewTab,
     Settings,
-    WarpBar,
-    Terminal,
+    /// Local input strip for pane id.
+    WarpBar(u64),
+    /// History cells for pane id.
+    Terminal(u64),
     /// Title-bar drag region (window move). On macOS, excludes traffic lights.
     TitleDrag,
     None,
@@ -58,8 +60,8 @@ fn traffic_lights_right() -> f32 {
 
 /// Hit-test chrome at `(x, y)` in logical pixels (top-left origin).
 ///
-/// Priority: traffic lights (mac) → tab chips / new / settings → warp →
-/// terminal → title drag → none.
+/// Priority: traffic lights (mac) → tab chips / new / settings →
+/// input strip (bottom of glass) → history cells → title drag → none.
 pub fn hit_test(
     layout: &FrameLayout,
     metrics: &Metrics,
@@ -92,11 +94,14 @@ pub fn hit_test(
         return HitTarget::Settings;
     }
 
-    if layout.warp.contains(x, y) {
-        return HitTarget::WarpBar;
-    }
-    if layout.terminal.contains(x, y) {
-        return HitTarget::Terminal;
+    // Multi-pane: hit any pane's footer → warp; cells → terminal.
+    for pl in &layout.panes {
+        if pl.warp.contains(x, y) || pl.path.contains(x, y) || pl.divider.contains(x, y) {
+            return HitTarget::WarpBar(pl.pane_id);
+        }
+        if pl.cells.contains(x, y) || pl.glass.contains(x, y) {
+            return HitTarget::Terminal(pl.pane_id);
+        }
     }
 
     if layout.title.contains(x, y) {
@@ -200,26 +205,22 @@ mod tests {
             ),
             HitTarget::Settings
         );
-        assert_eq!(
-            hit_test(
-                &layout,
-                &m,
-                layout.warp.x + 1.0,
-                layout.warp.y + 1.0,
-                false
-            ),
-            HitTarget::WarpBar
+        let w = hit_test(
+            &layout,
+            &m,
+            layout.warp.x + 1.0,
+            layout.warp.y + 1.0,
+            false,
         );
-        assert_eq!(
-            hit_test(
-                &layout,
-                &m,
-                layout.terminal.x + 1.0,
-                layout.terminal.y + 1.0,
-                false
-            ),
-            HitTarget::Terminal
+        assert!(matches!(w, HitTarget::WarpBar(_)));
+        let t = hit_test(
+            &layout,
+            &m,
+            layout.cells.x + 1.0,
+            layout.cells.y + 1.0,
+            false,
         );
+        assert!(matches!(t, HitTarget::Terminal(_)));
     }
 
     #[test]

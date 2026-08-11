@@ -6,8 +6,9 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::commands::{filter_commands, Command, HelpState, PaletteState};
 use crate::input::{is_mac, traffic_light_rects};
-use crate::layout::{FrameLayout, Metrics, PanelInstance};
+use crate::layout::{FrameLayout, Metrics, PaneLayout, PanelInstance};
 use crate::rain_atlas::RainAtlas;
 use crate::rain_sim;
 use crate::session::ChromeSession;
@@ -596,8 +597,14 @@ impl Renderer {
         &mut self,
         session: &ChromeSession,
         settings: &SettingsState,
+        palette: &PaletteState,
+        help: &HelpState,
+        commands: &[Command],
+        layout: &FrameLayout,
         pty_active: bool,
-        cursor_visible: bool,
+        // PTY block cursor in history cells; smooth caret alpha on the ❯ line.
+        terminal_cursor_visible: bool,
+        input_caret_alpha: f32,
         pointer: Option<(f32, f32)>,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
@@ -673,7 +680,6 @@ impl Renderer {
         );
         let _ = t; // wall-clock still used by composite glass time
 
-        let layout = FrameLayout::compute(logical_w, logical_h, self.metrics, session.tabs.len());
         let active_idx = session
             .tabs
             .iter()
@@ -685,20 +691,45 @@ impl Renderer {
             None
         };
         let mut panels = layout.glass_panels(self.metrics, active_idx, lights);
-        // Settings glass modal + scrim (agility dialog presentation)
-        if settings.visible() {
+        // Modal overlays (settings / palette / help) — agility dialog presentation
+        {
             use crate::layout::{PanelInstance, PanelKind, Rect};
-            let scrim = PanelInstance::glass(
-                Rect::new(0.0, 0.0, logical_w, logical_h),
-                0.0,
-                PanelKind::Scrim,
-            )
-            .with_opacity(settings.scrim_alpha());
-            let modal_r = settings.animated_modal_rect(logical_w, logical_h);
-            let modal = PanelInstance::glass(modal_r, self.metrics.radius, PanelKind::Modal)
-                .with_opacity(settings.content_ease().clamp(0.0, 1.0));
-            panels.push(scrim);
-            panels.push(modal);
+            let any_overlay = settings.visible() || palette.visible() || help.visible();
+            if any_overlay {
+                let scrim_a = settings
+                    .scrim_alpha()
+                    .max(palette.scrim_alpha())
+                    .max(help.scrim_alpha());
+                panels.push(
+                    PanelInstance::glass(
+                        Rect::new(0.0, 0.0, logical_w, logical_h),
+                        0.0,
+                        PanelKind::Scrim,
+                    )
+                    .with_opacity(scrim_a),
+                );
+            }
+            if settings.visible() {
+                let modal_r = settings.animated_modal_rect(logical_w, logical_h);
+                panels.push(
+                    PanelInstance::glass(modal_r, self.metrics.radius, PanelKind::Modal)
+                        .with_opacity(settings.content_ease().clamp(0.0, 1.0)),
+                );
+            }
+            if palette.visible() {
+                let modal_r = overlay_modal_rect(logical_w, logical_h, 480.0, 420.0);
+                panels.push(
+                    PanelInstance::glass(modal_r, self.metrics.radius, PanelKind::Modal)
+                        .with_opacity(palette.content_ease().clamp(0.0, 1.0)),
+                );
+            }
+            if help.visible() {
+                let modal_r = overlay_modal_rect(logical_w, logical_h, 520.0, 480.0);
+                panels.push(
+                    PanelInstance::glass(modal_r, self.metrics.radius, PanelKind::Modal)
+                        .with_opacity(help.content_ease().clamp(0.0, 1.0)),
+                );
+            }
         }
         let count = panels.len() as u32;
 
@@ -852,13 +883,17 @@ impl Renderer {
 
         // Pass 2: text overlay onto scene RT
         let labels = chrome_labels(
-            &layout,
+            layout,
             self.metrics,
             session,
             active_idx,
             settings,
+            palette,
+            help,
+            commands,
             pty_active,
-            cursor_visible,
+            terminal_cursor_visible,
+            input_caret_alpha,
         );
         self.text.prepare(&self.device, &self.queue, &labels);
         self.text
@@ -916,14 +951,20 @@ impl Renderer {
     }
 }
 
-/// Derive grid cols/rows from a terminal rect (logical px).
-/// `inset` should be [`Metrics::inset`] (spacing system).
-pub fn terminal_grid_size(terminal: &crate::layout::Rect, inset: f32) -> (u16, u16) {
-    let inner_w = (terminal.w - inset * 2.0).max(CELL_W);
-    let inner_h = (terminal.h - inset * 2.0).max(CELL_H);
+/// Derive grid cols/rows from the **cells** rect (PTY hole inside the single glass).
+/// `cells` is already inset — no extra pad.
+pub fn terminal_grid_size(cells: &crate::layout::Rect, _inset: f32) -> (u16, u16) {
+    let inner_w = cells.w.max(CELL_W);
+    let inner_h = cells.h.max(CELL_H);
     let cols = (inner_w / CELL_W).floor().max(1.0) as u16;
     let rows = (inner_h / CELL_H).floor().max(1.0) as u16;
     (cols, rows)
+}
+
+fn overlay_modal_rect(window_w: f32, window_h: f32, max_w: f32, max_h: f32) -> crate::layout::Rect {
+    let w = (window_w - 32.0).min(max_w).max(280.0);
+    let h = (window_h - 64.0).min(max_h).max(220.0);
+    crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.42, w, h)
 }
 
 /// Chrome + terminal strings for the current frame (logical px).
@@ -933,18 +974,22 @@ fn chrome_labels(
     session: &ChromeSession,
     active_idx: usize,
     settings: &SettingsState,
+    palette: &PaletteState,
+    help: &HelpState,
+    commands: &[Command],
     pty_active: bool,
-    cursor_visible: bool,
+    terminal_cursor_visible: bool,
+    input_caret_alpha: f32,
 ) -> Vec<TextLabel> {
     let muted = [0.75, 0.90, 0.80, 0.85];
     let bright = [0.90, 1.0, 0.92, 0.95];
     let dim = [0.55, 0.70, 0.60, 0.75];
 
-    let mut labels = Vec::with_capacity(48 + session.active_grid().rows() as usize);
+    let mut labels = Vec::with_capacity(128);
 
-    // Window title on clear bar (right of traffic lights on mac).
+    // Window title
     let title_size = 12.0;
-    let title_y = (m.title_h - title_size * 1.25) * 0.5; // account for glyphon line-height
+    let title_y = (m.title_h - title_size * 1.25) * 0.5;
     let title_x = if is_mac() {
         68.0 + m.stack()
     } else {
@@ -955,10 +1000,9 @@ fn chrome_labels(
         title_x,
         title_y,
         title_size,
-        dim, // quieter on rain — no green title plate
+        dim,
     ));
 
-    // Logo 「硯」 — centered in logo slot.
     labels.push(TextLabel::centered(
         "硯",
         [layout.logo.x, layout.logo.y, layout.logo.w, layout.logo.h],
@@ -966,7 +1010,6 @@ fn chrome_labels(
         bright,
     ));
 
-    // Tab chip labels — centered in each glass chip.
     let tab_size = 12.0;
     for (i, chip) in layout.tab_chips.iter().enumerate() {
         let title = session
@@ -983,7 +1026,6 @@ fn chrome_labels(
         ));
     }
 
-    // New-tab 「+」 — centered in 32×32 glass.
     labels.push(TextLabel::centered(
         "+",
         [
@@ -996,7 +1038,6 @@ fn chrome_labels(
         dim,
     ));
 
-    // Settings — centered in chip.
     labels.push(TextLabel::centered(
         "settings",
         [
@@ -1009,33 +1050,70 @@ fn chrome_labels(
         dim,
     ));
 
-    // Terminal cell lines (mono ~13) inside the glass well.
-    let inset = m.inset();
-    push_terminal_labels(&mut labels, layout, inset, session, cursor_visible);
+    // Every leaf pane: cells + footer
+    let focus = session.focus_pane_id();
+    for pl in &layout.panes {
+        let Some(pane) = session.panes.get(&pl.pane_id) else {
+            continue;
+        };
+        let show_cursor = terminal_cursor_visible && pl.pane_id == focus;
+        push_pane_cells(&mut labels, pl, pane, show_cursor);
 
-    // Warp draft or placeholder.
-    let warp_size = 13.0;
-    let warp_text = if session.draft.is_empty() {
-        "warp · type a command…".to_string()
-    } else {
-        format!("❯ {}", session.draft)
-    };
-    let warp_color = if session.draft.is_empty() { dim } else { bright };
-    labels.push(TextLabel::new(
-        warp_text,
-        layout.warp.x + inset,
-        layout.warp.y + inset,
-        warp_size,
-        warp_color,
-    ));
+        let sep_color = [0.35, 0.55, 0.42, 0.75];
+        let mono_size = 13.0;
+        let path_size = 12.0;
+        let cols = ((pl.divider.w / CELL_W).floor() as usize).max(4);
+        let sep: String = "─".repeat(cols);
+        let sep_y = pl.divider.y + (pl.divider.h - mono_size * 1.25).max(0.0) * 0.5;
+        labels.push(TextLabel::mono(sep, pl.divider.x, sep_y, mono_size, sep_color));
 
-    // Settings glass modal text (agility dialog content fade + spring rect).
+        let path_str = crate::session::display_path(&pane.cwd);
+        if !path_str.is_empty() {
+            let path_y = pl.path.y + (pl.path.h - path_size * 1.25).max(0.0) * 0.5;
+            labels.push(TextLabel::mono(
+                path_str,
+                pl.path.x,
+                path_y,
+                path_size,
+                dim,
+            ));
+        }
+
+        let draft = pane.draft.as_str();
+        let warp_text = format!("❯ {draft}");
+        let input_y = pl.warp.y + (pl.warp.h - mono_size * 1.25).max(0.0) * 0.5;
+        let input_bright = if pl.focused { bright } else { dim };
+        labels.push(TextLabel::mono(
+            warp_text,
+            pl.warp.x,
+            input_y,
+            mono_size,
+            input_bright,
+        ));
+
+        if pl.focused {
+            let a = input_caret_alpha.clamp(0.0, 1.0);
+            if a > 0.02 {
+                let caret_cols = 2 + draft.chars().count();
+                let caret_x = pl.warp.x + caret_cols as f32 * CELL_W;
+                labels.push(TextLabel::mono(
+                    "▌",
+                    caret_x,
+                    input_y,
+                    mono_size,
+                    [0.0, 0.90, 0.46, a],
+                ));
+            }
+        }
+    }
+
+    let win_w = layout.title.w;
+    let win_h = layout.workspace.y + layout.workspace.h + m.edge();
+
+    // Settings modal
     if settings.visible() {
         let ease = settings.content_ease().clamp(0.0, 1.0);
-        let win_w = layout.title.w;
-        let win_h = layout.warp.y + layout.warp.h + m.edge();
         let modal = settings.animated_modal_rect(win_w, win_h);
-
         let grid = session.active_grid();
         let lines = settings.display_lines(
             pty_active,
@@ -1043,47 +1121,123 @@ fn chrome_labels(
             grid.rows(),
             session.tabs.len(),
         );
-        let pad = m.inset() * 2.0;
-        let mut y = modal.y + pad;
-        let x = modal.x + pad;
-        let mut title_c = bright;
-        title_c[3] *= ease;
-        labels.push(TextLabel::new("Settings", x, y, 16.0, title_c));
-        y += 32.0;
-        for line in lines {
-            if line.is_empty() {
-                y += 8.0;
-                continue;
-            }
-            let mut color = if line.starts_with("  ") { dim } else { muted };
-            color[3] *= ease;
-            if color[3] < 0.02 {
-                continue;
-            }
-            labels.push(TextLabel::new(line, x, y, 12.0, color));
-            y += 16.0;
-            if y > modal.y + modal.h - pad {
-                break;
-            }
+        push_modal_lines(&mut labels, &modal, "Settings", &lines, ease, bright, muted, dim, m);
+    }
+
+    // Command palette
+    if palette.visible() {
+        let ease = palette.content_ease().clamp(0.0, 1.0);
+        let modal = overlay_modal_rect(win_w, win_h, 480.0, 420.0);
+        let filtered = filter_commands(commands, &palette.query);
+        let mut lines = Vec::new();
+        lines.push(format!("❯ {}", palette.query));
+        lines.push(String::new());
+        for (i, &idx) in filtered.iter().enumerate().take(12) {
+            let c = &commands[idx];
+            let mark = if i == palette.selected { "▸ " } else { "  " };
+            lines.push(format!("{mark}{}", c.title));
+            lines.push(format!("    {}", c.desc));
         }
+        if filtered.is_empty() {
+            lines.push("  no matches".into());
+        }
+        push_modal_lines(
+            &mut labels,
+            &modal,
+            "Command palette",
+            &lines,
+            ease,
+            bright,
+            muted,
+            dim,
+            m,
+        );
+    }
+
+    // Keyboard shortcuts help
+    if help.visible() {
+        let ease = help.content_ease().clamp(0.0, 1.0);
+        let modal = overlay_modal_rect(win_w, win_h, 520.0, 480.0);
+        let mut lines = Vec::new();
+        let mut last_cat = "";
+        for c in commands {
+            if c.category != last_cat {
+                if !last_cat.is_empty() {
+                    lines.push(String::new());
+                }
+                lines.push(c.category.to_string());
+                last_cat = c.category;
+            }
+            lines.push(format!("  {}  —  {}", c.title, c.desc));
+        }
+        push_modal_lines(
+            &mut labels,
+            &modal,
+            "Keyboard shortcuts",
+            &lines,
+            ease,
+            bright,
+            muted,
+            dim,
+            m,
+        );
     }
 
     labels
 }
 
-/// Emit one monospace label per non-empty terminal row (run-length color segments).
-/// Uses scrollback-aware visible rows; cursor only when at live bottom.
-fn push_terminal_labels(
+fn push_modal_lines(
     labels: &mut Vec<TextLabel>,
-    layout: &FrameLayout,
-    inset: f32,
-    session: &ChromeSession,
+    modal: &crate::layout::Rect,
+    title: &str,
+    lines: &[String],
+    ease: f32,
+    bright: [f32; 4],
+    muted: [f32; 4],
+    dim: [f32; 4],
+    m: Metrics,
+) {
+    let pad = m.inset() * 2.0;
+    let mut y = modal.y + pad;
+    let x = modal.x + pad;
+    let mut title_c = bright;
+    title_c[3] *= ease;
+    labels.push(TextLabel::new(title, x, y, 16.0, title_c));
+    y += 28.0;
+    for line in lines {
+        if line.is_empty() {
+            y += 8.0;
+            continue;
+        }
+        let mut color = if line.starts_with("  ") || line.starts_with("    ") {
+            dim
+        } else if line.starts_with("▸") {
+            bright
+        } else {
+            muted
+        };
+        color[3] *= ease;
+        if color[3] < 0.02 {
+            continue;
+        }
+        labels.push(TextLabel::new(line.clone(), x, y, 12.0, color));
+        y += 16.0;
+        if y > modal.y + modal.h - pad {
+            break;
+        }
+    }
+}
+
+fn push_pane_cells(
+    labels: &mut Vec<TextLabel>,
+    pl: &PaneLayout,
+    pane: &crate::session::Pane,
     cursor_visible: bool,
 ) {
     let mono_size = 13.0;
-    let origin_x = layout.terminal.x + inset;
-    let origin_y = layout.terminal.y + inset;
-    let grid = session.active_grid();
+    let origin_x = pl.cells.x;
+    let origin_y = pl.cells.y;
+    let grid = &pane.grid;
     let cursor = grid.cursor();
     let live_view = grid.view_offset() == 0;
 
@@ -1092,15 +1246,12 @@ fn push_terminal_labels(
         if cells.is_empty() {
             continue;
         }
-
-        // Skip fully blank rows (no cursor either).
         let has_content = cells.iter().any(|c| c.ch != ' ' || c.bg.is_some());
         let has_cursor = cursor_visible && live_view && cursor.row == row;
         if !has_content && !has_cursor {
             continue;
         }
 
-        // Walk color runs (fg + bg) to preserve SGR without one atlas entry per cell.
         let mut col = 0usize;
         while col < cells.len() {
             let start = col;
@@ -1111,11 +1262,9 @@ fn push_terminal_labels(
                 text.push(cells[col].ch);
                 col += 1;
             }
-            // Trim trailing spaces on the last run of a content-less end.
             if !text.chars().any(|c| c != ' ') {
                 continue;
             }
-            // Keep internal spaces; trim only pure trailing blank runs at EOL.
             let end_col = start + text.chars().count();
             if end_col == cells.len() {
                 while text.ends_with(' ') {
@@ -1128,7 +1277,6 @@ fn push_terminal_labels(
 
             let x = origin_x + start as f32 * CELL_W;
             let y = origin_y + row as f32 * CELL_H;
-            // Background: full-block run under the glyphs (approx; true cell quads later).
             if let Some(bg) = bg {
                 let blocks: String = "█".repeat(text.chars().count().max(1));
                 labels.push(TextLabel::mono(
@@ -1139,11 +1287,15 @@ fn push_terminal_labels(
                     [bg[0], bg[1], bg[2], 0.85],
                 ));
             }
-            let color = [fg[0], fg[1], fg[2], 0.95];
-            labels.push(TextLabel::mono(text, x, y, mono_size, color));
+            labels.push(TextLabel::mono(
+                text,
+                x,
+                y,
+                mono_size,
+                [fg[0], fg[1], fg[2], 0.95],
+            ));
         }
 
-        // Cursor block (block style) when on this row (live view only).
         if has_cursor {
             let cx = origin_x + cursor.col as f32 * CELL_W;
             let cy = origin_y + row as f32 * CELL_H;

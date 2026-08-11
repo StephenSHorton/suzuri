@@ -1,4 +1,4 @@
-//! winit application — multi-tab PTY, settings, chrome interaction.
+//! winit application — multi-tab, multi-pane PTY, palette, help, chrome.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,15 +14,19 @@ use winit::{
 };
 
 use crate::ansi::AnsiDecoder;
+use crate::commands::{
+    default_commands, filter_commands, CommandAction, HelpState, PaletteState,
+};
 use crate::input::{hit_test, is_mac, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
+use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
 use crate::renderer::{self, Renderer};
-use crate::session::ChromeSession;
+use crate::session::{ChromeSession, CloseOutcome};
 use crate::settings::SettingsState;
 
-/// Per-tab live shell state (kept out of [`ChromeSession`] — not Clone).
-struct TabRuntime {
+/// Per-pane live shell state (keyed by pane id).
+struct PaneRuntime {
     pty: Option<PtySession>,
     ansi: AnsiDecoder,
 }
@@ -37,10 +41,11 @@ pub struct ChromeApp {
     warp_focused: bool,
     terminal_focused: bool,
     modifiers: ModifiersState,
-    /// One PTY + ANSI decoder per tab id.
-    runtimes: HashMap<u64, TabRuntime>,
+    runtimes: HashMap<u64, PaneRuntime>,
     settings: SettingsState,
-    /// Wall clock for cursor blink phase.
+    palette: PaletteState,
+    help: HelpState,
+    commands: Vec<crate::commands::Command>,
     started: Instant,
     clipboard: Option<arboard::Clipboard>,
 }
@@ -49,14 +54,13 @@ impl Default for ChromeApp {
     fn default() -> Self {
         let mut session = ChromeSession::new(80, 24);
         let mut runtimes = HashMap::new();
-        let id = session.active_id;
+        let pane_id = session.focus_pane_id();
         let (cols, rows) = {
             let g = session.active_grid();
             (g.cols(), g.rows())
         };
-        let rt = spawn_tab_runtime(cols, rows, &mut session, id);
-        let pty_ok = rt.pty.is_some();
-        runtimes.insert(id, rt);
+        let rt = spawn_pane_runtime(cols, rows, &mut session, pane_id);
+        runtimes.insert(pane_id, rt);
 
         Self {
             window: None,
@@ -65,45 +69,38 @@ impl Default for ChromeApp {
             metrics: Metrics::default(),
             cursor: LogicalPosition::new(0.0, 0.0),
             pointer_inside: false,
-            // Prefer live terminal when PTY is up; warp otherwise.
-            warp_focused: !pty_ok,
-            terminal_focused: pty_ok,
+            warp_focused: true,
+            terminal_focused: false,
             modifiers: ModifiersState::empty(),
             runtimes,
             settings: SettingsState::new(),
+            palette: PaletteState::new(),
+            help: HelpState::new(),
+            commands: default_commands(),
             started: Instant::now(),
             clipboard: arboard::Clipboard::new().ok(),
         }
     }
 }
 
-fn spawn_tab_runtime(
+fn spawn_pane_runtime(
     cols: u16,
     rows: u16,
     session: &mut ChromeSession,
-    tab_id: u64,
-) -> TabRuntime {
+    pane_id: u64,
+) -> PaneRuntime {
     match PtySession::spawn(cols, rows) {
         Ok(pty) => {
-            if let Some(tab) = session.tabs.iter_mut().find(|t| t.id == tab_id) {
-                tab.grid.clear();
-                tab.pty_mode = true;
-                tab.busy = false;
-            }
-            TabRuntime {
+            session.mark_pane_pty(pane_id);
+            PaneRuntime {
                 pty: Some(pty),
                 ansi: AnsiDecoder::new(),
             }
         }
         Err(e) => {
-            eprintln!("suzuri-chrome: PTY for tab {tab_id} failed ({e}) — mock");
-            let prev = session.active_id;
-            session.select_tab(tab_id);
-            session.boot_mock_on_active();
-            if prev != tab_id {
-                session.select_tab(prev);
-            }
-            TabRuntime {
+            eprintln!("suzuri-chrome: PTY for pane {pane_id} failed ({e}) — mock");
+            session.boot_mock_on_pane(pane_id);
+            PaneRuntime {
                 pty: None,
                 ansi: AnsiDecoder::new(),
             }
@@ -118,16 +115,31 @@ impl ChromeApp {
             .any(|rt| rt.pty.as_mut().is_some_and(|p| p.is_alive()))
     }
 
-    fn active_cursor_visible(&self) -> bool {
+    fn blink_on(&self) -> bool {
+        let phase = self.started.elapsed().as_secs_f32();
+        (phase * 1.9).fract() < 0.55
+    }
+
+    fn terminal_cursor_visible(&self) -> bool {
+        if !self.terminal_focused || self.warp_focused {
+            return false;
+        }
+        let id = self.session.focus_pane_id();
         let ansi_on = self
             .runtimes
-            .get(&self.session.active_id)
+            .get(&id)
             .map(|rt| rt.ansi.cursor_visible)
             .unwrap_or(true);
-        // ~530ms blink duty (classic terminal feel).
-        let phase = self.started.elapsed().as_secs_f32();
-        let blink_on = (phase * 1.9).fract() < 0.55;
-        ansi_on && blink_on
+        ansi_on && self.blink_on()
+    }
+
+    fn input_caret_alpha(&self) -> f32 {
+        if !self.warp_focused {
+            return 0.0;
+        }
+        let t = self.started.elapsed().as_secs_f32();
+        let phase = (t * std::f32::consts::TAU / 1.1).sin() * 0.5 + 0.5;
+        0.18 + 0.82 * phase
     }
 
     fn paste_clipboard(&mut self) {
@@ -144,45 +156,55 @@ impl ChromeApp {
             self.session.paste_draft(&text);
             return;
         }
-        // Terminal focus → send to active PTY (bracketed paste not yet).
-        let id = self.session.active_id;
+        let id = self.session.focus_pane_id();
         if let Some(rt) = self.runtimes.get_mut(&id) {
             if let Some(pty) = &mut rt.pty {
                 let _ = pty.write_all(text.as_bytes());
                 return;
             }
         }
-        // Mock fallback
         self.session.paste_draft(&text);
     }
 
     fn current_layout(&self) -> FrameLayout {
-        if let Some(r) = &self.renderer {
-            r.layout(self.session.tabs.len())
+        let tab_count = self.session.tabs.len();
+        let mut layout = if let Some(r) = &self.renderer {
+            r.layout(tab_count)
         } else {
-            FrameLayout::compute(1120.0, 740.0, self.metrics, self.session.tabs.len())
+            FrameLayout::compute(1120.0, 740.0, self.metrics, tab_count)
+        };
+
+        // Apply split-tree leaf rects for the active tab.
+        if let Some(tab) = self.session.active_tab() {
+            let mut leafs = Vec::new();
+            let gap = self.metrics.stack();
+            tab.root
+                .layout_into(layout.workspace, gap, &mut leafs);
+            layout.apply_pane_rects(self.metrics, &leafs, tab.focus_pane);
         }
+        layout
     }
 
-    fn sync_grid_to_terminal(&mut self) {
+    fn sync_grids_to_panes(&mut self) {
         let layout = self.current_layout();
-        let (cols, rows) =
-            renderer::terminal_grid_size(&layout.terminal, self.metrics.inset());
-        let (cur_c, cur_r) = {
-            let g = self.session.active_grid();
-            (g.cols(), g.rows())
-        };
-        if cols != cur_c || rows != cur_r {
-            self.session.resize_all(cols, rows);
-            for rt in self.runtimes.values_mut() {
-                if let Some(pty) = &mut rt.pty {
-                    let _ = pty.resize(cols, rows);
+        for pl in &layout.panes {
+            let (cols, rows) = renderer::terminal_grid_size(&pl.cells, self.metrics.inset());
+            let need = self
+                .session
+                .grid(pl.pane_id)
+                .map(|g| g.cols() != cols || g.rows() != rows)
+                .unwrap_or(true);
+            if need {
+                self.session.resize_pane(pl.pane_id, cols, rows);
+                if let Some(rt) = self.runtimes.get_mut(&pl.pane_id) {
+                    if let Some(pty) = &mut rt.pty {
+                        let _ = pty.resize(cols, rows);
+                    }
                 }
             }
         }
     }
 
-    /// Drain **all** tab PTYs into their own grids (background tabs keep updating).
     fn drain_all_ptys(&mut self) {
         let mut pending: Vec<(u64, String)> = Vec::new();
         for (id, rt) in self.runtimes.iter_mut() {
@@ -201,13 +223,133 @@ impl ChromeApp {
                 if let Some(grid) = self.session.grid_mut(id) {
                     rt.ansi.feed(grid, chunk.as_bytes());
                 }
+                if let Some(cwd) = rt.ansi.take_cwd() {
+                    self.session.set_cwd(id, cwd);
+                }
             }
-            if let Some(tab) = self.session.tabs.iter_mut().find(|t| t.id == id) {
-                tab.busy = false;
+            if let Some(p) = self.session.panes.get_mut(&id) {
+                p.busy = false;
             }
         }
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    fn overlay_open(&self) -> bool {
+        self.settings.open || self.palette.open || self.help.open
+    }
+
+    fn close_all_overlays(&mut self) {
+        self.settings.close();
+        self.palette.close();
+        self.help.close();
+    }
+
+    fn run_action(&mut self, event_loop: &ActiveEventLoop, action: CommandAction) {
+        match action {
+            CommandAction::OpenSettings => {
+                self.palette.close();
+                self.help.close();
+                self.settings.open();
+            }
+            CommandAction::OpenHelp => {
+                self.palette.close();
+                self.settings.close();
+                self.help.open_help();
+            }
+            CommandAction::OpenPalette => {
+                self.settings.close();
+                self.help.close();
+                self.palette.open_palette();
+            }
+            CommandAction::NewTab => self.new_tab(),
+            CommandAction::CloseTab | CommandAction::ClosePane => {
+                self.close_pane_or_tab(event_loop);
+            }
+            CommandAction::NextTab => {
+                self.session.next_tab();
+            }
+            CommandAction::PrevTab => {
+                self.session.prev_tab();
+            }
+            CommandAction::SplitRight => {
+                self.split_pane(SplitAxis::Vertical);
+            }
+            CommandAction::SplitDown => {
+                self.split_pane(SplitAxis::Horizontal);
+            }
+            CommandAction::FocusLeft => self.focus_dir(FocusDir::Left),
+            CommandAction::FocusRight => self.focus_dir(FocusDir::Right),
+            CommandAction::FocusUp => self.focus_dir(FocusDir::Up),
+            CommandAction::FocusDown => self.focus_dir(FocusDir::Down),
+            CommandAction::ToggleRain => {
+                self.settings.prefs.rain = !self.settings.prefs.rain;
+            }
+            CommandAction::ToggleLens => {
+                self.settings.prefs.lens = !self.settings.prefs.lens;
+            }
+            CommandAction::Quit => event_loop.exit(),
+        }
+    }
+
+    fn new_tab(&mut self) {
+        let layout = self.current_layout();
+        let (cols, rows) = renderer::terminal_grid_size(
+            layout.panes.first().map(|p| &p.cells).unwrap_or(&layout.cells),
+            self.metrics.inset(),
+        );
+        let (_tid, pane_id) = self.session.new_tab(cols, rows);
+        let rt = spawn_pane_runtime(cols, rows, &mut self.session, pane_id);
+        self.runtimes.insert(pane_id, rt);
+        self.warp_focused = true;
+        self.terminal_focused = false;
+    }
+
+    fn split_pane(&mut self, axis: SplitAxis) {
+        let layout = self.current_layout();
+        // New pane starts small; use a reasonable grid from half workspace.
+        let (cols, rows) = {
+            let mut half = layout.workspace;
+            match axis {
+                SplitAxis::Vertical => half.w *= 0.5,
+                SplitAxis::Horizontal => half.h *= 0.5,
+            }
+            // Approximate cells region
+            let inset = self.metrics.inset();
+            let strip = self.metrics.input_strip_h;
+            let cells = crate::layout::Rect::new(
+                half.x + inset,
+                half.y + inset,
+                (half.w - inset * 2.0).max(40.0),
+                (half.h - inset * 2.0 - strip).max(40.0),
+            );
+            renderer::terminal_grid_size(&cells, inset)
+        };
+        if let Some(new_id) = self.session.split_focused(axis, cols, rows) {
+            let rt = spawn_pane_runtime(cols, rows, &mut self.session, new_id);
+            self.runtimes.insert(new_id, rt);
+            self.warp_focused = true;
+            self.terminal_focused = false;
+            self.sync_grids_to_panes();
+        }
+    }
+
+    fn focus_dir(&mut self, dir: FocusDir) {
+        let layout = self.current_layout();
+        self.session
+            .focus_neighbor(dir, layout.workspace, self.metrics.stack());
+    }
+
+    fn close_pane_or_tab(&mut self, event_loop: &ActiveEventLoop) {
+        match self.session.close_focused_pane_or_tab() {
+            CloseOutcome::QuitApp => event_loop.exit(),
+            CloseOutcome::ClosedPanes(ids) => {
+                for id in ids {
+                    self.runtimes.remove(&id);
+                }
+            }
+            CloseOutcome::None => {}
         }
     }
 
@@ -221,33 +363,55 @@ impl ChromeApp {
             is_mac(),
         );
 
-        // Settings glass modal: absorb clicks inside; scrim / outside closes
-        // (settings chip still toggles). Mirrors agility Dialog dismiss-on-outside.
-        if self.settings.visible() {
+        // Overlays: click outside closes
+        if self.palette.visible() || self.help.visible() || self.settings.visible() {
             match target {
-                HitTarget::Settings => {
+                HitTarget::Settings if self.settings.visible() => {
                     self.settings.toggle();
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
                     return;
                 }
-                HitTarget::Close | HitTarget::Minimize | HitTarget::Zoom => {
-                    // allow window chrome through
-                }
+                HitTarget::Close | HitTarget::Minimize | HitTarget::Zoom => {}
                 _ => {
                     let win_w = layout.title.w;
-                    let win_h = layout.warp.y + layout.warp.h + self.metrics.edge();
+                    let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+                    // Rough: any overlay modal is centered — dismiss on outside
                     let modal = self.settings.animated_modal_rect(win_w, win_h);
-                    if modal.contains(self.cursor.x, self.cursor.y) {
-                        // click inside modal — no-op
+                    if self.settings.visible() && modal.contains(self.cursor.x, self.cursor.y) {
                         return;
                     }
-                    self.settings.close();
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
+                    // Palette/help use larger centered rects — dismiss outside roughly
+                    if self.palette.visible() || self.help.visible() {
+                        // click on scrim
+                        if target == HitTarget::None
+                            || matches!(
+                                target,
+                                HitTarget::TitleDrag
+                                    | HitTarget::Terminal(_)
+                                    | HitTarget::WarpBar(_)
+                            )
+                        {
+                            // still check if inside modal approx
+                            let mx = win_w * 0.5;
+                            let my = win_h * 0.45;
+                            let inside = (self.cursor.x - mx).abs() < 220.0
+                                && (self.cursor.y - my).abs() < 200.0;
+                            if !inside {
+                                self.close_all_overlays();
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                            return; // inside modal — no-op for now
+                        }
                     }
-                    return;
+                    if self.settings.visible() {
+                        self.settings.close();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                 }
             }
         }
@@ -273,36 +437,23 @@ impl ChromeApp {
                 if let Some(tab) = self.session.tabs.get(i) {
                     let id = tab.id;
                     self.session.select_tab(id);
-                    // Focus terminal when the tab has a live PTY.
-                    let pty = self
-                        .runtimes
-                        .get(&id)
-                        .and_then(|rt| rt.pty.as_ref())
-                        .is_some();
-                    self.terminal_focused = pty;
-                    self.warp_focused = !pty;
+                    self.warp_focused = true;
+                    self.terminal_focused = false;
                 }
             }
-            HitTarget::NewTab => {
-                let (cols, rows) = {
-                    let g = self.session.active_grid();
-                    (g.cols(), g.rows())
-                };
-                let id = self.session.new_tab(cols, rows);
-                let rt = spawn_tab_runtime(cols, rows, &mut self.session, id);
-                let pty = rt.pty.is_some();
-                self.runtimes.insert(id, rt);
-                self.terminal_focused = pty;
-                self.warp_focused = !pty;
-            }
+            HitTarget::NewTab => self.new_tab(),
             HitTarget::Settings => {
+                self.help.close();
+                self.palette.close();
                 self.settings.toggle();
             }
-            HitTarget::WarpBar => {
+            HitTarget::WarpBar(pane_id) => {
+                self.session.set_focus_pane(pane_id);
                 self.warp_focused = true;
                 self.terminal_focused = false;
             }
-            HitTarget::Terminal => {
+            HitTarget::Terminal(pane_id) => {
+                self.session.set_focus_pane(pane_id);
                 self.terminal_focused = true;
                 self.warp_focused = false;
             }
@@ -326,31 +477,15 @@ impl ChromeApp {
         if let HitTarget::Tab(i) = target {
             if let Some(tab) = self.session.tabs.get(i) {
                 let id = tab.id;
-                if self.session.tabs.len() <= 1 {
+                let removed = self.session.close_tab(id);
+                if removed.is_empty() {
                     event_loop.exit();
-                    return;
-                }
-                if self.session.close_tab(id) {
-                    self.runtimes.remove(&id);
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
+                } else {
+                    for pid in removed {
+                        self.runtimes.remove(&pid);
+                    }
                 }
             }
-        }
-    }
-
-    fn close_active_tab_or_quit(&mut self, event_loop: &ActiveEventLoop) {
-        let id = self.session.active_id;
-        if self.session.tabs.len() <= 1 {
-            event_loop.exit();
-            return;
-        }
-        if self.session.close_tab(id) {
-            self.runtimes.remove(&id);
-        }
-        if let Some(w) = &self.window {
-            w.request_redraw();
         }
     }
 
@@ -360,8 +495,9 @@ impl ChromeApp {
         }
 
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            if self.settings.open || self.settings.visible() {
-                self.settings.close();
+            if self.overlay_open() || self.settings.visible() || self.palette.visible() || self.help.visible()
+            {
+                self.close_all_overlays();
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -372,37 +508,84 @@ impl ChromeApp {
         }
 
         let super_or_ctrl = self.modifiers.super_key() || self.modifiers.control_key();
+        let shift = self.modifiers.shift_key();
+        let alt = self.modifiers.alt_key();
+
+        // Global shortcuts
         if super_or_ctrl {
             if let Key::Character(ref s) = event.logical_key {
-                match s.as_str() {
+                let ch = s.as_str();
+                match ch {
+                    "k" | "K" if !shift => {
+                        self.help.close();
+                        self.settings.close();
+                        self.palette.toggle();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "/" if !shift => {
+                        self.palette.close();
+                        self.settings.close();
+                        self.help.toggle();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     "," => {
+                        self.palette.close();
+                        self.help.close();
                         self.settings.toggle();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
-                    "t" | "T" => {
-                        let (cols, rows) = {
-                            let g = self.session.active_grid();
-                            (g.cols(), g.rows())
-                        };
-                        let id = self.session.new_tab(cols, rows);
-                        let rt = spawn_tab_runtime(cols, rows, &mut self.session, id);
-                        let pty = rt.pty.is_some();
-                        self.runtimes.insert(id, rt);
-                        self.terminal_focused = pty;
-                        self.warp_focused = !pty;
+                    "t" | "T" if !shift => {
+                        self.new_tab();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
-                    "w" | "W" => {
-                        self.close_active_tab_or_quit(event_loop);
+                    "w" | "W" if !shift => {
+                        self.close_pane_or_tab(event_loop);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
                         return;
                     }
-                    "v" | "V" => {
+                    "d" | "D" if shift => {
+                        self.split_pane(SplitAxis::Vertical);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "e" | "E" if shift => {
+                        self.split_pane(SplitAxis::Horizontal);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "]" if shift => {
+                        self.session.next_tab();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "[" if shift => {
+                        self.session.prev_tab();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "v" | "V" if !shift => {
                         self.paste_clipboard();
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -412,9 +595,71 @@ impl ChromeApp {
                     _ => {}
                 }
             }
+            // ⌥⌘ arrows — pane focus
+            if alt {
+                if let Key::Named(nk) = &event.logical_key {
+                    let dir = match nk {
+                        NamedKey::ArrowLeft => Some(FocusDir::Left),
+                        NamedKey::ArrowRight => Some(FocusDir::Right),
+                        NamedKey::ArrowUp => Some(FocusDir::Up),
+                        NamedKey::ArrowDown => Some(FocusDir::Down),
+                        _ => None,
+                    };
+                    if let Some(d) = dir {
+                        self.focus_dir(d);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                }
+            }
         }
 
-        // Settings open: number keys toggle prefs; arrows / [ ] adjust darken.
+        // Palette open: filter / navigate / run
+        if self.palette.open {
+            let filtered = filter_commands(&self.commands, &self.palette.query);
+            match &event.logical_key {
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.palette.move_sel(1, filtered.len());
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.palette.move_sel(-1, filtered.len());
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(&idx) = filtered.get(self.palette.selected) {
+                        let action = self.commands[idx].action;
+                        self.palette.close();
+                        self.run_action(event_loop, action);
+                    }
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    self.palette.query.pop();
+                    self.palette.selected = 0;
+                }
+                Key::Character(s) if !super_or_ctrl => {
+                    self.palette.query.push_str(s);
+                    self.palette.selected = 0;
+                }
+                _ => {
+                    if let Some(text) = &event.text {
+                        if !super_or_ctrl {
+                            for c in text.chars() {
+                                if !c.is_control() {
+                                    self.palette.query.push(c);
+                                }
+                            }
+                            self.palette.selected = 0;
+                        }
+                    }
+                }
+            }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
         if self.settings.open {
             if let Key::Character(ref s) = event.logical_key {
                 if self.settings.handle_hotkey(s.as_str()) {
@@ -426,9 +671,13 @@ impl ChromeApp {
             return;
         }
 
-        // Terminal focus → raw input to **active** tab PTY.
+        if self.help.open {
+            return;
+        }
+
+        // Terminal focus → PTY
         if self.terminal_focused {
-            let id = self.session.active_id;
+            let id = self.session.focus_pane_id();
             if let Some(rt) = self.runtimes.get_mut(&id) {
                 if let Some(pty) = &mut rt.pty {
                     match &event.logical_key {
@@ -469,7 +718,7 @@ impl ChromeApp {
             }
         }
 
-        // Warp-focused (or mock terminal): edit draft + history.
+        // Warp / local input
         if self.warp_focused || !self.terminal_focused {
             match &event.logical_key {
                 Key::Named(NamedKey::Backspace) => self.session.backspace(),
@@ -504,13 +753,14 @@ impl ChromeApp {
     }
 
     fn submit_line(&mut self) {
-        let line = self.session.draft.trim_end().to_string();
+        let line = self.session.draft().trim_end().to_string();
         if line.is_empty() {
             return;
         }
         self.session.push_history(&line);
-        self.session.draft.clear();
-        let id = self.session.active_id;
+        self.session.apply_cwd_after_command(&line);
+        self.session.draft_mut().clear();
+        let id = self.session.focus_pane_id();
 
         let used_pty = if let Some(rt) = self.runtimes.get_mut(&id) {
             if let Some(pty) = &mut rt.pty {
@@ -526,12 +776,11 @@ impl ChromeApp {
         };
 
         if used_pty {
-            if let Some(tab) = self.session.tabs.iter_mut().find(|t| t.id == id) {
-                tab.busy = true;
+            if let Some(p) = self.session.panes.get_mut(&id) {
+                p.busy = true;
             }
-            // After warp submit into live PTY, keep warp focused so ↑ history works.
         } else {
-            self.session.draft = line;
+            *self.session.draft_mut() = line;
             self.session.submit_draft_mock();
         }
     }
@@ -557,7 +806,6 @@ impl ApplicationHandler for ChromeApp {
                 .expect("create window"),
         );
 
-        // macOS: round the frameless window (matches pane radius).
         #[cfg(target_os = "macos")]
         crate::macos_window::configure_rounded_window(&window, 16.0);
 
@@ -565,7 +813,7 @@ impl ApplicationHandler for ChromeApp {
         self.metrics = renderer.metrics();
         self.window = Some(window);
         self.renderer = Some(renderer);
-        self.sync_grid_to_terminal();
+        self.sync_grids_to_panes();
 
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -582,11 +830,8 @@ impl ApplicationHandler for ChromeApp {
         _device_id: winit::event::DeviceId,
         event: DeviceEvent,
     ) {
-        // Fallback pointer tracking if WindowEvent::CursorMoved is flaky on
-        // transparent frameless windows (seen on some macOS setups).
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
             if !self.pointer_inside {
-                // Seed from window center on first motion when outside flag is wrong
                 if let Some(w) = &self.window {
                     let s = w.inner_size();
                     let scale = w.scale_factor();
@@ -613,7 +858,7 @@ impl ApplicationHandler for ChromeApp {
                 self.cursor.x = self.cursor.x.clamp(0.0, lw);
                 self.cursor.y = self.cursor.y.clamp(0.0, lh);
             }
-            let _ = PhysicalPosition::new(0.0, 0.0); // silence unused if optimized
+            let _ = PhysicalPosition::new(0.0, 0.0);
         }
     }
 
@@ -684,7 +929,6 @@ impl ApplicationHandler for ChromeApp {
                     }
                 };
                 if lines != 0 {
-                    // Positive lines = scroll up into history.
                     self.session.active_grid_mut().scroll_view(lines);
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -700,7 +944,7 @@ impl ApplicationHandler for ChromeApp {
                 if let (Some(r), Some(w)) = (self.renderer.as_mut(), self.window.as_ref()) {
                     r.resize(size, w.scale_factor() as f32);
                 }
-                self.sync_grid_to_terminal();
+                self.sync_grids_to_panes();
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -710,7 +954,7 @@ impl ApplicationHandler for ChromeApp {
                 if let (Some(r), Some(w)) = (self.renderer.as_mut(), self.window.as_ref()) {
                     r.resize(w.inner_size(), scale_factor as f32);
                 }
-                self.sync_grid_to_terminal();
+                self.sync_grids_to_panes();
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -722,10 +966,18 @@ impl ApplicationHandler for ChromeApp {
 
             WindowEvent::RedrawRequested => {
                 self.drain_all_ptys();
-                // Advance settings modal springs (agility dialog timing).
-                self.settings.tick(1.0 / 60.0);
+                let dt = 1.0 / 60.0;
+                self.settings.tick(dt);
+                self.palette.tick(dt);
+                self.help.tick(dt);
+                let _ = self.session.tick_splits(dt);
+                self.sync_grids_to_panes();
+
                 let pty_on = self.any_pty_alive();
-                let cursor_vis = self.active_cursor_visible();
+                let term_cursor = self.terminal_cursor_visible();
+                let caret_alpha = self.input_caret_alpha();
+                let layout = self.current_layout();
+
                 if let Some(r) = self.renderer.as_mut() {
                     let pointer = self
                         .pointer_inside
@@ -733,8 +985,13 @@ impl ApplicationHandler for ChromeApp {
                     match r.render(
                         &self.session,
                         &self.settings,
+                        &self.palette,
+                        &self.help,
+                        &self.commands,
+                        &layout,
                         pty_on,
-                        cursor_vis,
+                        term_cursor,
+                        caret_alpha,
                         pointer,
                     ) {
                         Ok(()) => {}

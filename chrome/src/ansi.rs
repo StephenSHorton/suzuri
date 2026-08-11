@@ -26,6 +26,10 @@ pub struct AnsiDecoder {
     scroll_region: Option<(u16, u16)>,
     /// SGR reverse video active (`7` / `27`).
     reverse: bool,
+    /// OSC payload buffer (between ESC ] and BEL/ST).
+    osc_buf: Vec<u8>,
+    /// Latest cwd from OSC 7 / 7878 (consumed by the host).
+    pending_cwd: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -51,6 +55,8 @@ impl Default for AnsiDecoder {
             primary_backup: None,
             scroll_region: None,
             reverse: false,
+            osc_buf: Vec::new(),
+            pending_cwd: None,
         }
     }
 }
@@ -63,6 +69,18 @@ impl AnsiDecoder {
     /// True while the alternate screen buffer is active (`CSI ? 1049 h` / `? 47 h`).
     pub fn on_alt_screen(&self) -> bool {
         self.primary_backup.is_some()
+    }
+
+    /// Take the latest OSC-reported cwd, if any.
+    pub fn take_cwd(&mut self) -> Option<String> {
+        self.pending_cwd.take()
+    }
+
+    fn finish_osc(&mut self) {
+        if let Some(path) = parse_cwd_osc_payload(&self.osc_buf) {
+            self.pending_cwd = Some(path);
+        }
+        self.osc_buf.clear();
     }
 
     /// Feed raw PTY bytes into the grid.
@@ -132,6 +150,7 @@ impl AnsiDecoder {
                     self.csi_priv = false;
                 }
                 b']' => {
+                    self.osc_buf.clear();
                     self.esc = EscState::Osc;
                 }
                 // IND — index (move down / scroll)
@@ -141,11 +160,17 @@ impl AnsiDecoder {
                 _ => self.esc = EscState::Ground,
             },
             EscState::Osc => {
-                // BEL or ESC \ ends OSC
+                // BEL or ST (ESC \) ends OSC — parse cwd (OSC 7 / 7878).
                 if b == 0x07 {
+                    self.finish_osc();
                     self.esc = EscState::Ground;
                 } else if b == 0x1b {
-                    self.esc = EscState::Esc; // might be ST
+                    // Possible ST: next byte should be `\`; finish on that path via Esc.
+                    // If next is not `\`, we already left Osc — treat as cancelled ST.
+                    self.finish_osc();
+                    self.esc = EscState::Esc;
+                } else if self.osc_buf.len() < 4096 {
+                    self.osc_buf.push(b);
                 }
             }
             EscState::Csi => match b {
@@ -529,6 +554,52 @@ fn utf8_width(b: u8) -> usize {
     }
 }
 
+/// Parse OSC payload for cwd: `7878;cwd=<path>` or `7;file://...`.
+fn parse_cwd_osc_payload(payload: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(payload).ok()?.trim();
+    if let Some(rest) = s.strip_prefix("7878;cwd=") {
+        let p = rest.trim();
+        if !p.is_empty() {
+            return Some(p.to_string());
+        }
+        return None;
+    }
+    if let Some(uri) = s.strip_prefix("7;") {
+        return file_uri_path(uri.trim());
+    }
+    None
+}
+
+fn file_uri_path(uri: &str) -> Option<String> {
+    let uri = uri.trim();
+    if !uri.starts_with("file:") {
+        return None;
+    }
+    let mut rest = uri.trim_start_matches("file:");
+    rest = rest.trim_start_matches("//");
+    // Drop host if present (file://localhost/path or file:///path)
+    if let Some(slash) = rest.find('/') {
+        let host = &rest[..slash];
+        let path = &rest[slash..];
+        if !host.is_empty()
+            && !host.eq_ignore_ascii_case("localhost")
+            && host != "127.0.0.1"
+        {
+            // UNC-ish: skip for chrome macOS path display
+            return Some(format!("//{host}{path}"));
+        }
+        rest = path;
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    // file:///Users/foo → /Users/foo
+    if !rest.starts_with('/') {
+        return Some(format!("/{rest}"));
+    }
+    Some(rest.to_string())
+}
+
 fn xterm256(idx: u16) -> [f32; 3] {
     match idx {
         0 => [0.0, 0.0, 0.0],
@@ -562,6 +633,28 @@ fn xterm256(idx: u16) -> [f32; 3] {
 mod tests {
     use super::*;
     use crate::cells::theme;
+
+    #[test]
+    fn osc7_file_uri_sets_cwd() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        dec.feed(
+            &mut grid,
+            b"\x1b]7;file:///Users/stephen/projects\x07",
+        );
+        assert_eq!(
+            dec.take_cwd().as_deref(),
+            Some("/Users/stephen/projects")
+        );
+    }
+
+    #[test]
+    fn osc_7878_cwd() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        dec.feed(&mut grid, b"\x1b]7878;cwd=/tmp/demo\x07");
+        assert_eq!(dec.take_cwd().as_deref(), Some("/tmp/demo"));
+    }
 
     #[test]
     fn sgr_bg_41_sets_bg_on_next_chars() {

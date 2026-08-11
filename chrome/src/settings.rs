@@ -240,10 +240,12 @@ impl SettingsState {
             "keys".into(),
             "  Esc       close settings".into(),
             "  ⌘/,       toggle settings".into(),
-            "  ⌘T / ⌘W  new / close tab".into(),
+            "  ⌘K       command palette".into(),
+            "  ⌘/       keyboard shortcuts".into(),
+            "  ⌘T / ⌘W  new tab / close pane".into(),
+            "  ⇧⌘D/E    split right / down".into(),
             "  ⌘V       paste".into(),
             "  wheel    scrollback".into(),
-            "  ↑/↓      warp history (warp focused)".into(),
         ]
     }
 }
