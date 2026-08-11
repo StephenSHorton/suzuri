@@ -193,23 +193,23 @@ fn eval_glass_panel(
 
     var glass = refracted;
 
-    // Lens Fresnel: pale sky mix on rim, not GGX scene reflection
+    // Fresnel rim — very quiet (second pass down from chalky white)
     if (reflection > 0.001) {
         let n_dot_v = clamp(normal.z, 0.0, 1.0);
         let f0 = pow2((ior - AIR_IOR) / (ior + AIR_IOR));
         let fres = fresnel_schlick(n_dot_v, f0) * reflection;
-        glass = mix(glass, glass * 0.85 + vec3f(0.9, 0.95, 1.0) * 0.28, clamp(fres * rim, 0.0, 0.4));
+        glass = mix(glass, glass * 0.94 + vec3f(0.4, 0.55, 0.5) * 0.06, clamp(fres * rim, 0.0, 0.1));
     }
 
-    // Lens rim shine / arcs
+    // Rim shine / arcs — whisper only
     let ldot = dot(g2, normalize(vec2f(-0.6, 0.8)));
     let band = pow(rim, 1.8);
     let arcs = pow(abs(ldot), 3.0) * select(0.28, 0.5, ldot > 0.0);
-    glass += band * (0.03 + arcs) * shine;
+    glass += band * (0.012 + arcs * 0.45) * shine;
 
-    // Lens crystal outline on the pane edge
-    let outline = 1.0 - smoothstep(0.0, 2.0, abs(sd));
-    glass += vec3f(0.75, 0.92, 0.88) * outline * 0.22;
+    // Crystal outline — barely-there edge
+    let outline = 1.0 - smoothstep(0.0, 1.2, abs(sd));
+    glass += vec3f(0.28, 0.45, 0.38) * outline * 0.04;
 
     return vec4f(glass, mask);
 }
