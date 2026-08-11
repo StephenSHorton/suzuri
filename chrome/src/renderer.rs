@@ -29,7 +29,21 @@ struct RainUniforms {
 struct FrameUniforms {
     size: [f32; 4],
     misc: [f32; 4],
+    /// Canvas UI Glass defaults: ior, edge, bevel, depth
+    glass: [f32; 4],
+    /// aberration, blur, reflection, shine
+    glass2: [f32; 4],
 }
+
+/// Canvas UI `GlassVanilla` DEFAULTS — https://github.com/DavidHDev/canvas-ui
+const GLASS_IOR: f32 = 1.5;
+const GLASS_EDGE: f32 = 0.7;
+const GLASS_BEVEL: f32 = 4.0;
+const GLASS_DEPTH: f32 = 250.0;
+const GLASS_ABERRATION: f32 = 1.0;
+const GLASS_BLUR: f32 = 0.0;
+const GLASS_REFLECTION: f32 = 1.0;
+const GLASS_SHINE: f32 = 0.01;
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -200,6 +214,13 @@ impl Renderer {
             contents: bytemuck::bytes_of(&FrameUniforms {
                 size: [1.0, 1.0, 1.0, 1.0],
                 misc: [0.0, 1.0, 0.0, 0.0],
+                glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
+                glass2: [
+                    GLASS_ABERRATION,
+                    GLASS_BLUR,
+                    GLASS_REFLECTION,
+                    GLASS_SHINE,
+                ],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -409,6 +430,14 @@ impl Renderer {
             bytemuck::bytes_of(&FrameUniforms {
                 size: [logical_w, logical_h, fw, fh],
                 misc: [t, self.scale_factor, count as f32, 0.0],
+                // Canvas UI GlassVanilla defaults (panel-adapted in shader)
+                glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
+                glass2: [
+                    GLASS_ABERRATION,
+                    GLASS_BLUR,
+                    GLASS_REFLECTION,
+                    GLASS_SHINE,
+                ],
             }),
         );
 
