@@ -54,16 +54,21 @@ One glass pane only — input is text at the bottom of the well (not a second re
 
 | Key | Action |
 |-----|--------|
-| ⌘/Ctrl+T | New tab (+ PTY) |
-| ⌘/Ctrl+W | Close tab (quit if last) |
+| **⌘K** | **Command palette** |
+| **⌘/** | **Keyboard shortcuts** |
+| ⌘, | Settings |
+| ⌘T | New tab (+ PTY) |
+| ⌘W | Close pane (or tab if last pane) |
+| ⇧⌘D | Split right (jelly open) |
+| ⇧⌘E | Split down (jelly open) |
+| ⌥⌘←↑↓→ | Focus pane |
+| ⇧⌘[ / ] | Prev / next tab |
 | Middle-click tab | Close tab |
-| ⌘/Ctrl+, | Settings |
-| ⌘/Ctrl+V | Paste |
-| Esc | Close settings / quit |
-| ↑/↓ (warp) | Command history |
+| ⌘V | Paste |
+| Esc | Close overlay / quit |
+| ↑/↓ (input) | Command history |
 | Wheel | Scrollback |
 | Settings **1** / **2** | Toggle rain / lens |
-| Settings **[** / **]** | Glass darken |
 
 ### Library (`suzuri_chrome`)
 
