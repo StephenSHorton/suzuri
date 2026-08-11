@@ -8,7 +8,7 @@
 struct FrameUniforms {
     // xy = logical size (css px), zw = framebuffer size
     size: vec4f,
-    // x=time, y=dpr, z=panel_count, w=unused
+    // x=time, y=dpr, z=panel_count, w=glass face darken (0..1) — all panes/chips/modal
     misc: vec4f,
     // Canvas UI glass defaults: x=ior, y=edge, z=bevel, w=depth (logical px)
     glass: vec4f,
@@ -124,16 +124,12 @@ fn eval_glass_panel(
     let shine = max(u.glass2.w, 0.08);
 
     // --- Optical scale ---
-    // Old path used min_half for depth/edge. Warp is short (~92px) so min_half ≈ 46
-    // while Terminal min_half is hundreds → warp got ~½ the refraction depth and a
-    // thinner bevel, so the two panes never matched. Primary panes (Terminal=0,
-    // Warp=1) share a fixed optical scale (lens radius 120). Chips still soft-cap.
-    let is_primary_pane = kind < 1.5; // Terminal | Warp
-    let optical = select(
-        min(min_half, 48.0), // chips / small chrome: size-capped
-        120.0,               // terminal + warp: same as LENS_RADIUS
-        is_primary_pane,
-    );
+    // All glass chrome (panes + nav chips) shares the lens optical scale so
+    // tabs/settings/+ match terminal/warp refraction, bevel, and rim.
+    // `kind` is kept for callers / future style hooks; solids never reach here.
+    let _kind = kind;
+    let _min_half = min_half;
+    let optical = 120.0; // same as LENS_RADIUS / primary panes
     let depth = min(u.glass.w, max(optical * 2.2, 40.0));
 
     let local = px - center;
@@ -193,6 +189,12 @@ fn eval_glass_panel(
 
     var glass = refracted;
 
+    // Shared face darken — all optical glass (panes + nav chips + modal).
+    // Multiply toward pure black (not a lifted grey underlay — that *lightens*
+    // our black rain plate). Driven by `u.misc.w` ← Rust `GLASS_DARKEN`.
+    let darken = clamp(u.misc.w, 0.0, 1.0);
+    glass = glass * (1.0 - darken);
+
     // Fresnel rim — very quiet (second pass down from chalky white)
     if (reflection > 0.001) {
         let n_dot_v = clamp(normal.z, 0.0, 1.0);
@@ -219,14 +221,8 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     let logical = u.size.xy;
     let px = in.uv * logical; // top-left origin
 
+    // No title-bar fill — rain shows through; traffic lights + title text only.
     var col = sample_rain_raw(px, 0.0);
-
-    // Title bar dim strip
-    let title_h = 44.0;
-    if (px.y < title_h) {
-        let bar = vec3f(0.03, 0.07, 0.05);
-        col = mix(col, bar, 0.55);
-    }
 
     let n = u32(u.misc.z);
     for (var i = 0u; i < 32u; i++) {
@@ -236,8 +232,8 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         let center = r.xy + r.zw * 0.5;
         let half = r.zw * 0.5;
 
-        // Solid traffic-light kinds (6 close / 7 min / 8 zoom)
-        if (p.kind > 5.5) {
+        // Solid traffic lights (6 close / 7 min / 8 zoom) — not scrim/modal
+        if (p.kind > 5.5 && p.kind < 8.5) {
             let d = sd_round_box(px - center, half, p.radius);
             let inside = 1.0 - smoothstep(-1.0, 1.0, d);
             if (inside <= 0.001) { continue; }
@@ -252,9 +248,20 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             continue;
         }
 
+        // Scrim (9): full-rect dim — agility overlay bg-black/50
+        if (p.kind > 8.5 && p.kind < 9.5) {
+            let d = sd_round_box(px - center, half, max(p.radius, 0.0));
+            let inside = 1.0 - smoothstep(-1.0, 1.0, d);
+            let a = clamp(p._pad.x, 0.0, 1.0) * inside;
+            col = mix(col, vec3f(0.0, 0.0, 0.0), a);
+            continue;
+        }
+
+        // Modal (10) + other glass: same optical glass; _pad.x fades content
         let g = eval_glass_panel(px, center, half, p.radius, p.kind);
         if (g.a <= 0.001) { continue; }
-        col = mix(col, g.rgb, g.a * 0.96);
+        let fade = select(1.0, clamp(p._pad.x, 0.0, 1.0), p.kind > 9.5);
+        col = mix(col, g.rgb, g.a * 0.96 * fade);
     }
 
     return vec4f(col, 1.0);

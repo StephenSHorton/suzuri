@@ -9,6 +9,8 @@ mod app;
 mod cells;
 mod input;
 mod layout;
+#[cfg(target_os = "macos")]
+mod macos_window;
 mod pty;
 mod rain_atlas;
 mod rain_sim;

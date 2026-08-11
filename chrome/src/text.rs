@@ -40,7 +40,7 @@ use winit::dpi::PhysicalSize;
 #[derive(Clone, Debug)]
 pub struct TextLabel {
     pub text: String,
-    /// Top-left of the baseline box, logical px.
+    /// Top-left of the layout box, logical px (used when `center_in` is None).
     pub x: f32,
     pub y: f32,
     /// Font size in logical px.
@@ -51,6 +51,9 @@ pub struct TextLabel {
     pub mono: bool,
     /// Digital-rain glyph — prefer a CJK face that covers half-width katakana.
     pub rain: bool,
+    /// If set `[x, y, w, h]`, center the shaped glyph box in this rect (logical px).
+    /// Overrides `x` / `y` after measuring line width.
+    pub center_in: Option<[f32; 4]>,
 }
 
 impl TextLabel {
@@ -63,6 +66,7 @@ impl TextLabel {
             color,
             mono: false,
             rain: false,
+            center_in: None,
         }
     }
 
@@ -75,6 +79,26 @@ impl TextLabel {
             color,
             mono: true,
             rain: false,
+            center_in: None,
+        }
+    }
+
+    /// Center this label inside a logical rect (nav chips, icon buttons, etc.).
+    pub fn centered(
+        text: impl Into<String>,
+        rect: [f32; 4],
+        size: f32,
+        color: [f32; 4],
+    ) -> Self {
+        Self {
+            text: text.into(),
+            x: rect[0],
+            y: rect[1],
+            size,
+            color,
+            mono: false,
+            rain: false,
+            center_in: Some(rect),
         }
     }
 }
@@ -208,14 +232,38 @@ impl TextLayer {
         let areas: Vec<TextArea> = labels
             .iter()
             .enumerate()
-            .map(|(i, label)| TextArea {
-                buffer: &self.buffers[i],
-                left: label.x * scale,
-                top: label.y * scale,
-                scale: 1.0,
-                bounds,
-                default_color: rgba_u8(label.color),
-                custom_glyphs: &[],
+            .map(|(i, label)| {
+                let size_px = (label.size * scale).max(1.0);
+                // Must match set_metrics line_height above.
+                let line_h = size_px * 1.25;
+                let (left, top) = if let Some([rx, ry, rw, rh]) = label.center_in {
+                    // Shaped line width in physical px (glyphon buffer is physical).
+                    let line_w = self.buffers[i]
+                        .layout_runs()
+                        .map(|run| run.line_w)
+                        .fold(0.0f32, f32::max);
+                    let cx = rx * scale;
+                    let cy = ry * scale;
+                    let cw = rw * scale;
+                    let ch = rh * scale;
+                    // Optical nudge: sans caps sit slightly high in the EM box.
+                    let optical_y = 0.5 * scale;
+                    (
+                        cx + (cw - line_w).max(0.0) * 0.5,
+                        cy + (ch - line_h).max(0.0) * 0.5 + optical_y,
+                    )
+                } else {
+                    (label.x * scale, label.y * scale)
+                };
+                TextArea {
+                    buffer: &self.buffers[i],
+                    left,
+                    top,
+                    scale: 1.0,
+                    bounds,
+                    default_color: rgba_u8(label.color),
+                    custom_glyphs: &[],
+                }
             })
             .collect();
 

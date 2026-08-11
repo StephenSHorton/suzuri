@@ -17,8 +17,9 @@ use crate::text::{TextLabel, TextLayer};
 /// Approximate mono cell metrics used for grid resize + terminal paint.
 pub const CELL_W: f32 = 7.8;
 pub const CELL_H: f32 = 15.0;
-/// Inset padding inside the terminal glass panel for cell text.
-pub const TERM_PAD: f32 = 10.0;
+/// Default inner glass inset — prefer [`Metrics::inset`] at call sites.
+/// Kept for callers that don't have Metrics yet; matches Spacing::inset.
+pub const TERM_PAD: f32 = 8.0; // matches Spacing::inset (inside); outside is Spacing::space
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -39,6 +40,7 @@ struct RainUniforms {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct FrameUniforms {
     size: [f32; 4],
+    /// x=time, y=dpr, z=panel_count, w=glass face darken (0..1)
     misc: [f32; 4],
     /// Canvas UI Glass defaults: ior, edge, bevel, depth
     glass: [f32; 4],
@@ -64,6 +66,9 @@ const GLASS_ABERRATION: f32 = 1.0;
 const GLASS_BLUR: f32 = 0.0;
 const GLASS_REFLECTION: f32 = 1.0;
 const GLASS_SHINE: f32 = 0.01;
+/// Shared face darken for every optical glass surface (terminal, warp, chips, modal).
+/// 0 = fully clear (rain only); 1 = solid black. Multiplies face brightness.
+const GLASS_DARKEN: f32 = 0.82;
 /// Canvas UI default lens size (radius, CSS px).
 const LENS_RADIUS: f32 = 120.0;
 /// Canvas UI follow feel (~follow 0.2).
@@ -159,13 +164,28 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        // Prefer premultiplied so transparent window corners (macOS rounded)
+        // composite correctly over the desktop.
+        let alpha_mode = caps
+            .alpha_modes
+            .iter()
+            .copied()
+            .find(|m| *m == wgpu::CompositeAlphaMode::PreMultiplied)
+            .or_else(|| {
+                caps.alpha_modes
+                    .iter()
+                    .copied()
+                    .find(|m| *m == wgpu::CompositeAlphaMode::PostMultiplied)
+            })
+            .unwrap_or(caps.alpha_modes[0]);
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -292,7 +312,7 @@ impl Renderer {
             label: Some("frame uniforms"),
             contents: bytemuck::bytes_of(&FrameUniforms {
                 size: [1.0, 1.0, 1.0, 1.0],
-                misc: [0.0, 1.0, 0.0, 0.0],
+                misc: [0.0, 1.0, 0.0, GLASS_DARKEN],
                 glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
                 glass2: [
                     GLASS_ABERRATION,
@@ -661,7 +681,22 @@ impl Renderer {
         } else {
             None
         };
-        let panels = layout.glass_panels(self.metrics, active_idx, lights);
+        let mut panels = layout.glass_panels(self.metrics, active_idx, lights);
+        // Settings glass modal + scrim (agility dialog presentation)
+        if settings.visible() {
+            use crate::layout::{PanelInstance, PanelKind, Rect};
+            let scrim = PanelInstance::glass(
+                Rect::new(0.0, 0.0, logical_w, logical_h),
+                0.0,
+                PanelKind::Scrim,
+            )
+            .with_opacity(settings.scrim_alpha());
+            let modal_r = settings.animated_modal_rect(logical_w, logical_h);
+            let modal = PanelInstance::glass(modal_r, self.metrics.radius, PanelKind::Modal)
+                .with_opacity(settings.content_ease().clamp(0.0, 1.0));
+            panels.push(scrim);
+            panels.push(modal);
+        }
         let count = panels.len() as u32;
 
         let need = (panels.len() as u64) * std::mem::size_of::<PanelInstance>() as u64;
@@ -682,7 +717,7 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&FrameUniforms {
                 size: [logical_w, logical_h, fw, fh],
-                misc: [t, self.scale_factor, count as f32, 0.0],
+                misc: [t, self.scale_factor, count as f32, GLASS_DARKEN],
                 // Same glass constants as the cursor lens (panes match lens look)
                 glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
                 glass2: [
@@ -845,7 +880,13 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        // Transparent clear — macOS rounded corners need alpha 0 outside.
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -866,9 +907,10 @@ impl Renderer {
 }
 
 /// Derive grid cols/rows from a terminal rect (logical px).
-pub fn terminal_grid_size(terminal: &crate::layout::Rect) -> (u16, u16) {
-    let inner_w = (terminal.w - TERM_PAD * 2.0).max(CELL_W);
-    let inner_h = (terminal.h - TERM_PAD * 2.0).max(CELL_H);
+/// `inset` should be [`Metrics::inset`] (spacing system).
+pub fn terminal_grid_size(terminal: &crate::layout::Rect, inset: f32) -> (u16, u16) {
+    let inner_w = (terminal.w - inset * 2.0).max(CELL_W);
+    let inner_h = (terminal.h - inset * 2.0).max(CELL_H);
     let cols = (inner_w / CELL_W).floor().max(1.0) as u16;
     let rows = (inner_h / CELL_H).floor().max(1.0) as u16;
     (cols, rows)
@@ -890,29 +932,31 @@ fn chrome_labels(
 
     let mut labels = Vec::with_capacity(48 + session.active_grid().rows() as usize);
 
-    // Title (right of traffic lights on mac).
-    let title_size = 13.0;
-    let title_y = (m.title_h - title_size) * 0.5;
-    let title_x = if is_mac() { m.pad + 72.0 } else { m.pad + 8.0 };
+    // Window title on clear bar (right of traffic lights on mac).
+    let title_size = 12.0;
+    let title_y = (m.title_h - title_size * 1.25) * 0.5; // account for glyphon line-height
+    let title_x = if is_mac() {
+        68.0 + m.stack()
+    } else {
+        m.edge()
+    };
     labels.push(TextLabel::new(
         "suzuri · chrome",
         title_x,
         title_y,
         title_size,
-        muted,
+        dim, // quieter on rain — no green title plate
     ));
 
-    // Logo 「硯」 left of tab chips.
-    let logo_size = 16.0;
-    labels.push(TextLabel::new(
+    // Logo 「硯」 — centered in logo slot.
+    labels.push(TextLabel::centered(
         "硯",
-        layout.logo.x + 4.0,
-        layout.logo.y + (layout.logo.h - logo_size) * 0.5 - 1.0,
-        logo_size,
+        [layout.logo.x, layout.logo.y, layout.logo.w, layout.logo.h],
+        16.0,
         bright,
     ));
 
-    // Tab chip labels.
+    // Tab chip labels — centered in each glass chip.
     let tab_size = 12.0;
     for (i, chip) in layout.tab_chips.iter().enumerate() {
         let title = session
@@ -921,36 +965,43 @@ fn chrome_labels(
             .map(|t| t.title.as_str())
             .unwrap_or("?");
         let color = if i == active_idx { bright } else { dim };
-        labels.push(TextLabel::new(
+        labels.push(TextLabel::centered(
             title,
-            chip.x + 12.0,
-            chip.y + (chip.h - tab_size) * 0.5 - 1.0,
+            [chip.x, chip.y, chip.w, chip.h],
             tab_size,
             color,
         ));
     }
 
-    // New-tab 「+」
-    let plus_size = 16.0;
-    labels.push(TextLabel::new(
+    // New-tab 「+」 — centered in 32×32 glass.
+    labels.push(TextLabel::centered(
         "+",
-        layout.tab_new.x + 7.0,
-        layout.tab_new.y + (layout.tab_new.h - plus_size) * 0.5 - 1.0,
-        plus_size,
+        [
+            layout.tab_new.x,
+            layout.tab_new.y,
+            layout.tab_new.w,
+            layout.tab_new.h,
+        ],
+        16.0,
         dim,
     ));
 
-    // Settings
-    labels.push(TextLabel::new(
+    // Settings — centered in chip.
+    labels.push(TextLabel::centered(
         "settings",
-        layout.settings.x + 14.0,
-        layout.settings.y + (layout.settings.h - tab_size) * 0.5 - 1.0,
+        [
+            layout.settings.x,
+            layout.settings.y,
+            layout.settings.w,
+            layout.settings.h,
+        ],
         tab_size,
         dim,
     ));
 
     // Terminal cell lines (mono ~13) inside the glass well.
-    push_terminal_labels(&mut labels, layout, session, cursor_visible);
+    let inset = m.inset();
+    push_terminal_labels(&mut labels, layout, inset, session, cursor_visible);
 
     // Warp draft or placeholder.
     let warp_size = 13.0;
@@ -962,14 +1013,19 @@ fn chrome_labels(
     let warp_color = if session.draft.is_empty() { dim } else { bright };
     labels.push(TextLabel::new(
         warp_text,
-        layout.warp.x + 16.0,
-        layout.warp.y + 14.0,
+        layout.warp.x + inset,
+        layout.warp.y + inset,
         warp_size,
         warp_color,
     ));
 
-    // Settings overlay (text over the terminal well).
-    if settings.open {
+    // Settings glass modal text (agility dialog content fade + spring rect).
+    if settings.visible() {
+        let ease = settings.content_ease().clamp(0.0, 1.0);
+        let win_w = layout.title.w;
+        let win_h = layout.warp.y + layout.warp.h + m.edge();
+        let modal = settings.animated_modal_rect(win_w, win_h);
+
         let grid = session.active_grid();
         let lines = settings.display_lines(
             pty_active,
@@ -977,18 +1033,28 @@ fn chrome_labels(
             grid.rows(),
             session.tabs.len(),
         );
-        let mut y = layout.terminal.y + 20.0;
-        let x = layout.terminal.x + 20.0;
-        labels.push(TextLabel::new("settings", x, y, 16.0, bright));
-        y += 28.0;
+        let pad = m.inset() * 2.0;
+        let mut y = modal.y + pad;
+        let x = modal.x + pad;
+        let mut title_c = bright;
+        title_c[3] *= ease;
+        labels.push(TextLabel::new("Settings", x, y, 16.0, title_c));
+        y += 32.0;
         for line in lines {
             if line.is_empty() {
-                y += 10.0;
+                y += 8.0;
                 continue;
             }
-            let color = if line.starts_with("  ") { dim } else { muted };
-            labels.push(TextLabel::new(line, x, y, 12.5, color));
+            let mut color = if line.starts_with("  ") { dim } else { muted };
+            color[3] *= ease;
+            if color[3] < 0.02 {
+                continue;
+            }
+            labels.push(TextLabel::new(line, x, y, 12.0, color));
             y += 16.0;
+            if y > modal.y + modal.h - pad {
+                break;
+            }
         }
     }
 
@@ -999,12 +1065,13 @@ fn chrome_labels(
 fn push_terminal_labels(
     labels: &mut Vec<TextLabel>,
     layout: &FrameLayout,
+    inset: f32,
     session: &ChromeSession,
     cursor_visible: bool,
 ) {
     let mono_size = 13.0;
-    let origin_x = layout.terminal.x + TERM_PAD;
-    let origin_y = layout.terminal.y + TERM_PAD;
+    let origin_x = layout.terminal.x + inset;
+    let origin_y = layout.terminal.y + inset;
     let grid = session.active_grid();
     let cursor = grid.cursor();
 

@@ -47,6 +47,25 @@ fn sample_scene_fb(fb_px: vec2f, lod: f32) -> vec3f {
     return textureSampleLevel(scene_tex, scene_samp, uv, lod).rgb;
 }
 
+// Rounded window silhouette (logical px). Matches Metrics.radius / macOS CALayer.
+fn sd_round_box(p: vec2f, b: vec2f, r: f32) -> f32 {
+    let q = abs(p) - b + vec2f(r);
+    return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+/// Premultiplied alpha for the OS window shape (radius 16 logical pts).
+fn window_premul(col: vec3f, fb_px: vec2f) -> vec4f {
+    let fb = max(u.size.zw, vec2f(1.0));
+    let logical = max(u.size.xy, vec2f(1.0));
+    let scale = fb / logical;
+    let win_r = 16.0;
+    let win_half = logical * 0.5;
+    let win_local = fb_px / scale - win_half;
+    let win_sd = sd_round_box(win_local, win_half, win_r);
+    let win_a = 1.0 - smoothstep(-1.0, 0.75, win_sd);
+    return vec4f(col * win_a, win_a);
+}
+
 fn ior_for_wavelength(base_ior: f32, aberration: f32, wavelength: f32) -> f32 {
     let ab = aberration * 0.1;
     return mix(
@@ -72,7 +91,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let presence = clamp(u.lens.w, 0.0, 1.0);
     let radius_log = u.lens.z;
     if (presence < 0.01 || radius_log < 1.0) {
-        return vec4f(col, 1.0);
+        return window_premul(col, fb_px);
     }
 
     let scale = fb / logical;
@@ -87,7 +106,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let mask = 1.0 - smoothstep(-aa, 0.0, sd);
     let alpha = mask * presence;
     if (alpha < 0.001) {
-        return vec4f(col, 1.0);
+        return window_premul(col, fb_px);
     }
 
     let ior = max(u.glass.x, 1.01);
@@ -159,5 +178,5 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     col *= 1.0 - shadow * (1.0 - mask);
 
     col = mix(col, glass, alpha);
-    return vec4f(col, 1.0);
+    return window_premul(col, fb_px);
 }

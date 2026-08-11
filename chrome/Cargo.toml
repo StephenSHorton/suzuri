@@ -20,8 +20,23 @@ bytemuck = { version = "1.22", features = ["derive"] }
 glyphon = "0.8"
 pollster = "0.4"
 portable-pty = "0.9"
+raw-window-handle = "0.6"
 wgpu = "24.0"
 winit = "0.30"
+
+# macOS: CALayer cornerRadius + clear NSWindow for rounded frameless chrome
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSObject"] }
+objc2-app-kit = { version = "0.2", features = [
+    "NSView",
+    "NSWindow",
+    "NSColor",
+    "NSResponder",
+    "NSGraphics",
+    "objc2-quartz-core",
+] }
+objc2-quartz-core = { version = "0.2", features = ["CALayer"] }
 
 [profile.dev]
 # Faster link while iterating shaders

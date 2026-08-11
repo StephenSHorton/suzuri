@@ -127,7 +127,8 @@ impl ChromeApp {
 
     fn sync_grid_to_terminal(&mut self) {
         let layout = self.current_layout();
-        let (cols, rows) = renderer::terminal_grid_size(&layout.terminal);
+        let (cols, rows) =
+            renderer::terminal_grid_size(&layout.terminal, self.metrics.inset());
         let (cur_c, cur_r) = {
             let g = self.session.active_grid();
             (g.cols(), g.rows())
@@ -180,6 +181,37 @@ impl ChromeApp {
             self.cursor.y,
             is_mac(),
         );
+
+        // Settings glass modal: absorb clicks inside; scrim / outside closes
+        // (settings chip still toggles). Mirrors agility Dialog dismiss-on-outside.
+        if self.settings.visible() {
+            match target {
+                HitTarget::Settings => {
+                    self.settings.toggle();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                HitTarget::Close | HitTarget::Minimize | HitTarget::Zoom => {
+                    // allow window chrome through
+                }
+                _ => {
+                    let win_w = layout.title.w;
+                    let win_h = layout.warp.y + layout.warp.h + self.metrics.edge();
+                    let modal = self.settings.animated_modal_rect(win_w, win_h);
+                    if modal.contains(self.cursor.x, self.cursor.y) {
+                        // click inside modal — no-op
+                        return;
+                    }
+                    self.settings.close();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+            }
+        }
 
         match target {
             HitTarget::Close => event_loop.exit(),
@@ -253,7 +285,7 @@ impl ChromeApp {
         }
 
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            if self.settings.open {
+            if self.settings.open || self.settings.visible() {
                 self.settings.close();
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -430,6 +462,10 @@ impl ApplicationHandler for ChromeApp {
                 .expect("create window"),
         );
 
+        // macOS: round the frameless window (matches pane radius).
+        #[cfg(target_os = "macos")]
+        crate::macos_window::configure_rounded_window(&window, 16.0);
+
         let renderer = pollster::block_on(Renderer::new(window.clone()));
         self.metrics = renderer.metrics();
         self.window = Some(window);
@@ -552,6 +588,8 @@ impl ApplicationHandler for ChromeApp {
 
             WindowEvent::RedrawRequested => {
                 self.drain_all_ptys();
+                // Advance settings modal springs (agility dialog timing).
+                self.settings.tick(1.0 / 60.0);
                 let pty_on = self.any_pty_alive();
                 let cursor_vis = self.active_cursor_visible();
                 if let Some(r) = self.renderer.as_mut() {

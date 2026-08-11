@@ -1854,8 +1854,13 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glyphon",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-quartz-core",
  "pollster",
  "portable-pty",
+ "raw-window-handle",
  "wgpu",
  "winit",
 ]
