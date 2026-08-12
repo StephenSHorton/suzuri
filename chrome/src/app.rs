@@ -2133,7 +2133,18 @@ impl ChromeApp {
     }
 
     /// Snapshot for MCP bridge: tabs + viewport/live lines + echo/blocks + PTY.
+    ///
+    /// Skips building the (expensive) snap unless the publisher is due — keeps
+    /// selection / mouse frames snappy instead of rebuilding JSON every paint.
     fn publish_bridge_status(&mut self) {
+        if !self.status_publisher.due() {
+            return;
+        }
+        // While dragging a terminal selection, defer status I/O entirely so
+        // press/drag/release paints aren't fighting disk writes.
+        if self.selecting_term {
+            return;
+        }
         let mut extras: Vec<PaneSnapExtra> = Vec::new();
         for (pane_id, rt) in &mut self.runtimes {
             let alive = rt.pty.as_mut().map(|p| p.is_alive()).unwrap_or(false);
@@ -2380,11 +2391,25 @@ impl ApplicationHandler for ChromeApp {
                     if let Some(pos) = self.term_cell_at_cursor() {
                         let clicks = self.term_click_count(pos);
                         self.apply_term_click_selection(pos, clicks);
+                        // Start selection paint on this press — don't wait for
+                        // the next continuous-redraw frame (felt ~½s late).
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
                     }
                 } else if !matches!(hit, HitTarget::Terminal(_) | HitTarget::ScrollBar(_)) {
-                    self.term_selection.clear();
-                    self.selecting_term = false;
-                    self.last_term_click = None;
+                    if !self.term_selection.is_empty() || self.selecting_term {
+                        self.term_selection.clear();
+                        self.selecting_term = false;
+                        self.last_term_click = None;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    } else {
+                        self.term_selection.clear();
+                        self.selecting_term = false;
+                        self.last_term_click = None;
+                    }
                 }
                 // Empty title-bar / nav chrome (not chips): drag, or double-click zoom.
                 // macOS: double-click title bar = zoom to fill (maximize), not fullscreen
@@ -2432,6 +2457,10 @@ impl ApplicationHandler for ChromeApp {
                 if self.selecting_term {
                     self.term_selection.end();
                     self.selecting_term = false;
+                    // End-drag paint immediately (selection stays, drag flag clears).
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
                 // Activate only on release, and only if still over the same target.
                 // Skip chrome activation if we were selecting terminal text or scrolling.
@@ -2664,7 +2693,18 @@ impl ApplicationHandler for ChromeApp {
                     event_loop.exit();
                     return;
                 }
+                // Apply mono font from settings before grid math / paint.
+                let font_changed = self
+                    .renderer
+                    .as_mut()
+                    .map(|r| r.set_mono_font_id(&self.settings.prefs.font))
+                    .unwrap_or(false);
+
                 self.sync_grids_to_panes();
+                if font_changed {
+                    // Cell pitch changed — resize PTY grids to the new metrics.
+                    self.sync_grids_to_panes();
+                }
                 self.update_chip_hover();
                 self.chip_ui.tick(dt);
 

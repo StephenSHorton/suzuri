@@ -81,13 +81,17 @@ impl StatusPublisher {
         Self::default()
     }
 
+    /// True when a new status write is due (callers can skip building a snap).
+    pub fn due(&self) -> bool {
+        Instant::now().duration_since(self.last) >= PUBLISH_INTERVAL
+    }
+
     /// Write status if the publish interval has elapsed.
     pub fn tick(&mut self, snap: &ChromeSnapOut) {
-        let now = Instant::now();
-        if now.duration_since(self.last) < PUBLISH_INTERVAL {
+        if !self.due() {
             return;
         }
-        self.last = now;
+        self.last = Instant::now();
         let _ = write_snap_at(&status_path(), snap);
     }
 

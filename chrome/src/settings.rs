@@ -30,8 +30,9 @@ pub mod settings_row {
     pub const LENS: usize = 1;
     pub const PRIMARY: usize = 2;
     pub const ACCENT: usize = 3;
-    pub const DARKEN: usize = 4;
-    pub const RESET: usize = 5;
+    pub const FONT: usize = 4;
+    pub const DARKEN: usize = 5;
+    pub const RESET: usize = 6;
 }
 
 /// Whether the settings modal is open, plus presentation springs + prefs.
@@ -181,6 +182,10 @@ impl SettingsState {
             settings_row::ACCENT => {
                 self.prefs.clear_accent();
             }
+            // Font: Enter cycles forward.
+            settings_row::FONT => {
+                self.prefs.cycle_font(1);
+            }
             settings_row::DARKEN => self.prefs.nudge_darken(0.05),
             settings_row::RESET => {
                 self.prefs.reset_to_defaults();
@@ -214,6 +219,9 @@ impl SettingsState {
             settings_row::ACCENT => {
                 self.prefs
                     .nudge_accent_hue(if dir < 0 { -15.0 } else { 15.0 });
+            }
+            settings_row::FONT => {
+                self.prefs.cycle_font(if dir < 0 { -1 } else { 1 });
             }
             settings_row::DARKEN => {
                 self.prefs.nudge_darken(if dir < 0 { -0.05 } else { 0.05 });
@@ -282,6 +290,14 @@ impl SettingsState {
                 let _ = self.save_prefs();
                 return true;
             }
+            if i == settings_row::FONT {
+                let mid = row.x + row.w * 0.55;
+                self.prefs
+                    .cycle_font(if x < mid { -1 } else { 1 });
+                self.dirty = true;
+                let _ = self.save_prefs();
+                return true;
+            }
             return self.activate_row(i);
         }
         false
@@ -295,6 +311,7 @@ impl SettingsState {
     /// | `2` | Toggle lens |
     /// | `3` | Focus primary color (then ←→ hue) |
     /// | `4` | Focus accent (Enter = auto; ←→ custom hue) |
+    /// | `5` | Cycle font |
     /// | `[` / `-` | Darken −5% |
     /// | `]` / `=` / `+` | Darken +5% |
     /// | `0` | Reset defaults |
@@ -316,6 +333,11 @@ impl SettingsState {
             }
             "4" => {
                 self.selected = settings_row::ACCENT;
+                true
+            }
+            "5" => {
+                self.selected = settings_row::FONT;
+                self.prefs.cycle_font(1);
                 true
             }
             "[" | "-" => {
@@ -462,11 +484,11 @@ impl SettingsState {
     }
 
     /// Base modal rect — wide horizontal glass card (not a square).
-    /// Height fits title + 6 rows + color swatches + footer.
+    /// Height fits title + 7 rows + color swatches + footer.
     pub fn base_modal_rect(window_w: f32, window_h: f32) -> Rect {
         let w = (window_w - 48.0).min(560.0).max(320.0);
-        // 48 title + 6×40 + 5×8 gaps + 36 swatches + 28 footer ≈ 420
-        let h = (window_h - 80.0).min(460.0).max(420.0);
+        // 48 title + 7×40 + 6×8 gaps + 36 swatches + 28 footer ≈ 470
+        let h = (window_h - 80.0).min(510.0).max(470.0);
         Rect::new(
             (window_w - w) * 0.5,
             (window_h - h) * 0.48,
@@ -532,6 +554,10 @@ impl SettingsState {
             format!("  [2] magnifier      {lens}  · pinch or ⌃/⌘+scroll"),
             format!("  [3] primary        {primary}  · ←→ hue · swatches"),
             format!("  [4] accent         {accent}  · Enter=auto · ←→ override"),
+            format!(
+                "  [5] font           {}  · ←→ cycle",
+                theme::font_label(&self.prefs.font)
+            ),
             format!("  [ / ]  glass darken  {darken_pct}%"),
             format!("  [0] reset defaults"),
             String::new(),
@@ -567,7 +593,7 @@ pub struct SettingsLayout {
 }
 
 impl SettingsLayout {
-    pub const ROW_COUNT: usize = 6;
+    pub const ROW_COUNT: usize = 7;
     pub const ROW_H: f32 = 40.0;
     pub const GAP: f32 = 8.0;
     pub const SWATCH: f32 = 28.0;
@@ -933,6 +959,7 @@ mod tests {
             theme: "tokyo-night".into(),
             primary: theme::TOKYO_NIGHT.jade,
             accent: Some(theme::TOKYO_NIGHT.secondary),
+            font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
         };
         {
