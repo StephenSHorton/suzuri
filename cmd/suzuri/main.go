@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
+	"github.com/StephenSHorton/suzuri/internal/chromehost"
 	"github.com/StephenSHorton/suzuri/internal/mcpsrv"
 	"github.com/StephenSHorton/suzuri/internal/transfer"
 	"github.com/StephenSHorton/suzuri/internal/ui"
@@ -49,6 +50,12 @@ func main() {
 	if len(os.Args) > 1 && transfer.IsTransferArg(os.Args[1]) {
 		winconsole.AttachParent()
 		os.Exit(transfer.RunCLI(os.Args[1:]))
+	}
+	// Native GPU chrome (optional UI). Default `suzuri` still opens classic ebiten.
+	// Spawns chrome/target/release/suzuri-chrome (or SUZURI_CHROME) and waits.
+	if len(os.Args) > 1 && os.Args[1] == "chrome" {
+		winconsole.AttachParent()
+		os.Exit(chromehost.RunCLI(os.Args[2:]))
 	}
 
 	defer func() {

@@ -71,24 +71,35 @@ and writing there so host and chrome share state.
   `suzuri` (ebiten / ConPTY host).
 - No hard dependency from `cmd/suzuri` on `surface/`.
 
-### Phase 1 — Spawn process (first merge)
+### Phase 1 — Spawn process (first merge) — **implemented**
 
-Go host treats chrome as an optional UI child:
+Go host treats chrome as an optional UI child. Package:
+[`internal/chromehost`](../internal/chromehost/) (`ResolveBinary`, `Start`,
+`RunCLI`).
 
-1. Resolve binary: next to `suzuri`, or `SUZURI_CHROME` env, or dev
-   `chrome/target/release/suzuri-chrome`.
-2. `exec.Command(chromePath, args...)` with inherited or logged stdio.
-3. Pass shared context via env / flags (not a long-lived wire yet), e.g.:
-   - `SUZURI_CONFIG_DIR`
-   - cwd / initial shell
-   - feature toggles (rain, lens) if needed
-4. Lifecycle: host owns process; exit chrome when host quits (or detach for
-   “chrome-only” mode).
-5. Keep Go `internal/chrome` + `internal/ui` as the **default** face until
-   chrome passes parity gates (`PARITY.md`).
+1. Resolve binary: `SUZURI_CHROME` env → next to `suzuri` → dev
+   `chrome/target/release/suzuri-chrome` (walk from cwd / exe) → `PATH`.
+2. `exec.Command` / CreateProcess (never macOS `open`) with inherited stdio.
+3. Pass shared context via env:
+   - `SUZURI_CONFIG_DIR` = product `config.Dir()`
+   - (later: cwd / initial shell / feature toggles)
+4. Lifecycle: `suzuri chrome` starts chrome and **waits** for exit (chrome-only
+   mode). Default `suzuri` still opens classic ebiten UI (`internal/ui` +
+   `internal/chrome`).
+5. Keep Go ebiten face as default until chrome passes parity gates (`PARITY.md`).
 
-**Success criteria:** users can run native chrome from a flag or subcommand
-without breaking existing ebiten UI.
+```bash
+# Classic UI (unchanged)
+suzuri
+
+# Native chrome UI (Phase 1)
+cd chrome && cargo build --release
+suzuri chrome
+# or: SUZURI_CHROME=/path/to/suzuri-chrome suzuri chrome
+```
+
+**Success criteria:** users can run native chrome from a subcommand without
+breaking existing ebiten UI.
 
 ### Phase 2 — Shared state files / IPC light
 
