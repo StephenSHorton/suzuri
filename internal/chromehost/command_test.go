@@ -8,7 +8,18 @@ import (
 )
 
 func TestValidCommand(t *testing.T) {
-	for _, cmd := range []string{CmdQuit, CmdOpenNotes, CmdOpenWorkspace, CmdOpenPalette} {
+	for _, cmd := range []string{
+		CmdQuit,
+		CmdOpenNotes,
+		CmdOpenWorkspace,
+		CmdOpenPalette,
+		CmdOpenSettings,
+		CmdOpenTransferSend,
+		CmdOpenTransferReceive,
+		CmdOpenHelp,
+		CmdNewTab,
+		CmdToggleCaffeine,
+	} {
 		if !ValidCommand(cmd) {
 			t.Fatalf("expected valid: %s", cmd)
 		}
@@ -21,6 +32,9 @@ func TestValidCommand(t *testing.T) {
 	}
 	if !ValidCommand("  quit  ") {
 		t.Fatal("trim should accept quit")
+	}
+	if ValidCommand("OpenSettings") {
+		t.Fatal("camelCase should be invalid (snake_case wire only)")
 	}
 }
 

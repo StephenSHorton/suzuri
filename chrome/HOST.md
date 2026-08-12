@@ -119,7 +119,7 @@ open a surface without full embed / sockets:
 | Chrome | `control_mailbox` module | Poll every **250ms** on the frame tick; read + truncate; fail soft if missing |
 | Go | `chromehost.SendCommand(cmd)` | Validates verb, writes file (atomic temp+rename) |
 
-**Commands** (exact line text):
+**Commands** (exact line text, snake_case):
 
 | Command | Effect |
 |---------|--------|
@@ -127,6 +127,12 @@ open a surface without full embed / sockets:
 | `open_notes` | Open notes overlay |
 | `open_workspace` | Open workspace overlay |
 | `open_palette` | Open command palette |
+| `open_settings` | Open settings overlay |
+| `open_transfer_send` | Open transfer send overlay |
+| `open_transfer_receive` | Open transfer receive overlay |
+| `open_help` | Open help overlay |
+| `new_tab` | Create a new tab |
+| `toggle_caffeine` | Toggle caffeine / keep-awake |
 
 ```go
 // From the Go host (chrome already running, or about to start):

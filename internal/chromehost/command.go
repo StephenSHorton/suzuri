@@ -13,13 +13,19 @@ import (
 // Chrome polls this file every ~250ms, executes one-line commands, and truncates.
 const CmdFile = "chrome_cmd"
 
-// Known control commands (one line each). Keep in sync with chrome
+// Known control commands (one line each, snake_case). Keep in sync with chrome
 // `control_mailbox::ControlCommand`.
 const (
-	CmdQuit          = "quit"
-	CmdOpenNotes     = "open_notes"
-	CmdOpenWorkspace = "open_workspace"
-	CmdOpenPalette   = "open_palette"
+	CmdQuit                = "quit"
+	CmdOpenNotes           = "open_notes"
+	CmdOpenWorkspace       = "open_workspace"
+	CmdOpenPalette         = "open_palette"
+	CmdOpenSettings        = "open_settings"
+	CmdOpenTransferSend    = "open_transfer_send"
+	CmdOpenTransferReceive = "open_transfer_receive"
+	CmdOpenHelp            = "open_help"
+	CmdNewTab              = "new_tab"
+	CmdToggleCaffeine      = "toggle_caffeine"
 )
 
 // CmdPath is the absolute path of the chrome control mailbox
@@ -45,7 +51,7 @@ func SendCommand(cmd string) error {
 		return fmt.Errorf("chromehost: empty command")
 	}
 	if !ValidCommand(cmd) {
-		return fmt.Errorf("chromehost: unknown command %q (want quit|open_notes|open_workspace|open_palette)", cmd)
+		return fmt.Errorf("chromehost: unknown command %q (want quit|open_notes|open_workspace|open_palette|open_settings|open_transfer_send|open_transfer_receive|open_help|new_tab|toggle_caffeine)", cmd)
 	}
 
 	path := CmdPath()
@@ -73,7 +79,16 @@ func SendCommand(cmd string) error {
 // ValidCommand reports whether cmd is a known chrome control verb.
 func ValidCommand(cmd string) bool {
 	switch strings.TrimSpace(cmd) {
-	case CmdQuit, CmdOpenNotes, CmdOpenWorkspace, CmdOpenPalette:
+	case CmdQuit,
+		CmdOpenNotes,
+		CmdOpenWorkspace,
+		CmdOpenPalette,
+		CmdOpenSettings,
+		CmdOpenTransferSend,
+		CmdOpenTransferReceive,
+		CmdOpenHelp,
+		CmdNewTab,
+		CmdToggleCaffeine:
 		return true
 	default:
 		return false

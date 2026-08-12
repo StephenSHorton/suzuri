@@ -5,11 +5,17 @@
 //! action. Missing or unreadable mailbox is a soft no-op so default spawn
 //! keeps working without any IPC setup.
 //!
-//! Commands (one line each):
+//! Commands (one line each, snake_case):
 //! - `quit`
 //! - `open_notes`
 //! - `open_workspace`
 //! - `open_palette`
+//! - `open_settings`
+//! - `open_transfer_send`
+//! - `open_transfer_receive`
+//! - `open_help`
+//! - `new_tab`
+//! - `toggle_caffeine`
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,6 +37,12 @@ pub enum ControlCommand {
     OpenNotes,
     OpenWorkspace,
     OpenPalette,
+    OpenSettings,
+    OpenTransferSend,
+    OpenTransferReceive,
+    OpenHelp,
+    NewTab,
+    ToggleCaffeine,
 }
 
 impl ControlCommand {
@@ -41,6 +53,12 @@ impl ControlCommand {
             "open_notes" => Some(Self::OpenNotes),
             "open_workspace" => Some(Self::OpenWorkspace),
             "open_palette" => Some(Self::OpenPalette),
+            "open_settings" => Some(Self::OpenSettings),
+            "open_transfer_send" => Some(Self::OpenTransferSend),
+            "open_transfer_receive" => Some(Self::OpenTransferReceive),
+            "open_help" => Some(Self::OpenHelp),
+            "new_tab" => Some(Self::NewTab),
+            "toggle_caffeine" => Some(Self::ToggleCaffeine),
             _ => None,
         }
     }
@@ -52,6 +70,12 @@ impl ControlCommand {
             Self::OpenNotes => CommandAction::OpenNotes,
             Self::OpenWorkspace => CommandAction::OpenWorkspace,
             Self::OpenPalette => CommandAction::OpenPalette,
+            Self::OpenSettings => CommandAction::OpenSettings,
+            Self::OpenTransferSend => CommandAction::OpenTransferSend,
+            Self::OpenTransferReceive => CommandAction::OpenTransferReceive,
+            Self::OpenHelp => CommandAction::OpenHelp,
+            Self::NewTab => CommandAction::NewTab,
+            Self::ToggleCaffeine => CommandAction::ToggleCaffeine,
         }
     }
 
@@ -62,6 +86,12 @@ impl ControlCommand {
             Self::OpenNotes => "open_notes",
             Self::OpenWorkspace => "open_workspace",
             Self::OpenPalette => "open_palette",
+            Self::OpenSettings => "open_settings",
+            Self::OpenTransferSend => "open_transfer_send",
+            Self::OpenTransferReceive => "open_transfer_receive",
+            Self::OpenHelp => "open_help",
+            Self::NewTab => "new_tab",
+            Self::ToggleCaffeine => "toggle_caffeine",
         }
     }
 }
@@ -203,8 +233,32 @@ mod tests {
             ControlCommand::parse("open_palette"),
             Some(ControlCommand::OpenPalette)
         );
+        assert_eq!(
+            ControlCommand::parse("open_settings"),
+            Some(ControlCommand::OpenSettings)
+        );
+        assert_eq!(
+            ControlCommand::parse("open_transfer_send"),
+            Some(ControlCommand::OpenTransferSend)
+        );
+        assert_eq!(
+            ControlCommand::parse("open_transfer_receive"),
+            Some(ControlCommand::OpenTransferReceive)
+        );
+        assert_eq!(
+            ControlCommand::parse("open_help"),
+            Some(ControlCommand::OpenHelp)
+        );
+        assert_eq!(ControlCommand::parse("new_tab"), Some(ControlCommand::NewTab));
+        assert_eq!(
+            ControlCommand::parse("toggle_caffeine"),
+            Some(ControlCommand::ToggleCaffeine)
+        );
         assert_eq!(ControlCommand::parse("nope"), None);
         assert_eq!(ControlCommand::parse(""), None);
+        // CamelCase / wrong separators stay unknown (snake_case wire only).
+        assert_eq!(ControlCommand::parse("OpenSettings"), None);
+        assert_eq!(ControlCommand::parse("open-settings"), None);
     }
 
     #[test]
@@ -225,6 +279,46 @@ mod tests {
             ControlCommand::OpenPalette.to_action(),
             CommandAction::OpenPalette
         );
+        assert_eq!(
+            ControlCommand::OpenSettings.to_action(),
+            CommandAction::OpenSettings
+        );
+        assert_eq!(
+            ControlCommand::OpenTransferSend.to_action(),
+            CommandAction::OpenTransferSend
+        );
+        assert_eq!(
+            ControlCommand::OpenTransferReceive.to_action(),
+            CommandAction::OpenTransferReceive
+        );
+        assert_eq!(
+            ControlCommand::OpenHelp.to_action(),
+            CommandAction::OpenHelp
+        );
+        assert_eq!(ControlCommand::NewTab.to_action(), CommandAction::NewTab);
+        assert_eq!(
+            ControlCommand::ToggleCaffeine.to_action(),
+            CommandAction::ToggleCaffeine
+        );
+    }
+
+    #[test]
+    fn as_str_round_trips_parse() {
+        let all = [
+            ControlCommand::Quit,
+            ControlCommand::OpenNotes,
+            ControlCommand::OpenWorkspace,
+            ControlCommand::OpenPalette,
+            ControlCommand::OpenSettings,
+            ControlCommand::OpenTransferSend,
+            ControlCommand::OpenTransferReceive,
+            ControlCommand::OpenHelp,
+            ControlCommand::NewTab,
+            ControlCommand::ToggleCaffeine,
+        ];
+        for cmd in all {
+            assert_eq!(ControlCommand::parse(cmd.as_str()), Some(cmd));
+        }
     }
 
     #[test]
