@@ -1432,11 +1432,37 @@ fn push_modal_glass(
         panels.push(
             PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
         );
-        // One chip per setting row (rain / lens / theme / glass darken).
-        for r in &lay.rows {
-            panels.push(
-                PanelInstance::glass(*r, m.chip_radius, PanelKind::ModalButton).with_opacity(ease),
-            );
+        use crate::settings::settings_row;
+        for (i, r) in lay.rows.iter().enumerate() {
+            // Focused row is lit like a selected list item.
+            let kind = if i == settings.selected {
+                PanelKind::ModalButtonActive
+            } else {
+                PanelKind::ModalButton
+            };
+            panels.push(PanelInstance::glass(*r, m.chip_radius, kind).with_opacity(ease));
+            // Boolean rows: Apple-style glass switch (track + thumb).
+            if i == settings_row::RAIN || i == settings_row::LENS {
+                let on = if i == settings_row::RAIN {
+                    settings.prefs.rain
+                } else {
+                    settings.prefs.lens
+                };
+                let track = crate::settings::SettingsLayout::toggle_track_rect(*r);
+                let track_kind = if on {
+                    PanelKind::ModalButtonActive
+                } else {
+                    PanelKind::ModalFrost
+                };
+                panels.push(
+                    PanelInstance::glass(track, track.h * 0.5, track_kind).with_opacity(ease),
+                );
+                let thumb = crate::settings::SettingsLayout::toggle_thumb_rect(*r, on);
+                panels.push(
+                    PanelInstance::glass(thumb, thumb.h * 0.5, PanelKind::ModalButton)
+                        .with_opacity(ease),
+                );
+            }
         }
     }
 
@@ -1725,54 +1751,49 @@ fn push_modal_labels(
         ));
         let grid = session.active_grid();
         let theme_val = crate::theme::label(&settings.prefs.theme).to_string();
-        let darken_val = format!("{:.0}%", settings.prefs.glass_darken * 100.0);
-        let row_data = [
-            (
-                "Glyph rain",
-                if settings.prefs.rain { "On" } else { "Off" },
-                "1",
-            ),
-            (
-                "Magnifier",
-                if settings.prefs.lens { "On" } else { "Off" },
-                "2",
-            ),
-            ("Theme", theme_val.as_str(), "3"),
-            ("Glass darken", darken_val.as_str(), "[ ]"),
-        ];
+        let darken_val = format!("‹  {:.0}%  ›", settings.prefs.glass_darken * 100.0);
+        let theme_disp = format!("‹  {theme_val}  ›");
+        use crate::settings::settings_row;
+        // Labels only — booleans use glass switches; theme/darken show value.
+        let titles = ["Glyph rain", "Magnifier", "Theme", "Glass darken"];
         let text_size = 13.0;
-        for (row, (title, val, key)) in lay.rows.iter().zip(row_data.into_iter()) {
+        for (i, row) in lay.rows.iter().enumerate() {
             let mut tc = bright;
             tc[3] *= ease;
-            let mut vc = muted;
-            vc[3] *= ease;
-            // Left label · key, vertically centered in the shared row chip.
             labels.push(TextLabel::left_vcenter(
-                format!("{title}  ·  {key}"),
+                titles[i],
                 lay.label_x(*row),
                 row.y,
                 row.h,
                 text_size,
                 tc,
             ));
-            // Value centered in the right column of the same chip.
-            let vr = lay.value_rect(*row);
-            labels.push(TextLabel::centered(
-                val.to_string(),
-                [vr.x, vr.y, vr.w, vr.h],
-                text_size,
-                vc,
-            ));
+            if i == settings_row::THEME || i == settings_row::DARKEN {
+                let mut vc = muted;
+                vc[3] *= ease;
+                let val = if i == settings_row::THEME {
+                    theme_disp.as_str()
+                } else {
+                    darken_val.as_str()
+                };
+                let vr = lay.value_rect(*row);
+                labels.push(TextLabel::centered(
+                    val.to_string(),
+                    [vr.x, vr.y, vr.w, vr.h],
+                    text_size,
+                    vc,
+                ));
+            }
         }
         let mut foot = dim;
         foot[3] *= ease * 0.9;
         let shell = if pty_active { "PTY live" } else { "mock shell" };
+        // Navigation hints first — this is a real focusable list now.
         labels.push(TextLabel::new(
             format!(
-                "{shell}  ·  {}×{}  ·  {} tabs",
+                "↑↓ move  ·  ⏎/click  ·  ←→ adjust  ·  {shell}  {}×{}",
                 grid.cols(),
                 grid.rows(),
-                session.tabs.len()
             ),
             modal.x + lay.pad,
             modal.y + modal.h - 28.0,

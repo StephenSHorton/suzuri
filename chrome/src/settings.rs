@@ -24,6 +24,14 @@ use crate::theme;
 // Re-export for existing `settings::ChromePrefs` / `GLASS_DARKEN_DEFAULT` imports.
 pub use crate::config_store::{ChromePrefs, GLASS_DARKEN_DEFAULT};
 
+/// Row indices in the settings list (must match [`SettingsLayout::ROW_COUNT`]).
+pub mod settings_row {
+    pub const RAIN: usize = 0;
+    pub const LENS: usize = 1;
+    pub const THEME: usize = 2;
+    pub const DARKEN: usize = 3;
+}
+
 /// Whether the settings modal is open, plus presentation springs + prefs.
 #[derive(Clone, Debug)]
 pub struct SettingsState {
@@ -31,6 +39,8 @@ pub struct SettingsState {
     pub open: bool,
     /// Session prefs (rain / lens / darken / theme). Loaded from disk on construct.
     pub prefs: ChromePrefs,
+    /// Focused row for keyboard / click (0..[`SettingsLayout::ROW_COUNT`]).
+    pub selected: usize,
     /// Spring position 0..1 for content (present).
     present: f32,
     present_vel: f32,
@@ -65,6 +75,7 @@ impl SettingsState {
         Self {
             open: false,
             prefs: prefs.clone(),
+            selected: 0,
             present: 0.0,
             present_vel: 0.0,
             overlay: 0.0,
@@ -118,40 +129,131 @@ impl SettingsState {
         }
     }
 
-    /// Toggle rain / lens, cycle theme, or nudge darken, from a key while the
-    /// modal is open. Saves prefs when a toggle lands.
+    /// Move keyboard focus by `delta` rows (wraps).
+    pub fn move_selection(&mut self, delta: i32) {
+        let n = SettingsLayout::ROW_COUNT as i32;
+        let cur = self.selected as i32;
+        self.selected = ((cur + delta).rem_euclid(n)) as usize;
+    }
+
+    /// Primary action on the focused row (Enter / Space / click).
+    /// Rain/lens toggle; theme cycles forward; darken nudges +5%.
+    pub fn activate_selected(&mut self) -> bool {
+        self.activate_row(self.selected)
+    }
+
+    /// Activate a specific row (also focuses it).
+    pub fn activate_row(&mut self, row: usize) -> bool {
+        if row >= SettingsLayout::ROW_COUNT {
+            return false;
+        }
+        self.selected = row;
+        match row {
+            settings_row::RAIN => self.prefs.rain = !self.prefs.rain,
+            settings_row::LENS => self.prefs.lens = !self.prefs.lens,
+            settings_row::THEME => {
+                let _ = self.prefs.cycle_theme();
+            }
+            settings_row::DARKEN => self.prefs.nudge_darken(0.05),
+            _ => return false,
+        }
+        self.dirty = true;
+        let _ = self.save_prefs();
+        true
+    }
+
+    /// Horizontal adjust on the focused row (← / →).
+    /// Rain/lens: either direction toggles. Theme: prev/next. Darken: ±5%.
+    pub fn nudge_selected(&mut self, dir: i32) -> bool {
+        if dir == 0 {
+            return false;
+        }
+        match self.selected {
+            settings_row::RAIN | settings_row::LENS => {
+                return self.activate_row(self.selected);
+            }
+            settings_row::THEME => {
+                if dir < 0 {
+                    let _ = self.prefs.cycle_theme_prev();
+                } else {
+                    let _ = self.prefs.cycle_theme();
+                }
+            }
+            settings_row::DARKEN => {
+                self.prefs.nudge_darken(if dir < 0 { -0.05 } else { 0.05 });
+            }
+            _ => return false,
+        }
+        self.dirty = true;
+        let _ = self.save_prefs();
+        true
+    }
+
+    /// Click inside the open modal. Hits a row → focus + activate (darken:
+    /// left half decreases, right half increases).
+    pub fn try_click(&mut self, x: f32, y: f32, window_w: f32, window_h: f32) -> bool {
+        if !self.open {
+            return false;
+        }
+        let lay = self.layout(window_w, window_h);
+        for (i, row) in lay.rows.iter().enumerate() {
+            if !row.contains(x, y) {
+                continue;
+            }
+            self.selected = i;
+            if i == settings_row::DARKEN {
+                let mid = row.x + row.w * 0.55;
+                self.prefs
+                    .nudge_darken(if x < mid { -0.05 } else { 0.05 });
+                self.dirty = true;
+                let _ = self.save_prefs();
+                return true;
+            }
+            // Prefer toggle track hit for rain/lens (still whole-row works).
+            return self.activate_row(i);
+        }
+        false
+    }
+
+    /// Optional number-key shortcuts (still work; primary UX is click / arrows).
     ///
     /// | Key | Action |
     /// |-----|--------|
-    /// | `1` | Toggle glyph rain |
-    /// | `2` | Toggle magnifier lens |
-    /// | `3` / `t` | Cycle theme forward |
-    /// | `T` / `⇧t` | Cycle theme backward |
-    /// | `[` / `-` | Darken glass −5% |
-    /// | `]` / `=` / `+` | Darken glass +5% |
+    /// | `1` | Focus + toggle rain |
+    /// | `2` | Focus + toggle lens |
+    /// | `3` / `t` | Focus theme + cycle forward |
+    /// | `T` | Focus theme + cycle backward |
+    /// | `[` / `-` | Focus darken −5% |
+    /// | `]` / `=` / `+` | Focus darken +5% |
     pub fn handle_hotkey(&mut self, key: &str) -> bool {
         let handled = match key {
             "1" => {
+                self.selected = settings_row::RAIN;
                 self.prefs.rain = !self.prefs.rain;
                 true
             }
             "2" => {
+                self.selected = settings_row::LENS;
                 self.prefs.lens = !self.prefs.lens;
                 true
             }
             "3" | "t" => {
-                self.prefs.cycle_theme();
+                self.selected = settings_row::THEME;
+                let _ = self.prefs.cycle_theme();
                 true
             }
             "T" => {
-                self.prefs.cycle_theme_prev();
+                self.selected = settings_row::THEME;
+                let _ = self.prefs.cycle_theme_prev();
                 true
             }
             "[" | "-" => {
+                self.selected = settings_row::DARKEN;
                 self.prefs.nudge_darken(-0.05);
                 true
             }
             "]" | "=" | "+" => {
+                self.selected = settings_row::DARKEN;
                 self.prefs.nudge_darken(0.05);
                 true
             }
@@ -164,13 +266,14 @@ impl SettingsState {
         handled
     }
 
+    pub fn open(&mut self) {
+        self.open = true;
+        self.selected = 0;
+    }
+
     /// Active chrome paint palette for `prefs.theme`.
     pub fn theme_colors(&self) -> theme::ThemeColors {
         self.prefs.theme_colors()
-    }
-
-    pub fn open(&mut self) {
-        self.open = true;
     }
 
     /// Close the modal; flush dirty prefs to disk.
@@ -391,6 +494,31 @@ impl SettingsLayout {
     pub fn label_x(&self, row: Rect) -> f32 {
         row.x + 14.0
     }
+
+    /// Apple-style switch track on the right of a boolean row.
+    pub fn toggle_track_rect(row: Rect) -> Rect {
+        let tw = 46.0;
+        let th = 26.0;
+        Rect::new(
+            row.x + row.w - 14.0 - tw,
+            row.y + (row.h - th) * 0.5,
+            tw,
+            th,
+        )
+    }
+
+    /// Knob inside the track (`on` = right side).
+    pub fn toggle_thumb_rect(row: Rect, on: bool) -> Rect {
+        let track = Self::toggle_track_rect(row);
+        let d = 20.0;
+        let pad = 3.0;
+        let x = if on {
+            track.x + track.w - pad - d
+        } else {
+            track.x + pad
+        };
+        Rect::new(x, track.y + (track.h - d) * 0.5, d, d)
+    }
 }
 
 #[cfg(test)]
@@ -447,6 +575,36 @@ mod tests {
         let vr = lay.value_rect(lay.rows[0]);
         assert!(vr.x > lay.rows[0].x);
         assert!(vr.x + vr.w <= lay.rows[0].x + lay.rows[0].w + 0.01);
+    }
+
+    #[test]
+    fn keyboard_nav_and_click_toggle() {
+        let (path, mut s) = fresh();
+        s.open();
+        assert_eq!(s.selected, 0);
+        let rain0 = s.prefs.rain;
+        s.move_selection(1);
+        assert_eq!(s.selected, 1);
+        s.move_selection(-1);
+        assert_eq!(s.selected, 0);
+        assert!(s.activate_selected());
+        assert_ne!(s.prefs.rain, rain0);
+        // Wrap selection
+        s.selected = SettingsLayout::ROW_COUNT - 1;
+        s.move_selection(1);
+        assert_eq!(s.selected, 0);
+        // Click rain row
+        let lay = s.layout(900.0, 700.0);
+        let r = lay.rows[0];
+        let rain1 = s.prefs.rain;
+        assert!(s.try_click(r.x + 20.0, r.y + 10.0, 900.0, 700.0));
+        assert_ne!(s.prefs.rain, rain1);
+        // Toggle geometry stays inside the row
+        let track = SettingsLayout::toggle_track_rect(r);
+        assert!(r.contains(track.x + 1.0, track.y + 1.0));
+        let thumb = SettingsLayout::toggle_thumb_rect(r, true);
+        assert!(track.contains(thumb.x + 1.0, thumb.y + 1.0));
+        cleanup(&path);
     }
 
     #[test]

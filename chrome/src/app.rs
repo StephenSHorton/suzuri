@@ -1083,6 +1083,13 @@ impl ChromeApp {
                 // Splash: any click on the card continues (Enter / click continue).
                 if self.splash.open {
                     self.dismiss_splash();
+                } else if self.settings.open {
+                    let layout = self.current_layout();
+                    let win_w = layout.title.w;
+                    let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+                    let _ = self
+                        .settings
+                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
                 } else if self.palette.open {
                     self.try_palette_click(event_loop);
                 } else if self.notes.open {
@@ -1706,11 +1713,40 @@ impl ChromeApp {
         }
 
         if self.settings.open {
-            if let Key::Character(ref s) = event.logical_key {
-                if self.settings.handle_hotkey(s.as_str()) {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
+            let mut handled = false;
+            match &event.logical_key {
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.settings.move_selection(-1);
+                    handled = true;
+                }
+                Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+                    self.settings.move_selection(1);
+                    handled = true;
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    handled = self.settings.nudge_selected(-1);
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    handled = self.settings.nudge_selected(1);
+                }
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                    handled = self.settings.activate_selected();
+                }
+                Key::Character(s) => {
+                    // Shift+Tab → previous row (when we only get "\t" as char, rare).
+                    if s.as_str() == "\t" {
+                        self.settings
+                            .move_selection(if self.modifiers.shift_key() { -1 } else { 1 });
+                        handled = true;
+                    } else {
+                        handled = self.settings.handle_hotkey(s.as_str());
                     }
+                }
+                _ => {}
+            }
+            if handled {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
                 }
             }
             return;
