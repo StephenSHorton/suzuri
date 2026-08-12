@@ -18,6 +18,7 @@ mod layout;
 mod links;
 #[cfg(target_os = "macos")]
 mod macos_window;
+mod new_window;
 mod notes;
 mod notes_ops;
 mod panes;

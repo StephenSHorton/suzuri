@@ -26,6 +26,7 @@ use crate::control_mailbox::ControlMailbox;
 use crate::input::{hit_test, is_mac, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
+use crate::new_window::spawn_new_window;
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
@@ -573,6 +574,12 @@ impl ChromeApp {
             }
             CommandAction::CaffeineOff => {
                 self.caffeine.deactivate();
+            }
+            CommandAction::NewWindow => {
+                if let Err(e) = spawn_new_window() {
+                    eprintln!("suzuri-chrome: new window failed: {e}");
+                    self.toast.show(format!("New window failed: {e}"));
+                }
             }
             CommandAction::Quit => self.request_quit(event_loop),
         }
@@ -1435,6 +1442,14 @@ impl ChromeApp {
                     }
                     "e" | "E" if shift => {
                         self.split_pane(SplitAxis::Horizontal);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    // Ctrl+Shift+N (and ⌘⇧N on mac) — new OS window process.
+                    "n" | "N" if shift => {
+                        self.run_action(event_loop, CommandAction::NewWindow);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }

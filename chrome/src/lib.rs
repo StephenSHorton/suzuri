@@ -21,6 +21,7 @@
 //! | [`control_mailbox`] | Phase 2 light IPC (`chrome_cmd` file) |
 //! | [`commands`] | Palette / shortcuts registry |
 //! | [`confirm`] | Crush-style yes/no confirm (quit) |
+//! | [`new_window`] | Spawn a second OS window (new process) |
 //! | [`rename`] | Tab / pane rename dialog |
 //! | [`toast`] | Ephemeral frost-chip status ("Copied") |
 //! | [`shell`] | Mock shell helpers (fallback when no PTY) |
@@ -44,6 +45,7 @@ pub mod control_mailbox;
 pub mod input;
 pub mod layout;
 pub mod links;
+pub mod new_window;
 pub mod notes;
 pub mod notes_ops;
 pub mod panes;
@@ -80,6 +82,7 @@ pub use links::{
     clean_url, find_links_in_line, link_at, link_span_at_col, link_url_at_col, normalize_url,
     open_url_in_browser, LinkHoverSpan, LinkSpan,
 };
+pub use new_window::{canonicalize_exe, resolve_self_exe, spawn_new_window};
 pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
 pub use pty::PtySession;
 pub use rename::{RenameState, RenameTarget};
