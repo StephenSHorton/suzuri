@@ -125,6 +125,161 @@ pub fn colors(id: &str) -> ThemeColors {
     }
 }
 
+/// Default accent (inkstone jade `#00e676`).
+pub const DEFAULT_ACCENT: [f32; 3] = [0.0, 0.902, 0.463];
+
+/// Preset accents for the settings color strip (click to apply).
+pub const ACCENT_PRESETS: &[[f32; 3]] = &[
+    [0.0, 0.902, 0.463],   // jade (default)
+    [0.533, 0.753, 0.816], // nord frost
+    [0.741, 0.576, 0.976], // dracula purple
+    [0.478, 0.635, 0.969], // tokyo blue
+    [0.655, 0.545, 0.980], // charm violet
+    [1.0, 0.420, 0.420],   // coral
+    [1.0, 0.75, 0.20],     // amber
+    [0.30, 0.85, 0.90],    // cyan
+];
+
+/// sRGB channel → linear (WCAG).
+fn srgb_to_linear(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Relative luminance Y ∈ [0,1] (WCAG 2.x).
+pub fn relative_luminance(rgb: [f32; 3]) -> f32 {
+    let r = srgb_to_linear(rgb[0]);
+    let g = srgb_to_linear(rgb[1]);
+    let b = srgb_to_linear(rgb[2]);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/// Pick black or white text for `bg` using the common WCAG threshold (~Figma/plugin practice):
+/// luminance **> 0.179** → black text, else white. Maximizes contrast vs the fill.
+pub const TEXT_LUMINANCE_THRESHOLD: f32 = 0.179;
+
+pub fn contrasting_text(bg: [f32; 3]) -> [f32; 3] {
+    if relative_luminance(bg) > TEXT_LUMINANCE_THRESHOLD {
+        [0.08, 0.08, 0.09] // near-black
+    } else {
+        [0.96, 0.97, 0.96] // near-white
+    }
+}
+
+fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+/// Build a full chrome palette from a user-picked accent (jade role).
+/// Dark terminal-ish bg derived from the accent; FG from contrast threshold.
+pub fn from_accent(accent: [f32; 3]) -> ThemeColors {
+    let accent = [
+        accent[0].clamp(0.0, 1.0),
+        accent[1].clamp(0.0, 1.0),
+        accent[2].clamp(0.0, 1.0),
+    ];
+    // Deep void with a hint of accent hue (readable glass on rain).
+    let bg = mix(accent, [0.02, 0.03, 0.03], 0.92);
+    let fg = contrasting_text(bg);
+    let muted = mix(fg, bg, 0.45);
+    ThemeColors {
+        bg,
+        fg,
+        jade: accent,
+        muted,
+        err: [1.0, 0.32, 0.32],
+    }
+}
+
+/// RGB → `#rrggbb`.
+pub fn to_hex(rgb: [f32; 3]) -> String {
+    let b = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", b(rgb[0]), b(rgb[1]), b(rgb[2]))
+}
+
+/// Parse `#rgb` / `#rrggbb` (also bare hex). None if invalid.
+pub fn parse_hex(s: &str) -> Option<[f32; 3]> {
+    let h = s.trim().trim_start_matches('#');
+    let full = if h.len() == 3 {
+        let mut o = String::with_capacity(6);
+        for c in h.chars() {
+            o.push(c);
+            o.push(c);
+        }
+        o
+    } else if h.len() == 6 {
+        h.to_string()
+    } else {
+        return None;
+    };
+    if !full.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let parse = |i: usize| {
+        u8::from_str_radix(&full[i..i + 2], 16)
+            .ok()
+            .map(|v| v as f32 / 255.0)
+    };
+    Some([parse(0)?, parse(2)?, parse(4)?])
+}
+
+/// Rotate hue in HSV by `delta_deg` (degrees), keep S/V.
+pub fn rotate_hue(rgb: [f32; 3], delta_deg: f32) -> [f32; 3] {
+    let (h, s, v) = rgb_to_hsv(rgb);
+    let h2 = (h + delta_deg).rem_euclid(360.0);
+    hsv_to_rgb(h2, s, v)
+}
+
+fn rgb_to_hsv(rgb: [f32; 3]) -> (f32, f32, f32) {
+    let r = rgb[0].clamp(0.0, 1.0);
+    let g = rgb[1].clamp(0.0, 1.0);
+    let b = rgb[2].clamp(0.0, 1.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let v = max;
+    let s = if max < 1e-6 { 0.0 } else { d / max };
+    let h = if d < 1e-6 {
+        0.0
+    } else if (max - r).abs() < 1e-6 {
+        60.0 * (((g - b) / d) % 6.0)
+    } else if (max - g).abs() < 1e-6 {
+        60.0 * (((b - r) / d) + 2.0)
+    } else {
+        60.0 * (((r - g) / d) + 4.0)
+    };
+    (h.rem_euclid(360.0), s, v)
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r1, g1, b1) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    [r1 + m, g1 + m, b1 + m]
+}
+
 // ── Catalog ─────────────────────────────────────────────────────────────────
 // Roles: bg ≈ void/dimMatte, fg ≈ text, jade ≈ primary/accent, muted ≈ dim/mute.
 // Inkstone keeps the existing cell jade-green look (tests + rain defaults).
@@ -237,5 +392,39 @@ mod tests {
         assert_eq!(label("nord"), "Nord");
         assert_eq!(label("tokyo_night"), "Tokyo Night");
         assert_eq!(label("nope"), "Inkstone");
+    }
+
+    #[test]
+    fn contrasting_text_uses_luminance_threshold() {
+        // Dark fills → near-white text (WCAG / Figma-style 0.179 cut).
+        let on_black = contrasting_text([0.0, 0.0, 0.0]);
+        assert!(on_black[0] > 0.9);
+        // Light fills → near-black text.
+        let on_white = contrasting_text([1.0, 1.0, 1.0]);
+        assert!(on_white[0] < 0.2);
+        // Jade (#00e676) is bright green (high G weight) → black checkmark on swatch.
+        assert!(relative_luminance(DEFAULT_ACCENT) > TEXT_LUMINANCE_THRESHOLD);
+        let on_jade = contrasting_text(DEFAULT_ACCENT);
+        assert!(on_jade[0] < 0.2, "bright jade prefers dark ink");
+        // Deep red is below threshold → white ink.
+        let on_deep = contrasting_text([0.35, 0.05, 0.05]);
+        assert!(on_deep[0] > 0.9);
+        // Amber sits well above threshold → black ink.
+        let on_amber = contrasting_text([1.0, 0.75, 0.20]);
+        assert!(on_amber[0] < 0.2);
+    }
+
+    #[test]
+    fn from_accent_sets_jade_and_readable_fg() {
+        let red = from_accent([1.0, 0.0, 0.0]);
+        assert!((red.jade[0] - 1.0).abs() < 1e-4);
+        assert!(red.jade[1] < 0.01);
+        // Deep bg → light fg via contrasting_text.
+        assert!(red.fg[0] > 0.9);
+        assert_eq!(to_hex([0.0, 0.902, 0.463]), "#00e676");
+        assert_eq!(parse_hex("#f00"), Some([1.0, 0.0, 0.0]));
+        let spun = rotate_hue([1.0, 0.0, 0.0], 120.0);
+        // Red +120° ≈ green.
+        assert!(spun[1] > spun[0] && spun[1] > spun[2]);
     }
 }

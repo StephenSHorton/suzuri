@@ -25,7 +25,7 @@ pub const ENV_CONFIG_DIR: &str = "SUZURI_CONFIG_DIR";
 /// Default glass face darken (matches product look).
 pub const GLASS_DARKEN_DEFAULT: f32 = 0.82;
 
-/// User-tunable chrome UI prefs (rain / lens / glass darken / theme / splash).
+/// User-tunable chrome UI prefs (rain / lens / glass darken / accent / splash).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromePrefs {
     /// Canvas UI glyph rain under glass.
@@ -34,8 +34,10 @@ pub struct ChromePrefs {
     pub lens: bool,
     /// Shared glass face darken 0..1 (panes / chips / modal).
     pub glass_darken: f32,
-    /// Named chrome theme id (`inkstone`, `nord`, …). See [`crate::theme`].
+    /// Legacy named theme id (migrated → accent on load if no accent saved).
     pub theme: String,
+    /// User accent RGB (primary / jade). Drives [`Self::theme_colors`].
+    pub accent: [f32; 3],
     /// First-run welcome splash has been dismissed (product `first_run_done` analog).
     pub splash_seen: bool,
 }
@@ -47,6 +49,7 @@ impl Default for ChromePrefs {
             lens: true,
             glass_darken: GLASS_DARKEN_DEFAULT,
             theme: theme::DEFAULT_THEME_ID.to_string(),
+            accent: theme::DEFAULT_ACCENT,
             splash_seen: false,
         }
     }
@@ -57,27 +60,38 @@ impl ChromePrefs {
         self.glass_darken = (self.glass_darken + delta).clamp(0.0, 0.95);
     }
 
-    /// Cycle to the next named theme (wraps). Returns the new id.
-    pub fn cycle_theme(&mut self) -> &str {
-        self.theme = theme::cycle_next(&self.theme).to_string();
-        &self.theme
+    /// Rotate accent hue by `delta_deg` degrees.
+    pub fn nudge_accent_hue(&mut self, delta_deg: f32) {
+        self.accent = theme::rotate_hue(self.accent, delta_deg);
     }
 
-    /// Cycle to the previous named theme (wraps). Returns the new id.
-    pub fn cycle_theme_prev(&mut self) -> &str {
-        self.theme = theme::cycle_prev(&self.theme).to_string();
-        &self.theme
+    pub fn set_accent(&mut self, rgb: [f32; 3]) {
+        self.accent = [
+            rgb[0].clamp(0.0, 1.0),
+            rgb[1].clamp(0.0, 1.0),
+            rgb[2].clamp(0.0, 1.0),
+        ];
     }
 
-    /// Active paint palette for the current theme id.
+    /// Active paint palette from the user accent (not legacy theme names).
     pub fn theme_colors(&self) -> theme::ThemeColors {
-        theme::colors(&self.theme)
+        theme::from_accent(self.accent)
     }
 
-    /// Normalize after load (clamp darken, fold theme id, keep bools as-is).
+    /// Reset toggles / accent / darken to factory defaults (keeps `splash_seen`).
+    pub fn reset_to_defaults(&mut self) {
+        let splash = self.splash_seen;
+        *self = Self::default();
+        self.splash_seen = splash;
+    }
+
+    /// Normalize after load (clamp darken/accent; migrate legacy `theme` → accent).
     pub fn normalize(mut self) -> Self {
         self.glass_darken = self.glass_darken.clamp(0.0, 0.95);
         self.theme = theme::normalize_id(&self.theme).to_string();
+        for c in &mut self.accent {
+            *c = c.clamp(0.0, 1.0);
+        }
         self
     }
 }
@@ -154,12 +168,14 @@ pub fn save_chrome_prefs(path: &Path, prefs: &ChromePrefs) -> io::Result<()> {
 /// Serialize prefs to stable JSON (pretty, trailing newline).
 pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
     let theme = theme::normalize_id(&prefs.theme);
+    let accent = theme::to_hex(prefs.accent);
     format!(
-        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"splash_seen\": {}\n}}\n",
+        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"accent\": \"{}\",\n  \"splash_seen\": {}\n}}\n",
         prefs.rain,
         prefs.lens,
         format_f32(prefs.glass_darken),
         theme,
+        accent,
         prefs.splash_seen,
     )
 }
@@ -177,13 +193,21 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
     let glass_darken = extract_f32(trimmed, "glass_darken").unwrap_or(d.glass_darken);
     let theme = extract_string(trimmed, "theme")
         .map(|s| theme::normalize_id(&s).to_string())
-        .unwrap_or(d.theme);
+        .unwrap_or(d.theme.clone());
     let splash_seen = extract_bool(trimmed, "splash_seen").unwrap_or(d.splash_seen);
+    // Prefer explicit accent; else migrate legacy theme id → that palette's jade.
+    let accent = extract_string(trimmed, "accent")
+        .and_then(|s| theme::parse_hex(&s))
+        .unwrap_or_else(|| {
+            // No accent field: use named theme's jade as the accent seed.
+            theme::colors(&theme).jade
+        });
     Some(ChromePrefs {
         rain,
         lens,
         glass_darken,
         theme,
+        accent,
         splash_seen,
     })
 }
@@ -284,6 +308,7 @@ mod tests {
             lens: true,
             glass_darken: 0.55,
             theme: "nord".into(),
+            accent: theme::NORD.jade,
             splash_seen: true,
         };
         save_chrome_prefs(&path, &prefs).expect("save");
@@ -297,6 +322,7 @@ mod tests {
         assert_eq!(loaded.lens, true);
         assert!((loaded.glass_darken - 0.55).abs() < 1e-4);
         assert_eq!(loaded.theme, "nord");
+        assert!((loaded.accent[1] - theme::NORD.jade[1]).abs() < 0.02);
         assert!(loaded.splash_seen);
         let _ = fs::remove_file(&path);
         if let Some(parent) = path.parent() {
@@ -334,6 +360,7 @@ mod tests {
             lens: true,
             glass_darken: GLASS_DARKEN_DEFAULT,
             theme: theme::DEFAULT_THEME_ID.into(),
+            accent: theme::DEFAULT_ACCENT,
             splash_seen: true,
         };
         save_chrome_prefs(&path, &prefs).expect("save");
@@ -366,6 +393,7 @@ mod tests {
             lens: false,
             glass_darken: 0.4,
             theme: "dracula".into(),
+            accent: theme::DRACULA.jade,
             splash_seen: false,
         };
         save_chrome_prefs(&path, &prefs).unwrap();
@@ -384,12 +412,14 @@ mod tests {
             lens: false,
             glass_darken: 0.82,
             theme: "charm".into(),
+            accent: theme::CHARM.jade,
             splash_seen: true,
         };
         let raw = chrome_prefs_to_json(&prefs);
         assert!(raw.contains("\"rain\": true"));
         assert!(raw.contains("\"lens\": false"));
         assert!(raw.contains("\"theme\": \"charm\""));
+        assert!(raw.contains("\"accent\":"));
         assert!(raw.contains("\"splash_seen\": true"));
         let back = parse_chrome_prefs_json(&raw).unwrap();
         assert_eq!(back, prefs);
@@ -427,13 +457,38 @@ mod tests {
     }
 
     #[test]
-    fn cycle_theme_advances() {
+    fn accent_drives_palette_and_hue_nudge() {
         let mut p = ChromePrefs::default();
-        assert_eq!(p.theme, "inkstone");
-        assert_eq!(p.cycle_theme(), "nord");
-        assert_eq!(p.theme, "nord");
-        let c = p.theme_colors();
-        assert_ne!(c.bg, theme::INKSTONE.bg);
+        assert_eq!(p.theme_colors().jade, theme::DEFAULT_ACCENT);
+        p.set_accent([1.0, 0.0, 0.0]);
+        assert!((p.theme_colors().jade[0] - 1.0).abs() < 1e-4);
+        p.nudge_accent_hue(60.0);
+        // Hue rotate should change green channel away from pure red.
+        assert!(p.accent[1] > 0.1);
+    }
+
+    #[test]
+    fn legacy_theme_migrates_to_accent() {
+        let p = parse_chrome_prefs_json(r#"{ "theme": "dracula" }"#).unwrap();
+        assert_eq!(p.theme, "dracula");
+        let jade = theme::DRACULA.jade;
+        assert!((p.accent[0] - jade[0]).abs() < 0.02);
+    }
+
+    #[test]
+    fn reset_keeps_splash_seen() {
+        let mut p = ChromePrefs {
+            rain: false,
+            lens: false,
+            glass_darken: 0.1,
+            theme: "nord".into(),
+            accent: [1.0, 0.0, 0.0],
+            splash_seen: true,
+        };
+        p.reset_to_defaults();
+        assert!(p.rain && p.lens);
+        assert!(p.splash_seen);
+        assert_eq!(p.accent, theme::DEFAULT_ACCENT);
     }
 
     #[test]
@@ -443,6 +498,7 @@ mod tests {
             lens: true,
             glass_darken: 1.5,
             theme: "nope".into(),
+            accent: theme::DEFAULT_ACCENT,
             splash_seen: false,
         }
         .normalize();

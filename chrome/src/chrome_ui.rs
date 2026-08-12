@@ -329,41 +329,36 @@ mod tests {
     }
 
     #[test]
-    fn chip_scale_smooths() {
+    fn hover_dims_label_not_scale() {
         let mut ui = ChipUi::default();
         ui.set_hover(Some(ChipId::Logo), (10.0, 10.0));
         ui.tick(1.0 / 60.0);
-        let s1 = ui.scale_for(ChipId::Logo);
-        assert!(s1 > 1.0 && s1 < 1.06, "s1={s1}");
-        for _ in 0..60 {
-            ui.tick(1.0 / 60.0);
-        }
-        assert!((ui.scale_for(ChipId::Logo) - 1.06).abs() < 0.01);
+        // No inflate on hover — only RGB dim.
+        assert!((ui.scale_for(ChipId::Logo) - 1.0).abs() < 0.001);
+        assert!((ui.hover_dim(ChipId::Logo) - ChipUi::HOVER_DIM).abs() < 0.001);
+        let c = ui.dim_color(ChipId::Logo, [1.0, 0.5, 0.25, 0.9]);
+        assert!((c[0] - 0.5).abs() < 0.001);
+        assert!((c[1] - 0.25).abs() < 0.001);
+        assert!((c[2] - 0.125).abs() < 0.001);
+        assert!((c[3] - 0.9).abs() < 0.001); // alpha preserved
         ui.set_hover(None, (10.0, 10.0));
-        for _ in 0..60 {
-            ui.tick(1.0 / 60.0);
-        }
-        assert!((ui.scale_for(ChipId::Logo) - 1.0).abs() < 0.02);
+        assert!((ui.hover_dim(ChipId::Logo) - 1.0).abs() < 0.001);
     }
 
     #[test]
-    fn spotlight_fades_after_leave() {
+    fn spotlight_stays_off() {
         let mut ui = ChipUi::default();
         ui.set_hover(Some(ChipId::Tab(0)), (100.0, 20.0));
         for _ in 0..40 {
             ui.tick(1.0 / 60.0);
         }
-        assert!(ui.spotlight() > 0.9);
+        // Hover wash removed — spotlight strength is always 0.
+        assert!(ui.spotlight() < 0.001);
         let pos = ui.spotlight_pos();
         assert!((pos[0] - 100.0).abs() < 0.1);
-        ui.set_hover(None, (200.0, 200.0)); // leave — pos should freeze
+        ui.set_hover(None, (200.0, 200.0));
+        // Last-in-chip position freezes on leave (unused while strength is 0).
         assert!((ui.spotlight_pos()[0] - 100.0).abs() < 0.1);
-        ui.tick(1.0 / 60.0);
-        let mid = ui.spotlight();
-        assert!(mid > 0.0 && mid < 1.0, "mid={mid}");
-        for _ in 0..90 {
-            ui.tick(1.0 / 60.0);
-        }
-        assert!(ui.spotlight() < 0.05);
+        assert!(ui.spotlight() < 0.001);
     }
 }

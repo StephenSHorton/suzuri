@@ -28,8 +28,9 @@ pub use crate::config_store::{ChromePrefs, GLASS_DARKEN_DEFAULT};
 pub mod settings_row {
     pub const RAIN: usize = 0;
     pub const LENS: usize = 1;
-    pub const THEME: usize = 2;
+    pub const ACCENT: usize = 2;
     pub const DARKEN: usize = 3;
+    pub const RESET: usize = 4;
 }
 
 /// Whether the settings modal is open, plus presentation springs + prefs.
@@ -160,7 +161,6 @@ impl SettingsState {
     }
 
     /// Primary action on the focused row (Enter / Space / click).
-    /// Rain/lens toggle; theme cycles forward; darken nudges +5%.
     pub fn activate_selected(&mut self) -> bool {
         self.activate_row(self.selected)
     }
@@ -174,10 +174,17 @@ impl SettingsState {
         match row {
             settings_row::RAIN => self.prefs.rain = !self.prefs.rain,
             settings_row::LENS => self.prefs.lens = !self.prefs.lens,
-            settings_row::THEME => {
-                let _ = self.prefs.cycle_theme();
-            }
+            // Accent: Enter focuses; use ←→ / swatches to change color.
+            settings_row::ACCENT => {}
             settings_row::DARKEN => self.prefs.nudge_darken(0.05),
+            settings_row::RESET => {
+                self.prefs.reset_to_defaults();
+                // Snap toggle visuals to defaults immediately.
+                self.rain_visual = if self.prefs.rain { 1.0 } else { 0.0 };
+                self.lens_visual = if self.prefs.lens { 1.0 } else { 0.0 };
+                self.rain_visual_vel = 0.0;
+                self.lens_visual_vel = 0.0;
+            }
             _ => return false,
         }
         self.dirty = true;
@@ -186,7 +193,7 @@ impl SettingsState {
     }
 
     /// Horizontal adjust on the focused row (← / →).
-    /// Rain/lens: either direction toggles. Theme: prev/next. Darken: ±5%.
+    /// Rain/lens: toggle. Accent: hue ±15°. Darken: ±5%.
     pub fn nudge_selected(&mut self, dir: i32) -> bool {
         if dir == 0 {
             return false;
@@ -195,16 +202,13 @@ impl SettingsState {
             settings_row::RAIN | settings_row::LENS => {
                 return self.activate_row(self.selected);
             }
-            settings_row::THEME => {
-                if dir < 0 {
-                    let _ = self.prefs.cycle_theme_prev();
-                } else {
-                    let _ = self.prefs.cycle_theme();
-                }
+            settings_row::ACCENT => {
+                self.prefs.nudge_accent_hue(if dir < 0 { -15.0 } else { 15.0 });
             }
             settings_row::DARKEN => {
                 self.prefs.nudge_darken(if dir < 0 { -0.05 } else { 0.05 });
             }
+            settings_row::RESET => return false,
             _ => return false,
         }
         self.dirty = true;
@@ -212,13 +216,24 @@ impl SettingsState {
         true
     }
 
-    /// Click inside the open modal. Hits a row → focus + activate (darken:
-    /// left half decreases, right half increases).
+    /// Click inside the open modal.
     pub fn try_click(&mut self, x: f32, y: f32, window_w: f32, window_h: f32) -> bool {
         if !self.open {
             return false;
         }
         let lay = self.layout(window_w, window_h);
+        // Color swatches under the accent row.
+        for (i, sw) in lay.swatches.iter().enumerate() {
+            if sw.contains(x, y) {
+                if let Some(rgb) = theme::ACCENT_PRESETS.get(i) {
+                    self.selected = settings_row::ACCENT;
+                    self.prefs.set_accent(*rgb);
+                    self.dirty = true;
+                    let _ = self.save_prefs();
+                    return true;
+                }
+            }
+        }
         for (i, row) in lay.rows.iter().enumerate() {
             if !row.contains(x, y) {
                 continue;
@@ -232,22 +247,30 @@ impl SettingsState {
                 let _ = self.save_prefs();
                 return true;
             }
-            // Prefer toggle track hit for rain/lens (still whole-row works).
+            if i == settings_row::ACCENT {
+                // Click left/right half of value area to nudge hue.
+                let mid = row.x + row.w * 0.55;
+                self.prefs
+                    .nudge_accent_hue(if x < mid { -20.0 } else { 20.0 });
+                self.dirty = true;
+                let _ = self.save_prefs();
+                return true;
+            }
             return self.activate_row(i);
         }
         false
     }
 
-    /// Optional number-key shortcuts (still work; primary UX is click / arrows).
+    /// Optional number-key shortcuts.
     ///
     /// | Key | Action |
     /// |-----|--------|
-    /// | `1` | Focus + toggle rain |
-    /// | `2` | Focus + toggle lens |
-    /// | `3` / `t` | Focus theme + cycle forward |
-    /// | `T` | Focus theme + cycle backward |
-    /// | `[` / `-` | Focus darken −5% |
-    /// | `]` / `=` / `+` | Focus darken +5% |
+    /// | `1` | Toggle rain |
+    /// | `2` | Toggle lens |
+    /// | `3` | Focus accent (then ←→ hue) |
+    /// | `[` / `-` | Darken −5% |
+    /// | `]` / `=` / `+` | Darken +5% |
+    /// | `0` | Reset defaults |
     pub fn handle_hotkey(&mut self, key: &str) -> bool {
         let handled = match key {
             "1" => {
@@ -260,14 +283,8 @@ impl SettingsState {
                 self.prefs.lens = !self.prefs.lens;
                 true
             }
-            "3" | "t" => {
-                self.selected = settings_row::THEME;
-                let _ = self.prefs.cycle_theme();
-                true
-            }
-            "T" => {
-                self.selected = settings_row::THEME;
-                let _ = self.prefs.cycle_theme_prev();
+            "3" => {
+                self.selected = settings_row::ACCENT;
                 true
             }
             "[" | "-" => {
@@ -278,6 +295,13 @@ impl SettingsState {
             "]" | "=" | "+" => {
                 self.selected = settings_row::DARKEN;
                 self.prefs.nudge_darken(0.05);
+                true
+            }
+            "0" => {
+                self.selected = settings_row::RESET;
+                self.prefs.reset_to_defaults();
+                self.rain_visual = if self.prefs.rain { 1.0 } else { 0.0 };
+                self.lens_visual = if self.prefs.lens { 1.0 } else { 0.0 };
                 true
             }
             _ => false,
@@ -407,11 +431,11 @@ impl SettingsState {
     }
 
     /// Base modal rect — wide horizontal glass card (not a square).
-    /// Height fits title + 4 setting rows + footer without clipping.
+    /// Height fits title + 5 rows + color swatches + footer.
     pub fn base_modal_rect(window_w: f32, window_h: f32) -> Rect {
         let w = (window_w - 48.0).min(560.0).max(320.0);
-        // 48 title + 4×40 rows + 3×8 gaps + 16 gap + 28 footer + 16 pad ≈ 292
-        let h = (window_h - 96.0).min(340.0).max(292.0);
+        // 48 title + 5×40 + 4×8 gaps + 36 swatches + 28 footer ≈ 360
+        let h = (window_h - 80.0).min(400.0).max(360.0);
         Rect::new(
             (window_w - w) * 0.5,
             (window_h - h) * 0.48,
@@ -460,8 +484,7 @@ impl SettingsState {
         let rain = if self.prefs.rain { "on" } else { "off" };
         let lens = if self.prefs.lens { "on" } else { "off" };
         let darken_pct = (self.prefs.glass_darken * 100.0).round() as i32;
-        let theme_id = theme::normalize_id(&self.prefs.theme);
-        let theme_label = theme::label(theme_id);
+        let accent = theme::to_hex(self.prefs.accent);
 
         vec![
             "suzuri-chrome 1.0.0".into(),
@@ -470,8 +493,9 @@ impl SettingsState {
             "toggles".into(),
             format!("  [1] glyph rain     {rain}"),
             format!("  [2] magnifier      {lens}  · pinch or ⌃/⌘+scroll"),
-            format!("  [3] theme          {theme_label} ({theme_id})"),
+            format!("  [3] accent         {accent}  · ←→ hue · click swatches"),
             format!("  [ / ]  glass darken  {darken_pct}%"),
+            format!("  [0] reset defaults"),
             String::new(),
             "status".into(),
             format!("  {shell}"),
@@ -481,13 +505,12 @@ impl SettingsState {
             "keys".into(),
             "  Esc       close settings".into(),
             "  ⌘/,       toggle settings".into(),
-            "  ⌘K       command palette".into(),
+            "  ⌘K / ⌘P  command palette".into(),
             "  ⌘/       keyboard shortcuts".into(),
             "  ⌘T / ⌘W  new tab / close pane".into(),
             "  ⇧⌘D/E    split right / down".into(),
             "  ⌘V       paste".into(),
             "  wheel    scrollback".into(),
-            "  3 / t    cycle theme".into(),
         ]
     }
 }
@@ -497,16 +520,20 @@ impl SettingsState {
 pub struct SettingsLayout {
     pub modal: Rect,
     pub pad: f32,
-    /// One frost/button chip per setting row (rain / lens / theme / darken).
+    /// One frost/button chip per setting row.
     pub rows: Vec<Rect>,
+    /// Color preset swatches under the accent row.
+    pub swatches: Vec<Rect>,
     /// Right-side value column width inside each row.
     pub value_w: f32,
 }
 
 impl SettingsLayout {
-    pub const ROW_COUNT: usize = 4;
+    pub const ROW_COUNT: usize = 5;
     pub const ROW_H: f32 = 40.0;
     pub const GAP: f32 = 8.0;
+    pub const SWATCH: f32 = 28.0;
+    pub const SWATCH_GAP: f32 = 8.0;
 
     pub fn new(modal: Rect) -> Self {
         let pad = 16.0;
@@ -521,11 +548,22 @@ impl SettingsLayout {
             ));
             y += Self::ROW_H + Self::GAP;
         }
+        // Swatch strip sits under the main rows (before footer).
+        let n = theme::ACCENT_PRESETS.len();
+        let mut swatches = Vec::with_capacity(n);
+        let strip_w = n as f32 * Self::SWATCH + (n.saturating_sub(1) as f32) * Self::SWATCH_GAP;
+        let mut sx = modal.x + pad + ((modal.w - pad * 2.0) - strip_w).max(0.0) * 0.5;
+        let sy = y + 4.0;
+        for _ in 0..n {
+            swatches.push(Rect::new(sx, sy, Self::SWATCH, Self::SWATCH));
+            sx += Self::SWATCH + Self::SWATCH_GAP;
+        }
         Self {
             modal,
             pad,
             rows,
-            value_w: 100.0,
+            swatches,
+            value_w: 110.0,
         }
     }
 
@@ -740,18 +778,38 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_cycles_theme() {
+    fn hotkey_focuses_accent_and_reset() {
         let (path, mut s) = fresh();
-        assert_eq!(s.prefs.theme, "inkstone");
         assert!(s.handle_hotkey("3"));
-        assert_eq!(s.prefs.theme, "nord");
-        assert!(s.handle_hotkey("t"));
-        assert_eq!(s.prefs.theme, "dracula");
-        assert!(s.handle_hotkey("T"));
-        assert_eq!(s.prefs.theme, "nord");
+        assert_eq!(s.selected, settings_row::ACCENT);
+        let a0 = s.prefs.accent;
+        assert!(s.nudge_selected(1));
+        assert_ne!(s.prefs.accent, a0);
+        s.prefs.rain = false;
+        assert!(s.handle_hotkey("0"));
+        assert!(s.prefs.rain);
+        assert_eq!(s.prefs.accent, theme::DEFAULT_ACCENT);
         let lines = s.display_lines(false, 80, 24, 1).join("\n");
-        assert!(lines.contains("theme"));
-        assert!(lines.contains("Nord") || lines.contains("nord"));
+        assert!(lines.contains("accent"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn swatch_click_sets_accent_and_reset_row() {
+        let (path, mut s) = fresh();
+        s.open();
+        let lay = s.layout(900.0, 700.0);
+        assert_eq!(lay.swatches.len(), theme::ACCENT_PRESETS.len());
+        // Click second preset (nord frost).
+        let sw = lay.swatches[1];
+        assert!(s.try_click(sw.x + 4.0, sw.y + 4.0, 900.0, 700.0));
+        assert_eq!(s.selected, settings_row::ACCENT);
+        assert_eq!(s.prefs.accent, theme::ACCENT_PRESETS[1]);
+        // Reset row restores defaults (keeps nothing of custom accent).
+        assert!(s.activate_row(settings_row::RESET));
+        assert_eq!(s.prefs.accent, theme::DEFAULT_ACCENT);
+        assert!(s.prefs.rain);
+        assert!((s.prefs.glass_darken - config_store::GLASS_DARKEN_DEFAULT).abs() < 1e-4);
         cleanup(&path);
     }
 
@@ -816,6 +874,7 @@ mod tests {
             lens: false,
             glass_darken: 0.45,
             theme: "tokyo-night".into(),
+            accent: theme::TOKYO_NIGHT.jade,
             splash_seen: true,
         };
         {

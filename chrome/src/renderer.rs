@@ -43,6 +43,11 @@ fn secondary_label_rgba(pal: &crate::theme::ThemeColors, lift: f32, alpha: f32) 
     ]
 }
 
+/// True when two accents match closely (preset selection ring).
+fn accent_near(a: [f32; 3], b: [f32; 3]) -> bool {
+    (a[0] - b[0]).abs() < 0.02 && (a[1] - b[1]).abs() < 0.02 && (a[2] - b[2]).abs() < 0.02
+}
+
 /// Fallback mono cell metrics (Gohu uni14 design). Prefer [`Renderer::cell_metrics`].
 pub const CELL_W: f32 = 7.0;
 pub const CELL_H: f32 = 14.0;
@@ -1501,6 +1506,22 @@ fn push_modal_glass(
                 );
             }
         }
+        // Color swatch chips under the accent row (solid fill painted as labels).
+        let accent = settings.prefs.accent;
+        for (i, sw) in lay.swatches.iter().enumerate() {
+            let selected = crate::theme::ACCENT_PRESETS
+                .get(i)
+                .map(|rgb| accent_near(*rgb, accent))
+                .unwrap_or(false);
+            let kind = if selected {
+                PanelKind::ModalButtonActive
+            } else {
+                PanelKind::ModalFrost
+            };
+            panels.push(
+                PanelInstance::glass(*sw, sw.h * 0.35, kind).with_opacity(ease),
+            );
+        }
     }
 
     if palette.visible() {
@@ -1782,12 +1803,19 @@ fn push_modal_labels(
             title_c,
         ));
         let grid = session.active_grid();
-        let theme_val = crate::theme::label(&settings.prefs.theme).to_string();
+        let accent = settings.prefs.accent;
+        let accent_hex = crate::theme::to_hex(accent);
+        let accent_disp = format!("‹  {accent_hex}  ›");
         let darken_val = format!("‹  {:.0}%  ›", settings.prefs.glass_darken * 100.0);
-        let theme_disp = format!("‹  {theme_val}  ›");
         use crate::settings::settings_row;
-        // Labels only — booleans use glass switches; theme/darken show value.
-        let titles = ["Glyph rain", "Magnifier", "Theme", "Glass darken"];
+        // Booleans = glass switches; accent/darken show value; reset is label-only.
+        let titles = [
+            "Glyph rain",
+            "Magnifier",
+            "Accent color",
+            "Glass darken",
+            "Reset defaults",
+        ];
         let text_size = 13.0;
         for (i, row) in lay.rows.iter().enumerate() {
             let mut tc = bright;
@@ -1800,11 +1828,17 @@ fn push_modal_labels(
                 text_size,
                 tc,
             ));
-            if i == settings_row::THEME || i == settings_row::DARKEN {
-                let mut vc = muted;
-                vc[3] *= ease;
-                let val = if i == settings_row::THEME {
-                    theme_disp.as_str()
+            if i == settings_row::ACCENT || i == settings_row::DARKEN {
+                let vc = if i == settings_row::ACCENT {
+                    // Hex in the live accent so the picker feels immediate.
+                    [accent[0], accent[1], accent[2], 0.95 * ease]
+                } else {
+                    let mut c = muted;
+                    c[3] *= ease;
+                    c
+                };
+                let val = if i == settings_row::ACCENT {
+                    accent_disp.as_str()
                 } else {
                     darken_val.as_str()
                 };
@@ -1817,13 +1851,37 @@ fn push_modal_labels(
                 ));
             }
         }
+        // Preset color strip — solid block glyphs (arbitrary RGB) on glass chips.
+        for (i, sw) in lay.swatches.iter().enumerate() {
+            let Some(rgb) = crate::theme::ACCENT_PRESETS.get(i) else {
+                continue;
+            };
+            let selected = accent_near(*rgb, accent);
+            let fill = [rgb[0], rgb[1], rgb[2], 0.98 * ease];
+            // Full-block covers most of the 28² chip (bitmap font ~size).
+            labels.push(TextLabel::centered(
+                "██",
+                [sw.x, sw.y, sw.w, sw.h],
+                18.0,
+                fill,
+            ));
+            if selected {
+                let ink = crate::theme::contrasting_text(*rgb);
+                labels.push(TextLabel::centered(
+                    "✓",
+                    [sw.x, sw.y, sw.w, sw.h],
+                    12.0,
+                    [ink[0], ink[1], ink[2], 0.95 * ease],
+                ));
+            }
+        }
         let mut foot = dim;
         foot[3] *= ease * 0.9;
         let shell = if pty_active { "PTY live" } else { "mock shell" };
         // Navigation hints first — this is a real focusable list now.
         labels.push(TextLabel::new(
             format!(
-                "↑↓ move  ·  ⏎/click  ·  ←→ adjust  ·  {shell}  {}×{}",
+                "↑↓ move  ·  click swatch  ·  ←→ hue  ·  0 reset  ·  {shell}  {}×{}",
                 grid.cols(),
                 grid.rows(),
             ),
