@@ -156,12 +156,18 @@ impl CellGrid {
         self.visual_offset
     }
 
+    /// True while the smooth scroll offset is still catching up to the target.
+    #[inline]
+    pub fn scroll_animating(&self) -> bool {
+        (self.visual_offset - self.view_offset as f32).abs() > 0.02
+    }
+
     /// Ease `visual_offset` toward `view_offset`. Returns true if still moving.
     pub fn tick_scroll(&mut self, dt: f32) -> bool {
         let target = self.view_offset as f32;
         let dt = dt.clamp(0.0, 0.05);
         if dt <= 0.0 {
-            return (self.visual_offset - target).abs() > 0.02;
+            return self.scroll_animating();
         }
         let prev = self.visual_offset;
         let alpha = 1.0 - (-SCROLL_EASE_K * dt).exp();

@@ -10,7 +10,7 @@ use winit::{
     event::{
         DeviceEvent, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
     },
-    event_loop::ActiveEventLoop,
+    event_loop::{ActiveEventLoop, ControlFlow},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId},
 };
@@ -128,6 +128,10 @@ pub struct ChromeApp {
     status_publisher: StatusPublisher,
     /// UI / terminal zoom multiplier (⌘± / ⌘0). 1.0 = design size.
     ui_zoom: f32,
+    /// Skip rain shader briefly after typing so key frames stay light/snappy.
+    input_boost_until: Instant,
+    /// Last applied mono font id (avoid re-resolve every paint).
+    applied_font: String,
 }
 
 impl Default for ChromeApp {
@@ -181,6 +185,8 @@ impl Default for ChromeApp {
             control_mailbox: ControlMailbox::new(),
             ui_zoom: 1.0,
             status_publisher: StatusPublisher::new(),
+            input_boost_until: Instant::now(),
+            applied_font: String::new(),
         };
         // First-run overlay only — PTY already spawned above.
         if !app.settings.prefs.splash_seen {
@@ -1278,6 +1284,7 @@ impl ChromeApp {
             }
             HitTarget::Terminal(pane_id) => {
                 self.session.set_focus_pane(pane_id);
+                // Alt-screen TUIs own the keyboard; otherwise click focuses warp.
                 let alt = self
                     .runtimes
                     .get(&pane_id)
@@ -2057,6 +2064,12 @@ impl ChromeApp {
                             }
                         }
                     }
+                    self.bump_input_boost();
+                    // Drain immediately so echo can paint this frame, not after a full rain pass.
+                    self.drain_all_ptys();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                     return;
                 }
             }
@@ -2089,6 +2102,7 @@ impl ChromeApp {
                     }
                 }
             }
+            self.bump_input_boost();
         }
 
         if let Some(w) = &self.window {
@@ -2225,6 +2239,45 @@ impl ChromeApp {
             self.session.submit_draft_mock();
         }
     }
+
+    /// True when continuous frames are needed (rain, modal springs, scroll, etc.).
+    fn needs_anim_frame(&self) -> bool {
+        // Freeze rain briefly after keys so typing frames skip the rain pass.
+        if self.settings.prefs.rain && Instant::now() >= self.input_boost_until {
+            return true;
+        }
+        if self.selecting_term || self.scroll_dragging.is_some() {
+            return true;
+        }
+        if self.settings.visible()
+            || self.palette.visible()
+            || self.help.visible()
+            || self.confirm.visible()
+            || self.splash.visible()
+            || self.notes.visible()
+            || self.workspace_ui.visible()
+            || self.transfer.visible()
+            || self.rename.visible()
+            || self.toast.visible()
+        {
+            return true;
+        }
+        for pane in self.session.panes.values() {
+            if pane.grid.scroll_animating() {
+                return true;
+            }
+        }
+        // Caret blink while an input path is focused.
+        if self.warp_focused || self.terminal_focused {
+            return true;
+        }
+        false
+    }
+
+    /// Mark a short window where rain is frozen so typing/paint frames stay light.
+    fn bump_input_boost(&mut self) {
+        self.input_boost_until = Instant::now() + Duration::from_millis(200);
+    }
 }
 
 impl ApplicationHandler for ChromeApp {
@@ -2261,8 +2314,36 @@ impl ApplicationHandler for ChromeApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Lightweight wake path: drain PTY / mailboxes without a full GPU frame
+        // so key-repeat and shell output stay responsive between paints.
         self.drain_all_ptys();
+        for cmd in self.control_mailbox.poll() {
+            self.run_action(event_loop, cmd.to_action());
+            if matches!(cmd, crate::control_mailbox::ControlCommand::Quit) {
+                return;
+            }
+        }
+        if let Some(line) = chrome_status::take_submit() {
+            self.submit_line_text(&line);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+
+        // Schedule the next frame only when something is animating (rain, springs,
+        // scroll ease, caret blink). Idle → Wait (event-driven redraw on input).
+        let wake = if self.needs_anim_frame() {
+            Duration::from_millis(16) // ~60 Hz while animating
+        } else {
+            Duration::from_millis(33) // PTY poll cadence when idle
+        };
+        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + wake));
+        if self.needs_anim_frame() {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
     }
 
     fn device_event(
@@ -2693,18 +2774,22 @@ impl ApplicationHandler for ChromeApp {
                     event_loop.exit();
                     return;
                 }
-                // Apply mono font from settings before grid math / paint.
-                let font_changed = self
-                    .renderer
-                    .as_mut()
-                    .map(|r| r.set_mono_font_id(&self.settings.prefs.font))
-                    .unwrap_or(false);
-
-                self.sync_grids_to_panes();
-                if font_changed {
-                    // Cell pitch changed — resize PTY grids to the new metrics.
-                    self.sync_grids_to_panes();
+                // Apply mono font only when prefs change (not every paint).
+                let want_font = self.settings.prefs.font.clone();
+                if self.applied_font != want_font {
+                    let changed = self
+                        .renderer
+                        .as_mut()
+                        .map(|r| r.set_mono_font_id(&want_font))
+                        .unwrap_or(false);
+                    self.applied_font = want_font;
+                    if changed {
+                        // Cell pitch changed with font — re-grid below.
+                    }
                 }
+
+                // Cheap when cols/rows unchanged; needed during split animations.
+                self.sync_grids_to_panes();
                 self.update_chip_hover();
                 self.chip_ui.tick(dt);
 
@@ -2717,6 +2802,8 @@ impl ApplicationHandler for ChromeApp {
                     let pointer = self
                         .pointer_inside
                         .then_some((self.cursor.x, self.cursor.y));
+                    let skip_rain = Instant::now() < self.input_boost_until
+                        || self.selecting_term;
                     match r.render(
                         &self.session,
                         &self.settings,
@@ -2739,6 +2826,7 @@ impl ApplicationHandler for ChromeApp {
                         &self.chip_ui,
                         &self.term_selection,
                         self.hovered_link_span.as_ref(),
+                        skip_rain,
                     ) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -2753,9 +2841,9 @@ impl ApplicationHandler for ChromeApp {
                         Err(e) => eprintln!("wgpu render: {e:?}"),
                     }
                 }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                // Do NOT always chain request_redraw — that + heavy frames
+                // starved keyboard repeat. Continuous frames are scheduled
+                // from about_to_wait via needs_anim_frame().
             }
 
             _ => {}

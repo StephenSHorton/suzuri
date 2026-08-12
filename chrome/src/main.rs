@@ -49,7 +49,9 @@ use winit::event_loop::EventLoop;
 
 fn main() {
     let event_loop = EventLoop::new().expect("event loop");
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    // Wait (not Poll): wake on input or a short timer. Continuous Poll + full
+    // GPU frames starved keyboard repeat and made typing feel laggy.
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
 
     let mut app = app::ChromeApp::default();
     event_loop

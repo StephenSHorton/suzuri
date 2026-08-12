@@ -705,6 +705,8 @@ impl Renderer {
         term_selection: &Selection,
         // Hovered URL span for primary tint (focused pane; None = no-op).
         hovered_link: Option<&LinkHoverSpan>,
+        // When true, skip the rain GPU pass (reuse last rain RT) for snappy typing.
+        skip_rain: bool,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -1031,7 +1033,9 @@ impl Renderer {
                 },
             ],
         });
-        {
+        // Rain RT: redraw when enabled and not in input-boost; otherwise leave
+        // the previous frame in place (Load) so typing doesn't flash black.
+        if settings.prefs.rain && !skip_rain {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("rain"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1046,12 +1050,27 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if settings.prefs.rain {
-                pass.set_pipeline(&self.rain_pipeline);
-                pass.set_bind_group(0, &rain_bind, &[]);
-                pass.draw(0..3, 0..1);
-            }
+            pass.set_pipeline(&self.rain_pipeline);
+            pass.set_bind_group(0, &rain_bind, &[]);
+            pass.draw(0..3, 0..1);
+        } else if !settings.prefs.rain {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rain-clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.rain_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let _ = &mut pass;
         }
+        // skip_rain + rain on: keep previous rain_view (no pass)
 
         // Pass 1: composite glass chrome → scene RT (not swapchain)
         {
