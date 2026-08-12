@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  suzuri Microsoft Store / MSIX package manifest (template).
+
+  Placeholders filled by packaging/windows/build-msix.ps1 from identity.json:
+    {{PACKAGE_NAME}}            Partner Center → Product identity → Package/Identity/Name
+    {{PUBLISHER}}               Partner Center → Package/Identity/Publisher (exact CN=…)
+    {{PUBLISHER_DISPLAY_NAME}}  Partner Center → Publisher display name
+    {{VERSION}}                 4-part version; revision (last) MUST be 0 for Store
+    {{ARCHITECTURE}}            x64 | arm64 | x86
+    {{DISPLAY_NAME}}            Store listing display name (usually "suzuri")
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  IgnorableNamespaces="uap uap3 uap10 rescap desktop">
+
+  <Identity
+    Name="{{PACKAGE_NAME}}"
+    Publisher="{{PUBLISHER}}"
+    Version="{{VERSION}}"
+    ProcessorArchitecture="{{ARCHITECTURE}}" />
+
+  <Properties>
+    <DisplayName>{{DISPLAY_NAME}}</DisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
+    <Description>suzuri（硯）— native terminal host for Windows. Your window, ConPTY, GPU chrome.</Description>
+    <Logo>Images\StoreLogo.png</Logo>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <!-- Win10 2004+ for packagedClassicApp / uap10 trust attributes. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <!-- Full-trust Win32 desktop bridge — required for ConPTY + native window host. -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+  <Applications>
+    <Application
+      Id="App"
+      Executable="suzuri.exe"
+      uap10:RuntimeBehavior="packagedClassicApp"
+      uap10:TrustLevel="mediumIL">
+      <uap:VisualElements
+        DisplayName="{{DISPLAY_NAME}}"
+        Description="suzuri — native terminal host (inkstone)"
+        BackgroundColor="#0A0A0A"
+        Square150x150Logo="Images\Square150x150Logo.png"
+        Square44x44Logo="Images\Square44x44Logo.png">
+        <uap:DefaultTile
+          Square71x71Logo="Images\Square71x71Logo.png"
+          Wide310x150Logo="Images\Wide310x150Logo.png"
+          Square310x310Logo="Images\Square310x310Logo.png"
+          ShortName="suzuri" />
+        <uap:SplashScreen Image="Images\Square150x150Logo.png" BackgroundColor="#0A0A0A" />
+      </uap:VisualElements>
+
+      <!-- Optional: `suzuri` on PATH after install (user-level App Execution Alias). -->
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="suzuri.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

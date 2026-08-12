@@ -12,6 +12,9 @@ fyne-cross/
 suzuri.exe~
 *.exe~
 
+# Partner Center product identity (do not commit publisher CN)
+packaging/windows/msix/identity.json
+
 # Rust engines under libs/*
 libs/**/target/
 

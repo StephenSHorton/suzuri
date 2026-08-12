@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/StephenSHorton/suzuri/internal/appmeta"
 	"github.com/StephenSHorton/suzuri/internal/update"
 )
 
@@ -49,15 +50,23 @@ func RunCLI(version string, args []string) int {
 	}
 
 	gate := newApplyGate()
-	upd := update.New("", version)
-	upd.OnApplyBegin = func() { gate.Begin() }
-	upd.AfterRelaunch = func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	}
 	updStop := make(chan struct{})
-	go RunUpdateBridge(ctx, upd, gate, updStop)
+	// MSIX / Microsoft Store: package identity is immutable — GitHub
+	// self-update would fail or violate Store policy. The bridge still
+	// answers chrome's "Check for updates" with a Store-managed toast.
+	if appmeta.IsPackaged() {
+		fmt.Fprintf(os.Stderr, "suzuri: packaged install — GitHub auto-update disabled (%s)\n", appmeta.PackageFullName())
+		go RunUpdateBridge(ctx, nil, gate, updStop)
+	} else {
+		upd := update.New("", version)
+		upd.OnApplyBegin = func() { gate.Begin() }
+		upd.AfterRelaunch = func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+		}
+		go RunUpdateBridge(ctx, upd, gate, updStop)
+	}
 
 	err = cmd.Wait()
 	if gate.Applying() {

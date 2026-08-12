@@ -70,6 +70,21 @@ func TestApplyGate(t *testing.T) {
 	}
 }
 
+func TestNilServiceToastsStore(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+	b := newUpdateBridge(nil, newApplyGate())
+	b.runCheck(false)
+	body, err := os.ReadFile(updateEvtPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(body))
+	if got != "toast updates via Microsoft Store" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestUpdatePathsUseConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("LOCALAPPDATA", dir)
