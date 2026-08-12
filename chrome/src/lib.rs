@@ -6,6 +6,7 @@
 //! - [`layout`] — geometry contract (title / tabs / terminal hole / warp)
 //! - [`cells`] — cell grid buffer
 //! - [`ansi`] — VT decoder into a grid
+//! - [`selection`] — cell drag selection + copy text extraction
 //! - [`pty`] — portable local shell PTY
 //! - [`session`] — multi-tab session (grids only; PTY map owned by host)
 //! - [`input`] — hit-test
@@ -13,6 +14,8 @@
 //!
 //! Rendering (`renderer`, `text`, `app`) stays binary-only for now so library
 //! consumers can plug their own present loop.
+//!
+//! App wiring notes for mouse selection + OSC titles: see `chrome/TERMINAL_HOOKS.md`.
 
 pub mod ansi;
 pub mod cells;
@@ -21,6 +24,7 @@ pub mod input;
 pub mod layout;
 pub mod panes;
 pub mod pty;
+pub mod selection;
 pub mod session;
 pub mod settings;
 pub mod shell;

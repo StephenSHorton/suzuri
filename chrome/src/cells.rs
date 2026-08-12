@@ -116,6 +116,79 @@ impl CellGrid {
         self.view_offset
     }
 
+    /// Number of rows retained in scrollback (oldest first).
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Total absolute document lines = scrollback + live viewport rows.
+    pub fn abs_line_count(&self) -> usize {
+        self.scrollback.len() + self.rows as usize
+    }
+
+    /// Map a visible viewport row (0..rows) to an absolute document row.
+    ///
+    /// Absolute row 0 is the oldest scrollback line. When `view_offset == 0`,
+    /// viewport row 0 maps to the first live row (`scrollback_len()`).
+    pub fn viewport_to_abs(&self, row: u16) -> usize {
+        let top = self.scrollback.len().saturating_sub(self.view_offset);
+        top + row as usize
+    }
+
+    /// Map absolute document row → visible viewport row, if currently on-screen.
+    pub fn abs_to_viewport(&self, abs_row: usize) -> Option<u16> {
+        let top = self.scrollback.len().saturating_sub(self.view_offset);
+        let bottom = top + self.rows as usize;
+        if abs_row >= top && abs_row < bottom {
+            Some((abs_row - top) as u16)
+        } else {
+            None
+        }
+    }
+
+    /// Characters for an absolute document row (full width, no trim).
+    /// Out-of-range rows yield a blank line of spaces.
+    pub fn line_text_abs(&self, abs_row: usize) -> String {
+        let cols = self.cols as usize;
+        if abs_row < self.scrollback.len() {
+            let row = &self.scrollback[abs_row];
+            let mut s: String = row.iter().map(|c| c.ch).collect();
+            while s.chars().count() < cols {
+                s.push(' ');
+            }
+            // If scrollback row was wider (shouldn't happen), truncate.
+            if s.chars().count() > cols {
+                s = s.chars().take(cols).collect();
+            }
+            s
+        } else {
+            let live = abs_row - self.scrollback.len();
+            if live < self.rows as usize {
+                self.row_cells(live as u16).iter().map(|c| c.ch).collect()
+            } else {
+                " ".repeat(cols)
+            }
+        }
+    }
+
+    /// Cell at absolute document coordinates, if in range.
+    pub fn cell_at_abs(&self, col: u16, abs_row: usize) -> Option<Cell> {
+        if col >= self.cols {
+            return None;
+        }
+        if abs_row < self.scrollback.len() {
+            let row = &self.scrollback[abs_row];
+            row.get(col as usize).copied()
+        } else {
+            let live = abs_row - self.scrollback.len();
+            if live < self.rows as usize {
+                self.cell_at(col, live as u16).copied()
+            } else {
+                None
+            }
+        }
+    }
+
     /// Scroll the view into history (positive = up into scrollback).
     pub fn scroll_view(&mut self, delta_rows: i32) {
         if delta_rows == 0 {
@@ -567,5 +640,30 @@ mod tests {
         g.resize(3, 3);
         assert_eq!(g.snapshot_strings()[0], "abc");
         assert_eq!(g.snapshot_strings()[1], "ef");
+    }
+
+    #[test]
+    fn viewport_abs_roundtrip_at_bottom() {
+        let mut g = CellGrid::new(4, 3);
+        g.writeln("a");
+        g.writeln("b");
+        g.writeln("c");
+        g.writeln("d");
+        // view_offset 0: viewport row 0 → first live row
+        assert_eq!(g.view_offset(), 0);
+        let abs0 = g.viewport_to_abs(0);
+        assert_eq!(g.abs_to_viewport(abs0), Some(0));
+        assert_eq!(g.line_text_abs(abs0).chars().take(1).collect::<String>(), "c");
+    }
+
+    #[test]
+    fn line_text_abs_scrollback() {
+        let mut g = CellGrid::new(5, 2);
+        g.writeln("one");
+        g.writeln("two");
+        g.writeln("three");
+        assert!(g.scrollback_len() >= 1);
+        let t0 = g.line_text_abs(0);
+        assert!(t0.starts_with("one") || t0.starts_with("two"), "got {t0:?}");
     }
 }

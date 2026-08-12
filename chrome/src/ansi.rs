@@ -30,6 +30,8 @@ pub struct AnsiDecoder {
     osc_buf: Vec<u8>,
     /// Latest cwd from OSC 7 / 7878 (consumed by the host).
     pending_cwd: Option<String>,
+    /// Latest window/icon title from OSC 0 / 2 (consumed by the host).
+    pending_title: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -57,6 +59,7 @@ impl Default for AnsiDecoder {
             reverse: false,
             osc_buf: Vec::new(),
             pending_cwd: None,
+            pending_title: None,
         }
     }
 }
@@ -76,9 +79,17 @@ impl AnsiDecoder {
         self.pending_cwd.take()
     }
 
+    /// Take the latest OSC 0 / 2 window title, if any.
+    pub fn take_title(&mut self) -> Option<String> {
+        self.pending_title.take()
+    }
+
     fn finish_osc(&mut self) {
         if let Some(path) = parse_cwd_osc_payload(&self.osc_buf) {
             self.pending_cwd = Some(path);
+        }
+        if let Some(title) = parse_title_osc_payload(&self.osc_buf) {
+            self.pending_title = Some(title);
         }
         self.osc_buf.clear();
     }
@@ -570,6 +581,26 @@ fn parse_cwd_osc_payload(payload: &[u8]) -> Option<String> {
     None
 }
 
+/// Parse OSC 0 / 2 window title: `0;<title>` or `2;<title>` (also accepts `1;`).
+///
+/// Empty titles are ignored so a reset sequence does not blank the pane label.
+fn parse_title_osc_payload(payload: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(payload).ok()?;
+    let (code, rest) = s.split_once(';')?;
+    match code {
+        "0" | "1" | "2" => {
+            let title = rest.trim_end_matches(['\u{7}', '\0']);
+            // Keep internal whitespace; only reject fully empty.
+            if title.is_empty() {
+                None
+            } else {
+                Some(title.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
 fn file_uri_path(uri: &str) -> Option<String> {
     let uri = uri.trim();
     if !uri.starts_with("file:") {
@@ -654,6 +685,39 @@ mod tests {
         let mut grid = CellGrid::new(20, 5);
         dec.feed(&mut grid, b"\x1b]7878;cwd=/tmp/demo\x07");
         assert_eq!(dec.take_cwd().as_deref(), Some("/tmp/demo"));
+    }
+
+    #[test]
+    fn osc_0_and_2_set_title() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        dec.feed(&mut grid, b"\x1b]0;shell - main\x07");
+        assert_eq!(dec.take_title().as_deref(), Some("shell - main"));
+        assert!(dec.take_title().is_none());
+
+        dec.feed(&mut grid, b"\x1b]2;nvim\x07");
+        assert_eq!(dec.take_title().as_deref(), Some("nvim"));
+    }
+
+    #[test]
+    fn osc_title_st_terminator() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        // OSC 2 ... ST (ESC \)
+        dec.feed(&mut grid, b"\x1b]2;via-st\x1b\\");
+        assert_eq!(dec.take_title().as_deref(), Some("via-st"));
+    }
+
+    #[test]
+    fn osc_title_does_not_clobber_cwd() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        dec.feed(&mut grid, b"\x1b]2;title-only\x07");
+        assert_eq!(dec.take_title().as_deref(), Some("title-only"));
+        assert!(dec.take_cwd().is_none());
+        dec.feed(&mut grid, b"\x1b]7;file:///tmp\x07");
+        assert_eq!(dec.take_cwd().as_deref(), Some("/tmp"));
+        assert!(dec.take_title().is_none());
     }
 
     #[test]
