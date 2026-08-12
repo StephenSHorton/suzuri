@@ -519,6 +519,7 @@ mod tests {
             lens: false,
             glass_darken: 0.45,
             theme: "tokyo-night".into(),
+            splash_seen: true,
         };
         {
             let mut s = SettingsState::with_path(&path);
