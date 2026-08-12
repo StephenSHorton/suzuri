@@ -45,8 +45,9 @@ either spawn that process or later link a present loop.
 **Parallel tracks** add `notes`, `workspace_ui`, `transfer_ui`, `chrome_ui` —
 export them from `lib.rs` when those modules land so hosts see one crate root.
 
-Optional **C ABI stubs** (`--features ffi`, module `ffi`) pin symbols for cgo.
-Default `cargo build --release` does **not** enable `ffi`.
+Optional **C ABI** (`--features ffi`, module `ffi`): version/layout probes plus
+real session create/destroy/size/tab helpers (see Phase 3). Default
+`cargo build --release` does **not** enable `ffi`.
 
 ## How the Go host runs chrome today (standalone)
 
@@ -158,37 +159,76 @@ round-trip via the same config dir.
 host tools and chrome without dual stores; host can `SendCommand` to open
 overlays or quit without embedding the GPU loop.
 
-### Phase 3 — Library embed (Rust) or cgo staticlib
+### Phase 3 — Library embed (Rust) or cgo staticlib — **partial**
 
 Two embed options (pick one per platform later):
 
 **A. Process remains the product** (recommended longer):  
-chrome stays a separate binary; Go only orchestrates.
+chrome stays a separate binary; Go only orchestrates. **GPU UI stays here.**
 
-**B. In-process:**
+**B. In-process (session + metrics only today):**
 
 ```bash
 # Rust host or helper
 cargo build --release -p suzuri-chrome
 
-# C ABI stubs for experiment / metrics only
+# C ABI for cgo / static link experiments
 cargo rustc --release --features ffi --crate-type staticlib
 # → target/release/libsuzuri_chrome.a  (link from cgo)
 ```
 
+Build with `--features ffi` to export symbols from `src/ffi.rs`. Default
+`cargo build --release` does **not** enable `ffi`.
+
+#### Real C symbols (Phase 3 partial)
+
+Probe / layout (no session required):
+
+| Symbol | Notes |
+|--------|--------|
+| `suzuri_chrome_abi_version` | `uint32_t`; bump on ABI breaks |
+| `suzuri_chrome_version` | static NUL-terminated package version |
+| `suzuri_chrome_is_ready` | `1` when built with `ffi` |
+| `suzuri_chrome_layout_metrics` | default title/tab/edge/input strip (CSS-px) |
+
+Session handles (thread-safe process-wide registry, `std::sync::Mutex`):
+
+| Symbol | Notes |
+|--------|--------|
+| `suzuri_chrome_session_create(cols, rows)` | → non-zero `usize` handle; `0` dims clamp to `1` |
+| `suzuri_chrome_session_destroy(handle)` | remove; unknown/0 is no-op |
+| `suzuri_chrome_session_size(handle, *cols, *rows)` | `0` ok, `-1` bad handle / null |
+| `suzuri_chrome_session_cols` / `_rows` | size getters; `0` if invalid |
+| `suzuri_chrome_session_tab_count(handle)` | ≥0 tabs, or `-1` bad handle |
+| `suzuri_chrome_session_new_tab(handle)` | `0` ok, `-1` bad handle |
+| `suzuri_chrome_session_write_banner(handle)` | mock boot banner on active pane |
+
 ```c
-// sketch — see src/ffi.rs for real symbols
+// see src/ffi.rs for full signatures
 uint32_t suzuri_chrome_abi_version(void);
 const char *suzuri_chrome_version(void);
+int suzuri_chrome_is_ready(void);
 int suzuri_chrome_layout_metrics(float w, float h,
     float *title_h, float *tab_h, float *edge, float *input_strip_h);
+
+size_t suzuri_chrome_session_create(unsigned cols, unsigned rows);
+void   suzuri_chrome_session_destroy(size_t handle);
+int    suzuri_chrome_session_size(size_t handle, unsigned *cols, unsigned *rows);
+unsigned suzuri_chrome_session_cols(size_t handle);
+unsigned suzuri_chrome_session_rows(size_t handle);
+int    suzuri_chrome_session_tab_count(size_t handle);
+int    suzuri_chrome_session_new_tab(size_t handle);
+int    suzuri_chrome_session_write_banner(size_t handle);
 ```
 
-Full GPU present-in-process needs a host-owned event loop + window; that is
-**not** in the stub ABI. Until then, spawn (Phase 1) is the supported path.
+**Not in this ABI:** GPU present loop, winit window, wgpu surface, rain, or
+host event-loop embed. Product framebuffer remains **process-spawned**
+(`suzuri-chrome` / Phase 1–2 mailbox). Session handles are for hosts that want
+in-process tab/grid state (or cgo experiments) without linking the renderer.
 
 **Success criteria:** either stable spawn integration **or** a documented
-staticlib link with non-stub session APIs.
+staticlib link with non-stub session APIs — **session create/destroy/size/tabs
+landed**; GPU embed still future.
 
 ### Phase 4 — Retire surface / thin Go chrome
 
@@ -217,8 +257,9 @@ native chrome is the only framebuffer.
 | Command | Intent |
 |---------|--------|
 | `cargo build --release` | Product binary + `rlib` (default) |
-| `cargo build --release --features ffi` | Same + C ABI stubs in the rlib |
+| `cargo build --release --features ffi` | Same + C ABI (session + metrics) in the rlib |
 | `cargo rustc --release --features ffi --crate-type staticlib` | `.a` for cgo experiments |
+| `cargo test --features ffi` | Includes `ffi` session registry tests |
 | `cargo run --release` | Standalone window |
 
 ## Ownership
@@ -227,7 +268,7 @@ native chrome is the only framebuffer.
 |------|------|
 | `chrome/src/lib.rs` | Host-facing Rust modules + re-exports |
 | `chrome/src/control_mailbox.rs` | Phase 2 `chrome_cmd` poller |
-| `chrome/src/ffi.rs` | Optional C ABI stubs (`feature = "ffi"`) |
+| `chrome/src/ffi.rs` | Optional C ABI: metrics + session handles (`feature = "ffi"`) |
 | `chrome/HOST.md` | This document |
 | `chrome/src/main.rs` + `app` / `renderer` | Standalone binary only |
 | `internal/chromehost` | Go spawn + `SendCommand` mailbox |

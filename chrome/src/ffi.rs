@@ -8,16 +8,48 @@
 //! cargo rustc --release --features ffi --crate-type staticlib
 //! ```
 //!
-//! These are **stubs** that pin symbol names and calling conventions. Default
-//! builds (`cargo build --release`) do **not** include this module.
+//! Phase 3 partial: real **session handles** (create / destroy / size / tabs)
+//! live behind a process-wide mutex registry. Layout metrics and version
+//! probes stay available without a session. Default builds
+//! (`cargo build --release`) do **not** include this module.
 //!
-//! Production path today: spawn the `suzuri-chrome` binary (see `HOST.md`).
-//! In-process embed lands after the spawn integration proves layout/PTY IPC.
+//! GPU present-in-process is **not** in this ABI — spawn the `suzuri-chrome`
+//! binary (see `HOST.md` Phase 1–2) for the product framebuffer.
 
+use std::collections::HashMap;
 use std::os::raw::{c_char, c_int, c_uint};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+use crate::session::ChromeSession;
 
 /// C ABI version. Bump when breaking exported symbols or layouts.
 pub const ABI_VERSION: u32 = 1;
+
+/// Host-owned session: grid size at create time + [`ChromeSession`] state.
+struct FfiSession {
+    cols: u16,
+    rows: u16,
+    session: ChromeSession,
+}
+
+fn sessions() -> &'static Mutex<HashMap<usize, FfiSession>> {
+    static REG: OnceLock<Mutex<HashMap<usize, FfiSession>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Next non-zero handle id (starts at 1).
+static NEXT_HANDLE: AtomicUsize = AtomicUsize::new(1);
+
+fn clamp_dim(v: c_uint) -> u16 {
+    if v == 0 {
+        1
+    } else if v > u16::MAX as c_uint {
+        u16::MAX
+    } else {
+        v as u16
+    }
+}
 
 /// Returns the C ABI version. Always safe to call.
 #[no_mangle]
@@ -38,20 +70,158 @@ pub extern "C" fn suzuri_chrome_is_ready() -> c_int {
     1
 }
 
-/// Placeholder: create a host-owned session handle.
+/// Create a host-owned session handle with one tab / one pane at `cols`×`rows`.
 ///
-/// Returns `0` until the embed path is wired. Hosts should spawn
-/// `suzuri-chrome` (process) per `HOST.md` Phase 1–2.
+/// Dimensions of `0` are clamped to `1`. Returns a **non-zero** opaque handle,
+/// or `0` if the registry lock is poisoned.
+///
+/// Boot banner is not written automatically; call
+/// [`suzuri_chrome_session_write_banner`] if the host wants mock shell text.
 #[no_mangle]
-pub extern "C" fn suzuri_chrome_session_create(_cols: c_uint, _rows: c_uint) -> usize {
+pub extern "C" fn suzuri_chrome_session_create(cols: c_uint, rows: c_uint) -> usize {
+    let cols = clamp_dim(cols);
+    let rows = clamp_dim(rows);
+    let mut map = match sessions().lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    // Extremely defensive: skip 0 if the counter ever wraps.
+    let handle = if handle == 0 {
+        NEXT_HANDLE.fetch_add(1, Ordering::Relaxed)
+    } else {
+        handle
+    };
+    map.insert(
+        handle,
+        FfiSession {
+            cols,
+            rows,
+            session: ChromeSession::new(cols, rows),
+        },
+    );
+    handle
+}
+
+/// Destroy a session handle from [`suzuri_chrome_session_create`].
+///
+/// Unknown / zero handles are a no-op.
+#[no_mangle]
+pub extern "C" fn suzuri_chrome_session_destroy(handle: usize) {
+    if handle == 0 {
+        return;
+    }
+    if let Ok(mut map) = sessions().lock() {
+        map.remove(&handle);
+    }
+}
+
+/// Write session grid size into out-params.
+///
+/// Returns `0` on success, `-1` if the handle is invalid or a pointer is null.
+#[no_mangle]
+pub extern "C" fn suzuri_chrome_session_size(
+    handle: usize,
+    out_cols: *mut c_uint,
+    out_rows: *mut c_uint,
+) -> c_int {
+    if handle == 0 || out_cols.is_null() || out_rows.is_null() {
+        return -1;
+    }
+    let map = match sessions().lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    let Some(s) = map.get(&handle) else {
+        return -1;
+    };
+    unsafe {
+        *out_cols = s.cols as c_uint;
+        *out_rows = s.rows as c_uint;
+    }
     0
 }
 
-/// Placeholder: destroy a session handle from [`suzuri_chrome_session_create`].
-///
-/// No-op while create returns null handles.
+/// Columns for a session handle, or `0` if invalid.
 #[no_mangle]
-pub extern "C" fn suzuri_chrome_session_destroy(_handle: usize) {}
+pub extern "C" fn suzuri_chrome_session_cols(handle: usize) -> c_uint {
+    if handle == 0 {
+        return 0;
+    }
+    sessions()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&handle).map(|s| s.cols as c_uint))
+        .unwrap_or(0)
+}
+
+/// Rows for a session handle, or `0` if invalid.
+#[no_mangle]
+pub extern "C" fn suzuri_chrome_session_rows(handle: usize) -> c_uint {
+    if handle == 0 {
+        return 0;
+    }
+    sessions()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&handle).map(|s| s.rows as c_uint))
+        .unwrap_or(0)
+}
+
+/// Number of tabs in the session, or `-1` if the handle is invalid.
+#[no_mangle]
+pub extern "C" fn suzuri_chrome_session_tab_count(handle: usize) -> c_int {
+    if handle == 0 {
+        return -1;
+    }
+    let map = match sessions().lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    match map.get(&handle) {
+        Some(s) => s.session.tabs.len() as c_int,
+        None => -1,
+    }
+}
+
+/// Open a new tab (one pane) at the session's create-time size.
+///
+/// Returns `0` on success, `-1` if the handle is invalid.
+#[no_mangle]
+pub extern "C" fn suzuri_chrome_session_new_tab(handle: usize) -> c_int {
+    if handle == 0 {
+        return -1;
+    }
+    let mut map = match sessions().lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    let Some(s) = map.get_mut(&handle) else {
+        return -1;
+    };
+    let (cols, rows) = (s.cols, s.rows);
+    s.session.new_tab(cols, rows);
+    0
+}
+
+/// Write the mock boot banner + prompt into the active pane.
+///
+/// Returns `0` on success, `-1` if the handle is invalid.
+#[no_mangle]
+pub extern "C" fn suzuri_chrome_session_write_banner(handle: usize) -> c_int {
+    if handle == 0 {
+        return -1;
+    }
+    let mut map = match sessions().lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    let Some(s) = map.get_mut(&handle) else {
+        return -1;
+    };
+    s.session.boot_mock_on_active();
+    0
+}
 
 /// Write default layout metrics (logical CSS-px) into out-params.
 ///
@@ -129,5 +299,64 @@ mod tests {
             std::ptr::null_mut(),
         );
         assert_eq!(rc, -1);
+    }
+
+    #[test]
+    fn session_create_destroy_tab_count() {
+        let h = suzuri_chrome_session_create(80, 24);
+        assert_ne!(h, 0, "create must return a non-zero handle");
+        assert_eq!(suzuri_chrome_session_tab_count(h), 1);
+        assert_eq!(suzuri_chrome_session_cols(h), 80);
+        assert_eq!(suzuri_chrome_session_rows(h), 24);
+
+        let mut cols = 0u32;
+        let mut rows = 0u32;
+        assert_eq!(suzuri_chrome_session_size(h, &mut cols, &mut rows), 0);
+        assert_eq!(cols, 80);
+        assert_eq!(rows, 24);
+
+        assert_eq!(suzuri_chrome_session_new_tab(h), 0);
+        assert_eq!(suzuri_chrome_session_tab_count(h), 2);
+
+        assert_eq!(suzuri_chrome_session_write_banner(h), 0);
+
+        suzuri_chrome_session_destroy(h);
+        assert_eq!(suzuri_chrome_session_tab_count(h), -1);
+        assert_eq!(suzuri_chrome_session_cols(h), 0);
+        assert_eq!(suzuri_chrome_session_new_tab(h), -1);
+        assert_eq!(suzuri_chrome_session_write_banner(h), -1);
+    }
+
+    #[test]
+    fn session_bad_handle() {
+        assert_eq!(suzuri_chrome_session_tab_count(0), -1);
+        assert_eq!(suzuri_chrome_session_tab_count(999_999_999), -1);
+        assert_eq!(suzuri_chrome_session_new_tab(0), -1);
+        assert_eq!(suzuri_chrome_session_cols(0), 0);
+        assert_eq!(suzuri_chrome_session_rows(0), 0);
+        let mut c = 1u32;
+        let mut r = 1u32;
+        assert_eq!(suzuri_chrome_session_size(0, &mut c, &mut r), -1);
+        // destroy of unknown is safe
+        suzuri_chrome_session_destroy(0);
+        suzuri_chrome_session_destroy(42);
+    }
+
+    #[test]
+    fn session_create_clamps_zero_dims() {
+        let h = suzuri_chrome_session_create(0, 0);
+        assert_ne!(h, 0);
+        assert_eq!(suzuri_chrome_session_cols(h), 1);
+        assert_eq!(suzuri_chrome_session_rows(h), 1);
+        suzuri_chrome_session_destroy(h);
+    }
+
+    #[test]
+    fn is_ready_and_version() {
+        assert_eq!(suzuri_chrome_is_ready(), 1);
+        let v = suzuri_chrome_version();
+        assert!(!v.is_null());
+        let s = unsafe { std::ffi::CStr::from_ptr(v) };
+        assert!(!s.to_bytes().is_empty());
     }
 }
