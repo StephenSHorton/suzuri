@@ -1926,10 +1926,9 @@ fn push_modal_labels(
             if y + btn_h > max_y {
                 break;
             }
+            // Title and shortcut chord share the same label color (not dim).
             let mut tc = bright;
             tc[3] *= ease;
-            let mut dc = dim;
-            dc[3] *= ease;
             labels.push(TextLabel::new(
                 c.title.to_string(),
                 modal.x + pad + 12.0,
@@ -1941,8 +1940,8 @@ fn push_modal_labels(
                 c.desc.clone(),
                 modal.x + modal.w * 0.42,
                 y + 8.0,
-                11.0,
-                dc,
+                12.0,
+                tc,
             ));
             y += btn_h + gap;
         }

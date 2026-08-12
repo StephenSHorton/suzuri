@@ -59,20 +59,27 @@ fn mod_key() -> &'static str {
     }
 }
 
+/// Primary+Shift chord prefix (joined with `+` before the key via [`chord`]).
 fn mod_shift() -> String {
     if is_mac() {
-        "⇧⌘".into()
+        "⇧+⌘".into()
     } else {
-        "Ctrl+Shift+".into()
+        "Ctrl+Shift".into()
     }
 }
 
+/// Primary+Alt/Option chord prefix.
 fn mod_alt() -> String {
     if is_mac() {
-        "⌥⌘".into()
+        "⌥+⌘".into()
     } else {
-        "Ctrl+Alt+".into()
+        "Ctrl+Alt".into()
     }
+}
+
+/// Join modifiers and key with `+` (⌘+K, ⇧+⌘+T, Ctrl+Shift+N).
+fn chord(mods: &str, key: &str) -> String {
+    format!("{mods}+{key}")
 }
 
 /// Full command list for palette + help sheet.
@@ -84,28 +91,28 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "palette",
             title: "Command palette",
-            desc: format!("{m}K · Navigate"),
+            desc: format!("{} · Navigate", chord(m, "K")),
             category: "Navigate",
             action: CommandAction::OpenPalette,
         },
         Command {
             id: "settings",
             title: "Settings",
-            desc: format!("{m}, · Appearance"),
+            desc: format!("{} · Appearance", chord(m, ",")),
             category: "Appearance",
             action: CommandAction::OpenSettings,
         },
         Command {
             id: "help",
             title: "Keyboard shortcuts",
-            desc: format!("{m}/ · Help"),
+            desc: format!("{} · Help", chord(m, "/")),
             category: "Help",
             action: CommandAction::OpenHelp,
         },
         Command {
             id: "notes",
             title: "Notes",
-            desc: format!("{ms}M · Notes"),
+            desc: format!("{} · Notes", chord(&ms, "M")),
             category: "Notes",
             action: CommandAction::OpenNotes,
         },
@@ -119,7 +126,7 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "workspace_cycle_status",
             title: "Cycle workspace status",
-            desc: format!("{ms}A · idle→working→waiting·… · Workspace"),
+            desc: format!("{} · idle→working→waiting·… · Workspace", chord(&ms, "A")),
             category: "Workspace",
             action: CommandAction::CycleWorkspaceStatus,
         },
@@ -168,14 +175,14 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "new_tab",
             title: "New tab",
-            desc: format!("{m}T · Tabs"),
+            desc: format!("{} · Tabs", chord(m, "T")),
             category: "Tabs",
             action: CommandAction::NewTab,
         },
         Command {
             id: "close_tab",
             title: "Close tab / pane",
-            desc: format!("{m}W · Tabs · Panes"),
+            desc: format!("{} · Tabs · Panes", chord(m, "W")),
             category: "Tabs",
             action: CommandAction::CloseTab,
         },
@@ -189,28 +196,28 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "next_tab",
             title: "Next tab",
-            desc: format!("{ms}] · Tabs"),
+            desc: format!("{} · Tabs", chord(&ms, "]")),
             category: "Tabs",
             action: CommandAction::NextTab,
         },
         Command {
             id: "prev_tab",
             title: "Previous tab",
-            desc: format!("{ms}[ · Tabs"),
+            desc: format!("{} · Tabs", chord(&ms, "[")),
             category: "Tabs",
             action: CommandAction::PrevTab,
         },
         Command {
             id: "split_right",
             title: "Split right",
-            desc: format!("{ms}D · Panes · jelly open"),
+            desc: format!("{} · Panes · jelly open", chord(&ms, "D")),
             category: "Panes",
             action: CommandAction::SplitRight,
         },
         Command {
             id: "split_down",
             title: "Split down",
-            desc: format!("{ms}E · Panes · jelly open"),
+            desc: format!("{} · Panes · jelly open", chord(&ms, "E")),
             category: "Panes",
             action: CommandAction::SplitDown,
         },
@@ -224,35 +231,35 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "close_pane",
             title: "Close pane",
-            desc: format!("{m}W · Panes"),
+            desc: format!("{} · Panes", chord(m, "W")),
             category: "Panes",
             action: CommandAction::ClosePane,
         },
         Command {
             id: "focus_left",
             title: "Focus pane left",
-            desc: format!("{ma}← · Panes"),
+            desc: format!("{} · Panes", chord(&ma, "←")),
             category: "Panes",
             action: CommandAction::FocusLeft,
         },
         Command {
             id: "focus_right",
             title: "Focus pane right",
-            desc: format!("{ma}→ · Panes"),
+            desc: format!("{} · Panes", chord(&ma, "→")),
             category: "Panes",
             action: CommandAction::FocusRight,
         },
         Command {
             id: "focus_up",
             title: "Focus pane up",
-            desc: format!("{ma}↑ · Panes"),
+            desc: format!("{} · Panes", chord(&ma, "↑")),
             category: "Panes",
             action: CommandAction::FocusUp,
         },
         Command {
             id: "focus_down",
             title: "Focus pane down",
-            desc: format!("{ma}↓ · Panes"),
+            desc: format!("{} · Panes", chord(&ma, "↓")),
             category: "Panes",
             action: CommandAction::FocusDown,
         },
@@ -273,7 +280,7 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "new_window",
             title: "New window",
-            desc: format!("{ms}N · Window"),
+            desc: format!("{} · Window", chord(&ms, "N")),
             category: "Window",
             action: CommandAction::NewWindow,
         },
@@ -738,6 +745,26 @@ mod tests {
                 "splash key chord should use + separators: {key}"
             );
         }
+    }
+
+    #[test]
+    fn command_descs_use_plus_chords() {
+        let all = default_commands();
+        let palette = all.iter().find(|c| c.id == "palette").unwrap();
+        assert!(
+            palette.desc.contains('+'),
+            "palette chord should use +: {}",
+            palette.desc
+        );
+        let new_win = all.iter().find(|c| c.id == "new_window").unwrap();
+        assert!(
+            new_win.desc.contains('+'),
+            "new_window chord should use +: {}",
+            new_win.desc
+        );
+        // Sanity: chord() helper
+        assert_eq!(chord("⌘", "K"), "⌘+K");
+        assert_eq!(chord("⇧+⌘", "T"), "⇧+⌘+T");
     }
 
     #[test]
