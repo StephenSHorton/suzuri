@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to identity.json (gitignored) and fill from Partner Center → Product management → Product identity. See packaging/windows/STORE.md.",
+  "packageName": "YourPublisher.suzuri",
+  "publisher": "CN=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
+  "publisherDisplayName": "Your Name Or Company",
+  "displayName": "suzuri"
+}

@@ -83,9 +83,6 @@ func newUpdateBridge(svc *update.Service, gate *applyGate) *updateBridge {
 // writes toast/offer events. stop is closed when the UI process exits without
 // an in-flight apply.
 func RunUpdateBridge(ctx context.Context, svc *update.Service, gate *applyGate, stop <-chan struct{}) {
-	if svc == nil {
-		return
-	}
 	b := newUpdateBridge(svc, gate)
 	_ = os.Remove(updateReqPath())
 	_ = os.Remove(updateEvtPath())
@@ -134,7 +131,7 @@ func bytesTrim(b []byte) []byte {
 
 func (b *updateBridge) runCheck(quiet bool) {
 	if b.svc == nil {
-		writeUpdateEvt("toast updates unavailable")
+		writeUpdateEvt("toast updates via Microsoft Store")
 		return
 	}
 	if !b.checkRunning.CompareAndSwap(false, true) {

@@ -1,0 +1,7 @@
+{
+  "_comment": "Local sideload / CI smoke identity. NOT for Store upload. Publisher matches the self-signed cert created by build-msix.ps1 -SignDev.",
+  "packageName": "Suzuri.Dev",
+  "publisher": "CN=Suzuri Dev",
+  "publisherDisplayName": "Suzuri Dev",
+  "displayName": "suzuri (dev)"
+}

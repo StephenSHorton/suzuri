@@ -34,7 +34,7 @@ chrome — not HTML and not Charm.
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics / control |
 | **Workspace** | Shared local channels, presence, tinted chat bubbles |
 | **Transfer** | Peer-to-peer send/receive (palette + CLI) |
-| **Updates** | Startup check + palette **Check for updates** (GitHub Releases; confirm before install) |
+| **Updates** | Startup check + palette **Check for updates** (GitHub Releases; confirm before install; disabled in Microsoft Store / MSIX builds) |
 
 ## Download
 
@@ -117,14 +117,15 @@ derived from it (or set manually). **Reset defaults** restores factory prefs.
 Release builds embed a version via `-ldflags -X main.version=…`. On startup
 (and via palette **Check for updates**), suzuri queries GitHub Releases. If a
 newer version exists, a confirmation modal offers install. The portable zip
-payload updates host + UI + transfer together when present.
+payload updates host + UI + transfer together when present. **Microsoft Store /
+MSIX** installs skip GitHub self-update (the Store owns updates).
 
 ## Packaging / CI
 
 | Workflow | Purpose |
 |----------|---------|
 | **CI** | `go test` + build |
-| **Release** | Tag `v*.*.*` → macOS / Windows assets + `SHA256SUMS` (includes UI binary) |
+| **Release** | Tag `v*.*.*` → macOS / Windows assets + Store MSIX + `SHA256SUMS` (includes UI binary) |
 | **Pages** | Site under `docs/site` |
 
 ```bash

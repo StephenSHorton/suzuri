@@ -193,6 +193,49 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
           Get-Item $out | Format-List Name, Length, FullName
 
+      # Microsoft Store MSIX (unsigned — Partner Center / Store re-signs).
+      # Uses identity.dev.json in CI so packaging always smoke-tests.
+      # For a Store-identity package, put Partner Center values in the
+      # MSIX_IDENTITY_JSON repo secret (full identity.json body) — optional.
+      - name: Windows MSIX package
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        env:
+          MSIX_IDENTITY_JSON: ${{ secrets.MSIX_IDENTITY_JSON }}
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $root = (Get-Location).Path
+          $idDir = Join-Path $root "packaging\windows\msix"
+          $msixOut = Join-Path $root "dist-msix"
+          $exe = Join-Path $root "suzuri.exe"
+          $xfer = Join-Path $root "suzuri-transfer.exe"
+          $chrome = Join-Path $root "suzuri-chrome.exe"
+          if (-not (Test-Path $xfer)) { throw "missing $xfer" }
+          if (-not (Test-Path $chrome)) { throw "missing $chrome" }
+          $script = Join-Path $root "packaging\windows\build-msix.ps1"
+          $common = @{
+            Version  = $v
+            Exe      = $exe
+            Transfer = $xfer
+            Chrome   = $chrome
+            OutDir   = $msixOut
+            Arch     = "x64"
+          }
+          if ($env:MSIX_IDENTITY_JSON) {
+            $prod = Join-Path $idDir "identity.json"
+            Set-Content -Path $prod -Value $env:MSIX_IDENTITY_JSON -Encoding UTF8
+            Write-Host "Using Partner Center identity from secret MSIX_IDENTITY_JSON"
+            & $script @common
+          } else {
+            Write-Host "No MSIX_IDENTITY_JSON secret — building dev-identity MSIX (not for Store upload)"
+            & $script @common -IdentityDev
+          }
+          if ($LASTEXITCODE -ne 0) { throw "build-msix.ps1 failed: $LASTEXITCODE" }
+          Get-ChildItem $msixOut -Filter "suzuri-*.msix" | ForEach-Object {
+            Copy-Item $_.FullName (Join-Path $root $_.Name) -Force
+            Get-Item (Join-Path $root $_.Name) | Format-List Name, Length, FullName
+          }
+
       # Import Developer ID cert when secrets are configured (optional).
       # Without secrets, build-app.sh falls back to ad-hoc signing.
       # Note: do not use `secrets.*` in `if:` — GitHub rejects the workflow file.
