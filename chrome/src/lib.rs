@@ -10,6 +10,7 @@
 //! - [`session`] — multi-tab session (grids only; PTY map owned by host)
 //! - [`input`] — hit-test
 //! - [`settings`] — settings overlay state
+//! - [`config_store`] — chrome prefs JSON (`chrome_prefs.json`, not product config)
 //!
 //! Rendering (`renderer`, `text`, `app`) stays binary-only for now so library
 //! consumers can plug their own present loop.
@@ -17,6 +18,7 @@
 pub mod ansi;
 pub mod cells;
 pub mod commands;
+pub mod config_store;
 pub mod input;
 pub mod layout;
 pub mod panes;

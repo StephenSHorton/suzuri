@@ -8,6 +8,7 @@ mod ansi;
 mod app;
 mod cells;
 mod commands;
+mod config_store;
 mod input;
 mod layout;
 #[cfg(target_os = "macos")]
