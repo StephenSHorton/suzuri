@@ -32,8 +32,13 @@ go build -o suzuri ./cmd/suzuri && ./suzuri chrome
 - Expanded `chrome_cmd` IPC (settings/help/transfer/new_tab/caffeine)
 - Copy toasts (`Copied` / `Ticket copied`)
 
+## Wave 6 ✅
+- New window (second process · palette / ⌃⇧N · mailbox `new_window`)
+- FFI session create/destroy + tabs (`--features ffi`; GPU still spawn)
+- Workspace auto-refresh (~1s) + presence cycle + `refresh_workspace`
+- Selection word/line drag modes (500ms multi-click · extend by word/line)
+
 ## Later
-- Multi-window
-- In-process FFI / deeper Go embed
-- MCP attach polish
-- Selection word/line UX polish
+- In-process GPU embed (full present loop)
+- MCP bridge in-process (beyond disk refresh)
+- Default install ships chrome as primary UI
