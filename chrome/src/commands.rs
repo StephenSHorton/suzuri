@@ -33,6 +33,8 @@ pub enum CommandAction {
     RenameTab,
     /// Open rename dialog for the focused pane (F2).
     RenamePane,
+    /// Spawn a second OS window (new process of this binary).
+    NewWindow,
     Quit,
 }
 
@@ -256,6 +258,13 @@ pub fn default_commands() -> Vec<Command> {
             desc: "Pinch or ⌃/⌘+scroll · Settings 2".into(),
             category: "Appearance",
             action: CommandAction::ToggleLens,
+        },
+        Command {
+            id: "new_window",
+            title: "New window",
+            desc: format!("{ms}N · Window"),
+            category: "Window",
+            action: CommandAction::NewWindow,
         },
         Command {
             id: "quit",
@@ -585,6 +594,21 @@ mod tests {
         assert!(idx.iter().any(|&i| all[i].id == "rename_pane"));
         assert!(all.iter().any(|c| c.action == CommandAction::RenameTab));
         assert!(all.iter().any(|c| c.action == CommandAction::RenamePane));
+    }
+
+    #[test]
+    fn registry_contains_new_window() {
+        let all = default_commands();
+        let cmd = all
+            .iter()
+            .find(|c| c.id == "new_window")
+            .expect("new_window command");
+        assert_eq!(cmd.title, "New window");
+        assert_eq!(cmd.category, "Window");
+        assert_eq!(cmd.action, CommandAction::NewWindow);
+        assert!(all.iter().any(|c| c.action == CommandAction::NewWindow));
+        let idx = filter_commands(&all, "new window");
+        assert!(idx.iter().any(|&i| all[i].id == "new_window"));
     }
 
     #[test]

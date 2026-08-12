@@ -15,6 +15,7 @@
 //! - `open_transfer_receive`
 //! - `open_help`
 //! - `new_tab`
+//! - `new_window`
 //! - `toggle_caffeine`
 
 use std::fs;
@@ -42,6 +43,7 @@ pub enum ControlCommand {
     OpenTransferReceive,
     OpenHelp,
     NewTab,
+    NewWindow,
     ToggleCaffeine,
 }
 
@@ -58,6 +60,7 @@ impl ControlCommand {
             "open_transfer_receive" => Some(Self::OpenTransferReceive),
             "open_help" => Some(Self::OpenHelp),
             "new_tab" => Some(Self::NewTab),
+            "new_window" => Some(Self::NewWindow),
             "toggle_caffeine" => Some(Self::ToggleCaffeine),
             _ => None,
         }
@@ -75,6 +78,7 @@ impl ControlCommand {
             Self::OpenTransferReceive => CommandAction::OpenTransferReceive,
             Self::OpenHelp => CommandAction::OpenHelp,
             Self::NewTab => CommandAction::NewTab,
+            Self::NewWindow => CommandAction::NewWindow,
             Self::ToggleCaffeine => CommandAction::ToggleCaffeine,
         }
     }
@@ -91,6 +95,7 @@ impl ControlCommand {
             Self::OpenTransferReceive => "open_transfer_receive",
             Self::OpenHelp => "open_help",
             Self::NewTab => "new_tab",
+            Self::NewWindow => "new_window",
             Self::ToggleCaffeine => "toggle_caffeine",
         }
     }
@@ -251,6 +256,10 @@ mod tests {
         );
         assert_eq!(ControlCommand::parse("new_tab"), Some(ControlCommand::NewTab));
         assert_eq!(
+            ControlCommand::parse("new_window"),
+            Some(ControlCommand::NewWindow)
+        );
+        assert_eq!(
             ControlCommand::parse("toggle_caffeine"),
             Some(ControlCommand::ToggleCaffeine)
         );
@@ -297,6 +306,10 @@ mod tests {
         );
         assert_eq!(ControlCommand::NewTab.to_action(), CommandAction::NewTab);
         assert_eq!(
+            ControlCommand::NewWindow.to_action(),
+            CommandAction::NewWindow
+        );
+        assert_eq!(
             ControlCommand::ToggleCaffeine.to_action(),
             CommandAction::ToggleCaffeine
         );
@@ -314,6 +327,7 @@ mod tests {
             ControlCommand::OpenTransferReceive,
             ControlCommand::OpenHelp,
             ControlCommand::NewTab,
+            ControlCommand::NewWindow,
             ControlCommand::ToggleCaffeine,
         ];
         for cmd in all {
