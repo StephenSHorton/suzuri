@@ -2,34 +2,37 @@
 
 Branch: `exp/native-chrome`
 
-## Agent tracks (merged)
+## Wave 1 (merged)
 
-| Track | Commit / merge | Status |
-|-------|----------------|--------|
-| Notes bank | `6074cc8` + integrate | ✅ |
-| Workspace chat | `f76636f` + integrate | ✅ |
-| Transfer engine | `6100c2d` / `bdbf199` | ✅ |
-| Terminal selection | `47ddb3b` / `d8c450b` + app wire | ✅ |
-| Settings persist | `635f301` / `d9154bc` | ✅ |
-| Host merge surface | `0ab23fe` / `a82c598` | ✅ |
+| Track | Status |
+|-------|--------|
+| Notes bank | ✅ |
+| Workspace chat | ✅ |
+| Transfer engine | ✅ |
+| Terminal selection | ✅ |
+| Settings persist | ✅ |
+| Host merge surface | ✅ |
 
-## Wave 2 (in flight)
+## Wave 2 (merged)
 
-| Track | Goal |
-|-------|------|
-| G | Selection **highlight** paint in renderer |
-| H | Transfer OS **drag-drop** + ticket **copy chip** |
-| I | Go host **spawn** `suzuri-chrome` (`HOST.md` phase 1) |
-| J | Notes **undo** + title focus polish |
+| Track | Status |
+|-------|--------|
+| Selection highlight paint | ✅ |
+| Transfer drag-drop + ticket copy | ✅ |
+| Go host `suzuri chrome` spawn | ✅ |
+| Notes undo + title focus | ✅ |
 
-## Later waves
+## Later
 
 - Workspace presence + file attach + MCP agents
 - Full theme catalog / multi-window
-- In-process FFI embed (after spawn)
+- In-process FFI embed after spawn
+- Selection multi-click word/line polish
 
 ## Run
 
 ```bash
-cd chrome && cargo run --release
+cd chrome && cargo build --release && ./target/release/suzuri-chrome
+# product host:
+go build -o suzuri ./cmd/suzuri && ./suzuri chrome
 ```

@@ -6,12 +6,14 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::cells::theme;
 use crate::chrome_ui::{ChipUi, TabJelly};
 use crate::commands::{filter_commands, Command, HelpState, PaletteState};
 use crate::input::{is_mac, traffic_light_rects};
 use crate::layout::{FrameLayout, Metrics, PaneLayout, PanelInstance};
 use crate::rain_atlas::RainAtlas;
 use crate::rain_sim;
+use crate::selection::Selection;
 use crate::session::ChromeSession;
 use crate::caffeine::Caffeine;
 use crate::notes::NotesState;
@@ -19,6 +21,9 @@ use crate::settings::SettingsState;
 use crate::transfer_ui::TransferUi;
 use crate::workspace_ui::WorkspaceUi;
 use crate::text::{TextLabel, TextLayer, CARET_BLOCK, CARET_RGB};
+
+/// Jade selection wash alpha for full-block underlay (`█` mono labels).
+const SELECTION_ALPHA: f32 = 0.32;
 
 /// Mono cell metrics for GohuFont uni14 (product design size 14px).
 /// Width ≈ half em of a 14px bitmap mono; height matches line box used in text layer.
@@ -650,6 +655,8 @@ impl Renderer {
         input_caret_alpha: f32,
         pointer: Option<(f32, f32)>,
         chip_ui: &ChipUi,
+        // Active terminal selection (focused pane only; empty is a no-op).
+        term_selection: &Selection,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -985,6 +992,7 @@ impl Renderer {
             input_caret_alpha,
             chip_ui,
             &self.tab_jelly,
+            term_selection,
         );
         self.text.prepare(&self.device, &self.queue, &labels);
         self.text
@@ -1086,6 +1094,7 @@ fn chrome_labels(
     input_caret_alpha: f32,
     chip_ui: &ChipUi,
     tab_jelly: &TabJelly,
+    term_selection: &Selection,
 ) -> Vec<TextLabel> {
     use crate::chrome_ui::{scale_rect, ChipId};
     let muted = [0.75, 0.90, 0.80, 0.85];
@@ -1180,7 +1189,13 @@ fn chrome_labels(
             continue;
         };
         let show_cursor = terminal_cursor_visible && pl.pane_id == focus;
-        push_pane_cells(&mut labels, pl, pane, show_cursor);
+        // Selection is one global model for the focused leaf; other panes get none.
+        let pane_sel = if pl.pane_id == focus {
+            Some(term_selection)
+        } else {
+            None
+        };
+        push_pane_cells(&mut labels, pl, pane, show_cursor, pane_sel);
 
         // Footer is UI chrome (not terminal grid) — no ASCII dashes, no cell overflow.
         // Hairline is drawn as a glass panel; path + input are normal UI labels.
@@ -1994,11 +2009,21 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// Paint terminal cells; optional selection underlay for the focused pane.
+///
+/// # Selection highlight
+/// Uses full-block mono glyphs (`█`) with jade at [`SELECTION_ALPHA`] behind
+/// cell text — same pipeline as ANSI bg, no glass/shader fill pass.
+///
+/// Remaining hooks (app / host): multi-click word/line select, right-click
+/// copy-or-paste, clear on focus change / resize / alt-screen, optional
+/// extend-while-scrolling under the cursor. See `TERMINAL_HOOKS.md`.
 fn push_pane_cells(
     labels: &mut Vec<TextLabel>,
     pl: &PaneLayout,
     pane: &crate::session::Pane,
     cursor_visible: bool,
+    selection: Option<&Selection>,
 ) {
     let mono_size = 14.0; // Gohu design size (product FontSizePx)
     let origin_x = pl.cells.x;
@@ -2006,16 +2031,31 @@ fn push_pane_cells(
     let grid = &pane.grid;
     let cursor = grid.cursor();
     let live_view = grid.view_offset() == 0;
+    let sel = selection.filter(|s| !s.is_empty());
 
     for row in 0..grid.rows() {
         let cells = grid.visible_row_cells(row);
         if cells.is_empty() {
             continue;
         }
+        let abs_row = grid.viewport_to_abs(row);
         let has_content = cells.iter().any(|c| c.ch != ' ' || c.bg.is_some());
         let has_cursor = cursor_visible && live_view && cursor.row == row;
-        if !has_content && !has_cursor {
+        let has_selection =
+            sel.is_some_and(|s| (0..grid.cols()).any(|c| s.contains(c, abs_row)));
+        if !has_content && !has_cursor && !has_selection {
             continue;
+        }
+
+        let y = origin_y + row as f32 * CELL_H;
+        // Never paint terminal cells into the footer / past the cells rect.
+        if y + CELL_H > pl.cells.y + pl.cells.h + 0.5 {
+            break;
+        }
+
+        // Selection wash under glyphs (and under ANSI cell bg when both apply).
+        if let Some(s) = sel {
+            push_selection_row(labels, s, origin_x, y, mono_size, grid.cols(), abs_row);
         }
 
         let mut col = 0usize;
@@ -2042,11 +2082,6 @@ fn push_pane_cells(
             }
 
             let x = origin_x + start as f32 * CELL_W;
-            let y = origin_y + row as f32 * CELL_H;
-            // Never paint terminal cells into the footer / past the cells rect.
-            if y + CELL_H > pl.cells.y + pl.cells.h + 0.5 {
-                break;
-            }
             if let Some(bg) = bg {
                 let blocks: String = "█".repeat(text.chars().count().max(1));
                 labels.push(TextLabel::mono(
@@ -2077,6 +2112,40 @@ fn push_pane_cells(
                 [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], 0.55],
             ));
         }
+    }
+}
+
+/// Contiguous jade full-block runs for one viewport row of the selection.
+fn push_selection_row(
+    labels: &mut Vec<TextLabel>,
+    selection: &Selection,
+    origin_x: f32,
+    y: f32,
+    mono_size: f32,
+    cols: u16,
+    abs_row: usize,
+) {
+    let mut col = 0u16;
+    while col < cols {
+        if !selection.contains(col, abs_row) {
+            col += 1;
+            continue;
+        }
+        let start = col;
+        col += 1;
+        while col < cols && selection.contains(col, abs_row) {
+            col += 1;
+        }
+        let n = (col - start) as usize;
+        let x = origin_x + start as f32 * CELL_W;
+        let blocks: String = "█".repeat(n.max(1));
+        labels.push(TextLabel::mono(
+            blocks,
+            x,
+            y,
+            mono_size,
+            [theme::JADE[0], theme::JADE[1], theme::JADE[2], SELECTION_ALPHA],
+        ));
     }
 }
 
