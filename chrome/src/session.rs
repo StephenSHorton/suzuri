@@ -140,6 +140,20 @@ impl ChromeSession {
         }
     }
 
+    /// Apply an OSC 0/2 window title to a pane only (not the chrome tab strip).
+    ///
+    /// Product rule: OSC renames panes; multi-pane tabs keep a sticky strip title.
+    /// Empty titles are ignored.
+    pub fn set_pane_title(&mut self, pane_id: u64, title: String) {
+        let title = title.trim();
+        if title.is_empty() {
+            return;
+        }
+        if let Some(p) = self.panes.get_mut(&pane_id) {
+            p.title = title.to_string();
+        }
+    }
+
     pub fn apply_cwd_after_command(&mut self, line: &str) {
         let id = self.focus_pane_id();
         let Some(p) = self.panes.get_mut(&id) else {
