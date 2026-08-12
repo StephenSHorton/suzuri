@@ -287,7 +287,7 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "quit",
             title: "Quit",
-            desc: "Esc (when idle) · Window".into(),
+            desc: format!("{} · Window", chord(&ms, "Q")),
             category: "Window",
             action: CommandAction::Quit,
         },
