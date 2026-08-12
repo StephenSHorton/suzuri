@@ -4,21 +4,24 @@
 //! via [`crate::workspace_store`], matching product `internal/workspace`.
 //!
 //! Public surface used by `app` / `renderer` (preserve):
-//! - fields: `open`, `channel`, `draft`, `messages`, `channels`
+//! - fields: `open`, `channel`, `draft`, `messages`, `channels`, `members`
 //! - glass: `visible`, `open`, `close`, `toggle`, `tick`, `content_ease`,
 //!   `scrim_alpha`, `animated_modal_rect`
 //! - compose: `insert_char`, `backspace`, `send`
 //! - channels: `select_channel`
+//! - presence / attach: `join_self`, `attach_path`, `members_strip_text`
 //!
 //! See `chrome/WORKSPACE_HOOKS.md` for hit-test layout constants and hooks.
 
+use std::path::Path;
+
 use crate::layout::Rect;
 use crate::workspace_store::{
-    local_human_name, WorkspaceStore, DEFAULT_CHANNEL, HISTORY_LIMIT, MAX_BODY_RUNES,
+    local_human_name, member_chip, WorkspaceStore, DEFAULT_CHANNEL, HISTORY_LIMIT, MAX_BODY_RUNES,
 };
 
-// Re-export so `workspace_ui::WsMessage` keeps working for app/renderer.
-pub use crate::workspace_store::WsMessage;
+// Re-export so `workspace_ui::WsMessage` / `WsMember` keep working for app/renderer.
+pub use crate::workspace_store::{WsMember, WsMessage};
 
 /// Layout constants shared with renderer + hit-testing (logical px).
 pub const MODAL_PAD: f32 = 14.0;
@@ -27,6 +30,8 @@ pub const CHANNEL_ROW_H: f32 = 28.0;
 /// Y offset of first channel row below modal top (title strip).
 pub const CHANNEL_LIST_TOP: f32 = MODAL_PAD + 18.0;
 pub const COMPOSE_H: f32 = 44.0;
+/// Height reserved under the title for the presence strip (message pane).
+pub const PRESENCE_STRIP_H: f32 = 18.0;
 
 /// What the compose line is editing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +40,8 @@ pub enum ComposeMode {
     Message,
     /// Create a new channel (draft = channel name).
     NewChannel,
+    /// Draft is a filesystem path to attach (Enter → `attach_path`).
+    AttachPath,
 }
 
 pub struct WorkspaceUi {
@@ -46,6 +53,8 @@ pub struct WorkspaceUi {
     pub draft: String,
     pub messages: Vec<WsMessage>,
     pub channels: Vec<String>,
+    /// Presence list for paint (product `members.json`).
+    pub members: Vec<WsMember>,
     /// Ephemeral status (create errors, etc.).
     pub status: String,
     pub mode: ComposeMode,
@@ -74,6 +83,7 @@ impl WorkspaceUi {
             draft: String::new(),
             messages: Vec::new(),
             channels: vec![DEFAULT_CHANNEL.into()],
+            members: Vec::new(),
             status: String::new(),
             mode: ComposeMode::Message,
             store,
@@ -82,6 +92,7 @@ impl WorkspaceUi {
         };
         s.reload_channels();
         s.reload_messages();
+        s.reload_members();
         s
     }
 
@@ -98,8 +109,19 @@ impl WorkspaceUi {
         self.mode = ComposeMode::Message;
         self.status.clear();
         self.scroll = 0;
+        // Join self as human if not already present (product open path).
+        self.join_self();
         self.reload_channels();
         self.reload_messages();
+        self.reload_members();
+    }
+
+    /// Register `$USER` as a human member (no-op update if already joined).
+    pub fn join_self(&mut self) {
+        match self.store.join(&self.human, "human", "") {
+            Ok(_) => {}
+            Err(e) => self.status = format!("join: {e}"),
+        }
     }
 
     pub fn close(&mut self) {
@@ -170,10 +192,14 @@ impl WorkspaceUi {
         self.draft.pop();
     }
 
-    /// Enter: post message, or create channel when in [`ComposeMode::NewChannel`].
+    /// Enter: post message, create channel, or attach path (by [`ComposeMode`]).
     pub fn send(&mut self) {
         match self.mode {
             ComposeMode::NewChannel => self.commit_new_channel(),
+            ComposeMode::AttachPath => {
+                let path = self.draft.clone();
+                self.attach_path(path.trim());
+            }
             ComposeMode::Message => self.post_draft(),
         }
     }
@@ -202,6 +228,50 @@ impl WorkspaceUi {
                 eprintln!("workspace post failed: {}", self.status);
             }
         }
+    }
+
+    /// Copy `path` into the active channel `files/` and post a file message.
+    /// Accepts a filesystem path string (no OS file dialog required).
+    pub fn attach_path(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        let path_str = path.to_string_lossy();
+        let path_str = path_str.trim();
+        if path_str.is_empty() {
+            self.status = "file path required".into();
+            return;
+        }
+        match self
+            .store
+            .upload(&self.channel, path_str, &self.human, "human", "")
+        {
+            Ok(msg) => {
+                let name = msg
+                    .file
+                    .as_ref()
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| msg.body.clone());
+                self.messages.push(msg);
+                if self.messages.len() > HISTORY_LIMIT {
+                    let n = self.messages.len() - HISTORY_LIMIT;
+                    self.messages.drain(0..n);
+                }
+                self.draft.clear();
+                self.mode = ComposeMode::Message;
+                self.status = format!("attached {name}");
+                self.scroll = 0;
+            }
+            Err(e) => {
+                self.status = e;
+                eprintln!("workspace attach failed: {}", self.status);
+            }
+        }
+    }
+
+    /// Start path-to-attach compose (product Ctrl+U style).
+    pub fn begin_attach(&mut self) {
+        self.mode = ComposeMode::AttachPath;
+        self.draft.clear();
+        self.status = "path to attach — Enter to upload".into();
     }
 
     fn commit_new_channel(&mut self) {
@@ -235,7 +305,7 @@ impl WorkspaceUi {
         self.status = "new channel name — Enter to create".into();
     }
 
-    /// Cancel new-channel mode back to message compose.
+    /// Cancel new-channel / attach mode back to message compose.
     pub fn cancel_mode(&mut self) {
         if self.mode != ComposeMode::Message {
             self.mode = ComposeMode::Message;
@@ -284,6 +354,7 @@ impl WorkspaceUi {
     pub fn refresh(&mut self) {
         self.reload_channels();
         self.reload_messages();
+        self.reload_members();
         self.status = "refreshed".into();
     }
 
@@ -311,6 +382,43 @@ impl WorkspaceUi {
                 self.messages.clear();
             }
         }
+    }
+
+    fn reload_members(&mut self) {
+        match self.store.list_members() {
+            Ok(list) => self.members = list,
+            Err(e) => {
+                // Keep prior members; surface error in status only when empty.
+                if self.members.is_empty() {
+                    self.status = format!("members error: {e}");
+                }
+            }
+        }
+    }
+
+    /// One-line presence strip for renderer paint (humans first, then agents).
+    pub fn members_strip_text(&self) -> String {
+        if self.members.is_empty() {
+            return "no members yet".into();
+        }
+        let mut humans: Vec<&WsMember> = Vec::new();
+        let mut agents: Vec<&WsMember> = Vec::new();
+        for m in &self.members {
+            if m.kind == "human" {
+                humans.push(m);
+            } else {
+                agents.push(m);
+            }
+        }
+        let mut chips: Vec<String> = humans.iter().chain(agents.iter()).map(|m| member_chip(m)).collect();
+        // Soft cap so the strip stays one visual line in the modal.
+        const MAX_CHIPS: usize = 6;
+        let hidden = chips.len().saturating_sub(MAX_CHIPS);
+        if hidden > 0 {
+            chips.truncate(MAX_CHIPS);
+            chips.push(format!("+{hidden}"));
+        }
+        chips.join("  ")
     }
 
     // ── hit-test ─────────────────────────────────────────────────────────────

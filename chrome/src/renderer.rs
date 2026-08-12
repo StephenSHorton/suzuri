@@ -1840,6 +1840,7 @@ fn push_modal_labels(
     if workspace_ui.visible() {
         use crate::workspace_ui::{
             ComposeMode, CHANNEL_LIST_TOP, CHANNEL_LIST_W, CHANNEL_ROW_H, COMPOSE_H, MODAL_PAD,
+            PRESENCE_STRIP_H,
         };
         let ease = workspace_ui.content_ease().clamp(0.0, 1.0);
         let modal = workspace_ui.animated_modal_rect(win_w, win_h);
@@ -1854,6 +1855,19 @@ fn push_modal_labels(
             13.0,
             title_c,
         ));
+        // Presence strip (members) — right of title / above messages.
+        {
+            let strip = workspace_ui.members_strip_text();
+            let mut sc = dim;
+            sc[3] *= ease;
+            labels.push(TextLabel::new(
+                truncate_chars(&strip, 72),
+                modal.x + pad + list_w + 10.0,
+                modal.y + 8.0,
+                11.0,
+                sc,
+            ));
+        }
         let mut y = modal.y + CHANNEL_LIST_TOP;
         for ch in &workspace_ui.channels {
             let mut tc = if *ch == workspace_ui.channel {
@@ -1884,7 +1898,7 @@ fn push_modal_labels(
             ));
         }
         let msg_x = modal.x + pad + list_w + 10.0;
-        let mut my = modal.y + pad + 8.0;
+        let mut my = modal.y + pad + 8.0 + PRESENCE_STRIP_H;
         let msg_bottom = modal.y + modal.h - pad - COMPOSE_H - 8.0;
         for msg in workspace_ui.visible_messages(12) {
             if my > msg_bottom - 20.0 {
@@ -1894,13 +1908,12 @@ fn push_modal_labels(
             fc[3] *= ease;
             let mut bc = muted;
             bc[3] *= ease;
-            labels.push(TextLabel::new(
-                format!("{}:", msg.from),
-                msg_x,
-                my,
-                11.0,
-                fc,
-            ));
+            let from_label = if msg.kind == "file" {
+                format!("{} [file]:", msg.from)
+            } else {
+                format!("{}:", msg.from)
+            };
+            labels.push(TextLabel::new(from_label, msg_x, my, 11.0, fc));
             labels.push(TextLabel::new(
                 truncate_chars(&msg.body, 56),
                 msg_x + 8.0,
@@ -1913,7 +1926,8 @@ fn push_modal_labels(
         let input_y = modal.y + modal.h - pad - COMPOSE_H;
         let placeholder = match workspace_ui.mode {
             ComposeMode::NewChannel => "Channel name · Enter to create",
-            ComposeMode::Message => "Message #… · Enter to send",
+            ComposeMode::AttachPath => "Path to attach · Enter to upload",
+            ComposeMode::Message => "Message #… · Enter to send · drop file to attach",
         };
         let draft = if workspace_ui.draft.is_empty() {
             placeholder
