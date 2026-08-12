@@ -34,6 +34,7 @@ use crate::renderer::{self, Renderer, CELL_H, CELL_W};
 use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome};
 use crate::settings::SettingsState;
+use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
 use crate::workspace_ui::WorkspaceUi;
 
@@ -64,6 +65,7 @@ pub struct ChromeApp {
     transfer: TransferUi,
     rename: RenameState,
     caffeine: Caffeine,
+    toast: ToastState,
     commands: Vec<crate::commands::Command>,
     started: Instant,
     clipboard: Option<arboard::Clipboard>,
@@ -120,6 +122,7 @@ impl Default for ChromeApp {
             transfer: TransferUi::new(),
             rename: RenameState::new(),
             caffeine: Caffeine::new(),
+            toast: ToastState::new(),
             commands: default_commands(),
             started: Instant::now(),
             clipboard: arboard::Clipboard::new().ok(),
@@ -866,7 +869,9 @@ impl ChromeApp {
             return;
         }
         if let Some(cb) = &mut self.clipboard {
-            let _ = cb.set_text(text);
+            if cb.set_text(text).is_ok() {
+                self.toast.show("Copied");
+            }
         }
     }
 
@@ -879,6 +884,8 @@ impl ChromeApp {
         if let Some(cb) = &mut self.clipboard {
             let _ = cb.set_text(ticket);
         }
+        // Product host toast: "ticket copied"; title-case for the frost chip.
+        self.toast.show("Ticket copied");
         true
     }
 
@@ -2042,6 +2049,7 @@ impl ApplicationHandler for ChromeApp {
                 self.workspace_ui.tick(dt);
                 self.transfer.tick(dt);
                 self.rename.tick(dt);
+                self.toast.tick(dt);
                 let _ = self.caffeine.tick();
                 let tick = self.session.tick_splits(dt);
                 if !tick.finished_closes.is_empty() {
@@ -2076,6 +2084,7 @@ impl ApplicationHandler for ChromeApp {
                         &self.transfer,
                         &self.rename,
                         &self.caffeine,
+                        &self.toast,
                         &self.commands,
                         &layout,
                         pty_on,

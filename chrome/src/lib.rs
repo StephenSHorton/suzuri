@@ -22,6 +22,7 @@
 //! | [`commands`] | Palette / shortcuts registry |
 //! | [`confirm`] | Crush-style yes/no confirm (quit) |
 //! | [`rename`] | Tab / pane rename dialog |
+//! | [`toast`] | Ephemeral frost-chip status ("Copied") |
 //! | [`shell`] | Mock shell helpers (fallback when no PTY) |
 //! | [`notes`] / [`notes_ops`] | Multi-note bank + product-compatible `notes.json` |
 //!
@@ -53,6 +54,7 @@ pub mod session;
 pub mod settings;
 pub mod shell;
 pub mod theme;
+pub mod toast;
 
 /// Optional C ABI stubs for cgo / static link. Enable with `--features ffi`.
 #[cfg(feature = "ffi")]
@@ -86,6 +88,7 @@ pub use session::{ChromeSession, CloseOutcome, Pane, Tab};
 pub use settings::{ChromePrefs, SettingsState, GLASS_DARKEN_DEFAULT};
 pub use shell::{ShellOutput, PROMPT_GLYPH};
 pub use theme::{colors as theme_colors, ThemeColors, DEFAULT_THEME_ID, THEME_IDS};
+pub use toast::{ToastState, TOAST_DURATION_S};
 
 /// Semver of this crate (`Cargo.toml` package version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
