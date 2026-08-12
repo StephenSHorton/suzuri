@@ -30,6 +30,7 @@ glyphon = "0.8"
 pollster = "0.4"
 portable-pty = "0.9"
 raw-window-handle = "0.6"
+regex = "1"
 wgpu = "24.0"
 winit = "0.30"
 

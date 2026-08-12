@@ -11,6 +11,7 @@
 //! | [`theme`] | Named chrome paint palettes (bg/fg/jade/muted) |
 //! | [`ansi`] | VT decoder into a grid |
 //! | [`selection`] | Cell drag selection + copy text extraction |
+//! | [`links`] | Terminal URL detect / normalize / open-in-browser |
 //! | [`pty`] | Portable local shell PTY |
 //! | [`session`] | Multi-tab session (grids; PTY map owned by host) |
 //! | [`panes`] | Split-pane tree + jelly animation state |
@@ -38,6 +39,7 @@ pub mod config_store;
 pub mod control_mailbox;
 pub mod input;
 pub mod layout;
+pub mod links;
 pub mod notes;
 pub mod notes_ops;
 pub mod panes;
@@ -66,6 +68,10 @@ pub use control_mailbox::{
 };
 pub use input::{hit_test, is_mac, traffic_light_rects, HitTarget};
 pub use layout::{FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect, Spacing};
+pub use links::{
+    clean_url, find_links_in_line, link_at, link_url_at_col, normalize_url, open_url_in_browser,
+    LinkSpan,
+};
 pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
 pub use pty::PtySession;
 pub use selection::Selection;

@@ -14,6 +14,7 @@ mod config_store;
 mod control_mailbox;
 mod input;
 mod layout;
+mod links;
 #[cfg(target_os = "macos")]
 mod macos_window;
 mod notes;

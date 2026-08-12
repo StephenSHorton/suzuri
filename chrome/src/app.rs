@@ -12,7 +12,7 @@ use winit::{
     },
     event_loop::ActiveEventLoop,
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{Fullscreen, Window, WindowAttributes, WindowId},
+    window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId},
 };
 
 use crate::ansi::AnsiDecoder;
@@ -24,6 +24,7 @@ use crate::commands::{
 use crate::control_mailbox::ControlMailbox;
 use crate::input::{hit_test, is_mac, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
+use crate::links::{link_url_at_col, open_url_in_browser};
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
@@ -73,6 +74,10 @@ pub struct ChromeApp {
     /// Terminal cell selection (absolute document rows).
     term_selection: Selection,
     selecting_term: bool,
+    /// URL under the pointer in the focused terminal (for hand cursor / Cmd-click).
+    hovered_link: Option<String>,
+    /// True while the OS pointer icon is the hand (link hover).
+    link_cursor_on: bool,
     /// Host light IPC: poll `chrome_cmd` under config dir (~250ms).
     control_mailbox: ControlMailbox,
 }
@@ -117,6 +122,8 @@ impl Default for ChromeApp {
             last_term_click: None,
             term_selection: Selection::new(),
             selecting_term: false,
+            hovered_link: None,
+            link_cursor_on: false,
             control_mailbox: ControlMailbox::new(),
         }
     }
@@ -622,6 +629,61 @@ impl ChromeApp {
         let row = row.clamp(0, grid.rows().saturating_sub(1) as i32) as u16;
         let abs = grid.viewport_to_abs(row);
         Some(clamp_pos(grid, col, abs))
+    }
+
+    /// Product open-link modifier: macOS Cmd (or Ctrl), elsewhere Ctrl (+no Alt/Shift).
+    fn link_open_mod_held(&self) -> bool {
+        if is_mac() {
+            // darwin: meta || (ctrl && !meta) → either Super or Control
+            self.modifiers.super_key() || self.modifiers.control_key()
+        } else {
+            self.modifiers.control_key()
+                && !self.modifiers.alt_key()
+                && !self.modifiers.shift_key()
+        }
+    }
+
+    /// URL under the pointer in the focused terminal, if any.
+    fn link_url_at_cursor(&self) -> Option<String> {
+        if self.overlay_open() {
+            return None;
+        }
+        let pos = self.term_cell_at_cursor()?;
+        let id = self.session.focus_pane_id();
+        let pane = self.session.panes.get(&id)?;
+        let line = pane.grid.line_text_abs(pos.abs_row);
+        link_url_at_col(&line, pos.col as usize)
+    }
+
+    /// Refresh `hovered_link` + hand cursor when the pointer is over a terminal URL.
+    fn update_link_hover(&mut self) {
+        let url = if self.selecting_term {
+            None
+        } else {
+            self.link_url_at_cursor()
+        };
+        self.hovered_link = url;
+        let want_hand = self.hovered_link.is_some();
+        if want_hand != self.link_cursor_on {
+            self.link_cursor_on = want_hand;
+            if let Some(w) = &self.window {
+                w.set_cursor(if want_hand {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                });
+            }
+        }
+    }
+
+    fn clear_link_hover(&mut self) {
+        self.hovered_link = None;
+        if self.link_cursor_on {
+            self.link_cursor_on = false;
+            if let Some(w) = &self.window {
+                w.set_cursor(CursorIcon::Default);
+            }
+        }
     }
 
     /// Consecutive terminal click count (1 = single, 2 = double, 3+ = triple).
@@ -1448,10 +1510,12 @@ impl ApplicationHandler for ChromeApp {
                         w.request_redraw();
                     }
                 }
+                self.update_link_hover();
             }
 
             WindowEvent::CursorLeft { .. } => {
                 self.pointer_inside = false;
+                self.clear_link_hover();
             }
 
             WindowEvent::MouseInput {
@@ -1462,6 +1526,21 @@ impl ApplicationHandler for ChromeApp {
                 self.chip_ui.pressed = true;
                 let hit = self.hit_at_cursor();
                 self.press_hit = Some(hit);
+                // Cmd/Ctrl+click on a terminal URL → open browser (no selection).
+                if matches!(hit, HitTarget::Terminal(_))
+                    && !self.overlay_open()
+                    && self.link_open_mod_held()
+                {
+                    if let Some(url) = self.link_url_at_cursor() {
+                        open_url_in_browser(&url);
+                        self.press_hit = None;
+                        self.selecting_term = false;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                }
                 // Terminal selection: single = drag, double = word, triple = line.
                 if matches!(hit, HitTarget::Terminal(_)) && !self.overlay_open() {
                     if let Some(pos) = self.term_cell_at_cursor() {
