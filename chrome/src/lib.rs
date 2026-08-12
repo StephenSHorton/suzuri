@@ -17,6 +17,7 @@
 //! | [`input`] | Hit-test for chrome affordances |
 //! | [`settings`] | Settings overlay state + prefs |
 //! | [`config_store`] | `chrome_prefs.json` + `SUZURI_CONFIG_DIR` |
+//! | [`control_mailbox`] | Phase 2 light IPC (`chrome_cmd` file) |
 //! | [`commands`] | Palette / shortcuts registry |
 //! | [`shell`] | Mock shell helpers (fallback when no PTY) |
 //! | [`notes`] / [`notes_ops`] | Multi-note bank + product-compatible `notes.json` |
@@ -34,6 +35,7 @@ pub mod cells;
 pub mod chrome_ui;
 pub mod commands;
 pub mod config_store;
+pub mod control_mailbox;
 pub mod input;
 pub mod layout;
 pub mod notes;
@@ -58,6 +60,10 @@ pub use commands::{
     default_commands, filter_commands, Command, CommandAction, HelpState, PaletteState,
 };
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
+pub use control_mailbox::{
+    chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
+    POLL_INTERVAL,
+};
 pub use input::{hit_test, is_mac, traffic_light_rects, HitTarget};
 pub use layout::{FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect, Spacing};
 pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
