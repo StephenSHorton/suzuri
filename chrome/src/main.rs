@@ -10,6 +10,7 @@ mod caffeine;
 mod cells;
 mod chrome_ui;
 mod commands;
+mod config_store;
 mod input;
 mod layout;
 #[cfg(target_os = "macos")]

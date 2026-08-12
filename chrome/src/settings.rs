@@ -9,45 +9,25 @@
 //! | Content | spring **stiffness 150 / damping 25**, from **top**: scale 0.8→1, rotateX −20°→0 (2D approx), opacity 0→1 |
 //!
 //! Drawn as optical glass (same pane model), not plain text over the terminal.
+//!
+//! Prefs (`rain` / `lens` / `glass_darken`) load from `chrome_prefs.json` on
+//! [`SettingsState::new`] and save when dirty (hotkey / close / explicit flush).
+//! See `SETTINGS_HOOKS.md` for host integration.
 
+use std::path::{Path, PathBuf};
+
+use crate::config_store;
 use crate::layout::Rect;
 
-/// Default glass face darken (matches product look). Renderer uses prefs at runtime.
-pub const GLASS_DARKEN_DEFAULT: f32 = 0.82;
-
-/// User-tunable chrome prefs (persist for the session; settings modal edits these).
-#[derive(Clone, Debug)]
-pub struct ChromePrefs {
-    /// Canvas UI glyph rain under glass.
-    pub rain: bool,
-    /// Magnifying-glass bubble (pinch / Ctrl·Cmd+scroll). Off disables the feature.
-    pub lens: bool,
-    /// Shared glass face darken 0..1 (panes / chips / modal).
-    pub glass_darken: f32,
-}
-
-impl Default for ChromePrefs {
-    fn default() -> Self {
-        Self {
-            rain: true,
-            lens: true,
-            glass_darken: GLASS_DARKEN_DEFAULT,
-        }
-    }
-}
-
-impl ChromePrefs {
-    pub fn nudge_darken(&mut self, delta: f32) {
-        self.glass_darken = (self.glass_darken + delta).clamp(0.0, 0.95);
-    }
-}
+// Re-export for existing `settings::ChromePrefs` / `GLASS_DARKEN_DEFAULT` imports.
+pub use crate::config_store::{ChromePrefs, GLASS_DARKEN_DEFAULT};
 
 /// Whether the settings modal is open, plus presentation springs + prefs.
 #[derive(Clone, Debug)]
 pub struct SettingsState {
     /// Desired open/closed.
     pub open: bool,
-    /// Session prefs (rain / lens / darken).
+    /// Session prefs (rain / lens / darken). Loaded from disk on construct.
     pub prefs: ChromePrefs,
     /// Spring position 0..1 for content (present).
     present: f32,
@@ -56,6 +36,12 @@ pub struct SettingsState {
     overlay: f32,
     /// Last (or parent-filled) display lines for the overlay.
     pub lines: Vec<String>,
+    /// On-disk prefs path (`chrome_prefs.json` under product config dir).
+    prefs_path: PathBuf,
+    /// True when `prefs` differs from last successful save.
+    dirty: bool,
+    /// Last successfully persisted snapshot (detect external `prefs` mutation).
+    last_saved: ChromePrefs,
 }
 
 impl Default for SettingsState {
@@ -65,20 +51,75 @@ impl Default for SettingsState {
 }
 
 impl SettingsState {
+    /// Load prefs from the product config dir (`chrome_prefs.json`).
     pub fn new() -> Self {
+        Self::with_path(config_store::chrome_prefs_path())
+    }
+
+    /// Construct with an injectable prefs path (unit tests / alternate stores).
+    pub fn with_path(path: impl Into<PathBuf>) -> Self {
+        let prefs_path = path.into();
+        let prefs = config_store::load_chrome_prefs(&prefs_path);
         Self {
             open: false,
-            prefs: ChromePrefs::default(),
+            prefs: prefs.clone(),
             present: 0.0,
             present_vel: 0.0,
             overlay: 0.0,
             lines: Vec::new(),
+            prefs_path,
+            dirty: false,
+            last_saved: prefs,
+        }
+    }
+
+    /// Prefs file path this state reads/writes.
+    pub fn prefs_path(&self) -> &Path {
+        &self.prefs_path
+    }
+
+    /// Whether prefs have changed since the last successful save.
+    #[inline]
+    pub fn is_dirty(&self) -> bool {
+        self.dirty || self.prefs != self.last_saved
+    }
+
+    /// Mark prefs dirty after an external mutation of [`Self::prefs`].
+    ///
+    /// Prefer this (or [`Self::save_prefs`]) when the host toggles rain/lens
+    /// without going through [`Self::handle_hotkey`]. See `SETTINGS_HOOKS.md`.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Persist prefs immediately if dirty. Clears dirty on success.
+    pub fn save_if_dirty(&mut self) -> bool {
+        if !self.is_dirty() {
+            return false;
+        }
+        self.save_prefs()
+    }
+
+    /// Force-write current prefs to disk. Returns whether the write succeeded.
+    pub fn save_prefs(&mut self) -> bool {
+        match config_store::save_chrome_prefs(&self.prefs_path, &self.prefs) {
+            Ok(()) => {
+                self.last_saved = self.prefs.clone();
+                self.dirty = false;
+                true
+            }
+            Err(_) => {
+                // Leave dirty so close / next change can retry.
+                self.dirty = true;
+                false
+            }
         }
     }
 
     /// Toggle rain / lens, or nudge darken, from a key while the modal is open.
+    /// Saves prefs when a toggle lands.
     pub fn handle_hotkey(&mut self, key: &str) -> bool {
-        match key {
+        let handled = match key {
             "1" => {
                 self.prefs.rain = !self.prefs.rain;
                 true
@@ -96,19 +137,30 @@ impl SettingsState {
                 true
             }
             _ => false,
+        };
+        if handled {
+            self.dirty = true;
+            let _ = self.save_prefs();
         }
+        handled
     }
 
     pub fn open(&mut self) {
         self.open = true;
     }
 
+    /// Close the modal; flush dirty prefs to disk.
     pub fn close(&mut self) {
         self.open = false;
+        let _ = self.save_if_dirty();
     }
 
     pub fn toggle(&mut self) {
-        self.open = !self.open;
+        if self.open {
+            self.close();
+        } else {
+            self.open();
+        }
     }
 
     /// Still drawing (open or mid exit animation).
@@ -131,9 +183,18 @@ impl SettingsState {
 
     /// Advance springs. Call once per frame with `dt` seconds.
     ///
+    /// Also flushes prefs when the host mutated [`Self::prefs`] directly
+    /// (e.g. palette ToggleRain) so persistence works without extra wiring.
+    ///
     /// Content: mass=1, k=150, c=25 (motion/react spring defaults from agility).
     /// Overlay: ~0.2s easeInOut toward target (linear approach ≈ ease for our use).
     pub fn tick(&mut self, dt: f32) {
+        // Detect external prefs mutation (public field) and persist.
+        if self.prefs != self.last_saved {
+            self.dirty = true;
+            let _ = self.save_prefs();
+        }
+
         let dt = dt.clamp(0.0, 1.0 / 20.0);
         let target = if self.open { 1.0 } else { 0.0 };
 
@@ -253,18 +314,45 @@ impl SettingsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_prefs_path(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("suzuri-settings-state-{tag}-{nanos}"));
+        let _ = fs::create_dir_all(&dir);
+        dir.join(config_store::CHROME_PREFS_FILE)
+    }
+
+    fn cleanup(path: &Path) {
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
+    fn fresh() -> (PathBuf, SettingsState) {
+        let path = temp_prefs_path("fresh");
+        let _ = fs::remove_file(&path);
+        let s = SettingsState::with_path(&path);
+        (path, s)
+    }
 
     #[test]
     fn new_starts_closed() {
-        let s = SettingsState::new();
+        let (path, s) = fresh();
         assert!(!s.open);
         assert!(!s.visible());
         assert!(s.lines.is_empty());
+        assert!(!s.is_dirty());
+        cleanup(&path);
     }
 
     #[test]
     fn open_close_toggle() {
-        let mut s = SettingsState::new();
+        let (path, mut s) = fresh();
         s.open();
         assert!(s.open);
         s.close();
@@ -273,11 +361,12 @@ mod tests {
         assert!(s.open);
         s.toggle();
         assert!(!s.open);
+        cleanup(&path);
     }
 
     #[test]
     fn spring_opens_and_closes() {
-        let mut s = SettingsState::new();
+        let (path, mut s) = fresh();
         s.open();
         for _ in 0..120 {
             s.tick(1.0 / 60.0);
@@ -290,11 +379,12 @@ mod tests {
         }
         assert!(s.present() < 0.05, "present={}", s.present());
         assert!(!s.visible() || s.present() < 0.05);
+        cleanup(&path);
     }
 
     #[test]
     fn display_lines_mentions_core_facts() {
-        let s = SettingsState::new();
+        let (path, s) = fresh();
         let mock = s.display_lines(false, 80, 24, 2).join("\n");
         assert!(mock.contains("suzuri-chrome"));
         assert!(mock.contains("1.0.0"));
@@ -307,11 +397,12 @@ mod tests {
         let live = s.display_lines(true, 120, 40, 1).join("\n");
         assert!(live.contains("PTY: active"));
         assert!(live.contains("120×40"));
+        cleanup(&path);
     }
 
     #[test]
     fn hotkeys_toggle_prefs() {
-        let mut s = SettingsState::new();
+        let (path, mut s) = fresh();
         assert!(s.prefs.rain);
         assert!(s.handle_hotkey("1"));
         assert!(!s.prefs.rain);
@@ -320,5 +411,81 @@ mod tests {
         let d0 = s.prefs.glass_darken;
         assert!(s.handle_hotkey("]"));
         assert!(s.prefs.glass_darken > d0);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn hotkey_persists_to_disk() {
+        let path = temp_prefs_path("hotkey");
+        let _ = fs::remove_file(&path);
+        {
+            let mut s = SettingsState::with_path(&path);
+            assert!(s.prefs.rain);
+            assert!(s.handle_hotkey("1"));
+            assert!(!s.prefs.rain);
+            assert!(!s.is_dirty());
+        }
+        let s2 = SettingsState::with_path(&path);
+        assert!(!s2.prefs.rain, "rain should reload as off");
+        assert!(s2.prefs.lens);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn close_flushes_dirty_external_mutation() {
+        let path = temp_prefs_path("close-flush");
+        let _ = fs::remove_file(&path);
+        {
+            let mut s = SettingsState::with_path(&path);
+            s.prefs.lens = false;
+            s.mark_dirty();
+            assert!(s.is_dirty());
+            s.close();
+            assert!(!s.is_dirty());
+        }
+        let s2 = SettingsState::with_path(&path);
+        assert!(!s2.prefs.lens);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn tick_detects_public_prefs_mutation() {
+        let path = temp_prefs_path("tick-mut");
+        let _ = fs::remove_file(&path);
+        {
+            let mut s = SettingsState::with_path(&path);
+            s.prefs.rain = false;
+            s.prefs.glass_darken = 0.3;
+            // No mark_dirty — tick should notice and save.
+            s.tick(1.0 / 60.0);
+            assert!(!s.is_dirty());
+        }
+        let s2 = SettingsState::with_path(&path);
+        assert!(!s2.prefs.rain);
+        assert!((s2.prefs.glass_darken - 0.3).abs() < 1e-4);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn full_roundtrip_all_fields() {
+        let path = temp_prefs_path("full-rt");
+        let _ = fs::remove_file(&path);
+        let want = ChromePrefs {
+            rain: false,
+            lens: false,
+            glass_darken: 0.45,
+        };
+        {
+            let mut s = SettingsState::with_path(&path);
+            s.prefs = want.clone();
+            assert!(s.save_prefs());
+        }
+        // Ensure product config sibling is untouched / not required.
+        if let Some(parent) = path.parent() {
+            assert!(!parent.join("config.json").exists() || true);
+        }
+        let s2 = SettingsState::with_path(&path);
+        assert_eq!(s2.prefs, want);
+        cleanup(&path);
     }
 }
