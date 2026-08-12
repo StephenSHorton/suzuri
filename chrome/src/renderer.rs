@@ -1406,16 +1406,38 @@ fn push_modal_glass(
         let modal = transfer.animated_modal_rect(win_w, win_h);
         panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
         let pad = 16.0;
-        let input = Rect::new(
-            modal.x + pad,
-            modal.y + 56.0,
-            modal.w - pad * 2.0,
-            48.0,
-        );
+        // Drop zone (send only, idle) sits above the path field.
+        let mut y = modal.y + 56.0;
+        if transfer.mode == crate::transfer_ui::TransferMode::Send && !transfer.is_running() {
+            let drop_h = 32.0;
+            let drop_zone = Rect::new(modal.x + pad, y, modal.w - pad * 2.0, drop_h);
+            let kind = if transfer.drop_hover {
+                PanelKind::ModalButton
+            } else {
+                PanelKind::ModalFrost
+            };
+            panels.push(PanelInstance::glass(drop_zone, m.chip_radius, kind).with_opacity(ease));
+            y += drop_h + 10.0;
+        }
+        let input = Rect::new(modal.x + pad, y, modal.w - pad * 2.0, 48.0);
         panels.push(
             PanelInstance::glass(input, m.chip_radius + 2.0, PanelKind::ModalFrost)
                 .with_opacity(ease),
         );
+        // Copy-ticket chip when a ticket is shareable.
+        if !transfer.ticket.is_empty() {
+            let chip_w = 120.0_f32.min(modal.w - pad * 2.0);
+            let chip = Rect::new(
+                modal.x + (modal.w - chip_w) * 0.5,
+                modal.y + modal.h - 52.0,
+                chip_w,
+                28.0,
+            );
+            panels.push(
+                PanelInstance::glass(chip, m.chip_radius, PanelKind::ModalButton)
+                    .with_opacity(ease),
+            );
+        }
     }
 }
 
@@ -1933,9 +1955,31 @@ fn push_modal_labels(
             11.0,
             sc,
         ));
-        let input_y = modal.y + 56.0;
+        // Layout matches push_modal_glass: optional drop zone then path field.
+        let mut y = modal.y + 56.0;
+        if transfer.mode == crate::transfer_ui::TransferMode::Send && !transfer.is_running() {
+            let drop_label = if transfer.drop_hover {
+                "▼  release to send this file  ▼"
+            } else {
+                "┌── drop a file or folder here ──┐"
+            };
+            let mut dc = if transfer.drop_hover { bright } else { dim };
+            dc[3] *= ease;
+            labels.push(TextLabel::new(
+                drop_label,
+                modal.x + pad + 10.0,
+                y + 8.0,
+                12.0,
+                dc,
+            ));
+            y += 32.0 + 10.0;
+            if !transfer.drop_hint.is_empty() {
+                // Status line already shows drop_hint; keep zone clean.
+            }
+        }
+        let input_y = y;
         let placeholder = match transfer.mode {
-            crate::transfer_ui::TransferMode::Send => "/path/to/file",
+            crate::transfer_ui::TransferMode::Send => "/path/to/file · or drop",
             crate::transfer_ui::TransferMode::Receive => "ticket words…",
         };
         let shown = if transfer.buf.is_empty() {
@@ -1952,23 +1996,46 @@ fn push_modal_labels(
             14.0,
             ic,
         ));
-        let cx = modal.x + pad + 14.0 + transfer.buf.chars().count() as f32 * 8.0;
-        labels.push(TextLabel::new(
-            CARET_BLOCK,
-            cx.min(modal.x + modal.w - pad - 20.0),
-            input_y + 16.0,
-            14.0,
-            [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
-        ));
+        if !transfer.is_running() {
+            let cx = modal.x + pad + 14.0 + transfer.buf.chars().count() as f32 * 8.0;
+            labels.push(TextLabel::new(
+                CARET_BLOCK,
+                cx.min(modal.x + modal.w - pad - 20.0),
+                input_y + 16.0,
+                14.0,
+                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+            ));
+        }
         if !transfer.ticket.is_empty() {
             let mut tc = bright;
             tc[3] *= ease;
             labels.push(TextLabel::new(
                 truncate_chars(&transfer.ticket, 64),
                 modal.x + pad,
-                modal.y + modal.h - 36.0,
+                modal.y + modal.h - 72.0,
                 11.0,
                 tc,
+            ));
+            // Copy ticket chip label (or "Copied!" flash).
+            let chip_label = if !transfer.copy_flash.is_empty() {
+                transfer.copy_flash.as_str()
+            } else {
+                "Copy ticket"
+            };
+            let mut cc = if !transfer.copy_flash.is_empty() {
+                bright
+            } else {
+                muted
+            };
+            cc[3] *= ease;
+            let chip_w = 120.0_f32.min(modal.w - pad * 2.0);
+            let label_w = chip_label.chars().count() as f32 * 7.0;
+            labels.push(TextLabel::new(
+                chip_label.to_string(),
+                modal.x + (modal.w - label_w.min(chip_w)) * 0.5,
+                modal.y + modal.h - 44.0,
+                12.0,
+                cc,
             ));
         }
     }
