@@ -132,7 +132,8 @@ Manual: **Ctrl+R** (⌘R) while open → `refresh()`. Mailbox: `refresh_workspac
 | Method | Behavior |
 |--------|----------|
 | `insert_char` / `backspace` | Draft edit |
-| `send()` | Post text **or** create channel **or** attach path (by mode) |
+| `send()` | Complete `@mention` if picker open; else post / create / attach |
+| `tab(shift)` | Cycle `@mention` picker when open; else `cycle_channel` |
 
 Posts append one product JSONL line under `channels/<slug>/messages.jsonl`.
 
@@ -181,8 +182,8 @@ PRESENCE_STRIP_H   = 18               // members line above messages
 
 1. Palette action `OpenWorkspace` → close other overlays → `workspace_ui.open()`
 2. Esc: if `mode != Message` → `cancel_mode()`; else `close()`
-3. Enter → `send()`; printable → `insert_char`; Backspace → `backspace`
-4. Tab / Shift+Tab → `cycle_channel`; ↑/↓ → scroll
+3. Enter → `send()` (completes `@mention` when picker open); printable → `insert_char`; Backspace → `backspace`
+4. Tab / Shift+Tab → `tab()` (mention cycle when picker open, else `cycle_channel`); ↑/↓ → scroll
 5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path; Ctrl+D ×2 → `request_delete_channel()` (blocks `#general`)
 6. Pointer inside `animated_modal_rect` → keep open; `try_click` for channel rail / presence strip
 7. Outside click → `close()` (via `close_all_overlays`)
@@ -197,7 +198,6 @@ cd chrome && cargo test && cargo build --release
 
 ## Out of scope (later)
 
-- `@` mention complete / highlight
 - Native FS watch (polling ~1s is enough for MCP attach)
 - OS file picker dialog (path string + drop is enough)
 - SHA-256 hash on upload (field present, often empty)

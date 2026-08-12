@@ -1583,6 +1583,7 @@ impl ChromeApp {
                         return;
                     }
                     Key::Named(NamedKey::Enter) => {
+                        // Completes @mention when picker open; otherwise posts.
                         self.workspace_ui.send();
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -1590,8 +1591,8 @@ impl ChromeApp {
                         return;
                     }
                     Key::Named(NamedKey::Tab) => {
-                        self.workspace_ui
-                            .cycle_channel(if shift { -1 } else { 1 });
+                        // @mention picker cycles when open; else channel tabs.
+                        self.workspace_ui.tab(shift);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }

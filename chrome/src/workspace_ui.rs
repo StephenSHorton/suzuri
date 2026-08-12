@@ -7,7 +7,7 @@
 //! - fields: `open`, `channel`, `draft`, `messages`, `channels`, `members`
 //! - glass: `visible`, `open`, `close`, `toggle`, `tick`, `content_ease`,
 //!   `scrim_alpha`, `animated_modal_rect`
-//! - compose: `insert_char`, `backspace`, `send`
+//! - compose: `insert_char`, `backspace`, `send`, `@mention` picker / complete
 //! - channels: `select_channel`
 //! - presence / attach: `join_self`, `attach_path`, `members_strip_text`,
 //!   `cycle_status`, `refresh` / soft auto-reload while open
@@ -136,6 +136,8 @@ pub struct WorkspaceUi {
     /// Ephemeral status (create errors, etc.).
     pub status: String,
     pub mode: ComposeMode,
+    /// Selected row in the `@mention` picker (clamped to candidates).
+    mention_sel: usize,
     store: WorkspaceStore,
     human: String,
     /// Scroll: how many messages from the end are hidden (0 = pin bottom).
@@ -175,6 +177,7 @@ impl WorkspaceUi {
             members: Vec::new(),
             status: String::new(),
             mode: ComposeMode::Message,
+            mention_sel: 0,
             store,
             human,
             scroll: 0,
@@ -222,6 +225,7 @@ impl WorkspaceUi {
         self.draft.clear();
         self.status.clear();
         self.mode = ComposeMode::Message;
+        self.mention_sel = 0;
         self.refresh_accum = 0.0;
         self.delete_pending = None;
     }
@@ -302,14 +306,20 @@ impl WorkspaceUi {
             return;
         }
         self.draft.push(ch);
+        self.clamp_mention_sel();
     }
 
     pub fn backspace(&mut self) {
         self.draft.pop();
+        self.clamp_mention_sel();
     }
 
-    /// Enter: post message, create channel, or attach path (by [`ComposeMode`]).
+    /// Enter: complete `@mention` if the picker is open; otherwise post / create / attach.
     pub fn send(&mut self) {
+        if self.mode == ComposeMode::Message && self.mention_picker_open() {
+            let _ = self.complete_mention();
+            return;
+        }
         match self.mode {
             ComposeMode::NewChannel => self.commit_new_channel(),
             ComposeMode::AttachPath => {
@@ -318,6 +328,110 @@ impl WorkspaceUi {
             }
             ComposeMode::Message => self.post_draft(),
         }
+    }
+
+    /// Tab / Shift+Tab: cycle `@mention` picker when open, else cycle channels.
+    pub fn tab(&mut self, shift: bool) {
+        if self.mode == ComposeMode::Message && self.mention_picker_open() {
+            self.cycle_mention(if shift { -1 } else { 1 });
+        } else {
+            self.cycle_channel(if shift { -1 } else { 1 });
+        }
+    }
+
+    /// True when message compose has an active `@query` with at least one member match.
+    pub fn mention_picker_open(&self) -> bool {
+        self.mode == ComposeMode::Message
+            && active_mention_query(&self.draft).is_some()
+            && !self.mention_candidates().is_empty()
+    }
+
+    /// Partial name after `@` for the active trailing mention token, if any.
+    pub fn mention_query(&self) -> Option<&str> {
+        if self.mode != ComposeMode::Message {
+            return None;
+        }
+        active_mention_query(&self.draft).map(|(_, q)| q)
+    }
+
+    /// Members matching the active `@query` prefix (humans first, then name).
+    pub fn mention_candidates(&self) -> Vec<&WsMember> {
+        let Some(query) = self.mention_query() else {
+            return Vec::new();
+        };
+        let q = query.to_ascii_lowercase();
+        let mut out: Vec<&WsMember> = self
+            .members
+            .iter()
+            .filter(|m| m.name.to_ascii_lowercase().starts_with(&q))
+            .collect();
+        out.sort_by(|a, b| {
+            let ak = (a.kind != "human", a.name.to_ascii_lowercase());
+            let bk = (b.kind != "human", b.name.to_ascii_lowercase());
+            ak.cmp(&bk)
+        });
+        out
+    }
+
+    /// Selected candidate index (0 when picker closed / empty).
+    pub fn mention_selected(&self) -> usize {
+        let n = self.mention_candidates().len();
+        if n == 0 {
+            0
+        } else {
+            self.mention_sel.min(n - 1)
+        }
+    }
+
+    pub fn cycle_mention(&mut self, delta: i32) {
+        let n = self.mention_candidates().len() as i32;
+        if n == 0 {
+            self.mention_sel = 0;
+            return;
+        }
+        let cur = self.mention_selected() as i32;
+        self.mention_sel = (((cur + delta) % n + n) % n) as usize;
+    }
+
+    /// Replace the active `@query` with `@Name ` for the selected member.
+    pub fn complete_mention(&mut self) -> bool {
+        let Some((start, _)) = active_mention_query(&self.draft) else {
+            return false;
+        };
+        let name = {
+            let candidates = self.mention_candidates();
+            if candidates.is_empty() {
+                return false;
+            }
+            let idx = self.mention_selected();
+            candidates[idx].name.clone()
+        };
+        let mut next = String::with_capacity(self.draft.len() + name.len() + 2);
+        next.push_str(&self.draft[..start]);
+        next.push('@');
+        next.push_str(&name);
+        next.push(' ');
+        if next.chars().count() > MAX_BODY_RUNES {
+            return false;
+        }
+        self.draft = next;
+        self.mention_sel = 0;
+        true
+    }
+
+    fn clamp_mention_sel(&mut self) {
+        let n = self.mention_candidates().len();
+        if n == 0 {
+            self.mention_sel = 0;
+        } else if self.mention_sel >= n {
+            self.mention_sel = n - 1;
+        }
+    }
+
+    /// Compose draft split into plain / `@mention` segments for colored paint.
+    /// Mentions match known member names (case-insensitive), painted with member color.
+    pub fn compose_highlight_segments(&self) -> Vec<ComposeSeg> {
+        highlight_mention_segments(&self.draft, &self.members)
     }
 
     fn post_draft(&mut self) {
@@ -866,6 +980,88 @@ impl WorkspaceUi {
     }
 }
 
+
+/// One painted run of compose text (mention highlight).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComposeSeg {
+    pub text: String,
+    /// `Some` member RGB when this run is an `@mention`.
+    pub mention_rgb: Option<[f32; 3]>,
+}
+
+/// Trailing `@query` token in message compose: `(byte_start, query)`.
+fn active_mention_query(draft: &str) -> Option<(usize, &str)> {
+    let token_start = match draft.rfind(|c: char| c.is_whitespace()) {
+        Some(i) => {
+            let ws = draft[i..].chars().next()?;
+            i + ws.len_utf8()
+        }
+        None => 0,
+    };
+    let token = &draft[token_start..];
+    let rest = token.strip_prefix('@')?;
+    if rest
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        Some((token_start, rest))
+    } else {
+        None
+    }
+}
+
+fn highlight_mention_segments(draft: &str, members: &[WsMember]) -> Vec<ComposeSeg> {
+    if draft.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut plain = String::new();
+    let chars: Vec<char> = draft.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let at_boundary = i == 0 || chars[i - 1].is_whitespace();
+        if chars[i] == '@' && at_boundary {
+            let mut j = i + 1;
+            while j < chars.len()
+                && (chars[j].is_alphanumeric() || chars[j] == '_' || chars[j] == '-' || chars[j] == '.')
+            {
+                j += 1;
+            }
+            if j > i + 1 {
+                let name: String = chars[i + 1..j].iter().collect();
+                if let Some(m) = members
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(&name))
+                {
+                    if !plain.is_empty() {
+                        out.push(ComposeSeg {
+                            text: std::mem::take(&mut plain),
+                            mention_rgb: None,
+                        });
+                    }
+                    let (rgb, _) = member_identity(&m.name, &m.kind);
+                    let typed: String = chars[i..j].iter().collect();
+                    out.push(ComposeSeg {
+                        text: typed,
+                        mention_rgb: Some(rgb),
+                    });
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        plain.push(chars[i]);
+        i += 1;
+    }
+    if !plain.is_empty() {
+        out.push(ComposeSeg {
+            text: plain,
+            mention_rgb: None,
+        });
+    }
+    out
+}
+
 fn truncate_runes(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max {
@@ -1073,6 +1269,57 @@ mod tests {
         assert_ne!(ui.status, "refreshed");
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn mention_query_and_complete() {
+        let dir = temp_root("mention");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        ui.human = "alice".into();
+        ui.join_self();
+        let store = WorkspaceStore::open_at(&dir);
+        store.join("bob", "human", "").unwrap();
+        store.join("bot", "agent", "s1").unwrap();
+        ui.reload_members();
+
+        ui.draft = "hi @b".into();
+        assert_eq!(ui.mention_query(), Some("b"));
+        let names: Vec<_> = ui.mention_candidates().iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"bob"));
+        assert!(names.contains(&"bot"));
+        assert!(ui.mention_picker_open());
+
+        // Prefer humans first in sort — bob before bot.
+        assert_eq!(ui.mention_candidates()[0].name, "bob");
+        assert!(ui.complete_mention());
+        assert_eq!(ui.draft, "hi @bob ");
+        assert!(!ui.mention_picker_open());
+
+        // Highlight completed mention.
+        let segs = ui.compose_highlight_segments();
+        assert!(segs.iter().any(|s| s.text == "@bob" && s.mention_rgb.is_some()));
+
+        // Tab cycles when picker open (via tab()).
+        ui.draft = "@".into();
+        assert!(ui.mention_picker_open());
+        let first = ui.mention_candidates()[0].name.clone();
+        ui.tab(false);
+        assert_ne!(ui.mention_selected(), 0);
+        ui.mention_sel = 0;
+        ui.send(); // completes, does not post
+        assert!(ui.draft.starts_with(&format!("@{first} ")));
+        assert!(ui.messages.iter().all(|m| m.body != ui.draft.trim()));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn active_mention_ignores_mid_word_at() {
+        assert!(active_mention_query("email@x").is_none());
+        assert_eq!(active_mention_query("@al").unwrap().1, "al");
+        assert_eq!(active_mention_query("hey @Al").unwrap().1, "Al");
+    }
+
 }
 
 
