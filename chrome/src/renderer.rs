@@ -1428,18 +1428,15 @@ fn push_modal_glass(
 
     if settings.visible() {
         let ease = settings.content_ease().clamp(0.0, 1.0);
-        let modal = settings.animated_modal_rect(win_w, win_h);
-        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
-        let pad = 16.0;
-        let row_h = 40.0;
-        let gap = 8.0;
-        let mut y = modal.y + 48.0;
-        for _ in 0..3 {
-            let r = Rect::new(modal.x + pad, y, modal.w - pad * 2.0, row_h);
+        let lay = settings.layout(win_w, win_h);
+        panels.push(
+            PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
+        );
+        // One chip per setting row (rain / lens / theme / glass darken).
+        for r in &lay.rows {
             panels.push(
-                PanelInstance::glass(r, m.chip_radius, PanelKind::ModalButton).with_opacity(ease),
+                PanelInstance::glass(*r, m.chip_radius, PanelKind::ModalButton).with_opacity(ease),
             );
-            y += row_h + gap;
         }
     }
 
@@ -1716,12 +1713,13 @@ fn push_modal_labels(
 
     if settings.visible() {
         let ease = settings.content_ease().clamp(0.0, 1.0);
-        let modal = settings.animated_modal_rect(win_w, win_h);
+        let lay = settings.layout(win_w, win_h);
+        let modal = lay.modal;
         let mut title_c = bright;
         title_c[3] *= ease;
         labels.push(TextLabel::new(
             "Settings",
-            modal.x + pad,
+            modal.x + lay.pad,
             modal.y + 14.0,
             15.0,
             title_c,
@@ -1729,7 +1727,7 @@ fn push_modal_labels(
         let grid = session.active_grid();
         let theme_val = crate::theme::label(&settings.prefs.theme).to_string();
         let darken_val = format!("{:.0}%", settings.prefs.glass_darken * 100.0);
-        let rows = [
+        let row_data = [
             (
                 "Glyph rain",
                 if settings.prefs.rain { "On" } else { "Off" },
@@ -1743,29 +1741,29 @@ fn push_modal_labels(
             ("Theme", theme_val.as_str(), "3"),
             ("Glass darken", darken_val.as_str(), "[ ]"),
         ];
-        let row_h = 36.0;
-        let gap = 6.0;
-        let mut y = modal.y + 48.0;
-        for (title, val, key) in rows {
+        let text_size = 13.0;
+        for (row, (title, val, key)) in lay.rows.iter().zip(row_data.into_iter()) {
             let mut tc = bright;
             tc[3] *= ease;
             let mut vc = muted;
             vc[3] *= ease;
-            labels.push(TextLabel::new(
-                format!("{title}   ·  {key}"),
-                modal.x + pad + 12.0,
-                y + 10.0,
-                13.0,
+            // Left label · key, vertically centered in the shared row chip.
+            labels.push(TextLabel::left_vcenter(
+                format!("{title}  ·  {key}"),
+                lay.label_x(*row),
+                row.y,
+                row.h,
+                text_size,
                 tc,
             ));
-            labels.push(TextLabel::new(
+            // Value centered in the right column of the same chip.
+            let vr = lay.value_rect(*row);
+            labels.push(TextLabel::centered(
                 val.to_string(),
-                modal.x + modal.w - pad - 72.0,
-                y + 10.0,
-                13.0,
+                [vr.x, vr.y, vr.w, vr.h],
+                text_size,
                 vc,
             ));
-            y += row_h + gap;
         }
         let mut foot = dim;
         foot[3] *= ease * 0.9;
@@ -1777,7 +1775,7 @@ fn push_modal_labels(
                 grid.rows(),
                 session.tabs.len()
             ),
-            modal.x + pad,
+            modal.x + lay.pad,
             modal.y + modal.h - 28.0,
             11.0,
             foot,

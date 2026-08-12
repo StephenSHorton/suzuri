@@ -261,9 +261,11 @@ impl SettingsState {
     }
 
     /// Base modal rect — wide horizontal glass card (not a square).
+    /// Height fits title + 4 setting rows + footer without clipping.
     pub fn base_modal_rect(window_w: f32, window_h: f32) -> Rect {
         let w = (window_w - 48.0).min(560.0).max(320.0);
-        let h = (window_h - 96.0).min(320.0).max(200.0);
+        // 48 title + 4×40 rows + 3×8 gaps + 16 gap + 28 footer + 16 pad ≈ 292
+        let h = (window_h - 96.0).min(340.0).max(292.0);
         Rect::new(
             (window_w - w) * 0.5,
             (window_h - h) * 0.48,
@@ -289,6 +291,11 @@ impl SettingsState {
         let w = base.w * sx;
         let h = base.h * sy;
         Rect::new(cx - w * 0.5, cy - h * 0.5, w, h)
+    }
+
+    /// Shared glass + label geometry for the settings card.
+    pub fn layout(&self, window_w: f32, window_h: f32) -> SettingsLayout {
+        SettingsLayout::new(self.animated_modal_rect(window_w, window_h))
     }
 
     /// Snapshot of status for UI (renderer will draw these as text labels).
@@ -339,6 +346,53 @@ impl SettingsState {
     }
 }
 
+/// Geometry for settings rows (panels + text must use the same rects).
+#[derive(Clone, Debug)]
+pub struct SettingsLayout {
+    pub modal: Rect,
+    pub pad: f32,
+    /// One frost/button chip per setting row (rain / lens / theme / darken).
+    pub rows: Vec<Rect>,
+    /// Right-side value column width inside each row.
+    pub value_w: f32,
+}
+
+impl SettingsLayout {
+    pub const ROW_COUNT: usize = 4;
+    pub const ROW_H: f32 = 40.0;
+    pub const GAP: f32 = 8.0;
+
+    pub fn new(modal: Rect) -> Self {
+        let pad = 16.0;
+        let mut rows = Vec::with_capacity(Self::ROW_COUNT);
+        let mut y = modal.y + 48.0;
+        for _ in 0..Self::ROW_COUNT {
+            rows.push(Rect::new(
+                modal.x + pad,
+                y,
+                modal.w - pad * 2.0,
+                Self::ROW_H,
+            ));
+            y += Self::ROW_H + Self::GAP;
+        }
+        Self {
+            modal,
+            pad,
+            rows,
+            value_w: 100.0,
+        }
+    }
+
+    pub fn value_rect(&self, row: Rect) -> Rect {
+        let w = self.value_w.min(row.w * 0.4);
+        Rect::new(row.x + row.w - w - 10.0, row.y, w, row.h)
+    }
+
+    pub fn label_x(&self, row: Rect) -> f32 {
+        row.x + 14.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +430,23 @@ mod tests {
         assert!(s.lines.is_empty());
         assert!(!s.is_dirty());
         cleanup(&path);
+    }
+
+    #[test]
+    fn settings_layout_four_rows() {
+        let lay = SettingsLayout::new(SettingsState::base_modal_rect(900.0, 700.0));
+        assert_eq!(lay.rows.len(), SettingsLayout::ROW_COUNT);
+        // Rows stack with constant gap; last row above footer zone.
+        for i in 1..lay.rows.len() {
+            let prev = lay.rows[i - 1];
+            let cur = lay.rows[i];
+            assert!((cur.y - (prev.y + prev.h + SettingsLayout::GAP)).abs() < 0.01);
+        }
+        let last = *lay.rows.last().unwrap();
+        assert!(last.y + last.h < lay.modal.y + lay.modal.h - 24.0);
+        let vr = lay.value_rect(lay.rows[0]);
+        assert!(vr.x > lay.rows[0].x);
+        assert!(vr.x + vr.w <= lay.rows[0].x + lay.rows[0].w + 0.01);
     }
 
     #[test]
