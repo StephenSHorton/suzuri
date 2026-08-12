@@ -840,6 +840,13 @@ impl ChromeApp {
                         }
                         return;
                     }
+                    Key::Named(NamedKey::Tab) => {
+                        self.notes.cycle_focus(shift);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     Key::Named(NamedKey::Enter) => {
                         self.notes.insert_char('\n');
                         if let Some(w) = &self.window {
@@ -925,6 +932,28 @@ impl ChromeApp {
 
         // Global shortcuts
         if super_or_ctrl {
+            // Notes body undo/redo (⌘Z / ⇧⌘Z) while notes overlay is open.
+            if self.notes.open {
+                if let Key::Character(ref s) = event.logical_key {
+                    match s.as_str() {
+                        "z" | "Z" if shift => {
+                            let _ = self.notes.redo();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        "z" | "Z" => {
+                            let _ = self.notes.undo();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             if let Key::Character(ref s) = event.logical_key {
                 let ch = s.as_str();
                 match ch {

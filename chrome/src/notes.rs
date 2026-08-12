@@ -47,6 +47,64 @@ pub const NOTES_TITLE_H: f32 = 36.0;
 pub const NOTES_GAP: f32 = 10.0;
 pub const NOTES_TITLE_BODY_GAP: f32 = 8.0;
 
+/// Max undo depth for the body editor (product uses 200; chrome keeps it light).
+pub const BODY_HIST_LIMIT: usize = 50;
+
+/// One restorable body editor state (text + caret). Mirrors `textedit.Snapshot`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BodySnapshot {
+    text: String,
+    cursor: usize,
+}
+
+/// Linear undo/redo stack for the notes body (product `textedit.History` subset).
+#[derive(Clone, Debug, Default)]
+struct BodyHistory {
+    past: Vec<BodySnapshot>,
+    future: Vec<BodySnapshot>,
+}
+
+impl BodyHistory {
+    fn clear(&mut self) {
+        self.past.clear();
+        self.future.clear();
+    }
+
+    fn can_undo(&self) -> bool {
+        !self.past.is_empty()
+    }
+
+    fn can_redo(&self) -> bool {
+        !self.future.is_empty()
+    }
+
+    /// Record before-state so the next mutation can be undone.
+    /// Consecutive identical snapshots are coalesced; new branch drops redo.
+    fn push(&mut self, snap: BodySnapshot) {
+        if self.past.last().is_some_and(|p| p == &snap) {
+            return;
+        }
+        self.past.push(snap);
+        if self.past.len() > BODY_HIST_LIMIT {
+            let drop = self.past.len() - BODY_HIST_LIMIT;
+            self.past.drain(0..drop);
+        }
+        self.future.clear();
+    }
+
+    fn undo(&mut self, current: BodySnapshot) -> Option<BodySnapshot> {
+        let prev = self.past.pop()?;
+        self.future.push(current);
+        Some(prev)
+    }
+
+    fn redo(&mut self, current: BodySnapshot) -> Option<BodySnapshot> {
+        let next = self.future.pop()?;
+        self.past.push(current);
+        Some(next)
+    }
+}
+
 /// Notes overlay state + persistence.
 pub struct NotesState {
     pub open: bool,
@@ -66,6 +124,8 @@ pub struct NotesState {
     pub list_hit: Vec<Rect>,
     pub body_rect: Rect,
     pub title_rect: Rect,
+    /// Body-only undo/redo (cleared when switching notes).
+    body_hist: BodyHistory,
 }
 
 impl NotesState {
@@ -100,6 +160,7 @@ impl NotesState {
             list_hit: Vec::new(),
             body_rect: Rect::default(),
             title_rect: Rect::default(),
+            body_hist: BodyHistory::default(),
         }
     }
 
@@ -153,8 +214,7 @@ impl NotesState {
             return;
         }
         if index == self.active {
-            self.focus = NotesFocus::Body;
-            self.cursor = self.body.chars().count();
+            self.set_focus(NotesFocus::Body);
             return;
         }
         self.flush_active();
@@ -164,6 +224,7 @@ impl NotesState {
         self.body = n.body.clone();
         self.cursor = self.body.chars().count();
         self.focus = NotesFocus::Body;
+        self.body_hist.clear();
         // Active-id change should persist.
         self.dirty = true;
     }
@@ -191,6 +252,7 @@ impl NotesState {
         self.body.clear();
         self.cursor = 0;
         self.focus = NotesFocus::Title;
+        self.body_hist.clear();
         self.dirty = true;
     }
 
@@ -222,6 +284,7 @@ impl NotesState {
         }
         self.cursor = self.body.chars().count();
         self.focus = NotesFocus::Body;
+        self.body_hist.clear();
         self.dirty = true;
     }
 
@@ -230,15 +293,69 @@ impl NotesState {
         self.delete_active();
     }
 
+    /// Move keyboard ownership between title and body; caret lands at field end.
     pub fn set_focus(&mut self, focus: NotesFocus) {
         self.focus = focus;
         self.cursor = match focus {
             NotesFocus::Title => self.title.chars().count(),
-            NotesFocus::Body => self.body.chars().count().min(self.cursor),
+            NotesFocus::Body => self.body.chars().count(),
         };
-        if focus == NotesFocus::Title {
-            self.cursor = self.title.chars().count();
+    }
+
+    /// Tab / Shift-Tab: toggle Title ↔ Body (two fields — direction is the same).
+    pub fn cycle_focus(&mut self, _reverse: bool) {
+        self.set_focus(match self.focus {
+            NotesFocus::Title => NotesFocus::Body,
+            NotesFocus::Body => NotesFocus::Title,
+        });
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.body_hist.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.body_hist.can_redo()
+    }
+
+    /// Undo last body edit. No-op when stack empty or focus was title-only (still restores body).
+    pub fn undo(&mut self) -> bool {
+        let current = self.body_snapshot();
+        let Some(prev) = self.body_hist.undo(current) else {
+            return false;
+        };
+        self.apply_body_snapshot(prev);
+        true
+    }
+
+    /// Redo previously undone body edit.
+    pub fn redo(&mut self) -> bool {
+        let current = self.body_snapshot();
+        let Some(next) = self.body_hist.redo(current) else {
+            return false;
+        };
+        self.apply_body_snapshot(next);
+        true
+    }
+
+    fn body_snapshot(&self) -> BodySnapshot {
+        BodySnapshot {
+            text: self.body.clone(),
+            cursor: self.cursor.min(self.body.chars().count()),
         }
+    }
+
+    fn apply_body_snapshot(&mut self, snap: BodySnapshot) {
+        self.body = snap.text;
+        let n = self.body.chars().count();
+        self.cursor = snap.cursor.min(n);
+        self.focus = NotesFocus::Body;
+        self.dirty = true;
+    }
+
+    fn push_body_undo(&mut self) {
+        let snap = self.body_snapshot();
+        self.body_hist.push(snap);
     }
 
     /// Compute split-pane layout for hit-testing and rendering.
@@ -380,12 +497,10 @@ impl NotesState {
             }
             NotesFocus::Body => {
                 let mut chars: Vec<char> = self.body.chars().collect();
-                if chars.len() >= NOTES_MAX_RUNES && ch != '\n' {
-                    // Still allow newline? Cap hard on any insert past max.
-                }
                 if chars.len() >= NOTES_MAX_RUNES {
                     return;
                 }
+                self.push_body_undo();
                 let i = self.cursor.min(chars.len());
                 chars.insert(i, ch);
                 self.cursor = i + 1;
@@ -414,6 +529,7 @@ impl NotesState {
                 let mut chars: Vec<char> = self.body.chars().collect();
                 let i = self.cursor.min(chars.len());
                 if i > 0 {
+                    self.push_body_undo();
                     chars.remove(i - 1);
                     self.cursor = i - 1;
                     self.body = chars.into_iter().collect();
@@ -943,6 +1059,116 @@ mod tests {
         assert!(s.open);
         s.close();
         assert!(!s.open);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn body_undo_redo_stack() {
+        let path = temp_notes_path("undo");
+        let _ = fs::remove_file(&path);
+        let mut s = NotesState::with_path(&path);
+        s.set_focus(NotesFocus::Body);
+        assert!(!s.can_undo());
+        assert!(!s.can_redo());
+
+        s.insert_char('a');
+        s.insert_char('b');
+        s.insert_char('c');
+        assert_eq!(s.body, "abc");
+        assert!(s.can_undo());
+        assert!(!s.can_redo());
+
+        assert!(s.undo());
+        assert_eq!(s.body, "ab");
+        assert!(s.can_redo());
+        assert!(s.undo());
+        assert_eq!(s.body, "a");
+        assert!(s.undo());
+        assert_eq!(s.body, "");
+        assert!(!s.can_undo());
+
+        assert!(s.redo());
+        assert_eq!(s.body, "a");
+        assert!(s.redo());
+        assert_eq!(s.body, "ab");
+        assert!(s.redo());
+        assert_eq!(s.body, "abc");
+        assert!(!s.can_redo());
+
+        // New edit after undo drops redo branch.
+        assert!(s.undo());
+        assert_eq!(s.body, "ab");
+        s.insert_char('X');
+        assert_eq!(s.body, "abX");
+        assert!(!s.can_redo());
+        assert!(s.undo());
+        assert_eq!(s.body, "ab");
+
+        // Title edits do not push body history.
+        s.set_focus(NotesFocus::Title);
+        s.insert_char('T');
+        assert_eq!(s.body, "ab");
+        // Still can undo body.
+        assert!(s.can_undo());
+        assert!(s.undo());
+        assert_eq!(s.focus, NotesFocus::Body);
+
+        // Switching notes clears history.
+        s.insert_char('z');
+        assert!(s.can_undo());
+        s.new_note();
+        assert!(!s.can_undo());
+        assert!(!s.can_redo());
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn title_body_focus_tab_and_click() {
+        let path = temp_notes_path("focus");
+        let _ = fs::remove_file(&path);
+        let mut s = NotesState::with_path(&path);
+        s.open = true;
+        s.present = 1.0;
+        s.set_focus(NotesFocus::Title);
+        s.insert_char('H');
+        // Typing goes to title.
+        assert_eq!(s.title, "H");
+        assert!(s.body.is_empty());
+
+        s.cycle_focus(false);
+        assert_eq!(s.focus, NotesFocus::Body);
+        s.insert_char('b');
+        assert_eq!(s.body, "b");
+        assert_eq!(s.title, "H");
+
+        s.cycle_focus(false);
+        assert_eq!(s.focus, NotesFocus::Title);
+
+        // Enter in title commits to body.
+        s.insert_char('\n');
+        assert_eq!(s.focus, NotesFocus::Body);
+
+        let lay = s.layout(800.0, 600.0);
+        s.try_click(lay.title.x + 4.0, lay.title.y + 4.0, 800.0, 600.0);
+        assert_eq!(s.focus, NotesFocus::Title);
+        s.try_click(lay.body.x + 4.0, lay.body.y + 4.0, 800.0, 600.0);
+        assert_eq!(s.focus, NotesFocus::Body);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn body_hist_limit_trims_oldest() {
+        let path = temp_notes_path("lim");
+        let _ = fs::remove_file(&path);
+        let mut s = NotesState::with_path(&path);
+        s.set_focus(NotesFocus::Body);
+        for i in 0..(BODY_HIST_LIMIT + 10) {
+            s.insert_char(char::from(b'a' + (i % 26) as u8));
+        }
+        assert_eq!(s.body_hist.past.len(), BODY_HIST_LIMIT);
+        assert!(s.undo());
         let _ = fs::remove_file(&path);
     }
 }
