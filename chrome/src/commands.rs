@@ -649,8 +649,15 @@ impl HelpLayout {
     pub const SEC_GAP: f32 = 6.0;
     pub const HEADER_H: f32 = 14.0;
 
+    /// Layout at full open (ease = 1). Prefer [`Self::with_ease`] while animating.
     pub fn new(window_w: f32, window_h: f32) -> Self {
-        let modal = Self::modal_rect(window_w, window_h);
+        Self::with_ease(window_w, window_h, 1.0)
+    }
+
+    /// Same geometry as other glass modals: spring `ease` scales size + drops from above
+    /// (palette / settings), then packs two-col rows inside the animated card.
+    pub fn with_ease(window_w: f32, window_h: f32, ease: f32) -> Self {
+        let modal = Self::animated_modal_rect(window_w, window_h, ease);
         let pad = 14.0;
         let sections = help_sections();
         // Prefer two columns so every product row fits with a glass chip.
@@ -703,11 +710,31 @@ impl HelpLayout {
         }
     }
 
+    /// Settled size (hit-test / “fully open”).
     pub fn modal_rect(window_w: f32, window_h: f32) -> crate::layout::Rect {
+        Self::base_modal_rect(window_w, window_h)
+    }
+
+    fn base_modal_rect(window_w: f32, window_h: f32) -> crate::layout::Rect {
         // Two-col stack needs ~40 title + ~15×29 rows + headers ≈ 520+.
         let w = (window_w - 40.0).min(800.0).max(360.0);
         let h = (window_h - 48.0).min(640.0).max(520.0);
         crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.40, w, h)
+    }
+
+    /// Agility-style content motion (same recipe as palette / settings):
+    /// scale 0.88→1 / 0.82→1, slight drop from above.
+    pub fn animated_modal_rect(window_w: f32, window_h: f32, ease: f32) -> crate::layout::Rect {
+        let base = Self::base_modal_rect(window_w, window_h);
+        let t = ease.clamp(0.0, 1.0);
+        let sx = 0.88 + 0.12 * t;
+        let sy = 0.82 + 0.18 * t;
+        let y_nudge = -24.0 * (1.0 - t);
+        let cx = base.x + base.w * 0.5;
+        let cy = base.y + base.h * 0.5 + y_nudge;
+        let w = base.w * sx;
+        let h = base.h * sy;
+        crate::layout::Rect::new(cx - w * 0.5, cy - h * 0.5, w, h)
     }
 }
 

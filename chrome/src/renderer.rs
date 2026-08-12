@@ -1552,7 +1552,8 @@ fn push_modal_glass(
 
     if help.visible() {
         let ease = help.content_ease().clamp(0.0, 1.0);
-        let lay = HelpLayout::new(win_w, win_h);
+        // Animated rect (scale + drop) matches palette/settings — not a static card.
+        let lay = HelpLayout::with_ease(win_w, win_h, ease);
         panels.push(
             PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
         );
@@ -1930,7 +1931,7 @@ fn push_modal_labels(
 
     if help.visible() {
         let ease = help.content_ease().clamp(0.0, 1.0);
-        let lay = HelpLayout::new(win_w, win_h);
+        let lay = HelpLayout::with_ease(win_w, win_h, ease);
         let modal = lay.modal;
         let mut title_c = bright;
         title_c[3] *= ease;
