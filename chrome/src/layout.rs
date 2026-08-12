@@ -181,6 +181,11 @@ pub const TAB_CLOSE_TRAIL: f32 = 10.0;
 /// Gap between title text area and close ×.
 pub const TAB_CLOSE_GAP: f32 = 6.0;
 
+/// Experiment: drop tab strip (+ workspace top) below the traffic-light /
+/// caffeine / logo band so those stay on the top row alone.
+/// Revert the commit that introduced this if the spacing feels wrong.
+pub const TAB_BAND_DROP: f32 = 12.0;
+
 impl FrameLayout {
     /// Compute chrome chrome for `tab_count` strip tabs (single full-workspace pane).
     pub fn compute(width: f32, height: f32, m: Metrics, tab_count: usize) -> Self {
@@ -198,25 +203,24 @@ impl FrameLayout {
     ) -> Self {
         let edge = m.edge();
         let _stack = m.stack(); // pane↔pane gaps applied in apply_pane_rects / split layout
-        let chrome_h = m.title_h; // single bar (tabs + logo live here)
-
-        let title = Rect::new(0.0, 0.0, width, chrome_h);
-        // Compat: no second strip — tabs share the title bar.
-        let tabs = Rect::new(0.0, 0.0, width, chrome_h);
-
-        // Nav chips first — still centered in the chrome bar (traffic lights too).
-        // Pane rises to the chip bottoms so nav↔pane air is closed without
-        // sliding chips down.
         let chip_h = m.spacing.unit * 4.0; // 32
         let cluster = m.cluster();
         let chip_w = TAB_CHIP_W; // title + air + close ×
         let logo_w = chip_h; // square glass
-        let chip_y = ((chrome_h - chip_h) * 0.5).max(0.0);
-        let chip_bottom = chip_y + chip_h;
+        // Side controls (traffic / caffeine / logo) stay in the original title band.
+        let side_band_h = m.title_h;
+        let chip_y_side = ((side_band_h - chip_h) * 0.5).max(0.0);
+        // Tabs (and thus the workspace top) sit a band lower — experimental.
+        let chip_y = chip_y_side + TAB_BAND_DROP;
+        let chrome_h = (chip_y + chip_h).max(side_band_h);
+
+        let title = Rect::new(0.0, 0.0, width, chrome_h);
+        // Compat: tabs live in the chrome bar (now taller by TAB_BAND_DROP).
+        let tabs = Rect::new(0.0, 0.0, width, chrome_h);
 
         let term_x = edge;
-        // Flush under chip bottoms (was flush under full chrome_h → ~4px air).
-        let term_y = chip_bottom;
+        // Workspace starts under the dropped tab row (not under the side chips).
+        let term_y = chrome_h;
         let term_w = (width - edge * 2.0).max(80.0);
         let term_h = (height - term_y - edge).max(80.0);
         let workspace = Rect::new(term_x, term_y, term_w, term_h);
@@ -264,10 +268,10 @@ impl FrameLayout {
             edge
         };
 
-        // Right cluster: [ ☕ caffeine ] [ 硯 logo/settings ]
-        let logo = Rect::new(width - edge - logo_w, chip_y, logo_w, chip_h);
+        // Right cluster: [ ☕ caffeine ] [ 硯 logo/settings ] — top band (with traffic lights).
+        let logo = Rect::new(width - edge - logo_w, chip_y_side, logo_w, chip_h);
         let settings = logo; // same hit target
-        let caffeine = Rect::new(logo.x - cluster - logo_w, chip_y, logo_w, chip_h);
+        let caffeine = Rect::new(logo.x - cluster - logo_w, chip_y_side, logo_w, chip_h);
         let tabs_right = caffeine.x - cluster;
 
         let mut x = tabs_left;
