@@ -98,11 +98,11 @@ Capture from a running build (Start menu tile + main window with a shell). Store
 | | GitHub portable / NSIS | Store MSIX |
 | --- | --- | --- |
 | Install path | `%LOCALAPPDATA%\Programs\suzuri` or anywhere | WindowsApps package folder (read-only) |
-| Updates | In-app GitHub Releases | **Microsoft Store only** |
+| Updates | In-app GitHub Releases | In-app Store check/install after the package is **published** |
 | Signing | Unsigned today (SignPath later) | Store re-signs |
 | Config / logs | `%LOCALAPPDATA%\suzuri` | Same env vars; may be package-virtualized |
 
-The app detects package identity (`GetCurrentPackageFullName`) and **disables GitHub auto-update** so Store builds do not try to overwrite themselves.
+The app detects package identity (`GetCurrentPackageFullName`) and **disables GitHub auto-update** so Store builds do not try to overwrite themselves. Packaged builds instead call `StoreContext` (`GetAppAndOptionalStorePackageUpdatesAsync` / `RequestDownloadAndInstallStorePackageUpdatesAsync`). That only succeeds after Partner Center certification **publishes** the new package — it does not skip the cert wait.
 
 The MSIX layout must include **`suzuri.exe`**, **`suzuri-chrome.exe`**, and **`suzuri-transfer.exe`** as siblings — same as the NSIS/zip layout. The host finds chrome and transfer next to itself.
 
