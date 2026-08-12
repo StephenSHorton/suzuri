@@ -16,7 +16,7 @@ import (
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/bridge"
-	"github.com/StephenSHorton/suzuri/internal/chrome"
+	"github.com/StephenSHorton/suzuri/internal/notes"
 	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
 
@@ -495,7 +495,7 @@ func notesTool(req bridge.NotesRequest) *mcp.CallToolResult {
 		}
 		// Fall through to disk if bridge call fails mid-flight.
 	}
-	off := chrome.ApplyNotesDiskOp(string(req.Op), req.ID, req.Title, req.Body, req.SetActive)
+	off := notes.ApplyNotesDiskOp(string(req.Op), req.ID, req.Title, req.Body, req.SetActive)
 	return textResult(off)
 }
 

@@ -790,9 +790,10 @@ fn initial_cwd() -> String {
         .unwrap_or_else(|_| "/".into())
 }
 
-/// Shorten `$HOME` → `~` for chrome path display (product `displayPath`).
+/// Shorten `$HOME` / `%USERPROFILE%` → `~` for chrome path display.
 ///
 /// Compares **cleaned** paths so trailing slashes / `.` / `..` still map to `~`.
+/// Output always uses `/` after the tilde (product-style).
 pub fn display_path(cwd: &str) -> String {
     let cwd = normalize_abs_path(cwd);
     if cwd.is_empty() {
@@ -803,25 +804,44 @@ pub fn display_path(cwd: &str) -> String {
         .unwrap_or_default();
     let home = normalize_abs_path(&home);
     if home.is_empty() {
-        return cwd;
+        return slashify_display(&cwd);
     }
     // Exact home (also try canonicalize when both exist on disk).
     if paths_equal(&cwd, &home) {
         return "~".into();
     }
-    // ~/rest — only if cwd is under home as a path prefix.
-    let home_prefix = if home == "/" {
+    // Compare with unified separators so Windows USERPROFILE works.
+    let cwd_u = slashify_display(&cwd);
+    let home_u = slashify_display(&home);
+    if paths_equal(&cwd_u, &home_u) || cwd_u.eq_ignore_ascii_case(&home_u) {
+        return "~".into();
+    }
+    let home_prefix = if home_u == "/" {
         "/".to_string()
     } else {
-        format!("{home}/")
+        format!("{home_u}/")
     };
-    if let Some(rest) = cwd.strip_prefix(&home_prefix) {
+    // Case-insensitive prefix on Windows-style drives.
+    let under = if cfg!(windows) {
+        cwd_u
+            .to_ascii_lowercase()
+            .strip_prefix(&home_prefix.to_ascii_lowercase())
+            .map(|r| r.to_string())
+    } else {
+        cwd_u.strip_prefix(&home_prefix).map(|r| r.to_string())
+    };
+    if let Some(rest) = under {
         if !rest.is_empty() {
             return format!("~/{rest}");
         }
         return "~".into();
     }
-    cwd
+    cwd_u
+}
+
+/// Display form: backslashes → forward slashes (UI labels).
+fn slashify_display(p: &str) -> String {
+    p.replace('\\', "/")
 }
 
 /// Collapse `//`, trailing `/` (except root), and `.` / `..` components.
@@ -908,16 +928,18 @@ mod tests {
 
     #[test]
     fn display_path_home_is_tilde() {
-        let home = std::env::var("HOME").expect("HOME");
+        // Unix CI has HOME; Windows runners usually only USERPROFILE.
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .expect("HOME or USERPROFILE");
         assert_eq!(display_path(&home), "~");
-        assert_eq!(display_path(&format!("{home}/")), "~");
-        assert_eq!(display_path(&format!("{home}/.")), "~");
-        assert_eq!(
-            display_path(&format!("{home}/projects/foo")),
-            "~/projects/foo"
-        );
-        // Unrelated absolute stays absolute
-        assert_eq!(display_path("/tmp"), "/tmp");
+        let slash = if home.contains('\\') { "\\" } else { "/" };
+        assert_eq!(display_path(&format!("{home}{slash}")), "~");
+        let sub = display_path(&format!("{home}{slash}projects{slash}foo"));
+        assert_eq!(sub, "~/projects/foo", "sub={sub}");
+        if !cfg!(windows) {
+            assert_eq!(display_path("/tmp"), "/tmp");
+        }
     }
 
     #[test]

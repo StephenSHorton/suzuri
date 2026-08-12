@@ -41,6 +41,8 @@ pub struct ChromePrefs {
     /// Optional **accent** override (product `colSecondary`).
     /// `None` → derive from [`Self::primary`] via [`theme::derive_accent`].
     pub accent: Option<[f32; 3]>,
+    /// Mono terminal font id (`gohu`, `sf-mono`, `menlo`, …). See [`theme::FONT_IDS`].
+    pub font: String,
     /// First-run welcome splash has been dismissed (product `first_run_done` analog).
     pub splash_seen: bool,
 }
@@ -54,6 +56,7 @@ impl Default for ChromePrefs {
             theme: theme::DEFAULT_THEME_ID.to_string(),
             primary: theme::DEFAULT_PRIMARY,
             accent: None,
+            font: theme::DEFAULT_FONT_ID.to_string(),
             splash_seen: false,
         }
     }
@@ -114,7 +117,15 @@ impl ChromePrefs {
         theme::from_primary(self.primary, self.accent)
     }
 
-    /// Reset toggles / colors / darken to factory defaults (keeps `splash_seen`).
+    pub fn set_font(&mut self, id: &str) {
+        self.font = theme::normalize_font_id(id).to_string();
+    }
+
+    pub fn cycle_font(&mut self, dir: i32) {
+        self.font = theme::cycle_font(&self.font, dir).to_string();
+    }
+
+    /// Reset toggles / colors / darken / font to factory defaults (keeps `splash_seen`).
     pub fn reset_to_defaults(&mut self) {
         let splash = self.splash_seen;
         *self = Self::default();
@@ -125,6 +136,7 @@ impl ChromePrefs {
     pub fn normalize(mut self) -> Self {
         self.glass_darken = self.glass_darken.clamp(0.0, 0.95);
         self.theme = theme::normalize_id(&self.theme).to_string();
+        self.font = theme::normalize_font_id(&self.font).to_string();
         for c in &mut self.primary {
             *c = c.clamp(0.0, 1.0);
         }
@@ -214,14 +226,16 @@ pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
         Some(rgb) => format!("\"{}\"", theme::to_hex(rgb)),
         None => "\"auto\"".into(),
     };
+    let font = theme::normalize_font_id(&prefs.font);
     format!(
-        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"splash_seen\": {}\n}}\n",
+        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"font\": \"{}\",\n  \"splash_seen\": {}\n}}\n",
         prefs.rain,
         prefs.lens,
         format_f32(prefs.glass_darken),
         theme,
         primary,
         accent,
+        font,
         prefs.splash_seen,
     )
 }
@@ -241,6 +255,9 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
         .map(|s| theme::normalize_id(&s).to_string())
         .unwrap_or(d.theme.clone());
     let splash_seen = extract_bool(trimmed, "splash_seen").unwrap_or(d.splash_seen);
+    let font = extract_string(trimmed, "font")
+        .map(|s| theme::normalize_font_id(&s).to_string())
+        .unwrap_or(d.font.clone());
 
     // Primary: explicit `primary` hex, else legacy `accent` hex (was primary),
     // else named theme jade, else default.
@@ -283,6 +300,7 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
         theme,
         primary,
         accent,
+        font,
         splash_seen,
     })
 }
@@ -385,6 +403,7 @@ mod tests {
             theme: "nord".into(),
             primary: theme::NORD.jade,
             accent: Some(theme::NORD.secondary),
+            font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
         };
         save_chrome_prefs(&path, &prefs).expect("save");
@@ -439,6 +458,7 @@ mod tests {
             theme: theme::DEFAULT_THEME_ID.into(),
             primary: theme::DEFAULT_PRIMARY,
             accent: None,
+            font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
         };
         save_chrome_prefs(&path, &prefs).expect("save");
@@ -473,6 +493,7 @@ mod tests {
             theme: "dracula".into(),
             primary: theme::DRACULA.jade,
             accent: None,
+            font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: false,
         };
         save_chrome_prefs(&path, &prefs).unwrap();
@@ -493,6 +514,7 @@ mod tests {
             theme: "charm".into(),
             primary: theme::CHARM.jade,
             accent: None,
+            font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
         };
         let raw = chrome_prefs_to_json(&prefs);
@@ -600,6 +622,7 @@ mod tests {
             theme: "nord".into(),
             primary: [1.0, 0.0, 0.0],
             accent: Some([0.0, 1.0, 0.0]),
+            font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
         };
         p.reset_to_defaults();
@@ -618,6 +641,7 @@ mod tests {
             theme: "nope".into(),
             primary: theme::DEFAULT_PRIMARY,
             accent: None,
+            font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: false,
         }
         .normalize();

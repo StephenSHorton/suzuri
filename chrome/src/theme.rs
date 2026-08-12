@@ -136,6 +136,58 @@ pub const DEFAULT_PRIMARY: [f32; 3] = [0.0, 0.902, 0.463];
 /// Alias — historical name when primary lived in the `accent` prefs field.
 pub const DEFAULT_ACCENT: [f32; 3] = DEFAULT_PRIMARY;
 
+/// Terminal / mono font ids for settings (bundled Gohu first).
+pub const FONT_IDS: &[&str] = &[
+    "gohu",
+    "sf-mono",
+    "menlo",
+    "jetbrains",
+    "cascadia",
+    "system",
+];
+
+pub const DEFAULT_FONT_ID: &str = "gohu";
+
+/// Normalize font id (unknown → gohu).
+pub fn normalize_font_id(id: &str) -> &'static str {
+    let lower = id.trim().to_ascii_lowercase();
+    for known in FONT_IDS {
+        if *known == lower {
+            return *known;
+        }
+    }
+    // Aliases
+    match lower.as_str() {
+        "gohufont" | "gohu mono" | "default" | "" => "gohu",
+        "sfmono" | "sf mono" | "sf_mono" => "sf-mono",
+        "jetbrains mono" | "jetbrainsmono" | "jb mono" => "jetbrains",
+        "cascadia mono" | "cascadiamono" | "cascadia code" => "cascadia",
+        "monospace" | "mono" => "system",
+        _ => DEFAULT_FONT_ID,
+    }
+}
+
+/// Human label for settings value column.
+pub fn font_label(id: &str) -> &'static str {
+    match normalize_font_id(id) {
+        "sf-mono" => "SF Mono",
+        "menlo" => "Menlo",
+        "jetbrains" => "JetBrains Mono",
+        "cascadia" => "Cascadia Mono",
+        "system" => "System Mono",
+        _ => "Gohu",
+    }
+}
+
+/// Cycle font id forward/back.
+pub fn cycle_font(id: &str, dir: i32) -> &'static str {
+    let cur = normalize_font_id(id);
+    let idx = FONT_IDS.iter().position(|&f| f == cur).unwrap_or(0) as i32;
+    let n = FONT_IDS.len() as i32;
+    let next = (idx + dir).rem_euclid(n) as usize;
+    FONT_IDS[next]
+}
+
 /// Preset colors for the settings swatch strip (primary or accent override).
 pub const COLOR_PRESETS: &[[f32; 3]] = &[
     [0.0, 0.902, 0.463],   // jade (default primary)

@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/StephenSHorton/suzuri/internal/bridge"
-	"github.com/StephenSHorton/suzuri/internal/chrome"
+	"github.com/StephenSHorton/suzuri/internal/notes"
 	"github.com/StephenSHorton/suzuri/internal/config"
 	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
@@ -218,7 +218,7 @@ func trimSubmit(s string) string {
 func startChromeBridge(chromePID int) (*bridge.Host, error) {
 	h := bridge.NewHost()
 	h.BindNotes(func(req bridge.NotesRequest) bridge.NotesResult {
-		off := chrome.ApplyNotesDiskOp(string(req.Op), req.ID, req.Title, req.Body, req.SetActive)
+		off := notes.ApplyNotesDiskOp(string(req.Op), req.ID, req.Title, req.Body, req.SetActive)
 		switch req.Op {
 		case bridge.NotesOpCreate, bridge.NotesOpUpdate, bridge.NotesOpDelete:
 			_ = SendCommand(CmdOpenNotes)
@@ -275,7 +275,7 @@ func publishChromeStatus(h *bridge.Host, chromePID int) {
 	h.Publish(SnapshotFromChromeStatus(st, chromePID))
 }
 
-func notesBridgeFromDisk(off chrome.NotesBridgeResult) bridge.NotesResult {
+func notesBridgeFromDisk(off notes.NotesBridgeResult) bridge.NotesResult {
 	b, err := json.Marshal(off)
 	if err != nil {
 		return bridge.NotesResult{OK: false, Error: err.Error()}

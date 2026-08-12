@@ -6,30 +6,19 @@ import (
 	"strings"
 )
 
-// EnvUI selects which GUI `suzuri` (no subcommand) launches.
-//
-//	chrome / native — suzuri-chrome (native GPU)
-//	classic / ebiten / legacy — classic ebiten UI
-//
-// Empty: prefer chrome when a chrome binary is resolvable (install layout or
-// dev release build); otherwise classic.
+// EnvUI is retained for compatibility. The product UI is native-only;
+// classic/ebiten is no longer a launch path. Values "classic"/"ebiten"/"legacy"
+// are ignored (and logged by callers if needed).
 const EnvUI = "SUZURI_UI"
 
-// PreferChromeUI reports whether the default `suzuri` entrypoint should launch
-// native chrome instead of classic ebiten.
+// PreferChromeUI always reports true: product GUI is native GPU UI only.
+// Kept so older call sites / tests compile without branching on classic.
 func PreferChromeUI() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvUI))) {
-	case "classic", "ebiten", "legacy":
-		return false
-	case "chrome", "native":
-		return true
-	}
-	// Default: chrome when binary is available (sibling install or cargo release).
-	_, err := ResolveBinary()
-	return err == nil
+	_ = strings.ToLower(strings.TrimSpace(os.Getenv(EnvUI)))
+	return true
 }
 
-// SiblingChromeAvailable is true when suzuri-chrome sits next to the running
+// SiblingChromeAvailable is true when the UI binary sits next to the running
 // suzuri executable (product install layout). Does not search PATH or dev trees.
 func SiblingChromeAvailable() bool {
 	self, err := os.Executable()

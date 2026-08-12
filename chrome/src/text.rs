@@ -211,6 +211,11 @@ pub struct TextLayer {
     /// OS/2 weight of the embedded face (Gohu is 500, not 400).
     gohu_weight: Weight,
     gohu_ok: bool,
+    /// Active mono font id from settings (`gohu`, `sf-mono`, …).
+    mono_font_id: String,
+    /// Resolved face name for terminal mono paint.
+    mono_family: String,
+    mono_weight: Weight,
     /// Measured mono cell (logical px) for terminal grid + paint.
     mono_cell: MonoCellMetrics,
 }
@@ -322,9 +327,12 @@ impl TextLayer {
             width: 1,
             height: 1,
             scale_factor: 1.0,
-            gohu_family,
+            gohu_family: gohu_family.clone(),
             gohu_weight,
             gohu_ok,
+            mono_font_id: "gohu".into(),
+            mono_family: gohu_family,
+            mono_weight: gohu_weight,
             mono_cell,
         }
     }
@@ -332,6 +340,81 @@ impl TextLayer {
     /// Measured mono cell size (logical px) for PTY grid + terminal paint.
     pub fn mono_cell(&self) -> MonoCellMetrics {
         self.mono_cell
+    }
+
+    /// Active mono font id (settings).
+    pub fn mono_font_id(&self) -> &str {
+        &self.mono_font_id
+    }
+
+    /// Switch terminal mono face from a settings font id. Re-measures cell pitch.
+    /// Returns `true` if the face (or metrics) changed.
+    pub fn set_mono_font_id(&mut self, id: &str) -> bool {
+        let id = crate::theme::normalize_font_id(id);
+        if self.mono_font_id == id {
+            return false;
+        }
+        let (family, weight) = self.resolve_font_id(id);
+        self.mono_font_id = id.to_string();
+        self.mono_family = family;
+        self.mono_weight = weight;
+        self.font_system
+            .db_mut()
+            .set_monospace_family(self.mono_family.as_str());
+        self.remeasure_mono_cell();
+        true
+    }
+
+    fn resolve_font_id(&self, id: &str) -> (String, Weight) {
+        let candidates: &[&str] = match id {
+            "sf-mono" => &["SF Mono", "SFMono-Regular", "Menlo"],
+            "menlo" => &["Menlo", "Menlo-Regular"],
+            "jetbrains" => &["JetBrains Mono", "JetBrainsMono-Regular", "JetBrains Mono NL"],
+            "cascadia" => &["Cascadia Mono", "Cascadia Code", "CascadiaMono"],
+            "system" => &[], // Family::Monospace
+            _ => return (self.gohu_family.clone(), self.gohu_weight),
+        };
+        if id == "system" {
+            return ("monospace".into(), Weight::NORMAL);
+        }
+        for face in self.font_system.db().faces() {
+            for (name, _) in &face.families {
+                for c in candidates {
+                    if name.eq_ignore_ascii_case(c) || name.contains(c) {
+                        return (name.clone(), face.weight);
+                    }
+                }
+            }
+        }
+        // Missing system face → fall back to bundled Gohu.
+        (self.gohu_family.clone(), self.gohu_weight)
+    }
+
+    fn remeasure_mono_cell(&mut self) {
+        let design = 14.0_f32;
+        let mut probe = Buffer::new(&mut self.font_system, FontMetrics::new(design, design));
+        probe.set_size(&mut self.font_system, Some(200.0), Some(design));
+        let attrs = if self.mono_font_id == "system" {
+            Attrs::new().family(Family::Monospace)
+        } else {
+            Attrs::new()
+                .family(Family::Name(self.mono_family.as_str()))
+                .weight(self.mono_weight)
+        };
+        probe.set_text(&mut self.font_system, "M", attrs, Shaping::Advanced);
+        probe.shape_until_scroll(&mut self.font_system, false);
+        let mut advance = 0.0_f32;
+        for run in probe.layout_runs() {
+            advance = advance.max(run.line_w);
+        }
+        self.mono_cell = if advance >= 5.0 && advance <= 16.0 {
+            MonoCellMetrics {
+                w: advance.round().max(1.0),
+                h: design,
+            }
+        } else {
+            MonoCellMetrics::default()
+        };
     }
 
     pub fn resize(&mut self, physical: PhysicalSize<u32>, scale_factor: f32) {
@@ -363,8 +446,9 @@ impl TextLayer {
             ));
         }
 
-        let gohu_name = self.gohu_family.clone();
-        let gohu_weight = self.gohu_weight;
+        let mono_name = self.mono_family.clone();
+        let mono_weight = self.mono_weight;
+        let mono_system = self.mono_font_id == "system";
         let gohu_ok = self.gohu_ok;
 
         for (i, label) in labels.iter().enumerate() {
@@ -407,16 +491,16 @@ impl TextLayer {
                 // One system UI face for the whole chord → shared baseline / advances.
                 let attrs = Attrs::new().family(Family::Name(KEY_CHORD_FAMILY));
                 buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-            } else if gohu_ok {
-                // MUST set weight=500 or cosmic-text will not select Gohu.
-                let attrs = Attrs::new()
-                    .family(Family::Name(gohu_name.as_str()))
-                    .weight(gohu_weight);
-                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-            } else {
+            } else if mono_system || !gohu_ok {
                 let attrs = Attrs::new()
                     .family(Family::Monospace)
-                    .weight(gohu_weight);
+                    .weight(mono_weight);
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+            } else {
+                // Named mono face (Gohu weight 500, system faces usually 400).
+                let attrs = Attrs::new()
+                    .family(Family::Name(mono_name.as_str()))
+                    .weight(mono_weight);
                 buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
             }
             buf.shape_until_scroll(&mut self.font_system, false);

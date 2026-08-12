@@ -31,11 +31,21 @@ jobs:
           shared-key: ci-transfer-${{ matrix.os }}
           cache-targets: false
 
+      - name: Cache cargo (native UI)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: chrome -> chrome/target
+          shared-key: ci-chrome-${{ matrix.os }}
+          cache-targets: false
+
       - name: Test (Go)
         run: go test ./...
 
       - name: Test (transfer engine)
         run: cargo test --manifest-path libs/transfer/Cargo.toml --workspace
+
+      - name: Test (native UI)
+        run: cargo test --manifest-path chrome/Cargo.toml --bins
 
       - name: Build host
         shell: bash
@@ -55,4 +65,14 @@ jobs:
             test -f libs/transfer/target/release/suzuri-transfer.exe
           else
             test -f libs/transfer/target/release/suzuri-transfer
+          fi
+
+      - name: Build native UI
+        shell: bash
+        run: |
+          cargo build --release --manifest-path chrome/Cargo.toml --bin suzuri-chrome
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            test -f chrome/target/release/suzuri-chrome.exe
+          else
+            test -f chrome/target/release/suzuri-chrome
           fi

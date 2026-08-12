@@ -9,7 +9,7 @@ Track B / Wave 3 Track K of product parity. Implementation lives in:
 | `src/app.rs` | Keys, palette action, click routing, drop → attach |
 | `src/renderer.rs` | Paint labels inside animated modal (incl. members strip) |
 
-Product references: `internal/workspace/`, `internal/chrome/workspace.go`.
+Product references: `internal/workspace/` (Go store); UI paint in this crate.
 
 ## Data layout
 

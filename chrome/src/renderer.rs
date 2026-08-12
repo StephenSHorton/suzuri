@@ -628,6 +628,12 @@ impl Renderer {
         self.text.mono_cell()
     }
 
+    /// Apply settings mono font id. Returns true if metrics changed (caller
+    /// should re-grid PTY panes).
+    pub fn set_mono_font_id(&mut self, id: &str) -> bool {
+        self.text.set_mono_font_id(id)
+    }
+
     pub fn metrics(&self) -> Metrics {
         self.metrics
     }
@@ -699,6 +705,8 @@ impl Renderer {
         term_selection: &Selection,
         // Hovered URL span for primary tint (focused pane; None = no-op).
         hovered_link: Option<&LinkHoverSpan>,
+        // When true, skip the rain GPU pass (reuse last rain RT) for snappy typing.
+        skip_rain: bool,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -1025,7 +1033,9 @@ impl Renderer {
                 },
             ],
         });
-        {
+        // Rain RT: redraw when enabled and not in input-boost; otherwise leave
+        // the previous frame in place (Load) so typing doesn't flash black.
+        if settings.prefs.rain && !skip_rain {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("rain"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1040,12 +1050,27 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if settings.prefs.rain {
-                pass.set_pipeline(&self.rain_pipeline);
-                pass.set_bind_group(0, &rain_bind, &[]);
-                pass.draw(0..3, 0..1);
-            }
+            pass.set_pipeline(&self.rain_pipeline);
+            pass.set_bind_group(0, &rain_bind, &[]);
+            pass.draw(0..3, 0..1);
+        } else if !settings.prefs.rain {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rain-clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.rain_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let _ = &mut pass;
         }
+        // skip_rain + rain on: keep previous rain_view (no pass)
 
         // Pass 1: composite glass chrome → scene RT (not swapchain)
         {
@@ -1316,36 +1341,51 @@ fn chrome_labels(
         ));
     }
 
+    // Terminal cells are painted in the same text pass as modals (after glass).
+    // When any modal is open, skip terminal glyphs so they don't punch through
+    // modal glass/scrim (text was drawing above settings/palette/etc.).
+    let modal_covers_term = settings.visible()
+        || palette.visible()
+        || help.visible()
+        || confirm.visible()
+        || splash.visible()
+        || notes.visible()
+        || workspace_ui.visible()
+        || transfer.visible()
+        || rename.visible();
+
     // Every leaf pane: cells + footer
     let focus = session.focus_pane_id();
     for pl in &layout.panes {
         let Some(pane) = session.panes.get(&pl.pane_id) else {
             continue;
         };
-        let show_cursor = terminal_cursor_visible && pl.pane_id == focus;
-        // Selection + link hover are one global model for the focused leaf.
-        let pane_sel = if pl.pane_id == focus {
-            Some(term_selection)
-        } else {
-            None
-        };
-        let pane_link = if pl.pane_id == focus {
-            hovered_link
-        } else {
-            None
-        };
-        push_pane_cells(
-            &mut labels,
-            pl,
-            pane,
-            show_cursor,
-            pane_sel,
-            selection_rgb,
-            pane_link,
-            link_hover_rgb,
-            caret_rgb,
-            cell,
-        );
+        if !modal_covers_term {
+            let show_cursor = terminal_cursor_visible && pl.pane_id == focus;
+            // Selection + link hover are one global model for the focused leaf.
+            let pane_sel = if pl.pane_id == focus {
+                Some(term_selection)
+            } else {
+                None
+            };
+            let pane_link = if pl.pane_id == focus {
+                hovered_link
+            } else {
+                None
+            };
+            push_pane_cells(
+                &mut labels,
+                pl,
+                pane,
+                show_cursor,
+                pane_sel,
+                selection_rgb,
+                pane_link,
+                link_hover_rgb,
+                caret_rgb,
+                cell,
+            );
+        }
 
         // Footer (path + warp) only when the command strip is present.
         // Alt-screen panes collapse the strip to zero height — skip paint.
@@ -1854,15 +1894,20 @@ fn push_modal_labels(
         };
         let darken_val = format!("‹  {:.0}%  ›", settings.prefs.glass_darken * 100.0);
         use crate::settings::settings_row;
-        // Booleans = glass switches; primary/accent/darken show values; reset label-only.
+        // Booleans = glass switches; primary/accent/font/darken show values.
         let titles = [
             "Glyph rain",
             "Magnifier",
             "Primary color",
             "Accent color",
+            "Font",
             "Glass darken",
             "Reset defaults",
         ];
+        let font_disp = format!(
+            "‹  {}  ›",
+            crate::theme::font_label(&settings.prefs.font)
+        );
         let text_size = 13.0;
         for (i, row) in lay.rows.iter().enumerate() {
             let mut tc = bright;
@@ -1877,6 +1922,7 @@ fn push_modal_labels(
             ));
             if i == settings_row::PRIMARY
                 || i == settings_row::ACCENT
+                || i == settings_row::FONT
                 || i == settings_row::DARKEN
             {
                 let vc = if i == settings_row::PRIMARY {
@@ -1892,6 +1938,8 @@ fn push_modal_labels(
                     primary_disp.as_str()
                 } else if i == settings_row::ACCENT {
                     accent_disp.as_str()
+                } else if i == settings_row::FONT {
+                    font_disp.as_str()
                 } else {
                     darken_val.as_str()
                 };

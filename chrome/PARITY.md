@@ -1,4 +1,6 @@
-# suzuri-chrome product parity
+# Native UI product parity
+
+Product UI is this crate. Classic Charm/ebiten UI has been **removed** from the host.
 
 Branch: `exp/native-chrome`
 
