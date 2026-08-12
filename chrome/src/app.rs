@@ -132,6 +132,8 @@ pub struct ChromeApp {
     input_boost_until: Instant,
     /// Last applied mono font id (avoid re-resolve every paint).
     applied_font: String,
+    /// Accumulated trackpad pixel-delta (macOS sends many sub-line events).
+    wheel_accum: f32,
 }
 
 impl Default for ChromeApp {
@@ -187,6 +189,7 @@ impl Default for ChromeApp {
             status_publisher: StatusPublisher::new(),
             input_boost_until: Instant::now(),
             applied_font: String::new(),
+            wheel_accum: 0.0,
         };
         // First-run overlay only — PTY already spawned above.
         if !app.settings.prefs.splash_seen {
@@ -1349,7 +1352,7 @@ impl ChromeApp {
                 }
                 return;
             }
-            // Clear terminal selection before quitting on bare Esc.
+            // Clear a drag-selection, then fall through so TUIs still get Esc.
             if !self.term_selection.is_empty() || self.selecting_term {
                 self.term_selection.clear();
                 self.selecting_term = false;
@@ -1359,7 +1362,19 @@ impl ChromeApp {
                 }
                 return;
             }
-            self.request_quit(event_loop);
+            // Never quit on Escape — fullscreen TUIs (vim, less, Grok, …) use it
+            // constantly. Forward CSI Esc to the live PTY.
+            let id = self.session.focus_pane_id();
+            if let Some(rt) = self.runtimes.get_mut(&id) {
+                if let Some(pty) = &mut rt.pty {
+                    let _ = pty.write_all(b"\x1b");
+                    self.bump_input_boost();
+                    self.drain_all_ptys();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
             return;
         }
 
@@ -2631,8 +2646,12 @@ impl ApplicationHandler for ChromeApp {
                         }
                     }
                 } else {
+                    // LineDelta = discrete mouse wheel. PixelDelta = trackpad;
+                    // macOS sends many sub-line events — accumulate or they vanish.
+                    const PX_PER_LINE: f32 = 12.0;
                     let lines = match delta {
                         MouseScrollDelta::LineDelta(_, y) => {
+                            self.wheel_accum = 0.0;
                             if y > 0.0 {
                                 3
                             } else if y < 0.0 {
@@ -2643,19 +2662,19 @@ impl ApplicationHandler for ChromeApp {
                         }
                         MouseScrollDelta::PixelDelta(p) => {
                             let y = p.y as f32;
-                            if y > 2.0 {
-                                3
-                            } else if y < -2.0 {
-                                -3
-                            } else {
+                            if !y.is_finite() {
                                 0
+                            } else {
+                                self.wheel_accum += y;
+                                let n = (self.wheel_accum / PX_PER_LINE).trunc() as i32;
+                                self.wheel_accum -= n as f32 * PX_PER_LINE;
+                                n
                             }
                         }
                     };
                     if lines != 0 {
-                        // Slightly faster than 1:1 so history feels snappy (product ~half-viewport on keys).
-                        let step = (lines * 2).clamp(-12, 12);
-                        // Workspace chat owns the wheel while open (not the terminal).
+                        let step = lines.clamp(-24, 24);
+                        // Workspace chat owns the wheel while its modal is open.
                         if self.workspace_ui.open {
                             if step > 0 {
                                 self.workspace_ui.scroll_up(step as usize);
@@ -2663,7 +2682,16 @@ impl ApplicationHandler for ChromeApp {
                                 self.workspace_ui.scroll_down((-step) as usize);
                             }
                         } else {
-                            self.session.active_grid_mut().scroll_view(step);
+                            // Alt-screen TUIs own the viewport — don't steal scrollback.
+                            let id = self.session.focus_pane_id();
+                            let alt = self
+                                .runtimes
+                                .get(&id)
+                                .map(|rt| rt.ansi.on_alt_screen())
+                                .unwrap_or(false);
+                            if !alt {
+                                self.session.active_grid_mut().scroll_view(step);
+                            }
                         }
                         if let Some(w) = &self.window {
                             w.request_redraw();
