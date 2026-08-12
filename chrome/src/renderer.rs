@@ -14,7 +14,8 @@ use crate::confirm::ConfirmState;
 use crate::input::{is_mac, traffic_light_rects};
 use crate::layout::{FrameLayout, Metrics, PaneLayout, PanelInstance};
 use crate::rain_atlas::RainAtlas;
-use crate::rain_sim;
+use crate::rain_sim::{self, RainUniforms};
+use crate::rain_thread::RainThread;
 use crate::rename::RenameState;
 use crate::links::LinkHoverSpan;
 use crate::selection::Selection;
@@ -54,21 +55,6 @@ pub const CELL_H: f32 = 14.0;
 /// Default inner glass inset — prefer [`Metrics::inset`] at call sites.
 /// Kept for callers that don't have Metrics yet; matches Spacing::inset.
 pub const TERM_PAD: f32 = 8.0; // matches Spacing::inset (inside); outside is Spacing::space
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct RainUniforms {
-    /// xy = fb size, z = time, w = unused
-    res_time: [f32; 4],
-    /// x=cell, y=speed, z=speedVar, w=density
-    params: [f32; 4],
-    /// x=trail, y=glow, z=mutate, w=flicker
-    params2: [f32; 4],
-    /// x=layers, y=glyphCount, z=atlasGrid, w=unused
-    params3: [f32; 4],
-    color: [f32; 4],
-    head_color: [f32; 4],
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -119,14 +105,9 @@ pub struct Renderer {
     size: winit::dpi::PhysicalSize<u32>,
     scale_factor: f32,
 
-    rain_tex: wgpu::Texture,
-    rain_view: wgpu::TextureView,
-    rain_pipeline: wgpu::RenderPipeline,
-    rain_bgl: wgpu::BindGroupLayout,
-    rain_uniform_buf: wgpu::Buffer,
     rain_atlas: RainAtlas,
-    /// Canvas UI GlyphRain starts at t=7.3
-    rain_time: f32,
+    /// Encodes rain off the UI thread; we only sample the last completed RT.
+    rain_thread: RainThread,
 
     composite_pipeline: wgpu::RenderPipeline,
     composite_bgl: wgpu::BindGroupLayout,
@@ -248,38 +229,34 @@ impl Renderer {
 
         let rain_atlas = RainAtlas::build(&device, &queue);
 
-        let rain_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rain uniforms"),
-            contents: bytemuck::bytes_of(&RainUniforms {
-                res_time: [1.0, 1.0, 7.3, 0.0],
-                params: [
-                    rain_sim::CELL,
-                    rain_sim::SPEED,
-                    rain_sim::SPEED_VARIANCE,
-                    rain_sim::DENSITY,
-                ],
-                params2: [
-                    rain_sim::TRAIL,
-                    rain_sim::GLOW,
-                    rain_sim::MUTATE,
-                    rain_sim::FLICKER,
-                ],
-                params3: [rain_sim::LAYERS, rain_atlas.count, rain_atlas.grid, 0.0],
-                color: [
-                    rain_sim::COLOR[0],
-                    rain_sim::COLOR[1],
-                    rain_sim::COLOR[2],
-                    1.0,
-                ],
-                head_color: [
-                    rain_sim::HEAD_COLOR[0],
-                    rain_sim::HEAD_COLOR[1],
-                    rain_sim::HEAD_COLOR[2],
-                    1.0,
-                ],
-            }),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let rain_seed = RainUniforms {
+            res_time: [1.0, 1.0, 7.3, 0.0],
+            params: [
+                rain_sim::CELL,
+                rain_sim::SPEED,
+                rain_sim::SPEED_VARIANCE,
+                rain_sim::DENSITY,
+            ],
+            params2: [
+                rain_sim::TRAIL,
+                rain_sim::GLOW,
+                rain_sim::MUTATE,
+                rain_sim::FLICKER,
+            ],
+            params3: [rain_sim::LAYERS, rain_atlas.count, rain_atlas.grid, 0.0],
+            color: [
+                rain_sim::COLOR[0],
+                rain_sim::COLOR[1],
+                rain_sim::COLOR[2],
+                1.0,
+            ],
+            head_color: [
+                rain_sim::HEAD_COLOR[0],
+                rain_sim::HEAD_COLOR[1],
+                rain_sim::HEAD_COLOR[2],
+                1.0,
+            ],
+        };
 
         let rain_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("rain bgl"),
@@ -345,14 +322,24 @@ impl Renderer {
             cache: None,
         });
 
-        let (rain_tex, rain_view) = create_rain_target(&device, config.width, config.height);
-
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("rain sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+
+        let rain_thread = RainThread::spawn(
+            device.clone(),
+            queue.clone(),
+            rain_pipeline,
+            rain_bgl,
+            rain_atlas.view.clone(),
+            sampler.clone(),
+            config.width,
+            config.height,
+            rain_seed,
+        );
 
         let frame_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("frame uniforms"),
@@ -558,13 +545,8 @@ impl Renderer {
             config,
             size,
             scale_factor,
-            rain_tex,
-            rain_view,
-            rain_pipeline,
-            rain_bgl,
-            rain_uniform_buf,
             rain_atlas,
-            rain_time: 7.3,
+            rain_thread,
             composite_pipeline,
             composite_bgl,
             frame_uniform_buf,
@@ -665,9 +647,6 @@ impl Renderer {
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
 
-        let (tex, view) = create_rain_target(&self.device, self.config.width, self.config.height);
-        self.rain_tex = tex;
-        self.rain_view = view;
         let (st, sv) = create_scene_target(
             &self.device,
             self.surface_format,
@@ -705,8 +684,6 @@ impl Renderer {
         term_selection: &Selection,
         // Hovered URL span for primary tint (focused pane; None = no-op).
         hovered_link: Option<&LinkHoverSpan>,
-        // When true, skip the rain GPU pass (reuse last rain RT) for snappy typing.
-        skip_rain: bool,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -762,14 +739,13 @@ impl Renderer {
             self.lens_pos = self.lens_target;
         }
 
-        if settings.prefs.rain {
-            self.rain_time += dt;
-        }
-        self.queue.write_buffer(
-            &self.rain_uniform_buf,
-            0,
-            bytemuck::bytes_of(&RainUniforms {
-                res_time: [fw, fh, self.rain_time, 0.0],
+        let j = settings.prefs.theme_colors().jade;
+        self.rain_thread.publish(
+            settings.prefs.rain,
+            self.config.width,
+            self.config.height,
+            RainUniforms {
+                res_time: [fw, fh, 0.0, 0.0],
                 params: [
                     rain_sim::CELL * self.scale_factor, // cell in framebuffer px (Canvas UI * dpr)
                     rain_sim::SPEED,
@@ -788,22 +764,16 @@ impl Renderer {
                     self.rain_atlas.grid,
                     0.0,
                 ],
-                color: {
-                    // Theme jade body; brighter head from same accent.
-                    let j = settings.prefs.theme_colors().jade;
-                    [j[0], j[1], j[2], 1.0]
-                },
-                head_color: {
-                    let j = settings.prefs.theme_colors().jade;
-                    [
-                        (j[0] + 0.15).min(1.0),
-                        (j[1] + 0.12).min(1.0),
-                        (j[2] + 0.10).min(1.0),
-                        1.0,
-                    ]
-                },
-            }),
+                color: [j[0], j[1], j[2], 1.0],
+                head_color: [
+                    (j[0] + 0.15).min(1.0),
+                    (j[1] + 0.12).min(1.0),
+                    (j[2] + 0.10).min(1.0),
+                    1.0,
+                ],
+            },
         );
+        let rain_view = self.rain_thread.front_view();
         let _ = t; // wall-clock still used by composite glass time
 
         let active_idx = session
@@ -995,7 +965,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.rain_view),
+                    resource: wgpu::BindingResource::TextureView(&rain_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -1014,63 +984,8 @@ impl Renderer {
                 label: Some("frame"),
             });
 
-        // Pass 0: Canvas UI GlyphRain (per-fragment continuous phase reveal) → rain RT
-        let rain_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rain bg"),
-            layout: &self.rain_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.rain_uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.rain_atlas.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-        // Rain RT: redraw when enabled and not in input-boost; otherwise leave
-        // the previous frame in place (Load) so typing doesn't flash black.
-        if settings.prefs.rain && !skip_rain {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("rain"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.rain_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.rain_pipeline);
-            pass.set_bind_group(0, &rain_bind, &[]);
-            pass.draw(0..3, 0..1);
-        } else if !settings.prefs.rain {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("rain-clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.rain_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            let _ = &mut pass;
-        }
-        // skip_rain + rain on: keep previous rain_view (no pass)
+        // Rain is encoded on RainThread. This frame only composites the last
+        // completed rain RT (never waits on the rain pass).
 
         // Pass 1: composite glass chrome → scene RT (not swapchain)
         {

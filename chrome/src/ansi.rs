@@ -36,6 +36,16 @@ pub struct AnsiDecoder {
     pending_title: Option<String>,
     /// Bytes to write back to the PTY (DA / DECRQM answers). Host drains.
     pending_replies: Vec<Vec<u8>>,
+    /// DECSET 1 — application cursor keys (`ESC OA` vs `ESC [A`).
+    pub app_cursor: bool,
+    /// Any xterm mouse report mode (9 / 1000 / 1002 / 1003).
+    pub mouse_tracking: bool,
+    /// CSI ? 1002 h — motion while a button is held.
+    pub mouse_drag: bool,
+    /// CSI ? 1003 h — all motion (hover).
+    pub mouse_any: bool,
+    /// CSI ? 1006 h — SGR mouse encoding.
+    pub mouse_sgr: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -73,6 +83,11 @@ impl Default for AnsiDecoder {
             pending_cwd: None,
             pending_title: None,
             pending_replies: Vec::new(),
+            app_cursor: false,
+            mouse_tracking: false,
+            mouse_drag: false,
+            mouse_any: false,
+            mouse_sgr: false,
         }
     }
 }
@@ -316,22 +331,50 @@ impl AnsiDecoder {
             }
             // CSI > flags u / CSI < n u — push/pop keyboard enhancement: accept silently.
             (b'>' | b'<' | b'=', b'u') => {}
-            // CSI ? … $ p — DECRQM: report mode as reset (2) so apps don't hang.
-            // Final is `p` after intermediate `$` (already consumed).
+            // CSI ? … $ p — DECRQM. 1 = set, 2 = reset.
             (b'?', b'p') => {
                 let mode = params.first().copied().unwrap_or(0);
-                // ESC [ ? mode ; 2 $ y  (2 = reset)
-                let s = format!("\x1b[?{mode};2$y");
+                let val = if self.priv_mode_is_set(mode) { 1 } else { 2 };
+                let s = format!("\x1b[?{mode};{val}$y");
                 self.reply(s.as_bytes());
             }
             _ => {}
         }
     }
 
+    fn priv_mode_is_set(&self, mode: u16) -> bool {
+        match mode {
+            1 => self.app_cursor,
+            25 => self.cursor_visible,
+            9 | 1000 => self.mouse_tracking,
+            1002 => self.mouse_drag,
+            1003 => self.mouse_any,
+            1006 => self.mouse_sgr,
+            47 | 1047 | 1049 => self.on_alt_screen(),
+            _ => false,
+        }
+    }
+
     fn set_priv_mode(&mut self, grid: &mut CellGrid, mode: u16, set: bool) {
         match mode {
+            1 => self.app_cursor = set,
             // Show / hide cursor
             25 => self.cursor_visible = set,
+            // X10 / VT200 / drag / any-event mouse
+            9 | 1000 => self.mouse_tracking = set,
+            1002 => {
+                self.mouse_drag = set;
+                if set {
+                    self.mouse_tracking = true;
+                }
+            }
+            1003 => {
+                self.mouse_any = set;
+                if set {
+                    self.mouse_tracking = true;
+                }
+            }
+            1006 => self.mouse_sgr = set,
             // Alternate screen (xterm 1049 saves cursor; 47 is classic)
             47 | 1047 | 1049 => {
                 if set {
@@ -362,6 +405,12 @@ impl AnsiDecoder {
             // Restored primary keeps its own suppress flag (false).
         }
         self.scroll_region = None;
+        // Don't leak SGR mouse reports into the shell if the TUI forgot ?1000l.
+        self.mouse_tracking = false;
+        self.mouse_drag = false;
+        self.mouse_any = false;
+        self.mouse_sgr = false;
+        self.app_cursor = false;
     }
 
     fn exec_csi(&mut self, grid: &mut CellGrid, final_byte: u8, params: &[u16]) {
@@ -847,6 +896,27 @@ mod tests {
         assert!(!snap[0].contains('p'), "got {:?}", snap[0]);
         let replies = dec.take_replies();
         assert!(!replies.is_empty());
+    }
+
+    #[test]
+    fn mouse_modes_and_decrqm() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        assert!(!dec.mouse_tracking);
+        dec.feed(&mut grid, b"\x1b[?1000h\x1b[?1006h");
+        assert!(dec.mouse_tracking);
+        assert!(dec.mouse_sgr);
+        dec.feed(&mut grid, b"\x1b[?1000$p");
+        let replies = dec.take_replies();
+        assert!(
+            replies.iter().any(|r| r == b"\x1b[?1000;1$y"),
+            "DECRQM should report set: {replies:?}"
+        );
+        dec.feed(&mut grid, b"\x1b[?1049h");
+        assert!(dec.on_alt_screen());
+        dec.feed(&mut grid, b"\x1b[?1049l");
+        assert!(!dec.mouse_tracking);
+        assert!(!dec.mouse_sgr);
     }
 
     #[test]

@@ -29,6 +29,7 @@ use crate::control_mailbox::ControlMailbox;
 use crate::input::{hit_test, is_mac, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
+use crate::mouse_pty::encode_mouse_wheel;
 use crate::new_window::spawn_new_window;
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
@@ -131,8 +132,7 @@ pub struct ChromeApp {
     status_publisher: StatusPublisher,
     /// UI / terminal zoom multiplier (⌘± / ⌘0). 1.0 = design size.
     ui_zoom: f32,
-    /// Skip rain shader briefly after typing so key frames stay light/snappy.
-    input_boost_until: Instant,
+
     /// Last applied mono font id (avoid re-resolve every paint).
     applied_font: String,
     /// Accumulated trackpad pixel-delta (macOS sends many sub-line events).
@@ -191,7 +191,7 @@ impl Default for ChromeApp {
             update_mailbox: UpdateMailbox::new(),
             ui_zoom: 1.0,
             status_publisher: StatusPublisher::new(),
-            input_boost_until: Instant::now(),
+
             applied_font: String::new(),
             wheel_accum: 0.0,
         };
@@ -974,6 +974,49 @@ impl ChromeApp {
         )
     }
 
+    /// 1-based viewport cell under the pointer (xterm mouse protocol).
+    /// Falls back to (1, 1) when the cursor is outside the well.
+    fn term_screen_cell_1based(&self) -> (u16, u16) {
+        let layout = self.current_layout();
+        let focus = self.session.focus_pane_id();
+        let Some(pl) = layout.panes.iter().find(|p| p.pane_id == focus) else {
+            return (1, 1);
+        };
+        let Some(pane) = self.session.panes.get(&focus) else {
+            return (1, 1);
+        };
+        let cells = pl.cells;
+        let grid = &pane.grid;
+        let cell = self.cell_metrics();
+        let col = ((self.cursor.x - cells.x) / cell.w.max(1.0)).floor() as i32;
+        let row = ((self.cursor.y - cells.y) / cell.h.max(1.0)).floor() as i32;
+        let col = col.clamp(0, grid.cols().saturating_sub(1) as i32) as u16;
+        let row = row.clamp(0, grid.rows().saturating_sub(1) as i32) as u16;
+        (col + 1, row + 1)
+    }
+
+    /// Forward a wheel step to an alt-screen TUI (SGR 64/65 or arrow keys).
+    fn forward_alt_wheel(&mut self, pane_id: u64, steps: i32) {
+        let (col, row) = self.term_screen_cell_1based();
+        let Some(rt) = self.runtimes.get_mut(&pane_id) else {
+            return;
+        };
+        let Some(pty) = rt.pty.as_mut() else {
+            return;
+        };
+        let bytes = encode_mouse_wheel(
+            col,
+            row,
+            steps,
+            rt.ansi.mouse_tracking,
+            rt.ansi.mouse_sgr,
+            rt.ansi.app_cursor,
+        );
+        if !bytes.is_empty() {
+            let _ = pty.write_all(&bytes);
+        }
+    }
+
     /// Map pointer → absolute cell pos in the focused pane's cell well.
     fn term_cell_at_cursor(&self) -> Option<CellPos> {
         if self.overlay_open() {
@@ -1423,7 +1466,6 @@ impl ChromeApp {
             if let Some(rt) = self.runtimes.get_mut(&id) {
                 if let Some(pty) = &mut rt.pty {
                     let _ = pty.write_all(b"\x1b");
-                    self.bump_input_boost();
                     self.drain_all_ptys();
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -2134,8 +2176,6 @@ impl ChromeApp {
                             }
                         }
                     }
-                    self.bump_input_boost();
-                    // Drain immediately so echo can paint this frame, not after a full rain pass.
                     self.drain_all_ptys();
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -2172,7 +2212,6 @@ impl ChromeApp {
                     }
                 }
             }
-            self.bump_input_boost();
         }
 
         if let Some(w) = &self.window {
@@ -2312,8 +2351,7 @@ impl ChromeApp {
 
     /// True when continuous frames are needed (rain, modal springs, scroll, etc.).
     fn needs_anim_frame(&self) -> bool {
-        // Freeze rain briefly after keys so typing frames skip the rain pass.
-        if self.settings.prefs.rain && Instant::now() >= self.input_boost_until {
+        if self.settings.prefs.rain {
             return true;
         }
         if self.selecting_term || self.scroll_dragging.is_some() {
@@ -2344,10 +2382,6 @@ impl ChromeApp {
         false
     }
 
-    /// Mark a short window where rain is frozen so typing/paint frames stay light.
-    fn bump_input_boost(&mut self) {
-        self.input_boost_until = Instant::now() + Duration::from_millis(200);
-    }
 }
 
 impl ApplicationHandler for ChromeApp {
@@ -2402,8 +2436,9 @@ impl ApplicationHandler for ChromeApp {
             }
         }
 
-        // Schedule the next frame only when something is animating (rain, springs,
-        // scroll ease, caret blink). Idle → Wait (event-driven redraw on input).
+        // Schedule the next frame only when something is animating (composite
+        // rain sample, springs, scroll ease, caret blink). Rain encode runs on
+        // its own thread — this wake is just to blit the latest RT.
         let wake = if self.needs_anim_frame() {
             Duration::from_millis(16) // ~60 Hz while animating
         } else {
@@ -2738,14 +2773,17 @@ impl ApplicationHandler for ChromeApp {
                                 self.workspace_ui.scroll_down((-step) as usize);
                             }
                         } else {
-                            // Alt-screen TUIs own the viewport — don't steal scrollback.
                             let id = self.session.focus_pane_id();
                             let alt = self
                                 .runtimes
                                 .get(&id)
                                 .map(|rt| rt.ansi.on_alt_screen())
                                 .unwrap_or(false);
-                            if !alt {
+                            if alt {
+                                // Grok / vim / less: host history is suppressed.
+                                // Forward wheel as SGR (if the app asked) or arrows.
+                                self.forward_alt_wheel(id, step);
+                            } else {
                                 self.session.active_grid_mut().scroll_view(step);
                             }
                         }
@@ -2887,8 +2925,6 @@ impl ApplicationHandler for ChromeApp {
                     let pointer = self
                         .pointer_inside
                         .then_some((self.cursor.x, self.cursor.y));
-                    let skip_rain = Instant::now() < self.input_boost_until
-                        || self.selecting_term;
                     match r.render(
                         &self.session,
                         &self.settings,
@@ -2911,7 +2947,6 @@ impl ApplicationHandler for ChromeApp {
                         &self.chip_ui,
                         &self.term_selection,
                         self.hovered_link_span.as_ref(),
-                        skip_rain,
                     ) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
