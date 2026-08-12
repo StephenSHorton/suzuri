@@ -91,7 +91,7 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "palette",
             title: "Command palette",
-            desc: format!("{} · Navigate", chord(m, "K")),
+            desc: format!("{} · {} · Navigate", chord(m, "K"), chord(m, "P")),
             category: "Navigate",
             action: CommandAction::OpenPalette,
         },
@@ -595,7 +595,7 @@ pub fn help_sections() -> Vec<HelpSection> {
             title: "Chrome",
             rows: vec![
                 HelpRow {
-                    keys: chord(m, "K"),
+                    keys: format!("{} · {}", chord(m, "K"), chord(m, "P")),
                     desc: "Palette",
                 },
                 HelpRow {
@@ -956,14 +956,14 @@ impl SplashLayout {
 pub fn splash_hint_rows() -> Vec<(String, &'static str)> {
     if is_mac() {
         vec![
-            ("⌘+K".into(), "commands"),
+            ("⌘+K · ⌘+P".into(), "commands"),
             ("⌘+,".into(), "settings"),
             ("⌘+/".into(), "shortcuts"),
             ("⇧+⌘+T".into(), "new tab"),
         ]
     } else {
         vec![
-            ("Ctrl+K".into(), "commands"),
+            ("Ctrl+K · Ctrl+P".into(), "commands"),
             ("Ctrl+,".into(), "settings"),
             ("Ctrl+/".into(), "shortcuts"),
             ("Ctrl+Shift+T".into(), "new tab"),

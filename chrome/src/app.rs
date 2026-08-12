@@ -1629,7 +1629,8 @@ impl ChromeApp {
             if let Key::Character(ref s) = event.logical_key {
                 let ch = s.as_str();
                 match ch {
-                    "k" | "K" if !shift => {
+                    // Product: ctrl+k and ctrl+p both open the command palette.
+                    "k" | "K" | "p" | "P" if !shift => {
                         self.help.close();
                         self.settings.close();
                         self.notes.close();
