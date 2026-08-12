@@ -380,11 +380,18 @@ impl PaletteState {
         e * 0.50
     }
 
-    /// Wide horizontal palette card (input-first, not a tall square).
+    /// Result row height (title + shortcut subtext).
+    pub const ROW_H: f32 = 48.0;
+    pub const ROW_GAP: f32 = 6.0;
+    pub const INPUT_H: f32 = 48.0;
+    pub const MAX_ROWS: usize = 6;
+
+    /// Wide horizontal palette card (input + tall result rows for subtitles).
     pub fn modal_rect(&self, window_w: f32, window_h: f32) -> crate::layout::Rect {
         let t = self.content_ease();
         let base_w = (window_w - 48.0).min(680.0).max(360.0);
-        let base_h = (window_h - 120.0).min(280.0).max(180.0);
+        // input + pad + 6×(row+gap) + footer air ≈ 48+18+6×54+20 ≈ 410
+        let base_h = (window_h - 100.0).min(420.0).max(320.0);
         let sx = 0.88 + 0.12 * t;
         let sy = 0.82 + 0.18 * t;
         let w = base_w * sx;

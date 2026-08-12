@@ -1514,11 +1514,12 @@ fn push_modal_glass(
     }
 
     if palette.visible() {
+        use crate::commands::PaletteState;
         let ease = palette.content_ease().clamp(0.0, 1.0);
         let modal = palette.modal_rect(win_w, win_h);
         panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
         let pad = 14.0;
-        let input_h = 48.0;
+        let input_h = PaletteState::INPUT_H;
         let input = Rect::new(
             modal.x + pad,
             modal.y + pad + 4.0,
@@ -1530,11 +1531,11 @@ fn push_modal_glass(
                 .with_opacity(ease),
         );
         let filtered = filter_commands(commands, &palette.query);
-        let btn_h = 36.0;
-        let gap = 6.0;
+        let btn_h = PaletteState::ROW_H;
+        let gap = PaletteState::ROW_GAP;
         let mut y = input.y + input.h + 12.0;
         let max_y = modal.y + modal.h - pad;
-        for (i, _) in filtered.iter().enumerate().take(6) {
+        for (i, _) in filtered.iter().enumerate().take(PaletteState::MAX_ROWS) {
             if y + btn_h > max_y {
                 break;
             }
@@ -1843,10 +1844,11 @@ fn push_modal_labels(
     }
 
     if palette.visible() {
+        use crate::commands::PaletteState;
         let ease = palette.content_ease().clamp(0.0, 1.0);
         let modal = palette.modal_rect(win_w, win_h);
         let pad = 14.0;
-        let input_h = 48.0;
+        let input_h = PaletteState::INPUT_H;
         let input = crate::layout::Rect::new(
             modal.x + pad,
             modal.y + pad + 4.0,
@@ -1882,32 +1884,33 @@ fn push_modal_labels(
         }
 
         let filtered = filter_commands(commands, &palette.query);
-        let btn_h = 36.0;
-        let gap = 6.0;
+        let btn_h = PaletteState::ROW_H;
+        let gap = PaletteState::ROW_GAP;
         let mut y = input.y + input.h + 12.0;
         let max_y = modal.y + modal.h - pad;
-        for (i, &idx) in filtered.iter().enumerate().take(6) {
+        for (i, &idx) in filtered.iter().enumerate().take(PaletteState::MAX_ROWS) {
             if y + btn_h > max_y {
                 break;
             }
             let c = &commands[idx];
             let mut tc = if i == palette.selected { bright } else { muted };
             tc[3] *= ease;
-            let mut dc = dim;
+            let mut dc = muted; // same readable secondary as settings values
             dc[3] *= ease;
+            // Title upper third, shortcut desc lower — roomy row for subtext.
             labels.push(TextLabel::new(
                 c.title.to_string(),
                 modal.x + pad + 14.0,
-                y + 8.0,
-                13.0,
+                y + 10.0,
+                14.0,
                 tc,
             ));
-            let desc = truncate_chars(&c.desc, 42);
+            let desc = truncate_chars(&c.desc, 48);
             labels.push(TextLabel::new(
                 desc,
                 modal.x + pad + 14.0,
-                y + 22.0,
-                10.0,
+                y + 28.0,
+                12.0,
                 dc,
             ));
             y += btn_h + gap;
@@ -1918,7 +1921,7 @@ fn push_modal_labels(
             labels.push(TextLabel::new(
                 "No matches",
                 modal.x + pad + 14.0,
-                y + 8.0,
+                y + 14.0,
                 13.0,
                 nc,
             ));
