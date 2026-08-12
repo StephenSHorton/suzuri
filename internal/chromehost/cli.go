@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/StephenSHorton/suzuri/internal/update"
 )
 
 // RunCLI is the product GUI entry: resolve the native UI binary, start the MCP
@@ -17,7 +19,7 @@ import (
 //
 // The binary on disk is still named `suzuri-chrome` (sidecar next to `suzuri`);
 // that is an implementation detail — the product is just **suzuri**.
-func RunCLI(args []string) int {
+func RunCLI(version string, args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -33,7 +35,7 @@ func RunCLI(args []string) int {
 		go runStatusPublisher(host, os.Getpid(), pubStop)
 	}
 
-	cmd, err := Start(ctx, args...)
+	cmd, err := Start(ctx, version, args...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "suzuri: %v\n", err)
 		fmt.Fprintln(os.Stderr, "hint: install a release that includes the UI binary, or build with:")
@@ -46,7 +48,25 @@ func RunCLI(args []string) int {
 		publishChromeStatus(host, cmd.Process.Pid)
 	}
 
+	gate := newApplyGate()
+	upd := update.New("", version)
+	upd.OnApplyBegin = func() { gate.Begin() }
+	upd.AfterRelaunch = func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
+	updStop := make(chan struct{})
+	go RunUpdateBridge(ctx, upd, gate, updStop)
+
 	err = cmd.Wait()
+	if gate.Applying() {
+		// DownloadAndApply relaunches then os.Exit — park so we don't
+		// tear down mid-replace. Finish() unblocks if apply failed.
+		gate.Wait(15 * time.Minute)
+	} else {
+		close(updStop)
+	}
 	removeChromeStatus()
 	// Brief grace so MCP clients see a clean remove of bridge.json after Stop.
 	time.Sleep(20 * time.Millisecond)

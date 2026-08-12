@@ -783,11 +783,98 @@ impl Default for ChromeSession {
     }
 }
 
-fn initial_cwd() -> String {
-    std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| "/".into())
+/// Home directory (`$HOME` / `%USERPROFILE%`) when it exists as a folder.
+pub fn user_home_dir() -> Option<String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let home = home.trim();
+    if home.is_empty() {
+        return None;
+    }
+    let p = std::path::Path::new(home);
+    if p.is_dir() {
+        Some(home.to_string())
+    } else {
+        None
+    }
+}
+
+/// True when `cwd` is a Dock / installer launch directory, not a user project.
+///
+/// macOS Launch Services starts `.app` binaries in `Contents/Resources`.
+/// Windows installers often set cwd to the folder that contains `suzuri.exe`.
+/// A source checkout (`go.mod` + `chrome/Cargo.toml`) is kept so
+/// `cd repo && ./suzuri` still opens in the repo.
+pub fn is_unhelpful_cwd(cwd: &str) -> bool {
+    is_unhelpful_cwd_ex(cwd, current_exe_dir().as_deref())
+}
+
+fn current_exe_dir() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_string_lossy().into_owned()))
+}
+
+fn looks_like_source_tree(dir: &std::path::Path) -> bool {
+    dir.join("go.mod").is_file() && dir.join("chrome").join("Cargo.toml").is_file()
+}
+
+fn is_unhelpful_cwd_ex(cwd: &str, exe_dir: Option<&str>) -> bool {
+    let cwd_n = normalize_abs_path(cwd);
+    if cwd_n.is_empty() {
+        return true;
+    }
+    let slash = slashify_display(&cwd_n);
+    if slash.contains(".app/Contents") {
+        return true;
+    }
+    let Some(exe_dir) = exe_dir else {
+        return false;
+    };
+    let exe_n = normalize_abs_path(exe_dir);
+    if exe_n.is_empty() {
+        return false;
+    }
+    if !paths_equal(&cwd_n, &exe_n)
+        && !slashify_display(&cwd_n).eq_ignore_ascii_case(&slashify_display(&exe_n))
+    {
+        return false;
+    }
+    !looks_like_source_tree(std::path::Path::new(exe_dir))
+}
+
+/// Working directory for a newly created pane (and for `chdir` at launch).
+///
+/// Prefer the process cwd when the user launched from a real project folder;
+/// fall back to `$HOME` so Dock / `.app` / installer starts are not
+/// `/Applications/suzuri.app/Contents/Resources`.
+pub fn initial_cwd() -> String {
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd = cwd.to_string_lossy();
+        if !is_unhelpful_cwd(&cwd) {
+            return cwd.into_owned();
+        }
+    }
+    user_home_dir()
+        .or_else(|| std::env::var("HOME").ok().filter(|s| !s.is_empty()))
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "/".into())
+}
+
+/// `chdir` into [`initial_cwd`] so child shells inherit `~` instead of the
+/// `.app` Resources folder. No-op when already there.
+pub fn normalize_process_cwd() {
+    let want = initial_cwd();
+    if want.is_empty() {
+        return;
+    }
+    if let Ok(cur) = std::env::current_dir() {
+        if paths_equal(&cur.to_string_lossy(), &want) {
+            return;
+        }
+    }
+    let _ = std::env::set_current_dir(&want);
 }
 
 /// Shorten `$HOME` / `%USERPROFILE%` → `~` for chrome path display.
@@ -925,6 +1012,34 @@ fn cwd_after_command(cwd: &str, line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_bundle_cwd_is_unhelpful() {
+        assert!(is_unhelpful_cwd_ex(
+            "/Applications/suzuri.app/Contents/Resources",
+            Some("/Applications/suzuri.app/Contents/MacOS")
+        ));
+        assert!(is_unhelpful_cwd_ex(
+            "/Applications/suzuri.app/Contents/MacOS",
+            Some("/Applications/suzuri.app/Contents/MacOS")
+        ));
+        assert!(!is_unhelpful_cwd_ex(
+            "/Users/stephen/projects/foo",
+            Some("/Applications/suzuri.app/Contents/MacOS")
+        ));
+        assert!(!is_unhelpful_cwd_ex("/tmp", Some("/usr/local/bin")));
+        assert!(is_unhelpful_cwd_ex("", None));
+    }
+
+    #[test]
+    fn initial_cwd_never_returns_app_resources() {
+        let cwd = initial_cwd();
+        assert!(
+            !slashify_display(&cwd).contains(".app/Contents"),
+            "initial_cwd={cwd}"
+        );
+        assert!(!cwd.is_empty());
+    }
 
     #[test]
     fn display_path_home_is_tilde() {

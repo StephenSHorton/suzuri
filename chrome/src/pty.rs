@@ -37,6 +37,17 @@ impl PtySession {
         pixel_width: u16,
         pixel_height: u16,
     ) -> Result<Self, String> {
+        Self::spawn_in(cols, rows, pixel_width, pixel_height, None)
+    }
+
+    /// Spawn in `cwd` when it is a non-empty directory; otherwise inherit.
+    pub fn spawn_in(
+        cols: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+        cwd: Option<&str>,
+    ) -> Result<Self, String> {
         let pty_system = native_pty_system();
         let size = PtySize {
             rows,
@@ -53,6 +64,9 @@ impl PtySession {
         // Attached to a PTY → shells run interactive without extra flags.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        if let Some(dir) = cwd.map(str::trim).filter(|s| !s.is_empty()) {
+            cmd.cwd(dir);
+        }
 
         let child = pair
             .slave

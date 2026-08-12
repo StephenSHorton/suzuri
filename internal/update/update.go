@@ -49,6 +49,13 @@ type Service struct {
 	current string
 	client  *http.Client
 	busy    atomic.Bool
+	// OnApplyBegin fires after a successful download, just before files are
+	// replaced. The UI host uses this to keep the process alive while chrome
+	// is torn down around relaunch.
+	OnApplyBegin func()
+	// AfterRelaunch fires after the new host process has started (kill the
+	// old UI child so we don't leave two windows).
+	AfterRelaunch func()
 }
 
 // New returns a Service for owner/repo and the running version string.
@@ -164,6 +171,10 @@ func (s *Service) DownloadAndApply(info Info) error {
 		newExe = dst
 	}
 
+	if s.OnApplyBegin != nil {
+		s.OnApplyBegin()
+	}
+
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -216,10 +227,16 @@ func (s *Service) DownloadAndApply(info Info) error {
 	resignMacExecutable(self)
 
 	cmd := exec.Command(self)
-	cmd.Dir = selfDir
+	// Never relaunch inside the .app Resources / install folder.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		cmd.Dir = home
+	}
 	if err := cmd.Start(); err != nil {
 		_ = os.Rename(old, self)
 		return fmt.Errorf("relaunch: %w", err)
+	}
+	if s.AfterRelaunch != nil {
+		s.AfterRelaunch()
 	}
 	committed = true
 	log.Info("update: relaunched", "version", info.Version, "path", self)

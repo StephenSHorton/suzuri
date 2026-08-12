@@ -39,6 +39,8 @@ pub enum CommandAction {
     RefreshWorkspace,
     /// Cycle local human presence (idle→working→waiting→blocked→away).
     CycleWorkspaceStatus,
+    /// Query GitHub Releases (host may open confirm).
+    CheckUpdates,
     Quit,
 }
 
@@ -171,6 +173,13 @@ pub fn default_commands() -> Vec<Command> {
             desc: "Allow sleep · System".into(),
             category: "System",
             action: CommandAction::CaffeineOff,
+        },
+        Command {
+            id: "check_updates",
+            title: "Check for updates",
+            desc: "GitHub Releases · System".into(),
+            category: "System",
+            action: CommandAction::CheckUpdates,
         },
         Command {
             id: "new_tab",
@@ -1006,6 +1015,20 @@ mod tests {
         assert!(all.iter().any(|c| c.action == CommandAction::NewWindow));
         let idx = filter_commands(&all, "new window");
         assert!(idx.iter().any(|&i| all[i].id == "new_window"));
+    }
+
+    #[test]
+    fn registry_contains_check_updates() {
+        let all = default_commands();
+        let cmd = all
+            .iter()
+            .find(|c| c.id == "check_updates")
+            .expect("check_updates command");
+        assert_eq!(cmd.title, "Check for updates");
+        assert_eq!(cmd.category, "System");
+        assert_eq!(cmd.action, CommandAction::CheckUpdates);
+        let idx = filter_commands(&all, "updates");
+        assert!(idx.iter().any(|&i| all[i].id == "check_updates"));
     }
 
     #[test]

@@ -42,12 +42,14 @@ mod text;
 mod theme;
 mod toast;
 mod transfer_ui;
+mod updater;
 mod workspace_store;
 mod workspace_ui;
 
 use winit::event_loop::EventLoop;
 
 fn main() {
+    session::normalize_process_cwd();
     let event_loop = EventLoop::new().expect("event loop");
     // Wait (not Poll): wake on input or a short timer. Continuous Poll + full
     // GPU frames starved keyboard repeat and made typing feel laggy.

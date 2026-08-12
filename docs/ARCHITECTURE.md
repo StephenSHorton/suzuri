@@ -48,6 +48,7 @@ shared by the host bridge and agents — not a second UI.
 |----------|---------|
 | `SUZURI_CHROME` | Explicit path to the UI binary (dev / override) |
 | `SUZURI_CONFIG_DIR` | Shared config root (host + UI) |
+| `SUZURI_VERSION` | Host release version (updater; `dev` never offers) |
 | `SUZURI_UI` | **Ignored for product path.** Classic/ebiten is gone. |
 
 ## Build (dev)

@@ -62,6 +62,7 @@ pub mod settings;
 pub mod shell;
 pub mod theme;
 pub mod toast;
+pub mod updater;
 
 /// Optional C ABI for cgo / static link (session handles + metrics).
 /// Enable with `--features ffi`.
@@ -85,7 +86,11 @@ pub use cmd_blocks::{
     is_clear_command, pty_submit_payload, CmdBlockLog, HIST_META_CAP, RECENT_BLOCKS,
 };
 pub use echo_filter::{EchoFilter, ECHO_FILTER_GIVE_UP};
-pub use confirm::{ConfirmChoice, ConfirmState};
+pub use confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
+pub use updater::{
+    parse_event, update_evt_path, update_req_path, UpdateEvent, UpdateMailbox, UPDATE_EVT_FILE,
+    UPDATE_REQ_FILE,
+};
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
 pub use control_mailbox::{
     chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
@@ -102,7 +107,10 @@ pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
 pub use pty::PtySession;
 pub use rename::{RenameState, RenameTarget};
 pub use selection::Selection;
-pub use session::{ChromeSession, CloseOutcome, Pane, Tab};
+pub use session::{
+    initial_cwd, is_unhelpful_cwd, normalize_process_cwd, user_home_dir, ChromeSession,
+    CloseOutcome, Pane, Tab,
+};
 pub use settings::{ChromePrefs, SettingsState, GLASS_DARKEN_DEFAULT};
 pub use shell::{ShellOutput, PROMPT_GLYPH};
 pub use theme::{colors as theme_colors, ThemeColors, DEFAULT_THEME_ID, THEME_IDS};
