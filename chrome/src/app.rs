@@ -1592,6 +1592,7 @@ impl ApplicationHandler for ChromeApp {
                         caret_alpha,
                         pointer,
                         &self.chip_ui,
+                        &self.term_selection,
                     ) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

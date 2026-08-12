@@ -20,7 +20,7 @@ Branch: `exp/native-chrome`
 - Notes undo/selection drag / title rename polish
 - Workspace presence + file attach + MCP agents
 - Full theme catalog / multi-window
-- Selection **visual highlight** paint in renderer
+- Selection multi-click / right-click / clear-on-focus polish (highlight paint: done)
 
 ## Run
 

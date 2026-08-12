@@ -121,18 +121,31 @@ Right-click copy is optional: if selection non-empty, copy; else paste (product)
 
 ---
 
-## 5. Paint highlight (renderer)
+## 5. Paint highlight (renderer) — done
 
-For each visible cell `(col, view_row)`:
+`Renderer::render` takes `&Selection`; `chrome_labels` passes it only to the
+**focused** pane’s `push_pane_cells`. Empty selection is a no-op
+(`is_empty` / `contains` false).
+
+Per visible viewport row:
 
 ```rust
 let abs = grid.viewport_to_abs(view_row);
-if selection.contains(col, abs) {
-    // draw selection bg (theme jade / dim invert)
-}
+// contiguous runs where selection.contains(col, abs)
+// → TextLabel::mono("█"×n, jade @ ~0.32 alpha) under glyphs
 ```
 
-No change required to `Selection` for paint — `contains` is line-oriented.
+Implementation: `push_selection_row` in `renderer.rs` (glyph-block underlay,
+same pipeline as ANSI cell bg — no glass/shader fill pass).
+
+### Still open (app / host polish)
+
+| Hook | Notes |
+|------|--------|
+| Multi-click word/line | `select_word` / `select_line` APIs exist |
+| Right-click copy-or-paste | product: copy if selection, else paste |
+| Clear on focus / resize / alt-screen | avoid stale ranges across panes |
+| Extend while scrolling | re-map cursor via `viewport_to_abs` mid-drag |
 
 ---
 
