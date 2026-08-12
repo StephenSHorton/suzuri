@@ -8,6 +8,10 @@ pub enum CommandAction {
     OpenSettings,
     OpenHelp,
     OpenPalette,
+    OpenNotes,
+    OpenWorkspace,
+    OpenTransferSend,
+    OpenTransferReceive,
     NewTab,
     CloseTab,
     NextTab,
@@ -21,6 +25,10 @@ pub enum CommandAction {
     FocusDown,
     ToggleRain,
     ToggleLens,
+    ToggleCaffeine,
+    Caffeine15m,
+    Caffeine1h,
+    CaffeineOff,
     Quit,
 }
 
@@ -83,6 +91,62 @@ pub fn default_commands() -> Vec<Command> {
             desc: format!("{m}/ · Help"),
             category: "Help",
             action: CommandAction::OpenHelp,
+        },
+        Command {
+            id: "notes",
+            title: "Notes",
+            desc: format!("{ms}M · Notes"),
+            category: "Notes",
+            action: CommandAction::OpenNotes,
+        },
+        Command {
+            id: "workspace",
+            title: "Workspace",
+            desc: "Shared channels · humans + AIs".into(),
+            category: "Workspace",
+            action: CommandAction::OpenWorkspace,
+        },
+        Command {
+            id: "transfer_send",
+            title: "Send file (ticket)…",
+            desc: "P2P · Transfer".into(),
+            category: "Transfer",
+            action: CommandAction::OpenTransferSend,
+        },
+        Command {
+            id: "transfer_receive",
+            title: "Receive ticket…",
+            desc: "P2P · Transfer".into(),
+            category: "Transfer",
+            action: CommandAction::OpenTransferReceive,
+        },
+        Command {
+            id: "caffeine_toggle",
+            title: "Toggle caffeine",
+            desc: "☕ strip · prevent sleep · System".into(),
+            category: "System",
+            action: CommandAction::ToggleCaffeine,
+        },
+        Command {
+            id: "caffeine_15",
+            title: "Caffeine 15 minutes",
+            desc: "Stay awake 15m · System".into(),
+            category: "System",
+            action: CommandAction::Caffeine15m,
+        },
+        Command {
+            id: "caffeine_1h",
+            title: "Caffeine 1 hour",
+            desc: "Stay awake 1h · System".into(),
+            category: "System",
+            action: CommandAction::Caffeine1h,
+        },
+        Command {
+            id: "caffeine_off",
+            title: "Caffeine off",
+            desc: "Allow sleep · System".into(),
+            category: "System",
+            action: CommandAction::CaffeineOff,
         },
         Command {
             id: "new_tab",
@@ -170,8 +234,8 @@ pub fn default_commands() -> Vec<Command> {
         },
         Command {
             id: "toggle_lens",
-            title: "Toggle mouse lens",
-            desc: "Settings 2 · Appearance".into(),
+            title: "Toggle magnifier",
+            desc: "Pinch or ⌃/⌘+scroll · Settings 2".into(),
             category: "Appearance",
             action: CommandAction::ToggleLens,
         },
@@ -269,6 +333,24 @@ impl PaletteState {
         let t = self.overlay.clamp(0.0, 1.0);
         let e = t * t * (3.0 - 2.0 * t);
         e * 0.50
+    }
+
+    /// Wide horizontal palette card (input-first, not a tall square).
+    pub fn modal_rect(&self, window_w: f32, window_h: f32) -> crate::layout::Rect {
+        let t = self.content_ease();
+        let base_w = (window_w - 48.0).min(680.0).max(360.0);
+        let base_h = (window_h - 120.0).min(280.0).max(180.0);
+        let sx = 0.88 + 0.12 * t;
+        let sy = 0.82 + 0.18 * t;
+        let w = base_w * sx;
+        let h = base_h * sy;
+        let y_nudge = -20.0 * (1.0 - t);
+        crate::layout::Rect::new(
+            (window_w - w) * 0.5,
+            (window_h - h) * 0.38 + y_nudge,
+            w,
+            h,
+        )
     }
 
     pub fn tick(&mut self, dt: f32) {

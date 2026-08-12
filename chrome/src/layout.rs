@@ -9,11 +9,12 @@
 //! |-------|---------|---------|
 //! | `unit` | 8 | base grid |
 //! | `edge` | 16 (2×) | **window edges only** — left, right, bottom |
-//! | `stack` | 8 (1×) | nav ↔ terminal, terminal ↔ warp (internal chrome gaps) |
+//! | `stack` | 8 (1×) | pane ↔ pane (splits); not chrome→workspace (that is flush) |
 //! | `inset` | 8 (1×) | padding **inside** glass (terminal text, warp field) |
 //! | `cluster` | 8 (1×) | gap between sibling nav chips |
 //!
-//! Edge is the only larger token; everything between regions is `stack`/`inset`.
+//! Chrome bar → workspace is flush (`top_pad = 0`) so the jelly bridge stays
+//! short without sliding nav chips down. Edge is the only larger perimeter token.
 
 /// 8-point spacing tokens. Prefer these over magic numbers in layout/paint.
 #[derive(Clone, Copy, Debug)]
@@ -69,12 +70,13 @@ impl Default for Metrics {
     fn default() -> Self {
         let s = Spacing::default();
         Self {
-            title_h: s.unit * 4.0,      // 32 — slim drag bar (lights + title only)
-            tab_h: s.unit * 5.0,        // 40
-            // divider + path + input (~3 mono rows), on the 8pt grid
-            input_strip_h: s.unit * 6.0, // 48
-            radius: s.unit * 2.0,       // 16
-            chip_radius: s.unit,        // 8
+            // Single chrome bar: traffic lights + tabs + logo (no separate tab strip).
+            title_h: s.unit * 5.0, // 40
+            tab_h: 0.0,            // tabs live in the title bar
+            // divider + path + input = 3 mono cell rows (14 each) so text never overflows
+            input_strip_h: 14.0 * 3.0, // 42
+            radius: s.unit * 2.0,        // 16
+            chip_radius: s.unit,         // 8
             spacing: s,
         }
     }
@@ -155,13 +157,16 @@ pub struct FrameLayout {
     pub path: Rect,
     /// One entry per visible leaf pane.
     pub panes: Vec<PaneLayout>,
-    /// Logo slot left of the tab strip (character 「硯」).
+    /// Logo glass button (top-right) — opens settings.
     pub logo: Rect,
-    /// Dynamic tab chips (left → right).
+    /// Caffeine (☕) glass chip — left of the logo.
+    pub caffeine: Rect,
+    /// Dynamic tab chips (left → right) in the title bar.
     pub tab_chips: Vec<Rect>,
     pub tab_active: Rect,
     pub tab_idle: Rect,
     pub tab_new: Rect,
+    /// Same as [`logo`] — settings is the logo button.
     pub settings: Rect,
 }
 
@@ -181,15 +186,28 @@ impl FrameLayout {
         pane_specs: &[(u64, bool)],
     ) -> Self {
         let edge = m.edge();
-        let stack = m.stack();
+        let _stack = m.stack(); // pane↔pane gaps applied in apply_pane_rects / split layout
+        let chrome_h = m.title_h; // single bar (tabs + logo live here)
 
-        let title = Rect::new(0.0, 0.0, width, m.title_h);
-        let tabs = Rect::new(0.0, m.title_h, width, m.tab_h);
+        let title = Rect::new(0.0, 0.0, width, chrome_h);
+        // Compat: no second strip — tabs share the title bar.
+        let tabs = Rect::new(0.0, 0.0, width, chrome_h);
+
+        // Nav chips first — still centered in the chrome bar (traffic lights too).
+        // Pane rises to the chip bottoms so nav↔pane air is closed without
+        // sliding chips down.
+        let chip_h = m.spacing.unit * 4.0; // 32
+        let cluster = m.cluster();
+        let chip_w = m.spacing.unit * 12.0; // 96
+        let logo_w = chip_h; // square glass
+        let chip_y = ((chrome_h - chip_h) * 0.5).max(0.0);
+        let chip_bottom = chip_y + chip_h;
 
         let term_x = edge;
-        let term_y = m.title_h + m.tab_h + stack;
+        // Flush under chip bottoms (was flush under full chrome_h → ~4px air).
+        let term_y = chip_bottom;
         let term_w = (width - edge * 2.0).max(80.0);
-        let term_h = (height - m.title_h - m.tab_h - stack - edge).max(80.0);
+        let term_h = (height - term_y - edge).max(80.0);
         let workspace = Rect::new(term_x, term_y, term_w, term_h);
 
         // Default: one pane fills the workspace.
@@ -220,24 +238,38 @@ impl FrameLayout {
             .cloned()
             .unwrap_or_else(|| panes[0].clone());
 
-        // Tab strip
-        let chip_h = m.spacing.unit * 4.0;
-        let chip_y = m.title_h + (m.tab_h - chip_h) * 0.5;
-        let logo_w = m.spacing.unit * 4.0;
-        let logo = Rect::new(edge, chip_y, logo_w, chip_h);
+        // Tabs start just after mac traffic lights (or left edge).
+        let tabs_left = if cfg!(target_os = "macos") {
+            // lights: 16 + 3*12 + 2*8 ≈ 60; keep extra air before first tab
+            // (was 72 — felt tight against the traffic lights).
+            80.0 // a bit more than 72, less than 88
+        } else {
+            edge
+        };
 
-        let chip_w = m.spacing.unit * 12.0;
-        let cluster = m.cluster();
-        let mut x = edge + logo_w + cluster;
+        // Right cluster: [ ☕ caffeine ] [ 硯 logo/settings ]
+        let logo = Rect::new(width - edge - logo_w, chip_y, logo_w, chip_h);
+        let settings = logo; // same hit target
+        let caffeine = Rect::new(logo.x - cluster - logo_w, chip_y, logo_w, chip_h);
+        let tabs_right = caffeine.x - cluster;
+
+        let mut x = tabs_left;
         let mut tab_chips = Vec::with_capacity(tab_count);
         for _ in 0..tab_count {
+            if x + chip_w > tabs_right {
+                break; // overflow — stop adding chips
+            }
             tab_chips.push(Rect::new(x, chip_y, chip_w, chip_h));
             x += chip_w + cluster;
         }
-        let tab_new = Rect::new(x, chip_y, chip_h, chip_h);
-
-        let settings_w = chip_w;
-        let settings = Rect::new(width - edge - settings_w, chip_y, settings_w, chip_h);
+        // Ghost + control: smaller hit/glass shell; icon stays full size in paint.
+        let new_size = m.spacing.unit * 3.0; // 24 — was full chip 32
+        let new_y = chip_y + (chip_h - new_size) * 0.5;
+        let tab_new = if x + new_size <= tabs_right {
+            Rect::new(x, new_y, new_size, new_size)
+        } else {
+            Rect::new(tabs_right - new_size, new_y, new_size, new_size)
+        };
 
         let tab_active = tab_chips.first().copied().unwrap_or_default();
         let tab_idle = tab_chips.get(1).copied().unwrap_or_default();
@@ -253,6 +285,7 @@ impl FrameLayout {
             path: focused.path,
             panes,
             logo,
+            caffeine,
             tab_chips,
             tab_active,
             tab_idle,
@@ -284,13 +317,20 @@ impl FrameLayout {
     }
 
     /// Glass / solid panel instances for the composite pass.
+    ///
+    /// `chip_ui` drives hover scale + press wash. `tab_jelly` draws the active
+    /// tab as a continuous piece that melts into the workspace.
     pub fn glass_panels(
         &self,
         m: Metrics,
         active_tab_index: usize,
         traffic_lights: Option<[Rect; 3]>,
+        chip_ui: &crate::chrome_ui::ChipUi,
+        tab_jelly: &crate::chrome_ui::TabJelly,
     ) -> Vec<PanelInstance> {
-        let mut out = Vec::with_capacity(8 + self.tab_chips.len() + self.panes.len());
+        use crate::chrome_ui::{scale_rect, ChipId};
+
+        let mut out = Vec::with_capacity(10 + self.tab_chips.len() + self.panes.len());
 
         if let Some(lights) = traffic_lights {
             let r = lights[0].w * 0.5;
@@ -299,36 +339,101 @@ impl FrameLayout {
             out.push(PanelInstance::glass(lights[2], r, PanelKind::SolidZoom));
         }
 
+        // Workspace panes — smooth-unioned in the shader with the active tab
+        // (surface tension / stretchy glass, not separate cubes).
         for pl in &self.panes {
             out.push(PanelInstance::glass(pl.glass, m.radius, PanelKind::Terminal));
+            // Footer hairline (replaces overflowing ASCII ───)
+            let mid_y = pl.divider.y + pl.divider.h * 0.5 - 0.75;
+            let line = Rect::new(pl.divider.x, mid_y, pl.divider.w, 1.5);
+            out.push(
+                PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9),
+            );
         }
 
+        // Active goo — slides under tabs via jelly (unscaled so switch = pure slide).
+        // Smooth-unions with Terminal panes into one surface.
+        if !self.tab_chips.is_empty() && active_tab_index < self.tab_chips.len() {
+            let chip_h = self.tab_chips[0].h;
+            let chip_y = self.tab_chips[0].y;
+            let mut active_r = tab_jelly.active_chip_rect(chip_y, chip_h);
+            // Grow down into the well so smin can join (geometry, not scale).
+            let target_bottom = self.workspace.y + m.chip_radius * 2.0; // a bit deeper for soft light
+            let bottom = active_r.y + active_r.h;
+            if target_bottom > bottom {
+                active_r.h = target_bottom - active_r.y;
+            }
+            let id = ChipId::Tab(active_tab_index);
+            out.push(
+                PanelInstance::glass(active_r, m.chip_radius, PanelKind::ChipActive)
+                    .with_press(chip_ui.press_light(id)),
+            );
+        }
+
+        // Tab chips stay at layout positions. Suppress idle glass only when the
+        // jelly is already covering that chip (so mid-slide doesn't leave a hole
+        // on the destination or a double-stack on the source).
         for (i, chip) in self.tab_chips.iter().enumerate() {
-            let kind = if i == active_tab_index {
-                PanelKind::ChipActive
-            } else {
-                PanelKind::ChipIdle
-            };
-            out.push(PanelInstance::glass(*chip, m.chip_radius, kind));
+            let cx = chip.x + chip.w * 0.5;
+            let covered = (tab_jelly.x - cx).abs() < chip.w * 0.45;
+            if covered {
+                continue;
+            }
+            let id = ChipId::Tab(i);
+            let r = scale_rect(*chip, chip_ui.scale_for(id));
+            out.push(
+                PanelInstance::glass(r, m.chip_radius, PanelKind::ChipIdle)
+                    .with_press(chip_ui.press_light(id)),
+            );
         }
 
-        out.push(PanelInstance::glass(
-            self.tab_new,
-            m.chip_radius,
-            PanelKind::NewTab,
-        ));
-        out.push(PanelInstance::glass(
-            self.settings,
-            m.chip_radius,
-            PanelKind::Settings,
-        ));
+        // Ghost + : no idle glass — shell fades in with animated press wash.
+        {
+            let id = ChipId::NewTab;
+            if chip_ui.ghost_shell_visible(id) {
+                let r = scale_rect(self.tab_new, chip_ui.scale_for(id));
+                let rr = (m.chip_radius * 0.75).max(4.0);
+                out.push(
+                    PanelInstance::glass(r, rr, PanelKind::NewTab)
+                        .with_press(chip_ui.press_light(id)),
+                );
+            }
+        }
+        {
+            let id = ChipId::Caffeine;
+            let r = scale_rect(self.caffeine, chip_ui.scale_for(id));
+            out.push(
+                PanelInstance::glass(r, m.chip_radius, PanelKind::Caffeine)
+                    .with_press(chip_ui.press_light(id)),
+            );
+        }
+        {
+            let id = ChipId::Logo;
+            let r = scale_rect(self.logo, chip_ui.scale_for(id));
+            out.push(
+                PanelInstance::glass(r, m.chip_radius, PanelKind::Settings)
+                    .with_press(chip_ui.press_light(id)),
+            );
+        }
         out
     }
 }
 
 fn pane_layout_in_glass(pane_id: u64, glass: Rect, m: Metrics, focused: bool) -> PaneLayout {
     let inset = m.inset();
-    let strip = m.input_strip_h.min((glass.h - inset * 2.0).max(0.0));
+    // Three fixed mono rows (divider / path / input) — each = one cell height so
+    // 14px Gohu never overflows its band or the glass bottom.
+    let row: f32 = 14.0;
+    let avail: f32 = (glass.h - inset * 2.0).max(0.0);
+    let strip_want: f32 = row * 3.0;
+    let strip: f32 = strip_want.min(avail);
+    let row_h: f32 = if strip >= strip_want {
+        row
+    } else {
+        (strip / 3.0).max(1.0)
+    };
+    let strip: f32 = row_h * 3.0;
+
     let inner_x = glass.x + inset;
     let inner_w = (glass.w - inset * 2.0).max(40.0);
     let inner_top = glass.y + inset;
@@ -336,12 +441,12 @@ fn pane_layout_in_glass(pane_id: u64, glass: Rect, m: Metrics, focused: bool) ->
     let cells_h = (inner_bottom - inner_top - strip).max(CELL_H_MIN);
     let cells = Rect::new(inner_x, inner_top, inner_w, cells_h);
 
-    let div_h = (strip * 0.22).max(m.spacing.half());
-    let path_h = (strip * 0.34).max(m.spacing.unit);
-    let input_h = (strip - div_h - path_h).max(m.spacing.unit);
-    let divider = Rect::new(inner_x, cells.y + cells.h, inner_w, div_h);
-    let path = Rect::new(inner_x, divider.y + divider.h, inner_w, path_h);
-    let warp = Rect::new(inner_x, path.y + path.h, inner_w, input_h);
+    let divider = Rect::new(inner_x, cells.y + cells.h, inner_w, row_h);
+    let path = Rect::new(inner_x, divider.y + divider.h, inner_w, row_h);
+    let warp = Rect::new(inner_x, path.y + path.h, inner_w, row_h);
+
+    // Footer must end at or above the glass inner bottom (no overflow).
+    debug_assert!(warp.y + warp.h <= inner_bottom + 0.5);
 
     PaneLayout {
         pane_id,
@@ -369,6 +474,8 @@ pub enum PanelKind {
     ChipIdle = 3,
     Settings = 4,
     NewTab = 5,
+    /// Caffeine cup chip (☕).
+    Caffeine = 12,
     /// Solid macOS close (#ff5f57).
     SolidClose = 6,
     /// Solid macOS minimize (#febc2e).
@@ -379,6 +486,16 @@ pub enum PanelKind {
     Scrim = 9,
     /// Settings glass modal (same optics as panes; `_pad[0]` = opacity).
     Modal = 10,
+    /// Active-tab jelly neck bridging chrome → workspace.
+    TabConnect = 11,
+    /// Nested modal field — heavier frost (search / notes body).
+    ModalFrost = 13,
+    /// Modal option / action glass button.
+    ModalButton = 14,
+    /// Selected modal option button.
+    ModalButtonActive = 15,
+    /// Thin solid rule (pane footer, list separators).
+    Hairline = 16,
 }
 
 /// GPU-ready panel instance.
@@ -390,7 +507,7 @@ pub struct PanelInstance {
     /// corner radius (or scrim unused)
     pub radius: f32,
     pub kind: f32,
-    /// `_pad[0]` = opacity for Scrim / Modal; otherwise 0.
+    /// `_pad[0]` = opacity (Scrim/Modal) or 1; `_pad[1]` = press light 0..1 for chips.
     pub _pad: [f32; 2],
 }
 
@@ -406,6 +523,11 @@ impl PanelInstance {
 
     pub fn with_opacity(mut self, opacity: f32) -> Self {
         self._pad[0] = opacity.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn with_press(mut self, press: f32) -> Self {
+        self._pad[1] = press.clamp(0.0, 1.0);
         self
     }
 }
@@ -430,7 +552,7 @@ mod tests {
     fn edge_16_everything_else_8() {
         let s = Spacing::default();
         assert_eq!(s.edge, 16.0, "window edges");
-        assert_eq!(s.stack, 8.0, "between regions");
+        assert_eq!(s.stack, 8.0, "pane↔pane / cluster spacing");
         assert_eq!(s.inset, 8.0, "inside glass");
         assert_eq!(s.cluster, 8.0, "chip cluster");
     }
@@ -439,12 +561,21 @@ mod tests {
     fn edge_vs_stack_gutters() {
         let m = Metrics::default();
         let edge = m.edge();
-        let stack = m.stack();
         let l = FrameLayout::compute(800.0, 600.0, m, 2);
 
-        // nav → workspace == stack (8), not edge
-        let under_nav = l.workspace.y - (m.title_h + m.tab_h);
-        assert!((under_nav - stack).abs() < 0.01, "nav→workspace {under_nav}");
+        // Tabs stay centered in the chrome bar — not slid down toward the pane.
+        let chip_h = l.tab_chips[0].h;
+        let chip_y = l.tab_chips[0].y;
+        let expected_y = (m.title_h - chip_h) * 0.5;
+        assert!((chip_y - expected_y).abs() < 0.01, "chips centered {chip_y}");
+
+        // Pane is flush under chip bottoms (zero air between nav and well).
+        let chip_bottom = chip_y + chip_h;
+        assert!(
+            (l.workspace.y - chip_bottom).abs() < 0.01,
+            "chip→workspace {}",
+            l.workspace.y - chip_bottom
+        );
 
         assert!(l.cells.y >= l.terminal.y);
         assert!(l.warp.y + l.warp.h <= l.terminal.y + l.terminal.h + 0.01);

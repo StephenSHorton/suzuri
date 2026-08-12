@@ -1,58 +1,50 @@
 //! Minimal GPU text overlay via [glyphon] (cosmic-text + wgpu 24).
 //!
-//! # How to draw a string
+//! Product suzuri embeds **GohuFont uni14 Nerd Font Mono** (`assets.FontFaceBundled`).
 //!
-//! ```ignore
-//! // Once, after device/queue/format are ready:
-//! let mut text = TextLayer::new(&device, &queue, surface_format);
-//! text.resize(physical_size, scale_factor);
-//!
-//! // Each frame (logical px match layout.rs):
-//! text.prepare(
-//!     &device,
-//!     &queue,
-//!     &[TextLabel {
-//!         text: "hello".into(),
-//!         x: 12.0,
-//!         y: 10.0,
-//!         size: 14.0,
-//!         color: [1.0, 1.0, 1.0, 0.9],
-//!     }],
-//! );
-//!
-//! // In a render pass that loads the existing surface (do not clear):
-//! text.render_in_pass(&mut pass);
-//! // or:
-//! text.render(&device, &mut encoder, &view);
-//! text.trim_atlas(); // call after submit, once per frame is fine
-//! ```
-//!
-//! Label `x` / `y` / `size` are **logical** pixels (CSS-px style), same as
-//! [`crate::layout`]. They are scaled by the last `resize` scale factor.
+//! # Critical matching detail
+//! Gohu’s OS/2 weight is **500** (Medium), not 400 (Normal). cosmic-text’s default
+//! `Attrs` weight is Normal — with family Name only, it **skips Gohu** and falls
+//! back to another face. Always pass the face’s real weight.
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics as FontMetrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
 use winit::dpi::PhysicalSize;
+
+/// Product suzuri mono — GohuFont uni14 Nerd Font Mono (see `assets/fonts/`).
+const GOHU_TTF: &[u8] = include_bytes!("../../assets/fonts/GohuFontuni14NerdFontMono-Regular.ttf");
+
+/// fontdb / GDI face name (matches `assets.FontFaceBundled`).
+pub const GOHU_FAMILY: &str = "GohuFont uni14 Nerd Font Mono";
+
+/// Default caret glyph — full block everywhere (terminal, warp, modals).
+pub const CARET_BLOCK: &str = "█";
+
+/// Primary caret color (jade), alpha applied by caller.
+pub const CARET_RGB: [f32; 3] = [0.0, 0.90, 0.46];
+
+/// System face for ☕ (Gohu has no U+2615).
+#[cfg(target_os = "macos")]
+const SYMBOLS_FAMILY: &str = "Apple Symbols";
+#[cfg(target_os = "windows")]
+const SYMBOLS_FAMILY: &str = "Segoe UI Symbol";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const SYMBOLS_FAMILY: &str = "Noto Sans Symbols2";
 
 /// One screen-space label (logical pixels).
 #[derive(Clone, Debug)]
 pub struct TextLabel {
     pub text: String,
-    /// Top-left of the layout box, logical px (used when `center_in` is None).
     pub x: f32,
     pub y: f32,
-    /// Font size in logical px.
     pub size: f32,
-    /// RGBA in 0..=1.
     pub color: [f32; 4],
-    /// Use monospace family (terminal cell lines).
     pub mono: bool,
-    /// Digital-rain glyph — prefer a CJK face that covers half-width katakana.
     pub rain: bool,
-    /// If set `[x, y, w, h]`, center the shaped glyph box in this rect (logical px).
-    /// Overrides `x` / `y` after measuring line width.
+    /// UI symbol (☕) — system symbols face.
+    pub symbols: bool,
     pub center_in: Option<[f32; 4]>,
 }
 
@@ -66,6 +58,7 @@ impl TextLabel {
             color,
             mono: false,
             rain: false,
+            symbols: false,
             center_in: None,
         }
     }
@@ -79,12 +72,31 @@ impl TextLabel {
             color,
             mono: true,
             rain: false,
+            symbols: false,
             center_in: None,
         }
     }
 
-    /// Center this label inside a logical rect (nav chips, icon buttons, etc.).
     pub fn centered(
+        text: impl Into<String>,
+        rect: [f32; 4],
+        size: f32,
+        color: [f32; 4],
+    ) -> Self {
+        Self {
+            text: text.into(),
+            x: rect[0],
+            y: rect[1],
+            size,
+            color,
+            mono: true,
+            rain: false,
+            symbols: false,
+            center_in: Some(rect),
+        }
+    }
+
+    pub fn symbol_centered(
         text: impl Into<String>,
         rect: [f32; 4],
         size: f32,
@@ -98,6 +110,7 @@ impl TextLabel {
             color,
             mono: false,
             rain: false,
+            symbols: true,
             center_in: Some(rect),
         }
     }
@@ -111,17 +124,56 @@ pub struct TextLayer {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
-    /// Reused shape buffers, one per label prepared last frame.
     buffers: Vec<Buffer>,
     width: u32,
     height: u32,
     scale_factor: f32,
+    gohu_family: String,
+    /// OS/2 weight of the embedded face (Gohu is 500, not 400).
+    gohu_weight: Weight,
+    gohu_ok: bool,
 }
 
 impl TextLayer {
-    /// Construct with the surface format used for the composite target.
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let mut font_system = FontSystem::new();
+        font_system.db_mut().load_font_data(GOHU_TTF.to_vec());
+
+        let mut gohu_family = GOHU_FAMILY.to_string();
+        // Gohu ships as weight 500 — must match Attrs or cosmic-text picks another face.
+        let mut gohu_weight = Weight(500);
+        let mut found = false;
+        for face in font_system.db().faces() {
+            for (name, _) in &face.families {
+                if name.eq_ignore_ascii_case(GOHU_FAMILY)
+                    || name.contains("GohuFont")
+                    || name.contains("Gohu")
+                {
+                    gohu_family = name.clone();
+                    gohu_weight = face.weight;
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+
+        if found {
+            font_system
+                .db_mut()
+                .set_monospace_family(gohu_family.as_str());
+            eprintln!(
+                "suzuri-chrome: UI font ready · {gohu_family} weight={}",
+                gohu_weight.0
+            );
+        } else {
+            eprintln!(
+                "suzuri-chrome: Gohu face not found after load (expected `{GOHU_FAMILY}`)"
+            );
+        }
+
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
@@ -133,8 +185,34 @@ impl TextLayer {
             None,
         );
 
-        // Seed one buffer so prepare always has a metrics template.
         let seed = Buffer::new(&mut font_system, FontMetrics::new(14.0, 18.0));
+
+        // Probe: only count OK if shaped glyphs use the Gohu face id.
+        let gohu_ok = {
+            let mut probe = Buffer::new(&mut font_system, FontMetrics::new(14.0, 18.0));
+            probe.set_size(&mut font_system, Some(200.0), Some(20.0));
+            let attrs = Attrs::new()
+                .family(Family::Name(gohu_family.as_str()))
+                .weight(gohu_weight);
+            probe.set_text(&mut font_system, "W", attrs, Shaping::Advanced);
+            probe.shape_until_scroll(&mut font_system, false);
+            let mut ok = false;
+            for run in probe.layout_runs() {
+                for g in run.glyphs.iter() {
+                    // Advance ~8px at 14 for Gohu mono cells
+                    if g.w > 4.0 && g.w < 12.0 {
+                        ok = true;
+                    }
+                }
+            }
+            if !ok {
+                eprintln!(
+                    "suzuri-chrome: Gohu probe failed (weight={}) — check face matching",
+                    gohu_weight.0
+                );
+            }
+            ok
+        };
 
         Self {
             font_system,
@@ -147,17 +225,18 @@ impl TextLayer {
             width: 1,
             height: 1,
             scale_factor: 1.0,
+            gohu_family,
+            gohu_weight,
+            gohu_ok,
         }
     }
 
-    /// Update physical resolution and DPI scale (logical → physical).
     pub fn resize(&mut self, physical: PhysicalSize<u32>, scale_factor: f32) {
         self.width = physical.width.max(1);
         self.height = physical.height.max(1);
         self.scale_factor = scale_factor.max(0.01);
     }
 
-    /// Shape and upload `labels` for the next draw. Call once per frame before render.
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
@@ -174,7 +253,6 @@ impl TextLayer {
 
         let scale = self.scale_factor;
 
-        // Ensure we have one buffer per label.
         while self.buffers.len() < labels.len() {
             self.buffers.push(Buffer::new(
                 &mut self.font_system,
@@ -182,46 +260,53 @@ impl TextLayer {
             ));
         }
 
+        let gohu_name = self.gohu_family.clone();
+        let gohu_weight = self.gohu_weight;
+        let gohu_ok = self.gohu_ok;
+
         for (i, label) in labels.iter().enumerate() {
-            let size_px = (label.size * scale).max(1.0);
-            let line_height = size_px * 1.25;
+            // Prefer integer physical px (bitmap-friendly).
+            let size_px = (label.size * scale).max(1.0).round().max(1.0);
+            let line_height = (size_px * 1.2).round().max(size_px);
             let metrics = FontMetrics::new(size_px, line_height);
+            let max_w = (self.width as f32).max(1.0);
+            let text = label.text.as_str();
+            let is_rain = label.rain;
+            let is_symbols = label.symbols;
 
             let buf = &mut self.buffers[i];
             buf.set_metrics(&mut self.font_system, metrics);
-            // Single-line chrome labels: generous width, one line of height.
-            let max_w = (self.width as f32).max(1.0);
-            buf.set_size(
-                &mut self.font_system,
-                Some(max_w),
-                Some(line_height * 2.0),
-            );
-            // Rain needs half-width katakana — product suzuri uses a CJK face.
-            // Hiragino Sans covers FF61–FF9F on macOS; SansSerif fallback otherwise.
-            let attrs = if label.rain {
+            buf.set_size(&mut self.font_system, Some(max_w), Some(line_height));
+
+            if is_rain {
                 #[cfg(target_os = "macos")]
                 {
-                    Attrs::new().family(Family::Name("Hiragino Sans"))
+                    let attrs = Attrs::new().family(Family::Name("Hiragino Sans"));
+                    buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    Attrs::new().family(Family::SansSerif)
+                    let attrs = Attrs::new().family(Family::SansSerif);
+                    buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
                 }
-            } else if label.mono {
-                Attrs::new().family(Family::Monospace)
+            } else if is_symbols {
+                let attrs = Attrs::new().family(Family::Name(SYMBOLS_FAMILY));
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+            } else if gohu_ok {
+                // MUST set weight=500 or cosmic-text will not select Gohu.
+                let attrs = Attrs::new()
+                    .family(Family::Name(gohu_name.as_str()))
+                    .weight(gohu_weight);
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
             } else {
-                Attrs::new().family(Family::SansSerif)
-            };
-            buf.set_text(
-                &mut self.font_system,
-                &label.text,
-                attrs,
-                Shaping::Advanced,
-            );
+                let attrs = Attrs::new()
+                    .family(Family::Monospace)
+                    .weight(gohu_weight);
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+            }
             buf.shape_until_scroll(&mut self.font_system, false);
         }
 
-        // Build areas that borrow the buffers.
         let bounds = TextBounds {
             left: 0,
             top: 0,
@@ -233,11 +318,8 @@ impl TextLayer {
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let size_px = (label.size * scale).max(1.0);
-                // Must match set_metrics line_height above.
-                let line_h = size_px * 1.25;
+                let size_px = (label.size * scale).max(1.0).round().max(1.0);
                 let (left, top) = if let Some([rx, ry, rw, rh]) = label.center_in {
-                    // Shaped line width in physical px (glyphon buffer is physical).
                     let line_w = self.buffers[i]
                         .layout_runs()
                         .map(|run| run.line_w)
@@ -246,11 +328,9 @@ impl TextLayer {
                     let cy = ry * scale;
                     let cw = rw * scale;
                     let ch = rh * scale;
-                    // Optical nudge: sans caps sit slightly high in the EM box.
-                    let optical_y = 0.5 * scale;
                     (
                         cx + (cw - line_w).max(0.0) * 0.5,
-                        cy + (ch - line_h).max(0.0) * 0.5 + optical_y,
+                        cy + (ch - size_px).max(0.0) * 0.5,
                     )
                 } else {
                     (label.x * scale, label.y * scale)
@@ -267,7 +347,6 @@ impl TextLayer {
             })
             .collect();
 
-        // Retry once if the atlas fills up mid-prepare.
         if self
             .text_renderer
             .prepare(
@@ -294,14 +373,10 @@ impl TextLayer {
         }
     }
 
-    /// Draw prepared text into an existing render pass (load, don't clear).
     pub fn render_in_pass(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let _ = self
-            .text_renderer
-            .render(&self.atlas, &self.viewport, pass);
+        let _ = self.text_renderer.render(&self.atlas, &self.viewport, pass);
     }
 
-    /// Begin a load-preserving pass on `view` and draw prepared text.
     pub fn render(
         &self,
         _device: &wgpu::Device,
@@ -309,7 +384,7 @@ impl TextLayer {
         view: &wgpu::TextureView,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("text overlay"),
+            label: Some("text"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
                 resolve_target: None,
@@ -325,7 +400,6 @@ impl TextLayer {
         self.render_in_pass(&mut pass);
     }
 
-    /// Drop unused atlas pages (call after `queue.submit`).
     pub fn trim_atlas(&mut self) {
         self.atlas.trim();
     }

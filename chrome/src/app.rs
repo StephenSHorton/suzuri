@@ -2,28 +2,35 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition},
-    event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{
+        DeviceEvent, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+    },
     event_loop::ActiveEventLoop,
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{Window, WindowAttributes, WindowId},
+    window::{Fullscreen, Window, WindowAttributes, WindowId},
 };
 
 use crate::ansi::AnsiDecoder;
+use crate::caffeine::Caffeine;
+use crate::chrome_ui::{ChipId, ChipUi};
 use crate::commands::{
     default_commands, filter_commands, CommandAction, HelpState, PaletteState,
 };
 use crate::input::{hit_test, is_mac, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
+use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
 use crate::renderer::{self, Renderer};
 use crate::session::{ChromeSession, CloseOutcome};
 use crate::settings::SettingsState;
+use crate::transfer_ui::TransferUi;
+use crate::workspace_ui::WorkspaceUi;
 
 /// Per-pane live shell state (keyed by pane id).
 struct PaneRuntime {
@@ -45,9 +52,20 @@ pub struct ChromeApp {
     settings: SettingsState,
     palette: PaletteState,
     help: HelpState,
+    notes: NotesState,
+    workspace_ui: WorkspaceUi,
+    transfer: TransferUi,
+    caffeine: Caffeine,
     commands: Vec<crate::commands::Command>,
     started: Instant,
     clipboard: Option<arboard::Clipboard>,
+    chip_ui: ChipUi,
+    /// Left-button hit at mouse-down; activation runs on release if still the same.
+    press_hit: Option<HitTarget>,
+    /// Middle-button hit at mouse-down (tab close on matching release).
+    middle_press_hit: Option<HitTarget>,
+    /// Last empty title-bar click (time + logical xy) for OS zoom double-click.
+    last_title_click: Option<(Instant, f32, f32)>,
 }
 
 impl Default for ChromeApp {
@@ -76,9 +94,17 @@ impl Default for ChromeApp {
             settings: SettingsState::new(),
             palette: PaletteState::new(),
             help: HelpState::new(),
+            notes: NotesState::new(),
+            workspace_ui: WorkspaceUi::new(),
+            transfer: TransferUi::new(),
+            caffeine: Caffeine::new(),
             commands: default_commands(),
             started: Instant::now(),
             clipboard: arboard::Clipboard::new().ok(),
+            chip_ui: ChipUi::default(),
+            press_hit: None,
+            middle_press_hit: None,
+            last_title_click: None,
         }
     }
 }
@@ -180,6 +206,27 @@ impl ChromeApp {
             let gap = self.metrics.stack();
             tab.root
                 .layout_into(layout.workspace, gap, &mut leafs);
+            // Solo-exit: scale the glass toward center while jelly closes.
+            if let Some(anim) = &tab.solo_exit {
+                let s = anim.jelly.clamp(0.0, 1.15);
+                leafs = leafs
+                    .into_iter()
+                    .map(|(id, r)| {
+                        if id == anim.pane_id {
+                            let cx = r.x + r.w * 0.5;
+                            let cy = r.y + r.h * 0.5;
+                            let nw = (r.w * s).max(1.0);
+                            let nh = (r.h * s).max(1.0);
+                            (
+                                id,
+                                crate::layout::Rect::new(cx - nw * 0.5, cy - nh * 0.5, nw, nh),
+                            )
+                        } else {
+                            (id, r)
+                        }
+                    })
+                    .collect();
+            }
             layout.apply_pane_rects(self.metrics, &leafs, tab.focus_pane);
         }
         layout
@@ -237,13 +284,54 @@ impl ChromeApp {
     }
 
     fn overlay_open(&self) -> bool {
-        self.settings.open || self.palette.open || self.help.open
+        self.settings.open
+            || self.palette.open
+            || self.help.open
+            || self.notes.open
+            || self.workspace_ui.open
+            || self.transfer.open
     }
 
     fn close_all_overlays(&mut self) {
         self.settings.close();
         self.palette.close();
         self.help.close();
+        self.notes.close();
+        self.workspace_ui.close();
+        self.transfer.close();
+    }
+
+    fn try_palette_click(&mut self, event_loop: &ActiveEventLoop) {
+        let layout = self.current_layout();
+        let win_w = layout.title.w;
+        let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+        let modal = self.palette.modal_rect(win_w, win_h);
+        let pad = 14.0;
+        let input_h = 48.0;
+        let input_bottom = modal.y + pad + 4.0 + input_h;
+        let btn_h = 36.0;
+        let gap = 6.0;
+        let mut y = input_bottom + 12.0;
+        let filtered = filter_commands(&self.commands, &self.palette.query);
+        let x = self.cursor.x;
+        let cy = self.cursor.y;
+        // Click on input: stay open, do nothing
+        if x >= modal.x + pad
+            && x <= modal.x + modal.w - pad
+            && cy >= modal.y + pad
+            && cy <= input_bottom
+        {
+            return;
+        }
+        for (i, &idx) in filtered.iter().enumerate().take(6) {
+            if cy >= y && cy <= y + btn_h && x >= modal.x + pad && x <= modal.x + modal.w - pad {
+                let action = self.commands[idx].action;
+                self.palette.close();
+                self.run_action(event_loop, action);
+                return;
+            }
+            y += btn_h + gap;
+        }
     }
 
     fn run_action(&mut self, event_loop: &ActiveEventLoop, action: CommandAction) {
@@ -251,17 +339,52 @@ impl ChromeApp {
             CommandAction::OpenSettings => {
                 self.palette.close();
                 self.help.close();
+                self.notes.close();
                 self.settings.open();
             }
             CommandAction::OpenHelp => {
                 self.palette.close();
                 self.settings.close();
+                self.notes.close();
                 self.help.open_help();
             }
             CommandAction::OpenPalette => {
                 self.settings.close();
                 self.help.close();
+                self.notes.close();
                 self.palette.open_palette();
+            }
+            CommandAction::OpenNotes => {
+                self.palette.close();
+                self.settings.close();
+                self.help.close();
+                self.workspace_ui.close();
+                self.transfer.close();
+                self.notes.open();
+            }
+            CommandAction::OpenWorkspace => {
+                self.palette.close();
+                self.settings.close();
+                self.help.close();
+                self.notes.close();
+                self.transfer.close();
+                self.workspace_ui.open();
+            }
+            CommandAction::OpenTransferSend => {
+                self.palette.close();
+                self.settings.close();
+                self.help.close();
+                self.notes.close();
+                self.workspace_ui.close();
+                self.transfer.open_send();
+            }
+            CommandAction::OpenTransferReceive => {
+                self.palette.close();
+                self.settings.close();
+                self.help.close();
+                self.notes.close();
+                self.workspace_ui.close();
+                self.transfer.open_receive();
             }
             CommandAction::NewTab => self.new_tab(),
             CommandAction::CloseTab | CommandAction::ClosePane => {
@@ -288,6 +411,18 @@ impl ChromeApp {
             }
             CommandAction::ToggleLens => {
                 self.settings.prefs.lens = !self.settings.prefs.lens;
+            }
+            CommandAction::ToggleCaffeine => {
+                let _ = self.caffeine.toggle();
+            }
+            CommandAction::Caffeine15m => {
+                let _ = self.caffeine.activate(Some(Duration::from_secs(15 * 60)));
+            }
+            CommandAction::Caffeine1h => {
+                let _ = self.caffeine.activate(Some(Duration::from_secs(60 * 60)));
+            }
+            CommandAction::CaffeineOff => {
+                self.caffeine.deactivate();
             }
             CommandAction::Quit => event_loop.exit(),
         }
@@ -349,71 +484,180 @@ impl ChromeApp {
                     self.runtimes.remove(&id);
                 }
             }
-            CloseOutcome::None => {}
+            CloseOutcome::Animating | CloseOutcome::None => {}
         }
     }
 
-    fn handle_click(&mut self, event_loop: &ActiveEventLoop) {
+    /// When a shell process exits (`exit`, EOF, crash), jelly-close its pane.
+    fn reap_dead_shells(&mut self) {
+        let mut dead = Vec::new();
+        for (id, rt) in self.runtimes.iter_mut() {
+            if let Some(pty) = &mut rt.pty {
+                if !pty.is_alive() {
+                    // Drain any final output (logout banner, etc.)
+                    let chunk = pty.try_read();
+                    if !chunk.is_empty() {
+                        if let Some(grid) = self.session.grid_mut(*id) {
+                            rt.ansi.feed(grid, chunk.as_bytes());
+                        }
+                    }
+                    dead.push(*id);
+                }
+            }
+        }
+        for id in dead {
+            // Drop the dead PTY handle but keep the pane until anim ends.
+            if let Some(rt) = self.runtimes.get_mut(&id) {
+                rt.pty = None;
+            }
+            self.session.begin_close_pane(id);
+        }
+    }
+
+    fn finish_closed_panes(&mut self, event_loop: &ActiveEventLoop, finished: &[u64]) {
+        for id in finished {
+            self.runtimes.remove(id);
+        }
+        if self.session.is_empty() {
+            event_loop.exit();
+        }
+    }
+
+    /// Update chip hover from current pointer + layout (scale / press light).
+    fn update_chip_hover(&mut self) {
         let layout = self.current_layout();
-        let target = hit_test(
+        let x = self.cursor.x;
+        let y = self.cursor.y;
+        let mut hit = None;
+        if self.pointer_inside {
+            if layout.logo.contains(x, y) {
+                hit = Some(ChipId::Logo);
+            } else if layout.caffeine.contains(x, y) {
+                hit = Some(ChipId::Caffeine);
+            } else if layout.tab_new.contains(x, y) {
+                hit = Some(ChipId::NewTab);
+            } else {
+                for (i, chip) in layout.tab_chips.iter().enumerate() {
+                    if chip.contains(x, y) {
+                        hit = Some(ChipId::Tab(i));
+                        break;
+                    }
+                }
+            }
+        }
+        // Position freezes on leave so the green light can fade out in place.
+        self.chip_ui.set_hover(hit, (x, y));
+    }
+
+    /// While a pane is on the alt screen (vim, grok, etc.), route keys to PTY;
+    /// when it leaves, restore command-line focus.
+    fn sync_focus_for_alt_screen(&mut self) {
+        let id = self.session.focus_pane_id();
+        let alt = self
+            .runtimes
+            .get(&id)
+            .map(|rt| rt.ansi.on_alt_screen())
+            .unwrap_or(false);
+        if alt {
+            self.terminal_focused = true;
+            self.warp_focused = false;
+        } else if self.terminal_focused {
+            // Left alt screen — back to command line unless user explicitly… 
+            // (we only auto-clear when we auto-set; keep simple: always restore)
+            self.terminal_focused = false;
+            self.warp_focused = true;
+        }
+    }
+
+    fn hit_at_cursor(&self) -> HitTarget {
+        let layout = self.current_layout();
+        hit_test(
             &layout,
             &self.metrics,
             self.cursor.x,
             self.cursor.y,
             is_mac(),
-        );
+        )
+    }
 
-        // Overlays: click outside closes
-        if self.palette.visible() || self.help.visible() || self.settings.visible() {
-            match target {
-                HitTarget::Settings if self.settings.visible() => {
-                    self.settings.toggle();
-                    return;
-                }
-                HitTarget::Close | HitTarget::Minimize | HitTarget::Zoom => {}
-                _ => {
+    /// True if the pointer is over any open modal card (input, buttons, body).
+    fn pointer_in_open_modal(&self) -> bool {
+        let layout = self.current_layout();
+        let win_w = layout.title.w;
+        let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+        let x = self.cursor.x;
+        let y = self.cursor.y;
+        if self.settings.visible() && self.settings.animated_modal_rect(win_w, win_h).contains(x, y)
+        {
+            return true;
+        }
+        if self.palette.visible() && self.palette.modal_rect(win_w, win_h).contains(x, y) {
+            return true;
+        }
+        if self.help.visible() {
+            let r = crate::renderer::overlay_modal_rect_pub(win_w, win_h, 640.0, 360.0);
+            if r.contains(x, y) {
+                return true;
+            }
+        }
+        if self.notes.visible() && self.notes.animated_modal_rect(win_w, win_h).contains(x, y) {
+            return true;
+        }
+        if self.workspace_ui.visible()
+            && self.workspace_ui.animated_modal_rect(win_w, win_h).contains(x, y)
+        {
+            return true;
+        }
+        if self.transfer.visible() && self.transfer.animated_modal_rect(win_w, win_h).contains(x, y)
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Activate a control (runs on **mouse-up** when press & release share a target).
+    fn handle_activation(&mut self, event_loop: &ActiveEventLoop, target: HitTarget) {
+        // Traffic lights always work
+        if matches!(
+            target,
+            HitTarget::Close | HitTarget::Minimize | HitTarget::Zoom
+        ) {
+            // fall through to match below
+        } else if self.overlay_open() || self.notes.visible() || self.workspace_ui.visible()
+            || self.transfer.visible()
+            || self.palette.visible()
+            || self.help.visible()
+            || self.settings.visible()
+        {
+            // Click **inside** any modal: keep open (don't steal focus to terminal).
+            if self.pointer_in_open_modal() {
+                // Palette option clicks / notes list handled later if needed.
+                if self.palette.open {
+                    self.try_palette_click(event_loop);
+                } else if self.notes.open {
+                    let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    // Rough: any overlay modal is centered — dismiss on outside
-                    let modal = self.settings.animated_modal_rect(win_w, win_h);
-                    if self.settings.visible() && modal.contains(self.cursor.x, self.cursor.y) {
-                        return;
-                    }
-                    // Palette/help use larger centered rects — dismiss outside roughly
-                    if self.palette.visible() || self.help.visible() {
-                        // click on scrim
-                        if target == HitTarget::None
-                            || matches!(
-                                target,
-                                HitTarget::TitleDrag
-                                    | HitTarget::Terminal(_)
-                                    | HitTarget::WarpBar(_)
-                            )
-                        {
-                            // still check if inside modal approx
-                            let mx = win_w * 0.5;
-                            let my = win_h * 0.45;
-                            let inside = (self.cursor.x - mx).abs() < 220.0
-                                && (self.cursor.y - my).abs() < 200.0;
-                            if !inside {
-                                self.close_all_overlays();
-                                if let Some(w) = &self.window {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-                            return; // inside modal — no-op for now
-                        }
-                    }
-                    if self.settings.visible() {
-                        self.settings.close();
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                        return;
-                    }
+                    self.notes
+                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                } else if self.workspace_ui.open {
+                    let layout = self.current_layout();
+                    let win_w = layout.title.w;
+                    let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+                    self.workspace_ui
+                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
                 }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
             }
+            // Click outside → dismiss
+            self.close_all_overlays();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
         }
 
         match target {
@@ -424,15 +668,18 @@ impl ChromeApp {
                 }
             }
             HitTarget::Zoom => {
+                // Green traffic light: true fullscreen (not maximize/zoom).
+                // Title-bar double-click still toggles maximized fill.
                 if let Some(w) = &self.window {
-                    w.set_maximized(!w.is_maximized());
+                    if w.fullscreen().is_some() {
+                        w.set_fullscreen(None);
+                    } else {
+                        w.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    }
                 }
             }
-            HitTarget::TitleDrag => {
-                if let Some(w) = &self.window {
-                    let _ = w.drag_window();
-                }
-            }
+            // Title drag is started on press (OS requirement), not here.
+            HitTarget::TitleDrag => {}
             HitTarget::Tab(i) => {
                 if let Some(tab) = self.session.tabs.get(i) {
                     let id = tab.id;
@@ -442,9 +689,13 @@ impl ChromeApp {
                 }
             }
             HitTarget::NewTab => self.new_tab(),
+            HitTarget::Caffeine => {
+                let _ = self.caffeine.toggle();
+            }
             HitTarget::Settings => {
                 self.help.close();
                 self.palette.close();
+                self.notes.close();
                 self.settings.toggle();
             }
             HitTarget::WarpBar(pane_id) => {
@@ -454,8 +705,18 @@ impl ChromeApp {
             }
             HitTarget::Terminal(pane_id) => {
                 self.session.set_focus_pane(pane_id);
-                self.terminal_focused = true;
-                self.warp_focused = false;
+                let alt = self
+                    .runtimes
+                    .get(&pane_id)
+                    .map(|rt| rt.ansi.on_alt_screen())
+                    .unwrap_or(false);
+                if alt {
+                    self.terminal_focused = true;
+                    self.warp_focused = false;
+                } else {
+                    self.warp_focused = true;
+                    self.terminal_focused = false;
+                }
             }
             HitTarget::None => {}
         }
@@ -465,37 +726,30 @@ impl ChromeApp {
         }
     }
 
-    fn handle_middle_click(&mut self, event_loop: &ActiveEventLoop) {
-        let layout = self.current_layout();
-        let target = hit_test(
-            &layout,
-            &self.metrics,
-            self.cursor.x,
-            self.cursor.y,
-            is_mac(),
-        );
-        if let HitTarget::Tab(i) = target {
-            if let Some(tab) = self.session.tabs.get(i) {
-                let id = tab.id;
-                let removed = self.session.close_tab(id);
-                if removed.is_empty() {
-                    event_loop.exit();
-                } else {
-                    for pid in removed {
-                        self.runtimes.remove(&pid);
-                    }
-                }
-            }
-        }
-    }
-
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
         if !event.state.is_pressed() {
             return;
         }
 
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-            if self.overlay_open() || self.settings.visible() || self.palette.visible() || self.help.visible()
+            // Workspace: Esc cancels new-channel compose before closing.
+            if self.workspace_ui.open
+                && self.workspace_ui.mode
+                    != crate::workspace_ui::ComposeMode::Message
+            {
+                self.workspace_ui.cancel_mode();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+            if self.overlay_open()
+                || self.settings.visible()
+                || self.palette.visible()
+                || self.help.visible()
+                || self.notes.visible()
+                || self.workspace_ui.visible()
+                || self.transfer.visible()
             {
                 self.close_all_overlays();
                 if let Some(w) = &self.window {
@@ -511,6 +765,114 @@ impl ChromeApp {
         let shift = self.modifiers.shift_key();
         let alt = self.modifiers.alt_key();
 
+        // Modal text surfaces (notes / workspace / transfer) — not terminal.
+        if !super_or_ctrl {
+            if self.notes.open {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => {
+                        self.notes.backspace();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowLeft) => {
+                        self.notes.move_cursor(-1);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowRight) => {
+                        self.notes.move_cursor(1);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.notes.insert_char('\n');
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Character(s) => {
+                        for ch in s.chars() {
+                            if !ch.is_control() {
+                                self.notes.insert_char(ch);
+                            }
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if self.workspace_ui.open {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => {
+                        self.workspace_ui.backspace();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.workspace_ui.send();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Character(s) => {
+                        for ch in s.chars() {
+                            if !ch.is_control() {
+                                self.workspace_ui.insert_char(ch);
+                            }
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if self.transfer.open {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => {
+                        self.transfer.backspace();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.transfer.submit();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Character(s) => {
+                        for ch in s.chars() {
+                            if !ch.is_control() {
+                                self.transfer.insert_char(ch);
+                            }
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Global shortcuts
         if super_or_ctrl {
             if let Key::Character(ref s) = event.logical_key {
@@ -519,6 +881,7 @@ impl ChromeApp {
                     "k" | "K" if !shift => {
                         self.help.close();
                         self.settings.close();
+                        self.notes.close();
                         self.palette.toggle();
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -528,6 +891,7 @@ impl ChromeApp {
                     "/" if !shift => {
                         self.palette.close();
                         self.settings.close();
+                        self.notes.close();
                         self.help.toggle();
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -537,7 +901,18 @@ impl ChromeApp {
                     "," => {
                         self.palette.close();
                         self.help.close();
+                        self.notes.close();
                         self.settings.toggle();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "m" | "M" if shift => {
+                        self.palette.close();
+                        self.settings.close();
+                        self.help.close();
+                        self.notes.toggle();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -895,7 +1270,61 @@ impl ApplicationHandler for ChromeApp {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.handle_click(event_loop);
+                self.chip_ui.pressed = true;
+                let hit = self.hit_at_cursor();
+                self.press_hit = Some(hit);
+                // Empty title-bar / nav chrome (not chips): drag, or double-click zoom.
+                // macOS: double-click title bar = zoom to fill (maximize), not fullscreen
+                // (green button is separate). Same maximize toggle on other platforms.
+                if hit == HitTarget::TitleDrag {
+                    let x = self.cursor.x;
+                    let y = self.cursor.y;
+                    let now = Instant::now();
+                    let is_double = self
+                        .last_title_click
+                        .map(|(t, lx, ly)| {
+                            now.duration_since(t) < Duration::from_millis(450)
+                                && (x - lx).abs() < 6.0
+                                && (y - ly).abs() < 6.0
+                        })
+                        .unwrap_or(false);
+                    if is_double {
+                        self.last_title_click = None;
+                        self.press_hit = None; // cancel activation/drag path
+                        if let Some(w) = &self.window {
+                            w.set_maximized(!w.is_maximized());
+                        }
+                    } else {
+                        self.last_title_click = Some((now, x, y));
+                        // Window drag must start on press (platform).
+                        if let Some(w) = &self.window {
+                            let _ = w.drag_window();
+                        }
+                    }
+                } else {
+                    self.last_title_click = None;
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.chip_ui.pressed = false;
+                // Activate only on release, and only if still over the same target.
+                if let Some(start) = self.press_hit.take() {
+                    let end = self.hit_at_cursor();
+                    if start == end && start != HitTarget::TitleDrag && start != HitTarget::None {
+                        self.handle_activation(event_loop, start);
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
 
             WindowEvent::MouseInput {
@@ -903,35 +1332,97 @@ impl ApplicationHandler for ChromeApp {
                 button: MouseButton::Middle,
                 ..
             } => {
-                self.handle_middle_click(event_loop);
+                self.middle_press_hit = Some(self.hit_at_cursor());
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                if let Some(start) = self.middle_press_hit.take() {
+                    let end = self.hit_at_cursor();
+                    if start == end {
+                        if let HitTarget::Tab(i) = start {
+                            if let Some(tab) = self.session.tabs.get(i) {
+                                let id = tab.id;
+                                let removed = self.session.close_tab(id);
+                                if removed.is_empty() {
+                                    event_loop.exit();
+                                } else {
+                                    for pid in removed {
+                                        self.runtimes.remove(&pid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Trackpad pinch → magnifying glass (grow / shrink bubble + zoom).
+            WindowEvent::PinchGesture { delta, phase, .. } => {
+                if self.settings.prefs.lens {
+                    if matches!(phase, TouchPhase::Started | TouchPhase::Moved) {
+                        // winit: positive = magnify in, negative = shrink out
+                        let d = delta as f32;
+                        if d.is_finite() {
+                            // Scale so a normal pinch covers a useful range quickly.
+                            if let Some(r) = self.renderer.as_mut() {
+                                r.magnify_delta(d * 2.8);
+                            }
+                        }
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => {
-                        if y > 0.0 {
-                            3
-                        } else if y < 0.0 {
-                            -3
-                        } else {
-                            0
+                // Ctrl/Cmd + scroll → same magnifier (mice / no trackpad).
+                let magnify_mod =
+                    self.modifiers.control_key() || self.modifiers.super_key();
+                if magnify_mod && self.settings.prefs.lens {
+                    let step = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y * 0.18,
+                        MouseScrollDelta::PixelDelta(p) => (p.y as f32 / 80.0) * 0.22,
+                    };
+                    if step.abs() > 1e-5 {
+                        if let Some(r) = self.renderer.as_mut() {
+                            r.magnify_delta(step);
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
                         }
                     }
-                    MouseScrollDelta::PixelDelta(p) => {
-                        let y = p.y as f32;
-                        if y > 2.0 {
-                            3
-                        } else if y < -2.0 {
-                            -3
-                        } else {
-                            0
+                } else {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => {
+                            if y > 0.0 {
+                                3
+                            } else if y < 0.0 {
+                                -3
+                            } else {
+                                0
+                            }
                         }
-                    }
-                };
-                if lines != 0 {
-                    self.session.active_grid_mut().scroll_view(lines);
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
+                        MouseScrollDelta::PixelDelta(p) => {
+                            let y = p.y as f32;
+                            if y > 2.0 {
+                                3
+                            } else if y < -2.0 {
+                                -3
+                            } else {
+                                0
+                            }
+                        }
+                    };
+                    if lines != 0 {
+                        self.session.active_grid_mut().scroll_view(lines);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
                     }
                 }
             }
@@ -966,12 +1457,28 @@ impl ApplicationHandler for ChromeApp {
 
             WindowEvent::RedrawRequested => {
                 self.drain_all_ptys();
+                self.reap_dead_shells();
+                // Auto raw-PTY focus while a fullscreen TUI owns the alt screen.
+                self.sync_focus_for_alt_screen();
                 let dt = 1.0 / 60.0;
                 self.settings.tick(dt);
                 self.palette.tick(dt);
                 self.help.tick(dt);
-                let _ = self.session.tick_splits(dt);
+                self.notes.tick(dt);
+                self.workspace_ui.tick(dt);
+                self.transfer.tick(dt);
+                let _ = self.caffeine.tick();
+                let tick = self.session.tick_splits(dt);
+                if !tick.finished_closes.is_empty() {
+                    self.finish_closed_panes(event_loop, &tick.finished_closes);
+                }
+                if self.session.is_empty() {
+                    event_loop.exit();
+                    return;
+                }
                 self.sync_grids_to_panes();
+                self.update_chip_hover();
+                self.chip_ui.tick(dt);
 
                 let pty_on = self.any_pty_alive();
                 let term_cursor = self.terminal_cursor_visible();
@@ -987,12 +1494,17 @@ impl ApplicationHandler for ChromeApp {
                         &self.settings,
                         &self.palette,
                         &self.help,
+                        &self.notes,
+                        &self.workspace_ui,
+                        &self.transfer,
+                        &self.caffeine,
                         &self.commands,
                         &layout,
                         pty_on,
                         term_cursor,
                         caret_alpha,
                         pointer,
+                        &self.chip_ui,
                     ) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

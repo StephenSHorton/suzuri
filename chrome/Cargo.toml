@@ -42,3 +42,7 @@ objc2-quartz-core = { version = "0.2", features = ["CALayer"] }
 [profile.dev]
 # Faster link while iterating shaders
 opt-level = 1
+
+[[example]]
+name = "font_probe"
+path = "examples/font_probe.rs"

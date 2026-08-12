@@ -12,6 +12,8 @@ pub enum HitTarget {
     Tab(usize),
     NewTab,
     Settings,
+    /// Top-right caffeine cup (left of logo).
+    Caffeine,
     /// Local input strip for pane id.
     WarpBar(u64),
     /// History cells for pane id.
@@ -60,8 +62,8 @@ fn traffic_lights_right() -> f32 {
 
 /// Hit-test chrome at `(x, y)` in logical pixels (top-left origin).
 ///
-/// Priority: traffic lights (mac) → tab chips / new / settings →
-/// input strip (bottom of glass) → history cells → title drag → none.
+/// Priority: traffic lights (mac) → tabs / + / logo-settings →
+/// input strip (bottom) → history cells → title drag → none.
 pub fn hit_test(
     layout: &FrameLayout,
     metrics: &Metrics,
@@ -82,6 +84,14 @@ pub fn hit_test(
         }
     }
 
+    // Right cluster: caffeine then logo/settings
+    if layout.caffeine.contains(x, y) {
+        return HitTarget::Caffeine;
+    }
+    if layout.logo.contains(x, y) || layout.settings.contains(x, y) {
+        return HitTarget::Settings;
+    }
+
     for (i, chip) in layout.tab_chips.iter().enumerate() {
         if chip.contains(x, y) {
             return HitTarget::Tab(i);
@@ -90,25 +100,26 @@ pub fn hit_test(
     if layout.tab_new.contains(x, y) {
         return HitTarget::NewTab;
     }
-    if layout.settings.contains(x, y) {
-        return HitTarget::Settings;
-    }
 
-    // Multi-pane: hit any pane's footer → warp; cells → terminal.
+    // Multi-pane: footer → command line; cells → history/PTY surface.
     for pl in &layout.panes {
         if pl.warp.contains(x, y) || pl.path.contains(x, y) || pl.divider.contains(x, y) {
             return HitTarget::WarpBar(pl.pane_id);
         }
-        if pl.cells.contains(x, y) || pl.glass.contains(x, y) {
+        if pl.cells.contains(x, y) {
+            return HitTarget::Terminal(pl.pane_id);
+        }
+        // Glass chrome (margins) — select pane but treat as terminal hit for focus
+        if pl.glass.contains(x, y) {
             return HitTarget::Terminal(pl.pane_id);
         }
     }
 
     if layout.title.contains(x, y) {
         if is_mac && x < traffic_lights_right() {
-            // Left of title strip reserved for traffic lights (even if miss).
             return HitTarget::None;
         }
+        // Don't drag when over tab chips (already handled); empty bar drag.
         return HitTarget::TitleDrag;
     }
 
@@ -151,14 +162,14 @@ mod tests {
             hit_test(&layout, &m, 8.0, m.title_h * 0.5, true),
             HitTarget::None
         );
-        assert_eq!(
-            hit_test(&layout, &m, 200.0, m.title_h * 0.5, true),
-            HitTarget::TitleDrag
+        // Empty strip between last chrome control and logo should drag.
+        let x = layout.tab_new.x + layout.tab_new.w + 16.0;
+        let y = m.title_h * 0.5;
+        assert!(
+            x < layout.logo.x,
+            "need free space between + and logo for drag"
         );
-        assert_eq!(
-            hit_test(&layout, &m, 8.0, m.title_h * 0.5, false),
-            HitTarget::TitleDrag
-        );
+        assert_eq!(hit_test(&layout, &m, x, y, true), HitTarget::TitleDrag);
     }
 
     #[test]

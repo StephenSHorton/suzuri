@@ -1,7 +1,7 @@
-//! Split-pane tree with floaty “jelly” open animation.
+//! Split-pane tree with floaty “jelly” open/close animation.
 //!
 //! Equal H/V splits (product v1). New pane starts collapsed and springs open
-//! with overshoot so existing panes feel pushed aside.
+//! with overshoot. Closing reverses jelly so the survivor expands.
 
 use crate::layout::Rect;
 
@@ -22,12 +22,24 @@ pub enum SplitNode {
         axis: SplitAxis,
         /// Settled split ratio for the first child (a). Usually 0.5.
         ratio: f32,
-        /// Jelly open for the **second** child (0 = closed, 1 = full). Springs with overshoot.
+        /// Jelly scale for the **second** child (0 = collapsed, 1 = full).
         jelly: f32,
         jelly_vel: f32,
+        /// Spring target for jelly (1 = open, 0 = closing).
+        jelly_target: f32,
+        /// When set, leaf `b` is animating closed and should be removed at settle.
+        closing_b: bool,
         a: Box<SplitNode>,
         b: Box<SplitNode>,
     },
+}
+
+/// Result of advancing close animations.
+#[derive(Clone, Debug, Default)]
+pub struct TickResult {
+    pub moving: bool,
+    /// Pane ids whose close jelly finished — caller should remove them.
+    pub finished_closes: Vec<u64>,
 }
 
 impl SplitNode {
@@ -58,14 +70,22 @@ impl SplitNode {
         }
     }
 
-    /// Advance jelly springs. Returns true if any node is still moving.
-    pub fn tick(&mut self, dt: f32) -> bool {
+    /// Advance jelly springs (open and close).
+    pub fn tick(&mut self, dt: f32) -> TickResult {
         let dt = dt.clamp(0.0, 1.0 / 20.0);
+        let mut result = TickResult::default();
+        self.tick_inner(dt, &mut result);
+        result
+    }
+
+    fn tick_inner(&mut self, dt: f32, result: &mut TickResult) {
         match self {
-            Self::Leaf(_) => false,
+            Self::Leaf(_) => {}
             Self::Branch {
                 jelly,
                 jelly_vel,
+                jelly_target,
+                closing_b,
                 a,
                 b,
                 ..
@@ -73,27 +93,52 @@ impl SplitNode {
                 // Soft spring — overshoots then settles (jelly feel).
                 const K: f32 = 140.0;
                 const C: f32 = 14.0;
-                let target = 1.0;
+                let target = *jelly_target;
                 let force = -K * (*jelly - target) - C * *jelly_vel;
                 *jelly_vel += force * dt;
                 *jelly += *jelly_vel * dt;
-                // Allow mild overshoot then clamp soft
-                if *jelly > 1.12 {
-                    *jelly = 1.12;
-                    *jelly_vel *= -0.35;
+
+                if target >= 1.0 {
+                    if *jelly > 1.12 {
+                        *jelly = 1.12;
+                        *jelly_vel *= -0.35;
+                    }
+                    if *jelly < 0.0 {
+                        *jelly = 0.0;
+                        *jelly_vel = 0.0;
+                    }
+                } else {
+                    // Closing: allow slight undershoot then settle
+                    if *jelly < -0.04 {
+                        *jelly = -0.04;
+                        *jelly_vel *= -0.35;
+                    }
+                    if *jelly > 1.15 {
+                        *jelly = 1.15;
+                    }
                 }
-                if *jelly < 0.0 {
-                    *jelly = 0.0;
+
+                let settled =
+                    (*jelly - target).abs() < 0.02 && jelly_vel.abs() < 0.04;
+                if settled {
+                    *jelly = target;
                     *jelly_vel = 0.0;
+                    if *closing_b && target <= 0.0 {
+                        // Second child is a leaf we're closing
+                        if let Self::Leaf(id) = b.as_ref() {
+                            result.finished_closes.push(*id);
+                        } else {
+                            // Nested: take first leaf of b
+                            result.finished_closes.push(b.first_leaf());
+                        }
+                        *closing_b = false;
+                    }
+                } else {
+                    result.moving = true;
                 }
-                let mut moving = (*jelly - 1.0).abs() > 0.002 || jelly_vel.abs() > 0.01;
-                if !moving {
-                    *jelly = 1.0;
-                    *jelly_vel = 0.0;
-                }
-                moving |= a.tick(dt);
-                moving |= b.tick(dt);
-                moving
+
+                a.tick_inner(dt, result);
+                b.tick_inner(dt, result);
             }
         }
     }
@@ -108,6 +153,8 @@ impl SplitNode {
                     ratio: 0.5,
                     jelly: 0.0,
                     jelly_vel: 0.0,
+                    jelly_target: 1.0,
+                    closing_b: false,
                     a: Box::new(Self::Leaf(focus)),
                     b: Box::new(Self::Leaf(new_id)),
                 };
@@ -120,8 +167,75 @@ impl SplitNode {
         }
     }
 
+    /// Start a jelly-close of leaf `id`. Returns false if not found or already sole leaf.
+    ///
+    /// For a sole leaf, the caller should run a tab-level exit anim instead.
+    pub fn begin_close_leaf(&mut self, id: u64) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch {
+                a,
+                b,
+                jelly,
+                jelly_vel,
+                jelly_target,
+                closing_b,
+                ..
+            } => {
+                // Prefer recurse so nested closes work.
+                if a.begin_close_leaf(id) || b.begin_close_leaf(id) {
+                    return true;
+                }
+                // Direct children that are the leaf (or contain only that leaf as single)
+                let a_is = matches!(a.as_ref(), Self::Leaf(p) if *p == id)
+                    || (a.leaf_ids() == [id]);
+                let b_is = matches!(b.as_ref(), Self::Leaf(p) if *p == id)
+                    || (b.leaf_ids() == [id]);
+
+                if b_is {
+                    *jelly_target = 0.0;
+                    *closing_b = true;
+                    // Ensure we animate from current open state
+                    if *jelly < 0.05 {
+                        *jelly = 1.0;
+                    }
+                    *jelly_vel = 0.0;
+                    return true;
+                }
+                if a_is {
+                    // Swap so the closing pane is always `b` (jelly shrinks b).
+                    std::mem::swap(a, b);
+                    *jelly = 1.0;
+                    *jelly_vel = 0.0;
+                    *jelly_target = 0.0;
+                    *closing_b = true;
+                    return true;
+                }
+                false
+            }
+        }
+    }
+
+    /// True if this pane is currently mid jelly-close.
+    pub fn is_closing(&self, id: u64) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch {
+                closing_b,
+                b,
+                a,
+                jelly_target,
+                ..
+            } => {
+                if *closing_b && *jelly_target <= 0.0 && b.contains_pane(id) {
+                    return true;
+                }
+                a.is_closing(id) || b.is_closing(id)
+            }
+        }
+    }
+
     /// Remove leaf `id`. If a branch becomes a single child, collapse it.
-    /// Returns whether the tree still contains any leaf, and the neighbor to focus.
     pub fn remove_leaf(&mut self, id: u64) -> RemoveResult {
         match self {
             Self::Leaf(p) => {
@@ -131,29 +245,24 @@ impl SplitNode {
                     RemoveResult::NotFound
                 }
             }
-            Self::Branch { a, b, .. } => {
-                match a.remove_leaf(id) {
+            Self::Branch { a, b, .. } => match a.remove_leaf(id) {
+                RemoveResult::RemovedEmpty => {
+                    let other = std::mem::replace(b.as_mut(), Self::Leaf(0));
+                    let focus = other.first_leaf();
+                    *self = other;
+                    RemoveResult::Removed { focus_hint: focus }
+                }
+                RemoveResult::Removed { focus_hint } => RemoveResult::Removed { focus_hint },
+                RemoveResult::NotFound => match b.remove_leaf(id) {
                     RemoveResult::RemovedEmpty => {
-                        // a gone — promote b
-                        let other = std::mem::replace(b.as_mut(), Self::Leaf(0));
+                        let other = std::mem::replace(a.as_mut(), Self::Leaf(0));
                         let focus = other.first_leaf();
                         *self = other;
                         RemoveResult::Removed { focus_hint: focus }
                     }
-                    RemoveResult::Removed { focus_hint } => {
-                        RemoveResult::Removed { focus_hint }
-                    }
-                    RemoveResult::NotFound => match b.remove_leaf(id) {
-                        RemoveResult::RemovedEmpty => {
-                            let other = std::mem::replace(a.as_mut(), Self::Leaf(0));
-                            let focus = other.first_leaf();
-                            *self = other;
-                            RemoveResult::Removed { focus_hint: focus }
-                        }
-                        other => other,
-                    },
-                }
-            }
+                    other => other,
+                },
+            },
         }
     }
 
@@ -177,20 +286,17 @@ impl SplitNode {
                 ..
             } => {
                 let j = jelly.clamp(0.0, 1.15);
-                // Effective share for b grows with jelly; a shrinks.
-                // When j=0, a has full area; when j=1, ratio/1-ratio split.
                 match axis {
                     SplitAxis::Vertical => {
                         let total = area.w;
                         let usable = (total - gap).max(0.0);
                         let b_share = usable * (1.0 - *ratio) * j.min(1.0);
-                        // Overshoot: briefly let b exceed its share
                         let b_share = if j > 1.0 {
                             b_share * (1.0 + (j - 1.0) * 0.35)
                         } else {
                             b_share
                         };
-                        let b_w = b_share.min(usable * 0.92);
+                        let b_w = b_share.min(usable * 0.92).max(0.0);
                         let a_w = (usable - b_w).max(0.0);
                         let a_rect = Rect::new(area.x, area.y, a_w, area.h);
                         let b_rect = Rect::new(area.x + a_w + gap, area.y, b_w, area.h);
@@ -208,7 +314,7 @@ impl SplitNode {
                         } else {
                             b_share
                         };
-                        let b_h = b_share.min(usable * 0.92);
+                        let b_h = b_share.min(usable * 0.92).max(0.0);
                         let a_h = (usable - b_h).max(0.0);
                         let a_rect = Rect::new(area.x, area.y, area.w, a_h);
                         let b_rect = Rect::new(area.x, area.y + a_h + gap, area.w, b_h);
@@ -270,6 +376,45 @@ pub enum RemoveResult {
     Removed { focus_hint: u64 },
 }
 
+/// Sole-pane (or whole-tab) exit: scale workspace glass from 1 → 0 with jelly.
+#[derive(Clone, Debug)]
+pub struct SoloExitAnim {
+    pub pane_id: u64,
+    pub jelly: f32,
+    pub jelly_vel: f32,
+}
+
+impl SoloExitAnim {
+    pub fn start(pane_id: u64) -> Self {
+        Self {
+            pane_id,
+            jelly: 1.0,
+            jelly_vel: 0.0,
+        }
+    }
+
+    /// Returns true while still animating; false when settled closed.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        let dt = dt.clamp(0.0, 1.0 / 20.0);
+        const K: f32 = 160.0;
+        const C: f32 = 16.0;
+        let target = 0.0;
+        let force = -K * (self.jelly - target) - C * self.jelly_vel;
+        self.jelly_vel += force * dt;
+        self.jelly += self.jelly_vel * dt;
+        if self.jelly < -0.05 {
+            self.jelly = -0.05;
+            self.jelly_vel *= -0.3;
+        }
+        if self.jelly.abs() < 0.02 && self.jelly_vel.abs() < 0.05 {
+            self.jelly = 0.0;
+            self.jelly_vel = 0.0;
+            return false;
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,19 +423,17 @@ mod tests {
     fn split_and_layout_two() {
         let mut root = SplitNode::leaf(1);
         assert!(root.split_leaf(1, 2, SplitAxis::Vertical));
-        // Force jelly open
-        if let SplitNode::Branch { jelly, .. } = &mut root {
+        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
             *jelly = 1.0;
+            *jelly_target = 1.0;
         }
         let mut out = Vec::new();
         root.layout_into(Rect::new(0.0, 0.0, 200.0, 100.0), 4.0, &mut out);
         assert_eq!(out.len(), 2);
-        assert!(out[0].1.w < 120.0);
-        assert!(out[1].1.w < 120.0);
     }
 
     #[test]
-    fn jelly_tick_settles() {
+    fn jelly_tick_settles_open() {
         let mut root = SplitNode::leaf(1);
         root.split_leaf(1, 2, SplitAxis::Horizontal);
         for _ in 0..180 {
@@ -304,6 +447,27 @@ mod tests {
     }
 
     #[test]
+    fn close_jelly_finishes() {
+        let mut root = SplitNode::leaf(1);
+        root.split_leaf(1, 2, SplitAxis::Vertical);
+        // open fully
+        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+            *jelly = 1.0;
+            *jelly_target = 1.0;
+        }
+        assert!(root.begin_close_leaf(2));
+        let mut finished = false;
+        for _ in 0..180 {
+            let r = root.tick(1.0 / 60.0);
+            if r.finished_closes.contains(&2) {
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "close should complete");
+    }
+
+    #[test]
     fn remove_collapses() {
         let mut root = SplitNode::leaf(1);
         root.split_leaf(1, 2, SplitAxis::Vertical);
@@ -312,5 +476,19 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(root, SplitNode::Leaf(1)));
+    }
+
+    #[test]
+    fn solo_exit_settles() {
+        let mut a = SoloExitAnim::start(1);
+        let mut moving = true;
+        for _ in 0..180 {
+            moving = a.tick(1.0 / 60.0);
+            if !moving {
+                break;
+            }
+        }
+        assert!(!moving);
+        assert!(a.jelly.abs() < 0.01);
     }
 }

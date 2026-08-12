@@ -6,13 +6,20 @@
 
 mod ansi;
 mod app;
+mod caffeine;
 mod cells;
+mod chrome_ui;
 mod commands;
 mod input;
 mod layout;
 #[cfg(target_os = "macos")]
 mod macos_window;
+mod notes;
+mod notes_ops;
 mod panes;
+mod transfer_ui;
+mod workspace_store;
+mod workspace_ui;
 mod pty;
 mod rain_atlas;
 mod rain_sim;

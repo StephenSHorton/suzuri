@@ -1,5 +1,6 @@
-// Cursor glass lens drawn last, sampling the full scene RT.
-// Uses @builtin(position) so the circle tracks the mouse in pixel space.
+// Magnifying glass lens — samples the full scene RT with variable zoom.
+// Appears as a glass bubble at the cursor; radius + magnification driven by
+// trackpad pinch or Ctrl/Cmd+scroll (see renderer magnifier state).
 
 struct LensUniforms {
     // xy = logical size, zw = framebuffer size (physical px)
@@ -8,7 +9,7 @@ struct LensUniforms {
     lens: vec4f,
     // ior, edge, bevel, depth
     glass: vec4f,
-    // aberration, blur, reflection, shine
+    // aberration, magnify (>=1), reflection, shine
     glass2: vec4f,
 }
 
@@ -97,6 +98,8 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let scale = fb / logical;
     let center_fb = u.lens.xy * scale;
     let radius_fb = radius_log * min(scale.x, scale.y);
+    // Magnification: 1 = no zoom, 2 = 2×, etc.
+    let magnify = max(u.glass2.y, 1.0);
 
     let local = fb_px - center_fb;
     let dist = length(local);
@@ -114,15 +117,13 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let bevel = max(u.glass.z, 0.5);
     let depth = min(u.glass.w, max(radius_log * 2.2, 40.0)) * min(scale.x, scale.y);
     let aberration = u.glass2.x;
-    let blur = u.glass2.y;
     let reflection = u.glass2.z;
-    // Canvas UI default shine is tiny (0.01); keep a gentle floor so arcs read
     let shine = max(u.glass2.w, 0.08);
 
     let edge_w = max(radius_fb * (1.0 - clamp(edge, 0.0, 0.98)), 1.0);
     let rim = pow(linear_step(-edge_w, 0.0, sd), bevel);
 
-    let scatter = min(blur, 1.0) * 0.02;
+    let scatter = 0.0;
     let rand_angle = ign(fb_px) * PI * 2.0;
     let flat_n = normalize(vec3f(
         sin(rand_angle) * scatter,
@@ -140,24 +141,33 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         rv = vec3f(g2 * rim * 8.0, -1.0);
     }
     let z = max(abs(rv.z), 1e-4);
-    let disp = rv.xy * (depth / z);
+    // Mild glass refraction on top of pure magnification
+    let disp = rv.xy * (depth / z) * 0.35;
+
+    // Magnifier: map screen offset back toward center by 1/magnify so content grows.
+    // Soft vignette so zoom eases at the rim (less harsh circle crop of high zoom).
+    let t = clamp(dist / max(radius_fb, 1.0), 0.0, 1.0);
+    let mag_ease = mix(magnify, 1.0, pow(t, 2.2) * 0.22); // slight less zoom near edge
+    let sample_local = local / mag_ease + disp;
 
     var refracted: vec3f;
     if (aberration > 0.001) {
-        let d0 = disp * (ior_for_wavelength(ior, aberration, 611.4) / ior);
-        let d1 = disp * (ior_for_wavelength(ior, aberration, 549.1) / ior);
-        let d2 = disp * (ior_for_wavelength(ior, aberration, 464.2) / ior);
-        let r = sample_scene_fb(fb_px + d0, blur).r;
-        let g = sample_scene_fb(fb_px + d1, blur).g;
-        let b = sample_scene_fb(fb_px + d2, blur).b;
+        let d0 = sample_local * (ior_for_wavelength(ior, aberration, 611.4) / ior);
+        let d1 = sample_local * (ior_for_wavelength(ior, aberration, 549.1) / ior);
+        let d2 = sample_local * (ior_for_wavelength(ior, aberration, 464.2) / ior);
+        // Keep CA subtle relative to mag offset
+        let base = center_fb + local / mag_ease;
+        let r = sample_scene_fb(base + d0 * 0.25, 0.0).r;
+        let g = sample_scene_fb(base + d1 * 0.25, 0.0).g;
+        let b = sample_scene_fb(base + d2 * 0.25, 0.0).b;
         refracted = vec3f(r, g, b);
     } else {
-        refracted = sample_scene_fb(fb_px + disp, blur);
+        refracted = sample_scene_fb(center_fb + sample_local, 0.0);
     }
 
     var glass = refracted;
 
-    // Match panes: very quiet Fresnel (second pass)
+    // Quiet Fresnel rim
     if (reflection > 0.001) {
         let n_dot_v = clamp(normal.z, 0.0, 1.0);
         let f0 = pow2((ior - AIR_IOR) / (ior + AIR_IOR));
@@ -170,7 +180,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let arcs = pow(abs(ldot), 3.0) * select(0.28, 0.5, ldot > 0.0);
     glass += band * (0.012 + arcs * 0.45) * shine;
 
-    // Barely-there crystal edge
+    // Crystal edge
     let outline = (1.0 - smoothstep(0.0, 1.2, abs(sd))) * presence;
     glass += vec3f(0.28, 0.45, 0.38) * outline * 0.04;
 

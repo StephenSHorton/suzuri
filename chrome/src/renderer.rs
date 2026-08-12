@@ -6,18 +6,24 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::chrome_ui::{ChipUi, TabJelly};
 use crate::commands::{filter_commands, Command, HelpState, PaletteState};
 use crate::input::{is_mac, traffic_light_rects};
 use crate::layout::{FrameLayout, Metrics, PaneLayout, PanelInstance};
 use crate::rain_atlas::RainAtlas;
 use crate::rain_sim;
 use crate::session::ChromeSession;
+use crate::caffeine::Caffeine;
+use crate::notes::NotesState;
 use crate::settings::SettingsState;
-use crate::text::{TextLabel, TextLayer};
+use crate::transfer_ui::TransferUi;
+use crate::workspace_ui::WorkspaceUi;
+use crate::text::{TextLabel, TextLayer, CARET_BLOCK, CARET_RGB};
 
-/// Approximate mono cell metrics used for grid resize + terminal paint.
-pub const CELL_W: f32 = 7.8;
-pub const CELL_H: f32 = 15.0;
+/// Mono cell metrics for GohuFont uni14 (product design size 14px).
+/// Width ≈ half em of a 14px bitmap mono; height matches line box used in text layer.
+pub const CELL_W: f32 = 7.0;
+pub const CELL_H: f32 = 14.0;
 /// Default inner glass inset — prefer [`Metrics::inset`] at call sites.
 /// Kept for callers that don't have Metrics yet; matches Spacing::inset.
 pub const TERM_PAD: f32 = 8.0; // matches Spacing::inset (inside); outside is Spacing::space
@@ -47,6 +53,8 @@ struct FrameUniforms {
     glass: [f32; 4],
     /// aberration, blur, reflection, shine
     glass2: [f32; 4],
+    /// xy = pointer logical, z = spotlight radius, w = 1 if pointer inside
+    hover: [f32; 4],
 }
 
 #[repr(C)]
@@ -67,9 +75,11 @@ const GLASS_ABERRATION: f32 = 1.0;
 const GLASS_BLUR: f32 = 0.0;
 const GLASS_REFLECTION: f32 = 1.0;
 const GLASS_SHINE: f32 = 0.01;
-/// Canvas UI default lens size (radius, CSS px).
-const LENS_RADIUS: f32 = 120.0;
-/// Canvas UI follow feel (~follow 0.2).
+/// Magnifier bubble — radius at full “level 1” (logical px). Can grow beyond.
+const MAG_RADIUS_BASE: f32 = 110.0;
+/// Max magnifier level (pinch / scroll accumulate into this).
+const MAG_LEVEL_MAX: f32 = 2.8;
+/// Canvas UI follow feel when the bubble is alive (~follow 0.2).
 const LENS_FOLLOW: f32 = 0.2;
 
 pub struct Renderer {
@@ -110,12 +120,21 @@ pub struct Renderer {
     /// Chrome + terminal text labels.
     text: TextLayer,
 
-    /// Cursor glass lens (Canvas UI style).
+    /// Magnifying-glass bubble (pinch / Ctrl·Cmd+scroll). Not always-on.
     lens_pos: [f32; 2],
     lens_target: [f32; 2],
+    /// Target power 0..MAG_LEVEL_MAX from gestures.
+    mag_level: f32,
+    /// Smoothed power for bubble grow/shrink + zoom.
+    mag_level_smooth: f32,
+    /// Smoothed radius / presence / magnify (derived each frame).
+    lens_radius: f32,
     lens_presence: f32,
-    lens_presence_target: f32,
+    lens_magnify: f32,
     pointer_inside: bool,
+
+    /// Active-tab jelly connector (shared with app tick).
+    pub tab_jelly: TabJelly,
     surface_format: wgpu::TextureFormat,
 }
 
@@ -318,6 +337,7 @@ impl Renderer {
                     GLASS_REFLECTION,
                     GLASS_SHINE,
                 ],
+                hover: [0.0, 0.0, 28.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -418,7 +438,7 @@ impl Renderer {
             label: Some("lens uniforms"),
             contents: bytemuck::bytes_of(&LensUniforms {
                 size: [1.0, 1.0, 1.0, 1.0],
-                lens: [0.0, 0.0, LENS_RADIUS, 0.0],
+                lens: [0.0, 0.0, 0.0, 0.0],
                 glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
                 glass2: [
                     GLASS_ABERRATION,
@@ -526,26 +546,45 @@ impl Renderer {
             text,
             lens_pos: [cx, cy],
             lens_target: [cx, cy],
+            mag_level: 0.0,
+            mag_level_smooth: 0.0,
+            lens_radius: 0.0,
             lens_presence: 0.0,
-            lens_presence_target: 0.0,
+            lens_magnify: 1.0,
             pointer_inside: false,
+            tab_jelly: TabJelly::default(),
             surface_format: format,
         }
     }
 
-    /// Update cursor lens target (logical px, top-left origin).
+    /// Track pointer for magnifier center (logical px, top-left origin).
     pub fn set_pointer(&mut self, x: f32, y: f32, inside: bool) {
         if inside && x.is_finite() && y.is_finite() {
             self.lens_target = [x, y];
-            self.lens_presence_target = 1.0;
-            // Snap onto first enter so it doesn't fade in from off-screen
-            if !self.pointer_inside {
+            // Snap when bubble is just appearing so it grows from the cursor.
+            if self.mag_level_smooth < 0.05 {
                 self.lens_pos = [x, y];
             }
-        } else {
-            self.lens_presence_target = 0.0;
         }
         self.pointer_inside = inside;
+    }
+
+    /// Apply a magnifier delta (pinch or Ctrl/Cmd+scroll). Positive = embiggen.
+    pub fn magnify_delta(&mut self, delta: f32) {
+        if !delta.is_finite() || delta.abs() < 1e-6 {
+            return;
+        }
+        // Pinch deltas are small (~0.01–0.1); scroll is pre-scaled by the app.
+        self.mag_level = (self.mag_level + delta).clamp(0.0, MAG_LEVEL_MAX);
+        // Grow from cursor when first appearing
+        if self.mag_level > 0.02 && self.mag_level_smooth < 0.02 {
+            self.lens_pos = self.lens_target;
+        }
+    }
+
+    /// True while the bubble is visible (for skipping terminal scroll, etc.).
+    pub fn magnifier_active(&self) -> bool {
+        self.mag_level > 0.02 || self.mag_level_smooth > 0.02
     }
 
     pub fn metrics(&self) -> Metrics {
@@ -599,6 +638,10 @@ impl Renderer {
         settings: &SettingsState,
         palette: &PaletteState,
         help: &HelpState,
+        notes: &NotesState,
+        workspace_ui: &WorkspaceUi,
+        transfer: &TransferUi,
+        caffeine: &Caffeine,
         commands: &[Command],
         layout: &FrameLayout,
         pty_active: bool,
@@ -606,6 +649,7 @@ impl Renderer {
         terminal_cursor_visible: bool,
         input_caret_alpha: f32,
         pointer: Option<(f32, f32)>,
+        chip_ui: &ChipUi,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -621,22 +665,45 @@ impl Renderer {
         let logical_w = fw / self.scale_factor;
         let logical_h = fh / self.scale_factor;
 
-        // Pointer from app every frame; lens can be disabled in prefs
+        // Pointer tracks magnifier center; bubble only from pinch / Ctrl·Cmd+scroll.
         let lens_on = settings.prefs.lens;
         match pointer {
-            Some((px, py)) if lens_on => self.set_pointer(px, py, true),
-            _ => self.set_pointer(self.lens_target[0], self.lens_target[1], false),
+            Some((px, py)) => self.set_pointer(px, py, true),
+            None => self.set_pointer(self.lens_target[0], self.lens_target[1], false),
         }
         if !lens_on {
-            self.lens_presence_target = 0.0;
+            self.mag_level = 0.0;
         }
 
-        // Smooth follow (Canvas UI follow ≈ 0.2)
-        let k_pos = 1.0 - (-dt * (4.0 + LENS_FOLLOW * 26.0)).exp();
-        let k_pres = 1.0 - (-dt * 12.0).exp();
-        self.lens_pos[0] += (self.lens_target[0] - self.lens_pos[0]) * k_pos;
-        self.lens_pos[1] += (self.lens_target[1] - self.lens_pos[1]) * k_pos;
-        self.lens_presence += (self.lens_presence_target - self.lens_presence) * k_pres;
+        // Smooth magnifier level (bubble grow / shrink)
+        let k_mag = 1.0 - (-dt * 14.0).exp();
+        self.mag_level_smooth += (self.mag_level - self.mag_level_smooth) * k_mag;
+        if self.mag_level_smooth < 0.001 && self.mag_level < 0.001 {
+            self.mag_level_smooth = 0.0;
+        }
+
+        // Bubble radius: ease-out from 0 so it grows out of the cursor.
+        // level 0 → 0; level 1 → MAG_RADIUS_BASE; higher → larger.
+        let lv = self.mag_level_smooth;
+        let t_r = (lv / 1.15).clamp(0.0, 1.0);
+        let ease = 1.0 - (1.0 - t_r).powi(3); // ease-out cubic
+        let extra = ((lv - 1.15).max(0.0) * 55.0).min(160.0);
+        self.lens_radius = ease * MAG_RADIUS_BASE + extra;
+
+        // Presence: fully on once the bubble has a bit of size; fades when shrinking.
+        self.lens_presence = ((lv - 0.02) / 0.14).clamp(0.0, 1.0);
+
+        // Magnification factor grows with level (1× hidden → ~2.2× at 1 → ~4× at max).
+        self.lens_magnify = 1.0 + lv * 1.15;
+
+        // Follow cursor only while the bubble is alive
+        if self.lens_presence > 0.01 {
+            let k_pos = 1.0 - (-dt * (4.0 + LENS_FOLLOW * 26.0)).exp();
+            self.lens_pos[0] += (self.lens_target[0] - self.lens_pos[0]) * k_pos;
+            self.lens_pos[1] += (self.lens_target[1] - self.lens_pos[1]) * k_pos;
+        } else {
+            self.lens_pos = self.lens_target;
+        }
 
         if settings.prefs.rain {
             self.rain_time += dt;
@@ -690,16 +757,34 @@ impl Renderer {
         } else {
             None
         };
-        let mut panels = layout.glass_panels(self.metrics, active_idx, lights);
-        // Modal overlays (settings / palette / help) — agility dialog presentation
+        // Tick jelly toward active tab (also ticked in app; extra settle is fine)
+        let active_chip = layout.tab_chips.get(active_idx).copied();
+        self.tab_jelly.tick(dt, active_chip);
+
+        let mut panels = layout.glass_panels(
+            self.metrics,
+            active_idx,
+            lights,
+            chip_ui,
+            &self.tab_jelly,
+        );
+        // Modal overlays (settings / palette / help / notes)
         {
             use crate::layout::{PanelInstance, PanelKind, Rect};
-            let any_overlay = settings.visible() || palette.visible() || help.visible();
+            let any_overlay = settings.visible()
+                || palette.visible()
+                || help.visible()
+                || notes.visible()
+                || workspace_ui.visible()
+                || transfer.visible();
             if any_overlay {
                 let scrim_a = settings
                     .scrim_alpha()
                     .max(palette.scrim_alpha())
-                    .max(help.scrim_alpha());
+                    .max(help.scrim_alpha())
+                    .max(notes.scrim_alpha())
+                    .max(workspace_ui.scrim_alpha())
+                    .max(transfer.scrim_alpha());
                 panels.push(
                     PanelInstance::glass(
                         Rect::new(0.0, 0.0, logical_w, logical_h),
@@ -709,27 +794,19 @@ impl Renderer {
                     .with_opacity(scrim_a),
                 );
             }
-            if settings.visible() {
-                let modal_r = settings.animated_modal_rect(logical_w, logical_h);
-                panels.push(
-                    PanelInstance::glass(modal_r, self.metrics.radius, PanelKind::Modal)
-                        .with_opacity(settings.content_ease().clamp(0.0, 1.0)),
-                );
-            }
-            if palette.visible() {
-                let modal_r = overlay_modal_rect(logical_w, logical_h, 480.0, 420.0);
-                panels.push(
-                    PanelInstance::glass(modal_r, self.metrics.radius, PanelKind::Modal)
-                        .with_opacity(palette.content_ease().clamp(0.0, 1.0)),
-                );
-            }
-            if help.visible() {
-                let modal_r = overlay_modal_rect(logical_w, logical_h, 520.0, 480.0);
-                panels.push(
-                    PanelInstance::glass(modal_r, self.metrics.radius, PanelKind::Modal)
-                        .with_opacity(help.content_ease().clamp(0.0, 1.0)),
-                );
-            }
+            push_modal_glass(
+                &mut panels,
+                self.metrics,
+                logical_w,
+                logical_h,
+                settings,
+                palette,
+                help,
+                notes,
+                workspace_ui,
+                transfer,
+                commands,
+            );
         }
         let count = panels.len() as u32;
 
@@ -765,6 +842,15 @@ impl Renderer {
                     GLASS_REFLECTION,
                     GLASS_SHINE.max(0.1),
                 ],
+                // Spotlight: animated strength (fades out after leaving chips).
+                // xy = last chip cursor, z = radius, w = strength 0..1
+                hover: {
+                    let p = chip_ui.spotlight_pos();
+                    let s = chip_ui.spotlight();
+                    // Keep feeding last pos while fading even if pointer is None.
+                    let _ = pointer;
+                    [p[0], p[1], 32.0, s]
+                },
             }),
         );
 
@@ -776,15 +862,14 @@ impl Renderer {
                 lens: [
                     self.lens_pos[0],
                     self.lens_pos[1],
-                    LENS_RADIUS,
+                    self.lens_radius,
                     self.lens_presence,
                 ],
                 glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
                 glass2: [
                     GLASS_ABERRATION,
-                    GLASS_BLUR,
+                    self.lens_magnify, // magnify factor (was blur; lens uses mag)
                     GLASS_REFLECTION,
-                    // Same shine floor as panes / lens.wgsl
                     GLASS_SHINE.max(0.1),
                 ],
             }),
@@ -890,10 +975,16 @@ impl Renderer {
             settings,
             palette,
             help,
+            notes,
+            workspace_ui,
+            transfer,
+            caffeine,
             commands,
             pty_active,
             terminal_cursor_visible,
             input_caret_alpha,
+            chip_ui,
+            &self.tab_jelly,
         );
         self.text.prepare(&self.device, &self.queue, &labels);
         self.text
@@ -961,6 +1052,15 @@ pub fn terminal_grid_size(cells: &crate::layout::Rect, _inset: f32) -> (u16, u16
     (cols, rows)
 }
 
+pub fn overlay_modal_rect_pub(
+    window_w: f32,
+    window_h: f32,
+    max_w: f32,
+    max_h: f32,
+) -> crate::layout::Rect {
+    overlay_modal_rect(window_w, window_h, max_w, max_h)
+}
+
 fn overlay_modal_rect(window_w: f32, window_h: f32, max_w: f32, max_h: f32) -> crate::layout::Rect {
     let w = (window_w - 32.0).min(max_w).max(280.0);
     let h = (window_h - 64.0).min(max_h).max(220.0);
@@ -976,41 +1076,31 @@ fn chrome_labels(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    notes: &NotesState,
+    workspace_ui: &WorkspaceUi,
+    transfer: &TransferUi,
+    caffeine: &Caffeine,
     commands: &[Command],
     pty_active: bool,
     terminal_cursor_visible: bool,
     input_caret_alpha: f32,
+    chip_ui: &ChipUi,
+    tab_jelly: &TabJelly,
 ) -> Vec<TextLabel> {
+    use crate::chrome_ui::{scale_rect, ChipId};
     let muted = [0.75, 0.90, 0.80, 0.85];
     let bright = [0.90, 1.0, 0.92, 0.95];
     let dim = [0.55, 0.70, 0.60, 0.75];
+    // Warm accent when caffeine is on (product styleCaffeineOn).
+    let cafe_on = [1.0, 0.82, 0.45, 0.95];
+    let cafe_off = [0.45, 0.55, 0.48, 0.70];
 
     let mut labels = Vec::with_capacity(128);
+    let _ = tab_jelly; // labels no longer follow jelly
 
-    // Window title
-    let title_size = 12.0;
-    let title_y = (m.title_h - title_size * 1.25) * 0.5;
-    let title_x = if is_mac() {
-        68.0 + m.stack()
-    } else {
-        m.edge()
-    };
-    labels.push(TextLabel::new(
-        "suzuri · chrome",
-        title_x,
-        title_y,
-        title_size,
-        dim,
-    ));
-
-    labels.push(TextLabel::centered(
-        "硯",
-        [layout.logo.x, layout.logo.y, layout.logo.w, layout.logo.h],
-        16.0,
-        bright,
-    ));
-
-    let tab_size = 12.0;
+    // No window title — chrome bar is tabs + logo only.
+    // Gohu is bitmap-rooted @14 — prefer design size so chrome matches the host.
+    let tab_size = 14.0;
     for (i, chip) in layout.tab_chips.iter().enumerate() {
         let title = session
             .tabs
@@ -1018,37 +1108,70 @@ fn chrome_labels(
             .map(|t| t.title.as_str())
             .unwrap_or("?");
         let color = if i == active_idx { bright } else { dim };
+        // Labels always sit on the layout chip — never follow the jelly goo
+        // (that made the clicked tab's title jump into the previous active tab).
+        let r = scale_rect(*chip, chip_ui.scale_for(ChipId::Tab(i)));
         labels.push(TextLabel::centered(
             title,
-            [chip.x, chip.y, chip.w, chip.h],
+            [r.x, r.y, r.w, r.h],
             tab_size,
             color,
         ));
     }
 
-    labels.push(TextLabel::centered(
-        "+",
-        [
-            layout.tab_new.x,
-            layout.tab_new.y,
-            layout.tab_new.w,
-            layout.tab_new.h,
-        ],
-        16.0,
-        dim,
-    ));
+    // Ghost + : icon always full size; only the glass shell is press-only (layout).
+    {
+        let id = ChipId::NewTab;
+        let on = chip_ui.hover == Some(id);
+        let r = scale_rect(layout.tab_new, chip_ui.scale_for(id));
+        // Keep glyph size at 16 even though the hit shell is smaller (24).
+        let press = chip_ui.press_light(id);
+        let color = if press > 0.05 {
+            bright
+        } else if on {
+            [0.75, 0.95, 0.82, 0.95]
+        } else {
+            dim
+        };
+        labels.push(TextLabel::centered("+", [r.x, r.y, r.w, r.h], 14.0, color));
+    }
 
-    labels.push(TextLabel::centered(
-        "settings",
-        [
-            layout.settings.x,
-            layout.settings.y,
-            layout.settings.w,
-            layout.settings.h,
-        ],
-        tab_size,
-        dim,
-    ));
+    // Caffeine ☕ — fully centered in the chip (hint only as short overlay text if timed).
+    {
+        let r = scale_rect(layout.caffeine, chip_ui.scale_for(ChipId::Caffeine));
+        let on = caffeine.active();
+        let color = if on { cafe_on } else { cafe_off };
+        let h = if on { caffeine.hint() } else { String::new() };
+        // Timed: show cup+hint as one centered label; indefinite/off: cup alone.
+        if on && !h.is_empty() && h != "∞" {
+            labels.push(TextLabel::symbol_centered(
+                format!("☕{h}"),
+                [r.x, r.y, r.w, r.h],
+                16.0,
+                color,
+            ));
+        } else {
+            labels.push(TextLabel::symbol_centered(
+                "☕",
+                [r.x, r.y, r.w, r.h],
+                20.0,
+                color,
+            ));
+        }
+    }
+
+    // Logo glass button (top-right) — opens settings.
+    // 硯 is CJK — Gohu will tofu; glyphon falls through to a system CJK face when
+    // the primary face has no glyph (cosmic-text fallback). Size still 14 for grid.
+    {
+        let r = scale_rect(layout.logo, chip_ui.scale_for(ChipId::Logo));
+        labels.push(TextLabel::centered(
+            "硯",
+            [r.x, r.y, r.w, r.h],
+            14.0,
+            bright,
+        ));
+    }
 
     // Every leaf pane: cells + footer
     let focus = session.focus_pane_id();
@@ -1059,49 +1182,53 @@ fn chrome_labels(
         let show_cursor = terminal_cursor_visible && pl.pane_id == focus;
         push_pane_cells(&mut labels, pl, pane, show_cursor);
 
-        let sep_color = [0.35, 0.55, 0.42, 0.75];
-        let mono_size = 13.0;
+        // Footer is UI chrome (not terminal grid) — no ASCII dashes, no cell overflow.
+        // Hairline is drawn as a glass panel; path + input are normal UI labels.
         let path_size = 12.0;
-        let cols = ((pl.divider.w / CELL_W).floor() as usize).max(4);
-        let sep: String = "─".repeat(cols);
-        let sep_y = pl.divider.y + (pl.divider.h - mono_size * 1.25).max(0.0) * 0.5;
-        labels.push(TextLabel::mono(sep, pl.divider.x, sep_y, mono_size, sep_color));
+        let input_size = 13.0;
+        let char_w = 7.5_f32; // approx Gohu @12–13
 
         let path_str = crate::session::display_path(&pane.cwd);
         if !path_str.is_empty() {
-            let path_y = pl.path.y + (pl.path.h - path_size * 1.25).max(0.0) * 0.5;
-            labels.push(TextLabel::mono(
-                path_str,
+            // Never drop a lone `~` — always reserve room for at least that glyph.
+            let max_c = ((pl.path.w / char_w).floor() as usize).max(1);
+            let path_draw = truncate_chars(&path_str, max_c);
+            // Left-align path like product chrome (not centered — `~` was easy to miss).
+            let py = pl.path.y + (pl.path.h - path_size).max(0.0) * 0.5;
+            labels.push(TextLabel::new(
+                path_draw,
                 pl.path.x,
-                path_y,
+                py,
                 path_size,
                 dim,
             ));
         }
 
         let draft = pane.draft.as_str();
-        let warp_text = format!("❯ {draft}");
-        let input_y = pl.warp.y + (pl.warp.h - mono_size * 1.25).max(0.0) * 0.5;
+        let max_c = ((pl.warp.w / char_w).floor() as usize).max(4);
+        let warp_text = truncate_chars(&format!("❯ {draft}"), max_c);
         let input_bright = if pl.focused { bright } else { dim };
-        labels.push(TextLabel::mono(
+        // Left-align inside warp band (not full-center — reads as an input line).
+        let iy = pl.warp.y + (pl.warp.h - input_size).max(0.0) * 0.5;
+        labels.push(TextLabel::new(
             warp_text,
             pl.warp.x,
-            input_y,
-            mono_size,
+            iy,
+            input_size,
             input_bright,
         ));
 
         if pl.focused {
             let a = input_caret_alpha.clamp(0.0, 1.0);
             if a > 0.02 {
-                let caret_cols = 2 + draft.chars().count();
-                let caret_x = pl.warp.x + caret_cols as f32 * CELL_W;
-                labels.push(TextLabel::mono(
-                    "▌",
+                let caret_cols = (2 + draft.chars().count()).min(max_c.saturating_sub(1));
+                let caret_x = pl.warp.x + caret_cols as f32 * char_w;
+                labels.push(TextLabel::new(
+                    CARET_BLOCK,
                     caret_x,
-                    input_y,
-                    mono_size,
-                    [0.0, 0.90, 0.46, a],
+                    iy,
+                    input_size,
+                    [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], a],
                 ));
             }
         }
@@ -1110,122 +1237,761 @@ fn chrome_labels(
     let win_w = layout.title.w;
     let win_h = layout.workspace.y + layout.workspace.h + m.edge();
 
-    // Settings modal
-    if settings.visible() {
-        let ease = settings.content_ease().clamp(0.0, 1.0);
-        let modal = settings.animated_modal_rect(win_w, win_h);
-        let grid = session.active_grid();
-        let lines = settings.display_lines(
-            pty_active,
-            grid.cols(),
-            grid.rows(),
-            session.tabs.len(),
-        );
-        push_modal_lines(&mut labels, &modal, "Settings", &lines, ease, bright, muted, dim, m);
-    }
-
-    // Command palette
-    if palette.visible() {
-        let ease = palette.content_ease().clamp(0.0, 1.0);
-        let modal = overlay_modal_rect(win_w, win_h, 480.0, 420.0);
-        let filtered = filter_commands(commands, &palette.query);
-        let mut lines = Vec::new();
-        lines.push(format!("❯ {}", palette.query));
-        lines.push(String::new());
-        for (i, &idx) in filtered.iter().enumerate().take(12) {
-            let c = &commands[idx];
-            let mark = if i == palette.selected { "▸ " } else { "  " };
-            lines.push(format!("{mark}{}", c.title));
-            lines.push(format!("    {}", c.desc));
-        }
-        if filtered.is_empty() {
-            lines.push("  no matches".into());
-        }
-        push_modal_lines(
-            &mut labels,
-            &modal,
-            "Command palette",
-            &lines,
-            ease,
-            bright,
-            muted,
-            dim,
-            m,
-        );
-    }
-
-    // Keyboard shortcuts help
-    if help.visible() {
-        let ease = help.content_ease().clamp(0.0, 1.0);
-        let modal = overlay_modal_rect(win_w, win_h, 520.0, 480.0);
-        let mut lines = Vec::new();
-        let mut last_cat = "";
-        for c in commands {
-            if c.category != last_cat {
-                if !last_cat.is_empty() {
-                    lines.push(String::new());
-                }
-                lines.push(c.category.to_string());
-                last_cat = c.category;
-            }
-            lines.push(format!("  {}  —  {}", c.title, c.desc));
-        }
-        push_modal_lines(
-            &mut labels,
-            &modal,
-            "Keyboard shortcuts",
-            &lines,
-            ease,
-            bright,
-            muted,
-            dim,
-            m,
-        );
-    }
+    // --- Glass modals: real UI labels (not ASCII terminal dumps) ---
+    push_modal_labels(
+        &mut labels,
+        m,
+        win_w,
+        win_h,
+        session,
+        settings,
+        palette,
+        help,
+        notes,
+        workspace_ui,
+        transfer,
+        commands,
+        pty_active,
+        input_caret_alpha,
+        bright,
+        muted,
+        dim,
+    );
 
     labels
 }
 
-fn push_modal_lines(
+/// Glass chrome for overlays: outer shell, nested frost fields, option buttons.
+fn push_modal_glass(
+    panels: &mut Vec<crate::layout::PanelInstance>,
+    m: Metrics,
+    win_w: f32,
+    win_h: f32,
+    settings: &SettingsState,
+    palette: &PaletteState,
+    help: &HelpState,
+    notes: &NotesState,
+    workspace_ui: &WorkspaceUi,
+    transfer: &TransferUi,
+    commands: &[Command],
+) {
+    use crate::layout::{PanelInstance, PanelKind, Rect};
+
+    if settings.visible() {
+        let ease = settings.content_ease().clamp(0.0, 1.0);
+        let modal = settings.animated_modal_rect(win_w, win_h);
+        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
+        let pad = 16.0;
+        let row_h = 40.0;
+        let gap = 8.0;
+        let mut y = modal.y + 48.0;
+        for _ in 0..3 {
+            let r = Rect::new(modal.x + pad, y, modal.w - pad * 2.0, row_h);
+            panels.push(
+                PanelInstance::glass(r, m.chip_radius, PanelKind::ModalButton).with_opacity(ease),
+            );
+            y += row_h + gap;
+        }
+    }
+
+    if palette.visible() {
+        let ease = palette.content_ease().clamp(0.0, 1.0);
+        let modal = palette.modal_rect(win_w, win_h);
+        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
+        let pad = 14.0;
+        let input_h = 48.0;
+        let input = Rect::new(
+            modal.x + pad,
+            modal.y + pad + 4.0,
+            modal.w - pad * 2.0,
+            input_h,
+        );
+        panels.push(
+            PanelInstance::glass(input, m.chip_radius + 2.0, PanelKind::ModalFrost)
+                .with_opacity(ease),
+        );
+        let filtered = filter_commands(commands, &palette.query);
+        let btn_h = 36.0;
+        let gap = 6.0;
+        let mut y = input.y + input.h + 12.0;
+        let max_y = modal.y + modal.h - pad;
+        for (i, _) in filtered.iter().enumerate().take(6) {
+            if y + btn_h > max_y {
+                break;
+            }
+            let r = Rect::new(modal.x + pad, y, modal.w - pad * 2.0, btn_h);
+            let kind = if i == palette.selected {
+                PanelKind::ModalButtonActive
+            } else {
+                PanelKind::ModalButton
+            };
+            panels.push(PanelInstance::glass(r, m.chip_radius, kind).with_opacity(ease));
+            y += btn_h + gap;
+        }
+    }
+
+    if help.visible() {
+        let ease = help.content_ease().clamp(0.0, 1.0);
+        let modal = overlay_modal_rect(win_w, win_h, 640.0, 360.0);
+        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
+        let pad = 14.0;
+        let btn_h = 32.0;
+        let gap = 5.0;
+        let mut y = modal.y + 44.0;
+        let max_y = modal.y + modal.h - pad;
+        for _ in commands.iter().take(8) {
+            if y + btn_h > max_y {
+                break;
+            }
+            let r = Rect::new(modal.x + pad, y, modal.w - pad * 2.0, btn_h);
+            panels.push(
+                PanelInstance::glass(r, m.chip_radius, PanelKind::ModalButton).with_opacity(ease),
+            );
+            y += btn_h + gap;
+        }
+    }
+
+    if notes.visible() {
+        let ease = notes.content_ease().clamp(0.0, 1.0);
+        let lay = notes.layout(win_w, win_h);
+        panels.push(
+            PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
+        );
+        panels.push(
+            PanelInstance::glass(lay.list, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
+        );
+        panels.push(
+            PanelInstance::glass(lay.title, m.chip_radius, PanelKind::ModalFrost)
+                .with_opacity(ease),
+        );
+        panels.push(
+            PanelInstance::glass(lay.body, m.chip_radius + 2.0, PanelKind::ModalFrost)
+                .with_opacity(ease),
+        );
+    }
+
+    if workspace_ui.visible() {
+        let ease = workspace_ui.content_ease().clamp(0.0, 1.0);
+        let modal = workspace_ui.animated_modal_rect(win_w, win_h);
+        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
+        let pad = 14.0;
+        let list_w = 140.0;
+        let ch = Rect::new(modal.x + pad, modal.y + pad, list_w, modal.h - pad * 2.0 - 52.0);
+        panels.push(
+            PanelInstance::glass(ch, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
+        );
+        let msg = Rect::new(
+            ch.x + ch.w + 10.0,
+            modal.y + pad,
+            modal.x + modal.w - pad - (ch.x + ch.w + 10.0),
+            ch.h,
+        );
+        panels.push(
+            PanelInstance::glass(msg, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
+        );
+        let input = Rect::new(
+            modal.x + pad,
+            modal.y + modal.h - pad - 44.0,
+            modal.w - pad * 2.0,
+            44.0,
+        );
+        panels.push(
+            PanelInstance::glass(input, m.chip_radius + 2.0, PanelKind::ModalFrost)
+                .with_opacity(ease),
+        );
+    }
+
+    if transfer.visible() {
+        let ease = transfer.content_ease().clamp(0.0, 1.0);
+        let modal = transfer.animated_modal_rect(win_w, win_h);
+        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
+        let pad = 16.0;
+        let input = Rect::new(
+            modal.x + pad,
+            modal.y + 56.0,
+            modal.w - pad * 2.0,
+            48.0,
+        );
+        panels.push(
+            PanelInstance::glass(input, m.chip_radius + 2.0, PanelKind::ModalFrost)
+                .with_opacity(ease),
+        );
+    }
+}
+
+fn push_modal_labels(
     labels: &mut Vec<TextLabel>,
-    modal: &crate::layout::Rect,
-    title: &str,
-    lines: &[String],
-    ease: f32,
+    m: Metrics,
+    win_w: f32,
+    win_h: f32,
+    session: &ChromeSession,
+    settings: &SettingsState,
+    palette: &PaletteState,
+    help: &HelpState,
+    notes: &NotesState,
+    workspace_ui: &WorkspaceUi,
+    transfer: &TransferUi,
+    commands: &[Command],
+    pty_active: bool,
+    caret_alpha: f32,
     bright: [f32; 4],
     muted: [f32; 4],
     dim: [f32; 4],
-    m: Metrics,
 ) {
-    let pad = m.inset() * 2.0;
-    let mut y = modal.y + pad;
-    let x = modal.x + pad;
-    let mut title_c = bright;
-    title_c[3] *= ease;
-    labels.push(TextLabel::new(title, x, y, 16.0, title_c));
-    y += 28.0;
-    for line in lines {
-        if line.is_empty() {
-            y += 8.0;
-            continue;
+    let pad = 16.0;
+    let caret_a = caret_alpha.clamp(0.0, 1.0);
+
+    if settings.visible() {
+        let ease = settings.content_ease().clamp(0.0, 1.0);
+        let modal = settings.animated_modal_rect(win_w, win_h);
+        let mut title_c = bright;
+        title_c[3] *= ease;
+        labels.push(TextLabel::new(
+            "Settings",
+            modal.x + pad,
+            modal.y + 14.0,
+            15.0,
+            title_c,
+        ));
+        let grid = session.active_grid();
+        let rows = [
+            (
+                "Glyph rain",
+                if settings.prefs.rain { "On" } else { "Off" },
+                "1",
+            ),
+            (
+                "Magnifier",
+                if settings.prefs.lens { "On" } else { "Off" },
+                "2",
+            ),
+            (
+                "Glass darken",
+                &format!("{:.0}%", settings.prefs.glass_darken * 100.0),
+                "[ ]",
+            ),
+        ];
+        let row_h = 40.0;
+        let gap = 8.0;
+        let mut y = modal.y + 48.0;
+        for (title, val, key) in rows {
+            let mut tc = bright;
+            tc[3] *= ease;
+            let mut vc = muted;
+            vc[3] *= ease;
+            labels.push(TextLabel::new(
+                format!("{title}   ·  {key}"),
+                modal.x + pad + 12.0,
+                y + 10.0,
+                13.0,
+                tc,
+            ));
+            labels.push(TextLabel::new(
+                val.to_string(),
+                modal.x + modal.w - pad - 72.0,
+                y + 10.0,
+                13.0,
+                vc,
+            ));
+            y += row_h + gap;
         }
-        let mut color = if line.starts_with("  ") || line.starts_with("    ") {
-            dim
-        } else if line.starts_with("▸") {
-            bright
+        let mut foot = dim;
+        foot[3] *= ease * 0.9;
+        let shell = if pty_active { "PTY live" } else { "mock shell" };
+        labels.push(TextLabel::new(
+            format!(
+                "{shell}  ·  {}×{}  ·  {} tabs",
+                grid.cols(),
+                grid.rows(),
+                session.tabs.len()
+            ),
+            modal.x + pad,
+            modal.y + modal.h - 28.0,
+            11.0,
+            foot,
+        ));
+    }
+
+    if palette.visible() {
+        let ease = palette.content_ease().clamp(0.0, 1.0);
+        let modal = palette.modal_rect(win_w, win_h);
+        let pad = 14.0;
+        let input_h = 48.0;
+        let input = crate::layout::Rect::new(
+            modal.x + pad,
+            modal.y + pad + 4.0,
+            modal.w - pad * 2.0,
+            input_h,
+        );
+        let ty = input.y + (input.h - 15.0) * 0.5;
+        let mut qc = if palette.query.is_empty() { dim } else { bright };
+        qc[3] *= ease;
+        let display = if palette.query.is_empty() {
+            "Type a command…"
         } else {
-            muted
+            palette.query.as_str()
         };
-        color[3] *= ease;
-        if color[3] < 0.02 {
-            continue;
+        labels.push(TextLabel::new(
+            display.to_string(),
+            input.x + 14.0,
+            ty,
+            15.0,
+            qc,
+        ));
+        // Caret after query (not on placeholder)
+        if !palette.query.is_empty() || caret_a > 0.02 {
+            let approx = 8.2_f32;
+            let caret_x = input.x + 14.0 + palette.query.chars().count() as f32 * approx;
+            labels.push(TextLabel::new(
+                CARET_BLOCK,
+                caret_x.min(input.x + input.w - 20.0),
+                ty,
+                15.0,
+                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+            ));
         }
-        labels.push(TextLabel::new(line.clone(), x, y, 12.0, color));
-        y += 16.0;
-        if y > modal.y + modal.h - pad {
-            break;
+
+        let filtered = filter_commands(commands, &palette.query);
+        let btn_h = 36.0;
+        let gap = 6.0;
+        let mut y = input.y + input.h + 12.0;
+        let max_y = modal.y + modal.h - pad;
+        for (i, &idx) in filtered.iter().enumerate().take(6) {
+            if y + btn_h > max_y {
+                break;
+            }
+            let c = &commands[idx];
+            let mut tc = if i == palette.selected { bright } else { muted };
+            tc[3] *= ease;
+            let mut dc = dim;
+            dc[3] *= ease;
+            labels.push(TextLabel::new(
+                c.title.to_string(),
+                modal.x + pad + 14.0,
+                y + 8.0,
+                13.0,
+                tc,
+            ));
+            let desc = truncate_chars(&c.desc, 42);
+            labels.push(TextLabel::new(
+                desc,
+                modal.x + pad + 14.0,
+                y + 22.0,
+                10.0,
+                dc,
+            ));
+            y += btn_h + gap;
+        }
+        if filtered.is_empty() {
+            let mut nc = dim;
+            nc[3] *= ease;
+            labels.push(TextLabel::new(
+                "No matches",
+                modal.x + pad + 14.0,
+                y + 8.0,
+                13.0,
+                nc,
+            ));
         }
     }
+
+    if help.visible() {
+        let ease = help.content_ease().clamp(0.0, 1.0);
+        let modal = overlay_modal_rect(win_w, win_h, 640.0, 360.0);
+        let mut title_c = bright;
+        title_c[3] *= ease;
+        labels.push(TextLabel::new(
+            "Keyboard shortcuts",
+            modal.x + 16.0,
+            modal.y + 14.0,
+            15.0,
+            title_c,
+        ));
+        let pad = 14.0;
+        let btn_h = 32.0;
+        let gap = 5.0;
+        let mut y = modal.y + 44.0;
+        let max_y = modal.y + modal.h - pad;
+        for c in commands.iter().take(8) {
+            if y + btn_h > max_y {
+                break;
+            }
+            let mut tc = bright;
+            tc[3] *= ease;
+            let mut dc = dim;
+            dc[3] *= ease;
+            labels.push(TextLabel::new(
+                c.title.to_string(),
+                modal.x + pad + 12.0,
+                y + 8.0,
+                12.0,
+                tc,
+            ));
+            labels.push(TextLabel::new(
+                c.desc.clone(),
+                modal.x + modal.w * 0.42,
+                y + 8.0,
+                11.0,
+                dc,
+            ));
+            y += btn_h + gap;
+        }
+    }
+
+    if notes.visible() {
+        let ease = notes.content_ease().clamp(0.0, 1.0);
+        // Shared geometry with NotesState::layout / try_click (see NOTES_HOOKS.md).
+        let lay = notes.layout(win_w, win_h);
+        let list = lay.list;
+        let row_h = crate::notes::NOTES_ROW_H;
+        for (i, r) in lay.list_rows.iter().enumerate() {
+            let mut tc = if i == notes.active_index() {
+                bright
+            } else {
+                muted
+            };
+            tc[3] *= ease;
+            let title = notes.display_title_for(i);
+            labels.push(TextLabel::new(
+                truncate_chars(&title, 18),
+                list.x + 10.0,
+                r.y + 8.0,
+                12.0,
+                tc,
+            ));
+        }
+        let mut nc = dim;
+        nc[3] *= ease;
+        labels.push(TextLabel::new(
+            "+ New note",
+            list.x + 10.0,
+            lay.new_row.y + 8.0,
+            12.0,
+            nc,
+        ));
+        let mut dc = dim;
+        dc[3] *= ease * 0.9;
+        let del_label = if notes.bank().len() <= 1 {
+            "Clear note"
+        } else {
+            "Delete note"
+        };
+        labels.push(TextLabel::new(
+            del_label.to_string(),
+            list.x + 10.0,
+            lay.delete_row.y + 8.0,
+            11.0,
+            dc,
+        ));
+
+        let title_r = lay.title;
+        let mut tc = bright;
+        tc[3] *= ease;
+        let title_text = if notes.title.is_empty() {
+            if notes.focus == crate::notes::NotesFocus::Title {
+                String::new()
+            } else {
+                "Title".into()
+            }
+        } else {
+            notes.title.clone()
+        };
+        let title_color = if notes.title.is_empty() && notes.focus != crate::notes::NotesFocus::Title
+        {
+            let mut c = dim;
+            c[3] *= ease;
+            c
+        } else {
+            tc
+        };
+        labels.push(TextLabel::new(
+            title_text,
+            title_r.x + 12.0,
+            title_r.y + 10.0,
+            14.0,
+            title_color,
+        ));
+        if notes.focus == crate::notes::NotesFocus::Title {
+            let caret_x = title_r.x + 12.0 + notes.cursor as f32 * 8.0;
+            labels.push(TextLabel::new(
+                CARET_BLOCK,
+                caret_x.min(title_r.x + title_r.w - 16.0),
+                title_r.y + 10.0,
+                14.0,
+                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+            ));
+        }
+        let body = lay.body;
+        let mut bc = muted;
+        bc[3] *= ease;
+        let mut by = body.y + 12.0;
+        if notes.body.is_empty() {
+            labels.push(TextLabel::new(
+                "Start writing…",
+                body.x + 14.0,
+                by,
+                13.0,
+                bc,
+            ));
+            if notes.focus == crate::notes::NotesFocus::Body {
+                labels.push(TextLabel::new(
+                    CARET_BLOCK,
+                    body.x + 14.0,
+                    by,
+                    13.0,
+                    [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+                ));
+            }
+        } else {
+            for line in notes.body.lines() {
+                if by > body.y + body.h - 16.0 {
+                    break;
+                }
+                labels.push(TextLabel::new(
+                    line.to_string(),
+                    body.x + 14.0,
+                    by,
+                    13.0,
+                    bc,
+                ));
+                by += 18.0;
+            }
+            if notes.focus == crate::notes::NotesFocus::Body {
+                let last = notes.body.lines().last().unwrap_or("");
+                let caret_x = body.x + 14.0 + last.chars().count() as f32 * 7.5;
+                labels.push(TextLabel::new(
+                    CARET_BLOCK,
+                    caret_x.min(body.x + body.w - 16.0),
+                    (by - 18.0).max(body.y + 12.0),
+                    13.0,
+                    [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+                ));
+            }
+        }
+        let mut foot = dim;
+        foot[3] *= ease;
+        let status = if notes.is_dirty() { "unsaved" } else { "saved" };
+        labels.push(TextLabel::new(
+            format!(
+                "{} notes · {} chars · {status} · Esc saves",
+                notes.bank().len(),
+                notes.body.chars().count()
+            ),
+            lay.title.x,
+            lay.modal.y + lay.modal.h - 22.0,
+            11.0,
+            foot,
+        ));
+        let _ = row_h; // layout constant available for future row chrome
+    }
+
+    if workspace_ui.visible() {
+        use crate::workspace_ui::{
+            ComposeMode, CHANNEL_LIST_TOP, CHANNEL_LIST_W, CHANNEL_ROW_H, COMPOSE_H, MODAL_PAD,
+        };
+        let ease = workspace_ui.content_ease().clamp(0.0, 1.0);
+        let modal = workspace_ui.animated_modal_rect(win_w, win_h);
+        let pad = MODAL_PAD;
+        let list_w = CHANNEL_LIST_W;
+        let mut title_c = bright;
+        title_c[3] *= ease;
+        labels.push(TextLabel::new(
+            "Workspace",
+            modal.x + pad,
+            modal.y + 8.0,
+            13.0,
+            title_c,
+        ));
+        let mut y = modal.y + CHANNEL_LIST_TOP;
+        for ch in &workspace_ui.channels {
+            let mut tc = if *ch == workspace_ui.channel {
+                bright
+            } else {
+                muted
+            };
+            tc[3] *= ease;
+            labels.push(TextLabel::new(
+                format!("#{ch}"),
+                modal.x + pad + 10.0,
+                y,
+                12.0,
+                tc,
+            ));
+            y += CHANNEL_ROW_H;
+        }
+        // "+ New" matches `WorkspaceUi::new_channel_row_rect` hit target.
+        {
+            let mut tc = dim;
+            tc[3] *= ease;
+            labels.push(TextLabel::new(
+                "+ New",
+                modal.x + pad + 10.0,
+                y,
+                12.0,
+                tc,
+            ));
+        }
+        let msg_x = modal.x + pad + list_w + 10.0;
+        let mut my = modal.y + pad + 8.0;
+        let msg_bottom = modal.y + modal.h - pad - COMPOSE_H - 8.0;
+        for msg in workspace_ui.visible_messages(12) {
+            if my > msg_bottom - 20.0 {
+                break;
+            }
+            let mut fc = dim;
+            fc[3] *= ease;
+            let mut bc = muted;
+            bc[3] *= ease;
+            labels.push(TextLabel::new(
+                format!("{}:", msg.from),
+                msg_x,
+                my,
+                11.0,
+                fc,
+            ));
+            labels.push(TextLabel::new(
+                truncate_chars(&msg.body, 56),
+                msg_x + 8.0,
+                my + 14.0,
+                12.0,
+                bc,
+            ));
+            my += 36.0;
+        }
+        let input_y = modal.y + modal.h - pad - COMPOSE_H;
+        let placeholder = match workspace_ui.mode {
+            ComposeMode::NewChannel => "Channel name · Enter to create",
+            ComposeMode::Message => "Message #… · Enter to send",
+        };
+        let draft = if workspace_ui.draft.is_empty() {
+            placeholder
+        } else {
+            workspace_ui.draft.as_str()
+        };
+        let mut dc = if workspace_ui.draft.is_empty() {
+            dim
+        } else {
+            bright
+        };
+        dc[3] *= ease;
+        labels.push(TextLabel::new(
+            draft.to_string(),
+            modal.x + pad + 14.0,
+            input_y + 14.0,
+            13.0,
+            dc,
+        ));
+        if !workspace_ui.draft.is_empty() || caret_a > 0.02 {
+            let cx = modal.x
+                + pad
+                + 14.0
+                + workspace_ui.draft.chars().count() as f32 * 7.5;
+            labels.push(TextLabel::new(
+                CARET_BLOCK,
+                cx,
+                input_y + 14.0,
+                13.0,
+                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+            ));
+        }
+        if !workspace_ui.status.is_empty() {
+            let mut sc = dim;
+            sc[3] *= ease;
+            labels.push(TextLabel::new(
+                truncate_chars(&workspace_ui.status, 48),
+                modal.x + pad + list_w + 10.0,
+                modal.y + modal.h - 20.0,
+                10.0,
+                sc,
+            ));
+        }
+    }
+
+    if transfer.visible() {
+        let ease = transfer.content_ease().clamp(0.0, 1.0);
+        let modal = transfer.animated_modal_rect(win_w, win_h);
+        let pad = 16.0;
+        let mut title_c = bright;
+        title_c[3] *= ease;
+        let title = match transfer.mode {
+            crate::transfer_ui::TransferMode::Send => "Send file (ticket)",
+            crate::transfer_ui::TransferMode::Receive => "Receive ticket",
+        };
+        labels.push(TextLabel::new(
+            title,
+            modal.x + pad,
+            modal.y + 16.0,
+            15.0,
+            title_c,
+        ));
+        let mut sc = muted;
+        sc[3] *= ease;
+        labels.push(TextLabel::new(
+            transfer.status.clone(),
+            modal.x + pad,
+            modal.y + 36.0,
+            11.0,
+            sc,
+        ));
+        let input_y = modal.y + 56.0;
+        let placeholder = match transfer.mode {
+            crate::transfer_ui::TransferMode::Send => "/path/to/file",
+            crate::transfer_ui::TransferMode::Receive => "ticket words…",
+        };
+        let shown = if transfer.buf.is_empty() {
+            placeholder
+        } else {
+            transfer.buf.as_str()
+        };
+        let mut ic = if transfer.buf.is_empty() { dim } else { bright };
+        ic[3] *= ease;
+        labels.push(TextLabel::new(
+            shown.to_string(),
+            modal.x + pad + 14.0,
+            input_y + 16.0,
+            14.0,
+            ic,
+        ));
+        let cx = modal.x + pad + 14.0 + transfer.buf.chars().count() as f32 * 8.0;
+        labels.push(TextLabel::new(
+            CARET_BLOCK,
+            cx.min(modal.x + modal.w - pad - 20.0),
+            input_y + 16.0,
+            14.0,
+            [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+        ));
+        if !transfer.ticket.is_empty() {
+            let mut tc = bright;
+            tc[3] *= ease;
+            labels.push(TextLabel::new(
+                truncate_chars(&transfer.ticket, 64),
+                modal.x + pad,
+                modal.y + modal.h - 36.0,
+                11.0,
+                tc,
+            ));
+        }
+    }
+
+    let _ = m;
+}
+
+/// Truncate to at most `max_chars` (append … if cut). Keeps footer single-line.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let n = s.chars().count();
+    if n <= max_chars {
+        return s.to_string();
+    }
+    if max_chars == 1 {
+        return "…".into();
+    }
+    let keep = max_chars - 1;
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('…');
+    out
 }
 
 fn push_pane_cells(
@@ -1234,7 +2000,7 @@ fn push_pane_cells(
     pane: &crate::session::Pane,
     cursor_visible: bool,
 ) {
-    let mono_size = 13.0;
+    let mono_size = 14.0; // Gohu design size (product FontSizePx)
     let origin_x = pl.cells.x;
     let origin_y = pl.cells.y;
     let grid = &pane.grid;
@@ -1277,6 +2043,10 @@ fn push_pane_cells(
 
             let x = origin_x + start as f32 * CELL_W;
             let y = origin_y + row as f32 * CELL_H;
+            // Never paint terminal cells into the footer / past the cells rect.
+            if y + CELL_H > pl.cells.y + pl.cells.h + 0.5 {
+                break;
+            }
             if let Some(bg) = bg {
                 let blocks: String = "█".repeat(text.chars().count().max(1));
                 labels.push(TextLabel::mono(
@@ -1300,11 +2070,11 @@ fn push_pane_cells(
             let cx = origin_x + cursor.col as f32 * CELL_W;
             let cy = origin_y + row as f32 * CELL_H;
             labels.push(TextLabel::mono(
-                "█",
+                CARET_BLOCK,
                 cx,
                 cy,
                 mono_size,
-                [0.0, 0.90, 0.46, 0.55],
+                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], 0.55],
             ));
         }
     }

@@ -20,7 +20,7 @@ pub const GLASS_DARKEN_DEFAULT: f32 = 0.82;
 pub struct ChromePrefs {
     /// Canvas UI glyph rain under glass.
     pub rain: bool,
-    /// Mouse glass lens.
+    /// Magnifying-glass bubble (pinch / Ctrl·Cmd+scroll). Off disables the feature.
     pub lens: bool,
     /// Shared glass face darken 0..1 (panes / chips / modal).
     pub glass_darken: f32,
@@ -175,13 +175,13 @@ impl SettingsState {
         e * 0.50
     }
 
-    /// Base modal rect centered in the window (pre-animation).
+    /// Base modal rect — wide horizontal glass card (not a square).
     pub fn base_modal_rect(window_w: f32, window_h: f32) -> Rect {
-        let w = (window_w - 32.0).min(420.0).max(280.0);
-        let h = (window_h - 64.0).min(360.0).max(220.0);
+        let w = (window_w - 48.0).min(560.0).max(320.0);
+        let h = (window_h - 96.0).min(320.0).max(200.0);
         Rect::new(
             (window_w - w) * 0.5,
-            (window_h - h) * 0.5,
+            (window_h - h) * 0.48,
             w,
             h,
         )
@@ -229,7 +229,7 @@ impl SettingsState {
             String::new(),
             "toggles".into(),
             format!("  [1] glyph rain     {rain}"),
-            format!("  [2] mouse lens     {lens}"),
+            format!("  [2] magnifier      {lens}  · pinch or ⌃/⌘+scroll"),
             format!("  [ / ]  glass darken  {darken_pct}%"),
             String::new(),
             "status".into(),

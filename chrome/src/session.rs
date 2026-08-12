@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::cells::{theme, CellGrid};
-use crate::panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
+use crate::panes::{FocusDir, RemoveResult, SoloExitAnim, SplitAxis, SplitNode, TickResult};
 use crate::shell::{self, ShellOutput};
 
 /// One terminal leaf (grid + cwd). PTY lives in the app, keyed by `id`.
@@ -19,6 +19,8 @@ pub struct Pane {
     pub cwd: String,
     /// Local command draft for this pane's input strip.
     pub draft: String,
+    /// Shell exited / user closed — animating out; don't re-trigger.
+    pub exiting: bool,
 }
 
 /// One chrome-strip tab that may hold a split tree of panes.
@@ -28,6 +30,8 @@ pub struct Tab {
     pub title: String,
     pub root: SplitNode,
     pub focus_pane: u64,
+    /// Sole-pane graceful exit (no split branch to reverse-jelly).
+    pub solo_exit: Option<SoloExitAnim>,
 }
 
 /// Application-facing session. Panes are addressable by id across tabs.
@@ -58,6 +62,7 @@ impl ChromeSession {
                 pty_mode: false,
                 cwd: initial_cwd(),
                 draft: String::new(),
+                exiting: false,
             },
         );
         let tab = Tab {
@@ -65,6 +70,7 @@ impl ChromeSession {
             title: "shell 1".into(),
             root: SplitNode::leaf(pane_id),
             focus_pane: pane_id,
+            solo_exit: None,
         };
         Self {
             tabs: vec![tab],
@@ -163,12 +169,122 @@ impl ChromeSession {
         self.panes.get(&pane_id).map(|p| &p.grid)
     }
 
-    pub fn tick_splits(&mut self, dt: f32) -> bool {
-        let mut moving = false;
+    /// Advance open/close jelly. Returns finished pane ids to drop PTYs for,
+    /// and whether any animation is still moving.
+    pub fn tick_splits(&mut self, dt: f32) -> TickResult {
+        let mut result = TickResult::default();
+        let mut solo_finished: Vec<(u64, u64)> = Vec::new(); // (tab_id, pane_id)
+
         for tab in &mut self.tabs {
-            moving |= tab.root.tick(dt);
+            let r = tab.root.tick(dt);
+            result.moving |= r.moving;
+            result.finished_closes.extend(r.finished_closes.iter().copied());
+
+            if let Some(anim) = &mut tab.solo_exit {
+                if anim.tick(dt) {
+                    result.moving = true;
+                } else {
+                    solo_finished.push((tab.id, anim.pane_id));
+                    tab.solo_exit = None;
+                }
+            }
         }
-        moving
+
+        // Finalize branch closes that finished jelly
+        let finished = result.finished_closes.clone();
+        for pid in finished {
+            self.finalize_pane_close(pid, &mut result);
+        }
+        for (tab_id, pane_id) in solo_finished {
+            result.finished_closes.push(pane_id);
+            self.finalize_solo_close(tab_id, pane_id, &mut result);
+        }
+        result
+    }
+
+    /// Begin graceful exit of a pane (shell died or user closed).
+    /// Returns true if an animation was started (or already in progress).
+    pub fn begin_close_pane(&mut self, pane_id: u64) -> bool {
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
+            return false;
+        };
+        if pane.exiting {
+            return true;
+        }
+        pane.exiting = true;
+
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.root.contains_pane(pane_id) || t.solo_exit.as_ref().map(|s| s.pane_id) == Some(pane_id))
+        else {
+            return false;
+        };
+
+        let leaf_count = tab.root.leaf_ids().len();
+        if leaf_count <= 1 {
+            // Sole pane — jelly-scale the whole well, then drop tab/pane.
+            if tab.solo_exit.is_none() {
+                tab.solo_exit = Some(SoloExitAnim::start(pane_id));
+            }
+            return true;
+        }
+
+        if tab.root.begin_close_leaf(pane_id) {
+            // Focus a survivor if we're closing the focused pane.
+            if tab.focus_pane == pane_id {
+                if let Some(other) = tab.root.leaf_ids().into_iter().find(|id| *id != pane_id) {
+                    tab.focus_pane = other;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn finalize_pane_close(&mut self, pane_id: u64, result: &mut TickResult) {
+        let Some(tab_idx) = self
+            .tabs
+            .iter()
+            .position(|t| t.root.contains_pane(pane_id) || t.root.is_closing(pane_id))
+        else {
+            // Already removed from tree — still drop pane map entry
+            self.panes.remove(&pane_id);
+            return;
+        };
+
+        let tab = &mut self.tabs[tab_idx];
+        match tab.root.remove_leaf(pane_id) {
+            RemoveResult::Removed { focus_hint } => {
+                tab.focus_pane = focus_hint;
+                self.panes.remove(&pane_id);
+            }
+            RemoveResult::RemovedEmpty => {
+                // Shouldn't happen for branch close of one of two
+                self.panes.remove(&pane_id);
+            }
+            RemoveResult::NotFound => {
+                self.panes.remove(&pane_id);
+            }
+        }
+        let _ = result;
+    }
+
+    fn finalize_solo_close(&mut self, tab_id: u64, pane_id: u64, result: &mut TickResult) {
+        self.panes.remove(&pane_id);
+        if self.tabs.len() <= 1 {
+            // Last well closed — empty session; app will quit.
+            self.tabs.clear();
+            self.panes.clear();
+        } else {
+            let removed = self.close_tab(tab_id);
+            for id in removed {
+                if id != pane_id {
+                    result.finished_closes.push(id);
+                }
+            }
+        }
     }
 
     /// Create a new chrome tab with one pane. Returns (tab_id, pane_id).
@@ -193,6 +309,7 @@ impl ChromeSession {
                 pty_mode: false,
                 cwd,
                 draft: String::new(),
+                exiting: false,
             },
         );
         self.tabs.push(Tab {
@@ -200,6 +317,7 @@ impl ChromeSession {
             title: format!("shell {pane_id}"),
             root: SplitNode::leaf(pane_id),
             focus_pane: pane_id,
+            solo_exit: None,
         });
         self.active_id = tab_id;
         (tab_id, pane_id)
@@ -339,43 +457,37 @@ impl ChromeSession {
                 pty_mode: false,
                 cwd,
                 draft: String::new(),
+                exiting: false,
             },
         );
         Some(new_id)
     }
 
-    /// Close focused pane. Returns removed pane ids (for PTY teardown).
-    /// If last pane in tab, closes the tab (unless last tab).
+    /// Close focused pane with jelly animation (same path as shell exit).
     pub fn close_focused_pane_or_tab(&mut self) -> CloseOutcome {
-        let tab_id = self.active_id;
         let focus = self.focus_pane_id();
-        let leaf_count = self
-            .active_tab()
-            .map(|t| t.root.leaf_ids().len())
-            .unwrap_or(1);
-
-        if leaf_count <= 1 {
-            let removed = self.close_tab(tab_id);
-            if removed.is_empty() {
-                CloseOutcome::QuitApp
-            } else {
-                CloseOutcome::ClosedPanes(removed)
-            }
+        if self.begin_close_pane(focus) {
+            CloseOutcome::Animating
         } else {
-            let tab = self.tabs.iter_mut().find(|t| t.id == tab_id).unwrap();
-            match tab.root.remove_leaf(focus) {
-                RemoveResult::Removed { focus_hint } => {
-                    tab.focus_pane = focus_hint;
-                    self.panes.remove(&focus);
-                    CloseOutcome::ClosedPanes(vec![focus])
+            CloseOutcome::None
+        }
+    }
+
+    /// True if the session has no tabs left (last pane exited).
+    pub fn is_empty(&self) -> bool {
+        self.tabs.is_empty()
+    }
+
+    /// Solo-exit scale for layout (1 = full, 0 = gone).
+    pub fn solo_exit_scale(&self, pane_id: u64) -> Option<f32> {
+        for tab in &self.tabs {
+            if let Some(anim) = &tab.solo_exit {
+                if anim.pane_id == pane_id {
+                    return Some(anim.jelly.clamp(0.0, 1.15));
                 }
-                RemoveResult::RemovedEmpty => {
-                    // shouldn't happen with leaf_count > 1
-                    CloseOutcome::None
-                }
-                RemoveResult::NotFound => CloseOutcome::None,
             }
         }
+        None
     }
 
     pub fn set_focus_pane(&mut self, pane_id: u64) {
@@ -557,8 +669,11 @@ impl ChromeSession {
 #[derive(Clone, Debug)]
 pub enum CloseOutcome {
     None,
+    /// Last tab/pane — app should exit (immediate, rare).
     QuitApp,
     ClosedPanes(Vec<u64>),
+    /// Close animation started; PTY drop happens when tick finishes.
+    Animating,
 }
 
 impl Default for ChromeSession {
@@ -574,23 +689,89 @@ fn initial_cwd() -> String {
         .unwrap_or_else(|_| "/".into())
 }
 
+/// Shorten `$HOME` → `~` for chrome path display (product `displayPath`).
+///
+/// Compares **cleaned** paths so trailing slashes / `.` / `..` still map to `~`.
 pub fn display_path(cwd: &str) -> String {
-    let cwd = cwd.trim();
+    let cwd = normalize_abs_path(cwd);
     if cwd.is_empty() {
         return String::new();
     }
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    let home = normalize_abs_path(&home);
     if home.is_empty() {
-        return cwd.to_string();
+        return cwd;
     }
-    if cwd == home {
+    // Exact home (also try canonicalize when both exist on disk).
+    if paths_equal(&cwd, &home) {
         return "~".into();
     }
-    let prefix = format!("{home}/");
-    if let Some(rest) = cwd.strip_prefix(&prefix) {
-        return format!("~/{rest}");
+    // ~/rest — only if cwd is under home as a path prefix.
+    let home_prefix = if home == "/" {
+        "/".to_string()
+    } else {
+        format!("{home}/")
+    };
+    if let Some(rest) = cwd.strip_prefix(&home_prefix) {
+        if !rest.is_empty() {
+            return format!("~/{rest}");
+        }
+        return "~".into();
     }
-    cwd.to_string()
+    cwd
+}
+
+/// Collapse `//`, trailing `/` (except root), and `.` / `..` components.
+fn normalize_abs_path(p: &str) -> String {
+    let p = p.trim();
+    if p.is_empty() {
+        return String::new();
+    }
+    use std::path::{Component, Path};
+    let path = Path::new(p);
+    let mut out = std::path::PathBuf::new();
+    let mut absolute = false;
+    for c in path.components() {
+        match c {
+            Component::Prefix(pref) => {
+                out.push(pref.as_os_str());
+            }
+            Component::RootDir => {
+                absolute = true;
+                out.push(std::path::MAIN_SEPARATOR_STR);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = out.pop();
+            }
+            Component::Normal(s) => out.push(s),
+        }
+    }
+    let mut s = out.to_string_lossy().into_owned();
+    // PathBuf on Unix for "/" + "Users" can look right; ensure no trailing slash.
+    if s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if absolute && s.is_empty() {
+        s = "/".into();
+    }
+    s
+}
+
+fn paths_equal(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    // Resolve symlinks when possible (macOS /var vs /private/var, etc.).
+    if let (Ok(ca), Ok(cb)) = (
+        std::fs::canonicalize(a),
+        std::fs::canonicalize(b),
+    ) {
+        return ca == cb;
+    }
+    false
 }
 
 fn cwd_after_command(cwd: &str, line: &str) -> Option<String> {
@@ -623,6 +804,20 @@ fn cwd_after_command(cwd: &str, line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_path_home_is_tilde() {
+        let home = std::env::var("HOME").expect("HOME");
+        assert_eq!(display_path(&home), "~");
+        assert_eq!(display_path(&format!("{home}/")), "~");
+        assert_eq!(display_path(&format!("{home}/.")), "~");
+        assert_eq!(
+            display_path(&format!("{home}/projects/foo")),
+            "~/projects/foo"
+        );
+        // Unrelated absolute stays absolute
+        assert_eq!(display_path("/tmp"), "/tmp");
+    }
 
     #[test]
     fn boot_writes_banner() {
