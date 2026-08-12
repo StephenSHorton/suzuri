@@ -21,8 +21,15 @@ go build -o suzuri ./cmd/suzuri && ./suzuri chrome
 - Selection multi-click (word / line)
 - Host light IPC (`chrome_cmd` mailbox: quit / open_notes / open_workspace / open_palette)
 
+## Wave 4 ✅
+- Terminal URL hover + Cmd/Ctrl+click open browser (`links.rs`)
+- Confirm quit modal (`confirm.rs`)
+- First-run splash (`splash_seen` in chrome_prefs)
+- Tab / pane rename dialog (F2 + palette)
+
 ## Later
 - Multi-window
 - In-process FFI / deeper Go embed
 - MCP attach polish
 - Selection word/line UX polish
+- Link hover paint (primary tint under URL span)
