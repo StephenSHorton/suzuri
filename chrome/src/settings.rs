@@ -41,6 +41,11 @@ pub struct SettingsState {
     pub prefs: ChromePrefs,
     /// Focused row for keyboard / click (0..[`SettingsLayout::ROW_COUNT`]).
     pub selected: usize,
+    /// Animated toggle knobs 0..1 (spring toward prefs.rain / prefs.lens).
+    rain_visual: f32,
+    rain_visual_vel: f32,
+    lens_visual: f32,
+    lens_visual_vel: f32,
     /// Spring position 0..1 for content (present).
     present: f32,
     present_vel: f32,
@@ -72,10 +77,16 @@ impl SettingsState {
     pub fn with_path(path: impl Into<PathBuf>) -> Self {
         let prefs_path = path.into();
         let prefs = config_store::load_chrome_prefs(&prefs_path);
+        let rain_v = if prefs.rain { 1.0 } else { 0.0 };
+        let lens_v = if prefs.lens { 1.0 } else { 0.0 };
         Self {
             open: false,
             prefs: prefs.clone(),
             selected: 0,
+            rain_visual: rain_v,
+            rain_visual_vel: 0.0,
+            lens_visual: lens_v,
+            lens_visual_vel: 0.0,
             present: 0.0,
             present_vel: 0.0,
             overlay: 0.0,
@@ -84,6 +95,18 @@ impl SettingsState {
             dirty: false,
             last_saved: prefs,
         }
+    }
+
+    /// Rain switch knob position 0..1 (animated).
+    #[inline]
+    pub fn rain_toggle_t(&self) -> f32 {
+        self.rain_visual.clamp(0.0, 1.0)
+    }
+
+    /// Lens switch knob position 0..1 (animated).
+    #[inline]
+    pub fn lens_toggle_t(&self) -> f32 {
+        self.lens_visual.clamp(0.0, 1.0)
     }
 
     /// Prefs file path this state reads/writes.
@@ -346,6 +369,26 @@ impl SettingsState {
         } else if self.overlay > target {
             self.overlay = (self.overlay - step).max(target);
         }
+
+        // --- switch knobs: spring toward boolean prefs (snappy Apple-ish) ---
+        const TK: f32 = 280.0;
+        const TC: f32 = 28.0;
+        let rain_t = if self.prefs.rain { 1.0 } else { 0.0 };
+        let force_r = -TK * (self.rain_visual - rain_t) - TC * self.rain_visual_vel;
+        self.rain_visual_vel += force_r * dt;
+        self.rain_visual = (self.rain_visual + self.rain_visual_vel * dt).clamp(0.0, 1.0);
+        if (self.rain_visual - rain_t).abs() < 0.002 && self.rain_visual_vel.abs() < 0.02 {
+            self.rain_visual = rain_t;
+            self.rain_visual_vel = 0.0;
+        }
+        let lens_t = if self.prefs.lens { 1.0 } else { 0.0 };
+        let force_l = -TK * (self.lens_visual - lens_t) - TC * self.lens_visual_vel;
+        self.lens_visual_vel += force_l * dt;
+        self.lens_visual = (self.lens_visual + self.lens_visual_vel * dt).clamp(0.0, 1.0);
+        if (self.lens_visual - lens_t).abs() < 0.002 && self.lens_visual_vel.abs() < 0.02 {
+            self.lens_visual = lens_t;
+            self.lens_visual_vel = 0.0;
+        }
     }
 
     /// Ease content for opacity / scale (slight ease on spring for nicer feel).
@@ -509,14 +552,17 @@ impl SettingsLayout {
 
     /// Knob inside the track (`on` = right side).
     pub fn toggle_thumb_rect(row: Rect, on: bool) -> Rect {
+        Self::toggle_thumb_rect_t(row, if on { 1.0 } else { 0.0 })
+    }
+
+    /// Knob position lerped by `t` in 0..1 (animated switch).
+    pub fn toggle_thumb_rect_t(row: Rect, t: f32) -> Rect {
         let track = Self::toggle_track_rect(row);
         let d = 20.0;
         let pad = 3.0;
-        let x = if on {
-            track.x + track.w - pad - d
-        } else {
-            track.x + pad
-        };
+        let x0 = track.x + pad;
+        let x1 = track.x + track.w - pad - d;
+        let x = x0 + (x1 - x0) * t.clamp(0.0, 1.0);
         Rect::new(x, track.y + (track.h - d) * 0.5, d, d)
     }
 }
@@ -604,6 +650,28 @@ mod tests {
         assert!(r.contains(track.x + 1.0, track.y + 1.0));
         let thumb = SettingsLayout::toggle_thumb_rect(r, true);
         assert!(track.contains(thumb.x + 1.0, thumb.y + 1.0));
+        // Animated mid position sits between off and on.
+        let off = SettingsLayout::toggle_thumb_rect_t(r, 0.0);
+        let mid = SettingsLayout::toggle_thumb_rect_t(r, 0.5);
+        let on = SettingsLayout::toggle_thumb_rect_t(r, 1.0);
+        assert!(mid.x > off.x && mid.x < on.x);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn toggle_visual_springs_toward_pref() {
+        let (path, mut s) = fresh();
+        s.prefs.rain = true;
+        s.rain_visual = 0.0;
+        for _ in 0..90 {
+            s.tick(1.0 / 60.0);
+        }
+        assert!(s.rain_toggle_t() > 0.95);
+        s.prefs.rain = false;
+        for _ in 0..90 {
+            s.tick(1.0 / 60.0);
+        }
+        assert!(s.rain_toggle_t() < 0.05);
         cleanup(&path);
     }
 

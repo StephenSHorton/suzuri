@@ -1488,15 +1488,16 @@ fn push_modal_glass(
                 PanelKind::ModalButton
             };
             panels.push(PanelInstance::glass(*r, m.chip_radius, kind).with_opacity(ease));
-            // Boolean rows: Apple-style glass switch (track + thumb).
+            // Boolean rows: Apple-style glass switch (track + spring-animated thumb).
             if i == settings_row::RAIN || i == settings_row::LENS {
-                let on = if i == settings_row::RAIN {
-                    settings.prefs.rain
+                let t = if i == settings_row::RAIN {
+                    settings.rain_toggle_t()
                 } else {
-                    settings.prefs.lens
+                    settings.lens_toggle_t()
                 };
                 let track = crate::settings::SettingsLayout::toggle_track_rect(*r);
-                let track_kind = if on {
+                // Track lights up as the knob crosses the midpoint.
+                let track_kind = if t > 0.5 {
                     PanelKind::ModalButtonActive
                 } else {
                     PanelKind::ModalFrost
@@ -1504,7 +1505,7 @@ fn push_modal_glass(
                 panels.push(
                     PanelInstance::glass(track, track.h * 0.5, track_kind).with_opacity(ease),
                 );
-                let thumb = crate::settings::SettingsLayout::toggle_thumb_rect(*r, on);
+                let thumb = crate::settings::SettingsLayout::toggle_thumb_rect_t(*r, t);
                 panels.push(
                     PanelInstance::glass(thumb, thumb.h * 0.5, PanelKind::ModalButton)
                         .with_opacity(ease),
