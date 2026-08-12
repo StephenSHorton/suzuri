@@ -22,6 +22,9 @@ SetCompressor /SOLID lzma
 !ifndef SOURCE_TRANSFER
   !define SOURCE_TRANSFER ""
 !endif
+!ifndef SOURCE_CHROME
+  !define SOURCE_CHROME ""
+!endif
 !ifndef ICON
   !define ICON "assets\icon\suzuri.ico"
 !endif
@@ -76,11 +79,16 @@ Section "suzuri" SecMain
   Pop $0
   nsExec::ExecToLog 'taskkill /IM suzuri-transfer.exe /F'
   Pop $0
+  nsExec::ExecToLog 'taskkill /IM suzuri-chrome.exe /F'
+  Pop $0
   Sleep 300
 
   File "/oname=suzuri.exe" "${SOURCE_EXE}"
   !if "${SOURCE_TRANSFER}" != ""
     File "/oname=suzuri-transfer.exe" "${SOURCE_TRANSFER}"
+  !endif
+  !if "${SOURCE_CHROME}" != ""
+    File "/oname=suzuri-chrome.exe" "${SOURCE_CHROME}"
   !endif
   File "${ICON}"
 
@@ -130,12 +138,16 @@ Section "Uninstall"
   Pop $0
   nsExec::ExecToLog 'taskkill /IM suzuri-transfer.exe /F'
   Pop $0
+  nsExec::ExecToLog 'taskkill /IM suzuri-chrome.exe /F'
+  Pop $0
   Sleep 300
 
   Delete "$INSTDIR\suzuri.exe"
   Delete "$INSTDIR\suzuri.exe.old"
   Delete "$INSTDIR\suzuri-transfer.exe"
   Delete "$INSTDIR\suzuri-transfer.exe.old"
+  Delete "$INSTDIR\suzuri-chrome.exe"
+  Delete "$INSTDIR\suzuri-chrome.exe.old"
   Delete "$INSTDIR\suzuri.ico"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

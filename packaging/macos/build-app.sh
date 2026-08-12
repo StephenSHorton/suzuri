@@ -5,6 +5,7 @@
 #   packaging/macos/build-app.sh \
 #     --binary ./suzuri \
 #     --transfer ./suzuri-transfer \
+#     --chrome ./suzuri-chrome \
 #     --version 0.9.29 \
 #     --out dist
 #
@@ -16,6 +17,7 @@ set -euo pipefail
 
 BINARY=""
 TRANSFER=""
+CHROME=""
 VERSION="0.0.0-dev"
 OUT_DIR="dist"
 ARCH="$(uname -m)"
@@ -29,11 +31,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) BINARY="$2"; shift 2 ;;
     --transfer) TRANSFER="$2"; shift 2 ;;
+    --chrome) CHROME="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
     --arch) GOARCH="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,22p' "$0"
+      sed -n '2,25p' "$0"
       exit 0
       ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
@@ -62,13 +65,18 @@ echo "==> assembling $APP_NAME (version $VERSION)"
 rm -rf "$APP_PATH"
 mkdir -p "$MACOS_DIR" "$RES_DIR"
 
-# Executable + optional P2P transfer engine (sibling for ResolveBinary).
+# Executable + optional sidecars (sibling layout for chromehost / transfer Resolve).
 cp "$BINARY" "$MACOS_DIR/suzuri"
 chmod +x "$MACOS_DIR/suzuri"
 if [[ -n "$TRANSFER" && -f "$TRANSFER" ]]; then
   cp "$TRANSFER" "$MACOS_DIR/suzuri-transfer"
   chmod +x "$MACOS_DIR/suzuri-transfer"
   echo "==> bundled transfer engine"
+fi
+if [[ -n "$CHROME" && -f "$CHROME" ]]; then
+  cp "$CHROME" "$MACOS_DIR/suzuri-chrome"
+  chmod +x "$MACOS_DIR/suzuri-chrome"
+  echo "==> bundled native chrome (suzuri-chrome)"
 fi
 
 # Info.plist with version stamped

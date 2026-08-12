@@ -54,7 +54,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # P2P transfer engine lives in-repo: libs/transfer (Rust/iroh).
+      # P2P transfer engine + native GPU chrome live in-repo (Rust).
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -63,6 +63,13 @@ jobs:
         with:
           workspaces: libs/transfer -> libs/transfer/target
           shared-key: suzuri-transfer-${{ matrix.goos }}-${{ matrix.goarch }}
+          cache-targets: false
+
+      - name: Cache cargo (native chrome)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: chrome -> chrome/target
+          shared-key: suzuri-chrome-${{ matrix.goos }}-${{ matrix.goarch }}
           cache-targets: false
 
       - name: Resolve version
@@ -82,6 +89,10 @@ jobs:
         shell: bash
         run: cargo test --manifest-path libs/transfer/Cargo.toml --workspace
 
+      - name: Test native chrome
+        shell: bash
+        run: cargo test --manifest-path chrome/Cargo.toml --bins
+
       - name: Build transfer engine
         shell: bash
         run: |
@@ -94,6 +105,19 @@ jobs:
             chmod +x ./suzuri-transfer
           fi
           ls -la ./suzuri-transfer*
+
+      - name: Build native chrome
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --manifest-path chrome/Cargo.toml --bin suzuri-chrome
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            cp chrome/target/release/suzuri-chrome.exe ./suzuri-chrome.exe
+          else
+            cp chrome/target/release/suzuri-chrome ./suzuri-chrome
+            chmod +x ./suzuri-chrome
+          fi
+          ls -la ./suzuri-chrome*
 
       - name: Build
         shell: bash
@@ -120,16 +144,16 @@ jobs:
           goarch="${{ matrix.goarch }}"
           base="suzuri-$v-$goos-$goarch"
           if [ "$goos" = "windows" ]; then
-            # Portable zip is the in-app update payload (host + transfer engine).
-            7z a -tzip "$base.zip" suzuri.exe suzuri-transfer.exe \
-              || powershell -Command "Compress-Archive -Path suzuri.exe,suzuri-transfer.exe -DestinationPath $base.zip -Force"
-            # Standalone host exe kept for convenience (no transfer engine).
+            # Portable zip: host + transfer + chrome (sibling layout for ResolveBinary).
+            7z a -tzip "$base.zip" suzuri.exe suzuri-transfer.exe suzuri-chrome.exe \
+              || powershell -Command "Compress-Archive -Path suzuri.exe,suzuri-transfer.exe,suzuri-chrome.exe -DestinationPath $base.zip -Force"
+            # Standalone host exe kept for convenience (no sidecars).
             cp suzuri.exe "$base.exe"
           else
             # Bare host binary (legacy); zip is preferred update payload.
             cp suzuri "$base"
-            chmod +x "$base" suzuri-transfer
-            zip -9 "$base.zip" suzuri suzuri-transfer
+            chmod +x "$base" suzuri-transfer suzuri-chrome
+            zip -9 "$base.zip" suzuri suzuri-transfer suzuri-chrome
           fi
           ls -la suzuri-*
 
@@ -152,15 +176,18 @@ jobs:
           $out = Join-Path $root "suzuri-$v-windows-amd64-setup.exe"
           $exe = Join-Path $root "suzuri.exe"
           $xfer = Join-Path $root "suzuri-transfer.exe"
+          $chrome = Join-Path $root "suzuri-chrome.exe"
           $ico = Join-Path $root "assets\icon\suzuri.ico"
           if (-not (Test-Path $exe)) { throw "missing $exe" }
           if (-not (Test-Path $xfer)) { throw "missing $xfer" }
+          if (-not (Test-Path $chrome)) { throw "missing $chrome" }
           if (-not (Test-Path $ico)) { throw "missing $ico" }
           & $makensis `
             "/DVERSION=$v" `
             "/DOUTFILE=$out" `
             "/DSOURCE_EXE=$exe" `
             "/DSOURCE_TRANSFER=$xfer" `
+            "/DSOURCE_CHROME=$chrome" `
             "/DICON=$ico" `
             (Join-Path $root "packaging\windows\suzuri.nsi")
           if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
@@ -224,6 +251,7 @@ jobs:
           packaging/macos/build-app.sh \
             --binary ./suzuri \
             --transfer ./suzuri-transfer \
+            --chrome ./suzuri-chrome \
             --version "$v" \
             --arch "$arch" \
             --out dist-mac
