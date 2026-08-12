@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/StephenSHorton/suzuri/internal/update"
 )
 
 func TestParseUpdateReq(t *testing.T) {
@@ -68,6 +70,41 @@ func TestApplyGate(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Wait did not return after Finish")
 	}
+}
+
+type fakeUpdater struct {
+	current string
+	info    *update.Info
+	err     error
+	applied *update.Info
+}
+
+func (f *fakeUpdater) Current() string { return f.current }
+
+func (f *fakeUpdater) Check() (*update.Info, error) { return f.info, f.err }
+
+func (f *fakeUpdater) DownloadAndApply(info update.Info) error {
+	cp := info
+	f.applied = &cp
+	return f.err
+}
+
+func TestStoreLikeUpdaterOffers(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+	f := &fakeUpdater{current: "0.9.105", info: &update.Info{Version: "0.9.116"}}
+	b := newUpdateBridge(f, newApplyGate())
+	b.runCheck(false)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		body, err := os.ReadFile(updateEvtPath())
+		if err == nil && strings.Contains(string(body), "offer 0.9.116") {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	body, _ := os.ReadFile(updateEvtPath())
+	t.Fatalf("expected store-like offer for v0.9.116, evt=%q path=%s", body, updateEvtPath())
 }
 
 func TestNilServiceToastsStore(t *testing.T) {

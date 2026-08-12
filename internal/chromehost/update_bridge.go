@@ -2,6 +2,7 @@ package chromehost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,10 +62,11 @@ func (g *applyGate) Wait(d time.Duration) {
 	}
 }
 
-// updateBridge is the host half of the GitHub Releases updater (classic
+// updateBridge is the host half of the updater mailbox (classic
 // internal/ui/updater.go). One in-flight check; confirm required before apply.
+// svc is a GitHub *update.Service or a Store *update.StoreService.
 type updateBridge struct {
-	svc  *update.Service
+	svc  update.Updater
 	gate *applyGate
 
 	pendingMu    sync.Mutex
@@ -75,14 +77,14 @@ type updateBridge struct {
 	later        string
 }
 
-func newUpdateBridge(svc *update.Service, gate *applyGate) *updateBridge {
+func newUpdateBridge(svc update.Updater, gate *applyGate) *updateBridge {
 	return &updateBridge{svc: svc, gate: gate}
 }
 
 // RunUpdateBridge polls chrome's update_req mailbox, runs a startup check, and
 // writes toast/offer events. stop is closed when the UI process exits without
 // an in-flight apply.
-func RunUpdateBridge(ctx context.Context, svc *update.Service, gate *applyGate, stop <-chan struct{}) {
+func RunUpdateBridge(ctx context.Context, svc update.Updater, gate *applyGate, stop <-chan struct{}) {
 	b := newUpdateBridge(svc, gate)
 	_ = os.Remove(updateReqPath())
 	_ = os.Remove(updateEvtPath())
@@ -199,7 +201,11 @@ func (b *updateBridge) applyPending() {
 		log.Info("update: applying after confirm", "version", info.Version)
 		if err := b.svc.DownloadAndApply(*info); err != nil {
 			log.Warn("update apply failed", "err", err)
-			writeUpdateEvt("toast update install failed")
+			if errors.Is(err, update.ErrStoreCanceled) {
+				writeUpdateEvt("toast update canceled")
+			} else {
+				writeUpdateEvt("toast update install failed")
+			}
 			if b.gate != nil {
 				b.gate.Finish()
 			}
@@ -207,6 +213,13 @@ func (b *updateBridge) applyPending() {
 			b.offerMu.Lock()
 			b.offered = info.Version
 			b.offerMu.Unlock()
+			return
+		}
+		// GitHub apply os.Exits on success. Store apply may return after
+		// the package is staged and the app needs a restart.
+		writeUpdateEvt(fmt.Sprintf("toast v%s installed — restart suzuri", info.Version))
+		if b.gate != nil {
+			b.gate.Finish()
 		}
 	}()
 }
@@ -242,7 +255,11 @@ func (b *updateBridge) peekPending() *update.Info {
 	return b.pending
 }
 
+var updateEvtMu sync.Mutex
+
 func writeUpdateEvt(body string) {
+	updateEvtMu.Lock()
+	defer updateEvtMu.Unlock()
 	path := updateEvtPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		log.Debug("update: mkdir evt", "err", err)
@@ -252,17 +269,20 @@ func writeUpdateEvt(body string) {
 		body += "\n"
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
+	payload := []byte(body)
+	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
 		log.Debug("update: write evt", "err", err)
 		return
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	for i := 0; i < 8; i++ {
 		_ = os.Remove(path)
-		if err2 := os.Rename(tmp, path); err2 != nil {
-			_ = os.Remove(tmp)
-			log.Debug("update: install evt", "err", err2)
+		if err := os.Rename(tmp, path); err == nil {
+			return
 		}
+		time.Sleep(time.Duration(4*(i+1)) * time.Millisecond)
 	}
+	_ = os.WriteFile(path, payload, 0o644)
+	_ = os.Remove(tmp)
 }
 
 // parseUpdateReq is exported for tests (single verb).
