@@ -163,12 +163,23 @@ pub struct FrameLayout {
     pub caffeine: Rect,
     /// Dynamic tab chips (left → right) in the title bar.
     pub tab_chips: Vec<Rect>,
+    /// Close (×) hit target inside each tab chip — same length as [`tab_chips`].
+    pub tab_closes: Vec<Rect>,
     pub tab_active: Rect,
     pub tab_idle: Rect,
     pub tab_new: Rect,
     /// Same as [`logo`] — settings is the logo button.
     pub settings: Rect,
 }
+
+/// Tab chip width (room for title + gap + close ×).
+pub const TAB_CHIP_W: f32 = 112.0;
+/// Close × size inside a tab chip.
+pub const TAB_CLOSE_SZ: f32 = 14.0;
+/// Inset from the chip’s right edge to the close ×.
+pub const TAB_CLOSE_TRAIL: f32 = 10.0;
+/// Gap between title text area and close ×.
+pub const TAB_CLOSE_GAP: f32 = 6.0;
 
 impl FrameLayout {
     /// Compute chrome chrome for `tab_count` strip tabs (single full-workspace pane).
@@ -198,7 +209,7 @@ impl FrameLayout {
         // sliding chips down.
         let chip_h = m.spacing.unit * 4.0; // 32
         let cluster = m.cluster();
-        let chip_w = m.spacing.unit * 12.0; // 96
+        let chip_w = TAB_CHIP_W; // title + air + close ×
         let logo_w = chip_h; // square glass
         let chip_y = ((chrome_h - chip_h) * 0.5).max(0.0);
         let chip_bottom = chip_y + chip_h;
@@ -261,11 +272,17 @@ impl FrameLayout {
 
         let mut x = tabs_left;
         let mut tab_chips = Vec::with_capacity(tab_count);
+        let mut tab_closes = Vec::with_capacity(tab_count);
         for _ in 0..tab_count {
             if x + chip_w > tabs_right {
                 break; // overflow — stop adding chips
             }
-            tab_chips.push(Rect::new(x, chip_y, chip_w, chip_h));
+            let chip = Rect::new(x, chip_y, chip_w, chip_h);
+            tab_chips.push(chip);
+            // Close ×: right side of chip with trail padding (not jammed in the corner).
+            let cx = chip.x + chip.w - TAB_CLOSE_TRAIL - TAB_CLOSE_SZ;
+            let cy = chip.y + (chip.h - TAB_CLOSE_SZ) * 0.5;
+            tab_closes.push(Rect::new(cx, cy, TAB_CLOSE_SZ, TAB_CLOSE_SZ));
             x += chip_w + cluster;
         }
         // Ghost + control: smaller hit/glass shell; icon stays full size in paint.
@@ -293,11 +310,23 @@ impl FrameLayout {
             logo,
             caffeine,
             tab_chips,
+            tab_closes,
             tab_active,
             tab_idle,
             tab_new,
             settings,
         }
+    }
+
+    /// Title label area inside a tab chip (excludes close × + gaps).
+    pub fn tab_title_rect(chip: Rect) -> Rect {
+        let right = TAB_CLOSE_TRAIL + TAB_CLOSE_SZ + TAB_CLOSE_GAP;
+        Rect::new(
+            chip.x + 10.0,
+            chip.y,
+            (chip.w - 10.0 - right).max(8.0),
+            chip.h,
+        )
     }
 
     /// Replace pane glass rects from a split-tree layout pass.

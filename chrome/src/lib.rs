@@ -73,8 +73,8 @@ pub mod ffi;
 pub use ansi::AnsiDecoder;
 pub use cells::{theme as cell_theme, Cell, CellGrid, Cursor};
 pub use commands::{
-    default_commands, filter_commands, splash_hint_rows, Command, CommandAction, HelpState,
-    PaletteState, SplashState,
+    default_commands, filter_commands, help_sections, splash_hint_rows, Command, CommandAction,
+    HelpRow, HelpSection, HelpState, PaletteState, SplashState,
 };
 pub use chrome_status::{
     clear_status, history_tail_of, live_lines_of, publish_status, snap_from_session, status_path,

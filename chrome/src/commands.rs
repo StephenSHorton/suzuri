@@ -175,7 +175,7 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "new_tab",
             title: "New tab",
-            desc: format!("{} · Tabs", chord(m, "T")),
+            desc: format!("{} · Tabs", chord(&ms, "T")),
             category: "Tabs",
             action: CommandAction::NewTab,
         },
@@ -428,6 +428,205 @@ impl PaletteState {
         let cur = self.selected as i32;
         self.selected = ((cur + delta).rem_euclid(n)) as usize;
     }
+}
+
+/// One row in the product-style shortcuts sheet.
+#[derive(Clone, Debug)]
+pub struct HelpRow {
+    pub keys: String,
+    pub desc: &'static str,
+}
+
+/// Titled group of shortcut rows (product `helpSectionBlock`).
+#[derive(Clone, Debug)]
+pub struct HelpSection {
+    pub title: &'static str,
+    pub rows: Vec<HelpRow>,
+}
+
+/// Full product-parity keyboard reference (not the palette registry).
+pub fn help_sections() -> Vec<HelpSection> {
+    let m = mod_key();
+    let ms = mod_shift();
+    let ma = mod_alt();
+    let clear_line = if is_mac() {
+        format!("{} · Esc", chord(m, "⌫"))
+    } else {
+        format!("Esc · {}", chord(m, "U"))
+    };
+    let open_url = if is_mac() {
+        "⌘-click".into()
+    } else {
+        "Ctrl-click".into()
+    };
+    let focus_panes = if is_mac() {
+        format!("{} arrows", ma)
+    } else {
+        "Alt+arrows".into()
+    };
+    let word_jump = if is_mac() {
+        "⌥+← / ⌥+→".into()
+    } else {
+        "Ctrl+← / Ctrl+→".into()
+    };
+    let line_ends = if is_mac() {
+        format!("{} · Home/End", chord(m, "←→"))
+    } else {
+        "Home / End".into()
+    };
+    let tab_nav = format!(
+        "{} · {} · {}",
+        chord(&ms, "←→"),
+        chord(&ms, "[ ]"),
+        chord(m, "Tab")
+    );
+    vec![
+        HelpSection {
+            title: "Tabs",
+            rows: vec![
+                HelpRow {
+                    keys: chord(&ms, "T"),
+                    desc: "New tab",
+                },
+                HelpRow {
+                    keys: chord(&ms, "N"),
+                    desc: "New window",
+                },
+                HelpRow {
+                    keys: tab_nav,
+                    desc: "Prev / next",
+                },
+                HelpRow {
+                    keys: chord(m, "1-9"),
+                    desc: "Jump to tab",
+                },
+                HelpRow {
+                    keys: "Strip × · palette".into(),
+                    desc: "Close tab",
+                },
+                HelpRow {
+                    keys: "Palette · double-click".into(),
+                    desc: "Rename tab",
+                },
+            ],
+        },
+        HelpSection {
+            title: "Command line",
+            rows: vec![
+                HelpRow {
+                    keys: "Enter".into(),
+                    desc: "Run command",
+                },
+                HelpRow {
+                    keys: "↑ / ↓".into(),
+                    desc: "History",
+                },
+                HelpRow {
+                    keys: clear_line,
+                    desc: "Clear line",
+                },
+                HelpRow {
+                    keys: chord(m, "C"),
+                    desc: "Clear draft",
+                },
+                HelpRow {
+                    keys: chord(m, "V"),
+                    desc: "Paste into bar",
+                },
+            ],
+        },
+        HelpSection {
+            title: "Terminal",
+            rows: vec![
+                HelpRow {
+                    keys: format!("{} · dbl-click · tpl-click", chord(&ms, "C")),
+                    desc: "Copy selection",
+                },
+                HelpRow {
+                    keys: "Wheel · PageUp/Down".into(),
+                    desc: "Scrollback",
+                },
+                HelpRow {
+                    keys: open_url,
+                    desc: "Open URL",
+                },
+                HelpRow {
+                    keys: "Hover link".into(),
+                    desc: "Highlight",
+                },
+            ],
+        },
+        HelpSection {
+            title: "Panes",
+            rows: vec![
+                HelpRow {
+                    keys: chord(&ms, "D"),
+                    desc: "Split right",
+                },
+                HelpRow {
+                    keys: chord(&ms, "E"),
+                    desc: "Split down",
+                },
+                HelpRow {
+                    keys: focus_panes,
+                    desc: "Focus pane",
+                },
+                HelpRow {
+                    keys: word_jump,
+                    desc: "Word jump (PTY)",
+                },
+                HelpRow {
+                    keys: line_ends,
+                    desc: "Line ends",
+                },
+                HelpRow {
+                    keys: "F2".into(),
+                    desc: "Rename pane",
+                },
+                HelpRow {
+                    keys: chord(m, "W"),
+                    desc: "Close pane (last → tab)",
+                },
+            ],
+        },
+        HelpSection {
+            title: "Chrome",
+            rows: vec![
+                HelpRow {
+                    keys: chord(m, "K"),
+                    desc: "Palette",
+                },
+                HelpRow {
+                    keys: chord(m, ","),
+                    desc: "Settings",
+                },
+                HelpRow {
+                    keys: chord(m, "/"),
+                    desc: "Help (this window)",
+                },
+                HelpRow {
+                    keys: chord(&ms, "M"),
+                    desc: "Notes",
+                },
+                HelpRow {
+                    keys: "☕ top-right".into(),
+                    desc: "Toggle caffeine",
+                },
+                HelpRow {
+                    keys: format!("{} / {}", chord(m, "+"), chord(m, "-")),
+                    desc: "Zoom in / out",
+                },
+                HelpRow {
+                    keys: chord(m, "0"),
+                    desc: "Reset zoom",
+                },
+                HelpRow {
+                    keys: "Esc".into(),
+                    desc: "Dismiss overlay",
+                },
+            ],
+        },
+    ]
 }
 
 /// Help / shortcuts overlay (reuses palette-like presentation).
@@ -765,6 +964,17 @@ mod tests {
         // Sanity: chord() helper
         assert_eq!(chord("⌘", "K"), "⌘+K");
         assert_eq!(chord("⇧+⌘", "T"), "⇧+⌘+T");
+    }
+
+    #[test]
+    fn help_sections_cover_product_groups() {
+        let secs = help_sections();
+        let titles: Vec<_> = secs.iter().map(|s| s.title).collect();
+        for need in ["Tabs", "Command line", "Terminal", "Panes", "Chrome"] {
+            assert!(titles.contains(&need), "missing section {need}");
+        }
+        let n: usize = secs.iter().map(|s| s.rows.len()).sum();
+        assert!(n >= 20, "expected product-scale shortcut list, got {n}");
     }
 
     #[test]

@@ -10,6 +10,8 @@ pub enum HitTarget {
     Zoom,
     /// Tab chip index into [`FrameLayout::tab_chips`].
     Tab(usize),
+    /// Close (×) on tab strip index.
+    TabClose(usize),
     NewTab,
     Settings,
     /// Top-right caffeine cup (left of logo).
@@ -97,6 +99,12 @@ pub fn hit_test(
         return HitTarget::Settings;
     }
 
+    // Close × first (sits inside the chip; higher priority than select).
+    for (i, close) in layout.tab_closes.iter().enumerate() {
+        if close.contains(x, y) {
+            return HitTarget::TabClose(i);
+        }
+    }
     for (i, chip) in layout.tab_chips.iter().enumerate() {
         if chip.contains(x, y) {
             return HitTarget::Tab(i);
@@ -187,22 +195,35 @@ mod tests {
     fn tabs_and_panels() {
         let (layout, m) = demo_layout();
         assert_eq!(layout.tab_chips.len(), 2);
+        assert_eq!(layout.tab_closes.len(), 2);
+        // Left band of chip → select (not the close × on the right).
         assert_eq!(
             hit_test(
                 &layout,
                 &m,
-                layout.tab_chips[0].x + 1.0,
-                layout.tab_chips[0].y + 1.0,
+                layout.tab_chips[0].x + 12.0,
+                layout.tab_chips[0].y + layout.tab_chips[0].h * 0.5,
                 false
             ),
             HitTarget::Tab(0)
+        );
+        let c0 = layout.tab_closes[0];
+        assert_eq!(
+            hit_test(
+                &layout,
+                &m,
+                c0.x + c0.w * 0.5,
+                c0.y + c0.h * 0.5,
+                false
+            ),
+            HitTarget::TabClose(0)
         );
         assert_eq!(
             hit_test(
                 &layout,
                 &m,
-                layout.tab_chips[1].x + 1.0,
-                layout.tab_chips[1].y + 1.0,
+                layout.tab_chips[1].x + 12.0,
+                layout.tab_chips[1].y + layout.tab_chips[1].h * 0.5,
                 false
             ),
             HitTarget::Tab(1)
@@ -254,8 +275,8 @@ mod tests {
             hit_test(
                 &layout,
                 &m,
-                layout.tab_chips[3].x + 1.0,
-                layout.tab_chips[3].y + 1.0,
+                layout.tab_chips[3].x + 12.0,
+                layout.tab_chips[3].y + layout.tab_chips[3].h * 0.5,
                 false
             ),
             HitTarget::Tab(3)

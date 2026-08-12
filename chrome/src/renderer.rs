@@ -8,7 +8,8 @@ use winit::window::Window;
 
 use crate::chrome_ui::{ChipUi, TabJelly};
 use crate::commands::{
-    filter_commands, splash_hint_rows, Command, HelpState, PaletteState, SplashState,
+    filter_commands, help_sections, splash_hint_rows, Command, HelpState, PaletteState,
+    SplashState,
 };
 use crate::confirm::ConfirmState;
 use crate::input::{is_mac, traffic_light_rects};
@@ -1218,12 +1219,29 @@ fn chrome_labels(
         // Labels always sit on the layout chip — never follow the jelly goo
         // (that made the clicked tab's title jump into the previous active tab).
         let r = scale_rect(*chip, chip_ui.scale_for(ChipId::Tab(i)));
+        // Title sits in the left band; close × has its own rect on the right.
+        let title_r = crate::layout::FrameLayout::tab_title_rect(r);
         labels.push(TextLabel::centered(
             title,
-            [r.x, r.y, r.w, r.h],
+            [title_r.x, title_r.y, title_r.w, title_r.h],
             tab_size,
             color,
         ));
+        if let Some(close) = layout.tab_closes.get(i) {
+            let cr = scale_rect(*close, chip_ui.scale_for(ChipId::Tab(i)));
+            let close_on = chip_ui.hover == Some(ChipId::Tab(i));
+            let xc = if close_on {
+                [0.95, 0.55, 0.50, 0.95]
+            } else {
+                dim
+            };
+            labels.push(TextLabel::centered(
+                "×",
+                [cr.x, cr.y, cr.w, cr.h],
+                13.0,
+                xc,
+            ));
+        }
     }
 
     // Ghost + : icon always full size; only the glass shell is press-only (layout).
@@ -1524,7 +1542,7 @@ fn push_modal_glass(
 
     if help.visible() {
         let ease = help.content_ease().clamp(0.0, 1.0);
-        let modal = overlay_modal_rect(win_w, win_h, 640.0, 360.0);
+        let modal = overlay_modal_rect(win_w, win_h, 720.0, 480.0);
         panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
         let pad = 14.0;
         let btn_h = 32.0;
@@ -1907,44 +1925,90 @@ fn push_modal_labels(
 
     if help.visible() {
         let ease = help.content_ease().clamp(0.0, 1.0);
-        let modal = overlay_modal_rect(win_w, win_h, 640.0, 360.0);
+        // Product two-col card: wide enough for keys + desc.
+        let modal = overlay_modal_rect(win_w, win_h, 720.0, 480.0);
         let mut title_c = bright;
         title_c[3] *= ease;
         labels.push(TextLabel::new(
-            "Keyboard shortcuts",
+            "Shortcuts",
             modal.x + 16.0,
-            modal.y + 14.0,
+            modal.y + 12.0,
             15.0,
             title_c,
         ));
         let pad = 14.0;
-        let btn_h = 32.0;
-        let gap = 5.0;
-        let mut y = modal.y + 44.0;
-        let max_y = modal.y + modal.h - pad;
-        for c in commands.iter().take(8) {
-            if y + btn_h > max_y {
+        let sections = help_sections();
+        // Two columns when wide enough (product helpBodyTwoCol).
+        let two_col = modal.w >= 560.0;
+        let col_gap = 16.0;
+        let col_w = if two_col {
+            (modal.w - pad * 2.0 - col_gap) * 0.5
+        } else {
+            modal.w - pad * 2.0
+        };
+        let left_x = modal.x + pad;
+        let right_x = left_x + col_w + col_gap;
+        let mut y_left = modal.y + 40.0;
+        let mut y_right = modal.y + 40.0;
+        let max_y = modal.y + modal.h - pad - 8.0;
+        let row_h = 18.0;
+        let sec_gap = 10.0;
+        let mid = (sections.len() + 1) / 2;
+        for (si, sec) in sections.iter().enumerate() {
+            let (x, y) = if two_col && si >= mid {
+                (right_x, &mut y_right)
+            } else if two_col {
+                (left_x, &mut y_left)
+            } else {
+                (left_x, &mut y_left)
+            };
+            if *y + row_h > max_y {
                 break;
             }
-            // Title and shortcut chord share the same label color (not dim).
-            let mut tc = bright;
-            tc[3] *= ease;
+            let mut sc = muted;
+            sc[3] *= ease;
             labels.push(TextLabel::new(
-                c.title.to_string(),
-                modal.x + pad + 12.0,
-                y + 8.0,
-                12.0,
-                tc,
+                sec.title.to_string(),
+                x,
+                *y,
+                11.0,
+                sc,
             ));
-            labels.push(TextLabel::new(
-                c.desc.clone(),
-                modal.x + modal.w * 0.42,
-                y + 8.0,
-                12.0,
-                tc,
-            ));
-            y += btn_h + gap;
+            *y += row_h + 2.0;
+            for row in &sec.rows {
+                if *y + row_h > max_y {
+                    break;
+                }
+                let mut kc = bright;
+                kc[3] *= ease;
+                // Keys and description share label color (not dim).
+                labels.push(TextLabel::new(
+                    row.keys.clone(),
+                    x,
+                    *y,
+                    11.0,
+                    kc,
+                ));
+                labels.push(TextLabel::new(
+                    row.desc.to_string(),
+                    x + col_w * 0.48,
+                    *y,
+                    11.0,
+                    kc,
+                ));
+                *y += row_h;
+            }
+            *y += sec_gap;
         }
+        let mut foot = bright;
+        foot[3] *= ease * 0.85;
+        labels.push(TextLabel::new(
+            "esc  close",
+            modal.x + pad,
+            modal.y + modal.h - 22.0,
+            11.0,
+            foot,
+        ));
     }
 
     if confirm.visible() {

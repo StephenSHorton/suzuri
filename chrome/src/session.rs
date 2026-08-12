@@ -440,6 +440,21 @@ impl ChromeSession {
         }
     }
 
+    /// Jump to tab by strip index (0-based). Product ⌘1–⌘9.
+    pub fn select_tab_index(&mut self, index: usize) -> bool {
+        if let Some(tab) = self.tabs.get(index) {
+            self.active_id = tab.id;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Active tab's index in the strip, if any.
+    pub fn active_tab_index(&self) -> Option<usize> {
+        self.tabs.iter().position(|t| t.id == self.active_id)
+    }
+
     pub fn next_tab(&mut self) {
         if self.tabs.is_empty() {
             return;

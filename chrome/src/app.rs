@@ -126,6 +126,8 @@ pub struct ChromeApp {
     control_mailbox: ControlMailbox,
     /// Publish `chrome_status.json` for Go MCP bridge proxy.
     status_publisher: StatusPublisher,
+    /// UI / terminal zoom multiplier (⌘± / ⌘0). 1.0 = design size.
+    ui_zoom: f32,
 }
 
 impl Default for ChromeApp {
@@ -177,6 +179,7 @@ impl Default for ChromeApp {
             hovered_link_span: None,
             link_cursor_on: false,
             control_mailbox: ControlMailbox::new(),
+            ui_zoom: 1.0,
             status_publisher: StatusPublisher::new(),
         };
         // First-run overlay only — PTY already spawned above.
@@ -363,12 +366,42 @@ impl ChromeApp {
         layout
     }
 
-    /// Mono cell pitch (logical px) — measured Gohu when renderer is up.
+    /// Mono cell pitch (logical px) — measured Gohu when renderer is up, × zoom.
     fn cell_metrics(&self) -> MonoCellMetrics {
-        self.renderer
+        let base = self
+            .renderer
             .as_ref()
             .map(|r| r.cell_metrics())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let z = self.ui_zoom.clamp(0.75, 1.75);
+        MonoCellMetrics {
+            w: (base.w * z).max(1.0),
+            h: (base.h * z).max(1.0),
+        }
+    }
+
+    fn nudge_zoom(&mut self, delta: f32) {
+        self.ui_zoom = (self.ui_zoom + delta).clamp(0.75, 1.75);
+        self.sync_grids_to_panes();
+        self.toast.show(format!("Zoom {:.0}%", self.ui_zoom * 100.0));
+    }
+
+    fn reset_zoom(&mut self) {
+        self.ui_zoom = 1.0;
+        self.sync_grids_to_panes();
+        self.toast.show("Zoom 100%");
+    }
+
+    fn close_tab_by_id(&mut self, event_loop: &ActiveEventLoop, tab_id: u64) {
+        if self.session.tabs.len() <= 1 {
+            // Last tab → quit (product strip × on sole tab).
+            self.request_quit(event_loop);
+            return;
+        }
+        let pane_ids = self.session.close_tab(tab_id);
+        for id in pane_ids {
+            self.runtimes.remove(&id);
+        }
     }
 
     /// Physical pixel size of a terminal grid for `TIOCGWINSZ`.
@@ -769,6 +802,13 @@ impl ChromeApp {
                 }
             }
             CloseOutcome::Animating | CloseOutcome::None => {}
+        }
+    }
+
+    fn select_tab_index(&mut self, index: usize) {
+        if self.session.select_tab_index(index) {
+            self.warp_focused = true;
+            self.terminal_focused = false;
         }
     }
 
@@ -1216,6 +1256,11 @@ impl ChromeApp {
                     self.terminal_focused = false;
                 }
             }
+            HitTarget::TabClose(i) => {
+                if let Some(tab) = self.session.tabs.get(i).map(|t| t.id) {
+                    self.close_tab_by_id(event_loop, tab);
+                }
+            }
             HitTarget::NewTab => self.new_tab(),
             HitTarget::Caffeine => {
                 let _ = self.caffeine.toggle();
@@ -1624,7 +1669,8 @@ impl ChromeApp {
                         }
                         return;
                     }
-                    "t" | "T" if !shift => {
+                    // Product: ⇧⌘T new tab; also accept ⌘T.
+                    "t" | "T" => {
                         self.new_tab();
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -1660,6 +1706,7 @@ impl ChromeApp {
                         }
                         return;
                     }
+                    // Prev / next tab: ⇧⌘[ ] and ⇧⌘← →
                     "]" if shift => {
                         self.session.next_tab();
                         if let Some(w) = &self.window {
@@ -1674,6 +1721,46 @@ impl ChromeApp {
                         }
                         return;
                     }
+                    // ⌘1–9 jump to tab (product).
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if !shift && !alt => {
+                        if let Some(d) = ch.chars().next().and_then(|c| c.to_digit(10)) {
+                            self.select_tab_index((d as usize).saturating_sub(1));
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                    }
+                    // Zoom: ⌘+ / ⌘= / ⌘- / ⌘0
+                    "+" | "=" if !shift || ch == "+" => {
+                        self.nudge_zoom(0.1);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "-" | "_" => {
+                        self.nudge_zoom(-0.1);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "0" if !shift => {
+                        self.reset_zoom();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    // Clear warp draft: ⌘U (product clear-to-start).
+                    "u" | "U" if !shift && self.warp_focused => {
+                        self.session.draft_mut().clear();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     "v" | "V" if !shift => {
                         self.paste_clipboard();
                         if let Some(w) = &self.window {
@@ -1681,8 +1768,8 @@ impl ChromeApp {
                         }
                         return;
                     }
-                    "c" | "C" if !shift => {
-                        // Transfer open + ticket → copy ticket; else terminal selection.
+                    // Product: ⇧⌘C copy; also ⌘C when selection / transfer ticket.
+                    "c" | "C" if shift || !self.warp_focused || !self.term_selection.is_empty() => {
                         if self.transfer.open || self.transfer.visible() {
                             if self.copy_transfer_ticket_if_any() {
                                 if let Some(w) = &self.window {
@@ -1691,7 +1778,24 @@ impl ChromeApp {
                                 return;
                             }
                         }
-                        self.copy_selection_if_any();
+                        if !self.term_selection.is_empty() {
+                            self.copy_selection_if_any();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        // Warp focus + no selection: ⌘C clears draft (product clear/interrupt).
+                        if self.warp_focused && !shift {
+                            self.session.draft_mut().clear();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                    }
+                    "c" | "C" if !shift && self.warp_focused => {
+                        self.session.draft_mut().clear();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -1700,9 +1804,51 @@ impl ChromeApp {
                     _ => {}
                 }
             }
-            // ⌥⌘ arrows — pane focus
-            if alt {
-                if let Key::Named(nk) = &event.logical_key {
+            // ⌘Tab / ⇧⌘Tab — next / prev tab
+            if matches!(event.logical_key, Key::Named(NamedKey::Tab)) {
+                if shift {
+                    self.session.prev_tab();
+                } else {
+                    self.session.next_tab();
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+            // ⌘⌫ — clear warp line (product clear)
+            if matches!(event.logical_key, Key::Named(NamedKey::Backspace))
+                && self.warp_focused
+                && !shift
+            {
+                self.session.draft_mut().clear();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+            // ⌥⌘ arrows — pane focus; ⇧⌘ arrows — prev/next tab
+            if let Key::Named(nk) = &event.logical_key {
+                if shift && !alt {
+                    match nk {
+                        NamedKey::ArrowLeft | NamedKey::ArrowUp => {
+                            self.session.prev_tab();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        NamedKey::ArrowRight | NamedKey::ArrowDown => {
+                            self.session.next_tab();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                if alt {
                     let dir = match nk {
                         NamedKey::ArrowLeft => Some(FocusDir::Left),
                         NamedKey::ArrowRight => Some(FocusDir::Right),
@@ -2324,17 +2470,13 @@ impl ApplicationHandler for ChromeApp {
                 if let Some(start) = self.middle_press_hit.take() {
                     let end = self.hit_at_cursor();
                     if start == end {
-                        if let HitTarget::Tab(i) = start {
-                            if let Some(tab) = self.session.tabs.get(i) {
-                                let id = tab.id;
-                                let removed = self.session.close_tab(id);
-                                if removed.is_empty() {
-                                    event_loop.exit();
-                                } else {
-                                    for pid in removed {
-                                        self.runtimes.remove(&pid);
-                                    }
-                                }
+                        let idx = match start {
+                            HitTarget::Tab(i) | HitTarget::TabClose(i) => Some(i),
+                            _ => None,
+                        };
+                        if let Some(i) = idx {
+                            if let Some(tab) = self.session.tabs.get(i).map(|t| t.id) {
+                                self.close_tab_by_id(event_loop, tab);
                             }
                         }
                     }
