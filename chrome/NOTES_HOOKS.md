@@ -23,6 +23,8 @@ Product refs: `internal/chrome/notes*.go`, `notes_store.go`
 | `select(i)` / `new_note()` / `delete_active()` | Bank mutations (dirty) |
 | `try_click(x,y,win_w,win_h)` | List / + New / Delete / title / body hit-test |
 | `insert_char` / `backspace` / `move_cursor` | Edit **title or body** per `focus` |
+| `set_focus` / `cycle_focus` | Title ↔ Body; typing always hits the focused field |
+| `undo` / `redo` / `can_undo` / `can_redo` | Body-only history stack (`BODY_HIST_LIMIT` ≈ 50) |
 | `layout(win_w,win_h)` / `refresh_layout` | Shared hit-test geometry |
 | `is_dirty()` / `save()` / `snapshot()` | Persistence |
 | `with_path(path)` | Injectable store for tests |
@@ -52,10 +54,15 @@ Already routed when `notes.open` and no super/ctrl:
 - Printable → `insert_char` (title if `focus == Title`, else body)
 - Backspace / ← / → → `backspace` / `move_cursor`
 - Enter in title → commit focus to body; in body → newline
+- Tab / Shift-Tab → `cycle_focus` Title ↔ Body
 
-Optional polish (not required for bank parity):
+With super/ctrl while notes open:
 
-- Tab / Shift-Tab → `set_focus` Title ↔ Body
+- ⌘Z / Ctrl+Z → `undo` (body)
+- ⇧⌘Z / Ctrl+Shift+Z → `redo` (body)
+
+Optional later:
+
 - Cmd/Ctrl+Backspace or a confirm dialog → `delete_active` (UI row already calls it on click)
 
 ## Dirty / save
@@ -64,6 +71,14 @@ Optional polish (not required for bank parity):
 - `close()` / Esc path: `flush_active` + atomic write (`notes.json.tmp` → rename).
 - Always write on close so `active_id` stays product-compatible even if body unchanged.
 
+## Body undo / redo
+
+- Stack of `{text, cursor}` snapshots pushed **before** each body mutation (`insert_char` / `backspace` on body).
+- Coalesces consecutive identical snapshots; new edit after undo clears redo.
+- Cleared on `select` / `new_note` / `delete_active` (document switch).
+- Title edits do not push; undo still restores body and moves focus to Body.
+- Product ref: `internal/textedit/history.go` + `notesPushUndo` / `notesUndo` / `notesRedo`.
+
 ## Tests
 
 ```bash
@@ -71,10 +86,10 @@ cd chrome && cargo test notes
 ```
 
 - `notes_ops`: create / update / delete / find / full bank / display title  
-- `notes`: temp-path round-trip, multi-note bank, layout hit regions, parse product JSON  
+- `notes`: temp-path round-trip, multi-note bank, layout hit regions, parse product JSON, body undo/redo, title/body focus  
 
 ## Out of scope (parity polish later)
 
-- Undo/redo history, drag-select, word/line click counts  
+- Drag-select, word/line click counts  
 - Full list-only screen (chrome keeps split list+editor)  
 - Confirm dialog before delete (product has confirm; chrome deletes on list row click)  
