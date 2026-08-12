@@ -619,8 +619,9 @@ impl SplashLayout {
             cont_w,
             cont_h,
         );
-        // Mac glyphs (⌘K / ⇧⌘T) are short; Linux uses "Ctrl+Shift+T".
-        let key_col_w = if is_mac() { 76.0 } else { 118.0 };
+        // Mac glyphs (⌘K / ⇧⌘T); Linux uses "Ctrl+Shift+T". Keep wide enough
+        // that left-aligned chords never crowd the description column.
+        let key_col_w = if is_mac() { 88.0 } else { 128.0 };
         Self {
             modal,
             pad,

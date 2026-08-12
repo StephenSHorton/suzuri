@@ -1672,22 +1672,31 @@ fn push_modal_labels(
         ));
         let hints = splash_hint_rows();
         let text_size = 12.0;
+        // Shared left edges so every row’s ⌘ / labels form clean vertical columns.
+        let key_x = lay.rows.first().map(|r| r.x + 12.0).unwrap_or(0.0);
+        let label_x = lay
+            .rows
+            .first()
+            .map(|r| lay.label_x(*r))
+            .unwrap_or(key_x + lay.key_col_w);
         for (row, (key, label)) in lay.rows.iter().zip(hints.into_iter()) {
             let mut kc = bright;
             kc[3] *= ease;
             let mut lc = muted;
             lc[3] *= ease;
-            // Key: fully centered in the left column (same vertical center for all rows).
-            labels.push(TextLabel::centered(
+            // Keys: LEFT-aligned (not centered) — centering made short chords
+            // (⌘,) sit further right than long ones (⇧⌘T).
+            labels.push(TextLabel::key_left_vcenter(
                 key,
-                [row.x, row.y, lay.key_col_w, row.h],
+                key_x,
+                row.y,
+                row.h,
                 text_size,
                 kc,
             ));
-            // Description: left-aligned, same vertical center band as the key.
             labels.push(TextLabel::left_vcenter(
                 label.to_string(),
-                lay.label_x(*row),
+                label_x,
                 row.y,
                 row.h,
                 text_size,

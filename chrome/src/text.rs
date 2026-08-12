@@ -45,6 +45,8 @@ pub struct TextLabel {
     pub rain: bool,
     /// UI symbol (☕) — system symbols face.
     pub symbols: bool,
+    /// Key chords (⌘K / ⇧⌘T) — system UI face so modifiers share one baseline.
+    pub key_chord: bool,
     pub center_in: Option<[f32; 4]>,
 }
 
@@ -59,6 +61,7 @@ impl TextLabel {
             mono: false,
             rain: false,
             symbols: false,
+            key_chord: false,
             center_in: None,
         }
     }
@@ -73,6 +76,7 @@ impl TextLabel {
             mono: true,
             rain: false,
             symbols: false,
+            key_chord: false,
             center_in: None,
         }
     }
@@ -92,6 +96,7 @@ impl TextLabel {
             mono: true,
             rain: false,
             symbols: false,
+            key_chord: false,
             center_in: Some(rect),
         }
     }
@@ -109,6 +114,30 @@ impl TextLabel {
         Self::new(text, x, y, size, color)
     }
 
+    /// Keyboard chord left-aligned + v-centered (shared left edge for all rows).
+    pub fn key_left_vcenter(
+        text: impl Into<String>,
+        x: f32,
+        band_y: f32,
+        band_h: f32,
+        size: f32,
+        color: [f32; 4],
+    ) -> Self {
+        let y = band_y + (band_h - size).max(0.0) * 0.5;
+        Self {
+            text: text.into(),
+            x,
+            y,
+            size,
+            color,
+            mono: false,
+            rain: false,
+            symbols: false,
+            key_chord: true,
+            center_in: None,
+        }
+    }
+
     pub fn symbol_centered(
         text: impl Into<String>,
         rect: [f32; 4],
@@ -124,10 +153,19 @@ impl TextLabel {
             mono: false,
             rain: false,
             symbols: true,
+            key_chord: false,
             center_in: Some(rect),
         }
     }
 }
+
+/// System face for ⌘ ⇧ ⌥ chords — keeps modifiers on one baseline (Gohu mixes poorly).
+#[cfg(target_os = "macos")]
+const KEY_CHORD_FAMILY: &str = "SF Pro Text";
+#[cfg(target_os = "windows")]
+const KEY_CHORD_FAMILY: &str = "Segoe UI";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const KEY_CHORD_FAMILY: &str = "sans-serif";
 
 /// Glyphon-backed text layer for overlay labels.
 pub struct TextLayer {
@@ -286,10 +324,18 @@ impl TextLayer {
             let text = label.text.as_str();
             let is_rain = label.rain;
             let is_symbols = label.symbols;
+            let is_key_chord = label.key_chord;
 
             let buf = &mut self.buffers[i];
             buf.set_metrics(&mut self.font_system, metrics);
-            buf.set_size(&mut self.font_system, Some(max_w), Some(line_height));
+            // Key chords: give the buffer a wide single-line box so multi-glyph
+            // modifiers (⇧⌘T) never wrap into a second line.
+            let buf_h = if is_key_chord {
+                line_height * 1.5
+            } else {
+                line_height
+            };
+            buf.set_size(&mut self.font_system, Some(max_w), Some(buf_h));
 
             if is_rain {
                 #[cfg(target_os = "macos")]
@@ -304,6 +350,10 @@ impl TextLayer {
                 }
             } else if is_symbols {
                 let attrs = Attrs::new().family(Family::Name(SYMBOLS_FAMILY));
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+            } else if is_key_chord {
+                // One system UI face for the whole chord → shared baseline / advances.
+                let attrs = Attrs::new().family(Family::Name(KEY_CHORD_FAMILY));
                 buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
             } else if gohu_ok {
                 // MUST set weight=500 or cosmic-text will not select Gohu.
