@@ -1219,15 +1219,15 @@ fn chrome_labels(
     // Gohu is bitmap-rooted @14 — prefer design size so chrome matches the host.
     let tab_size = 14.0;
     for (i, chip) in layout.tab_chips.iter().enumerate() {
+        let id = ChipId::Tab(i);
         let title = session
             .tabs
             .get(i)
             .map(|t| t.title.as_str())
             .unwrap_or("?");
-        let color = if i == active_idx { bright } else { dim };
-        // Labels always sit on the layout chip — never follow the jelly goo
-        // (that made the clicked tab's title jump into the previous active tab).
-        let r = scale_rect(*chip, chip_ui.scale_for(ChipId::Tab(i)));
+        let color = chip_ui.dim_color(id, if i == active_idx { bright } else { dim });
+        // Labels sit on layout chips — no hover scale.
+        let r = scale_rect(*chip, chip_ui.scale_for(id));
         // Title sits in the left band; close × has its own rect on the right.
         let title_r = crate::layout::FrameLayout::tab_title_rect(r);
         labels.push(TextLabel::centered(
@@ -1237,13 +1237,9 @@ fn chrome_labels(
             color,
         ));
         if let Some(close) = layout.tab_closes.get(i) {
-            let cr = scale_rect(*close, chip_ui.scale_for(ChipId::Tab(i)));
-            let close_on = chip_ui.hover == Some(ChipId::Tab(i));
-            let xc = if close_on {
-                [0.95, 0.55, 0.50, 0.95]
-            } else {
-                dim
-            };
+            let cr = scale_rect(*close, chip_ui.scale_for(id));
+            // × only dims on hover — no red flash.
+            let xc = chip_ui.dim_color(id, dim);
             labels.push(TextLabel::centered(
                 "×",
                 [cr.x, cr.y, cr.w, cr.h],
@@ -1253,28 +1249,20 @@ fn chrome_labels(
         }
     }
 
-    // Ghost + : icon always full size; only the glass shell is press-only (layout).
+    // Ghost + : no hover recolor — just dim.
     {
         let id = ChipId::NewTab;
-        let on = chip_ui.hover == Some(id);
         let r = scale_rect(layout.tab_new, chip_ui.scale_for(id));
-        // Keep glyph size at 16 even though the hit shell is smaller (24).
-        let press = chip_ui.press_light(id);
-        let color = if press > 0.05 {
-            bright
-        } else if on {
-            [0.75, 0.95, 0.82, 0.95]
-        } else {
-            dim
-        };
+        let color = chip_ui.dim_color(id, dim);
         labels.push(TextLabel::centered("+", [r.x, r.y, r.w, r.h], 14.0, color));
     }
 
     // Caffeine ☕ — fully centered in the chip (hint only as short overlay text if timed).
     {
-        let r = scale_rect(layout.caffeine, chip_ui.scale_for(ChipId::Caffeine));
+        let id = ChipId::Caffeine;
+        let r = scale_rect(layout.caffeine, chip_ui.scale_for(id));
         let on = caffeine.active();
-        let color = if on { cafe_on } else { cafe_off };
+        let color = chip_ui.dim_color(id, if on { cafe_on } else { cafe_off });
         let h = if on { caffeine.hint() } else { String::new() };
         // Timed: show cup+hint as one centered label; indefinite/off: cup alone.
         if on && !h.is_empty() && h != "∞" {
@@ -1298,12 +1286,13 @@ fn chrome_labels(
     // 硯 is CJK — Gohu will tofu; glyphon falls through to a system CJK face when
     // the primary face has no glyph (cosmic-text fallback). Size still 14 for grid.
     {
-        let r = scale_rect(layout.logo, chip_ui.scale_for(ChipId::Logo));
+        let id = ChipId::Logo;
+        let r = scale_rect(layout.logo, chip_ui.scale_for(id));
         labels.push(TextLabel::centered(
             "硯",
             [r.x, r.y, r.w, r.h],
             14.0,
-            bright,
+            chip_ui.dim_color(id, bright),
         ));
     }
 

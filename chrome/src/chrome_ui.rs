@@ -65,36 +65,19 @@ impl Default for ChipUi {
 }
 
 impl ChipUi {
-    fn target_scale(&self, id: ChipId) -> f32 {
-        let on = self.hover == Some(id);
-        if id == ChipId::NewTab {
-            // Ghost +: no idle hover inflate; press still shrinks.
-            if on && self.pressed {
-                0.92
-            } else {
-                1.0
-            }
-        } else if on && self.pressed {
-            0.94
-        } else if on {
-            1.06
-        } else {
-            1.0
-        }
-    }
+    /// Hover dim factor applied to chip labels (1 = full, 0.5 = 50% dim).
+    pub const HOVER_DIM: f32 = 0.5;
 
     fn target_press(&self, id: ChipId) -> f32 {
+        // Only press-in wash on mouse down — no hover glow.
         if self.hover == Some(id) && self.pressed {
-            1.0
+            0.35 // soft, not full jade flood
         } else {
             0.0
         }
     }
 
     /// Record hit-test hover + cursor. Call before [`tick`].
-    ///
-    /// Spotlight position only updates while over a chip so leaving freezes the
-    /// light under the exit point and lets strength fade out smoothly.
     pub fn set_hover(&mut self, hover: Option<ChipId>, cursor: (f32, f32)) {
         self.hover = hover;
         if hover.is_some() {
@@ -106,50 +89,41 @@ impl ChipUi {
     pub fn tick(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 1.0 / 20.0);
 
-        // Spotlight: on while over a chip, spring off when leaving (no hard cut).
-        let spot_target = if self.hover.is_some() { 1.0 } else { 0.0 };
-        self.spotlight.spring(dt, spot_target, 260.0, 24.0);
-        self.spotlight.value = self.spotlight.value.clamp(0.0, 1.0);
+        // No hover spotlight / scale — keep strength at 0.
+        self.spotlight.value = 0.0;
+        self.spotlight.vel = 0.0;
 
-        // Ensure currently interactive chips exist in the maps.
-        let mut ids: Vec<ChipId> = self.scale.keys().copied().collect();
+        // Ensure currently interactive chips exist for press settle.
+        let mut ids: Vec<ChipId> = self.press.keys().copied().collect();
         if let Some(h) = self.hover {
             if !ids.contains(&h) {
                 ids.push(h);
             }
         }
-        // Always track logo / newtab / caffeine so they settle after leave.
         for extra in [ChipId::Logo, ChipId::NewTab, ChipId::Caffeine] {
             if !ids.contains(&extra) {
                 ids.push(extra);
             }
         }
-        // Keep a few tab slots warm (scale settles after hover leave).
         for i in 0..8 {
             let t = ChipId::Tab(i);
-            if !ids.contains(&t) && (self.scale.contains_key(&t) || self.press.contains_key(&t)) {
+            if !ids.contains(&t) && self.press.contains_key(&t) {
                 ids.push(t);
             }
         }
 
         for id in ids {
-            let ts = self.target_scale(id);
-            let tp = self.target_press(id);
+            // Scale always 1 — no inflate/shrink on hover.
             let s = self.scale.entry(id).or_insert_with(|| AnimF::at(1.0));
-            // Snappy but smooth — slightly stiffer on press-in.
-            let (k, c) = if self.pressed && self.hover == Some(id) {
-                (420.0, 28.0)
-            } else {
-                (280.0, 24.0)
-            };
-            s.spring(dt, ts, k, c);
+            s.value = 1.0;
+            s.vel = 0.0;
 
+            let tp = self.target_press(id);
             let p = self.press.entry(id).or_insert_with(|| AnimF::at(0.0));
             p.spring(dt, tp, 360.0, 26.0);
             p.value = p.value.clamp(0.0, 1.0);
         }
 
-        // Drop fully settled idle entries so the map doesn't grow forever.
         self.scale.retain(|id, a| {
             let idle = self.hover != Some(*id)
                 && !self.pressed
@@ -159,26 +133,41 @@ impl ChipUi {
         });
     }
 
-    /// Animated spotlight strength 0..1 (shader `hover.w`).
+    /// Spotlight strength — always off (no green hover wash).
     pub fn spotlight(&self) -> f32 {
-        self.spotlight.value.clamp(0.0, 1.0)
+        0.0
     }
 
-    /// Spotlight center (logical px) — last position while over a chip.
+    /// Spotlight center (unused while strength is 0).
     pub fn spotlight_pos(&self) -> [f32; 2] {
         self.hover_pos
     }
 
-    /// Current animated scale for a chip.
-    pub fn scale_for(&self, id: ChipId) -> f32 {
-        self.scale
-            .get(&id)
-            .map(|a| a.value)
-            .unwrap_or(1.0)
-            .clamp(0.85, 1.15)
+    /// Scale always 1 — layout rects stay fixed on hover.
+    pub fn scale_for(&self, _id: ChipId) -> f32 {
+        1.0
     }
 
-    /// Animated full-chip primary wash (0..1).
+    /// Label / icon multiplier: 50% when hovered, else full.
+    pub fn hover_dim(&self, id: ChipId) -> f32 {
+        if self.hover == Some(id) {
+            Self::HOVER_DIM
+        } else {
+            1.0
+        }
+    }
+
+    /// Apply hover dim to an RGBA label color.
+    pub fn dim_color(&self, id: ChipId, mut rgba: [f32; 4]) -> [f32; 4] {
+        let d = self.hover_dim(id);
+        rgba[0] *= d;
+        rgba[1] *= d;
+        rgba[2] *= d;
+        // Keep alpha so glass/text still composites; dim is in RGB.
+        rgba
+    }
+
+    /// Animated press wash (0..1) — only while mouse is down.
     pub fn press_light(&self, id: ChipId) -> f32 {
         self.press
             .get(&id)
@@ -187,7 +176,7 @@ impl ChipUi {
             .clamp(0.0, 1.0)
     }
 
-    /// Whether the ghost + shell should show (animated press past threshold).
+    /// Ghost + shell only while pressing (no hover-only shell).
     pub fn ghost_shell_visible(&self, id: ChipId) -> bool {
         self.press_light(id) > 0.04
     }
