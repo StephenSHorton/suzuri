@@ -22,6 +22,7 @@ mod panes;
 mod pty;
 mod rain_atlas;
 mod rain_sim;
+mod rename;
 mod renderer;
 mod selection;
 mod session;

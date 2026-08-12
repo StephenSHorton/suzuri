@@ -12,6 +12,7 @@ use crate::input::{is_mac, traffic_light_rects};
 use crate::layout::{FrameLayout, Metrics, PaneLayout, PanelInstance};
 use crate::rain_atlas::RainAtlas;
 use crate::rain_sim;
+use crate::rename::RenameState;
 use crate::selection::Selection;
 use crate::session::ChromeSession;
 use crate::caffeine::Caffeine;
@@ -645,6 +646,7 @@ impl Renderer {
         notes: &NotesState,
         workspace_ui: &WorkspaceUi,
         transfer: &TransferUi,
+        rename: &RenameState,
         caffeine: &Caffeine,
         commands: &[Command],
         layout: &FrameLayout,
@@ -776,7 +778,7 @@ impl Renderer {
             chip_ui,
             &self.tab_jelly,
         );
-        // Modal overlays (settings / palette / help / notes)
+        // Modal overlays (settings / palette / help / notes / rename)
         {
             use crate::layout::{PanelInstance, PanelKind, Rect};
             let any_overlay = settings.visible()
@@ -784,7 +786,8 @@ impl Renderer {
                 || help.visible()
                 || notes.visible()
                 || workspace_ui.visible()
-                || transfer.visible();
+                || transfer.visible()
+                || rename.visible();
             if any_overlay {
                 let scrim_a = settings
                     .scrim_alpha()
@@ -792,7 +795,8 @@ impl Renderer {
                     .max(help.scrim_alpha())
                     .max(notes.scrim_alpha())
                     .max(workspace_ui.scrim_alpha())
-                    .max(transfer.scrim_alpha());
+                    .max(transfer.scrim_alpha())
+                    .max(rename.scrim_alpha());
                 panels.push(
                     PanelInstance::glass(
                         Rect::new(0.0, 0.0, logical_w, logical_h),
@@ -813,6 +817,7 @@ impl Renderer {
                 notes,
                 workspace_ui,
                 transfer,
+                rename,
                 commands,
             );
         }
@@ -986,6 +991,7 @@ impl Renderer {
             notes,
             workspace_ui,
             transfer,
+            rename,
             caffeine,
             commands,
             pty_active,
@@ -1088,6 +1094,7 @@ fn chrome_labels(
     notes: &NotesState,
     workspace_ui: &WorkspaceUi,
     transfer: &TransferUi,
+    rename: &RenameState,
     caffeine: &Caffeine,
     commands: &[Command],
     pty_active: bool,
@@ -1281,6 +1288,7 @@ fn chrome_labels(
         notes,
         workspace_ui,
         transfer,
+        rename,
         commands,
         pty_active,
         input_caret_alpha,
@@ -1304,6 +1312,7 @@ fn push_modal_glass(
     notes: &NotesState,
     workspace_ui: &WorkspaceUi,
     transfer: &TransferUi,
+    rename: &RenameState,
     commands: &[Command],
 ) {
     use crate::layout::{PanelInstance, PanelKind, Rect};
@@ -1470,6 +1479,24 @@ fn push_modal_glass(
             );
         }
     }
+
+    if rename.visible() {
+        let ease = rename.content_ease().clamp(0.0, 1.0);
+        let modal = rename.modal_rect(win_w, win_h);
+        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
+        let pad = 14.0;
+        let input_h = 44.0;
+        let input = Rect::new(
+            modal.x + pad,
+            modal.y + 44.0,
+            modal.w - pad * 2.0,
+            input_h,
+        );
+        panels.push(
+            PanelInstance::glass(input, m.chip_radius + 2.0, PanelKind::ModalFrost)
+                .with_opacity(ease),
+        );
+    }
 }
 
 fn push_modal_labels(
@@ -1484,6 +1511,7 @@ fn push_modal_labels(
     notes: &NotesState,
     workspace_ui: &WorkspaceUi,
     transfer: &TransferUi,
+    rename: &RenameState,
     commands: &[Command],
     pty_active: bool,
     caret_alpha: f32,
@@ -2082,6 +2110,62 @@ fn push_modal_labels(
                 cc,
             ));
         }
+    }
+
+    if rename.visible() {
+        let ease = rename.content_ease().clamp(0.0, 1.0);
+        let modal = rename.modal_rect(win_w, win_h);
+        let pad = 14.0;
+        let mut title_c = bright;
+        title_c[3] *= ease;
+        labels.push(TextLabel::new(
+            rename.title(),
+            modal.x + pad,
+            modal.y + 14.0,
+            15.0,
+            title_c,
+        ));
+        let input_h = 44.0;
+        let input_y = modal.y + 44.0;
+        let ty = input_y + (input_h - 15.0) * 0.5;
+        let empty = rename.buffer.is_empty();
+        let display = if empty {
+            "name…"
+        } else {
+            rename.buffer.as_str()
+        };
+        let mut qc = if empty { dim } else { bright };
+        qc[3] *= ease;
+        labels.push(TextLabel::new(
+            format!("> {display}"),
+            modal.x + pad + 12.0,
+            ty,
+            15.0,
+            qc,
+        ));
+        // Caret after buffer (always show while open so empty seed is editable)
+        {
+            let approx = 8.2_f32;
+            // "> " + buffer
+            let cols = 2 + rename.buffer.chars().count();
+            let caret_x = modal.x + pad + 12.0 + cols as f32 * approx;
+            labels.push(TextLabel::new(
+                CARET_BLOCK,
+                caret_x.min(modal.x + modal.w - pad - 20.0),
+                ty,
+                15.0,
+                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+            ));
+        }
+        let mut foot = dim;
+        foot[3] *= ease * 0.9;
+        labels.push(TextLabel::new(
+            "enter save  ·  esc cancel  ·  empty clears custom name",
+            modal.x + pad,
+            modal.y + modal.h - 26.0,
+            11.0,
+            foot,
+        ));
     }
 
     let _ = m;

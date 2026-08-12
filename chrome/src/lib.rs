@@ -42,6 +42,7 @@ pub mod notes;
 pub mod notes_ops;
 pub mod panes;
 pub mod pty;
+pub mod rename;
 pub mod selection;
 pub mod session;
 pub mod settings;
@@ -59,6 +60,7 @@ pub use cells::{theme as cell_theme, Cell, CellGrid, Cursor};
 pub use commands::{
     default_commands, filter_commands, Command, CommandAction, HelpState, PaletteState,
 };
+pub use rename::{RenameState, RenameTarget};
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
 pub use control_mailbox::{
     chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
