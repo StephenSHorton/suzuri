@@ -98,6 +98,10 @@ pub struct CellGrid {
     bg: Option<[f32; 3]>,
     /// Rows scrolled off the top (oldest first). Each row is `cols` cells.
     scrollback: Vec<Vec<Cell>>,
+    /// When true (alt screen), rows scrolled off the top are discarded — not
+    /// pushed into scrollback. Full-screen TUIs must not pollute history.
+    pub suppress_scrollback: bool,
+
     /// Integer scroll target (rows above stick-bottom). Wheel/keys update this.
     view_offset: usize,
     /// Smoothed offset for paint (product `scrollback.visual` / `tickSmooth`).
@@ -123,6 +127,7 @@ impl CellGrid {
             fg: theme::FG,
             bg: None,
             scrollback: Vec::new(),
+            suppress_scrollback: false,
             view_offset: 0,
             visual_offset: 0.0,
             scrollback_pin: 0,
@@ -470,7 +475,11 @@ impl CellGrid {
     }
 
     /// Append a finished row to scrollback (host command blocks, VT scroll).
+    /// No-op when [`Self::suppress_scrollback`] (alt screen).
     pub(crate) fn push_scrollback_row(&mut self, row: Vec<Cell>) {
+        if self.suppress_scrollback {
+            return;
+        }
         self.scrollback.push(row);
         if self.scrollback.len() > MAX_SCROLLBACK {
             let drop_n = self.scrollback.len() - MAX_SCROLLBACK;
@@ -486,6 +495,15 @@ impl CellGrid {
         if self.visual_offset > max as f32 {
             self.visual_offset = max as f32;
         }
+    }
+
+    /// Live-grid row only (no scrollback composition). Used for alt-screen paint.
+    pub fn live_row_cells(&self, row: u16) -> Vec<Cell> {
+        let cols = self.cols as usize;
+        if row >= self.rows {
+            return vec![Cell::blank(); cols];
+        }
+        self.row_cells(row).to_vec()
     }
 
     /// Append a plain-text row to scrollback (pads/truncates to `cols`).
@@ -839,7 +857,18 @@ impl CellGrid {
     }
 
     fn put_visible(&mut self, ch: char) {
+        use unicode_width::UnicodeWidthChar;
+        // Display width: 0 = combining / control (skip), 1 = normal, 2 = wide.
+        let w = match ch.width() {
+            Some(0) => return,
+            Some(n) => n.min(2) as u16,
+            None => 1,
+        };
         if self.cursor.col >= self.cols {
+            self.newline();
+        }
+        // Wide glyph needs two cells: primary + spacer (TUI-safe mono grid).
+        if w >= 2 && self.cursor.col + 1 >= self.cols {
             self.newline();
         }
         if let Some(i) = self.index(self.cursor.col, self.cursor.row) {
@@ -850,6 +879,17 @@ impl CellGrid {
             };
         }
         self.cursor.col = self.cursor.col.saturating_add(1);
+        if w >= 2 {
+            if let Some(i) = self.index(self.cursor.col, self.cursor.row) {
+                // Continuation cell — blank with same colors so bg fills the span.
+                self.cells[i] = Cell {
+                    ch: ' ',
+                    fg: self.fg,
+                    bg: self.bg,
+                };
+            }
+            self.cursor.col = self.cursor.col.saturating_add(1);
+        }
         // Defer wrap until next glyph so a full line does not auto-scroll early.
     }
 
@@ -879,6 +919,30 @@ mod tests {
         let snap = g.snapshot_strings();
         assert_eq!(snap[0], "hello");
         assert_eq!(snap[1], "world");
+    }
+
+    #[test]
+    fn wide_char_takes_two_cells() {
+        let mut g = CellGrid::new(8, 2);
+        // Fullwidth digit １ (U+FF11) has display width 2.
+        g.put_char('１');
+        g.put_char('A');
+        let row = g.row_cells(0);
+        assert_eq!(row[0].ch, '１');
+        assert_eq!(row[1].ch, ' '); // continuation
+        assert_eq!(row[2].ch, 'A');
+        assert_eq!(g.cursor().col, 3);
+    }
+
+    #[test]
+    fn suppress_scrollback_discards_scrolled_rows() {
+        let mut g = CellGrid::new(4, 2);
+        g.suppress_scrollback = true;
+        g.writeln("aa");
+        g.writeln("bb");
+        g.writeln("cc");
+        // No history to scroll up into — stick-bottom top is live-only.
+        assert_eq!(g.max_view_offset(), 0);
     }
 
     #[test]

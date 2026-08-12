@@ -33,6 +33,20 @@ const SYMBOLS_FAMILY: &str = "Segoe UI Symbol";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const SYMBOLS_FAMILY: &str = "Noto Sans Symbols2";
 
+/// Mono cell size in **logical** px (grid + paint). Measured from Gohu when possible.
+#[derive(Clone, Copy, Debug)]
+pub struct MonoCellMetrics {
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Default for MonoCellMetrics {
+    fn default() -> Self {
+        // Gohu uni14 design size — fallback if measurement fails.
+        Self { w: 7.0, h: 14.0 }
+    }
+}
+
 /// One screen-space label (logical pixels).
 #[derive(Clone, Debug)]
 pub struct TextLabel {
@@ -48,6 +62,8 @@ pub struct TextLabel {
     /// Key chords (⌘K / ⇧⌘T) — system UI face so modifiers share one baseline.
     pub key_chord: bool,
     pub center_in: Option<[f32; 4]>,
+    /// Optional clip rect in logical px `[x, y, w, h]` (terminal pane hole).
+    pub clip: Option<[f32; 4]>,
 }
 
 impl TextLabel {
@@ -63,6 +79,7 @@ impl TextLabel {
             symbols: false,
             key_chord: false,
             center_in: None,
+            clip: None,
         }
     }
 
@@ -78,6 +95,7 @@ impl TextLabel {
             symbols: false,
             key_chord: false,
             center_in: None,
+            clip: None,
         }
     }
 
@@ -98,7 +116,14 @@ impl TextLabel {
             symbols: false,
             key_chord: false,
             center_in: Some(rect),
+            clip: None,
         }
+    }
+
+    /// Clip this label to a logical rect (e.g. terminal cells hole).
+    pub fn with_clip(mut self, clip: [f32; 4]) -> Self {
+        self.clip = Some(clip);
+        self
     }
 
     /// Left-aligned, vertically centered in a band (modal rows, chips).
@@ -135,6 +160,7 @@ impl TextLabel {
             symbols: false,
             key_chord: true,
             center_in: None,
+            clip: None,
         }
     }
 
@@ -155,6 +181,7 @@ impl TextLabel {
             symbols: true,
             key_chord: false,
             center_in: Some(rect),
+            clip: None,
         }
     }
 }
@@ -183,6 +210,8 @@ pub struct TextLayer {
     /// OS/2 weight of the embedded face (Gohu is 500, not 400).
     gohu_weight: Weight,
     gohu_ok: bool,
+    /// Measured mono cell (logical px) for terminal grid + paint.
+    mono_cell: MonoCellMetrics,
 }
 
 impl TextLayer {
@@ -239,18 +268,22 @@ impl TextLayer {
         let seed = Buffer::new(&mut font_system, FontMetrics::new(14.0, 18.0));
 
         // Probe: only count OK if shaped glyphs use the Gohu face id.
-        let gohu_ok = {
-            let mut probe = Buffer::new(&mut font_system, FontMetrics::new(14.0, 18.0));
-            probe.set_size(&mut font_system, Some(200.0), Some(20.0));
+        // Also measure mono cell advance for terminal grid (logical 14px).
+        let (gohu_ok, mono_cell) = {
+            let design = 14.0_f32;
+            let mut probe = Buffer::new(&mut font_system, FontMetrics::new(design, design));
+            probe.set_size(&mut font_system, Some(200.0), Some(design));
             let attrs = Attrs::new()
                 .family(Family::Name(gohu_family.as_str()))
                 .weight(gohu_weight);
-            probe.set_text(&mut font_system, "W", attrs, Shaping::Advanced);
+            probe.set_text(&mut font_system, "M", attrs, Shaping::Advanced);
             probe.shape_until_scroll(&mut font_system, false);
             let mut ok = false;
+            let mut advance = 0.0_f32;
             for run in probe.layout_runs() {
+                advance = advance.max(run.line_w);
                 for g in run.glyphs.iter() {
-                    // Advance ~8px at 14 for Gohu mono cells
+                    // Advance ~7–8px at 14 for Gohu mono cells
                     if g.w > 4.0 && g.w < 12.0 {
                         ok = true;
                     }
@@ -262,7 +295,19 @@ impl TextLayer {
                     gohu_weight.0
                 );
             }
-            ok
+            let cell = if advance >= 5.0 && advance <= 12.0 {
+                MonoCellMetrics {
+                    w: advance.round().max(1.0),
+                    h: design,
+                }
+            } else {
+                MonoCellMetrics::default()
+            };
+            eprintln!(
+                "suzuri-chrome: mono cell {}×{} logical px",
+                cell.w, cell.h
+            );
+            (ok, cell)
         };
 
         Self {
@@ -279,7 +324,13 @@ impl TextLayer {
             gohu_family,
             gohu_weight,
             gohu_ok,
+            mono_cell,
         }
+    }
+
+    /// Measured mono cell size (logical px) for PTY grid + terminal paint.
+    pub fn mono_cell(&self) -> MonoCellMetrics {
+        self.mono_cell
     }
 
     pub fn resize(&mut self, physical: PhysicalSize<u32>, scale_factor: f32) {
@@ -370,7 +421,7 @@ impl TextLayer {
             buf.shape_until_scroll(&mut self.font_system, false);
         }
 
-        let bounds = TextBounds {
+        let full_bounds = TextBounds {
             left: 0,
             top: 0,
             right: self.width as i32,
@@ -397,6 +448,21 @@ impl TextLayer {
                     )
                 } else {
                     (label.x * scale, label.y * scale)
+                };
+                // Optional clip to a logical rect (terminal cells hole).
+                let bounds = if let Some([cx, cy, cw, ch]) = label.clip {
+                    let l = (cx * scale).floor() as i32;
+                    let t = (cy * scale).floor() as i32;
+                    let r = ((cx + cw) * scale).ceil() as i32;
+                    let b = ((cy + ch) * scale).ceil() as i32;
+                    TextBounds {
+                        left: l.max(0),
+                        top: t.max(0),
+                        right: r.min(self.width as i32),
+                        bottom: b.min(self.height as i32),
+                    }
+                } else {
+                    full_bounds
                 };
                 TextArea {
                     buffer: &self.buffers[i],

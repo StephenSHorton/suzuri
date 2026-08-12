@@ -27,12 +27,22 @@ impl PtySession {
     /// Shell selection: `$SHELL` if set and non-empty, else `/bin/zsh` on macOS,
     /// `cmd.exe` on Windows, `/bin/bash` elsewhere.
     pub fn spawn(cols: u16, rows: u16) -> Result<Self, String> {
+        Self::spawn_with_pixels(cols, rows, 0, 0)
+    }
+
+    /// Spawn with explicit pixel size (cols×cell_w, rows×cell_h) for DPI-aware TUIs.
+    pub fn spawn_with_pixels(
+        cols: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<Self, String> {
         let pty_system = native_pty_system();
         let size = PtySize {
             rows,
             cols,
-            pixel_width: 0,
-            pixel_height: 0,
+            pixel_width,
+            pixel_height,
         };
         let pair = pty_system
             .openpty(size)
@@ -88,12 +98,23 @@ impl PtySession {
 
     /// Resize the PTY (winsize); notifies the child via SIGWINCH on Unix.
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String> {
+        self.resize_with_pixels(cols, rows, 0, 0)
+    }
+
+    /// Resize with pixel dimensions (helps apps that query `TIOCGWINSZ` px fields).
+    pub fn resize_with_pixels(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<(), String> {
         self.master
             .resize(PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width,
+                pixel_height,
             })
             .map_err(|e| format!("resize: {e}"))
     }

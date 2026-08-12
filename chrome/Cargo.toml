@@ -32,6 +32,7 @@ pollster = "0.4"
 portable-pty = "0.9"
 raw-window-handle = "0.6"
 regex = "1"
+unicode-width = "0.2"
 wgpu = "24.0"
 winit = "0.30"
 

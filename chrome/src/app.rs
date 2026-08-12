@@ -34,7 +34,8 @@ use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
 use crate::rename::{RenameState, RenameTarget};
-use crate::renderer::{self, Renderer, CELL_H, CELL_W};
+use crate::renderer::{self, Renderer};
+use crate::text::MonoCellMetrics;
 use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome};
 use crate::settings::SettingsState;
@@ -195,7 +196,18 @@ fn spawn_pane_runtime(
     session: &mut ChromeSession,
     pane_id: u64,
 ) -> PaneRuntime {
-    match PtySession::spawn(cols, rows) {
+    spawn_pane_runtime_px(cols, rows, 0, 0, session, pane_id)
+}
+
+fn spawn_pane_runtime_px(
+    cols: u16,
+    rows: u16,
+    pixel_w: u16,
+    pixel_h: u16,
+    session: &mut ChromeSession,
+    pane_id: u64,
+) -> PaneRuntime {
+    match PtySession::spawn_with_pixels(cols, rows, pixel_w, pixel_h) {
         Ok(pty) => {
             session.mark_pane_pty(pane_id);
             PaneRuntime {
@@ -342,10 +354,34 @@ impl ChromeApp {
         layout
     }
 
+    /// Mono cell pitch (logical px) — measured Gohu when renderer is up.
+    fn cell_metrics(&self) -> MonoCellMetrics {
+        self.renderer
+            .as_ref()
+            .map(|r| r.cell_metrics())
+            .unwrap_or_default()
+    }
+
+    /// Physical pixel size of a terminal grid for `TIOCGWINSZ`.
+    fn pty_pixel_size(&self, cols: u16, rows: u16) -> (u16, u16) {
+        let cell = self.cell_metrics();
+        let scale = self
+            .renderer
+            .as_ref()
+            .map(|r| r.scale_factor())
+            .unwrap_or(1.0)
+            .max(0.5);
+        let pw = (cols as f32 * cell.w * scale).round().max(1.0) as u16;
+        let ph = (rows as f32 * cell.h * scale).round().max(1.0) as u16;
+        (pw, ph)
+    }
+
     fn sync_grids_to_panes(&mut self) {
         let layout = self.current_layout();
+        let cell = self.cell_metrics();
         for pl in &layout.panes {
-            let (cols, rows) = renderer::terminal_grid_size(&pl.cells, self.metrics.inset());
+            let (cols, rows) =
+                renderer::terminal_grid_size_with(&pl.cells, cell.w, cell.h);
             let need = self
                 .session
                 .grid(pl.pane_id)
@@ -353,9 +389,10 @@ impl ChromeApp {
                 .unwrap_or(true);
             if need {
                 self.session.resize_pane(pl.pane_id, cols, rows);
+                let (pw, ph) = self.pty_pixel_size(cols, rows);
                 if let Some(rt) = self.runtimes.get_mut(&pl.pane_id) {
                     if let Some(pty) = &mut rt.pty {
-                        let _ = pty.resize(cols, rows);
+                        let _ = pty.resize_with_pixels(cols, rows, pw, ph);
                     }
                 }
             }
@@ -654,12 +691,15 @@ impl ChromeApp {
 
     fn new_tab(&mut self) {
         let layout = self.current_layout();
-        let (cols, rows) = renderer::terminal_grid_size(
+        let cell = self.cell_metrics();
+        let (cols, rows) = renderer::terminal_grid_size_with(
             layout.panes.first().map(|p| &p.cells).unwrap_or(&layout.cells),
-            self.metrics.inset(),
+            cell.w,
+            cell.h,
         );
+        let (pw, ph) = self.pty_pixel_size(cols, rows);
         let (_tid, pane_id) = self.session.new_tab(cols, rows);
-        let rt = spawn_pane_runtime(cols, rows, &mut self.session, pane_id);
+        let rt = spawn_pane_runtime_px(cols, rows, pw, ph, &mut self.session, pane_id);
         self.runtimes.insert(pane_id, rt);
         self.warp_focused = true;
         self.terminal_focused = false;
@@ -667,6 +707,7 @@ impl ChromeApp {
 
     fn split_pane(&mut self, axis: SplitAxis) {
         let layout = self.current_layout();
+        let cell = self.cell_metrics();
         // New pane starts small; use a reasonable grid from half workspace.
         let (cols, rows) = {
             let mut half = layout.workspace;
@@ -683,10 +724,11 @@ impl ChromeApp {
                 (half.w - inset * 2.0).max(40.0),
                 (half.h - inset * 2.0 - strip).max(40.0),
             );
-            renderer::terminal_grid_size(&cells, inset)
+            renderer::terminal_grid_size_with(&cells, cell.w, cell.h)
         };
+        let (pw, ph) = self.pty_pixel_size(cols, rows);
         if let Some(new_id) = self.session.split_focused(axis, cols, rows) {
-            let rt = spawn_pane_runtime(cols, rows, &mut self.session, new_id);
+            let rt = spawn_pane_runtime_px(cols, rows, pw, ph, &mut self.session, new_id);
             self.runtimes.insert(new_id, rt);
             self.warp_focused = true;
             self.terminal_focused = false;
@@ -820,8 +862,9 @@ impl ChromeApp {
         }
         let pane = self.session.panes.get(&focus)?;
         let grid = &pane.grid;
-        let col = ((x - cells.x) / CELL_W).floor() as i32;
-        let row = ((y - cells.y) / CELL_H).floor() as i32;
+        let cell = self.cell_metrics();
+        let col = ((x - cells.x) / cell.w.max(1.0)).floor() as i32;
+        let row = ((y - cells.y) / cell.h.max(1.0)).floor() as i32;
         let col = col.clamp(0, grid.cols().saturating_sub(1) as i32) as u16;
         let row = row.clamp(0, grid.rows().saturating_sub(1) as i32) as u16;
         let abs = grid.viewport_to_abs(row);

@@ -252,14 +252,17 @@ impl AnsiDecoder {
             let cols = grid.cols();
             let rows = grid.rows();
             *grid = CellGrid::new(cols, rows);
+            grid.suppress_scrollback = true;
+            self.scroll_region = None;
         }
     }
 
     fn leave_alt_screen(&mut self, grid: &mut CellGrid) {
         if let Some(primary) = self.primary_backup.take() {
             *grid = primary;
+            // Restored primary keeps its own suppress flag (false).
         }
-        // Scroll region is typically reset when leaving alt, but keep simple.
+        self.scroll_region = None;
     }
 
     fn exec_csi(&mut self, grid: &mut CellGrid, final_byte: u8, params: &[u16]) {

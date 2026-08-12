@@ -25,15 +25,14 @@ use crate::settings::SettingsState;
 use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
 use crate::workspace_ui::WorkspaceUi;
-use crate::text::{TextLabel, TextLayer, CARET_BLOCK, CARET_RGB};
+use crate::text::{MonoCellMetrics, TextLabel, TextLayer, CARET_BLOCK, CARET_RGB};
 
 /// Jade selection wash alpha for full-block underlay (`█` mono labels).
 const SELECTION_ALPHA: f32 = 0.32;
 /// Primary wash under a hovered URL span (product link hover ≈ 12% BG blend).
 const LINK_HOVER_ALPHA: f32 = 0.14;
 
-/// Mono cell metrics for GohuFont uni14 (product design size 14px).
-/// Width ≈ half em of a 14px bitmap mono; height matches line box used in text layer.
+/// Fallback mono cell metrics (Gohu uni14 design). Prefer [`Renderer::cell_metrics`].
 pub const CELL_W: f32 = 7.0;
 pub const CELL_H: f32 = 14.0;
 /// Default inner glass inset — prefer [`Metrics::inset`] at call sites.
@@ -599,6 +598,11 @@ impl Renderer {
         self.mag_level > 0.02 || self.mag_level_smooth > 0.02
     }
 
+    /// Measured mono cell (logical px) — use for PTY cols/rows and paint pitch.
+    pub fn cell_metrics(&self) -> MonoCellMetrics {
+        self.text.mono_cell()
+    }
+
     pub fn metrics(&self) -> Metrics {
         self.metrics
     }
@@ -1060,6 +1064,7 @@ impl Renderer {
             &self.tab_jelly,
             term_selection,
             hovered_link,
+            self.cell_metrics(),
         );
         self.text.prepare(&self.device, &self.queue, &labels);
         self.text
@@ -1118,12 +1123,23 @@ impl Renderer {
 }
 
 /// Derive grid cols/rows from the **cells** rect (PTY hole inside the single glass).
-/// `cells` is already inset — no extra pad.
+/// `cells` is already inset — no extra pad. Uses measured mono metrics when provided.
 pub fn terminal_grid_size(cells: &crate::layout::Rect, _inset: f32) -> (u16, u16) {
-    let inner_w = cells.w.max(CELL_W);
-    let inner_h = cells.h.max(CELL_H);
-    let cols = (inner_w / CELL_W).floor().max(1.0) as u16;
-    let rows = (inner_h / CELL_H).floor().max(1.0) as u16;
+    terminal_grid_size_with(cells, CELL_W, CELL_H)
+}
+
+/// Like [`terminal_grid_size`] with explicit cell pitch (logical px).
+pub fn terminal_grid_size_with(
+    cells: &crate::layout::Rect,
+    cell_w: f32,
+    cell_h: f32,
+) -> (u16, u16) {
+    let cw = cell_w.max(1.0);
+    let ch = cell_h.max(1.0);
+    let inner_w = cells.w.max(cw);
+    let inner_h = cells.h.max(ch);
+    let cols = (inner_w / cw).floor().max(1.0) as u16;
+    let rows = (inner_h / ch).floor().max(1.0) as u16;
     (cols, rows)
 }
 
@@ -1167,6 +1183,7 @@ fn chrome_labels(
     tab_jelly: &TabJelly,
     term_selection: &Selection,
     hovered_link: Option<&LinkHoverSpan>,
+    cell: MonoCellMetrics,
 ) -> Vec<TextLabel> {
     use crate::chrome_ui::{scale_rect, ChipId};
     // Chrome label colors track prefs theme (see SETTINGS_HOOKS.md / theme.rs).
@@ -1290,13 +1307,14 @@ fn chrome_labels(
             selection_rgb,
             pane_link,
             link_hover_rgb,
+            cell,
         );
 
         // Footer is UI chrome (not terminal grid) — no ASCII dashes, no cell overflow.
         // Hairline is drawn as a glass panel; path + input are normal UI labels.
         let path_size = 12.0;
         let input_size = 13.0;
-        let char_w = 7.5_f32; // approx Gohu @12–13
+        let char_w = cell.w.max(1.0);
 
         let path_str = crate::session::display_path(&pane.cwd);
         if !path_str.is_empty() {
@@ -2475,26 +2493,45 @@ fn push_pane_cells(
     selection_rgb: [f32; 3],
     link_hover: Option<&LinkHoverSpan>,
     link_hover_rgb: [f32; 3],
+    cell: MonoCellMetrics,
 ) {
-    let mono_size = 14.0; // Gohu design size (product FontSizePx)
+    let mono_size = cell.h.max(1.0); // design size = cell height (Gohu 14)
+    let cell_w = cell.w.max(1.0);
+    let cell_h = cell.h.max(1.0);
     let origin_x = pl.cells.x;
     let origin_y = pl.cells.y;
+    let clip = [pl.cells.x, pl.cells.y, pl.cells.w, pl.cells.h];
     let grid = &pane.grid;
     let cursor = grid.cursor();
-    let cursor_abs = grid.cursor_abs_row();
+    let alt = grid.suppress_scrollback;
+    let cursor_abs = if alt {
+        // Live-only: abs = live row index.
+        cursor.row as usize
+    } else {
+        grid.cursor_abs_row()
+    };
     let sel = selection.filter(|s| !s.is_empty());
 
     for row in 0..grid.rows() {
-        let cells = grid.visible_row_cells(row);
+        let cells = if alt {
+            grid.live_row_cells(row)
+        } else {
+            grid.visible_row_cells(row)
+        };
         if cells.is_empty() {
             continue;
         }
-        let abs_row = grid.viewport_to_abs(row);
+        let abs_row = if alt {
+            row as usize
+        } else {
+            grid.viewport_to_abs(row)
+        };
         let has_content = cells.iter().any(|c| c.ch != ' ' || c.bg.is_some());
-        // Cursor tracks live grid coords → abs; show when that abs is on-screen
-        // (stick-bottom composition may place live mid-viewport).
-        let has_cursor = cursor_visible
-            && grid.abs_to_viewport(cursor_abs) == Some(row);
+        let has_cursor = if alt {
+            cursor_visible && cursor.row == row
+        } else {
+            cursor_visible && grid.abs_to_viewport(cursor_abs) == Some(row)
+        };
         let has_selection =
             sel.is_some_and(|s| (0..grid.cols()).any(|c| s.contains(c, abs_row)));
         let has_link_hover =
@@ -2503,9 +2540,9 @@ fn push_pane_cells(
             continue;
         }
 
-        let y = origin_y + row as f32 * CELL_H;
+        let y = origin_y + row as f32 * cell_h;
         // Never paint terminal cells into the footer / past the cells rect.
-        if y + CELL_H > pl.cells.y + pl.cells.h + 0.5 {
+        if y + cell_h > pl.cells.y + pl.cells.h + 0.5 {
             break;
         }
 
@@ -2516,10 +2553,12 @@ fn push_pane_cells(
                 origin_x,
                 y,
                 mono_size,
+                cell_w,
                 grid.cols(),
                 abs_row,
                 selection_rgb,
                 SELECTION_ALPHA,
+                clip,
                 |col, ar| s.contains(col, ar),
             );
         }
@@ -2532,82 +2571,71 @@ fn push_pane_cells(
                     origin_x,
                     y,
                     mono_size,
+                    cell_w,
                     grid.cols(),
                     abs_row,
                     link_hover_rgb,
                     LINK_HOVER_ALPHA,
+                    clip,
                     |col, ar| h.contains(col, ar),
                 );
             }
         }
 
-        let mut col = 0usize;
-        while col < cells.len() {
-            let start = col;
+        // Per-cell paint at fixed pitch — never run-shape a whole row (advance drift
+        // against CELL_W is what made wide TUIs overflow the glass).
+        for col in 0..cells.len() {
+            let c = &cells[col];
+            let x = origin_x + col as f32 * cell_w;
+            // Skip cells that start past the clip (right overflow).
+            if x >= pl.cells.x + pl.cells.w {
+                break;
+            }
             let hover_cell = link_hover.is_some_and(|h| h.contains(col as u16, abs_row));
             let fg = if hover_cell {
                 link_hover_rgb
             } else {
-                cells[col].fg
+                c.fg
             };
-            let bg = cells[col].bg;
-            let mut text = String::new();
-            while col < cells.len() {
-                let ch_hover = link_hover.is_some_and(|h| h.contains(col as u16, abs_row));
-                let ch_fg = if ch_hover {
-                    link_hover_rgb
-                } else {
-                    cells[col].fg
-                };
-                if ch_fg != fg || cells[col].bg != bg || ch_hover != hover_cell {
-                    break;
-                }
-                text.push(cells[col].ch);
-                col += 1;
+            if let Some(bg) = c.bg {
+                labels.push(
+                    TextLabel::mono(
+                        "█",
+                        x,
+                        y,
+                        mono_size,
+                        [bg[0], bg[1], bg[2], 0.85],
+                    )
+                    .with_clip(clip),
+                );
             }
-            if !text.chars().any(|c| c != ' ') {
-                continue;
+            if c.ch != ' ' {
+                labels.push(
+                    TextLabel::mono(
+                        c.ch.to_string(),
+                        x,
+                        y,
+                        mono_size,
+                        [fg[0], fg[1], fg[2], 0.95],
+                    )
+                    .with_clip(clip),
+                );
             }
-            let end_col = start + text.chars().count();
-            if end_col == cells.len() {
-                while text.ends_with(' ') {
-                    text.pop();
-                }
-            }
-            if text.is_empty() {
-                continue;
-            }
-
-            let x = origin_x + start as f32 * CELL_W;
-            if let Some(bg) = bg {
-                let blocks: String = "█".repeat(text.chars().count().max(1));
-                labels.push(TextLabel::mono(
-                    blocks,
-                    x,
-                    y,
-                    mono_size,
-                    [bg[0], bg[1], bg[2], 0.85],
-                ));
-            }
-            labels.push(TextLabel::mono(
-                text,
-                x,
-                y,
-                mono_size,
-                [fg[0], fg[1], fg[2], 0.95],
-            ));
         }
 
         if has_cursor {
-            let cx = origin_x + cursor.col as f32 * CELL_W;
-            let cy = origin_y + row as f32 * CELL_H;
-            labels.push(TextLabel::mono(
-                CARET_BLOCK,
-                cx,
-                cy,
-                mono_size,
-                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], 0.55],
-            ));
+            let cx = origin_x + cursor.col as f32 * cell_w;
+            let cy = origin_y + row as f32 * cell_h;
+            labels.push(
+                TextLabel::mono(
+                    CARET_BLOCK,
+                    cx,
+                    cy,
+                    mono_size,
+                    [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], 0.55],
+                )
+                .with_clip(clip),
+            );
         }
     }
 }
@@ -2618,10 +2646,12 @@ fn push_accent_row(
     origin_x: f32,
     y: f32,
     mono_size: f32,
+    cell_w: f32,
     cols: u16,
     abs_row: usize,
     accent: [f32; 3],
     alpha: f32,
+    clip: [f32; 4],
     mut contains: impl FnMut(u16, usize) -> bool,
 ) {
     let mut col = 0u16;
@@ -2630,21 +2660,18 @@ fn push_accent_row(
             col += 1;
             continue;
         }
-        let start = col;
+        let x = origin_x + col as f32 * cell_w;
+        labels.push(
+            TextLabel::mono(
+                "█",
+                x,
+                y,
+                mono_size,
+                [accent[0], accent[1], accent[2], alpha],
+            )
+            .with_clip(clip),
+        );
         col += 1;
-        while col < cols && contains(col, abs_row) {
-            col += 1;
-        }
-        let n = (col - start) as usize;
-        let x = origin_x + start as f32 * CELL_W;
-        let blocks: String = "█".repeat(n.max(1));
-        labels.push(TextLabel::mono(
-            blocks,
-            x,
-            y,
-            mono_size,
-            [accent[0], accent[1], accent[2], alpha],
-        ));
     }
 }
 
