@@ -457,6 +457,96 @@ impl HelpState {
     }
 }
 
+/// First-run welcome splash (product `splash.go` card).
+///
+/// Overlay only — does not block PTY spawn. Dismiss with Enter / Esc / click;
+/// host marks `ChromePrefs.splash_seen` and persists.
+#[derive(Clone, Debug)]
+pub struct SplashState {
+    pub open: bool,
+    present: f32,
+    present_vel: f32,
+    overlay: f32,
+}
+
+impl Default for SplashState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SplashState {
+    pub fn new() -> Self {
+        Self {
+            open: false,
+            present: 0.0,
+            present_vel: 0.0,
+            overlay: 0.0,
+        }
+    }
+
+    pub fn open_splash(&mut self) {
+        self.open = true;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
+    pub fn visible(&self) -> bool {
+        self.open || self.present > 0.01 || self.overlay > 0.01
+    }
+
+    pub fn content_ease(&self) -> f32 {
+        let t = self.present.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    pub fn scrim_alpha(&self) -> f32 {
+        let t = self.overlay.clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t) * 0.50
+    }
+
+    /// Compact welcome card (narrower than help sheet).
+    pub fn modal_rect(window_w: f32, window_h: f32) -> crate::layout::Rect {
+        let w = (window_w - 48.0).min(420.0).max(280.0);
+        let h = (window_h - 80.0).min(280.0).max(200.0);
+        crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.42, w, h)
+    }
+
+    pub fn tick(&mut self, dt: f32) {
+        let dt = dt.clamp(0.0, 1.0 / 20.0);
+        let target = if self.open { 1.0 } else { 0.0 };
+        const K: f32 = 150.0;
+        const C: f32 = 25.0;
+        let force = -K * (self.present - target) - C * self.present_vel;
+        self.present_vel += force * dt;
+        self.present += self.present_vel * dt;
+        if (self.present - target).abs() < 0.001 && self.present_vel.abs() < 0.01 {
+            self.present = target;
+            self.present_vel = 0.0;
+        }
+        let step = dt / 0.2;
+        if self.overlay < target {
+            self.overlay = (self.overlay + step).min(target);
+        } else if self.overlay > target {
+            self.overlay = (self.overlay - step).max(target);
+        }
+    }
+}
+
+/// Key-hint rows for the splash body (platform-aware labels).
+pub fn splash_hint_rows() -> Vec<(String, &'static str)> {
+    let m = mod_key();
+    let ms = mod_shift();
+    vec![
+        (format!("{m}K"), "commands"),
+        (format!("{m},"), "settings"),
+        (format!("{m}/"), "shortcuts"),
+        (format!("{ms}T"), "new tab"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +567,35 @@ mod tests {
             p.tick(1.0 / 60.0);
         }
         assert!(p.present() > 0.9);
+    }
+
+    #[test]
+    fn splash_open_close() {
+        let mut s = SplashState::new();
+        assert!(!s.open);
+        assert!(!s.visible());
+        s.open_splash();
+        assert!(s.open);
+        for _ in 0..90 {
+            s.tick(1.0 / 60.0);
+        }
+        assert!(s.visible());
+        assert!(s.content_ease() > 0.9);
+        assert!(s.scrim_alpha() > 0.4);
+        s.close();
+        assert!(!s.open);
+        for _ in 0..90 {
+            s.tick(1.0 / 60.0);
+        }
+        assert!(!s.visible());
+        assert!(s.content_ease() < 0.05);
+    }
+
+    #[test]
+    fn splash_hints_nonempty() {
+        let rows = splash_hint_rows();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().any(|(_, l)| *l == "commands"));
+        assert!(rows.iter().any(|(_, l)| *l == "new tab"));
     }
 }

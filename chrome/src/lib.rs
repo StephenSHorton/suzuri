@@ -57,7 +57,8 @@ pub mod ffi;
 pub use ansi::AnsiDecoder;
 pub use cells::{theme as cell_theme, Cell, CellGrid, Cursor};
 pub use commands::{
-    default_commands, filter_commands, Command, CommandAction, HelpState, PaletteState,
+    default_commands, filter_commands, splash_hint_rows, Command, CommandAction, HelpState,
+    PaletteState, SplashState,
 };
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
 pub use control_mailbox::{

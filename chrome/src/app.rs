@@ -19,7 +19,7 @@ use crate::ansi::AnsiDecoder;
 use crate::caffeine::Caffeine;
 use crate::chrome_ui::{ChipId, ChipUi};
 use crate::commands::{
-    default_commands, filter_commands, CommandAction, HelpState, PaletteState,
+    default_commands, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
 };
 use crate::control_mailbox::ControlMailbox;
 use crate::input::{hit_test, is_mac, HitTarget};
@@ -54,6 +54,7 @@ pub struct ChromeApp {
     settings: SettingsState,
     palette: PaletteState,
     help: HelpState,
+    splash: SplashState,
     notes: NotesState,
     workspace_ui: WorkspaceUi,
     transfer: TransferUi,
@@ -89,7 +90,7 @@ impl Default for ChromeApp {
         let rt = spawn_pane_runtime(cols, rows, &mut session, pane_id);
         runtimes.insert(pane_id, rt);
 
-        Self {
+        let mut app = Self {
             window: None,
             renderer: None,
             session,
@@ -103,6 +104,7 @@ impl Default for ChromeApp {
             settings: SettingsState::new(),
             palette: PaletteState::new(),
             help: HelpState::new(),
+            splash: SplashState::new(),
             notes: NotesState::new(),
             workspace_ui: WorkspaceUi::new(),
             transfer: TransferUi::new(),
@@ -118,7 +120,12 @@ impl Default for ChromeApp {
             term_selection: Selection::new(),
             selecting_term: false,
             control_mailbox: ControlMailbox::new(),
+        };
+        // First-run overlay only — PTY already spawned above.
+        if !app.settings.prefs.splash_seen {
+            app.splash.open_splash();
         }
+        app
     }
 }
 
@@ -152,6 +159,18 @@ fn spawn_pane_runtime(
 }
 
 impl ChromeApp {
+    /// Dismiss splash, mark `splash_seen`, and persist chrome prefs.
+    /// Enter / Esc / outside click / continue all go through here.
+    fn dismiss_splash(&mut self) {
+        let was_open = self.splash.open;
+        self.splash.close();
+        if was_open || !self.settings.prefs.splash_seen {
+            self.settings.prefs.splash_seen = true;
+            self.settings.mark_dirty();
+            let _ = self.settings.save_prefs();
+        }
+    }
+
     fn any_pty_alive(&mut self) -> bool {
         self.runtimes
             .values_mut()
@@ -307,12 +326,18 @@ impl ChromeApp {
         self.settings.open
             || self.palette.open
             || self.help.open
+            || self.splash.open
             || self.notes.open
             || self.workspace_ui.open
             || self.transfer.open
     }
 
     fn close_all_overlays(&mut self) {
+        if self.splash.open {
+            self.dismiss_splash();
+        } else {
+            self.splash.close();
+        }
         self.settings.close();
         self.palette.close();
         self.help.close();
@@ -723,6 +748,12 @@ impl ChromeApp {
                 return true;
             }
         }
+        if self.splash.visible() {
+            let r = SplashState::modal_rect(win_w, win_h);
+            if r.contains(x, y) {
+                return true;
+            }
+        }
         if self.notes.visible() && self.notes.animated_modal_rect(win_w, win_h).contains(x, y) {
             return true;
         }
@@ -750,12 +781,15 @@ impl ChromeApp {
             || self.transfer.visible()
             || self.palette.visible()
             || self.help.visible()
+            || self.splash.visible()
             || self.settings.visible()
         {
             // Click **inside** any modal: keep open (don't steal focus to terminal).
             if self.pointer_in_open_modal() {
-                // Palette option clicks / notes list handled later if needed.
-                if self.palette.open {
+                // Splash: any click on the card continues (Enter / click continue).
+                if self.splash.open {
+                    self.dismiss_splash();
+                } else if self.palette.open {
                     self.try_palette_click(event_loop);
                 } else if self.notes.open {
                     let layout = self.current_layout();
@@ -873,6 +907,7 @@ impl ChromeApp {
                 || self.settings.visible()
                 || self.palette.visible()
                 || self.help.visible()
+                || self.splash.visible()
                 || self.notes.visible()
                 || self.workspace_ui.visible()
                 || self.transfer.visible()
@@ -900,6 +935,30 @@ impl ChromeApp {
         let super_or_ctrl = self.modifiers.super_key() || self.modifiers.control_key();
         let shift = self.modifiers.shift_key();
         let alt = self.modifiers.alt_key();
+
+        // First-run splash: Enter / Space continue (Esc handled above).
+        if self.splash.open {
+            match &event.logical_key {
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                    self.dismiss_splash();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                Key::Character(s) if s.as_str() == " " => {
+                    self.dismiss_splash();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                _ => {
+                    // Swallow other keys while splash is up (product exclusive modal).
+                    return;
+                }
+            }
+        }
 
         // Modal text surfaces (notes / workspace / transfer) — not terminal.
         if !super_or_ctrl {
@@ -1714,6 +1773,7 @@ impl ApplicationHandler for ChromeApp {
                 self.settings.tick(dt);
                 self.palette.tick(dt);
                 self.help.tick(dt);
+                self.splash.tick(dt);
                 self.notes.tick(dt);
                 self.workspace_ui.tick(dt);
                 self.transfer.tick(dt);
@@ -1744,6 +1804,7 @@ impl ApplicationHandler for ChromeApp {
                         &self.settings,
                         &self.palette,
                         &self.help,
+                        &self.splash,
                         &self.notes,
                         &self.workspace_ui,
                         &self.transfer,

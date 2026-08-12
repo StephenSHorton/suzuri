@@ -7,7 +7,9 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::chrome_ui::{ChipUi, TabJelly};
-use crate::commands::{filter_commands, Command, HelpState, PaletteState};
+use crate::commands::{
+    filter_commands, splash_hint_rows, Command, HelpState, PaletteState, SplashState,
+};
 use crate::input::{is_mac, traffic_light_rects};
 use crate::layout::{FrameLayout, Metrics, PaneLayout, PanelInstance};
 use crate::rain_atlas::RainAtlas;
@@ -642,6 +644,7 @@ impl Renderer {
         settings: &SettingsState,
         palette: &PaletteState,
         help: &HelpState,
+        splash: &SplashState,
         notes: &NotesState,
         workspace_ui: &WorkspaceUi,
         transfer: &TransferUi,
@@ -776,12 +779,13 @@ impl Renderer {
             chip_ui,
             &self.tab_jelly,
         );
-        // Modal overlays (settings / palette / help / notes)
+        // Modal overlays (settings / palette / help / splash / notes)
         {
             use crate::layout::{PanelInstance, PanelKind, Rect};
             let any_overlay = settings.visible()
                 || palette.visible()
                 || help.visible()
+                || splash.visible()
                 || notes.visible()
                 || workspace_ui.visible()
                 || transfer.visible();
@@ -790,6 +794,7 @@ impl Renderer {
                     .scrim_alpha()
                     .max(palette.scrim_alpha())
                     .max(help.scrim_alpha())
+                    .max(splash.scrim_alpha())
                     .max(notes.scrim_alpha())
                     .max(workspace_ui.scrim_alpha())
                     .max(transfer.scrim_alpha());
@@ -810,6 +815,7 @@ impl Renderer {
                 settings,
                 palette,
                 help,
+                splash,
                 notes,
                 workspace_ui,
                 transfer,
@@ -983,6 +989,7 @@ impl Renderer {
             settings,
             palette,
             help,
+            splash,
             notes,
             workspace_ui,
             transfer,
@@ -1085,6 +1092,7 @@ fn chrome_labels(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    splash: &SplashState,
     notes: &NotesState,
     workspace_ui: &WorkspaceUi,
     transfer: &TransferUi,
@@ -1278,6 +1286,7 @@ fn chrome_labels(
         settings,
         palette,
         help,
+        splash,
         notes,
         workspace_ui,
         transfer,
@@ -1301,12 +1310,42 @@ fn push_modal_glass(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    splash: &SplashState,
     notes: &NotesState,
     workspace_ui: &WorkspaceUi,
     transfer: &TransferUi,
     commands: &[Command],
 ) {
     use crate::layout::{PanelInstance, PanelKind, Rect};
+
+    if splash.visible() {
+        let ease = splash.content_ease().clamp(0.0, 1.0);
+        let modal = SplashState::modal_rect(win_w, win_h);
+        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
+        // Hint rows as frost chips (product dialog body).
+        let pad = 16.0;
+        let row_h = 28.0;
+        let gap = 4.0;
+        let mut y = modal.y + 64.0;
+        for _ in 0..4 {
+            let r = Rect::new(modal.x + pad, y, modal.w - pad * 2.0, row_h);
+            panels.push(
+                PanelInstance::glass(r, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
+            );
+            y += row_h + gap;
+        }
+        // Continue affordance
+        let cont_w = 120.0_f32.min(modal.w - pad * 2.0);
+        let cont = Rect::new(
+            modal.x + (modal.w - cont_w) * 0.5,
+            modal.y + modal.h - 44.0,
+            cont_w,
+            28.0,
+        );
+        panels.push(
+            PanelInstance::glass(cont, m.chip_radius, PanelKind::ModalButton).with_opacity(ease),
+        );
+    }
 
     if settings.visible() {
         let ease = settings.content_ease().clamp(0.0, 1.0);
@@ -1481,6 +1520,7 @@ fn push_modal_labels(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    splash: &SplashState,
     notes: &NotesState,
     workspace_ui: &WorkspaceUi,
     transfer: &TransferUi,
@@ -1493,6 +1533,62 @@ fn push_modal_labels(
 ) {
     let pad = 16.0;
     let caret_a = caret_alpha.clamp(0.0, 1.0);
+
+    if splash.visible() {
+        let ease = splash.content_ease().clamp(0.0, 1.0);
+        let modal = SplashState::modal_rect(win_w, win_h);
+        let mut title_c = bright;
+        title_c[3] *= ease;
+        labels.push(TextLabel::new(
+            "硯  suzuri",
+            modal.x + pad,
+            modal.y + 16.0,
+            16.0,
+            title_c,
+        ));
+        let mut sub = dim;
+        sub[3] *= ease * 0.95;
+        labels.push(TextLabel::new(
+            "real terminal · charm chrome",
+            modal.x + pad,
+            modal.y + 40.0,
+            11.0,
+            sub,
+        ));
+        let row_h = 28.0;
+        let gap = 4.0;
+        let mut y = modal.y + 64.0;
+        for (key, label) in splash_hint_rows() {
+            let mut kc = bright;
+            kc[3] *= ease;
+            let mut lc = muted;
+            lc[3] *= ease;
+            labels.push(TextLabel::new(
+                key,
+                modal.x + pad + 12.0,
+                y + 7.0,
+                12.0,
+                kc,
+            ));
+            labels.push(TextLabel::new(
+                label.to_string(),
+                modal.x + pad + 88.0,
+                y + 7.0,
+                12.0,
+                lc,
+            ));
+            y += row_h + gap;
+        }
+        let mut foot = dim;
+        foot[3] *= ease * 0.95;
+        labels.push(TextLabel::new(
+            "enter  continue",
+            modal.x + (modal.w - 110.0) * 0.5,
+            modal.y + modal.h - 38.0,
+            11.0,
+            foot,
+        ));
+    }
 
     if settings.visible() {
         let ease = settings.content_ease().clamp(0.0, 1.0);

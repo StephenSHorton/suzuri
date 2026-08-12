@@ -25,7 +25,7 @@ pub const ENV_CONFIG_DIR: &str = "SUZURI_CONFIG_DIR";
 /// Default glass face darken (matches product look).
 pub const GLASS_DARKEN_DEFAULT: f32 = 0.82;
 
-/// User-tunable chrome UI prefs (rain / lens / glass darken / theme).
+/// User-tunable chrome UI prefs (rain / lens / glass darken / theme / splash).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromePrefs {
     /// Canvas UI glyph rain under glass.
@@ -36,6 +36,8 @@ pub struct ChromePrefs {
     pub glass_darken: f32,
     /// Named chrome theme id (`inkstone`, `nord`, …). See [`crate::theme`].
     pub theme: String,
+    /// First-run welcome splash has been dismissed (product `first_run_done` analog).
+    pub splash_seen: bool,
 }
 
 impl Default for ChromePrefs {
@@ -45,6 +47,7 @@ impl Default for ChromePrefs {
             lens: true,
             glass_darken: GLASS_DARKEN_DEFAULT,
             theme: theme::DEFAULT_THEME_ID.to_string(),
+            splash_seen: false,
         }
     }
 }
@@ -152,11 +155,12 @@ pub fn save_chrome_prefs(path: &Path, prefs: &ChromePrefs) -> io::Result<()> {
 pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
     let theme = theme::normalize_id(&prefs.theme);
     format!(
-        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\"\n}}\n",
+        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"splash_seen\": {}\n}}\n",
         prefs.rain,
         prefs.lens,
         format_f32(prefs.glass_darken),
-        theme
+        theme,
+        prefs.splash_seen,
     )
 }
 
@@ -174,11 +178,13 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
     let theme = extract_string(trimmed, "theme")
         .map(|s| theme::normalize_id(&s).to_string())
         .unwrap_or(d.theme);
+    let splash_seen = extract_bool(trimmed, "splash_seen").unwrap_or(d.splash_seen);
     Some(ChromePrefs {
         rain,
         lens,
         glass_darken,
         theme,
+        splash_seen,
     })
 }
 
@@ -278,6 +284,7 @@ mod tests {
             lens: true,
             glass_darken: 0.55,
             theme: "nord".into(),
+            splash_seen: true,
         };
         save_chrome_prefs(&path, &prefs).expect("save");
         assert!(path.is_file(), "expected file at {}", path.display());
@@ -290,6 +297,7 @@ mod tests {
         assert_eq!(loaded.lens, true);
         assert!((loaded.glass_darken - 0.55).abs() < 1e-4);
         assert_eq!(loaded.theme, "nord");
+        assert!(loaded.splash_seen);
         let _ = fs::remove_file(&path);
         if let Some(parent) = path.parent() {
             let _ = fs::remove_dir_all(parent);
@@ -315,6 +323,28 @@ mod tests {
         assert!(p.lens);
         assert!((p.glass_darken - GLASS_DARKEN_DEFAULT).abs() < 1e-4);
         assert_eq!(p.theme, theme::DEFAULT_THEME_ID);
+        assert!(!p.splash_seen);
+    }
+
+    #[test]
+    fn splash_seen_roundtrip() {
+        let path = temp_prefs_path("splash");
+        let prefs = ChromePrefs {
+            rain: true,
+            lens: true,
+            glass_darken: GLASS_DARKEN_DEFAULT,
+            theme: theme::DEFAULT_THEME_ID.into(),
+            splash_seen: true,
+        };
+        save_chrome_prefs(&path, &prefs).expect("save");
+        let loaded = load_chrome_prefs(&path);
+        assert!(loaded.splash_seen);
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"splash_seen\": true"));
+        // Missing key → default false
+        let p = parse_chrome_prefs_json(r#"{ "rain": true }"#).unwrap();
+        assert!(!p.splash_seen);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
@@ -336,6 +366,7 @@ mod tests {
             lens: false,
             glass_darken: 0.4,
             theme: "dracula".into(),
+            splash_seen: false,
         };
         save_chrome_prefs(&path, &prefs).unwrap();
         let config_body = fs::read_to_string(&config).unwrap();
@@ -353,11 +384,13 @@ mod tests {
             lens: false,
             glass_darken: 0.82,
             theme: "charm".into(),
+            splash_seen: true,
         };
         let raw = chrome_prefs_to_json(&prefs);
         assert!(raw.contains("\"rain\": true"));
         assert!(raw.contains("\"lens\": false"));
         assert!(raw.contains("\"theme\": \"charm\""));
+        assert!(raw.contains("\"splash_seen\": true"));
         let back = parse_chrome_prefs_json(&raw).unwrap();
         assert_eq!(back, prefs);
     }
@@ -410,6 +443,7 @@ mod tests {
             lens: true,
             glass_darken: 1.5,
             theme: "nope".into(),
+            splash_seen: false,
         }
         .normalize();
         assert!((p.glass_darken - 0.95).abs() < 1e-5);
