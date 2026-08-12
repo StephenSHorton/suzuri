@@ -1713,6 +1713,55 @@ impl ChromeApp {
             return;
         }
 
+        // Host scrollback navigation when not on alt-screen (product PageUp/Down).
+        // On alt-screen, leave keys for the TUI / PTY path below.
+        {
+            let id = self.session.focus_pane_id();
+            let alt = self
+                .runtimes
+                .get(&id)
+                .map(|rt| rt.ansi.on_alt_screen())
+                .unwrap_or(false);
+            if !alt {
+                let rows = self
+                    .session
+                    .active_grid()
+                    .rows()
+                    .max(1) as i32;
+                let half = (rows / 2).max(1);
+                let scrolled = match &event.logical_key {
+                    Key::Named(NamedKey::PageUp) => {
+                        self.session.active_grid_mut().scroll_view(half);
+                        true
+                    }
+                    Key::Named(NamedKey::PageDown) => {
+                        self.session.active_grid_mut().scroll_view(-half);
+                        true
+                    }
+                    Key::Named(NamedKey::Home)
+                        if self.modifiers.control_key() || self.modifiers.super_key() =>
+                    {
+                        let max = self.session.active_grid().max_view_offset() as i32;
+                        self.session.active_grid_mut().scroll_view(max);
+                        true
+                    }
+                    Key::Named(NamedKey::End)
+                        if self.modifiers.control_key() || self.modifiers.super_key() =>
+                    {
+                        self.session.active_grid_mut().scroll_to_bottom();
+                        true
+                    }
+                    _ => false,
+                };
+                if scrolled {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+            }
+        }
+
         // Terminal focus → PTY
         if self.terminal_focused {
             let id = self.session.focus_pane_id();

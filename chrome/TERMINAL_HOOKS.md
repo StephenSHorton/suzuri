@@ -214,3 +214,27 @@ let line = grid.line_text_abs(abs);
 let title = ansi.take_title();   // Option<String>
 session.set_pane_title(pane_id, title);
 ```
+
+---
+
+## 8. Pin-aware stick-bottom + host scroll keys
+
+`CellGrid` composes **post-pin scrollback + live extent** when `view_offset == 0`
+so Warp command blocks stay visible above shell output (product `viewWindow`).
+
+| API | Role |
+|-----|------|
+| `view_top_abs` / `stick_bottom_top` | Viewport row 0 absolute index |
+| `max_view_offset` | Clamp for wheel / PageUp |
+| `pin_here` | After `clear` / `cls` / `Clear-Host` |
+| `live_extent` | Non-blank live rows (trailing blanks don't push history) |
+
+**Keys** (not on alt-screen):
+
+| Key | Action |
+|-----|--------|
+| PageUp / PageDown | Scroll half viewport |
+| Ctrl/⌘+Home | Oldest history |
+| Ctrl/⌘+End | Stick bottom |
+
+Wheel still calls `scroll_view(±lines)`.

@@ -2435,7 +2435,7 @@ fn push_pane_cells(
     let origin_y = pl.cells.y;
     let grid = &pane.grid;
     let cursor = grid.cursor();
-    let live_view = grid.view_offset() == 0;
+    let cursor_abs = grid.cursor_abs_row();
     let sel = selection.filter(|s| !s.is_empty());
 
     for row in 0..grid.rows() {
@@ -2445,7 +2445,10 @@ fn push_pane_cells(
         }
         let abs_row = grid.viewport_to_abs(row);
         let has_content = cells.iter().any(|c| c.ch != ' ' || c.bg.is_some());
-        let has_cursor = cursor_visible && live_view && cursor.row == row;
+        // Cursor tracks live grid coords → abs; show when that abs is on-screen
+        // (stick-bottom composition may place live mid-viewport).
+        let has_cursor = cursor_visible
+            && grid.abs_to_viewport(cursor_abs) == Some(row);
         let has_selection =
             sel.is_some_and(|s| (0..grid.cols()).any(|c| s.contains(c, abs_row)));
         let has_link_hover =

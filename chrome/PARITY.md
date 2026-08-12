@@ -62,6 +62,11 @@ go build -o suzuri ./cmd/suzuri && ./suzuri
 - Clear pin (`clear`/`cls`/`Clear-Host`) + stick-bottom
 - PTY payload uses CR (product `sendBarPayload`), multi-line → CR
 
+## Wave 10 polish ✅
+- Pin-aware stick-bottom composition (command blocks stay visible above live)
+- PageUp/PageDown + Ctrl/⌘+Home/End host scroll
+- Cursor/selection map through composed viewport
+
 ## Later
 - Full in-process GPU present loop (cgo + host window)
 - Package install always ships `suzuri-chrome` sibling binary

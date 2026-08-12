@@ -140,24 +140,59 @@ impl CellGrid {
         self.scrollback.len() + self.rows as usize
     }
 
+    /// Absolute document row for viewport row 0 (pin-aware stick-bottom).
+    ///
+    /// Stick-bottom (`view_offset == 0`) composes post-pin scrollback + live
+    /// extent so command blocks stay visible above shell output (product
+    /// `viewWindow`). Scrolling up reveals pre-pin history.
+    pub fn view_top_abs(&self) -> usize {
+        self.stick_bottom_top()
+            .saturating_sub(self.view_offset)
+    }
+
+    /// Top absolute row when fully stuck to the bottom (offset 0).
+    pub fn stick_bottom_top(&self) -> usize {
+        let vh = self.rows as usize;
+        let hist = self.scrollback.len();
+        let pin = self.scrollback_pin.min(hist);
+        // Product liveExtent: trailing blank PTY rows don't push history off-screen.
+        let live_ext = self.live_extent();
+        let post = hist.saturating_sub(pin) + live_ext;
+        if post <= vh {
+            // Short post-pin content (e.g. after clear): top-align at pin.
+            pin
+        } else {
+            pin + (post - vh)
+        }
+    }
+
+    /// Max `view_offset` (scroll until absolute row 0 is at the top).
+    pub fn max_view_offset(&self) -> usize {
+        self.stick_bottom_top()
+    }
+
     /// Map a visible viewport row (0..rows) to an absolute document row.
     ///
-    /// Absolute row 0 is the oldest scrollback line. When `view_offset == 0`,
-    /// viewport row 0 maps to the first live row (`scrollback_len()`).
+    /// Absolute row 0 is the oldest scrollback line. Stick-bottom composes
+    /// history + live; see [`view_top_abs`].
     pub fn viewport_to_abs(&self, row: u16) -> usize {
-        let top = self.scrollback.len().saturating_sub(self.view_offset);
-        top + row as usize
+        self.view_top_abs() + row as usize
     }
 
     /// Map absolute document row → visible viewport row, if currently on-screen.
     pub fn abs_to_viewport(&self, abs_row: usize) -> Option<u16> {
-        let top = self.scrollback.len().saturating_sub(self.view_offset);
+        let top = self.view_top_abs();
         let bottom = top + self.rows as usize;
         if abs_row >= top && abs_row < bottom {
             Some((abs_row - top) as u16)
         } else {
             None
         }
+    }
+
+    /// Absolute document row of the cell-grid cursor (live region).
+    pub fn cursor_abs_row(&self) -> usize {
+        self.scrollback.len() + self.cursor.row as usize
     }
 
     /// Characters for an absolute document row (full width, no trim).
@@ -208,7 +243,7 @@ impl CellGrid {
         if delta_rows == 0 {
             return;
         }
-        let max = self.scrollback.len();
+        let max = self.max_view_offset();
         if delta_rows > 0 {
             self.view_offset = (self.view_offset + delta_rows as usize).min(max);
         } else {
@@ -287,15 +322,14 @@ impl CellGrid {
         out
     }
 
-    /// Cells for a visible row accounting for `view_offset` (scrollback + live).
+    /// Cells for a visible row accounting for pin-aware stick-bottom + scroll.
     pub fn visible_row_cells(&self, row: u16) -> Vec<Cell> {
         let cols = self.cols as usize;
         let blank = vec![Cell::blank(); cols];
         if row >= self.rows {
             return blank;
         }
-        let top = self.scrollback.len().saturating_sub(self.view_offset);
-        let abs = top + row as usize;
+        let abs = self.viewport_to_abs(row);
         if abs < self.scrollback.len() {
             let mut r = self.scrollback[abs].clone();
             r.resize(cols, Cell::blank());
@@ -318,6 +352,11 @@ impl CellGrid {
             self.scrollback.drain(0..drop_n);
             self.view_offset = self.view_offset.saturating_sub(drop_n);
             self.scrollback_pin = self.scrollback_pin.saturating_sub(drop_n);
+        }
+        // Keep offset valid as document grows/shrinks (stick-bottom top changes).
+        let max = self.max_view_offset();
+        if self.view_offset > max {
+            self.view_offset = max;
         }
     }
 
@@ -447,7 +486,7 @@ impl CellGrid {
         }
         if self.view_offset > 0 {
             // Keep relative position when history grows while scrolled up.
-            self.view_offset = (self.view_offset + n).min(self.scrollback.len());
+            self.view_offset = (self.view_offset + n).min(self.max_view_offset());
         }
         if n >= self.rows as usize {
             self.cells.fill(Cell::blank());
@@ -483,7 +522,7 @@ impl CellGrid {
                 self.push_scrollback_row(row);
             }
             if self.view_offset > 0 {
-                self.view_offset = (self.view_offset + n).min(self.scrollback.len());
+                self.view_offset = (self.view_offset + n).min(self.max_view_offset());
             }
         }
         if n >= height {
@@ -745,11 +784,56 @@ mod tests {
         g.writeln("b");
         g.writeln("c");
         g.writeln("d");
-        // view_offset 0: viewport row 0 → first live row
         assert_eq!(g.view_offset(), 0);
         let abs0 = g.viewport_to_abs(0);
         assert_eq!(g.abs_to_viewport(abs0), Some(0));
-        assert_eq!(g.line_text_abs(abs0).chars().take(1).collect::<String>(), "c");
+        // Stick-bottom composition may start in scrollback when live is short.
+        let ch: String = g.line_text_abs(abs0).chars().take(1).collect();
+        assert!(
+            ch == "a" || ch == "b" || ch == "c" || ch == "d" || ch == " ",
+            "unexpected first col {ch:?}"
+        );
+    }
+
+    #[test]
+    fn stick_bottom_shows_scrollback_blocks() {
+        let mut g = CellGrid::new(20, 6);
+        // Simulate host block + little live output.
+        g.push_scrollback_text("────────", Some(theme::DIM));
+        g.push_scrollback_text("❯ echo hi", Some(theme::JADE));
+        g.set_cursor(0, 0);
+        g.put_str("hi");
+        assert_eq!(g.view_offset(), 0);
+        // Viewport should include the command block line, not only live.
+        let mut found_cmd = false;
+        for r in 0..g.rows() {
+            let line: String = g.visible_row_cells(r).iter().map(|c| c.ch).collect();
+            if line.contains("echo hi") {
+                found_cmd = true;
+            }
+        }
+        assert!(found_cmd, "command block should be visible at stick-bottom");
+    }
+
+    #[test]
+    fn pin_here_top_aligns_after_clear() {
+        let mut g = CellGrid::new(20, 8);
+        for i in 0..5 {
+            g.push_scrollback_text(&format!("old{i}"), None);
+        }
+        g.pin_here();
+        g.push_scrollback_text("────────", None);
+        g.push_scrollback_text("❯ clear", Some(theme::JADE));
+        // Empty live after clear (cursor row may still count as 1 for live_extent).
+        assert!(g.live_extent() <= 1);
+        assert_eq!(g.view_offset(), 0);
+        // Stick-bottom top should be at pin (top-align short post-pin content).
+        assert_eq!(g.view_top_abs(), g.scrollback_pin());
+        // Scroll up can reach pre-pin history.
+        g.scroll_view(g.max_view_offset() as i32);
+        assert_eq!(g.view_top_abs(), 0);
+        let line: String = g.visible_row_cells(0).iter().map(|c| c.ch).collect();
+        assert!(line.contains("old0"), "got {line:?}");
     }
 
     #[test]

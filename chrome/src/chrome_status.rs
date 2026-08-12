@@ -241,7 +241,7 @@ pub fn live_lines_of(grid: &CellGrid) -> Vec<String> {
     out
 }
 
-/// What the user currently sees (respects scrollback view_offset).
+/// What the user currently sees (pin-aware stick-bottom + view_offset).
 pub fn viewport_lines_of(grid: &CellGrid) -> Vec<String> {
     let rows = grid.rows();
     let mut out = Vec::with_capacity(rows as usize);
