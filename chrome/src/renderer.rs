@@ -1642,7 +1642,6 @@ fn push_modal_labels(
     muted: [f32; 4],
     dim: [f32; 4],
 ) {
-    let pad = 16.0;
     let caret_a = caret_alpha.clamp(0.0, 1.0);
 
     if splash.visible() {
