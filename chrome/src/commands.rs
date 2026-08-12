@@ -619,9 +619,8 @@ impl SplashLayout {
             cont_w,
             cont_h,
         );
-        // Mac glyphs (⌘K / ⇧⌘T); Linux uses "Ctrl+Shift+T". Keep wide enough
-        // that left-aligned chords never crowd the description column.
-        let key_col_w = if is_mac() { 88.0 } else { 128.0 };
+        // Mac: "⇧+⌘+T"; Linux: "Ctrl+Shift+T". Wide enough for left-aligned chords.
+        let key_col_w = if is_mac() { 108.0 } else { 128.0 };
         Self {
             modal,
             pad,
@@ -638,15 +637,23 @@ impl SplashLayout {
 }
 
 /// Key-hint rows for the splash body (platform-aware labels).
+/// Modifiers and the key are joined with `+` (⌘+K, ⇧+⌘+T).
 pub fn splash_hint_rows() -> Vec<(String, &'static str)> {
-    let m = mod_key();
-    let ms = mod_shift();
-    vec![
-        (format!("{m}K"), "commands"),
-        (format!("{m},"), "settings"),
-        (format!("{m}/"), "shortcuts"),
-        (format!("{ms}T"), "new tab"),
-    ]
+    if is_mac() {
+        vec![
+            ("⌘+K".into(), "commands"),
+            ("⌘+,".into(), "settings"),
+            ("⌘+/".into(), "shortcuts"),
+            ("⇧+⌘+T".into(), "new tab"),
+        ]
+    } else {
+        vec![
+            ("Ctrl+K".into(), "commands"),
+            ("Ctrl+,".into(), "settings"),
+            ("Ctrl+/".into(), "shortcuts"),
+            ("Ctrl+Shift+T".into(), "new tab"),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -724,6 +731,13 @@ mod tests {
         assert_eq!(rows.len(), 4);
         assert!(rows.iter().any(|(_, l)| *l == "commands"));
         assert!(rows.iter().any(|(_, l)| *l == "new tab"));
+        // Plus-separated chords (mac: ⌘+K / ⇧+⌘+T; else Ctrl+…).
+        for (key, _) in &rows {
+            assert!(
+                key.contains('+'),
+                "splash key chord should use + separators: {key}"
+            );
+        }
     }
 
     #[test]
