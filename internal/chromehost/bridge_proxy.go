@@ -10,8 +10,8 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/StephenSHorton/suzuri/internal/bridge"
-	"github.com/StephenSHorton/suzuri/internal/notes"
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/notes"
 	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
 

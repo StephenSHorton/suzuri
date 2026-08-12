@@ -12,6 +12,15 @@ pub enum ConfirmChoice {
     No,
 }
 
+/// Which confirm is showing — yes/no dispatch depends on this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ConfirmKind {
+    #[default]
+    Quit,
+    /// Install a GitHub release and restart.
+    Update,
+}
+
 /// Whether the confirm modal is open, plus presentation springs + copy.
 #[derive(Clone, Debug)]
 pub struct ConfirmState {
@@ -20,6 +29,7 @@ pub struct ConfirmState {
     pub body: String,
     pub yes_label: String,
     pub no_label: String,
+    pub kind: ConfirmKind,
     present: f32,
     present_vel: f32,
     overlay: f32,
@@ -39,6 +49,7 @@ impl ConfirmState {
             body: String::new(),
             yes_label: "Yes".into(),
             no_label: "Cancel".into(),
+            kind: ConfirmKind::Quit,
             present: 0.0,
             present_vel: 0.0,
             overlay: 0.0,
@@ -48,10 +59,23 @@ impl ConfirmState {
     /// Product quit dialog: "Quit suzuri?" / "Close all tabs and quit?".
     pub fn open_quit(&mut self) {
         self.open = true;
+        self.kind = ConfirmKind::Quit;
         self.title = "Quit suzuri?".into();
         self.body = "Close all tabs and quit?".into();
         self.yes_label = "Quit".into();
         self.no_label = "Cancel".into();
+    }
+
+    /// Product update dialog: "Update suzuri?" / "vX is available. Install and restart?".
+    pub fn open_update(&mut self, version: &str) {
+        let ver = version.trim().trim_start_matches('v');
+        let ver = if ver.is_empty() { "?" } else { ver };
+        self.open = true;
+        self.kind = ConfirmKind::Update;
+        self.title = "Update suzuri?".into();
+        self.body = format!("v{ver} is available. Install and restart?");
+        self.yes_label = "Update".into();
+        self.no_label = "Later".into();
     }
 
     /// Generic confirm with custom copy.
@@ -63,6 +87,7 @@ impl ConfirmState {
         no: impl Into<String>,
     ) {
         self.open = true;
+        self.kind = ConfirmKind::Quit;
         self.title = title.into();
         self.body = body.into();
         self.yes_label = yes.into();
@@ -217,6 +242,21 @@ mod tests {
         assert_eq!(c.body, "Close all tabs and quit?");
         assert_eq!(c.yes_label, "Quit");
         assert_eq!(c.no_label, "Cancel");
+        assert_eq!(c.kind, ConfirmKind::Quit);
+    }
+
+    #[test]
+    fn open_update_sets_product_copy() {
+        let mut c = ConfirmState::new();
+        c.open_update("v1.2.3");
+        assert!(c.open);
+        assert_eq!(c.kind, ConfirmKind::Update);
+        assert_eq!(c.title, "Update suzuri?");
+        assert_eq!(c.body, "v1.2.3 is available. Install and restart?");
+        assert_eq!(c.yes_label, "Update");
+        assert_eq!(c.no_label, "Later");
+        c.open_update("4.0.0");
+        assert_eq!(c.body, "v4.0.0 is available. Install and restart?");
     }
 
     #[test]

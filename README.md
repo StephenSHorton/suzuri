@@ -34,7 +34,7 @@ chrome — not HTML and not Charm.
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics / control |
 | **Workspace** | Shared local channels, presence, tinted chat bubbles |
 | **Transfer** | Peer-to-peer send/receive (palette + CLI) |
-| **Updates** | Auto-update from GitHub Releases |
+| **Updates** | Startup check + palette **Check for updates** (GitHub Releases; confirm before install) |
 
 ## Download
 

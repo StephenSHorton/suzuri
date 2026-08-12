@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -94,5 +95,28 @@ func TestWithConfigDir(t *testing.T) {
 	}
 	if saw != EnvConfigDir+"=/new/config" {
 		t.Fatalf("got %q", saw)
+	}
+}
+
+func TestWithHostEnvSetsVersion(t *testing.T) {
+	env := []string{"FOO=1", EnvVersion + "=old", "BAR=2"}
+	out := withHostEnv(env, "/cfg", "0.9.113")
+	var sawVer, sawDir string
+	for _, e := range out {
+		if strings.HasPrefix(e, EnvVersion+"=") {
+			if sawVer != "" {
+				t.Fatalf("duplicate version in %v", out)
+			}
+			sawVer = e
+		}
+		if strings.HasPrefix(e, EnvConfigDir+"=") {
+			sawDir = e
+		}
+	}
+	if sawVer != EnvVersion+"=0.9.113" {
+		t.Fatalf("version %q", sawVer)
+	}
+	if sawDir != EnvConfigDir+"=/cfg" {
+		t.Fatalf("dir %q", sawDir)
 	}
 }

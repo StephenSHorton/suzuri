@@ -64,5 +64,5 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: suzuri | suzuri mcp | suzuri version | suzuri transfer …")
 		os.Exit(2)
 	}
-	os.Exit(chromehost.RunCLI(args))
+	os.Exit(chromehost.RunCLI(version, args))
 }

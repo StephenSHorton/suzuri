@@ -15,6 +15,12 @@ There is **no** Charm/ebiten product path and **no** `surface/` web path.
 | Cell pane (shell / TUI only) | this crate | mono grid in the glass well |
 | Host policy (config dir, updates, MCP, transfer) | Go | `internal/*` |
 
+First-pane cwd is `$HOME` when Launch Services (or an installer) starts the
+process inside the `.app` bundle or the install folder. A real project
+directory from a terminal launch is kept. Palette **Check for updates** plus
+a startup check talk to the host over `{config}/update_req` + `update_evt`
+(same confirm-before-install flow as classic suzuri).
+
 ## How launch works
 
 ```bash

@@ -24,7 +24,7 @@ use crate::echo_filter::EchoFilter;
 use crate::commands::{
     default_commands, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
 };
-use crate::confirm::{ConfirmChoice, ConfirmState};
+use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
 use crate::input::{hit_test, is_mac, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
@@ -41,6 +41,7 @@ use crate::session::{ChromeSession, CloseOutcome};
 use crate::settings::SettingsState;
 use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
+use crate::updater::{UpdateEvent, UpdateMailbox};
 use crate::workspace_ui::WorkspaceUi;
 
 /// Max raw PTY bytes retained for MCP `pty_tail` (recent end of stream).
@@ -124,6 +125,8 @@ pub struct ChromeApp {
     link_cursor_on: bool,
     /// Host light IPC: poll `chrome_cmd` under config dir (~250ms).
     control_mailbox: ControlMailbox,
+    /// Host updater IPC: `update_req` / `update_evt`.
+    update_mailbox: UpdateMailbox,
     /// Publish `chrome_status.json` for Go MCP bridge proxy.
     status_publisher: StatusPublisher,
     /// UI / terminal zoom multiplier (⌘± / ⌘0). 1.0 = design size.
@@ -185,6 +188,7 @@ impl Default for ChromeApp {
             hovered_link_span: None,
             link_cursor_on: false,
             control_mailbox: ControlMailbox::new(),
+            update_mailbox: UpdateMailbox::new(),
             ui_zoom: 1.0,
             status_publisher: StatusPublisher::new(),
             input_boost_until: Instant::now(),
@@ -219,7 +223,12 @@ fn spawn_pane_runtime_px(
     session: &mut ChromeSession,
     pane_id: u64,
 ) -> PaneRuntime {
-    match PtySession::spawn_with_pixels(cols, rows, pixel_w, pixel_h) {
+    let cwd = session
+        .panes
+        .get(&pane_id)
+        .map(|p| p.cwd.as_str())
+        .filter(|s| !s.is_empty());
+    match PtySession::spawn_in(cols, rows, pixel_w, pixel_h, cwd) {
         Ok(pty) => {
             session.mark_pane_pty(pane_id);
             PaneRuntime {
@@ -570,17 +579,52 @@ impl ChromeApp {
     }
 
     fn apply_confirm_choice(&mut self, event_loop: &ActiveEventLoop, choice: ConfirmChoice) {
-        match choice {
-            ConfirmChoice::Yes => {
+        match (self.confirm.kind, choice) {
+            (ConfirmKind::Quit, ConfirmChoice::Yes) => {
                 self.confirm.close();
                 chrome_status::clear_status();
                 event_loop.exit();
             }
-            ConfirmChoice::No => {
+            (ConfirmKind::Update, ConfirmChoice::Yes) => {
+                self.confirm.close();
+                self.toast.show("installing update…");
+                self.update_mailbox.request_install();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            (ConfirmKind::Update, ConfirmChoice::No) => {
+                self.confirm.close();
+                self.update_mailbox.request_later();
+                self.toast.show("update deferred");
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            (_, ConfirmChoice::No) => {
                 self.confirm.close();
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
+            }
+        }
+    }
+
+    fn apply_update_events(&mut self) {
+        for ev in self.update_mailbox.poll() {
+            match ev {
+                UpdateEvent::Toast(msg) => self.toast.show(msg),
+                UpdateEvent::Offer { version } => {
+                    if self.confirm.open && self.confirm.kind == ConfirmKind::Quit {
+                        self.toast.show(format!("v{version} available"));
+                        continue;
+                    }
+                    self.close_modals_except_confirm();
+                    self.confirm.open_update(&version);
+                }
+            }
+            if let Some(w) = &self.window {
+                w.request_redraw();
             }
         }
     }
@@ -743,6 +787,17 @@ impl ChromeApp {
                 if let Err(e) = spawn_new_window() {
                     eprintln!("suzuri-chrome: new window failed: {e}");
                     self.toast.show(format!("New window failed: {e}"));
+                }
+            }
+            CommandAction::CheckUpdates => {
+                self.palette.close();
+                let ver = std::env::var("SUZURI_VERSION").unwrap_or_default();
+                let ver = ver.trim();
+                if ver.is_empty() || ver == "dev" {
+                    self.toast.show("dev build — auto-update off");
+                } else {
+                    self.toast.show("checking for updates…");
+                    self.update_mailbox.request_check();
                 }
             }
             CommandAction::Quit => self.request_quit(event_loop),
@@ -2339,6 +2394,7 @@ impl ApplicationHandler for ChromeApp {
                 return;
             }
         }
+        self.apply_update_events();
         if let Some(line) = chrome_status::take_submit() {
             self.submit_line_text(&line);
             if let Some(w) = &self.window {
@@ -2771,6 +2827,7 @@ impl ApplicationHandler for ChromeApp {
                         return;
                     }
                 }
+                self.apply_update_events();
                 // MCP / host warp submit (chrome_submit mailbox).
                 if let Some(line) = chrome_status::take_submit() {
                     self.submit_line_text(&line);
