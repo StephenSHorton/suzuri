@@ -25,7 +25,7 @@ use crate::confirm::{ConfirmChoice, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
 use crate::input::{hit_test, is_mac, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
-use crate::links::{link_url_at_col, open_url_in_browser};
+use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
@@ -81,6 +81,8 @@ pub struct ChromeApp {
     selecting_term: bool,
     /// URL under the pointer in the focused terminal (for hand cursor / Cmd-click).
     hovered_link: Option<String>,
+    /// Exact cell range of [`Self::hovered_link`] for primary hover paint.
+    hovered_link_span: Option<LinkHoverSpan>,
     /// True while the OS pointer icon is the hand (link hover).
     link_cursor_on: bool,
     /// Host light IPC: poll `chrome_cmd` under config dir (~250ms).
@@ -131,6 +133,7 @@ impl Default for ChromeApp {
             term_selection: Selection::new(),
             selecting_term: false,
             hovered_link: None,
+            hovered_link_span: None,
             link_cursor_on: false,
             control_mailbox: ControlMailbox::new(),
         };
@@ -760,8 +763,8 @@ impl ChromeApp {
         }
     }
 
-    /// URL under the pointer in the focused terminal, if any.
-    fn link_url_at_cursor(&self) -> Option<String> {
+    /// Link under the pointer in the focused terminal (URL + cell span), if any.
+    fn link_at_cursor(&self) -> Option<(String, LinkHoverSpan)> {
         if self.overlay_open() {
             return None;
         }
@@ -769,17 +772,44 @@ impl ChromeApp {
         let id = self.session.focus_pane_id();
         let pane = self.session.panes.get(&id)?;
         let line = pane.grid.line_text_abs(pos.abs_row);
-        link_url_at_col(&line, pos.col as usize)
+        let span = link_span_at_col(&line, pos.col as usize)?;
+        let col0 = span.x0.min(u16::MAX as usize) as u16;
+        let col1 = span.x1.min(u16::MAX as usize) as u16;
+        if col1 <= col0 {
+            return None;
+        }
+        Some((
+            span.url,
+            LinkHoverSpan {
+                col0,
+                col1,
+                abs_row: pos.abs_row,
+            },
+        ))
     }
 
-    /// Refresh `hovered_link` + hand cursor when the pointer is over a terminal URL.
+    /// URL under the pointer in the focused terminal, if any.
+    fn link_url_at_cursor(&self) -> Option<String> {
+        self.link_at_cursor().map(|(url, _)| url)
+    }
+
+    /// Refresh `hovered_link` / span + hand cursor when the pointer is over a terminal URL.
     fn update_link_hover(&mut self) {
-        let url = if self.selecting_term {
+        let hit = if self.selecting_term {
             None
         } else {
-            self.link_url_at_cursor()
+            self.link_at_cursor()
         };
-        self.hovered_link = url;
+        match hit {
+            Some((url, span)) => {
+                self.hovered_link = Some(url);
+                self.hovered_link_span = Some(span);
+            }
+            None => {
+                self.hovered_link = None;
+                self.hovered_link_span = None;
+            }
+        }
         let want_hand = self.hovered_link.is_some();
         if want_hand != self.link_cursor_on {
             self.link_cursor_on = want_hand;
@@ -795,6 +825,7 @@ impl ChromeApp {
 
     fn clear_link_hover(&mut self) {
         self.hovered_link = None;
+        self.hovered_link_span = None;
         if self.link_cursor_on {
             self.link_cursor_on = false;
             if let Some(w) = &self.window {
@@ -2084,6 +2115,7 @@ impl ApplicationHandler for ChromeApp {
                         pointer,
                         &self.chip_ui,
                         &self.term_selection,
+                        self.hovered_link_span.as_ref(),
                     ) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

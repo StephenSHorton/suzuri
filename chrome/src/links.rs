@@ -16,6 +16,26 @@ pub struct LinkSpan {
     pub url: String,
 }
 
+/// Hovered URL cell range for paint (absolute document row; cols half-open).
+///
+/// Mirrors product `linkSpan` + row, but uses abs rows like terminal selection
+/// so paint stays correct relative to scrollback while the pointer is still.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkHoverSpan {
+    /// Inclusive start column.
+    pub col0: u16,
+    /// Exclusive end column.
+    pub col1: u16,
+    pub abs_row: usize,
+}
+
+impl LinkHoverSpan {
+    /// Whether absolute cell `(col, abs_row)` lies in this hover span.
+    pub fn contains(&self, col: u16, abs_row: usize) -> bool {
+        abs_row == self.abs_row && col >= self.col0 && col < self.col1
+    }
+}
+
 /// Product `urlPattern`: http(s) and www. URLs in terminal text.
 static URL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)\b(?:https?://|www\.)[^\s<>"'{}|\\^`\[\]()]+"#)
@@ -72,10 +92,15 @@ pub fn link_at(spans: &[LinkSpan], col: usize) -> Option<&LinkSpan> {
     spans.iter().find(|s| col >= s.x0 && col < s.x1)
 }
 
+/// Find the full link span under `col` on `line`, if any.
+pub fn link_span_at_col(line: &str, col: usize) -> Option<LinkSpan> {
+    let spans = find_links_in_line(line);
+    link_at(&spans, col).cloned()
+}
+
 /// Find the URL under `col` on `line`, if any.
 pub fn link_url_at_col(line: &str, col: usize) -> Option<String> {
-    let spans = find_links_in_line(line);
-    link_at(&spans, col).map(|s| s.url.clone())
+    link_span_at_col(line, col).map(|s| s.url)
 }
 
 fn is_url_trail_punct(r: char) -> bool {
@@ -248,5 +273,29 @@ mod tests {
             Some("https://a.co/x")
         );
         assert_eq!(link_url_at_col(line, 0), None);
+    }
+
+    #[test]
+    fn link_hover_span_contains() {
+        let h = LinkHoverSpan {
+            col0: 4,
+            col1: 10,
+            abs_row: 3,
+        };
+        assert!(h.contains(4, 3));
+        assert!(h.contains(9, 3));
+        assert!(!h.contains(10, 3));
+        assert!(!h.contains(5, 2));
+        assert!(!h.contains(3, 3));
+    }
+
+    #[test]
+    fn link_span_at_col_bounds() {
+        let line = "go https://a.co/x please";
+        let s = link_span_at_col(line, 5).expect("hit");
+        assert_eq!(s.url, "https://a.co/x");
+        assert_eq!(s.x0, 3);
+        assert_eq!(s.x1, 3 + "https://a.co/x".len());
+        assert!(link_span_at_col(line, 0).is_none());
     }
 }

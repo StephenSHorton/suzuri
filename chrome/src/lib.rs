@@ -75,8 +75,8 @@ pub use control_mailbox::{
 pub use input::{hit_test, is_mac, traffic_light_rects, HitTarget};
 pub use layout::{FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect, Spacing};
 pub use links::{
-    clean_url, find_links_in_line, link_at, link_url_at_col, normalize_url, open_url_in_browser,
-    LinkSpan,
+    clean_url, find_links_in_line, link_at, link_span_at_col, link_url_at_col, normalize_url,
+    open_url_in_browser, LinkHoverSpan, LinkSpan,
 };
 pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
 pub use pty::PtySession;
