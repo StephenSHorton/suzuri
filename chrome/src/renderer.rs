@@ -25,7 +25,7 @@ use crate::settings::SettingsState;
 use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
 use crate::workspace_ui::WorkspaceUi;
-use crate::text::{MonoCellMetrics, TextLabel, TextLayer, CARET_BLOCK, CARET_RGB};
+use crate::text::{MonoCellMetrics, TextLabel, TextLayer, CARET_BLOCK};
 
 /// Jade selection wash alpha for full-block underlay (`█` mono labels).
 const SELECTION_ALPHA: f32 = 0.32;
@@ -82,6 +82,8 @@ struct FrameUniforms {
     glass2: [f32; 4],
     /// xy = pointer logical, z = spotlight radius, w = 1 if pointer inside
     hover: [f32; 4],
+    /// Theme primary RGB + pad (ModalButtonActive, hairlines, chip press).
+    primary: [f32; 4],
 }
 
 #[repr(C)]
@@ -365,6 +367,12 @@ impl Renderer {
                     GLASS_SHINE,
                 ],
                 hover: [0.0, 0.0, 28.0, 0.0],
+                primary: [
+                    crate::theme::DEFAULT_PRIMARY[0],
+                    crate::theme::DEFAULT_PRIMARY[1],
+                    crate::theme::DEFAULT_PRIMARY[2],
+                    1.0,
+                ],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -941,6 +949,10 @@ impl Renderer {
                     let _ = pointer;
                     [p[0], p[1], 32.0, s]
                 },
+                primary: {
+                    let j = settings.prefs.theme_colors().jade;
+                    [j[0], j[1], j[2], 1.0]
+                },
             }),
         );
 
@@ -1217,6 +1229,8 @@ fn chrome_labels(
     let selection_rgb = pal.jade;
     // Link hover uses secondary/accent so it reads apart from selection primary.
     let link_hover_rgb = pal.secondary;
+    // Carets / block cursor follow theme primary (not hardcoded jade).
+    let caret_rgb = pal.jade;
 
     let mut labels = Vec::with_capacity(128);
     let _ = tab_jelly; // labels no longer follow jelly
@@ -1329,6 +1343,7 @@ fn chrome_labels(
             selection_rgb,
             pane_link,
             link_hover_rgb,
+            caret_rgb,
             cell,
         );
 
@@ -1379,7 +1394,7 @@ fn chrome_labels(
                         caret_x,
                         iy,
                         input_size,
-                        [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], a],
+                        [caret_rgb[0], caret_rgb[1], caret_rgb[2], a],
                     ));
                 }
             }
@@ -1411,6 +1426,7 @@ fn chrome_labels(
         bright,
         muted,
         dim,
+        caret_rgb,
     );
 
     // Ephemeral toast chip (non-modal) — bottom-center frost label.
@@ -1739,8 +1755,12 @@ fn push_modal_labels(
     bright: [f32; 4],
     muted: [f32; 4],
     dim: [f32; 4],
+    caret_rgb: [f32; 3],
 ) {
     let caret_a = caret_alpha.clamp(0.0, 1.0);
+    let caret_rgba = |a: f32| -> [f32; 4] {
+        [caret_rgb[0], caret_rgb[1], caret_rgb[2], a]
+    };
 
     if splash.visible() {
         let ease = splash.content_ease().clamp(0.0, 1.0);
@@ -1971,7 +1991,7 @@ fn push_modal_labels(
                 caret_x.min(input.x + input.w - 20.0),
                 ty,
                 15.0,
-                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+                caret_rgba(caret_a * ease),
             ));
         }
 
@@ -2208,7 +2228,7 @@ fn push_modal_labels(
                 caret_x.min(title_r.x + title_r.w - 16.0),
                 title_r.y + 10.0,
                 14.0,
-                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+                caret_rgba(caret_a * ease),
             ));
         }
         let body = lay.body;
@@ -2229,7 +2249,7 @@ fn push_modal_labels(
                     body.x + 14.0,
                     by,
                     13.0,
-                    [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+                    caret_rgba(caret_a * ease),
                 ));
             }
         } else {
@@ -2254,7 +2274,7 @@ fn push_modal_labels(
                     caret_x.min(body.x + body.w - 16.0),
                     (by - 18.0).max(body.y + 12.0),
                     13.0,
-                    [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+                    caret_rgba(caret_a * ease),
                 ));
             }
         }
@@ -2413,7 +2433,7 @@ fn push_modal_labels(
                 cx,
                 input_y + 14.0,
                 13.0,
-                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+                caret_rgba(caret_a * ease),
             ));
         }
         if !workspace_ui.status.is_empty() {
@@ -2503,7 +2523,7 @@ fn push_modal_labels(
                 cx.min(modal.x + modal.w - pad - 20.0),
                 input_y + 16.0,
                 14.0,
-                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+                caret_rgba(caret_a * ease),
             ));
         }
         if !transfer.ticket.is_empty() {
@@ -2582,7 +2602,7 @@ fn push_modal_labels(
                 caret_x.min(modal.x + modal.w - pad - 20.0),
                 ty,
                 15.0,
-                [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], caret_a * ease],
+                caret_rgba(caret_a * ease),
             ));
         }
         let mut foot = dim;
@@ -2641,6 +2661,7 @@ fn push_pane_cells(
     selection_rgb: [f32; 3],
     link_hover: Option<&LinkHoverSpan>,
     link_hover_rgb: [f32; 3],
+    caret_rgb: [f32; 3],
     cell: MonoCellMetrics,
 ) {
     let mono_size = cell.h.max(1.0); // design size = cell height (Gohu 14)
@@ -2780,7 +2801,7 @@ fn push_pane_cells(
                     cx,
                     cy,
                     mono_size,
-                    [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], 0.55],
+                    [caret_rgb[0], caret_rgb[1], caret_rgb[2], 0.55],
                 )
                 .with_clip(clip),
             );

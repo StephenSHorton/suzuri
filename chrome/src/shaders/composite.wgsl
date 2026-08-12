@@ -16,6 +16,8 @@ struct FrameUniforms {
     glass2: vec4f,
     // xy = pointer logical (top-left), z = spotlight radius (logical), w = 1 when pointer inside
     hover: vec4f,
+    // Theme primary RGB (user settings) + pad — active buttons, hairlines, press wash
+    primary: vec4f,
 }
 
 struct Panel {
@@ -410,7 +412,8 @@ fn fs(in: VsOut) -> @location(0) vec4f {
 
     // No title-bar fill — rain shows through; traffic lights + title text only.
     var col = sample_rain_raw(px, 0.0);
-    let jade = vec3f(0.0, 0.902, 0.463);
+    // Brand primary from settings (not hardcoded inkstone jade).
+    let jade = u.primary.xyz;
     let n = u32(u.misc.z);
 
     // --- 1) Liquid glass blob: all panes + active tab, smooth-unioned ---

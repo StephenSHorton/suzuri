@@ -22,7 +22,8 @@ pub const GOHU_FAMILY: &str = "GohuFont uni14 Nerd Font Mono";
 /// Default caret glyph — full block everywhere (terminal, warp, modals).
 pub const CARET_BLOCK: &str = "█";
 
-/// Primary caret color (jade), alpha applied by caller.
+/// Fallback caret color when theme primary is unavailable (inkstone jade).
+/// Prefer `settings.prefs.theme_colors().jade` at paint sites.
 pub const CARET_RGB: [f32; 3] = [0.0, 0.90, 0.46];
 
 /// System face for ☕ (Gohu has no U+2615).
