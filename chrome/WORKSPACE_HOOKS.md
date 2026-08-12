@@ -120,6 +120,8 @@ Manual: **Ctrl+R** (⌘R) while open → `refresh()`. Mailbox: `refresh_workspac
 |--------|----------|
 | `select_channel(name)` | Switch + reload history |
 | `create_channel(name)` | Ensure dir/meta/jsonl; select |
+| `request_delete_channel()` | Ctrl+D ×2 confirm; blocks `#general` |
+| `confirm_delete_channel()` | Store delete + select `#general` |
 | `begin_new_channel()` | Compose mode = name entry |
 | `cancel_mode()` | Back to message compose |
 | `cycle_channel(delta)` | Tab-style prev/next |
@@ -181,7 +183,7 @@ PRESENCE_STRIP_H   = 18               // members line above messages
 2. Esc: if `mode != Message` → `cancel_mode()`; else `close()`
 3. Enter → `send()`; printable → `insert_char`; Backspace → `backspace`
 4. Tab / Shift+Tab → `cycle_channel`; ↑/↓ → scroll
-5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path
+5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path; Ctrl+D ×2 → `request_delete_channel()` (blocks `#general`)
 6. Pointer inside `animated_modal_rect` → keep open; `try_click` for channel rail / presence strip
 7. Outside click → `close()` (via `close_all_overlays`)
 8. `DroppedFile` while workspace open → `workspace_ui.attach_path(path)` (before transfer)
@@ -196,7 +198,6 @@ cd chrome && cargo test && cargo build --release
 ## Out of scope (later)
 
 - `@` mention complete / highlight
-- Delete channel
 - Native FS watch (polling ~1s is enough for MCP attach)
 - OS file picker dialog (path string + drop is enough)
 - SHA-256 hash on upload (field present, often empty)

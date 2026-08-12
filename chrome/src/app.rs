@@ -1667,7 +1667,7 @@ impl ChromeApp {
                     }
                 }
             }
-            // Workspace: Ctrl+R refresh, Ctrl+Shift+A cycle presence (while open).
+            // Workspace: Ctrl+R refresh, Ctrl+Shift+A cycle presence, Ctrl+D×2 delete channel (while open).
             if self.workspace_ui.open {
                 if let Key::Character(ref s) = event.logical_key {
                     match s.as_str() {
@@ -1694,6 +1694,13 @@ impl ChromeApp {
                         }
                         "u" | "U" if !shift => {
                             self.workspace_ui.begin_attach();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        "d" | "D" if !shift => {
+                            self.workspace_ui.request_delete_channel();
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
