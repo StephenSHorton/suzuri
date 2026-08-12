@@ -33,6 +33,10 @@ pub enum CommandAction {
     RenameTab,
     /// Open rename dialog for the focused pane (F2).
     RenamePane,
+    /// Soft-reload workspace from disk if open (mailbox / MCP).
+    RefreshWorkspace,
+    /// Cycle local human presence (idle→working→waiting→blocked→away).
+    CycleWorkspaceStatus,
     Quit,
 }
 
@@ -109,6 +113,13 @@ pub fn default_commands() -> Vec<Command> {
             desc: "Shared channels · humans + AIs".into(),
             category: "Workspace",
             action: CommandAction::OpenWorkspace,
+        },
+        Command {
+            id: "workspace_cycle_status",
+            title: "Cycle workspace status",
+            desc: format!("{ms}A · idle→working→waiting·… · Workspace"),
+            category: "Workspace",
+            action: CommandAction::CycleWorkspaceStatus,
         },
         Command {
             id: "transfer_send",

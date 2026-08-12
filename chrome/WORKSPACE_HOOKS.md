@@ -94,9 +94,25 @@ Preserve these for `app` / `renderer`:
 |--------|----------|
 | `join_self()` | `store.join($USER, "human", "")` |
 | `members_strip_text()` | One-line chip list (humans first; soft cap + overflow) |
-| `refresh()` | Also reloads members |
+| `refresh()` | Reload channels + messages + members; status = `"refreshed"` |
+| `reload_from_disk(announce)` | Soft reload (no status thrash when `announce=false`); preserves stick-to-bottom |
+| `cycle_status()` | Local human: idle→working→waiting→blocked→away→idle via `set_status` |
+| `self_status()` | Current local human presence code |
+| `presence_strip_rect` | Click target for cycle (title strip) |
 
-Store: `list_members`, `join`, `set_status`, `normalize_availability`, `member_chip`.
+Store: `list_members`, `join`, `set_status`, `normalize_availability`, `next_availability`, `member_chip`.
+
+### Auto-refresh while open
+
+`WorkspaceUi::tick` accumulates time; every ~1s (`AUTO_REFRESH_INTERVAL_SECS`) while `open`, calls `reload_from_disk(false)` so MCP / other clients’ JSONL posts appear without thrashing the status line or scroll.
+
+Manual: **Ctrl+R** (⌘R) while open → `refresh()`. Mailbox: `refresh_workspace` → `CommandAction::RefreshWorkspace` (soft no-op if closed).
+
+### Status cycle
+
+- **Ctrl+Shift+A** (⇧⌘A) while workspace open
+- Palette: **Cycle workspace status**
+- Click presence strip
 
 ### Channels
 
@@ -164,9 +180,12 @@ PRESENCE_STRIP_H   = 18               // members line above messages
 1. Palette action `OpenWorkspace` → close other overlays → `workspace_ui.open()`
 2. Esc: if `mode != Message` → `cancel_mode()`; else `close()`
 3. Enter → `send()`; printable → `insert_char`; Backspace → `backspace`
-4. Pointer inside `animated_modal_rect` → keep open; `try_click` for channel rail
-5. Outside click → `close()` (via `close_all_overlays`)
-6. `DroppedFile` while workspace open → `workspace_ui.attach_path(path)` (before transfer)
+4. Tab / Shift+Tab → `cycle_channel`; ↑/↓ → scroll
+5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path
+6. Pointer inside `animated_modal_rect` → keep open; `try_click` for channel rail / presence strip
+7. Outside click → `close()` (via `close_all_overlays`)
+8. `DroppedFile` while workspace open → `workspace_ui.attach_path(path)` (before transfer)
+9. Mailbox `refresh_workspace` → soft reload if open
 
 ## Build
 
@@ -178,6 +197,6 @@ cd chrome && cargo test && cargo build --release
 
 - `@` mention complete / highlight
 - Delete channel
-- Live FS watch / MCP refresh polling
+- Native FS watch (polling ~1s is enough for MCP attach)
 - OS file picker dialog (path string + drop is enough)
 - SHA-256 hash on upload (field present, often empty)
