@@ -267,7 +267,7 @@ impl SettingsState {
     /// |-----|--------|
     /// | `1` | Toggle rain |
     /// | `2` | Toggle lens |
-    /// | `3` | Focus accent (then ←→ hue) |
+    /// | `3` | Focus primary color (then ←→ hue) |
     /// | `[` / `-` | Darken −5% |
     /// | `]` / `=` / `+` | Darken +5% |
     /// | `0` | Reset defaults |
@@ -493,7 +493,7 @@ impl SettingsState {
             "toggles".into(),
             format!("  [1] glyph rain     {rain}"),
             format!("  [2] magnifier      {lens}  · pinch or ⌃/⌘+scroll"),
-            format!("  [3] accent         {accent}  · ←→ hue · click swatches"),
+            format!("  [3] primary        {accent}  · ←→ hue · click swatches"),
             format!("  [ / ]  glass darken  {darken_pct}%"),
             format!("  [0] reset defaults"),
             String::new(),
@@ -790,7 +790,7 @@ mod tests {
         assert!(s.prefs.rain);
         assert_eq!(s.prefs.accent, theme::DEFAULT_ACCENT);
         let lines = s.display_lines(false, 80, 24, 1).join("\n");
-        assert!(lines.contains("accent"));
+        assert!(lines.contains("primary"));
         cleanup(&path);
     }
 

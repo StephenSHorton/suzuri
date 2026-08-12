@@ -1826,7 +1826,7 @@ fn push_modal_labels(
         let titles = [
             "Glyph rain",
             "Magnifier",
-            "Accent color",
+            "Primary color",
             "Glass darken",
             "Reset defaults",
         ];

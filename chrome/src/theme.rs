@@ -14,7 +14,8 @@ pub struct ThemeColors {
     pub bg: [f32; 3],
     /// Primary text / glyphs.
     pub fg: [f32; 3],
-    /// Accent (inkstone jade, or theme primary).
+    /// Theme **primary** (product `colPrimary` / inkstone jade role).
+    /// Borders, selection, rain, self chat bubbles, active chrome.
     pub jade: [f32; 3],
     /// Secondary / dim labels.
     pub muted: [f32; 3],
