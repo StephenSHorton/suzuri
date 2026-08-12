@@ -32,6 +32,7 @@ mod settings;
 mod shell;
 mod text;
 mod theme;
+mod toast;
 mod transfer_ui;
 mod workspace_store;
 mod workspace_ui;

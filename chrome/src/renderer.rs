@@ -21,6 +21,7 @@ use crate::session::ChromeSession;
 use crate::caffeine::Caffeine;
 use crate::notes::NotesState;
 use crate::settings::SettingsState;
+use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
 use crate::workspace_ui::WorkspaceUi;
 use crate::text::{TextLabel, TextLayer, CARET_BLOCK, CARET_RGB};
@@ -653,6 +654,7 @@ impl Renderer {
         transfer: &TransferUi,
         rename: &RenameState,
         caffeine: &Caffeine,
+        toast: &ToastState,
         commands: &[Command],
         layout: &FrameLayout,
         pty_active: bool,
@@ -832,6 +834,16 @@ impl Renderer {
                 commands,
             );
         }
+        // Toast is non-modal: frost chip only, never a scrim or input capture.
+        if toast.visible() {
+            use crate::layout::{PanelInstance, PanelKind};
+            let op = toast.opacity();
+            let chip = toast.chip_rect(logical_w, logical_h);
+            panels.push(
+                PanelInstance::glass(chip, self.metrics.chip_radius, PanelKind::ModalFrost)
+                    .with_opacity(op),
+            );
+        }
         let count = panels.len() as u32;
 
         let need = (panels.len() as u64) * std::mem::size_of::<PanelInstance>() as u64;
@@ -1006,6 +1018,7 @@ impl Renderer {
             transfer,
             rename,
             caffeine,
+            toast,
             commands,
             pty_active,
             terminal_cursor_visible,
@@ -1111,6 +1124,7 @@ fn chrome_labels(
     transfer: &TransferUi,
     rename: &RenameState,
     caffeine: &Caffeine,
+    toast: &ToastState,
     commands: &[Command],
     pty_active: bool,
     terminal_cursor_visible: bool,
@@ -1313,6 +1327,20 @@ fn chrome_labels(
         muted,
         dim,
     );
+
+    // Ephemeral toast chip (non-modal) — bottom-center frost label.
+    if toast.visible() {
+        let chip = toast.chip_rect(win_w, win_h);
+        let op = toast.opacity();
+        let mut c = bright;
+        c[3] *= op;
+        labels.push(TextLabel::centered(
+            toast.message().to_string(),
+            [chip.x, chip.y, chip.w, chip.h],
+            13.0,
+            c,
+        ));
+    }
 
     labels
 }
