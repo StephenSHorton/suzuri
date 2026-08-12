@@ -32,6 +32,17 @@ const SELECTION_ALPHA: f32 = 0.32;
 /// Primary wash under a hovered URL span (product link hover ≈ 12% BG blend).
 const LINK_HOVER_ALPHA: f32 = 0.14;
 
+/// Secondary UI label color: blend theme muted → FG by `lift` (0=muted, 1=fg).
+fn secondary_label_rgba(pal: &crate::theme::ThemeColors, lift: f32, alpha: f32) -> [f32; 4] {
+    let t = lift.clamp(0.0, 1.0);
+    [
+        (pal.muted[0] * (1.0 - t) + pal.fg[0] * t).clamp(0.0, 1.0),
+        (pal.muted[1] * (1.0 - t) + pal.fg[1] * t).clamp(0.0, 1.0),
+        (pal.muted[2] * (1.0 - t) + pal.fg[2] * t).clamp(0.0, 1.0),
+        alpha.clamp(0.0, 1.0),
+    ]
+}
+
 /// Fallback mono cell metrics (Gohu uni14 design). Prefer [`Renderer::cell_metrics`].
 pub const CELL_W: f32 = 7.0;
 pub const CELL_H: f32 = 14.0;
@@ -1189,14 +1200,12 @@ fn chrome_labels(
     use crate::chrome_ui::{scale_rect, ChipId};
     // Chrome label colors track prefs theme (see SETTINGS_HOOKS.md / theme.rs).
     let pal = settings.prefs.theme_colors();
-    let muted = [pal.muted[0], pal.muted[1], pal.muted[2], 0.85];
     let bright = [pal.fg[0], pal.fg[1], pal.fg[2], 0.95];
-    let dim = [
-        pal.muted[0] * 0.85,
-        pal.muted[1] * 0.85,
-        pal.muted[2] * 0.85,
-        0.75,
-    ];
+    // Secondary text: lift theme `muted` toward FG so palette subtitles,
+    // inactive tabs, settings values, etc. stay readable on dark glass.
+    // (Raw muted × low alpha was nearly invisible.)
+    let muted = secondary_label_rgba(&pal, 0.55, 0.92);
+    let dim = secondary_label_rgba(&pal, 0.42, 0.88);
     // Warm accent when caffeine is on (product styleCaffeineOn).
     let cafe_on = [1.0, 0.82, 0.45, 0.95];
     let cafe_off = [0.45, 0.55, 0.48, 0.70];
