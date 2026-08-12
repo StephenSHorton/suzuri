@@ -13,14 +13,20 @@ Branch: `exp/native-chrome`
 | Settings persist | `635f301` / `d9154bc` | ✅ |
 | Host merge surface | `0ab23fe` / `a82c598` | ✅ |
 
-## Still thinner than product (next waves)
+## Wave 2 (in flight)
 
-- Go host **spawn/embed** of `suzuri-chrome` (see `HOST.md`)
-- Transfer OS drag-drop + ticket copy chip UI
-- Notes undo/selection drag / title rename polish
+| Track | Goal |
+|-------|------|
+| G | Selection **highlight** paint in renderer |
+| H | Transfer OS **drag-drop** + ticket **copy chip** |
+| I | Go host **spawn** `suzuri-chrome` (`HOST.md` phase 1) |
+| J | Notes **undo** + title focus polish |
+
+## Later waves
+
 - Workspace presence + file attach + MCP agents
 - Full theme catalog / multi-window
-- Selection **visual highlight** paint in renderer
+- In-process FFI embed (after spawn)
 
 ## Run
 
