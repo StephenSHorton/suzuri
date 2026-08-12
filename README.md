@@ -6,7 +6,9 @@
 
 **Suzuri** means *inkstone* — the stone where ink is ground before writing.
 
-A **real terminal host** for Windows and macOS: your window, PTY, VT cell grid, Charm chrome, Warp-style input bar. Not a TUI inside someone else’s emulator, and not a Warp fork.
+A **native terminal host** for macOS and Windows: your window, PTY, GPU chrome
+(glass, rain, tabs, settings, workspace). Not a TUI inside someone else’s
+emulator, and not a Charm/Bubble Tea app.
 
 **Site:** [stephenshorton.github.io/suzuri](https://stephenshorton.github.io/suzuri/) · **Download:** [latest release](https://github.com/StephenSHorton/suzuri/releases/latest)
 
@@ -14,191 +16,121 @@ A **real terminal host** for Windows and macOS: your window, PTY, VT cell grid, 
 
 ## Why
 
-Most “pretty terminals” are either:
+Most “pretty terminals” are either a full host (Windows Terminal, WezTerm) or a
+TUI that lives *inside* another terminal.
 
-- a **full host** (Windows Terminal, WezTerm) with deep VT fidelity, or  
-- a **TUI app** that lives *inside* another terminal (Crush, many Charm demos).
-
-**suzuri is a host.** It owns the native window + PTY + paint. Charm (Bubble Tea + Lip Gloss) owns the chrome you notice — tabs, palette, settings — composited over a dimmed shell.
+**suzuri is a host.** It owns the native window + PTY + paint. The interactive
+UI is a **native GPU shell** (Rust / wgpu) — optical glass, glyph rain, product
+chrome — not HTML and not Charm.
 
 ## Features
 
 | Area | Highlights |
 |------|------------|
-| **Host** | Native window (Win32 / macOS), ConPTY or POSIX PTY shells, scrollback, selection, copy/paste |
-| **Chrome** | Tabs, command palette (`Ctrl+K`), settings (`Ctrl+,`), help, themes |
-| **Panes** | Split right/down, shared sashes, per-pane Warp bars, focus with ⌘⌥+arrows (macOS) / Alt+arrows (Windows) |
-| **Input** | Warp-style bottom bar — local edit, multiline, history, echo filter |
-| **Look** | 16 themes (Inkstone, Charmtone, Nord, Dracula, Tokyo Night, …) · bundled Gohu mono · app icon · box-drawing |
-| **Polish** | Intros (matrix, ripple, ink wash, CRT) · shell ambient (rain, grain, waves, fireflies, CRT) · 猫咪 dim under settings · floating chrome |
-| **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics |
-| **Transfer** | Peer-to-peer send/receive (palette + CLI; iroh via `suzuri-transfer`) |
-| **Updates** | Auto-update from GitHub Releases on startup; palette **Check for updates** |
-| **Install** | Windows: user-scoped setup (`*-setup.exe`) · macOS: `.dmg` / `.app.zip` → Applications |
+| **Host** | Native window, ConPTY / POSIX PTY, scrollback, selection, copy/paste |
+| **Chrome** | Tabs, splits, command palette (`⌘K` / `⌘P`), settings (`⌘,`), help (`⌘/`) |
+| **Look** | Glass panes · glyph rain · primary + derived accent colors · Gohu mono |
+| **Input** | Warp-style compose · echo filter · command blocks |
+| **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics / control |
+| **Workspace** | Shared local channels, presence, tinted chat bubbles |
+| **Transfer** | Peer-to-peer send/receive (palette + CLI) |
+| **Updates** | Auto-update from GitHub Releases |
 
 ## Download
 
-**Windows (recommended)**
+**macOS (Apple Silicon)**
 
-1. Grab **`suzuri-*-windows-amd64-setup.exe`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
-2. Run the installer — **no administrator rights**. It installs to `%LOCALAPPDATA%\Programs\suzuri\`, adds **Start Menu** and desktop shortcuts, and an **Apps & features** uninstall entry.  
-3. Config and logs stay in `%LOCALAPPDATA%\suzuri\`. In-app updates still replace the installed exe in place.  
-4. Builds are **not Authenticode-signed**. SmartScreen may show “Windows protected your PC” — **More info → Run anyway**.
-
-**Windows (portable)**
-
-1. Grab **`suzuri-*-windows-amd64.exe`** (or the `.zip`) if you prefer a single file with no shortcuts.  
-2. Double-click — GUI subsystem, no spare console window. Same SmartScreen note as above.
-
-**macOS (Apple Silicon, recommended)**
-
-1. Grab **`suzuri-*-darwin-arm64.dmg`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).  
-2. Open the DMG and drag **suzuri** into **Applications** (or `~/Applications`).  
-3. **Signed releases:** when Developer ID + notarization secrets are configured, macOS builds are **Developer ID signed and notarized** (see [`packaging/macos/SIGNING.md`](packaging/macos/SIGNING.md)). Until then, first launch of an unsigned/ad-hoc build may show **“suzuri” Not Opened** — **System Settings → Privacy & Security → Open Anyway**, or right-click → **Open**.  
-4. Config and logs live in `~/Library/Application Support/suzuri/`. In-app updates replace the binary inside the `.app` (portable payload, not the DMG).
-
-**macOS (portable)**
-
-1. Grab **`suzuri-*-darwin-arm64`** (or the plain `.zip`, not `.app.zip`) if you prefer a single binary.  
-2. `chmod +x suzuri-*-darwin-arm64 && ./suzuri-*-darwin-arm64`  
-3. Same Gatekeeper note as the `.app` above if the binary is quarantined from a browser download.
-
-## Build from source
+1. Grab **`suzuri-*-darwin-arm64.dmg`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).
+2. Drag **suzuri** into **Applications**.
+3. Config / logs: `~/Library/Application Support/suzuri/`.
 
 **Windows**
 
-```powershell
-git clone https://github.com/StephenSHorton/suzuri.git
-cd suzuri
-go test ./...
-# -H windowsgui: no spare console on double-click / Start Menu (GUI host only).
-# Logs still go to %LOCALAPPDATA%\suzuri\suzuri.log. `suzuri version` reattaches
-# to the parent console when run from a shell.
-go build -ldflags "-H windowsgui -s -w -X main.version=dev" -o suzuri.exe ./cmd/suzuri
-.\suzuri.exe
-```
+1. Grab **`suzuri-*-windows-amd64-setup.exe`** from [Releases](https://github.com/StephenSHorton/suzuri/releases/latest).
+2. User install under `%LOCALAPPDATA%\Programs\suzuri\` (no admin).
+3. Config / logs: `%LOCALAPPDATA%\suzuri\`.
 
-**macOS**
-
-```bash
-git clone https://github.com/StephenSHorton/suzuri.git
-cd suzuri
-go test ./...
-# CGO required (ebiten window host)
-CGO_ENABLED=1 go build -ldflags "-s -w -X main.version=dev" -o suzuri ./cmd/suzuri
-./suzuri
-```
-
-Go 1.26+ recommended (see `go.mod`). Supported hosts: **Windows** (ConPTY) and **macOS** (POSIX PTY).
-
-## Keys
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+K` / `Ctrl+P` | Command palette |
-| `Ctrl+,` | Settings |
-| `Ctrl+/` | Help |
-| `⌘+/⌘-` · `Ctrl++` / `Ctrl+-` | Zoom UI (font size) |
-| `⌘0` · `Ctrl+0` | Reset zoom |
-| `Ctrl+Shift+T` | New tab |
-| `Ctrl+Shift+N` | New window |
-| `Ctrl+W` / `⌘W` | Close pane (last pane closes the tab; last tab confirms quit) |
-| `Ctrl+Shift+←` / `→` · `Ctrl+Shift+[` / `]` | Previous / next tab |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
-| `Ctrl+1`…`9` | Jump to tab |
-| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy / paste |
-| `⌘-click` · `Ctrl-click` URL | Open link in browser |
-
-## Config
-
-| OS | Config | Logs |
-|----|--------|------|
-| Windows | `%LOCALAPPDATA%\suzuri\config.json` | `%LOCALAPPDATA%\suzuri\suzuri.log` |
-| macOS | `~/Library/Application Support/suzuri/config.json` | same dir `suzuri.log` |
-
-Fields: font, theme, ANSI map, **intro** (`matrix` \| `ripple` \| `none`), profiles, window placement.
-
-`SUZURI_LOG_LEVEL=info` to quiet debug.
-
-## Transfer (P2P files)
-
-Send a file straight to another machine — no cloud, no size cap. Engine is Rust/iroh in [`libs/transfer`](libs/transfer/), shipped as `suzuri-transfer` next to the host (or `SUZURI_TRANSFER_BIN` / `PATH` while developing).
-
-```sh
-# Terminal A — print a ticket and keep serving until Ctrl+C
-suzuri send ./holiday.mkv
-
-# Terminal B — download (paste the ticket)
-suzuri receive 'blob…' ~/Downloads
-
-# Engine path + local identity
-suzuri transfer version
-suzuri transfer me
-
-# Dev: build engine next to a local binary
-./tools/build-transfer.sh --copy ./suzuri
-```
-
-Identity lives under the suzuri config tree: `…/suzuri/transfer/`. Palette: **Send file (ticket)…** / **Receive ticket…**. See [`docs/transfer.md`](docs/transfer.md) and [`libs/README.md`](libs/README.md).
-
-## MCP (agent diagnostics + notes)
-
-Spawn-on-demand stdio MCP — attach to a running GUI over loopback. Tools include terminal diag/submit/logs and **notes bank** CRUD (`suzuri_notes_list` / `_get` / `_create` / `_update` / `_delete`). See [`docs/mcp.md`](docs/mcp.md).
-
-```toml
-# ~/.grok/config.toml
-[mcp_servers.suzuri]
-command = '/path/to/suzuri'   # or C:\path\to\suzuri.exe on Windows
-args = ["mcp"]
-enabled = true
-```
+Portable `.zip` builds ship **host + UI + transfer** side by side. In-app
+updates replace the same layout.
 
 ## Architecture
 
-```
-Native window  →  key/mouse
-      │
-      ├─ Charm chrome (tabs / palette / settings)  → mini VT → paint
-      │
-      └─ active tab
-           write queue  →  PTY (ConPTY / POSIX)  →  shell
-                ↑                                    ↓
-           VT parse (UI thread)  ←  byte queue
-                ↓
-           cell grid + scrollback → paint (GDI / software+Metal)
-```
+One product, small process split:
 
-Design notes: [`docs/crush-inspired-plan.md`](docs/crush-inspired-plan.md).
+| Binary | Role |
+|--------|------|
+| **`suzuri`** | Go host — CLI, MCP, config, update, launches UI |
+| **UI process** | Rust GPU shell (packaged next to host; internal name `suzuri-chrome`) |
+| **`suzuri-transfer`** | Optional P2P engine |
 
-## Releases & CI
+You only run **`suzuri`**. Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-| Workflow | Purpose |
-|----------|---------|
-| **CI** | `go test` + build on Windows and macOS |
-| **Release** | Tag `v*.*.*` → windows-amd64 + darwin-arm64 assets + `SHA256SUMS` |
-| **Pages** | Deploys `docs/site` to GitHub Pages |
+## Build from source
+
+Requires **Go** (see `go.mod`), **Rust** (stable), and a C toolchain for CGO on
+the host where needed for other modules — the **product UI is pure Rust**.
 
 ```bash
-git tag v0.6.0
-git push origin v0.6.0
+git clone https://github.com/StephenSHorton/suzuri.git
+cd suzuri
+
+# UI (required for the window)
+cd chrome && cargo test --bins && cargo build --release && cd ..
+
+# Host
+go test ./...
+go build -ldflags "-s -w -X main.version=dev" -o suzuri ./cmd/suzuri
+
+# Run — host finds chrome/target/release/suzuri-chrome
+./suzuri
 ```
+
+**Windows GUI subsystem** (no spare console on double-click):
+
+```powershell
+go build -ldflags "-H windowsgui -s -w -X main.version=dev" -o suzuri.exe ./cmd/suzuri
+```
+
+**Optional transfer engine:**
+
+```bash
+./tools/build-transfer.sh
+```
+
+### CLI
+
+| Command | Purpose |
+|---------|---------|
+| `suzuri` | Launch the app |
+| `suzuri version` | Print version |
+| `suzuri mcp` | Stdio MCP (spawn-on-demand) |
+| `suzuri transfer …` | P2P transfer CLI |
+| `suzuri chrome …` | Alias that forwards args to the UI process |
+
+## Settings
+
+Open **Settings** (`⌘,`). **Primary color** is the brand color; **Accent** is
+derived from it (or set manually). **Reset defaults** restores factory prefs.
 
 ## Auto-update
 
-Release builds embed a version via `-ldflags -X main.version=…`. On startup (and via palette **Check for updates**), suzuri queries GitHub Releases and toasts progress. If a newer version exists, a **confirmation modal** asks before install; **Update** downloads the portable asset (not the setup installer), verifies `SHA256SUMS` when present, replaces the running binary, and relaunches. **Later** dismisses without installing. Works for portable `.exe` and the install under `%LOCALAPPDATA%\Programs\suzuri\`. Dev builds (`version=dev`) never offer updates.
+Release builds embed a version via `-ldflags -X main.version=…`. On startup
+(and via palette **Check for updates**), suzuri queries GitHub Releases. If a
+newer version exists, a confirmation modal offers install. The portable zip
+payload updates host + UI + transfer together when present.
 
-## Packaging
+## Packaging / CI
 
-| Artifact | Purpose |
+| Workflow | Purpose |
 |----------|---------|
-| `*-windows-amd64-setup.exe` | NSIS user installer (Start Menu, desktop, uninstall) |
-| `*-windows-amd64.exe` | Portable Windows binary (also the in-app update payload) |
-| `*-darwin-arm64.dmg` | macOS disk image — drag `suzuri.app` to Applications |
-| `*-darwin-arm64.app.zip` | Same `.app` bundle, zipped |
-| `*-darwin-arm64` / `.zip` | Portable macOS binary (in-app update payload) |
-| `SHA256SUMS` | Checksums for all release assets |
+| **CI** | `go test` + build |
+| **Release** | Tag `v*.*.*` → macOS / Windows assets + `SHA256SUMS` (includes UI binary) |
+| **Pages** | Site under `docs/site` |
 
-Installer sources: [`packaging/windows/suzuri.nsi`](packaging/windows/suzuri.nsi), [`packaging/macos/`](packaging/macos/).
+```bash
+git tag v0.9.112
+git push origin v0.9.112
+```
 
 ## License
 

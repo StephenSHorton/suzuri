@@ -2,7 +2,7 @@
 
 Primary module: [`src/notes.rs`](src/notes.rs)  
 Pure bank ops: [`src/notes_ops.rs`](src/notes_ops.rs)  
-Product refs: `internal/chrome/notes*.go`, `notes_store.go`
+Product refs: `internal/notes/` (disk bank + MCP offline ops); UI in this crate
 
 ## Product shape
 
