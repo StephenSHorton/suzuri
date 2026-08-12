@@ -29,6 +29,10 @@ pub enum CommandAction {
     Caffeine15m,
     Caffeine1h,
     CaffeineOff,
+    /// Open rename dialog for the chrome strip tab (page).
+    RenameTab,
+    /// Open rename dialog for the focused pane (F2).
+    RenamePane,
     Quit,
 }
 
@@ -163,6 +167,13 @@ pub fn default_commands() -> Vec<Command> {
             action: CommandAction::CloseTab,
         },
         Command {
+            id: "rename_tab",
+            title: "Rename tab",
+            desc: "Palette · custom strip name · Tabs".into(),
+            category: "Tabs",
+            action: CommandAction::RenameTab,
+        },
+        Command {
             id: "next_tab",
             title: "Next tab",
             desc: format!("{ms}] · Tabs"),
@@ -189,6 +200,13 @@ pub fn default_commands() -> Vec<Command> {
             desc: format!("{ms}E · Panes · jelly open"),
             category: "Panes",
             action: CommandAction::SplitDown,
+        },
+        Command {
+            id: "rename_pane",
+            title: "Rename pane",
+            desc: "F2 · custom pane title · Panes".into(),
+            category: "Panes",
+            action: CommandAction::RenamePane,
         },
         Command {
             id: "close_pane",
@@ -557,6 +575,16 @@ mod tests {
         let idx = filter_commands(&all, "split");
         assert!(!idx.is_empty());
         assert!(idx.iter().any(|&i| all[i].id.contains("split")));
+    }
+
+    #[test]
+    fn filter_finds_rename() {
+        let all = default_commands();
+        let idx = filter_commands(&all, "rename");
+        assert!(idx.iter().any(|&i| all[i].id == "rename_tab"));
+        assert!(idx.iter().any(|&i| all[i].id == "rename_pane"));
+        assert!(all.iter().any(|c| c.action == CommandAction::RenameTab));
+        assert!(all.iter().any(|c| c.action == CommandAction::RenamePane));
     }
 
     #[test]

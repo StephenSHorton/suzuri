@@ -21,6 +21,7 @@
 //! | [`control_mailbox`] | Phase 2 light IPC (`chrome_cmd` file) |
 //! | [`commands`] | Palette / shortcuts registry |
 //! | [`confirm`] | Crush-style yes/no confirm (quit) |
+//! | [`rename`] | Tab / pane rename dialog |
 //! | [`shell`] | Mock shell helpers (fallback when no PTY) |
 //! | [`notes`] / [`notes_ops`] | Multi-note bank + product-compatible `notes.json` |
 //!
@@ -46,6 +47,7 @@ pub mod notes;
 pub mod notes_ops;
 pub mod panes;
 pub mod pty;
+pub mod rename;
 pub mod selection;
 pub mod session;
 pub mod settings;
@@ -78,6 +80,7 @@ pub use links::{
 };
 pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
 pub use pty::PtySession;
+pub use rename::{RenameState, RenameTarget};
 pub use selection::Selection;
 pub use session::{ChromeSession, CloseOutcome, Pane, Tab};
 pub use settings::{ChromePrefs, SettingsState, GLASS_DARKEN_DEFAULT};

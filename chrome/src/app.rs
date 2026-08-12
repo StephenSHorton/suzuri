@@ -29,6 +29,7 @@ use crate::links::{link_url_at_col, open_url_in_browser};
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
+use crate::rename::{RenameState, RenameTarget};
 use crate::renderer::{self, Renderer, CELL_H, CELL_W};
 use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome};
@@ -61,6 +62,7 @@ pub struct ChromeApp {
     notes: NotesState,
     workspace_ui: WorkspaceUi,
     transfer: TransferUi,
+    rename: RenameState,
     caffeine: Caffeine,
     commands: Vec<crate::commands::Command>,
     started: Instant,
@@ -116,6 +118,7 @@ impl Default for ChromeApp {
             notes: NotesState::new(),
             workspace_ui: WorkspaceUi::new(),
             transfer: TransferUi::new(),
+            rename: RenameState::new(),
             caffeine: Caffeine::new(),
             commands: default_commands(),
             started: Instant::now(),
@@ -222,6 +225,18 @@ impl ChromeApp {
             return;
         };
         if text.is_empty() {
+            return;
+        }
+        // Modal text fields first (rename / palette query / notes already handle keys).
+        if self.rename.open {
+            // Single-line: stop at first newline.
+            let line = text.split(['\n', '\r']).next().unwrap_or("");
+            self.rename.insert_str(line);
+            return;
+        }
+        if self.palette.open {
+            self.palette.query.push_str(text.split(['\n', '\r']).next().unwrap_or(""));
+            self.palette.selected = 0;
             return;
         }
         if self.warp_focused {
@@ -341,6 +356,7 @@ impl ChromeApp {
             || self.notes.open
             || self.workspace_ui.open
             || self.transfer.open
+            || self.rename.open
     }
 
     fn close_all_overlays(&mut self) {
@@ -366,6 +382,21 @@ impl ChromeApp {
         self.notes.close();
         self.workspace_ui.close();
         self.transfer.close();
+        self.rename.close();
+    }
+
+    /// Open rename dialog for tab or pane (closes other modals first).
+    fn open_rename(&mut self, target: RenameTarget) {
+        self.close_all_overlays();
+        let seed = self.session.rename_seed(matches!(target, RenameTarget::Tab));
+        self.rename.open_with(target, &seed);
+    }
+
+    fn apply_rename(&mut self, target: RenameTarget, name: &str) {
+        match target {
+            RenameTarget::Tab => self.session.rename_active_tab(name),
+            RenameTarget::Pane => self.session.rename_focused_pane(name),
+        }
     }
 
     /// Quit when idle (no live PTY, single tab); otherwise open confirm.
@@ -440,18 +471,21 @@ impl ChromeApp {
                 self.palette.close();
                 self.help.close();
                 self.notes.close();
+                self.rename.close();
                 self.settings.open();
             }
             CommandAction::OpenHelp => {
                 self.palette.close();
                 self.settings.close();
                 self.notes.close();
+                self.rename.close();
                 self.help.open_help();
             }
             CommandAction::OpenPalette => {
                 self.settings.close();
                 self.help.close();
                 self.notes.close();
+                self.rename.close();
                 self.palette.open_palette();
             }
             CommandAction::OpenNotes => {
@@ -460,6 +494,7 @@ impl ChromeApp {
                 self.help.close();
                 self.workspace_ui.close();
                 self.transfer.close();
+                self.rename.close();
                 self.notes.open();
             }
             CommandAction::OpenWorkspace => {
@@ -468,6 +503,7 @@ impl ChromeApp {
                 self.help.close();
                 self.notes.close();
                 self.transfer.close();
+                self.rename.close();
                 self.workspace_ui.open();
             }
             CommandAction::OpenTransferSend => {
@@ -476,6 +512,7 @@ impl ChromeApp {
                 self.help.close();
                 self.notes.close();
                 self.workspace_ui.close();
+                self.rename.close();
                 self.transfer.open_send();
             }
             CommandAction::OpenTransferReceive => {
@@ -484,7 +521,14 @@ impl ChromeApp {
                 self.help.close();
                 self.notes.close();
                 self.workspace_ui.close();
+                self.rename.close();
                 self.transfer.open_receive();
+            }
+            CommandAction::RenameTab => {
+                self.open_rename(RenameTarget::Tab);
+            }
+            CommandAction::RenamePane => {
+                self.open_rename(RenameTarget::Pane);
             }
             CommandAction::NewTab => self.new_tab(),
             CommandAction::CloseTab | CommandAction::ClosePane => {
@@ -884,6 +928,9 @@ impl ChromeApp {
         {
             return true;
         }
+        if self.rename.visible() && self.rename.modal_rect(win_w, win_h).contains(x, y) {
+            return true;
+        }
         false
     }
 
@@ -902,6 +949,7 @@ impl ChromeApp {
             || self.confirm.visible()
             || self.splash.visible()
             || self.settings.visible()
+            || self.rename.visible()
         {
             // Click **inside** any modal: keep open (don't steal focus to terminal).
             if self.pointer_in_open_modal() {
@@ -1049,6 +1097,7 @@ impl ChromeApp {
                 || self.notes.visible()
                 || self.workspace_ui.visible()
                 || self.transfer.visible()
+                || self.rename.visible()
             {
                 self.close_all_overlays();
                 if let Some(w) = &self.window {
@@ -1228,6 +1277,34 @@ impl ChromeApp {
                     _ => {}
                 }
             }
+            if self.rename.open {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => {
+                        self.rename.backspace();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        let target = self.rename.target;
+                        let name = self.rename.commit();
+                        self.apply_rename(target, &name);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Character(s) => {
+                        self.rename.insert_str(s);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // Global shortcuts
@@ -1384,6 +1461,20 @@ impl ChromeApp {
                     }
                 }
             }
+        }
+
+        // F2 — rename focused pane (product keys; no modifiers).
+        if !super_or_ctrl
+            && !shift
+            && !alt
+            && !self.overlay_open()
+            && matches!(event.logical_key, Key::Named(NamedKey::F2))
+        {
+            self.open_rename(RenameTarget::Pane);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
         }
 
         // Palette open: filter / navigate / run
@@ -1950,6 +2041,7 @@ impl ApplicationHandler for ChromeApp {
                 self.notes.tick(dt);
                 self.workspace_ui.tick(dt);
                 self.transfer.tick(dt);
+                self.rename.tick(dt);
                 let _ = self.caffeine.tick();
                 let tick = self.session.tick_splits(dt);
                 if !tick.finished_closes.is_empty() {
@@ -1982,6 +2074,7 @@ impl ApplicationHandler for ChromeApp {
                         &self.notes,
                         &self.workspace_ui,
                         &self.transfer,
+                        &self.rename,
                         &self.caffeine,
                         &self.commands,
                         &layout,

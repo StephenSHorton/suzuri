@@ -143,7 +143,8 @@ impl ChromeSession {
     /// Apply an OSC 0/2 window title to a pane only (not the chrome tab strip).
     ///
     /// Product rule: OSC renames panes; multi-pane tabs keep a sticky strip title.
-    /// Empty titles are ignored.
+    /// Empty titles are ignored. Manual rename uses [`Self::rename_focused_pane`] /
+    /// [`Self::rename_active_tab`] and is independent of OSC.
     pub fn set_pane_title(&mut self, pane_id: u64, title: String) {
         let title = title.trim();
         if title.is_empty() {
@@ -151,6 +152,77 @@ impl ChromeSession {
         }
         if let Some(p) = self.panes.get_mut(&pane_id) {
             p.title = title.to_string();
+        }
+    }
+
+    /// Leaf count of the active tab (1 = solo).
+    pub fn active_leaf_count(&self) -> usize {
+        self.active_tab()
+            .map(|t| t.root.leaf_ids().len())
+            .unwrap_or(0)
+    }
+
+    /// Seed string for the rename dialog (current tab or focused pane title).
+    pub fn rename_seed(&self, tab: bool) -> String {
+        if tab {
+            self.active_tab()
+                .map(|t| t.title.clone())
+                .unwrap_or_default()
+        } else {
+            self.active_pane()
+                .map(|p| p.title.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    /// Manual "Rename tab" — sets the chrome strip title.
+    ///
+    /// Empty name clears the custom strip label: falls back to the focused
+    /// pane title (solo follow / multi sticky base).
+    pub fn rename_active_tab(&mut self, name: &str) {
+        let name = name.trim();
+        let focus = self.focus_pane_id();
+        let fallback = self
+            .panes
+            .get(&focus)
+            .map(|p| {
+                if p.title.trim().is_empty() {
+                    format!("shell {focus}")
+                } else {
+                    p.title.clone()
+                }
+            })
+            .unwrap_or_else(|| "shell".into());
+        if let Some(tab) = self.active_tab_mut() {
+            tab.title = if name.is_empty() {
+                fallback
+            } else {
+                name.to_string()
+            };
+        }
+    }
+
+    /// Manual "Rename pane" — sets the focused leaf title.
+    ///
+    /// Empty clears to `shell {id}`. Solo pages keep the strip in sync with the
+    /// only pane (product `applyRename`); multi-pane strip is left alone so
+    /// OSC/Grok continue to rename panes only.
+    pub fn rename_focused_pane(&mut self, name: &str) {
+        let name = name.trim();
+        let focus = self.focus_pane_id();
+        let leaf_count = self.active_leaf_count();
+        let resolved = if name.is_empty() {
+            format!("shell {focus}")
+        } else {
+            name.to_string()
+        };
+        if let Some(p) = self.panes.get_mut(&focus) {
+            p.title = resolved.clone();
+        }
+        if leaf_count <= 1 {
+            if let Some(tab) = self.active_tab_mut() {
+                tab.title = resolved;
+            }
         }
     }
 
@@ -868,5 +940,56 @@ mod tests {
         assert_eq!(s.draft(), "hi");
         s.backspace();
         assert_eq!(s.draft(), "h");
+    }
+
+    #[test]
+    fn rename_tab_sets_strip_title() {
+        let mut s = ChromeSession::new(80, 24);
+        assert_eq!(s.rename_seed(true), "shell 1");
+        s.rename_active_tab("work");
+        assert_eq!(s.active_tab().unwrap().title, "work");
+        // Empty clears → falls back to pane title
+        s.rename_active_tab("  ");
+        assert_eq!(s.active_tab().unwrap().title, "shell 1");
+    }
+
+    #[test]
+    fn rename_pane_solo_syncs_strip() {
+        let mut s = ChromeSession::new(80, 24);
+        s.rename_focused_pane("nvim");
+        assert_eq!(s.active_pane().unwrap().title, "nvim");
+        assert_eq!(s.active_tab().unwrap().title, "nvim");
+        // OSC still only touches pane (strip already nvim from manual rename)
+        s.set_pane_title(1, "from-osc".into());
+        assert_eq!(s.panes.get(&1).unwrap().title, "from-osc");
+        // Strip is not updated by OSC (product rule)
+        assert_eq!(s.active_tab().unwrap().title, "nvim");
+    }
+
+    #[test]
+    fn rename_pane_multi_leaves_strip() {
+        let mut s = ChromeSession::new(80, 24);
+        s.rename_active_tab("sticky");
+        let _ = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        assert_eq!(s.active_leaf_count(), 2);
+        // Focus is on the new pane; rename it
+        s.rename_focused_pane("right");
+        assert_eq!(s.active_pane().unwrap().title, "right");
+        // Multi-pane strip stays put
+        assert_eq!(s.active_tab().unwrap().title, "sticky");
+        // OSC pane title still works independently
+        let focus = s.focus_pane_id();
+        s.set_pane_title(focus, "osc-right".into());
+        assert_eq!(s.panes.get(&focus).unwrap().title, "osc-right");
+        assert_eq!(s.active_tab().unwrap().title, "sticky");
+    }
+
+    #[test]
+    fn rename_pane_empty_clears_to_shell_n() {
+        let mut s = ChromeSession::new(80, 24);
+        s.rename_focused_pane("tmp");
+        s.rename_focused_pane("");
+        assert_eq!(s.active_pane().unwrap().title, "shell 1");
+        assert_eq!(s.active_tab().unwrap().title, "shell 1");
     }
 }
