@@ -37,6 +37,7 @@
 
 pub mod ansi;
 pub mod cells;
+pub mod chrome_status;
 pub mod chrome_ui;
 pub mod commands;
 pub mod confirm;
@@ -70,6 +71,10 @@ pub use cells::{theme as cell_theme, Cell, CellGrid, Cursor};
 pub use commands::{
     default_commands, filter_commands, splash_hint_rows, Command, CommandAction, HelpState,
     PaletteState, SplashState,
+};
+pub use chrome_status::{
+    clear_status, publish_status, status_path, submit_path, take_submit, StatusPublisher,
+    PUBLISH_INTERVAL, STATUS_FILE, SUBMIT_FILE,
 };
 pub use confirm::{ConfirmChoice, ConfirmState};
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};

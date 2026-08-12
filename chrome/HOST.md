@@ -85,22 +85,26 @@ Go host treats chrome as an optional UI child. Package:
    - `SUZURI_CONFIG_DIR` = product `config.Dir()`
    - (later: cwd / initial shell / feature toggles)
 4. Lifecycle: `suzuri chrome` starts chrome and **waits** for exit (chrome-only
-   mode). Default `suzuri` still opens classic ebiten UI (`internal/ui` +
-   `internal/chrome`).
-5. Keep Go ebiten face as default until chrome passes parity gates (`PARITY.md`).
+   mode). Also starts MCP bridge proxy (Phase 2).
+5. **Default UI:** bare `suzuri` launches chrome when `PreferChromeUI()` is true:
+   - `SUZURI_UI=chrome` / `native` → always chrome
+   - `SUZURI_UI=classic` / `ebiten` / `legacy` → classic ebiten
+   - unset → chrome if `ResolveBinary()` succeeds (sibling install or cargo release), else classic
 
 ```bash
-# Classic UI (unchanged)
-suzuri
-
-# Native chrome UI (Phase 1)
+# Native chrome when binary is resolvable (install layout or cargo release)
 cd chrome && cargo build --release
+suzuri
+# or force:
+SUZURI_UI=chrome suzuri
 suzuri chrome
-# or: SUZURI_CHROME=/path/to/suzuri-chrome suzuri chrome
+
+# Classic ebiten
+SUZURI_UI=classic suzuri
 ```
 
-**Success criteria:** users can run native chrome from a subcommand without
-breaking existing ebiten UI.
+**Success criteria:** users can run native chrome as default or subcommand without
+breaking classic ebiten via `SUZURI_UI=classic`.
 
 ### Phase 2 — Shared state files / IPC light — **partial**
 
@@ -133,7 +137,9 @@ open a surface without full embed / sockets:
 | `open_transfer_receive` | Open transfer receive overlay |
 | `open_help` | Open help overlay |
 | `new_tab` | Create a new tab |
+| `new_window` | Spawn second chrome process |
 | `toggle_caffeine` | Toggle caffeine / keep-awake |
+| `refresh_workspace` | Soft-reload workspace panel if open |
 
 ```go
 // From the Go host (chrome already running, or about to start):
@@ -146,18 +152,28 @@ _ = chromehost.SendCommand(chromehost.CmdOpenNotes)
 echo open_palette > "$(…/suzuri)/chrome_cmd"
 ```
 
-**Defaults stay simple:** spawn (`suzuri chrome` / Phase 1) does **not** require
-the mailbox file. If the socket/file is unavailable or unreadable, chrome
-ignores it and keeps running. No Unix domain socket yet (`chrome.sock` remains
-optional future); the file mailbox is the cross-platform path.
+#### MCP bridge proxy (implemented)
 
-**Not yet:** focus-tab / multi-window, bidirectional events, or a long-lived
-Unix socket server. Shared data files (notes bank, `chrome_prefs.json`) already
-round-trip via the same config dir.
+While `suzuri chrome` (or default chrome UI) runs, the **Go parent** starts the
+same loopback MCP bridge as classic ebiten:
+
+| Piece | Role |
+|-------|------|
+| `bridge.json` | Written under `config.Dir()` (product path) |
+| Notes / workspace | Disk ops via `chrome.ApplyNotesDiskOp` / `workspace.Apply` |
+| Live refresh | `SendCommand(refresh_workspace)` / open notes after mutations |
+| Status / snapshot | From `{config}/chrome_status.json` (chrome publishes ~750ms) |
+| Submit | `{config}/chrome_submit` one line → chrome warp/PTY path |
+
+`suzuri mcp` attaches unchanged. Full PTY diag/viewport text still needs deeper
+chrome→host snapshot wiring; status + tabs + submit + notes/workspace work today.
+
+**Defaults stay simple:** spawn does **not** require the mailbox file. Chrome
+fails soft if files are missing.
 
 **Success criteria:** notes / settings / workspace data round-trip between Go
 host tools and chrome without dual stores; host can `SendCommand` to open
-overlays or quit without embedding the GPU loop.
+overlays or quit without embedding the GPU loop; MCP status works with chrome UI.
 
 ### Phase 3 — Library embed (Rust) or cgo staticlib — **partial**
 
@@ -202,6 +218,8 @@ Session handles (thread-safe process-wide registry, `std::sync::Mutex`):
 | `suzuri_chrome_session_tab_count(handle)` | ≥0 tabs, or `-1` bad handle |
 | `suzuri_chrome_session_new_tab(handle)` | `0` ok, `-1` bad handle |
 | `suzuri_chrome_session_write_banner(handle)` | mock boot banner on active pane |
+| `suzuri_chrome_present(handle)` | always `-1` (GPU not in-process) |
+| `suzuri_chrome_present_available` | always `0` |
 
 ```c
 // see src/ffi.rs for full signatures
@@ -216,6 +234,8 @@ void   suzuri_chrome_session_destroy(size_t handle);
 int    suzuri_chrome_session_size(size_t handle, unsigned *cols, unsigned *rows);
 unsigned suzuri_chrome_session_cols(size_t handle);
 unsigned suzuri_chrome_session_rows(size_t handle);
+int suzuri_chrome_present(size_t handle);          /* always -1 */
+int suzuri_chrome_present_available(void);         /* always 0 */
 int    suzuri_chrome_session_tab_count(size_t handle);
 int    suzuri_chrome_session_new_tab(size_t handle);
 int    suzuri_chrome_session_write_banner(size_t handle);

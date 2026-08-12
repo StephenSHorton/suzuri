@@ -18,7 +18,9 @@ func TestValidCommand(t *testing.T) {
 		CmdOpenTransferReceive,
 		CmdOpenHelp,
 		CmdNewTab,
+		CmdNewWindow,
 		CmdToggleCaffeine,
+		CmdRefreshWorkspace,
 	} {
 		if !ValidCommand(cmd) {
 			t.Fatalf("expected valid: %s", cmd)

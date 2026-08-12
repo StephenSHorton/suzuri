@@ -8,6 +8,7 @@ mod ansi;
 mod app;
 mod caffeine;
 mod cells;
+mod chrome_status;
 mod chrome_ui;
 mod commands;
 mod confirm;

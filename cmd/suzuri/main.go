@@ -51,11 +51,16 @@ func main() {
 		winconsole.AttachParent()
 		os.Exit(transfer.RunCLI(os.Args[1:]))
 	}
-	// Native GPU chrome (optional UI). Default `suzuri` still opens classic ebiten.
-	// Spawns chrome/target/release/suzuri-chrome (or SUZURI_CHROME) and waits.
+	// Native GPU chrome: explicit `suzuri chrome` always; bare `suzuri` when
+	// PreferChromeUI (SUZURI_UI=chrome|native, or chrome binary resolvable).
+	// Force classic ebiten with SUZURI_UI=classic.
 	if len(os.Args) > 1 && os.Args[1] == "chrome" {
 		winconsole.AttachParent()
 		os.Exit(chromehost.RunCLI(os.Args[2:]))
+	}
+	if len(os.Args) == 1 && chromehost.PreferChromeUI() {
+		winconsole.AttachParent()
+		os.Exit(chromehost.RunCLI(nil))
 	}
 
 	defer func() {

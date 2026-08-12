@@ -25,7 +25,9 @@ const (
 	CmdOpenTransferReceive = "open_transfer_receive"
 	CmdOpenHelp            = "open_help"
 	CmdNewTab              = "new_tab"
+	CmdNewWindow           = "new_window"
 	CmdToggleCaffeine      = "toggle_caffeine"
+	CmdRefreshWorkspace    = "refresh_workspace"
 )
 
 // CmdPath is the absolute path of the chrome control mailbox
@@ -51,7 +53,7 @@ func SendCommand(cmd string) error {
 		return fmt.Errorf("chromehost: empty command")
 	}
 	if !ValidCommand(cmd) {
-		return fmt.Errorf("chromehost: unknown command %q (want quit|open_notes|open_workspace|open_palette|open_settings|open_transfer_send|open_transfer_receive|open_help|new_tab|toggle_caffeine)", cmd)
+		return fmt.Errorf("chromehost: unknown command %q (want quit|open_notes|open_workspace|open_palette|open_settings|open_transfer_send|open_transfer_receive|open_help|new_tab|new_window|toggle_caffeine|refresh_workspace)", cmd)
 	}
 
 	path := CmdPath()
@@ -88,7 +90,9 @@ func ValidCommand(cmd string) bool {
 		CmdOpenTransferReceive,
 		CmdOpenHelp,
 		CmdNewTab,
-		CmdToggleCaffeine:
+		CmdNewWindow,
+		CmdToggleCaffeine,
+		CmdRefreshWorkspace:
 		return true
 	default:
 		return false

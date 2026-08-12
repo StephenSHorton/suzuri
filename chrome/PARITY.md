@@ -11,8 +11,11 @@ Selection highlight · Transfer drop + ticket copy · `suzuri chrome` host spawn
 ## Run
 
 ```bash
-cd chrome && cargo build --release && ./target/release/suzuri-chrome
-go build -o suzuri ./cmd/suzuri && ./suzuri chrome
+cd chrome && cargo build --release
+# Default UI prefers chrome when binary resolves:
+go build -o suzuri ./cmd/suzuri && ./suzuri
+# Force classic: SUZURI_UI=classic ./suzuri
+# Explicit: ./suzuri chrome
 ```
 
 ## Wave 3 ✅
@@ -38,7 +41,13 @@ go build -o suzuri ./cmd/suzuri && ./suzuri chrome
 - Workspace auto-refresh (~1s) + presence cycle + `refresh_workspace`
 - Selection word/line drag modes (500ms multi-click · extend by word/line)
 
+## Wave 7 ✅
+- Default UI prefers chrome when binary resolvable (`SUZURI_UI` override)
+- MCP bridge proxy while chrome runs (notes/workspace/status/submit)
+- `chrome_status.json` + `chrome_submit` mailboxes
+- FFI `present` / `present_available` stubs (GPU remains process-spawn)
+
 ## Later
-- In-process GPU embed (full present loop)
-- MCP bridge in-process (beyond disk refresh)
-- Default install ships chrome as primary UI
+- Full in-process GPU present loop (cgo + host window)
+- Chrome→bridge viewport/PTY diag snapshot (richer than status file)
+- Package install always ships `suzuri-chrome` sibling binary

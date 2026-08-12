@@ -259,6 +259,22 @@ pub extern "C" fn suzuri_chrome_layout_metrics(
     0
 }
 
+/// In-process GPU present loop.
+///
+/// **Not implemented.** Always returns `-1`. Product path: spawn the
+/// `suzuri-chrome` process (see `HOST.md` Phase 1–2 and chromehost bridge proxy).
+/// Session handles remain for headless state / metrics experiments only.
+#[no_mangle]
+pub extern "C" fn suzuri_chrome_present(_handle: usize) -> c_int {
+    -1
+}
+
+/// Returns 1 when GPU present is available in-process (always 0 today).
+#[no_mangle]
+pub extern "C" fn suzuri_chrome_present_available() -> c_int {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +282,15 @@ mod tests {
     #[test]
     fn abi_version_nonzero() {
         assert!(suzuri_chrome_abi_version() >= 1);
+    }
+
+    #[test]
+    fn present_not_implemented() {
+        assert_eq!(suzuri_chrome_present_available(), 0);
+        assert_eq!(suzuri_chrome_present(0), -1);
+        let h = suzuri_chrome_session_create(40, 12);
+        assert_eq!(suzuri_chrome_present(h), -1);
+        suzuri_chrome_session_destroy(h);
     }
 
     #[test]

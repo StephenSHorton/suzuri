@@ -17,6 +17,7 @@ use winit::{
 
 use crate::ansi::AnsiDecoder;
 use crate::caffeine::Caffeine;
+use crate::chrome_status::{self, StatusPublisher};
 use crate::chrome_ui::{ChipId, ChipUi};
 use crate::commands::{
     default_commands, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
@@ -91,6 +92,8 @@ pub struct ChromeApp {
     link_cursor_on: bool,
     /// Host light IPC: poll `chrome_cmd` under config dir (~250ms).
     control_mailbox: ControlMailbox,
+    /// Publish `chrome_status.json` for Go MCP bridge proxy.
+    status_publisher: StatusPublisher,
 }
 
 impl Default for ChromeApp {
@@ -141,6 +144,7 @@ impl Default for ChromeApp {
             hovered_link_span: None,
             link_cursor_on: false,
             control_mailbox: ControlMailbox::new(),
+            status_publisher: StatusPublisher::new(),
         };
         // First-run overlay only — PTY already spawned above.
         if !app.settings.prefs.splash_seen {
@@ -415,6 +419,7 @@ impl ChromeApp {
                 w.request_redraw();
             }
         } else {
+            chrome_status::clear_status();
             event_loop.exit();
         }
     }
@@ -428,6 +433,7 @@ impl ChromeApp {
         match choice {
             ConfirmChoice::Yes => {
                 self.confirm.close();
+                chrome_status::clear_status();
                 event_loop.exit();
             }
             ConfirmChoice::No => {
@@ -1749,9 +1755,19 @@ impl ChromeApp {
         if line.is_empty() {
             return;
         }
+        self.session.draft_mut().clear();
+        self.submit_line_text(&line);
+    }
+
+    /// Host / MCP submit path: run `line` as if entered in the warp bar.
+    fn submit_line_text(&mut self, line: &str) {
+        let line = line.trim_end();
+        if line.is_empty() {
+            return;
+        }
+        let line = line.to_string();
         self.session.push_history(&line);
         self.session.apply_cwd_after_command(&line);
-        self.session.draft_mut().clear();
         let id = self.session.focus_pane_id();
 
         let used_pty = if let Some(rt) = self.runtimes.get_mut(&id) {
@@ -2169,6 +2185,12 @@ impl ApplicationHandler for ChromeApp {
                         return;
                     }
                 }
+                // MCP / host warp submit (chrome_submit mailbox).
+                if let Some(line) = chrome_status::take_submit() {
+                    self.submit_line_text(&line);
+                }
+                // Publish status for Go bridge proxy (`chrome_status.json`).
+                self.status_publisher.tick(&self.session);
                 let dt = 1.0 / 60.0;
                 self.settings.tick(dt);
                 self.palette.tick(dt);
@@ -2186,6 +2208,7 @@ impl ApplicationHandler for ChromeApp {
                     self.finish_closed_panes(event_loop, &tick.finished_closes);
                 }
                 if self.session.is_empty() {
+                    chrome_status::clear_status();
                     event_loop.exit();
                     return;
                 }
