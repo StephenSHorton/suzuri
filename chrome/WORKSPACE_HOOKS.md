@@ -200,4 +200,3 @@ cd chrome && cargo test && cargo build --release
 
 - Native FS watch (polling ~1s is enough for MCP attach)
 - OS file picker dialog (path string + drop is enough)
-- SHA-256 hash on upload (field present, often empty)
