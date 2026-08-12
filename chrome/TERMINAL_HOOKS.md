@@ -68,30 +68,39 @@ Hold one `Selection` (recommend: on the app or keyed by `pane_id`).
 
 | Event | Action |
 |-------|--------|
-| Left **down** in terminal | `sel.begin(pos)` (or multi-click: word/line — see below) |
-| Left **move** while dragging | `sel.update(pos)` |
+| Left **down** in terminal | multi-click → begin / word / line (see below) |
+| Left **move** while dragging | `sel.update(pos)` (single-click drag only) |
 | Left **up** | `sel.end()` |
-| Click elsewhere / Escape | `sel.clear()` |
+| Click elsewhere / Escape (no overlay) | `sel.clear()` |
 | Scroll wheel while selecting | still absolute rows — update via new `viewport_to_abs` under cursor if desired |
 
 ```rust
-// mouse down
-self.selection.begin(pos);
-// mouse move (primary button held)
+// mouse down — click count from time+position window
+match clicks {
+    1 => selection.begin(pos),                    // drag may follow
+    2 => selection.select_word(grid, pos),
+    3 => selection.select_line(abs_row, cols),
+}
+// mouse move (primary held && selecting_term)
 self.selection.update(pos);
 // mouse up
 self.selection.end();
+// Esc with no overlay and selection active
+self.selection.clear();
 ```
 
-### Optional multi-click (product parity)
+### Multi-click (product parity) — done
 
 | Clicks | API |
 |--------|-----|
-| 1 | `begin` / single cell |
+| 1 | `begin` → drag selection |
 | 2 | `selection.select_word(grid, pos)` |
 | 3 | `selection.select_line(abs_row, grid.cols())` |
 
-Track click count with a short window (~500 ms) and same-cell tolerance.
+Track click count with **~400 ms** and **~4 px** tolerance (same idea as title-bar
+double-click zoom; fields: `last_term_click`, helpers `term_click_count` /
+`apply_term_click_selection` in `app.rs`). Word/line clicks do not start a drag
+(`selecting_term = false`) so the range stays fixed until the next interaction.
 
 ---
 
@@ -142,22 +151,26 @@ same pipeline as ANSI cell bg — no glass/shader fill pass).
 
 | Hook | Notes |
 |------|--------|
-| Multi-click word/line | `select_word` / `select_line` APIs exist |
+| Multi-click word/line | **done** — double/triple in `app.rs` |
+| Esc clears selection | **done** — when no overlay |
 | Right-click copy-or-paste | product: copy if selection, else paste |
 | Clear on focus / resize / alt-screen | avoid stale ranges across panes |
 | Extend while scrolling | re-map cursor via `viewport_to_abs` mid-drag |
 
 ---
 
-## 6. Suggested `ChromeApp` fields
+## 6. `ChromeApp` fields (selection)
 
 ```rust
-selection: selection::Selection,
-// optional: multi-click tracker (count, last cell, Instant)
+term_selection: selection::Selection,
+selecting_term: bool,
+/// time + logical xy + consecutive count (1..=3)
+last_term_click: Option<(Instant, f32, f32, u8)>,
 ```
 
-Clear selection on: tab/pane focus change, grid resize, alt-screen enter/leave
-(optional), or any key that produces PTY input other than copy/paste shortcuts.
+Clear selection on: Esc (no overlay), click outside terminal, tab/pane focus
+change, grid resize, alt-screen enter/leave (optional), or any key that produces
+PTY input other than copy/paste shortcuts.
 
 ---
 
