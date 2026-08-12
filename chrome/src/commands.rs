@@ -546,10 +546,17 @@ impl SplashState {
     }
 
     /// Compact welcome card (narrower than help sheet).
+    /// Height fits title + 4 hint rows + continue chip without overlap.
     pub fn modal_rect(window_w: f32, window_h: f32) -> crate::layout::Rect {
         let w = (window_w - 48.0).min(420.0).max(280.0);
-        let h = (window_h - 80.0).min(280.0).max(200.0);
+        // 64 title + 4×28 rows + 3×6 gaps + 12 gap + 28 cont + 16 pad ≈ 252
+        let h = (window_h - 80.0).min(300.0).max(252.0);
         crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.42, w, h)
+    }
+
+    /// Shared glass + label geometry so the continue chip and hint rows stay aligned.
+    pub fn layout(window_w: f32, window_h: f32) -> SplashLayout {
+        SplashLayout::new(Self::modal_rect(window_w, window_h))
     }
 
     pub fn tick(&mut self, dt: f32) {
@@ -570,6 +577,62 @@ impl SplashState {
         } else if self.overlay > target {
             self.overlay = (self.overlay - step).max(target);
         }
+    }
+}
+
+/// Geometry for the first-run splash card (panels + text must use the same rects).
+#[derive(Clone, Debug)]
+pub struct SplashLayout {
+    pub modal: crate::layout::Rect,
+    pub pad: f32,
+    /// Frost chips for each shortcut hint row.
+    pub rows: Vec<crate::layout::Rect>,
+    /// Left column inside each row for the key (text centered in this rect).
+    pub key_col_w: f32,
+    /// Continue / Enter affordance.
+    pub continue_btn: crate::layout::Rect,
+}
+
+impl SplashLayout {
+    pub fn new(modal: crate::layout::Rect) -> Self {
+        let pad = 16.0;
+        let row_h = 28.0;
+        let gap = 6.0;
+        let n_rows = splash_hint_rows().len();
+        let mut rows = Vec::with_capacity(n_rows);
+        let mut y = modal.y + 64.0;
+        for _ in 0..n_rows {
+            rows.push(crate::layout::Rect::new(
+                modal.x + pad,
+                y,
+                modal.w - pad * 2.0,
+                row_h,
+            ));
+            y += row_h + gap;
+        }
+        // Wide enough for "enter  continue" at 11px mono (~16 glyphs × ~6.5).
+        let cont_w = 148.0_f32.min(modal.w - pad * 2.0).max(120.0);
+        let cont_h = 28.0;
+        let continue_btn = crate::layout::Rect::new(
+            modal.x + (modal.w - cont_w) * 0.5,
+            modal.y + modal.h - pad - cont_h,
+            cont_w,
+            cont_h,
+        );
+        // Mac glyphs (⌘K / ⇧⌘T) are short; Linux uses "Ctrl+Shift+T".
+        let key_col_w = if is_mac() { 76.0 } else { 118.0 };
+        Self {
+            modal,
+            pad,
+            rows,
+            key_col_w,
+            continue_btn,
+        }
+    }
+
+    /// Left-aligned label column X (after the key column + gap).
+    pub fn label_x(&self, row: crate::layout::Rect) -> f32 {
+        row.x + self.key_col_w + 10.0
     }
 }
 
@@ -660,5 +723,22 @@ mod tests {
         assert_eq!(rows.len(), 4);
         assert!(rows.iter().any(|(_, l)| *l == "commands"));
         assert!(rows.iter().any(|(_, l)| *l == "new tab"));
+    }
+
+    #[test]
+    fn splash_layout_continue_below_rows() {
+        let lay = SplashLayout::new(SplashState::modal_rect(800.0, 600.0));
+        assert_eq!(lay.rows.len(), 4);
+        let last = *lay.rows.last().unwrap();
+        assert!(
+            lay.continue_btn.y >= last.y + last.h + 4.0,
+            "continue chip must sit below last hint row (cont.y={} last.bottom={})",
+            lay.continue_btn.y,
+            last.y + last.h
+        );
+        // Continue is horizontally centered in the modal.
+        let mid = lay.modal.x + lay.modal.w * 0.5;
+        let cont_mid = lay.continue_btn.x + lay.continue_btn.w * 0.5;
+        assert!((mid - cont_mid).abs() < 0.5);
     }
 }

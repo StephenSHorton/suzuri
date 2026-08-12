@@ -96,6 +96,19 @@ impl TextLabel {
         }
     }
 
+    /// Left-aligned, vertically centered in a band (modal rows, chips).
+    pub fn left_vcenter(
+        text: impl Into<String>,
+        x: f32,
+        band_y: f32,
+        band_h: f32,
+        size: f32,
+        color: [f32; 4],
+    ) -> Self {
+        let y = band_y + (band_h - size).max(0.0) * 0.5;
+        Self::new(text, x, y, size, color)
+    }
+
     pub fn symbol_centered(
         text: impl Into<String>,
         rect: [f32; 4],

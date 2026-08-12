@@ -1409,30 +1409,20 @@ fn push_modal_glass(
 
     if splash.visible() {
         let ease = splash.content_ease().clamp(0.0, 1.0);
-        let modal = SplashState::modal_rect(win_w, win_h);
-        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
-        // Hint rows as frost chips (product dialog body).
-        let pad = 16.0;
-        let row_h = 28.0;
-        let gap = 4.0;
-        let mut y = modal.y + 64.0;
-        for _ in 0..4 {
-            let r = Rect::new(modal.x + pad, y, modal.w - pad * 2.0, row_h);
-            panels.push(
-                PanelInstance::glass(r, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
-            );
-            y += row_h + gap;
-        }
-        // Continue affordance
-        let cont_w = 120.0_f32.min(modal.w - pad * 2.0);
-        let cont = Rect::new(
-            modal.x + (modal.w - cont_w) * 0.5,
-            modal.y + modal.h - 44.0,
-            cont_w,
-            28.0,
-        );
+        let lay = SplashState::layout(win_w, win_h);
         panels.push(
-            PanelInstance::glass(cont, m.chip_radius, PanelKind::ModalButton).with_opacity(ease),
+            PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
+        );
+        // Hint rows as frost chips (same rects as text path).
+        for r in &lay.rows {
+            panels.push(
+                PanelInstance::glass(*r, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
+            );
+        }
+        // Continue affordance — text is TextLabel::centered on this exact rect.
+        panels.push(
+            PanelInstance::glass(lay.continue_btn, m.chip_radius, PanelKind::ModalButton)
+                .with_opacity(ease),
         );
     }
 
@@ -1660,12 +1650,13 @@ fn push_modal_labels(
 
     if splash.visible() {
         let ease = splash.content_ease().clamp(0.0, 1.0);
-        let modal = SplashState::modal_rect(win_w, win_h);
+        let lay = SplashState::layout(win_w, win_h);
+        let modal = lay.modal;
         let mut title_c = bright;
         title_c[3] *= ease;
         labels.push(TextLabel::new(
             "硯  suzuri",
-            modal.x + pad,
+            modal.x + lay.pad,
             modal.y + 16.0,
             16.0,
             title_c,
@@ -1674,41 +1665,41 @@ fn push_modal_labels(
         sub[3] *= ease * 0.95;
         labels.push(TextLabel::new(
             "real terminal · charm chrome",
-            modal.x + pad,
+            modal.x + lay.pad,
             modal.y + 40.0,
             11.0,
             sub,
         ));
-        let row_h = 28.0;
-        let gap = 4.0;
-        let mut y = modal.y + 64.0;
-        for (key, label) in splash_hint_rows() {
+        let hints = splash_hint_rows();
+        let text_size = 12.0;
+        for (row, (key, label)) in lay.rows.iter().zip(hints.into_iter()) {
             let mut kc = bright;
             kc[3] *= ease;
             let mut lc = muted;
             lc[3] *= ease;
-            labels.push(TextLabel::new(
+            // Key: fully centered in the left column (same vertical center for all rows).
+            labels.push(TextLabel::centered(
                 key,
-                modal.x + pad + 12.0,
-                y + 7.0,
-                12.0,
+                [row.x, row.y, lay.key_col_w, row.h],
+                text_size,
                 kc,
             ));
-            labels.push(TextLabel::new(
+            // Description: left-aligned, same vertical center band as the key.
+            labels.push(TextLabel::left_vcenter(
                 label.to_string(),
-                modal.x + pad + 88.0,
-                y + 7.0,
-                12.0,
+                lay.label_x(*row),
+                row.y,
+                row.h,
+                text_size,
                 lc,
             ));
-            y += row_h + gap;
         }
         let mut foot = dim;
         foot[3] *= ease * 0.95;
-        labels.push(TextLabel::new(
+        let cont = lay.continue_btn;
+        labels.push(TextLabel::centered(
             "enter  continue",
-            modal.x + (modal.w - 110.0) * 0.5,
-            modal.y + modal.h - 38.0,
+            [cont.x, cont.y, cont.w, cont.h],
             11.0,
             foot,
         ));
