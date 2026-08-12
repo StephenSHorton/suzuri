@@ -21,6 +21,7 @@ use crate::chrome_ui::{ChipId, ChipUi};
 use crate::commands::{
     default_commands, filter_commands, CommandAction, HelpState, PaletteState,
 };
+use crate::control_mailbox::ControlMailbox;
 use crate::input::{hit_test, is_mac, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
 use crate::notes::NotesState;
@@ -70,6 +71,8 @@ pub struct ChromeApp {
     /// Terminal cell selection (absolute document rows).
     term_selection: Selection,
     selecting_term: bool,
+    /// Host light IPC: poll `chrome_cmd` under config dir (~250ms).
+    control_mailbox: ControlMailbox,
 }
 
 impl Default for ChromeApp {
@@ -111,6 +114,7 @@ impl Default for ChromeApp {
             last_title_click: None,
             term_selection: Selection::new(),
             selecting_term: false,
+            control_mailbox: ControlMailbox::new(),
         }
     }
 }
@@ -1547,6 +1551,13 @@ impl ApplicationHandler for ChromeApp {
                 self.reap_dead_shells();
                 // Auto raw-PTY focus while a fullscreen TUI owns the alt screen.
                 self.sync_focus_for_alt_screen();
+                // Phase 2 light IPC: host writes chrome_cmd; fail soft if absent.
+                for cmd in self.control_mailbox.poll() {
+                    self.run_action(event_loop, cmd.to_action());
+                    if matches!(cmd, crate::control_mailbox::ControlCommand::Quit) {
+                        return;
+                    }
+                }
                 let dt = 1.0 / 60.0;
                 self.settings.tick(dt);
                 self.palette.tick(dt);

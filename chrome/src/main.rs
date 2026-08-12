@@ -11,6 +11,7 @@ mod cells;
 mod chrome_ui;
 mod commands;
 mod config_store;
+mod control_mailbox;
 mod input;
 mod layout;
 #[cfg(target_os = "macos")]

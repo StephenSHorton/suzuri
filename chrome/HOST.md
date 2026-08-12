@@ -101,16 +101,56 @@ suzuri chrome
 **Success criteria:** users can run native chrome from a subcommand without
 breaking existing ebiten UI.
 
-### Phase 2 — Shared state files / IPC light
+### Phase 2 — Shared state files / IPC light — **partial**
 
 - Prefer **files + env** already used by product (notes bank, settings JSON)
   over a custom protocol.
-- Optional: small localhost or Unix-socket control plane for “open notes”,
-  “focus tab”, “quit” if spawn alone is insufficient.
 - Transfer still shells out to `suzuri-transfer` / hato (same as product).
 
+#### Control mailbox (implemented)
+
+Light control plane so the host can ask a **running** chrome process to quit or
+open a surface without full embed / sockets:
+
+| Side | Path | Behavior |
+|------|------|----------|
+| Mailbox file | `{config_dir}/chrome_cmd` | One command per line |
+| Config dir | Go `config.Dir()` · chrome `SUZURI_CONFIG_DIR` or product default | Same roots as notes/prefs |
+| Chrome | `control_mailbox` module | Poll every **250ms** on the frame tick; read + truncate; fail soft if missing |
+| Go | `chromehost.SendCommand(cmd)` | Validates verb, writes file (atomic temp+rename) |
+
+**Commands** (exact line text):
+
+| Command | Effect |
+|---------|--------|
+| `quit` | Exit chrome |
+| `open_notes` | Open notes overlay |
+| `open_workspace` | Open workspace overlay |
+| `open_palette` | Open command palette |
+
+```go
+// From the Go host (chrome already running, or about to start):
+_ = chromehost.SendCommand(chromehost.CmdOpenNotes)
+// or: chromehost.SendCommand("quit")
+```
+
+```bash
+# Manual poke while chrome is open:
+echo open_palette > "$(…/suzuri)/chrome_cmd"
+```
+
+**Defaults stay simple:** spawn (`suzuri chrome` / Phase 1) does **not** require
+the mailbox file. If the socket/file is unavailable or unreadable, chrome
+ignores it and keeps running. No Unix domain socket yet (`chrome.sock` remains
+optional future); the file mailbox is the cross-platform path.
+
+**Not yet:** focus-tab / multi-window, bidirectional events, or a long-lived
+Unix socket server. Shared data files (notes bank, `chrome_prefs.json`) already
+round-trip via the same config dir.
+
 **Success criteria:** notes / settings / workspace data round-trip between Go
-host tools and chrome without dual stores.
+host tools and chrome without dual stores; host can `SendCommand` to open
+overlays or quit without embedding the GPU loop.
 
 ### Phase 3 — Library embed (Rust) or cgo staticlib
 
@@ -180,9 +220,11 @@ native chrome is the only framebuffer.
 | Path | Role |
 |------|------|
 | `chrome/src/lib.rs` | Host-facing Rust modules + re-exports |
+| `chrome/src/control_mailbox.rs` | Phase 2 `chrome_cmd` poller |
 | `chrome/src/ffi.rs` | Optional C ABI stubs (`feature = "ffi"`) |
 | `chrome/HOST.md` | This document |
 | `chrome/src/main.rs` + `app` / `renderer` | Standalone binary only |
+| `internal/chromehost` | Go spawn + `SendCommand` mailbox |
 | `cmd/suzuri`, `internal/*` | Go host (spawn / policy) |
 | `surface/` | Deprecated spike — do not extend for product |
 
