@@ -3,6 +3,9 @@
 //! Coordinates are **absolute document rows**: row 0 is the oldest retained
 //! scrollback line; live viewport rows start at `grid.scrollback_len()`.
 //! Convert mouse hits with [`CellGrid::viewport_to_abs`] / [`CellGrid::abs_to_viewport`].
+//!
+//! Multi-click modes (`SelectMode::{Cell,Word,Line}`) keep drag granularity after
+//! double/triple click: word-aligned or full-line extend while the button is held.
 
 use crate::cells::CellGrid;
 
@@ -14,12 +17,29 @@ pub struct CellPos {
     pub abs_row: usize,
 }
 
+/// Granularity for selection extend while dragging.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelectMode {
+    /// Cell-to-cell drag (single click).
+    #[default]
+    Cell,
+    /// Word-aligned extend (double click + drag).
+    Word,
+    /// Full-line extend (triple click + drag).
+    Line,
+}
+
 /// Line-oriented cell selection (anchor → focus), matching product terminal UX.
 #[derive(Clone, Debug, Default)]
 pub struct Selection {
     active: bool,
     dragging: bool,
+    mode: SelectMode,
+    /// Fixed gesture origin (multi-click / begin cell). Used for Word/Line extend.
+    origin: CellPos,
+    /// Range endpoint A (for Cell mode: origin; for Word/Line: expanded).
     anchor: CellPos,
+    /// Range endpoint B (current / expanded end).
     focus: CellPos,
 }
 
@@ -44,6 +64,10 @@ impl Selection {
         !self.active
     }
 
+    pub fn mode(&self) -> SelectMode {
+        self.mode
+    }
+
     pub fn anchor(&self) -> CellPos {
         self.anchor
     }
@@ -52,22 +76,92 @@ impl Selection {
         self.focus
     }
 
-    /// Begin a drag at `pos` (clamped by the host to grid bounds).
+    /// Begin a cell-mode drag at `pos` (clamped by the host to grid bounds).
     pub fn begin(&mut self, pos: CellPos) {
         self.active = true;
         self.dragging = true;
+        self.mode = SelectMode::Cell;
+        self.origin = pos;
         self.anchor = pos;
         self.focus = pos;
     }
 
-    /// Extend the selection while dragging.
+    /// Extend the selection while dragging (cell mode only, or raw focus move).
+    ///
+    /// Prefer [`Self::update_drag`] when a grid is available so Word/Line modes
+    /// keep their granularity.
     pub fn update(&mut self, pos: CellPos) {
         if !self.active {
             self.begin(pos);
             return;
         }
         self.dragging = true;
-        self.focus = pos;
+        match self.mode {
+            SelectMode::Cell => {
+                self.focus = pos;
+            }
+            SelectMode::Word | SelectMode::Line => {
+                // Without a grid we cannot re-expand; move focus raw.
+                self.focus = pos;
+            }
+        }
+    }
+
+    /// Extend selection under the current mode using `grid` for word/line bounds.
+    ///
+    /// - **Cell**: focus follows `pos`
+    /// - **Word**: range is word-aligned from the origin word to the word under `pos`
+    /// - **Line**: full lines between origin row and `pos` row
+    pub fn update_drag(&mut self, grid: &CellGrid, pos: CellPos) {
+        if !self.active {
+            self.begin(pos);
+            return;
+        }
+        self.dragging = true;
+        match self.mode {
+            SelectMode::Cell => {
+                self.focus = pos;
+            }
+            SelectMode::Word => {
+                let (a_start, a_end) = word_bounds_at(grid, self.origin);
+                let (b_start, b_end) = word_bounds_at(grid, pos);
+                if cell_before_or_eq(self.origin, pos) {
+                    self.anchor = CellPos {
+                        col: a_start,
+                        abs_row: self.origin.abs_row,
+                    };
+                    self.focus = CellPos {
+                        col: b_end,
+                        abs_row: pos.abs_row,
+                    };
+                } else {
+                    self.anchor = CellPos {
+                        col: b_start,
+                        abs_row: pos.abs_row,
+                    };
+                    self.focus = CellPos {
+                        col: a_end,
+                        abs_row: self.origin.abs_row,
+                    };
+                }
+            }
+            SelectMode::Line => {
+                let last = grid.cols().saturating_sub(1);
+                let (r0, r1) = if self.origin.abs_row <= pos.abs_row {
+                    (self.origin.abs_row, pos.abs_row)
+                } else {
+                    (pos.abs_row, self.origin.abs_row)
+                };
+                self.anchor = CellPos {
+                    col: 0,
+                    abs_row: r0,
+                };
+                self.focus = CellPos {
+                    col: last,
+                    abs_row: r1,
+                };
+            }
+        }
     }
 
     /// End the drag; keep the selection if non-empty (including single cell).
@@ -173,11 +267,16 @@ impl Selection {
         self.dragging = false;
     }
 
-    /// Select whole absolute line `abs_row` (columns `0..cols-1`).
+    /// Select whole absolute line `abs_row` (columns `0..cols-1`). Sets [`SelectMode::Line`].
     pub fn select_line(&mut self, abs_row: usize, cols: u16) {
         let last = cols.saturating_sub(1);
         self.active = true;
-        self.dragging = false;
+        self.dragging = true;
+        self.mode = SelectMode::Line;
+        self.origin = CellPos {
+            col: 0,
+            abs_row,
+        };
         self.anchor = CellPos {
             col: 0,
             abs_row,
@@ -189,14 +288,13 @@ impl Selection {
     }
 
     /// Select word under `pos` using the line text at that absolute row.
+    /// Sets [`SelectMode::Word`] so a following drag stays word-aligned.
     pub fn select_word(&mut self, grid: &CellGrid, pos: CellPos) {
-        let line = grid.line_text_abs(pos.abs_row);
-        let (s, e) = word_bounds(&line, pos.col as usize);
-        let cols = grid.cols();
-        let e = (e as u16).min(cols.saturating_sub(1));
-        let s = (s as u16).min(e);
         self.active = true;
-        self.dragging = false;
+        self.dragging = true;
+        self.mode = SelectMode::Word;
+        self.origin = pos;
+        let (s, e) = word_bounds_at(grid, pos);
         self.anchor = CellPos {
             col: s,
             abs_row: pos.abs_row,
@@ -206,6 +304,19 @@ impl Selection {
             abs_row: pos.abs_row,
         };
     }
+}
+
+fn cell_before_or_eq(a: CellPos, b: CellPos) -> bool {
+    a.abs_row < b.abs_row || (a.abs_row == b.abs_row && a.col <= b.col)
+}
+
+fn word_bounds_at(grid: &CellGrid, pos: CellPos) -> (u16, u16) {
+    let line = grid.line_text_abs(pos.abs_row);
+    let (s, e) = word_bounds(&line, pos.col as usize);
+    let cols = grid.cols();
+    let e = (e as u16).min(cols.saturating_sub(1));
+    let s = (s as u16).min(e);
+    (s, e)
 }
 
 fn is_word_char(c: char) -> bool {
@@ -375,6 +486,7 @@ mod tests {
                 abs_row: 0,
             },
         );
+        assert_eq!(sel.mode(), SelectMode::Word);
         assert_eq!(sel.text(&g), "bar");
         sel.select_word(
             &g,
@@ -391,6 +503,7 @@ mod tests {
         let g = grid_with_lines(10, 2, &["hello"]);
         let mut sel = Selection::new();
         sel.select_line(0, g.cols());
+        assert_eq!(sel.mode(), SelectMode::Line);
         // Full width includes trailing spaces; whole-string trim keeps "hello"
         assert_eq!(sel.text(&g), "hello");
     }
@@ -423,8 +536,10 @@ mod tests {
             abs_row: 0,
         });
         assert!(!sel.is_empty());
+        assert_eq!(sel.mode(), SelectMode::Cell);
         sel.clear();
         assert!(sel.is_empty());
+        assert_eq!(sel.mode(), SelectMode::Cell);
         assert_eq!(sel.text(&g), "");
     }
 
@@ -434,5 +549,165 @@ mod tests {
         assert_eq!(word_bounds("hello world", 6), (6, 10));
         assert_eq!(word_bounds("path/to", 0), (0, 3));
         assert_eq!(word_bounds("path/to", 4), (4, 4));
+    }
+
+    /// Cases ported from `internal/ui/selection_test.go` TestWordBounds.
+    #[test]
+    fn word_bounds_from_go() {
+        let cases: &[(&str, usize, usize, usize)] = &[
+            ("hello world", 1, 0, 4),
+            ("hello world", 6, 6, 10),
+            ("  foo  ", 0, 0, 1),
+            ("  foo  ", 3, 2, 4),
+            ("a::b", 1, 1, 2),
+            ("", 0, 0, 0),
+            ("x", 0, 0, 0),
+            ("path/to", 4, 4, 4), // '/'
+            ("path/to", 0, 0, 3), // "path"
+            ("path/to", 5, 5, 6), // "to"
+        ];
+        for &(line, col, want_s, want_e) in cases {
+            assert_eq!(
+                word_bounds(line, col),
+                (want_s, want_e),
+                "word_bounds({line:?}, {col})"
+            );
+        }
+    }
+
+    #[test]
+    fn word_drag_extends_word_aligned() {
+        // "hello  world  extra" — double-click "hello", drag onto "world"
+        let g = grid_with_lines(24, 2, &["hello  world  extra"]);
+        let mut sel = Selection::new();
+        sel.select_word(
+            &g,
+            CellPos {
+                col: 1,
+                abs_row: 0,
+            },
+        );
+        assert_eq!(sel.text(&g), "hello");
+        assert_eq!(sel.mode(), SelectMode::Word);
+
+        // Drag to a cell inside "world"
+        sel.update_drag(
+            &g,
+            CellPos {
+                col: 9,
+                abs_row: 0,
+            },
+        );
+        assert_eq!(sel.text(&g), "hello  world");
+        // Interior of both words selected; space between included; not "extra"
+        assert!(sel.contains(0, 0));
+        assert!(sel.contains(10, 0));
+        assert!(!sel.contains(15, 0)); // 'e' of extra
+
+        // Reverse drag past origin onto leading side stays word-aligned on origin
+        sel.update_drag(
+            &g,
+            CellPos {
+                col: 0,
+                abs_row: 0,
+            },
+        );
+        assert_eq!(sel.text(&g), "hello");
+    }
+
+    #[test]
+    fn word_drag_across_rows() {
+        let g = grid_with_lines(12, 3, &["alpha beta", "gamma delta", "eps"]);
+        let mut sel = Selection::new();
+        sel.select_word(
+            &g,
+            CellPos {
+                col: 0,
+                abs_row: 0,
+            },
+        );
+        assert_eq!(sel.text(&g), "alpha");
+        sel.update_drag(
+            &g,
+            CellPos {
+                col: 2,
+                abs_row: 1,
+            },
+        );
+        // From start of "alpha" through end of "gamma" (word under focus on row 1)
+        assert_eq!(sel.text(&g), "alpha beta\ngamma");
+        assert!(sel.contains(0, 0));
+        assert!(sel.contains(11, 0)); // rest of first line
+        assert!(sel.contains(0, 1));
+        assert!(sel.contains(4, 1)); // end of gamma
+        assert!(!sel.contains(6, 1)); // space before delta / delta
+    }
+
+    #[test]
+    fn line_drag_extends_full_lines() {
+        let g = grid_with_lines(8, 4, &["aaaa", "bbbb", "cccc", "dddd"]);
+        let mut sel = Selection::new();
+        sel.select_line(1, g.cols());
+        assert_eq!(sel.mode(), SelectMode::Line);
+        assert_eq!(sel.text(&g), "bbbb");
+        // Full first selected line
+        assert!(sel.contains(0, 1));
+        assert!(sel.contains(7, 1));
+
+        sel.update_drag(
+            &g,
+            CellPos {
+                col: 3,
+                abs_row: 3,
+            },
+        );
+        // Lines 1..=3 fully selected regardless of focus col
+        assert!(sel.contains(0, 1));
+        assert!(sel.contains(7, 1));
+        assert!(sel.contains(0, 2));
+        assert!(sel.contains(7, 2));
+        assert!(sel.contains(0, 3));
+        assert!(sel.contains(7, 3));
+        assert!(!sel.contains(0, 0));
+        assert_eq!(sel.text(&g), "bbbb\ncccc\ndddd");
+
+        // Reverse: drag above origin
+        sel.update_drag(
+            &g,
+            CellPos {
+                col: 2,
+                abs_row: 0,
+            },
+        );
+        assert_eq!(sel.text(&g), "aaaa\nbbbb");
+        assert!(sel.contains(7, 0));
+        assert!(!sel.contains(0, 2));
+    }
+
+    #[test]
+    fn begin_resets_mode_to_cell() {
+        let g = grid_with_lines(10, 2, &["hello"]);
+        let mut sel = Selection::new();
+        sel.select_word(
+            &g,
+            CellPos {
+                col: 0,
+                abs_row: 0,
+            },
+        );
+        assert_eq!(sel.mode(), SelectMode::Word);
+        sel.begin(CellPos {
+            col: 2,
+            abs_row: 0,
+        });
+        assert_eq!(sel.mode(), SelectMode::Cell);
+        sel.update_drag(
+            &g,
+            CellPos {
+                col: 4,
+                abs_row: 0,
+            },
+        );
+        assert_eq!(sel.text(&g), "llo");
     }
 }

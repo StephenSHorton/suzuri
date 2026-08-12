@@ -69,20 +69,21 @@ Hold one `Selection` (recommend: on the app or keyed by `pane_id`).
 | Event | Action |
 |-------|--------|
 | Left **down** in terminal | multi-click → begin / word / line (see below) |
-| Left **move** while dragging | `sel.update(pos)` (single-click drag only) |
+| Left **move** while dragging | `sel.update_drag(grid, pos)` (cell / word / line mode) |
 | Left **up** | `sel.end()` |
 | Click elsewhere / Escape (no overlay) | `sel.clear()` |
 | Scroll wheel while selecting | still absolute rows — update via new `viewport_to_abs` under cursor if desired |
 
 ```rust
-// mouse down — click count from time+position window
+// mouse down — click count from 500ms + same-cell (±1) window
 match clicks {
-    1 => selection.begin(pos),                    // drag may follow
-    2 => selection.select_word(grid, pos),
-    3 => selection.select_line(abs_row, cols),
+    1 => selection.begin(pos),                 // SelectMode::Cell
+    2 => selection.select_word(grid, pos),     // SelectMode::Word
+    3 => selection.select_line(abs_row, cols), // SelectMode::Line
 }
+// always selecting_term = true so drag continues in that mode
 // mouse move (primary held && selecting_term)
-self.selection.update(pos);
+self.selection.update_drag(grid, pos);
 // mouse up
 self.selection.end();
 // Esc with no overlay and selection active
@@ -91,16 +92,18 @@ self.selection.clear();
 
 ### Multi-click (product parity) — done
 
-| Clicks | API |
-|--------|-----|
-| 1 | `begin` → drag selection |
-| 2 | `selection.select_word(grid, pos)` |
-| 3 | `selection.select_line(abs_row, grid.cols())` |
+| Clicks | API | Drag extend |
+|--------|-----|-------------|
+| 1 | `begin` → `SelectMode::Cell` | cell-to-cell |
+| 2 | `select_word` → `SelectMode::Word` | word-aligned origin↔focus |
+| 3 | `select_line` → `SelectMode::Line` | full lines between rows |
+| 4 | wraps to 1 | |
 
-Track click count with **~400 ms** and **~4 px** tolerance (same idea as title-bar
-double-click zoom; fields: `last_term_click`, helpers `term_click_count` /
-`apply_term_click_selection` in `app.rs`). Word/line clicks do not start a drag
-(`selecting_term = false`) so the range stays fixed until the next interaction.
+Track click count with **500 ms** and **cell proximity** (`|dcol|≤1`, `|drow|≤1`
+on absolute cell coords; fields: `last_term_click`, helpers `term_click_count` /
+`apply_term_click_selection` in `app.rs`). After double/triple click,
+`selecting_term` stays **true** so CursorMoved keeps calling `update_drag` in
+word/line mode (typical terminal UX).
 
 ---
 
@@ -162,10 +165,10 @@ same pipeline as ANSI cell bg — no glass/shader fill pass).
 ## 6. `ChromeApp` fields (selection)
 
 ```rust
-term_selection: selection::Selection,
+term_selection: selection::Selection, // mode: Cell | Word | Line
 selecting_term: bool,
-/// time + logical xy + consecutive count (1..=3)
-last_term_click: Option<(Instant, f32, f32, u8)>,
+/// time + cell (col, abs_row) + consecutive count (1..=3, wraps)
+last_term_click: Option<(Instant, u16, usize, u8)>,
 ```
 
 Clear selection on: Esc (no overlay), click outside terminal, tab/pane focus

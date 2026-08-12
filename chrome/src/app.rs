@@ -76,8 +76,9 @@ pub struct ChromeApp {
     middle_press_hit: Option<HitTarget>,
     /// Last empty title-bar click (time + logical xy) for OS zoom double-click.
     last_title_click: Option<(Instant, f32, f32)>,
-    /// Terminal multi-click tracker: time, logical xy, consecutive click count.
-    last_term_click: Option<(Instant, f32, f32, u8)>,
+    /// Terminal multi-click tracker: time, cell col/abs_row, consecutive count.
+    /// Same cell when |dcol|≤1 and |drow|≤1 within [`TERM_MULTI_CLICK_MS`].
+    last_term_click: Option<(Instant, u16, usize, u8)>,
     /// Terminal cell selection (absolute document rows).
     term_selection: Selection,
     selecting_term: bool,
@@ -148,9 +149,8 @@ impl Default for ChromeApp {
     }
 }
 
-/// Multi-click window for terminal word/line select (time + position, like title-bar zoom).
-const TERM_MULTI_CLICK_MS: u64 = 400;
-const TERM_MULTI_CLICK_PX: f32 = 4.0;
+/// Multi-click window for terminal word/line select (product: 500 ms; same cell ±1).
+const TERM_MULTI_CLICK_MS: u64 = 500;
 
 fn spawn_pane_runtime(
     cols: u16,
@@ -837,32 +837,35 @@ impl ChromeApp {
         }
     }
 
-    /// Consecutive terminal click count (1 = single, 2 = double, 3+ = triple).
-    /// Resets when outside ~400 ms / ~4 px of the previous press.
-    fn term_click_count(&mut self) -> u8 {
-        let x = self.cursor.x;
-        let y = self.cursor.y;
+    /// Consecutive terminal click count (1 = cell, 2 = word, 3 = line, then wraps to 1).
+    /// Same cell when within 500 ms and |dcol|≤1, |drow|≤1 (product multiClick).
+    fn term_click_count(&mut self, pos: CellPos) -> u8 {
         let now = Instant::now();
         let count = match self.last_term_click {
-            Some((t, lx, ly, n))
+            Some((t, col, abs_row, n))
                 if now.duration_since(t) < Duration::from_millis(TERM_MULTI_CLICK_MS)
-                    && (x - lx).abs() < TERM_MULTI_CLICK_PX
-                    && (y - ly).abs() < TERM_MULTI_CLICK_PX =>
+                    && (pos.col as i32 - col as i32).abs() <= 1
+                    && (pos.abs_row as i64 - abs_row as i64).abs() <= 1 =>
             {
-                n.saturating_add(1).min(3)
+                let next = n.saturating_add(1);
+                if next > 3 {
+                    1
+                } else {
+                    next
+                }
             }
             _ => 1,
         };
-        self.last_term_click = Some((now, x, y, count));
+        self.last_term_click = Some((now, pos.col, pos.abs_row, count));
         count
     }
 
     /// Apply single / word / line selection at `pos` for the given multi-click count.
+    /// Always leaves `selecting_term` so drag continues in that mode.
     fn apply_term_click_selection(&mut self, pos: CellPos, click_count: u8) {
         match click_count {
             1 => {
                 self.term_selection.begin(pos);
-                self.selecting_term = true;
             }
             2 => {
                 let id = self.session.focus_pane_id();
@@ -871,7 +874,6 @@ impl ChromeApp {
                 } else {
                     self.term_selection.select_cell(pos);
                 }
-                self.selecting_term = false;
             }
             _ => {
                 let id = self.session.focus_pane_id();
@@ -882,9 +884,9 @@ impl ChromeApp {
                     .map(|p| p.grid.cols())
                     .unwrap_or(1);
                 self.term_selection.select_line(pos.abs_row, cols);
-                self.selecting_term = false;
             }
         }
+        self.selecting_term = true;
     }
 
     fn copy_selection_if_any(&mut self) {
@@ -1785,7 +1787,12 @@ impl ApplicationHandler for ChromeApp {
                 self.pointer_inside = true;
                 if self.selecting_term {
                     if let Some(pos) = self.term_cell_at_cursor() {
-                        self.term_selection.update(pos);
+                        let id = self.session.focus_pane_id();
+                        if let Some(pane) = self.session.panes.get(&id) {
+                            self.term_selection.update_drag(&pane.grid, pos);
+                        } else {
+                            self.term_selection.update(pos);
+                        }
                     }
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -1822,10 +1829,11 @@ impl ApplicationHandler for ChromeApp {
                         return;
                     }
                 }
-                // Terminal selection: single = drag, double = word, triple = line.
+                // Terminal selection: single = cell drag, double = word, triple = line
+                // (then drag keeps that mode via update_drag).
                 if matches!(hit, HitTarget::Terminal(_)) && !self.overlay_open() {
                     if let Some(pos) = self.term_cell_at_cursor() {
-                        let clicks = self.term_click_count();
+                        let clicks = self.term_click_count(pos);
                         self.apply_term_click_selection(pos, clicks);
                     }
                 } else if !matches!(hit, HitTarget::Terminal(_)) {
