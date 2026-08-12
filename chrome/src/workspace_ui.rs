@@ -15,6 +15,7 @@
 //! See `chrome/WORKSPACE_HOOKS.md` for hit-test layout constants and hooks.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use crate::layout::Rect;
 use crate::workspace_store::{
@@ -25,6 +26,9 @@ use crate::workspace_store::{
 /// How often an open workspace reloads channels / messages / members from disk
 /// (MCP posts write JSONL; product `RefreshWorkspaceMsg` equivalent).
 pub const AUTO_REFRESH_INTERVAL_SECS: f32 = 1.0;
+
+/// How long a pending Ctrl+D delete stays armed before it expires.
+pub const DELETE_CONFIRM_SECS: f32 = 2.5;
 
 // Re-export so `workspace_ui::WsMessage` / `WsMember` keep working for app/renderer.
 pub use crate::workspace_store::{WsMember, WsMessage};
@@ -138,6 +142,8 @@ pub struct WorkspaceUi {
     pub scroll: usize,
     /// Accumulator for auto-refresh while open (seconds).
     refresh_accum: f32,
+    /// Armed delete: first Ctrl+D sets slug + time; second confirms.
+    delete_pending: Option<(String, Instant)>,
 }
 
 impl Default for WorkspaceUi {
@@ -173,6 +179,7 @@ impl WorkspaceUi {
             human,
             scroll: 0,
             refresh_accum: 0.0,
+            delete_pending: None,
         };
         s.reload_channels();
         s.reload_messages();
@@ -194,6 +201,7 @@ impl WorkspaceUi {
         self.status.clear();
         self.scroll = 0;
         self.refresh_accum = 0.0;
+        self.delete_pending = None;
         // Join self as human if not already present (product open path).
         self.join_self();
         self.reload_channels();
@@ -215,6 +223,7 @@ impl WorkspaceUi {
         self.status.clear();
         self.mode = ComposeMode::Message;
         self.refresh_accum = 0.0;
+        self.delete_pending = None;
     }
 
     pub fn toggle(&mut self) {
@@ -229,6 +238,14 @@ impl WorkspaceUi {
         // Wall time for auto-refresh (do not spring-clamp — long frames still count).
         let wall = dt.max(0.0);
         if self.open {
+            if let Some((_, armed_at)) = self.delete_pending {
+                if armed_at.elapsed().as_secs_f32() >= DELETE_CONFIRM_SECS {
+                    self.delete_pending = None;
+                    if self.status.starts_with("Press Ctrl+D again") {
+                        self.status.clear();
+                    }
+                }
+            }
             self.refresh_accum += wall;
             if self.refresh_accum >= AUTO_REFRESH_INTERVAL_SECS {
                 // Keep residual so hitch-heavy loops do not drift forever.
@@ -420,6 +437,7 @@ impl WorkspaceUi {
             self.channel = name.to_string();
             self.mode = ComposeMode::Message;
             self.scroll = 0;
+            self.delete_pending = None;
             self.reload_messages();
         }
     }
@@ -432,6 +450,54 @@ impl WorkspaceUi {
         self.scroll = 0;
         self.reload_messages();
         Ok(slug)
+    }
+
+    /// Ctrl+D x2: arm then delete the active channel (never `#general`).
+    pub fn request_delete_channel(&mut self) {
+        if self.mode != ComposeMode::Message {
+            self.cancel_mode();
+        }
+        let slug = self.channel.clone();
+        if slug == DEFAULT_CHANNEL || slug.is_empty() {
+            self.delete_pending = None;
+            self.status = format!("cannot delete #{DEFAULT_CHANNEL}");
+            return;
+        }
+        match &self.delete_pending {
+            Some((pending, armed_at))
+                if pending == &slug && armed_at.elapsed().as_secs_f32() < DELETE_CONFIRM_SECS =>
+            {
+                self.confirm_delete_channel();
+            }
+            _ => {
+                self.delete_pending = Some((slug.clone(), Instant::now()));
+                self.status = format!("Press Ctrl+D again to delete #{slug}");
+            }
+        }
+    }
+
+    /// Delete the active channel immediately (after confirm). Matches Go `DeleteChannel`.
+    pub fn confirm_delete_channel(&mut self) {
+        let slug = self.channel.clone();
+        self.delete_pending = None;
+        match self.store.delete_channel(&slug) {
+            Ok(removed) => {
+                self.reload_channels();
+                // Prefer #general after delete.
+                if self.channels.iter().any(|c| c == DEFAULT_CHANNEL) {
+                    self.channel = DEFAULT_CHANNEL.into();
+                } else if let Some(first) = self.channels.first().cloned() {
+                    self.channel = first;
+                } else {
+                    self.channel = DEFAULT_CHANNEL.into();
+                }
+                self.mode = ComposeMode::Message;
+                self.scroll = 0;
+                self.reload_messages();
+                self.status = format!("deleted #{removed}");
+            }
+            Err(e) => self.status = e,
+        }
     }
 
     pub fn cycle_channel(&mut self, delta: i32) {

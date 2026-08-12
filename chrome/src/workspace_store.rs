@@ -211,6 +211,26 @@ impl WorkspaceStore {
         Ok(slug)
     }
 
+    /// Remove a channel directory (meta, messages.jsonl, files/).
+    /// `#general` cannot be deleted. Returns the slug that was removed.
+    /// Matches product `Store.DeleteChannel`.
+    pub fn delete_channel(&self, name: &str) -> Result<String, String> {
+        self.ensure()?;
+        let slug = normalize_channel(name);
+        if slug.is_empty() {
+            return Err("invalid channel name".into());
+        }
+        if slug == DEFAULT_CHANNEL {
+            return Err(format!("cannot delete #{DEFAULT_CHANNEL}"));
+        }
+        let dir = self.root.join("channels").join(&slug);
+        if !dir.exists() {
+            return Err(format!("channel \"{slug}\" not found"));
+        }
+        fs::remove_dir_all(&dir).map_err(err)?;
+        Ok(slug)
+    }
+
     pub fn ensure_channel(&self, slug: &str, topic: &str) -> Result<(), String> {
         let slug = normalize_channel(slug);
         if slug.is_empty() {
@@ -1211,5 +1231,25 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "stephenhorton");
         assert_eq!(list[0].status, "idle");
+    }
+
+    #[test]
+    fn delete_channel_blocks_general_and_removes_others() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-ws-del-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WorkspaceStore::open_at(&dir);
+        store.create_channel("temp-room", "").unwrap();
+        assert!(store.list_channels().unwrap().iter().any(|c| c == "temp-room"));
+        let slug = store.delete_channel("temp-room").unwrap();
+        assert_eq!(slug, "temp-room");
+        assert!(!store.list_channels().unwrap().iter().any(|c| c == "temp-room"));
+        assert!(!dir.join("channels").join("temp-room").exists());
+        assert!(store.delete_channel("general").is_err());
+        assert!(store.delete_channel("missing-room").is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
