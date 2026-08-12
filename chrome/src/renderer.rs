@@ -6,7 +6,6 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::cells::theme;
 use crate::chrome_ui::{ChipUi, TabJelly};
 use crate::commands::{filter_commands, Command, HelpState, PaletteState};
 use crate::input::{is_mac, traffic_light_rects};
@@ -738,18 +737,20 @@ impl Renderer {
                     self.rain_atlas.grid,
                     0.0,
                 ],
-                color: [
-                    rain_sim::COLOR[0],
-                    rain_sim::COLOR[1],
-                    rain_sim::COLOR[2],
-                    1.0,
-                ],
-                head_color: [
-                    rain_sim::HEAD_COLOR[0],
-                    rain_sim::HEAD_COLOR[1],
-                    rain_sim::HEAD_COLOR[2],
-                    1.0,
-                ],
+                color: {
+                    // Theme jade body; brighter head from same accent.
+                    let j = settings.prefs.theme_colors().jade;
+                    [j[0], j[1], j[2], 1.0]
+                },
+                head_color: {
+                    let j = settings.prefs.theme_colors().jade;
+                    [
+                        (j[0] + 0.15).min(1.0),
+                        (j[1] + 0.12).min(1.0),
+                        (j[2] + 0.10).min(1.0),
+                        1.0,
+                    ]
+                },
             }),
         );
         let _ = t; // wall-clock still used by composite glass time
@@ -1097,12 +1098,20 @@ fn chrome_labels(
     term_selection: &Selection,
 ) -> Vec<TextLabel> {
     use crate::chrome_ui::{scale_rect, ChipId};
-    let muted = [0.75, 0.90, 0.80, 0.85];
-    let bright = [0.90, 1.0, 0.92, 0.95];
-    let dim = [0.55, 0.70, 0.60, 0.75];
+    // Chrome label colors track prefs theme (see SETTINGS_HOOKS.md / theme.rs).
+    let pal = settings.prefs.theme_colors();
+    let muted = [pal.muted[0], pal.muted[1], pal.muted[2], 0.85];
+    let bright = [pal.fg[0], pal.fg[1], pal.fg[2], 0.95];
+    let dim = [
+        pal.muted[0] * 0.85,
+        pal.muted[1] * 0.85,
+        pal.muted[2] * 0.85,
+        0.75,
+    ];
     // Warm accent when caffeine is on (product styleCaffeineOn).
     let cafe_on = [1.0, 0.82, 0.45, 0.95];
     let cafe_off = [0.45, 0.55, 0.48, 0.70];
+    let selection_rgb = pal.jade;
 
     let mut labels = Vec::with_capacity(128);
     let _ = tab_jelly; // labels no longer follow jelly
@@ -1195,7 +1204,14 @@ fn chrome_labels(
         } else {
             None
         };
-        push_pane_cells(&mut labels, pl, pane, show_cursor, pane_sel);
+        push_pane_cells(
+            &mut labels,
+            pl,
+            pane,
+            show_cursor,
+            pane_sel,
+            selection_rgb,
+        );
 
         // Footer is UI chrome (not terminal grid) — no ASCII dashes, no cell overflow.
         // Hairline is drawn as a glass panel; path + input are normal UI labels.
@@ -1491,6 +1507,8 @@ fn push_modal_labels(
             title_c,
         ));
         let grid = session.active_grid();
+        let theme_val = crate::theme::label(&settings.prefs.theme).to_string();
+        let darken_val = format!("{:.0}%", settings.prefs.glass_darken * 100.0);
         let rows = [
             (
                 "Glyph rain",
@@ -1502,14 +1520,11 @@ fn push_modal_labels(
                 if settings.prefs.lens { "On" } else { "Off" },
                 "2",
             ),
-            (
-                "Glass darken",
-                &format!("{:.0}%", settings.prefs.glass_darken * 100.0),
-                "[ ]",
-            ),
+            ("Theme", theme_val.as_str(), "3"),
+            ("Glass darken", darken_val.as_str(), "[ ]"),
         ];
-        let row_h = 40.0;
-        let gap = 8.0;
+        let row_h = 36.0;
+        let gap = 6.0;
         let mut y = modal.y + 48.0;
         for (title, val, key) in rows {
             let mut tc = bright;
@@ -2079,8 +2094,8 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 /// Paint terminal cells; optional selection underlay for the focused pane.
 ///
 /// # Selection highlight
-/// Uses full-block mono glyphs (`█`) with jade at [`SELECTION_ALPHA`] behind
-/// cell text — same pipeline as ANSI bg, no glass/shader fill pass.
+/// Uses full-block mono glyphs (`█`) with theme jade at [`SELECTION_ALPHA`]
+/// behind cell text — same pipeline as ANSI bg, no glass/shader fill pass.
 ///
 /// Remaining hooks (app / host): multi-click word/line select, right-click
 /// copy-or-paste, clear on focus change / resize / alt-screen, optional
@@ -2091,6 +2106,7 @@ fn push_pane_cells(
     pane: &crate::session::Pane,
     cursor_visible: bool,
     selection: Option<&Selection>,
+    selection_rgb: [f32; 3],
 ) {
     let mono_size = 14.0; // Gohu design size (product FontSizePx)
     let origin_x = pl.cells.x;
@@ -2122,7 +2138,16 @@ fn push_pane_cells(
 
         // Selection wash under glyphs (and under ANSI cell bg when both apply).
         if let Some(s) = sel {
-            push_selection_row(labels, s, origin_x, y, mono_size, grid.cols(), abs_row);
+            push_selection_row(
+                labels,
+                s,
+                origin_x,
+                y,
+                mono_size,
+                grid.cols(),
+                abs_row,
+                selection_rgb,
+            );
         }
 
         let mut col = 0usize;
@@ -2182,7 +2207,7 @@ fn push_pane_cells(
     }
 }
 
-/// Contiguous jade full-block runs for one viewport row of the selection.
+/// Contiguous accent full-block runs for one viewport row of the selection.
 fn push_selection_row(
     labels: &mut Vec<TextLabel>,
     selection: &Selection,
@@ -2191,6 +2216,7 @@ fn push_selection_row(
     mono_size: f32,
     cols: u16,
     abs_row: usize,
+    accent: [f32; 3],
 ) {
     let mut col = 0u16;
     while col < cols {
@@ -2211,7 +2237,7 @@ fn push_selection_row(
             x,
             y,
             mono_size,
-            [theme::JADE[0], theme::JADE[1], theme::JADE[2], SELECTION_ALPHA],
+            [accent[0], accent[1], accent[2], SELECTION_ALPHA],
         ));
     }
 }

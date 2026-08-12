@@ -15,7 +15,10 @@ cd chrome && cargo build --release && ./target/release/suzuri-chrome
 go build -o suzuri ./cmd/suzuri && ./suzuri chrome
 ```
 
+## Wave 3 (partial)
+- Themes + `SUZURI_CONFIG_DIR` ✅ (`theme.rs`, prefs.theme, host env path)
+
 ## Later
 - Workspace presence / attach / MCP
-- Themes / multi-window
+- Multi-window
 - In-process FFI

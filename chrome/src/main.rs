@@ -27,6 +27,7 @@ mod session;
 mod settings;
 mod shell;
 mod text;
+mod theme;
 mod transfer_ui;
 mod workspace_store;
 mod workspace_ui;

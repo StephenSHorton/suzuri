@@ -7,7 +7,8 @@
 //! | Module | Role |
 //! |--------|------|
 //! | [`layout`] | Geometry contract (title / tabs / terminal hole / warp) |
-//! | [`cells`] | Cell grid buffer + inkstone theme |
+//! | [`cells`] | Cell grid buffer + inkstone VT defaults |
+//! | [`theme`] | Named chrome paint palettes (bg/fg/jade/muted) |
 //! | [`ansi`] | VT decoder into a grid |
 //! | [`selection`] | Cell drag selection + copy text extraction |
 //! | [`pty`] | Portable local shell PTY |
@@ -15,7 +16,7 @@
 //! | [`panes`] | Split-pane tree + jelly animation state |
 //! | [`input`] | Hit-test for chrome affordances |
 //! | [`settings`] | Settings overlay state + prefs |
-//! | [`config_store`] | `chrome_prefs.json` (not product `config.json`) |
+//! | [`config_store`] | `chrome_prefs.json` + `SUZURI_CONFIG_DIR` |
 //! | [`commands`] | Palette / shortcuts registry |
 //! | [`shell`] | Mock shell helpers (fallback when no PTY) |
 //! | [`notes`] / [`notes_ops`] | Multi-note bank + product-compatible `notes.json` |
@@ -43,6 +44,7 @@ pub mod selection;
 pub mod session;
 pub mod settings;
 pub mod shell;
+pub mod theme;
 
 /// Optional C ABI stubs for cgo / static link. Enable with `--features ffi`.
 #[cfg(feature = "ffi")]
@@ -55,6 +57,7 @@ pub use cells::{theme as cell_theme, Cell, CellGrid, Cursor};
 pub use commands::{
     default_commands, filter_commands, Command, CommandAction, HelpState, PaletteState,
 };
+pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
 pub use input::{hit_test, is_mac, traffic_light_rects, HitTarget};
 pub use layout::{FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect, Spacing};
 pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
@@ -63,6 +66,7 @@ pub use selection::Selection;
 pub use session::{ChromeSession, CloseOutcome, Pane, Tab};
 pub use settings::{ChromePrefs, SettingsState, GLASS_DARKEN_DEFAULT};
 pub use shell::{ShellOutput, PROMPT_GLYPH};
+pub use theme::{colors as theme_colors, ThemeColors, DEFAULT_THEME_ID, THEME_IDS};
 
 /// Semver of this crate (`Cargo.toml` package version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

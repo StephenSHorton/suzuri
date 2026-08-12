@@ -3,7 +3,9 @@
 //! Product `config.json` (font, theme, profiles, …) is owned by the Go host
 //! (`internal/config`). This module **never** reads or writes that file.
 //!
-//! Paths match product layout:
+//! Paths match product layout (override with `SUZURI_CONFIG_DIR` — set by the
+//! Go host spawn so notes/prefs share the product dir):
+//! - env `SUZURI_CONFIG_DIR` when set (wins)
 //! - macOS: `~/Library/Application Support/suzuri/`
 //! - Windows: `%LOCALAPPDATA%\suzuri\`
 //! - Linux / other: `~/.config/suzuri/`
@@ -12,13 +14,18 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::theme;
+
 /// Filename under the product config directory (sibling of `config.json`).
 pub const CHROME_PREFS_FILE: &str = "chrome_prefs.json";
+
+/// Env var the Go host sets to the product `config.Dir()` path.
+pub const ENV_CONFIG_DIR: &str = "SUZURI_CONFIG_DIR";
 
 /// Default glass face darken (matches product look).
 pub const GLASS_DARKEN_DEFAULT: f32 = 0.82;
 
-/// User-tunable chrome UI prefs (rain / lens / glass darken).
+/// User-tunable chrome UI prefs (rain / lens / glass darken / theme).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromePrefs {
     /// Canvas UI glyph rain under glass.
@@ -27,6 +34,8 @@ pub struct ChromePrefs {
     pub lens: bool,
     /// Shared glass face darken 0..1 (panes / chips / modal).
     pub glass_darken: f32,
+    /// Named chrome theme id (`inkstone`, `nord`, …). See [`crate::theme`].
+    pub theme: String,
 }
 
 impl Default for ChromePrefs {
@@ -35,6 +44,7 @@ impl Default for ChromePrefs {
             rain: true,
             lens: true,
             glass_darken: GLASS_DARKEN_DEFAULT,
+            theme: theme::DEFAULT_THEME_ID.to_string(),
         }
     }
 }
@@ -44,15 +54,42 @@ impl ChromePrefs {
         self.glass_darken = (self.glass_darken + delta).clamp(0.0, 0.95);
     }
 
-    /// Normalize after load (clamp darken, keep bools as-is).
+    /// Cycle to the next named theme (wraps). Returns the new id.
+    pub fn cycle_theme(&mut self) -> &str {
+        self.theme = theme::cycle_next(&self.theme).to_string();
+        &self.theme
+    }
+
+    /// Cycle to the previous named theme (wraps). Returns the new id.
+    pub fn cycle_theme_prev(&mut self) -> &str {
+        self.theme = theme::cycle_prev(&self.theme).to_string();
+        &self.theme
+    }
+
+    /// Active paint palette for the current theme id.
+    pub fn theme_colors(&self) -> theme::ThemeColors {
+        theme::colors(&self.theme)
+    }
+
+    /// Normalize after load (clamp darken, fold theme id, keep bools as-is).
     pub fn normalize(mut self) -> Self {
         self.glass_darken = self.glass_darken.clamp(0.0, 0.95);
+        self.theme = theme::normalize_id(&self.theme).to_string();
         self
     }
 }
 
 /// Product config / data directory (same roots as Go `config.Dir()`).
+///
+/// Prefer **`SUZURI_CONFIG_DIR`** when set so a host-spawned chrome process
+/// shares notes / prefs with the product binary.
 pub fn product_config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var(ENV_CONFIG_DIR) {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = std::env::var_os("HOME") {
@@ -113,11 +150,13 @@ pub fn save_chrome_prefs(path: &Path, prefs: &ChromePrefs) -> io::Result<()> {
 
 /// Serialize prefs to stable JSON (pretty, trailing newline).
 pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
+    let theme = theme::normalize_id(&prefs.theme);
     format!(
-        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {}\n}}\n",
+        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\"\n}}\n",
         prefs.rain,
         prefs.lens,
-        format_f32(prefs.glass_darken)
+        format_f32(prefs.glass_darken),
+        theme
     )
 }
 
@@ -132,10 +171,14 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
     let rain = extract_bool(trimmed, "rain").unwrap_or(d.rain);
     let lens = extract_bool(trimmed, "lens").unwrap_or(d.lens);
     let glass_darken = extract_f32(trimmed, "glass_darken").unwrap_or(d.glass_darken);
+    let theme = extract_string(trimmed, "theme")
+        .map(|s| theme::normalize_id(&s).to_string())
+        .unwrap_or(d.theme);
     Some(ChromePrefs {
         rain,
         lens,
         glass_darken,
+        theme,
     })
 }
 
@@ -185,6 +228,33 @@ fn extract_f32(s: &str, key: &str) -> Option<f32> {
     rest[..end].parse().ok()
 }
 
+fn extract_string(s: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\"");
+    let i = s.find(&pat)?;
+    let after = &s[i + pat.len()..];
+    let colon = after.find(':')?;
+    let rest = after[colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    let body = &rest[1..];
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(n) = chars.next() {
+                out.push(n);
+            }
+            continue;
+        }
+        if c == '"' {
+            return Some(out);
+        }
+        out.push(c);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +277,7 @@ mod tests {
             rain: false,
             lens: true,
             glass_darken: 0.55,
+            theme: "nord".into(),
         };
         save_chrome_prefs(&path, &prefs).expect("save");
         assert!(path.is_file(), "expected file at {}", path.display());
@@ -218,6 +289,7 @@ mod tests {
         assert_eq!(loaded.rain, false);
         assert_eq!(loaded.lens, true);
         assert!((loaded.glass_darken - 0.55).abs() < 1e-4);
+        assert_eq!(loaded.theme, "nord");
         let _ = fs::remove_file(&path);
         if let Some(parent) = path.parent() {
             let _ = fs::remove_dir_all(parent);
@@ -230,6 +302,7 @@ mod tests {
         let _ = fs::remove_file(&path);
         let loaded = load_chrome_prefs(&path);
         assert_eq!(loaded, ChromePrefs::default());
+        assert_eq!(loaded.theme, theme::DEFAULT_THEME_ID);
         if let Some(parent) = path.parent() {
             let _ = fs::remove_dir_all(parent);
         }
@@ -241,6 +314,15 @@ mod tests {
         assert!(!p.rain);
         assert!(p.lens);
         assert!((p.glass_darken - GLASS_DARKEN_DEFAULT).abs() < 1e-4);
+        assert_eq!(p.theme, theme::DEFAULT_THEME_ID);
+    }
+
+    #[test]
+    fn parse_theme_aliases() {
+        let p = parse_chrome_prefs_json(r#"{ "theme": "tokyo_night" }"#).unwrap();
+        assert_eq!(p.theme, "tokyo-night");
+        let p = parse_chrome_prefs_json(r#"{ "theme": "charmtone" }"#).unwrap();
+        assert_eq!(p.theme, "charm");
     }
 
     #[test]
@@ -253,11 +335,14 @@ mod tests {
             rain: false,
             lens: false,
             glass_darken: 0.4,
+            theme: "dracula".into(),
         };
         save_chrome_prefs(&path, &prefs).unwrap();
         let config_body = fs::read_to_string(&config).unwrap();
         assert!(config_body.contains("keep-me"));
         assert!(!config_body.contains("glass_darken"));
+        let prefs_body = fs::read_to_string(&path).unwrap();
+        assert!(prefs_body.contains("\"theme\": \"dracula\""));
         let _ = fs::remove_dir_all(parent);
     }
 
@@ -267,10 +352,12 @@ mod tests {
             rain: true,
             lens: false,
             glass_darken: 0.82,
+            theme: "charm".into(),
         };
         let raw = chrome_prefs_to_json(&prefs);
         assert!(raw.contains("\"rain\": true"));
         assert!(raw.contains("\"lens\": false"));
+        assert!(raw.contains("\"theme\": \"charm\""));
         let back = parse_chrome_prefs_json(&raw).unwrap();
         assert_eq!(back, prefs);
     }
@@ -283,5 +370,49 @@ mod tests {
             Some(CHROME_PREFS_FILE)
         );
         assert_eq!(p.parent().map(|x| x.to_path_buf()), Some(product_config_dir()));
+    }
+
+    #[test]
+    fn product_config_dir_honors_suzuri_config_dir_env() {
+        // Process-global env — restore previous value so other tests stay clean.
+        let prev = std::env::var_os(ENV_CONFIG_DIR);
+        let custom = std::env::temp_dir().join(format!(
+            "suzuri-config-dir-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::env::set_var(ENV_CONFIG_DIR, &custom);
+        let got = product_config_dir();
+        assert_eq!(got, custom);
+        assert_eq!(chrome_prefs_path(), custom.join(CHROME_PREFS_FILE));
+        match prev {
+            Some(v) => std::env::set_var(ENV_CONFIG_DIR, v),
+            None => std::env::remove_var(ENV_CONFIG_DIR),
+        }
+    }
+
+    #[test]
+    fn cycle_theme_advances() {
+        let mut p = ChromePrefs::default();
+        assert_eq!(p.theme, "inkstone");
+        assert_eq!(p.cycle_theme(), "nord");
+        assert_eq!(p.theme, "nord");
+        let c = p.theme_colors();
+        assert_ne!(c.bg, theme::INKSTONE.bg);
+    }
+
+    #[test]
+    fn normalize_unknown_theme() {
+        let p = ChromePrefs {
+            rain: true,
+            lens: true,
+            glass_darken: 1.5,
+            theme: "nope".into(),
+        }
+        .normalize();
+        assert!((p.glass_darken - 0.95).abs() < 1e-5);
+        assert_eq!(p.theme, "inkstone");
     }
 }

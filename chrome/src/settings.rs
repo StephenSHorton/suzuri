@@ -10,14 +10,16 @@
 //!
 //! Drawn as optical glass (same pane model), not plain text over the terminal.
 //!
-//! Prefs (`rain` / `lens` / `glass_darken`) load from `chrome_prefs.json` on
-//! [`SettingsState::new`] and save when dirty (hotkey / close / explicit flush).
-//! See `SETTINGS_HOOKS.md` for host integration.
+//! Prefs (`rain` / `lens` / `glass_darken` / `theme`) load from
+//! `chrome_prefs.json` on [`SettingsState::new`] and save when dirty
+//! (hotkey / close / explicit flush). See `SETTINGS_HOOKS.md` for host
+//! integration and how the renderer should sample theme colors.
 
 use std::path::{Path, PathBuf};
 
 use crate::config_store;
 use crate::layout::Rect;
+use crate::theme;
 
 // Re-export for existing `settings::ChromePrefs` / `GLASS_DARKEN_DEFAULT` imports.
 pub use crate::config_store::{ChromePrefs, GLASS_DARKEN_DEFAULT};
@@ -27,7 +29,7 @@ pub use crate::config_store::{ChromePrefs, GLASS_DARKEN_DEFAULT};
 pub struct SettingsState {
     /// Desired open/closed.
     pub open: bool,
-    /// Session prefs (rain / lens / darken). Loaded from disk on construct.
+    /// Session prefs (rain / lens / darken / theme). Loaded from disk on construct.
     pub prefs: ChromePrefs,
     /// Spring position 0..1 for content (present).
     present: f32,
@@ -116,8 +118,17 @@ impl SettingsState {
         }
     }
 
-    /// Toggle rain / lens, or nudge darken, from a key while the modal is open.
-    /// Saves prefs when a toggle lands.
+    /// Toggle rain / lens, cycle theme, or nudge darken, from a key while the
+    /// modal is open. Saves prefs when a toggle lands.
+    ///
+    /// | Key | Action |
+    /// |-----|--------|
+    /// | `1` | Toggle glyph rain |
+    /// | `2` | Toggle magnifier lens |
+    /// | `3` / `t` | Cycle theme forward |
+    /// | `T` / `⇧t` | Cycle theme backward |
+    /// | `[` / `-` | Darken glass −5% |
+    /// | `]` / `=` / `+` | Darken glass +5% |
     pub fn handle_hotkey(&mut self, key: &str) -> bool {
         let handled = match key {
             "1" => {
@@ -126,6 +137,14 @@ impl SettingsState {
             }
             "2" => {
                 self.prefs.lens = !self.prefs.lens;
+                true
+            }
+            "3" | "t" => {
+                self.prefs.cycle_theme();
+                true
+            }
+            "T" => {
+                self.prefs.cycle_theme_prev();
                 true
             }
             "[" | "-" => {
@@ -143,6 +162,11 @@ impl SettingsState {
             let _ = self.save_prefs();
         }
         handled
+    }
+
+    /// Active chrome paint palette for `prefs.theme`.
+    pub fn theme_colors(&self) -> theme::ThemeColors {
+        self.prefs.theme_colors()
     }
 
     pub fn open(&mut self) {
@@ -283,6 +307,8 @@ impl SettingsState {
         let rain = if self.prefs.rain { "on" } else { "off" };
         let lens = if self.prefs.lens { "on" } else { "off" };
         let darken_pct = (self.prefs.glass_darken * 100.0).round() as i32;
+        let theme_id = theme::normalize_id(&self.prefs.theme);
+        let theme_label = theme::label(theme_id);
 
         vec![
             "suzuri-chrome 1.0.0".into(),
@@ -291,6 +317,7 @@ impl SettingsState {
             "toggles".into(),
             format!("  [1] glyph rain     {rain}"),
             format!("  [2] magnifier      {lens}  · pinch or ⌃/⌘+scroll"),
+            format!("  [3] theme          {theme_label} ({theme_id})"),
             format!("  [ / ]  glass darken  {darken_pct}%"),
             String::new(),
             "status".into(),
@@ -307,6 +334,7 @@ impl SettingsState {
             "  ⇧⌘D/E    split right / down".into(),
             "  ⌘V       paste".into(),
             "  wheel    scrollback".into(),
+            "  3 / t    cycle theme".into(),
         ]
     }
 }
@@ -415,6 +443,22 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_cycles_theme() {
+        let (path, mut s) = fresh();
+        assert_eq!(s.prefs.theme, "inkstone");
+        assert!(s.handle_hotkey("3"));
+        assert_eq!(s.prefs.theme, "nord");
+        assert!(s.handle_hotkey("t"));
+        assert_eq!(s.prefs.theme, "dracula");
+        assert!(s.handle_hotkey("T"));
+        assert_eq!(s.prefs.theme, "nord");
+        let lines = s.display_lines(false, 80, 24, 1).join("\n");
+        assert!(lines.contains("theme"));
+        assert!(lines.contains("Nord") || lines.contains("nord"));
+        cleanup(&path);
+    }
+
+    #[test]
     fn hotkey_persists_to_disk() {
         let path = temp_prefs_path("hotkey");
         let _ = fs::remove_file(&path);
@@ -474,6 +518,7 @@ mod tests {
             rain: false,
             lens: false,
             glass_darken: 0.45,
+            theme: "tokyo-night".into(),
         };
         {
             let mut s = SettingsState::with_path(&path);

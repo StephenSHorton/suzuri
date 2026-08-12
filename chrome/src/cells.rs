@@ -1,18 +1,28 @@
 //! Terminal cell grid — character cells with optional per-cell colors.
-//! Default theme: inkstone (bg near #050a07, fg #e8f5ee, jade #00e676).
+//!
+//! Default VT pen: **inkstone** (bg near #050a07, fg #e8f5ee, jade #00e676).
+//! Named chrome themes (nord, dracula, …) live in [`crate::theme`]; the
+//! renderer should paint glass / selection / rain from
+//! `settings.prefs.theme_colors()` (or `theme::colors(&prefs.theme)`), not
+//! only these static cell defaults.
 
 /// Inkstone palette as linear-ish RGB floats in 0..=1 (sRGB channel / 255).
+///
+/// Kept as **const** defaults for ANSI / new cells so VT tests stay stable.
+/// For the active chrome theme, use [`crate::theme::colors`].
 pub mod theme {
+    use crate::theme::INKSTONE;
+
     /// Near #050a07
-    pub const BG: [f32; 3] = [0.019_607_843, 0.039_215_687, 0.027_450_981];
+    pub const BG: [f32; 3] = INKSTONE.bg;
     /// #e8f5ee
-    pub const FG: [f32; 3] = [0.909_803_9, 0.960_784_3, 0.933_333_34];
+    pub const FG: [f32; 3] = INKSTONE.fg;
     /// #00e676
-    pub const JADE: [f32; 3] = [0.0, 0.901_960_8, 0.462_745_1];
+    pub const JADE: [f32; 3] = INKSTONE.jade;
     /// Dim / secondary text (~#6b7c72)
-    pub const DIM: [f32; 3] = [0.419_607_85, 0.486_274_5, 0.447_058_83];
+    pub const DIM: [f32; 3] = INKSTONE.muted;
     /// Error red (~#ff5252)
-    pub const ERR: [f32; 3] = [1.0, 0.321_568_64, 0.321_568_64];
+    pub const ERR: [f32; 3] = INKSTONE.err;
 }
 
 /// One terminal cell.
