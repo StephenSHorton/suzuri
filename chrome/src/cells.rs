@@ -76,6 +76,16 @@ pub struct Cursor {
 /// Max scrollback rows retained when the viewport scrolls.
 const MAX_SCROLLBACK: usize = 2000;
 
+/// Logical-px scrollbar geometry for the terminal cell well (product-style).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScrollbarGeom {
+    pub visible: bool,
+    /// Thumb top relative to track top (0 = top of track).
+    pub thumb_y: f32,
+    pub thumb_h: f32,
+    pub track_h: f32,
+}
+
 /// Fixed-size cell buffer with a logical cursor + scrollback.
 #[derive(Clone, Debug)]
 pub struct CellGrid {
@@ -169,6 +179,74 @@ impl CellGrid {
     /// Max `view_offset` (scroll until absolute row 0 is at the top).
     pub fn max_view_offset(&self) -> usize {
         self.stick_bottom_top()
+    }
+
+    /// Scrollbar thumb geometry for a track of height `track_h` (logical px).
+    /// Product `scrollback.Scrollbar`: at bottom → thumb near bottom; oldest → top.
+    pub fn scrollbar(&self, track_h: f32) -> ScrollbarGeom {
+        let track_h = track_h.max(8.0);
+        let max_off = self.max_view_offset();
+        let vh = self.rows as usize;
+        let hist = self.scrollback.len();
+        let live = self.live_extent().max(1);
+        let doc = hist + live;
+        let visible = max_off >= 1 || (self.scrollback_pin > 0 && hist > 0);
+        if !visible || doc <= 1 {
+            return ScrollbarGeom {
+                visible: false,
+                thumb_y: 0.0,
+                thumb_h: track_h,
+                track_h,
+            };
+        }
+        let den = doc.max(vh + 1);
+        let mut ratio = vh as f32 / den as f32;
+        if ratio > 1.0 {
+            ratio = 1.0;
+        }
+        let thumb_h = (track_h * ratio).max(18.0).min(track_h);
+        let travel = (track_h - thumb_h).max(0.0);
+        let t = if max_off > 0 {
+            (self.view_offset as f32 / max_off as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // offset 0 = bottom → thumb at bottom; offset max = top → thumb at top.
+        let thumb_y = travel * (1.0 - t);
+        ScrollbarGeom {
+            visible: true,
+            thumb_y,
+            thumb_h,
+            track_h,
+        }
+    }
+
+    /// Set scroll position from a 0..=1 fraction (0 = stick bottom, 1 = oldest).
+    pub fn set_scroll_fraction(&mut self, t: f32) {
+        let max = self.max_view_offset();
+        if max == 0 {
+            self.view_offset = 0;
+            return;
+        }
+        let t = t.clamp(0.0, 1.0);
+        self.view_offset = (t * max as f32).round() as usize;
+        if self.view_offset > max {
+            self.view_offset = max;
+        }
+    }
+
+    /// Map a Y position within a track (0 at top) to scroll fraction.
+    pub fn scroll_fraction_from_track_y(&self, y_in_track: f32, track_h: f32) -> f32 {
+        let sb = self.scrollbar(track_h);
+        if !sb.visible || sb.track_h <= 0.0 {
+            return 0.0;
+        }
+        let travel = (sb.track_h - sb.thumb_h).max(1.0);
+        // Thumb center targets y; product inverts so top of track = oldest.
+        let y = y_in_track - sb.thumb_h * 0.5;
+        let t_ui = (y / travel).clamp(0.0, 1.0);
+        // UI y=0 (top) → fraction 1 (oldest); y=bottom → 0.
+        1.0 - t_ui
     }
 
     /// Map a visible viewport row (0..rows) to an absolute document row.
@@ -813,6 +891,39 @@ mod tests {
             }
         }
         assert!(found_cmd, "command block should be visible at stick-bottom");
+    }
+
+    #[test]
+    fn scrollbar_visible_when_history() {
+        let mut g = CellGrid::new(20, 6);
+        for i in 0..30 {
+            g.push_scrollback_text(&format!("line{i}"), None);
+        }
+        let sb = g.scrollbar(200.0);
+        assert!(sb.visible);
+        assert!(sb.thumb_h >= 18.0);
+        assert!(sb.thumb_h <= 200.0);
+        // At bottom, thumb near bottom of track.
+        let travel = sb.track_h - sb.thumb_h;
+        assert!(sb.thumb_y >= travel * 0.9 - 1.0);
+        g.scroll_view(g.max_view_offset() as i32);
+        let sb2 = g.scrollbar(200.0);
+        assert!(sb2.thumb_y <= travel * 0.1 + 1.0);
+    }
+
+    #[test]
+    fn scroll_fraction_roundtrip() {
+        let mut g = CellGrid::new(20, 6);
+        for i in 0..40 {
+            g.push_scrollback_text(&format!("x{i}"), None);
+        }
+        g.set_scroll_fraction(0.0);
+        assert_eq!(g.view_offset(), 0);
+        g.set_scroll_fraction(1.0);
+        assert_eq!(g.view_offset(), g.max_view_offset());
+        g.set_scroll_fraction(0.5);
+        let mid = g.max_view_offset() / 2;
+        assert!((g.view_offset() as i32 - mid as i32).abs() <= 1);
     }
 
     #[test]

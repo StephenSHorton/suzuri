@@ -67,6 +67,11 @@ go build -o suzuri ./cmd/suzuri && ./suzuri
 - PageUp/PageDown + Ctrl/⌘+Home/End host scroll
 - Cursor/selection map through composed viewport
 
+## Wave 11 polish ✅
+- Terminal scrollbar thumb (frost chip, focused pane)
+- Click/drag scrollbar track to scrub history
+- Scrollbar geom matches product (bottom = newest)
+
 ## Later
 - Full in-process GPU present loop (cgo + host window)
 - Package install always ships `suzuri-chrome` sibling binary

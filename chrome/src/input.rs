@@ -18,10 +18,15 @@ pub enum HitTarget {
     WarpBar(u64),
     /// History cells for pane id.
     Terminal(u64),
+    /// Scrollbar track / thumb on the right of the cell well (pane id).
+    ScrollBar(u64),
     /// Title-bar drag region (window move). On macOS, excludes traffic lights.
     TitleDrag,
     None,
 }
+
+/// Width of the scroll hit gutter inside the cell well (logical px).
+pub const SCROLL_GUTTER_W: f32 = 10.0;
 
 /// Platform detection for chrome affordances (traffic lights, etc.).
 #[inline]
@@ -107,6 +112,12 @@ pub fn hit_test(
             return HitTarget::WarpBar(pl.pane_id);
         }
         if pl.cells.contains(x, y) {
+            // Right gutter: scrollbar (only when the well is wide enough).
+            if pl.cells.w > SCROLL_GUTTER_W * 3.0
+                && x >= pl.cells.x + pl.cells.w - SCROLL_GUTTER_W
+            {
+                return HitTarget::ScrollBar(pl.pane_id);
+            }
             return HitTarget::Terminal(pl.pane_id);
         }
         // Glass chrome (margins) — select pane but treat as terminal hit for focus

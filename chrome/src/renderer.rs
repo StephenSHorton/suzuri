@@ -790,6 +790,34 @@ impl Renderer {
             chip_ui,
             &self.tab_jelly,
         );
+        // Focused-pane scroll thumb (product-style; hide when nothing to scroll).
+        {
+            use crate::layout::{PanelInstance, PanelKind, Rect};
+            let focus = session.focus_pane_id();
+            for pl in &layout.panes {
+                if pl.pane_id != focus {
+                    continue;
+                }
+                let Some(pane) = session.panes.get(&pl.pane_id) else {
+                    continue;
+                };
+                let geom = pane.grid.scrollbar(pl.cells.h);
+                if !geom.visible {
+                    continue;
+                }
+                const TRACK_W: f32 = 5.0;
+                let x = pl.cells.x + pl.cells.w - TRACK_W - 2.0;
+                let thumb = Rect::new(
+                    x,
+                    pl.cells.y + geom.thumb_y,
+                    TRACK_W,
+                    geom.thumb_h.max(12.0),
+                );
+                panels.push(
+                    PanelInstance::glass(thumb, 2.5, PanelKind::ModalFrost).with_opacity(0.5),
+                );
+            }
+        }
         // Modal overlays (settings / palette / help / splash / confirm / notes / rename)
         {
             use crate::layout::{PanelInstance, PanelKind, Rect};

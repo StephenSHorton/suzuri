@@ -113,6 +113,8 @@ pub struct ChromeApp {
     /// Terminal cell selection (absolute document rows).
     term_selection: Selection,
     selecting_term: bool,
+    /// Dragging the terminal scrollbar thumb/track (pane id).
+    scroll_dragging: Option<u64>,
     /// URL under the pointer in the focused terminal (for hand cursor / Cmd-click).
     hovered_link: Option<String>,
     /// Exact cell range of [`Self::hovered_link`] for primary hover paint.
@@ -169,6 +171,7 @@ impl Default for ChromeApp {
             last_term_click: None,
             term_selection: Selection::new(),
             selecting_term: false,
+            scroll_dragging: None,
             hovered_link: None,
             hovered_link_span: None,
             link_cursor_on: false,
@@ -1169,6 +1172,10 @@ impl ChromeApp {
                     self.terminal_focused = false;
                 }
             }
+            // Scrollbar clicks are handled on press/drag; release is a no-op.
+            HitTarget::ScrollBar(pane_id) => {
+                self.session.set_focus_pane(pane_id);
+            }
             HitTarget::None => {}
         }
 
@@ -1848,6 +1855,23 @@ impl ChromeApp {
         self.submit_line_text(&line);
     }
 
+    /// Map pointer Y on the pane scrollbar track to `view_offset`.
+    fn apply_scrollbar_drag(&mut self, pane_id: u64) {
+        let layout = self.current_layout();
+        let Some(pl) = layout.panes.iter().find(|p| p.pane_id == pane_id) else {
+            return;
+        };
+        let track_h = pl.cells.h;
+        if track_h < 8.0 {
+            return;
+        }
+        let y_in = (self.cursor.y - pl.cells.y).clamp(0.0, track_h);
+        if let Some(grid) = self.session.grid_mut(pane_id) {
+            let frac = grid.scroll_fraction_from_track_y(y_in, track_h);
+            grid.set_scroll_fraction(frac);
+        }
+    }
+
     /// Snapshot for MCP bridge: tabs + viewport/live lines + echo/blocks + PTY.
     fn publish_bridge_status(&mut self) {
         let mut extras: Vec<PaneSnapExtra> = Vec::new();
@@ -2030,7 +2054,12 @@ impl ApplicationHandler for ChromeApp {
                 let logical: LogicalPosition<f64> = position.to_logical(scale);
                 self.cursor = LogicalPosition::new(logical.x as f32, logical.y as f32);
                 self.pointer_inside = true;
-                if self.selecting_term {
+                if let Some(pane_id) = self.scroll_dragging {
+                    self.apply_scrollbar_drag(pane_id);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                } else if self.selecting_term {
                     if let Some(pos) = self.term_cell_at_cursor() {
                         let id = self.session.focus_pane_id();
                         if let Some(pane) = self.session.panes.get(&id) {
@@ -2074,14 +2103,25 @@ impl ApplicationHandler for ChromeApp {
                         return;
                     }
                 }
+                // Scrollbar track/thumb drag (right gutter of cell well).
+                if let HitTarget::ScrollBar(pane_id) = hit {
+                    if !self.overlay_open() {
+                        self.scroll_dragging = Some(pane_id);
+                        self.session.set_focus_pane(pane_id);
+                        self.apply_scrollbar_drag(pane_id);
+                        self.term_selection.clear();
+                        self.selecting_term = false;
+                        self.last_term_click = None;
+                    }
+                }
                 // Terminal selection: single = cell drag, double = word, triple = line
                 // (then drag keeps that mode via update_drag).
-                if matches!(hit, HitTarget::Terminal(_)) && !self.overlay_open() {
+                else if matches!(hit, HitTarget::Terminal(_)) && !self.overlay_open() {
                     if let Some(pos) = self.term_cell_at_cursor() {
                         let clicks = self.term_click_count(pos);
                         self.apply_term_click_selection(pos, clicks);
                     }
-                } else if !matches!(hit, HitTarget::Terminal(_)) {
+                } else if !matches!(hit, HitTarget::Terminal(_) | HitTarget::ScrollBar(_)) {
                     self.term_selection.clear();
                     self.selecting_term = false;
                     self.last_term_click = None;
@@ -2128,18 +2168,21 @@ impl ApplicationHandler for ChromeApp {
                 ..
             } => {
                 self.chip_ui.pressed = false;
+                let was_scroll = self.scroll_dragging.take().is_some();
                 if self.selecting_term {
                     self.term_selection.end();
                     self.selecting_term = false;
                 }
                 // Activate only on release, and only if still over the same target.
-                // Skip chrome activation if we were selecting terminal text.
+                // Skip chrome activation if we were selecting terminal text or scrolling.
                 if let Some(start) = self.press_hit.take() {
                     let end = self.hit_at_cursor();
-                    if start == end
+                    if was_scroll {
+                        // already applied on drag
+                    } else if start == end
                         && start != HitTarget::TitleDrag
                         && start != HitTarget::None
-                        && !matches!(start, HitTarget::Terminal(_))
+                        && !matches!(start, HitTarget::Terminal(_) | HitTarget::ScrollBar(_))
                     {
                         self.handle_activation(event_loop, start);
                     } else if start == end && matches!(start, HitTarget::Terminal(_)) {
@@ -2244,7 +2287,9 @@ impl ApplicationHandler for ChromeApp {
                         }
                     };
                     if lines != 0 {
-                        self.session.active_grid_mut().scroll_view(lines);
+                        // Slightly faster than 1:1 so history feels snappy (product ~half-viewport on keys).
+                        let step = (lines * 2).clamp(-12, 12);
+                        self.session.active_grid_mut().scroll_view(step);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }

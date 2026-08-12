@@ -238,3 +238,11 @@ so Warp command blocks stay visible above shell output (product `viewWindow`).
 | Ctrl/⌘+End | Stick bottom |
 
 Wheel still calls `scroll_view(±lines)`.
+
+**Scrollbar** (focused pane, right gutter of cell well):
+
+| Piece | Behavior |
+|-------|----------|
+| Thumb | Frost chip; size ∝ viewport/doc; bottom when `view_offset == 0` |
+| Hit | `HitTarget::ScrollBar` when pointer in right ~10px of cells |
+| Drag | `set_scroll_fraction` from track Y (product invert) |
