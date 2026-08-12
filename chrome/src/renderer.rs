@@ -8,8 +8,7 @@ use winit::window::Window;
 
 use crate::chrome_ui::{ChipUi, TabJelly};
 use crate::commands::{
-    filter_commands, help_sections, splash_hint_rows, Command, HelpState, PaletteState,
-    SplashState,
+    filter_commands, splash_hint_rows, Command, HelpLayout, HelpState, PaletteState, SplashState,
 };
 use crate::confirm::ConfirmState;
 use crate::input::{is_mac, traffic_light_rects};
@@ -1542,22 +1541,15 @@ fn push_modal_glass(
 
     if help.visible() {
         let ease = help.content_ease().clamp(0.0, 1.0);
-        let modal = overlay_modal_rect(win_w, win_h, 720.0, 480.0);
-        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
-        let pad = 14.0;
-        let btn_h = 32.0;
-        let gap = 5.0;
-        let mut y = modal.y + 44.0;
-        let max_y = modal.y + modal.h - pad;
-        for _ in commands.iter().take(8) {
-            if y + btn_h > max_y {
-                break;
-            }
-            let r = Rect::new(modal.x + pad, y, modal.w - pad * 2.0, btn_h);
+        let lay = HelpLayout::new(win_w, win_h);
+        panels.push(
+            PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
+        );
+        // One frost chip per shortcut row (same rects as text path).
+        for (r, _, _) in &lay.rows {
             panels.push(
-                PanelInstance::glass(r, m.chip_radius, PanelKind::ModalButton).with_opacity(ease),
+                PanelInstance::glass(*r, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
             );
-            y += btn_h + gap;
         }
     }
 
@@ -1925,87 +1917,55 @@ fn push_modal_labels(
 
     if help.visible() {
         let ease = help.content_ease().clamp(0.0, 1.0);
-        // Product two-col card: wide enough for keys + desc.
-        let modal = overlay_modal_rect(win_w, win_h, 720.0, 480.0);
+        let lay = HelpLayout::new(win_w, win_h);
+        let modal = lay.modal;
         let mut title_c = bright;
         title_c[3] *= ease;
         labels.push(TextLabel::new(
             "Shortcuts",
-            modal.x + 16.0,
+            modal.x + lay.pad,
             modal.y + 12.0,
             15.0,
             title_c,
         ));
-        let pad = 14.0;
-        let sections = help_sections();
-        // Two columns when wide enough (product helpBodyTwoCol).
-        let two_col = modal.w >= 560.0;
-        let col_gap = 16.0;
-        let col_w = if two_col {
-            (modal.w - pad * 2.0 - col_gap) * 0.5
-        } else {
-            modal.w - pad * 2.0
-        };
-        let left_x = modal.x + pad;
-        let right_x = left_x + col_w + col_gap;
-        let mut y_left = modal.y + 40.0;
-        let mut y_right = modal.y + 40.0;
-        let max_y = modal.y + modal.h - pad - 8.0;
-        let row_h = 18.0;
-        let sec_gap = 10.0;
-        let mid = (sections.len() + 1) / 2;
-        for (si, sec) in sections.iter().enumerate() {
-            let (x, y) = if two_col && si >= mid {
-                (right_x, &mut y_right)
-            } else if two_col {
-                (left_x, &mut y_left)
-            } else {
-                (left_x, &mut y_left)
-            };
-            if *y + row_h > max_y {
-                break;
-            }
+        for (x, y, title) in &lay.headers {
             let mut sc = muted;
             sc[3] *= ease;
-            labels.push(TextLabel::new(
-                sec.title.to_string(),
-                x,
-                *y,
-                11.0,
-                sc,
+            labels.push(TextLabel::new(title.to_string(), *x, *y, 11.0, sc));
+        }
+        let text_size = 11.0;
+        for (r, keys, desc) in &lay.rows {
+            let mut kc = bright;
+            kc[3] *= ease;
+            // Keys left, description right — both v-centered in the chip.
+            let key_w = r.w * 0.52;
+            let max_key = ((key_w - 16.0) / 6.5).floor().max(4.0) as usize;
+            let key_draw = truncate_chars(keys, max_key);
+            labels.push(TextLabel::left_vcenter(
+                key_draw,
+                r.x + 10.0,
+                r.y,
+                r.h,
+                text_size,
+                kc,
             ));
-            *y += row_h + 2.0;
-            for row in &sec.rows {
-                if *y + row_h > max_y {
-                    break;
-                }
-                let mut kc = bright;
-                kc[3] *= ease;
-                // Keys and description share label color (not dim).
-                labels.push(TextLabel::new(
-                    row.keys.clone(),
-                    x,
-                    *y,
-                    11.0,
-                    kc,
-                ));
-                labels.push(TextLabel::new(
-                    row.desc.to_string(),
-                    x + col_w * 0.48,
-                    *y,
-                    11.0,
-                    kc,
-                ));
-                *y += row_h;
-            }
-            *y += sec_gap;
+            let max_desc = (((r.w - key_w) - 12.0) / 6.5).floor().max(4.0) as usize;
+            let desc_draw = truncate_chars(desc, max_desc);
+            labels.push(TextLabel::left_vcenter(
+                desc_draw,
+                r.x + key_w,
+                r.y,
+                r.h,
+                text_size,
+                kc,
+            ));
         }
         let mut foot = bright;
         foot[3] *= ease * 0.85;
         labels.push(TextLabel::new(
             "esc  close",
-            modal.x + pad,
-            modal.y + modal.h - 22.0,
+            modal.x + lay.pad,
+            lay.footer_y,
             11.0,
             foot,
         ));

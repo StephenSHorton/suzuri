@@ -474,12 +474,6 @@ pub fn help_sections() -> Vec<HelpSection> {
     } else {
         "Home / End".into()
     };
-    let tab_nav = format!(
-        "{} · {} · {}",
-        chord(&ms, "←→"),
-        chord(&ms, "[ ]"),
-        chord(m, "Tab")
-    );
     vec![
         HelpSection {
             title: "Tabs",
@@ -493,7 +487,8 @@ pub fn help_sections() -> Vec<HelpSection> {
                     desc: "New window",
                 },
                 HelpRow {
-                    keys: tab_nav,
+                    // Compact: avoid multi-chord soup overflowing the chip.
+                    keys: format!("{} · {}", chord(&ms, "[ ]"), chord(m, "Tab")),
                     desc: "Prev / next",
                 },
                 HelpRow {
@@ -501,11 +496,11 @@ pub fn help_sections() -> Vec<HelpSection> {
                     desc: "Jump to tab",
                 },
                 HelpRow {
-                    keys: "Strip × · palette".into(),
+                    keys: "Strip ×".into(),
                     desc: "Close tab",
                 },
                 HelpRow {
-                    keys: "Palette · double-click".into(),
+                    keys: "Palette".into(),
                     desc: "Rename tab",
                 },
             ],
@@ -539,11 +534,11 @@ pub fn help_sections() -> Vec<HelpSection> {
             title: "Terminal",
             rows: vec![
                 HelpRow {
-                    keys: format!("{} · dbl-click · tpl-click", chord(&ms, "C")),
+                    keys: format!("{} · dbl-click", chord(&ms, "C")),
                     desc: "Copy selection",
                 },
                 HelpRow {
-                    keys: "Wheel · PageUp/Down".into(),
+                    keys: "Wheel · PgUp/Dn".into(),
                     desc: "Scrollback",
                 },
                 HelpRow {
@@ -573,7 +568,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 },
                 HelpRow {
                     keys: word_jump,
-                    desc: "Word jump (PTY)",
+                    desc: "Word jump",
                 },
                 HelpRow {
                     keys: line_ends,
@@ -585,7 +580,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 },
                 HelpRow {
                     keys: chord(m, "W"),
-                    desc: "Close pane (last → tab)",
+                    desc: "Close pane",
                 },
             ],
         },
@@ -602,19 +597,19 @@ pub fn help_sections() -> Vec<HelpSection> {
                 },
                 HelpRow {
                     keys: chord(m, "/"),
-                    desc: "Help (this window)",
+                    desc: "Help",
                 },
                 HelpRow {
                     keys: chord(&ms, "M"),
                     desc: "Notes",
                 },
                 HelpRow {
-                    keys: "☕ top-right".into(),
-                    desc: "Toggle caffeine",
+                    keys: "☕".into(),
+                    desc: "Caffeine",
                 },
                 HelpRow {
                     keys: format!("{} / {}", chord(m, "+"), chord(m, "-")),
-                    desc: "Zoom in / out",
+                    desc: "Zoom",
                 },
                 HelpRow {
                     keys: chord(m, "0"),
@@ -622,11 +617,89 @@ pub fn help_sections() -> Vec<HelpSection> {
                 },
                 HelpRow {
                     keys: "Esc".into(),
-                    desc: "Dismiss overlay",
+                    desc: "Dismiss",
                 },
             ],
         },
     ]
+}
+
+/// Shared geometry for the shortcuts sheet (glass chips + labels must match).
+#[derive(Clone, Debug)]
+pub struct HelpLayout {
+    pub modal: crate::layout::Rect,
+    pub pad: f32,
+    /// Section header positions: (x, y, title).
+    pub headers: Vec<(f32, f32, &'static str)>,
+    /// One frost chip per shortcut row: (rect, keys, desc).
+    pub rows: Vec<(crate::layout::Rect, String, &'static str)>,
+    pub footer_y: f32,
+}
+
+impl HelpLayout {
+    pub const ROW_H: f32 = 28.0;
+    pub const ROW_GAP: f32 = 4.0;
+    pub const SEC_GAP: f32 = 8.0;
+    pub const HEADER_H: f32 = 16.0;
+
+    pub fn new(window_w: f32, window_h: f32) -> Self {
+        let modal = Self::modal_rect(window_w, window_h);
+        let pad = 14.0;
+        let sections = help_sections();
+        let two_col = modal.w >= 560.0;
+        let col_gap = 14.0;
+        let col_w = if two_col {
+            (modal.w - pad * 2.0 - col_gap) * 0.5
+        } else {
+            modal.w - pad * 2.0
+        };
+        let left_x = modal.x + pad;
+        let right_x = left_x + col_w + col_gap;
+        let footer_y = modal.y + modal.h - 24.0;
+        let max_y = footer_y - 8.0;
+        let mut y_left = modal.y + 42.0;
+        let mut y_right = modal.y + 42.0;
+        let mid = (sections.len() + 1) / 2;
+        let mut headers = Vec::new();
+        let mut rows = Vec::new();
+
+        for (si, sec) in sections.iter().enumerate() {
+            let (x, y) = if two_col && si >= mid {
+                (right_x, &mut y_right)
+            } else {
+                (left_x, &mut y_left)
+            };
+            if *y + Self::HEADER_H > max_y {
+                break;
+            }
+            headers.push((x, *y, sec.title));
+            *y += Self::HEADER_H + 4.0;
+            for row in &sec.rows {
+                if *y + Self::ROW_H > max_y {
+                    break;
+                }
+                let r = crate::layout::Rect::new(x, *y, col_w, Self::ROW_H);
+                rows.push((r, row.keys.clone(), row.desc));
+                *y += Self::ROW_H + Self::ROW_GAP;
+            }
+            *y += Self::SEC_GAP;
+        }
+
+        Self {
+            modal,
+            pad,
+            headers,
+            rows,
+            footer_y,
+        }
+    }
+
+    pub fn modal_rect(window_w: f32, window_h: f32) -> crate::layout::Rect {
+        // Tall enough for full product shortcut list (~28 row chips + headers).
+        let w = (window_w - 48.0).min(760.0).max(320.0);
+        let h = (window_h - 64.0).min(560.0).max(360.0);
+        crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.42, w, h)
+    }
 }
 
 /// Help / shortcuts overlay (reuses palette-like presentation).
@@ -975,6 +1048,22 @@ mod tests {
         }
         let n: usize = secs.iter().map(|s| s.rows.len()).sum();
         assert!(n >= 20, "expected product-scale shortcut list, got {n}");
+    }
+
+    #[test]
+    fn help_layout_one_chip_per_row() {
+        let lay = HelpLayout::new(1100.0, 800.0);
+        let n: usize = help_sections().iter().map(|s| s.rows.len()).sum();
+        assert_eq!(
+            lay.rows.len(),
+            n,
+            "glass chips must match every help row"
+        );
+        assert!(!lay.headers.is_empty());
+        // Chips stay above the footer.
+        for (r, _, _) in &lay.rows {
+            assert!(r.y + r.h < lay.footer_y);
+        }
     }
 
     #[test]

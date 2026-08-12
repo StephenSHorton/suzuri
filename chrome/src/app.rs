@@ -1118,7 +1118,7 @@ impl ChromeApp {
             return true;
         }
         if self.help.visible() {
-            let r = crate::renderer::overlay_modal_rect_pub(win_w, win_h, 640.0, 360.0);
+            let r = crate::commands::HelpLayout::modal_rect(win_w, win_h);
             if r.contains(x, y) {
                 return true;
             }
