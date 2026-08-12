@@ -56,7 +56,8 @@ pub mod shell;
 pub mod theme;
 pub mod toast;
 
-/// Optional C ABI stubs for cgo / static link. Enable with `--features ffi`.
+/// Optional C ABI for cgo / static link (session handles + metrics).
+/// Enable with `--features ffi`.
 #[cfg(feature = "ffi")]
 pub mod ffi;
 

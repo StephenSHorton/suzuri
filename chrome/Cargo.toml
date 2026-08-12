@@ -14,8 +14,9 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Optional C ABI stubs (`src/ffi.rs`) for Go cgo / foreign hosts.
-# Default builds stay free of export-abi noise; enable explicitly when linking.
+# Optional C ABI (`src/ffi.rs`) for Go cgo / foreign hosts: version/layout
+# probes + real session create/destroy/size/tab helpers. Default builds stay
+# free of export-abi noise; enable explicitly when linking.
 ffi = []
 
 [[bin]]
