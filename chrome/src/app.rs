@@ -67,6 +67,8 @@ pub struct ChromeApp {
     middle_press_hit: Option<HitTarget>,
     /// Last empty title-bar click (time + logical xy) for OS zoom double-click.
     last_title_click: Option<(Instant, f32, f32)>,
+    /// Terminal multi-click tracker: time, logical xy, consecutive click count.
+    last_term_click: Option<(Instant, f32, f32, u8)>,
     /// Terminal cell selection (absolute document rows).
     term_selection: Selection,
     selecting_term: bool,
@@ -109,11 +111,16 @@ impl Default for ChromeApp {
             press_hit: None,
             middle_press_hit: None,
             last_title_click: None,
+            last_term_click: None,
             term_selection: Selection::new(),
             selecting_term: false,
         }
     }
 }
+
+/// Multi-click window for terminal word/line select (time + position, like title-bar zoom).
+const TERM_MULTI_CLICK_MS: u64 = 400;
+const TERM_MULTI_CLICK_PX: f32 = 4.0;
 
 fn spawn_pane_runtime(
     cols: u16,
@@ -613,6 +620,56 @@ impl ChromeApp {
         Some(clamp_pos(grid, col, abs))
     }
 
+    /// Consecutive terminal click count (1 = single, 2 = double, 3+ = triple).
+    /// Resets when outside ~400 ms / ~4 px of the previous press.
+    fn term_click_count(&mut self) -> u8 {
+        let x = self.cursor.x;
+        let y = self.cursor.y;
+        let now = Instant::now();
+        let count = match self.last_term_click {
+            Some((t, lx, ly, n))
+                if now.duration_since(t) < Duration::from_millis(TERM_MULTI_CLICK_MS)
+                    && (x - lx).abs() < TERM_MULTI_CLICK_PX
+                    && (y - ly).abs() < TERM_MULTI_CLICK_PX =>
+            {
+                n.saturating_add(1).min(3)
+            }
+            _ => 1,
+        };
+        self.last_term_click = Some((now, x, y, count));
+        count
+    }
+
+    /// Apply single / word / line selection at `pos` for the given multi-click count.
+    fn apply_term_click_selection(&mut self, pos: CellPos, click_count: u8) {
+        match click_count {
+            1 => {
+                self.term_selection.begin(pos);
+                self.selecting_term = true;
+            }
+            2 => {
+                let id = self.session.focus_pane_id();
+                if let Some(pane) = self.session.panes.get(&id) {
+                    self.term_selection.select_word(&pane.grid, pos);
+                } else {
+                    self.term_selection.select_cell(pos);
+                }
+                self.selecting_term = false;
+            }
+            _ => {
+                let id = self.session.focus_pane_id();
+                let cols = self
+                    .session
+                    .panes
+                    .get(&id)
+                    .map(|p| p.grid.cols())
+                    .unwrap_or(1);
+                self.term_selection.select_line(pos.abs_row, cols);
+                self.selecting_term = false;
+            }
+        }
+    }
+
     fn copy_selection_if_any(&mut self) {
         if self.term_selection.is_empty() {
             return;
@@ -817,6 +874,16 @@ impl ChromeApp {
                 || self.transfer.visible()
             {
                 self.close_all_overlays();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+            // Clear terminal selection before quitting on bare Esc.
+            if !self.term_selection.is_empty() || self.selecting_term {
+                self.term_selection.clear();
+                self.selecting_term = false;
+                self.last_term_click = None;
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -1391,15 +1458,16 @@ impl ApplicationHandler for ChromeApp {
                 self.chip_ui.pressed = true;
                 let hit = self.hit_at_cursor();
                 self.press_hit = Some(hit);
-                // Terminal selection drag
+                // Terminal selection: single = drag, double = word, triple = line.
                 if matches!(hit, HitTarget::Terminal(_)) && !self.overlay_open() {
                     if let Some(pos) = self.term_cell_at_cursor() {
-                        self.term_selection.begin(pos);
-                        self.selecting_term = true;
+                        let clicks = self.term_click_count();
+                        self.apply_term_click_selection(pos, clicks);
                     }
                 } else if !matches!(hit, HitTarget::Terminal(_)) {
                     self.term_selection.clear();
                     self.selecting_term = false;
+                    self.last_term_click = None;
                 }
                 // Empty title-bar / nav chrome (not chips): drag, or double-click zoom.
                 // macOS: double-click title bar = zoom to fill (maximize), not fullscreen
