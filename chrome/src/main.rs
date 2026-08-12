@@ -10,6 +10,7 @@ mod caffeine;
 mod cells;
 mod chrome_ui;
 mod commands;
+mod confirm;
 mod config_store;
 mod control_mailbox;
 mod input;

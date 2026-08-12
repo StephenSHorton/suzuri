@@ -19,6 +19,7 @@
 //! | [`config_store`] | `chrome_prefs.json` + `SUZURI_CONFIG_DIR` |
 //! | [`control_mailbox`] | Phase 2 light IPC (`chrome_cmd` file) |
 //! | [`commands`] | Palette / shortcuts registry |
+//! | [`confirm`] | Crush-style yes/no confirm (quit) |
 //! | [`shell`] | Mock shell helpers (fallback when no PTY) |
 //! | [`notes`] / [`notes_ops`] | Multi-note bank + product-compatible `notes.json` |
 //!
@@ -34,6 +35,7 @@ pub mod ansi;
 pub mod cells;
 pub mod chrome_ui;
 pub mod commands;
+pub mod confirm;
 pub mod config_store;
 pub mod control_mailbox;
 pub mod input;
@@ -59,6 +61,7 @@ pub use cells::{theme as cell_theme, Cell, CellGrid, Cursor};
 pub use commands::{
     default_commands, filter_commands, Command, CommandAction, HelpState, PaletteState,
 };
+pub use confirm::{ConfirmChoice, ConfirmState};
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
 pub use control_mailbox::{
     chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
