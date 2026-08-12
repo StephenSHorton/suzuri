@@ -9,6 +9,14 @@ publish = false
 [lib]
 name = "suzuri_chrome"
 path = "src/lib.rs"
+# Default is rlib only. For cgo/static embed experiments:
+#   cargo rustc --release --features ffi --crate-type staticlib
+
+[features]
+default = []
+# Optional C ABI stubs (`src/ffi.rs`) for Go cgo / foreign hosts.
+# Default builds stay free of export-abi noise; enable explicitly when linking.
+ffi = []
 
 [[bin]]
 name = "suzuri-chrome"
