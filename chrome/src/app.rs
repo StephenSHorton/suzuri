@@ -1589,7 +1589,13 @@ impl ApplicationHandler for ChromeApp {
                 }
             }
             WindowEvent::DroppedFile(path) => {
-                if self.transfer.on_path_dropped(path) {
+                // Workspace open: attach into active channel first (product drop path).
+                if self.workspace_ui.open {
+                    self.workspace_ui.attach_path(&path);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                } else if self.transfer.on_path_dropped(path) {
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
