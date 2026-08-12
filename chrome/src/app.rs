@@ -21,6 +21,7 @@ use crate::chrome_ui::{ChipId, ChipUi};
 use crate::commands::{
     default_commands, filter_commands, CommandAction, HelpState, PaletteState,
 };
+use crate::confirm::{ConfirmChoice, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
 use crate::input::{hit_test, is_mac, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
@@ -55,6 +56,7 @@ pub struct ChromeApp {
     settings: SettingsState,
     palette: PaletteState,
     help: HelpState,
+    confirm: ConfirmState,
     notes: NotesState,
     workspace_ui: WorkspaceUi,
     transfer: TransferUi,
@@ -108,6 +110,7 @@ impl Default for ChromeApp {
             settings: SettingsState::new(),
             palette: PaletteState::new(),
             help: HelpState::new(),
+            confirm: ConfirmState::new(),
             notes: NotesState::new(),
             workspace_ui: WorkspaceUi::new(),
             transfer: TransferUi::new(),
@@ -314,6 +317,7 @@ impl ChromeApp {
         self.settings.open
             || self.palette.open
             || self.help.open
+            || self.confirm.open
             || self.notes.open
             || self.workspace_ui.open
             || self.transfer.open
@@ -323,9 +327,53 @@ impl ChromeApp {
         self.settings.close();
         self.palette.close();
         self.help.close();
+        self.confirm.close();
         self.notes.close();
         self.workspace_ui.close();
         self.transfer.close();
+    }
+
+    /// Close every glass modal except the confirm dialog (product `closeModalsExcept`).
+    fn close_modals_except_confirm(&mut self) {
+        self.settings.close();
+        self.palette.close();
+        self.help.close();
+        self.notes.close();
+        self.workspace_ui.close();
+        self.transfer.close();
+    }
+
+    /// Quit when idle (no live PTY, single tab); otherwise open confirm.
+    fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.needs_quit_confirm() {
+            self.close_modals_except_confirm();
+            self.confirm.open_quit();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        } else {
+            event_loop.exit();
+        }
+    }
+
+    /// Confirm when any PTY is still alive or more than one tab is open.
+    fn needs_quit_confirm(&mut self) -> bool {
+        self.any_pty_alive() || self.session.tabs.len() > 1
+    }
+
+    fn apply_confirm_choice(&mut self, event_loop: &ActiveEventLoop, choice: ConfirmChoice) {
+        match choice {
+            ConfirmChoice::Yes => {
+                self.confirm.close();
+                event_loop.exit();
+            }
+            ConfirmChoice::No => {
+                self.confirm.close();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+        }
     }
 
     fn try_palette_click(&mut self, event_loop: &ActiveEventLoop) {
@@ -451,7 +499,7 @@ impl ChromeApp {
             CommandAction::CaffeineOff => {
                 self.caffeine.deactivate();
             }
-            CommandAction::Quit => event_loop.exit(),
+            CommandAction::Quit => self.request_quit(event_loop),
         }
     }
 
@@ -785,6 +833,14 @@ impl ChromeApp {
                 return true;
             }
         }
+        if self.confirm.visible()
+            && self
+                .confirm
+                .animated_modal_rect(win_w, win_h)
+                .contains(x, y)
+        {
+            return true;
+        }
         if self.notes.visible() && self.notes.animated_modal_rect(win_w, win_h).contains(x, y) {
             return true;
         }
@@ -812,10 +868,24 @@ impl ChromeApp {
             || self.transfer.visible()
             || self.palette.visible()
             || self.help.visible()
+            || self.confirm.visible()
             || self.settings.visible()
         {
             // Click **inside** any modal: keep open (don't steal focus to terminal).
             if self.pointer_in_open_modal() {
+                // Confirm is topmost: yes/no buttons only.
+                if self.confirm.open {
+                    let layout = self.current_layout();
+                    let win_w = layout.title.w;
+                    let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+                    if let Some(choice) =
+                        self.confirm
+                            .hit_button(self.cursor.x, self.cursor.y, win_w, win_h)
+                    {
+                        self.apply_confirm_choice(event_loop, choice);
+                    }
+                    return;
+                }
                 // Palette option clicks / notes list handled later if needed.
                 if self.palette.open {
                     self.try_palette_click(event_loop);
@@ -849,7 +919,7 @@ impl ChromeApp {
         }
 
         match target {
-            HitTarget::Close => event_loop.exit(),
+            HitTarget::Close => self.request_quit(event_loop),
             HitTarget::Minimize => {
                 if let Some(w) = &self.window {
                     w.set_minimized(true);
@@ -920,6 +990,11 @@ impl ChromeApp {
         }
 
         if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            // Confirm is topmost: Esc / N dismisses without quitting.
+            if self.confirm.open {
+                self.apply_confirm_choice(event_loop, ConfirmChoice::No);
+                return;
+            }
             // Workspace: Esc cancels new-channel compose before closing.
             if self.workspace_ui.open
                 && self.workspace_ui.mode
@@ -935,6 +1010,7 @@ impl ChromeApp {
                 || self.settings.visible()
                 || self.palette.visible()
                 || self.help.visible()
+                || self.confirm.visible()
                 || self.notes.visible()
                 || self.workspace_ui.visible()
                 || self.transfer.visible()
@@ -955,7 +1031,24 @@ impl ChromeApp {
                 }
                 return;
             }
-            event_loop.exit();
+            self.request_quit(event_loop);
+            return;
+        }
+
+        // Confirm dialog keys: Enter / Y = yes, N = no (Esc handled above).
+        if self.confirm.open {
+            let choice = match &event.logical_key {
+                Key::Named(NamedKey::Enter) => Some(ConfirmChoice::Yes),
+                Key::Character(s) => match s.as_str() {
+                    "y" | "Y" => Some(ConfirmChoice::Yes),
+                    "n" | "N" => Some(ConfirmChoice::No),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(c) = choice {
+                self.apply_confirm_choice(event_loop, c);
+            }
             return;
         }
 
@@ -1487,7 +1580,7 @@ impl ApplicationHandler for ChromeApp {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.request_quit(event_loop),
 
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
@@ -1793,6 +1886,7 @@ impl ApplicationHandler for ChromeApp {
                 self.settings.tick(dt);
                 self.palette.tick(dt);
                 self.help.tick(dt);
+                self.confirm.tick(dt);
                 self.notes.tick(dt);
                 self.workspace_ui.tick(dt);
                 self.transfer.tick(dt);
@@ -1823,6 +1917,7 @@ impl ApplicationHandler for ChromeApp {
                         &self.settings,
                         &self.palette,
                         &self.help,
+                        &self.confirm,
                         &self.notes,
                         &self.workspace_ui,
                         &self.transfer,

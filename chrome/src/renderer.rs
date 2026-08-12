@@ -8,6 +8,7 @@ use winit::window::Window;
 
 use crate::chrome_ui::{ChipUi, TabJelly};
 use crate::commands::{filter_commands, Command, HelpState, PaletteState};
+use crate::confirm::ConfirmState;
 use crate::input::{is_mac, traffic_light_rects};
 use crate::layout::{FrameLayout, Metrics, PaneLayout, PanelInstance};
 use crate::rain_atlas::RainAtlas;
@@ -642,6 +643,7 @@ impl Renderer {
         settings: &SettingsState,
         palette: &PaletteState,
         help: &HelpState,
+        confirm: &ConfirmState,
         notes: &NotesState,
         workspace_ui: &WorkspaceUi,
         transfer: &TransferUi,
@@ -782,6 +784,7 @@ impl Renderer {
             let any_overlay = settings.visible()
                 || palette.visible()
                 || help.visible()
+                || confirm.visible()
                 || notes.visible()
                 || workspace_ui.visible()
                 || transfer.visible();
@@ -790,6 +793,7 @@ impl Renderer {
                     .scrim_alpha()
                     .max(palette.scrim_alpha())
                     .max(help.scrim_alpha())
+                    .max(confirm.scrim_alpha())
                     .max(notes.scrim_alpha())
                     .max(workspace_ui.scrim_alpha())
                     .max(transfer.scrim_alpha());
@@ -810,6 +814,7 @@ impl Renderer {
                 settings,
                 palette,
                 help,
+                confirm,
                 notes,
                 workspace_ui,
                 transfer,
@@ -983,6 +988,7 @@ impl Renderer {
             settings,
             palette,
             help,
+            confirm,
             notes,
             workspace_ui,
             transfer,
@@ -1085,6 +1091,7 @@ fn chrome_labels(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    confirm: &ConfirmState,
     notes: &NotesState,
     workspace_ui: &WorkspaceUi,
     transfer: &TransferUi,
@@ -1278,6 +1285,7 @@ fn chrome_labels(
         settings,
         palette,
         help,
+        confirm,
         notes,
         workspace_ui,
         transfer,
@@ -1301,6 +1309,7 @@ fn push_modal_glass(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    confirm: &ConfirmState,
     notes: &NotesState,
     workspace_ui: &WorkspaceUi,
     transfer: &TransferUi,
@@ -1380,6 +1389,21 @@ fn push_modal_glass(
             );
             y += btn_h + gap;
         }
+    }
+
+    if confirm.visible() {
+        let ease = confirm.content_ease().clamp(0.0, 1.0);
+        let modal = confirm.animated_modal_rect(win_w, win_h);
+        panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
+        let yes = confirm.yes_rect(win_w, win_h);
+        let no = confirm.no_rect(win_w, win_h);
+        panels.push(
+            PanelInstance::glass(yes, m.chip_radius, PanelKind::ModalButtonActive)
+                .with_opacity(ease),
+        );
+        panels.push(
+            PanelInstance::glass(no, m.chip_radius, PanelKind::ModalButton).with_opacity(ease),
+        );
     }
 
     if notes.visible() {
@@ -1481,6 +1505,7 @@ fn push_modal_labels(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    confirm: &ConfirmState,
     notes: &NotesState,
     workspace_ui: &WorkspaceUi,
     transfer: &TransferUi,
@@ -1688,6 +1713,58 @@ fn push_modal_labels(
             ));
             y += btn_h + gap;
         }
+    }
+
+    if confirm.visible() {
+        let ease = confirm.content_ease().clamp(0.0, 1.0);
+        let modal = confirm.animated_modal_rect(win_w, win_h);
+        let pad = 16.0;
+        let mut title_c = bright;
+        title_c[3] *= ease;
+        labels.push(TextLabel::new(
+            confirm.title.clone(),
+            modal.x + pad,
+            modal.y + 16.0,
+            15.0,
+            title_c,
+        ));
+        let mut body_c = muted;
+        body_c[3] *= ease;
+        labels.push(TextLabel::new(
+            confirm.body.clone(),
+            modal.x + pad,
+            modal.y + 48.0,
+            13.0,
+            body_c,
+        ));
+        // Product-style hints under the body (enter / esc).
+        let mut hint_c = dim;
+        hint_c[3] *= ease * 0.95;
+        labels.push(TextLabel::new(
+            format!("{}  enter    {}  esc", confirm.yes_label, confirm.no_label),
+            modal.x + pad,
+            modal.y + 78.0,
+            11.0,
+            hint_c,
+        ));
+        let yes = confirm.yes_rect(win_w, win_h);
+        let no = confirm.no_rect(win_w, win_h);
+        let mut yc = bright;
+        yc[3] *= ease;
+        let mut nc = muted;
+        nc[3] *= ease;
+        labels.push(TextLabel::centered(
+            confirm.yes_label.clone(),
+            [yes.x, yes.y, yes.w, yes.h],
+            13.0,
+            yc,
+        ));
+        labels.push(TextLabel::centered(
+            confirm.no_label.clone(),
+            [no.x, no.y, no.w, no.h],
+            13.0,
+            nc,
+        ));
     }
 
     if notes.visible() {
