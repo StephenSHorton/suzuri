@@ -17,8 +17,10 @@ use winit::{
 
 use crate::ansi::AnsiDecoder;
 use crate::caffeine::Caffeine;
-use crate::chrome_status::{self, StatusPublisher};
+use crate::chrome_status::{self, PaneSnapExtra, StatusPublisher};
 use crate::chrome_ui::{ChipId, ChipUi};
+use crate::cmd_blocks::CmdBlockLog;
+use crate::echo_filter::EchoFilter;
 use crate::commands::{
     default_commands, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
 };
@@ -49,6 +51,10 @@ struct PaneRuntime {
     ansi: AnsiDecoder,
     /// Recent raw PTY bytes (ring-ish: keep last PTY_TAIL_CAP).
     pty_tail: String,
+    /// Suppress shell local-echo of warp-submitted lines.
+    echo: EchoFilter,
+    /// Host-injected command blocks + MCP history kinds.
+    blocks: CmdBlockLog,
 }
 
 impl PaneRuntime {
@@ -193,6 +199,8 @@ fn spawn_pane_runtime(
                 pty: Some(pty),
                 ansi: AnsiDecoder::new(),
                 pty_tail: String::new(),
+                echo: EchoFilter::new(),
+                blocks: CmdBlockLog::new(),
             }
         }
         Err(e) => {
@@ -202,6 +210,8 @@ fn spawn_pane_runtime(
                 pty: None,
                 ansi: AnsiDecoder::new(),
                 pty_tail: String::new(),
+                echo: EchoFilter::new(),
+                blocks: CmdBlockLog::new(),
             }
         }
     }
@@ -365,8 +375,12 @@ impl ChromeApp {
         }
         for (id, chunk) in pending {
             if let Some(rt) = self.runtimes.get_mut(&id) {
-                if let Some(grid) = self.session.grid_mut(id) {
-                    rt.ansi.feed(grid, chunk.as_bytes());
+                // Suppress local echo of warp-submitted command when armed.
+                let filtered = rt.echo.feed(chunk.as_bytes());
+                if !filtered.is_empty() {
+                    if let Some(grid) = self.session.grid_mut(id) {
+                        rt.ansi.feed(grid, &filtered);
+                    }
                 }
                 if let Some(cwd) = rt.ansi.take_cwd() {
                     self.session.set_cwd(id, cwd);
@@ -1785,26 +1799,39 @@ impl ChromeApp {
         self.submit_line_text(&line);
     }
 
-    /// Snapshot for MCP bridge: tabs + viewport/live lines + PTY meta.
+    /// Snapshot for MCP bridge: tabs + viewport/live lines + echo/blocks + PTY.
     fn publish_bridge_status(&mut self) {
-        let mut meta: Vec<(u64, bool, bool, String, String)> = Vec::new();
+        let mut extras: Vec<PaneSnapExtra> = Vec::new();
         for (pane_id, rt) in &mut self.runtimes {
             let alive = rt.pty.as_mut().map(|p| p.is_alive()).unwrap_or(false);
             let alt = rt.ansi.on_alt_screen();
-            // Debug-quoted tail matches product bridge.TabSnap.PtyTail style.
+            let (echo_armed, echo_cmd, echo_phase) = rt.echo.status();
             let tail = if rt.pty_tail.is_empty() {
                 String::new()
             } else {
                 format!("{:?}", rt.pty_tail)
             };
-            meta.push((*pane_id, alive, alt, String::new(), tail));
+            extras.push(PaneSnapExtra {
+                pane_id: *pane_id,
+                alive,
+                alt_screen: alt,
+                shell: String::new(),
+                pty_tail: tail,
+                echo_armed,
+                echo_cmd,
+                echo_phase,
+                blocks: rt.blocks.recent_blocks(),
+                history: rt.blocks.history_meta(),
+            });
         }
-        // Panes without a runtime still appear via session tabs.
-        let snap = chrome_status::snap_from_session(&self.session, &meta);
+        let snap = chrome_status::snap_from_session(&self.session, &extras);
         self.status_publisher.tick(&snap);
     }
 
     /// Host / MCP submit path: run `line` as if entered in the warp bar.
+    ///
+    /// Product parity: inject command block into scrollback, arm echo filter,
+    /// then write the line to the PTY.
     fn submit_line_text(&mut self, line: &str) {
         let line = line.trim_end();
         if line.is_empty() {
@@ -1814,6 +1841,19 @@ impl ChromeApp {
         self.session.push_history(&line);
         self.session.apply_cwd_after_command(&line);
         let id = self.session.focus_pane_id();
+        let cwd_display = self.session.display_cwd();
+
+        // Host command block + echo arm (even for mock path).
+        if let Some(rt) = self.runtimes.get_mut(&id) {
+            if let Some(grid) = self.session.grid_mut(id) {
+                rt.blocks.push_block(&line, grid, &cwd_display);
+            }
+            rt.echo.arm(&line);
+        } else if let Some(grid) = self.session.grid_mut(id) {
+            // No runtime — still paint a block for visibility.
+            let mut log = CmdBlockLog::new();
+            log.push_block(&line, grid, &cwd_display);
+        }
 
         let used_pty = if let Some(rt) = self.runtimes.get_mut(&id) {
             if let Some(pty) = &mut rt.pty {

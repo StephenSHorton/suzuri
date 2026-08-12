@@ -39,10 +39,12 @@ pub mod ansi;
 pub mod cells;
 pub mod chrome_status;
 pub mod chrome_ui;
+pub mod cmd_blocks;
 pub mod commands;
 pub mod confirm;
 pub mod config_store;
 pub mod control_mailbox;
+pub mod echo_filter;
 pub mod input;
 pub mod layout;
 pub mod links;
@@ -74,9 +76,11 @@ pub use commands::{
 };
 pub use chrome_status::{
     clear_status, history_tail_of, live_lines_of, publish_status, snap_from_session, status_path,
-    submit_path, take_submit, viewport_lines_of, ChromeSnapOut, StatusPublisher, TabSnapOut,
-    HISTORY_TAIL, PUBLISH_INTERVAL, STATUS_FILE, SUBMIT_FILE,
+    submit_path, take_submit, viewport_lines_of, ChromeSnapOut, PaneSnapExtra, StatusPublisher,
+    TabSnapOut, HISTORY_TAIL, PUBLISH_INTERVAL, STATUS_FILE, SUBMIT_FILE,
 };
+pub use cmd_blocks::{CmdBlockLog, HIST_META_CAP, RECENT_BLOCKS};
+pub use echo_filter::{EchoFilter, ECHO_FILTER_GIVE_UP};
 pub use confirm::{ConfirmChoice, ConfirmState};
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
 pub use control_mailbox::{

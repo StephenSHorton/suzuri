@@ -36,9 +36,15 @@ pub struct TabSnapOut {
     pub shell: String,
     pub input: String,
     pub alt_screen: bool,
+    /// Echo filter status (MCP diag).
+    pub echo_armed: bool,
+    pub echo_cmd: String,
+    pub echo_phase: i32,
     pub live_lines: Vec<String>,
     pub viewport: Vec<String>,
     pub history: Vec<(String, String)>, // (text, kind)
+    /// Recent host-injected command blocks (newest last).
+    pub blocks: Vec<String>,
     pub pty_tail: String,
 }
 
@@ -101,20 +107,34 @@ pub fn submit_path() -> PathBuf {
     config_store::product_config_dir().join(SUBMIT_FILE)
 }
 
-/// Build a bridge snap from session + optional per-focus-pane meta.
-///
-/// `pane_meta`: `(pane_id, alive, alt_screen, shell, pty_tail)` for each known pane.
-pub fn snap_from_session(
-    session: &ChromeSession,
-    pane_meta: &[(u64, bool, bool, String, String)],
-) -> ChromeSnapOut {
-    let meta = |pane_id: u64| -> (bool, bool, String, String) {
-        for (id, alive, alt, shell, tail) in pane_meta {
-            if *id == pane_id {
-                return (*alive, *alt, shell.clone(), tail.clone());
-            }
-        }
-        (true, false, String::new(), String::new())
+/// Optional per-pane extras for echo / blocks / pty (keyed by pane id).
+#[derive(Clone, Debug, Default)]
+pub struct PaneSnapExtra {
+    pub pane_id: u64,
+    pub alive: bool,
+    pub alt_screen: bool,
+    pub shell: String,
+    pub pty_tail: String,
+    pub echo_armed: bool,
+    pub echo_cmd: String,
+    pub echo_phase: i32,
+    pub blocks: Vec<String>,
+    /// When non-empty, used for `history_tail` instead of plain grid text.
+    pub history: Vec<(String, String)>,
+}
+
+/// Build a bridge snap from session + optional per-pane extras.
+pub fn snap_from_session(session: &ChromeSession, extras: &[PaneSnapExtra]) -> ChromeSnapOut {
+    let extra = |pane_id: u64| -> PaneSnapExtra {
+        extras
+            .iter()
+            .find(|e| e.pane_id == pane_id)
+            .cloned()
+            .unwrap_or(PaneSnapExtra {
+                pane_id,
+                alive: true,
+                ..Default::default()
+            })
     };
 
     let active_idx = session
@@ -126,7 +146,7 @@ pub fn snap_from_session(
     let mut tabs = Vec::with_capacity(session.tabs.len());
     for (i, tab) in session.tabs.iter().enumerate() {
         let pane_id = tab.focus_pane;
-        let (alive, alt, shell, pty_tail) = meta(pane_id);
+        let ex = extra(pane_id);
         let pane = session.panes.get(&pane_id);
         let grid = pane.map(|p| &p.grid);
         let title = {
@@ -147,25 +167,33 @@ pub fn snap_from_session(
             }
         };
         let input = pane.map(|p| p.draft.clone()).unwrap_or_default();
-        let (live_lines, viewport, history) = match grid {
-            Some(g) => (
-                live_lines_of(g),
-                viewport_lines_of(g),
-                history_tail_of(g, HISTORY_TAIL),
-            ),
-            None => (Vec::new(), Vec::new(), Vec::new()),
+        let (live_lines, viewport) = match grid {
+            Some(g) => (live_lines_of(g), viewport_lines_of(g)),
+            None => (Vec::new(), Vec::new()),
+        };
+        let history = if !ex.history.is_empty() {
+            ex.history.clone()
+        } else {
+            match grid {
+                Some(g) => history_tail_of(g, HISTORY_TAIL),
+                None => Vec::new(),
+            }
         };
         tabs.push(TabSnapOut {
             id: i as i32,
             title,
-            alive,
-            shell,
+            alive: ex.alive,
+            shell: ex.shell,
             input,
-            alt_screen: alt,
+            alt_screen: ex.alt_screen,
+            echo_armed: ex.echo_armed,
+            echo_cmd: ex.echo_cmd,
+            echo_phase: ex.echo_phase,
             live_lines,
             viewport,
             history,
-            pty_tail,
+            blocks: ex.blocks,
+            pty_tail: ex.pty_tail,
         });
     }
 
@@ -174,6 +202,20 @@ pub fn snap_from_session(
         (g.cols() as i32, g.rows() as i32)
     };
 
+    let mut notes = vec![
+        "ui=chrome".into(),
+        "bridge=chrome_status.json".into(),
+        format!("version={}", env!("CARGO_PKG_VERSION")),
+    ];
+    if let Some(t) = tabs.iter().find(|t| t.id == active_idx) {
+        if t.echo_armed {
+            notes.push(format!("echo filter armed for: {}", t.echo_cmd));
+        }
+        for b in t.blocks.iter().rev().take(3) {
+            notes.push(format!("recent block: {b}"));
+        }
+    }
+
     ChromeSnapOut {
         pid: std::process::id(),
         version: env!("CARGO_PKG_VERSION").into(),
@@ -181,11 +223,7 @@ pub fn snap_from_session(
         rows,
         active_tab: active_idx,
         tabs,
-        notes: vec![
-            "ui=chrome".into(),
-            "bridge=chrome_status.json".into(),
-            format!("version={}", env!("CARGO_PKG_VERSION")),
-        ],
+        notes,
     }
 }
 
@@ -295,7 +333,12 @@ fn encode_tab(s: &mut String, t: &TabSnapOut) {
         "\"alt_screen\":{},",
         if t.alt_screen { "true" } else { "false" }
     ));
-    s.push_str("\"echo\":{\"armed\":false},");
+    s.push_str(&format!(
+        "\"echo\":{{\"armed\":{},\"cmd\":{},\"phase\":{}}},",
+        if t.echo_armed { "true" } else { "false" },
+        json_str(&t.echo_cmd),
+        t.echo_phase
+    ));
     s.push_str("\"live_lines\":");
     encode_str_array(s, &t.live_lines);
     s.push(',');
@@ -313,8 +356,14 @@ fn encode_tab(s: &mut String, t: &TabSnapOut) {
             json_str(kind)
         ));
     }
-    s.push_str("],");
-    s.push_str(&format!("\"blocks\":[],\"pty_tail\":{}", json_str(&t.pty_tail)));
+    s.push_str("],\"blocks\":[");
+    for (i, b) in t.blocks.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{{\"command\":{}}}", json_str(b)));
+    }
+    s.push_str(&format!("],\"pty_tail\":{}", json_str(&t.pty_tail)));
     s.push('}');
 }
 
@@ -390,7 +439,18 @@ mod tests {
             g.set_cursor(0, 0);
             g.put_str("hello bridge");
         }
-        let snap = snap_from_session(&session, &[(1, true, false, "zsh".into(), String::new())]);
+        let snap = snap_from_session(
+            &session,
+            &[PaneSnapExtra {
+                pane_id: 1,
+                alive: true,
+                shell: "zsh".into(),
+                echo_armed: true,
+                echo_cmd: "ls".into(),
+                blocks: vec!["ls".into()],
+                ..Default::default()
+            }],
+        );
         write_snap_at(&path, &snap).expect("write");
         let raw = fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"tabs\":["));
@@ -398,6 +458,8 @@ mod tests {
         assert!(raw.contains("\"live_lines\":"));
         assert!(raw.contains("hello bridge"));
         assert!(raw.contains("\"shell\":\"zsh\""));
+        assert!(raw.contains("\"armed\":true"));
+        assert!(raw.contains("\"command\":\"ls\""));
         let _ = fs::remove_file(&path);
     }
 

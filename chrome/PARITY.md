@@ -52,7 +52,11 @@ go build -o suzuri ./cmd/suzuri && ./suzuri
 - Go `SnapshotFromChromeStatus` for MCP diag/status/snapshot
 - Legacy thin status still accepted
 
+## Wave 9 ✅
+- Echo filter (product `echo_filter.go` port) armed on warp submit
+- Host command blocks: scrollback rule + `❯ cmd` + MCP `blocks[]` / history kinds
+- Snapshot notes include armed echo + recent blocks for `suzuri_diag`
+
 ## Later
 - Full in-process GPU present loop (cgo + host window)
-- Command blocks + echo filter in chrome status
 - Package install always ships `suzuri-chrome` sibling binary

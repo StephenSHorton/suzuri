@@ -241,13 +241,28 @@ impl CellGrid {
         }
     }
 
-    fn push_scrollback_row(&mut self, row: Vec<Cell>) {
+    /// Append a finished row to scrollback (host command blocks, VT scroll).
+    pub(crate) fn push_scrollback_row(&mut self, row: Vec<Cell>) {
         self.scrollback.push(row);
         if self.scrollback.len() > MAX_SCROLLBACK {
             let drop_n = self.scrollback.len() - MAX_SCROLLBACK;
             self.scrollback.drain(0..drop_n);
             self.view_offset = self.view_offset.saturating_sub(drop_n);
         }
+    }
+
+    /// Append a plain-text row to scrollback (pads/truncates to `cols`).
+    pub fn push_scrollback_text(&mut self, text: &str, fg: Option<[f32; 3]>) {
+        let cols = self.cols as usize;
+        let fg = fg.unwrap_or(theme::FG);
+        let mut row = Vec::with_capacity(cols);
+        for ch in text.chars().take(cols) {
+            row.push(Cell::colored(ch, fg));
+        }
+        while row.len() < cols {
+            row.push(Cell::colored(' ', fg));
+        }
+        self.push_scrollback_row(row);
     }
 
     pub fn set_cursor(&mut self, col: u16, row: u16) {

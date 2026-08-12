@@ -23,11 +23,11 @@ func TestSnapshotFromChromeStatusRich(t *testing.T) {
       "shell": "zsh",
       "input": "ls",
       "alt_screen": false,
-      "echo": {"armed": false},
+      "echo": {"armed": true, "cmd": "ls -la", "phase": 0},
       "live_lines": ["hello", "world"],
       "viewport": ["hello", "world"],
-      "history_tail": [{"text": "old", "kind": "normal"}],
-      "blocks": [],
+      "history_tail": [{"text": "old", "kind": "normal"}, {"text": "❯ ls -la", "kind": "cmd"}],
+      "blocks": [{"command": "ls -la"}],
       "pty_tail": ""
     }
   ],
@@ -57,11 +57,17 @@ func TestSnapshotFromChromeStatusRich(t *testing.T) {
 	if len(tab.Viewport) != 2 {
 		t.Fatalf("viewport %+v", tab.Viewport)
 	}
-	if len(tab.History) != 1 || tab.History[0].Text != "old" {
+	if len(tab.History) != 2 || tab.History[1].Kind != "cmd" {
 		t.Fatalf("history %+v", tab.History)
 	}
 	if tab.Input != "ls" {
 		t.Fatalf("input %q", tab.Input)
+	}
+	if !tab.Echo.Armed || tab.Echo.Cmd != "ls -la" {
+		t.Fatalf("echo %+v", tab.Echo)
+	}
+	if len(tab.Blocks) != 1 || tab.Blocks[0].Command != "ls -la" {
+		t.Fatalf("blocks %+v", tab.Blocks)
 	}
 	// notes should include version tag
 	found := false

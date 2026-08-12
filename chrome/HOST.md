@@ -175,9 +175,15 @@ Chrome writes a **bridge.Snapshot-compatible** document:
 | `tabs[]` | Per-tab: `title`, `alive`, `input` (warp draft), `alt_screen` |
 | `tabs[].live_lines` | Live grid rows (trailing spaces trimmed) |
 | `tabs[].viewport` | What the user sees (`view_offset` respected) |
-| `tabs[].history_tail` | Recent scrollback lines (`kind: normal`) |
+| `tabs[].history_tail` | Tagged lines (`normal` / `rule` / `cmd`) from host blocks + scrollback |
+| `tabs[].blocks[]` | Recent warp-submitted commands (`{command}`) — newest last |
+| `tabs[].echo` | `{armed, cmd, phase}` local-echo suppressor state |
 | `tabs[].pty_tail` | Debug-quoted recent raw PTY bytes (~2 KiB) |
-| `notes[]` | Agent tags (`ui=chrome`, version) |
+| `notes[]` | Agent tags (`ui=chrome`, version, armed echo, recent blocks) |
+
+On warp submit chrome injects a rule + `❯ cmd` into scrollback (product
+`pushBlock`) and arms the echo filter so shell local-echo of the same line is
+stripped before the VT decoder.
 
 Go `chromehost.SnapshotFromChromeStatus` maps this into `bridge.Snapshot` for
 `/v1/status`, `/v1/snapshot`, `/v1/diag`. Legacy thin status (`tabs` as a count)
