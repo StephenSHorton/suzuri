@@ -17,6 +17,10 @@ pub struct ThemeColors {
     /// Theme **primary** (product `colPrimary` / inkstone jade role).
     /// Borders, selection, rain, self chat bubbles, active chrome.
     pub jade: [f32; 3],
+    /// Theme **accent / secondary** (product `colSecondary`).
+    /// Highlights, link hover, complementary chrome — derived from primary
+    /// unless the user overrides it in settings.
+    pub secondary: [f32; 3],
     /// Secondary / dim labels.
     pub muted: [f32; 3],
     /// Error / destructive accent (ANSI red role).
@@ -126,12 +130,15 @@ pub fn colors(id: &str) -> ThemeColors {
     }
 }
 
-/// Default accent (inkstone jade `#00e676`).
-pub const DEFAULT_ACCENT: [f32; 3] = [0.0, 0.902, 0.463];
+/// Default **primary** (inkstone jade `#00e676`).
+pub const DEFAULT_PRIMARY: [f32; 3] = [0.0, 0.902, 0.463];
 
-/// Preset accents for the settings color strip (click to apply).
-pub const ACCENT_PRESETS: &[[f32; 3]] = &[
-    [0.0, 0.902, 0.463],   // jade (default)
+/// Alias — historical name when primary lived in the `accent` prefs field.
+pub const DEFAULT_ACCENT: [f32; 3] = DEFAULT_PRIMARY;
+
+/// Preset colors for the settings swatch strip (primary or accent override).
+pub const COLOR_PRESETS: &[[f32; 3]] = &[
+    [0.0, 0.902, 0.463],   // jade (default primary)
     [0.533, 0.753, 0.816], // nord frost
     [0.741, 0.576, 0.976], // dracula purple
     [0.478, 0.635, 0.969], // tokyo blue
@@ -140,6 +147,9 @@ pub const ACCENT_PRESETS: &[[f32; 3]] = &[
     [1.0, 0.75, 0.20],     // amber
     [0.30, 0.85, 0.90],    // cyan
 ];
+
+/// @deprecated use [`COLOR_PRESETS`].
+pub const ACCENT_PRESETS: &[[f32; 3]] = COLOR_PRESETS;
 
 /// sRGB channel → linear (WCAG).
 fn srgb_to_linear(c: f32) -> f32 {
@@ -180,25 +190,51 @@ fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
-/// Build a full chrome palette from a user-picked accent (jade role).
-/// Dark terminal-ish bg derived from the accent; FG from contrast threshold.
-pub fn from_accent(accent: [f32; 3]) -> ThemeColors {
-    let accent = [
-        accent[0].clamp(0.0, 1.0),
-        accent[1].clamp(0.0, 1.0),
-        accent[2].clamp(0.0, 1.0),
+/// Derive product-style **secondary / accent** from a primary.
+///
+/// Catalog pairs (charm violet→gold, nord frost→amber, tokyo blue→purple)
+/// are roughly a warm hue shift: +42°, slightly lower sat, lifted value.
+pub fn derive_accent(primary: [f32; 3]) -> [f32; 3] {
+    let (h, s, v) = rgb_to_hsv(primary);
+    let h2 = (h + 42.0).rem_euclid(360.0);
+    let s2 = (s * 0.82 + 0.12).clamp(0.28, 0.95);
+    let v2 = (v * 0.88 + 0.14).clamp(0.55, 0.98);
+    hsv_to_rgb(h2, s2, v2)
+}
+
+/// Build a palette from primary + optional accent override.
+/// `accent_override = None` → [`derive_accent`].
+pub fn from_primary(primary: [f32; 3], accent_override: Option<[f32; 3]>) -> ThemeColors {
+    let primary = [
+        primary[0].clamp(0.0, 1.0),
+        primary[1].clamp(0.0, 1.0),
+        primary[2].clamp(0.0, 1.0),
     ];
-    // Deep void with a hint of accent hue (readable glass on rain).
-    let bg = mix(accent, [0.02, 0.03, 0.03], 0.92);
+    let secondary = match accent_override {
+        Some(a) => [
+            a[0].clamp(0.0, 1.0),
+            a[1].clamp(0.0, 1.0),
+            a[2].clamp(0.0, 1.0),
+        ],
+        None => derive_accent(primary),
+    };
+    // Deep void with a hint of primary hue (readable glass on rain).
+    let bg = mix(primary, [0.02, 0.03, 0.03], 0.92);
     let fg = contrasting_text(bg);
     let muted = mix(fg, bg, 0.45);
     ThemeColors {
         bg,
         fg,
-        jade: accent,
+        jade: primary,
+        secondary,
         muted,
         err: [1.0, 0.32, 0.32],
     }
+}
+
+/// Legacy: primary only (accent auto-derived). Prefer [`from_primary`].
+pub fn from_accent(primary: [f32; 3]) -> ThemeColors {
+    from_primary(primary, None)
 }
 
 /// RGB → `#rrggbb`.
@@ -282,15 +318,16 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
 }
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
-// Roles: bg ≈ void/dimMatte, fg ≈ text, jade ≈ primary/accent, muted ≈ dim/mute.
+// Roles: bg ≈ void, fg ≈ text, jade ≈ primary, secondary ≈ accent, muted ≈ dim.
 // Inkstone keeps the existing cell jade-green look (tests + rain defaults).
+// Named `secondary` values match product `colSecondary` where catalog aligns.
 
-/// Inkstone — deep green-black terminal, jade accent (#00e676).
+/// Inkstone — deep green-black terminal, jade primary (#00e676).
 pub const INKSTONE: ThemeColors = ThemeColors {
     bg: hex_const(0x05, 0x0a, 0x07),
     fg: hex_const(0xe8, 0xf5, 0xee),
     jade: hex_const(0x00, 0xe6, 0x76),
-    // Secondary labels (was #6b7c72 — too dark on glass; lift toward soft jade-grey).
+    secondary: hex_const(0xc4, 0xa3, 0x5a), // soft gold (pair with jade)
     muted: hex_const(0x9a, 0xae, 0xa2),
     err: hex_const(0xff, 0x52, 0x52),
 };
@@ -300,16 +337,18 @@ pub const NORD: ThemeColors = ThemeColors {
     bg: hex_const(0x2e, 0x34, 0x40),
     fg: hex_const(0xec, 0xef, 0xf4),
     jade: hex_const(0x88, 0xc0, 0xd0),
-    muted: hex_const(0x8a, 0x96, 0xaa), // was #4c566a
+    secondary: hex_const(0xeb, 0xcb, 0x8b),
+    muted: hex_const(0x8a, 0x96, 0xaa),
     err: hex_const(0xbf, 0x61, 0x6a),
 };
 
-/// Dracula — purple base, pink/green accents.
+/// Dracula — purple base, pink secondary.
 pub const DRACULA: ThemeColors = ThemeColors {
     bg: hex_const(0x28, 0x2a, 0x36),
     fg: hex_const(0xf8, 0xf8, 0xf2),
     jade: hex_const(0xbd, 0x93, 0xf9),
-    muted: hex_const(0x98, 0xa0, 0xc8), // was #6272a4
+    secondary: hex_const(0xff, 0x79, 0xc6),
+    muted: hex_const(0x98, 0xa0, 0xc8),
     err: hex_const(0xff, 0x55, 0x55),
 };
 
@@ -318,16 +357,18 @@ pub const TOKYO_NIGHT: ThemeColors = ThemeColors {
     bg: hex_const(0x1a, 0x1b, 0x26),
     fg: hex_const(0xc0, 0xca, 0xf5),
     jade: hex_const(0x7a, 0xa2, 0xf7),
-    muted: hex_const(0x8a, 0x93, 0xbb), // was #565f89
+    secondary: hex_const(0xbb, 0x9a, 0xf7),
+    muted: hex_const(0x8a, 0x93, 0xbb),
     err: hex_const(0xf7, 0x76, 0x8e),
 };
 
-/// Charm — warm violet (product charmtone).
+/// Charm — warm violet primary, soft gold secondary (product charmtone).
 pub const CHARM: ThemeColors = ThemeColors {
     bg: hex_const(0x1a, 0x14, 0x18),
     fg: hex_const(0xf3, 0xe8, 0xee),
     jade: hex_const(0xa7, 0x8b, 0xfa),
-    muted: hex_const(0xb0, 0x9e, 0xa8), // was #8a7a84
+    secondary: hex_const(0xf0, 0xd9, 0xa8),
+    muted: hex_const(0xb0, 0x9e, 0xa8),
     err: hex_const(0xe8, 0xa0, 0xa8),
 };
 
@@ -416,16 +457,25 @@ mod tests {
     }
 
     #[test]
-    fn from_accent_sets_jade_and_readable_fg() {
-        let red = from_accent([1.0, 0.0, 0.0]);
+    fn from_primary_sets_jade_and_derives_accent() {
+        let red = from_primary([1.0, 0.0, 0.0], None);
         assert!((red.jade[0] - 1.0).abs() < 1e-4);
         assert!(red.jade[1] < 0.01);
         // Deep bg → light fg via contrasting_text.
         assert!(red.fg[0] > 0.9);
+        // Auto accent is not pure red (hue-shifted).
+        assert!(
+            (red.secondary[0] - 1.0).abs() > 0.05 || red.secondary[1] > 0.05,
+            "derived accent should differ from primary"
+        );
+        let custom = from_primary([1.0, 0.0, 0.0], Some([0.0, 1.0, 0.0]));
+        assert!((custom.secondary[1] - 1.0).abs() < 1e-4);
         assert_eq!(to_hex([0.0, 0.902, 0.463]), "#00e676");
         assert_eq!(parse_hex("#f00"), Some([1.0, 0.0, 0.0]));
         let spun = rotate_hue([1.0, 0.0, 0.0], 120.0);
-        // Red +120° ≈ green.
         assert!(spun[1] > spun[0] && spun[1] > spun[2]);
+        // Default primary's auto-accent is stable.
+        let d = derive_accent(DEFAULT_PRIMARY);
+        assert_eq!(from_primary(DEFAULT_PRIMARY, None).secondary, d);
     }
 }

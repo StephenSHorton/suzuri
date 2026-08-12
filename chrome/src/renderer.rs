@@ -1215,7 +1215,8 @@ fn chrome_labels(
     let cafe_on = [1.0, 0.82, 0.45, 0.95];
     let cafe_off = [0.45, 0.55, 0.48, 0.70];
     let selection_rgb = pal.jade;
-    let link_hover_rgb = pal.jade;
+    // Link hover uses secondary/accent so it reads apart from selection primary.
+    let link_hover_rgb = pal.secondary;
 
     let mut labels = Vec::with_capacity(128);
     let _ = tab_jelly; // labels no longer follow jelly
@@ -1506,12 +1507,16 @@ fn push_modal_glass(
                 );
             }
         }
-        // Color swatch chips under the accent row (solid fill painted as labels).
-        let accent = settings.prefs.accent;
+        // Color swatch chips — highlight matches the focused color row target.
+        let focus_rgb = if settings.selected == settings_row::ACCENT {
+            settings.prefs.effective_accent()
+        } else {
+            settings.prefs.primary
+        };
         for (i, sw) in lay.swatches.iter().enumerate() {
-            let selected = crate::theme::ACCENT_PRESETS
+            let selected = crate::theme::COLOR_PRESETS
                 .get(i)
-                .map(|rgb| accent_near(*rgb, accent))
+                .map(|rgb| accent_near(*rgb, focus_rgb))
                 .unwrap_or(false);
             let kind = if selected {
                 PanelKind::ModalButtonActive
@@ -1817,16 +1822,24 @@ fn push_modal_labels(
             title_c,
         ));
         let grid = session.active_grid();
-        let accent = settings.prefs.accent;
+        let primary = settings.prefs.primary;
+        let accent = settings.prefs.effective_accent();
+        let primary_hex = crate::theme::to_hex(primary);
         let accent_hex = crate::theme::to_hex(accent);
-        let accent_disp = format!("‹  {accent_hex}  ›");
+        let primary_disp = format!("‹  {primary_hex}  ›");
+        let accent_disp = if settings.prefs.accent_is_custom() {
+            format!("‹  {accent_hex}  ›")
+        } else {
+            format!("auto · {accent_hex}")
+        };
         let darken_val = format!("‹  {:.0}%  ›", settings.prefs.glass_darken * 100.0);
         use crate::settings::settings_row;
-        // Booleans = glass switches; accent/darken show value; reset is label-only.
+        // Booleans = glass switches; primary/accent/darken show values; reset label-only.
         let titles = [
             "Glyph rain",
             "Magnifier",
             "Primary color",
+            "Accent color",
             "Glass darken",
             "Reset defaults",
         ];
@@ -1842,16 +1855,22 @@ fn push_modal_labels(
                 text_size,
                 tc,
             ));
-            if i == settings_row::ACCENT || i == settings_row::DARKEN {
-                let vc = if i == settings_row::ACCENT {
-                    // Hex in the live accent so the picker feels immediate.
+            if i == settings_row::PRIMARY
+                || i == settings_row::ACCENT
+                || i == settings_row::DARKEN
+            {
+                let vc = if i == settings_row::PRIMARY {
+                    [primary[0], primary[1], primary[2], 0.95 * ease]
+                } else if i == settings_row::ACCENT {
                     [accent[0], accent[1], accent[2], 0.95 * ease]
                 } else {
                     let mut c = muted;
                     c[3] *= ease;
                     c
                 };
-                let val = if i == settings_row::ACCENT {
+                let val = if i == settings_row::PRIMARY {
+                    primary_disp.as_str()
+                } else if i == settings_row::ACCENT {
                     accent_disp.as_str()
                 } else {
                     darken_val.as_str()
@@ -1860,19 +1879,30 @@ fn push_modal_labels(
                 labels.push(TextLabel::centered(
                     val.to_string(),
                     [vr.x, vr.y, vr.w, vr.h],
-                    text_size,
+                    text_size - if i == settings_row::ACCENT
+                        && !settings.prefs.accent_is_custom()
+                    {
+                        1.0
+                    } else {
+                        0.0
+                    },
                     vc,
                 ));
             }
         }
-        // Preset color strip — solid block glyphs (arbitrary RGB) on glass chips.
+        // Preset color strip — solid block glyphs on glass chips.
+        // Checkmark tracks the focused color role (primary or accent).
+        let focus_rgb = if settings.selected == settings_row::ACCENT {
+            accent
+        } else {
+            primary
+        };
         for (i, sw) in lay.swatches.iter().enumerate() {
-            let Some(rgb) = crate::theme::ACCENT_PRESETS.get(i) else {
+            let Some(rgb) = crate::theme::COLOR_PRESETS.get(i) else {
                 continue;
             };
-            let selected = accent_near(*rgb, accent);
+            let selected = accent_near(*rgb, focus_rgb);
             let fill = [rgb[0], rgb[1], rgb[2], 0.98 * ease];
-            // Full-block covers most of the 28² chip (bitmap font ~size).
             labels.push(TextLabel::centered(
                 "██",
                 [sw.x, sw.y, sw.w, sw.h],
@@ -1892,10 +1922,9 @@ fn push_modal_labels(
         let mut foot = dim;
         foot[3] *= ease * 0.9;
         let shell = if pty_active { "PTY live" } else { "mock shell" };
-        // Navigation hints first — this is a real focusable list now.
         labels.push(TextLabel::new(
             format!(
-                "↑↓ move  ·  click swatch  ·  ←→ hue  ·  0 reset  ·  {shell}  {}×{}",
+                "↑↓  ·  swatch→focus  ·  ←→ hue  ·  Enter accent=auto  ·  {shell}  {}×{}",
                 grid.cols(),
                 grid.rows(),
             ),
