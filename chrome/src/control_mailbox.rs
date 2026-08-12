@@ -17,6 +17,7 @@
 //! - `new_tab`
 //! - `new_window`
 //! - `toggle_caffeine`
+//! - `refresh_workspace` — reload open workspace panel from disk (MCP soft no-op if closed)
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,6 +46,8 @@ pub enum ControlCommand {
     NewTab,
     NewWindow,
     ToggleCaffeine,
+    /// Soft-reload workspace panel if open (MCP post path).
+    RefreshWorkspace,
 }
 
 impl ControlCommand {
@@ -62,6 +65,7 @@ impl ControlCommand {
             "new_tab" => Some(Self::NewTab),
             "new_window" => Some(Self::NewWindow),
             "toggle_caffeine" => Some(Self::ToggleCaffeine),
+            "refresh_workspace" => Some(Self::RefreshWorkspace),
             _ => None,
         }
     }
@@ -80,6 +84,7 @@ impl ControlCommand {
             Self::NewTab => CommandAction::NewTab,
             Self::NewWindow => CommandAction::NewWindow,
             Self::ToggleCaffeine => CommandAction::ToggleCaffeine,
+            Self::RefreshWorkspace => CommandAction::RefreshWorkspace,
         }
     }
 
@@ -97,6 +102,7 @@ impl ControlCommand {
             Self::NewTab => "new_tab",
             Self::NewWindow => "new_window",
             Self::ToggleCaffeine => "toggle_caffeine",
+            Self::RefreshWorkspace => "refresh_workspace",
         }
     }
 }
@@ -263,6 +269,10 @@ mod tests {
             ControlCommand::parse("toggle_caffeine"),
             Some(ControlCommand::ToggleCaffeine)
         );
+        assert_eq!(
+            ControlCommand::parse("refresh_workspace"),
+            Some(ControlCommand::RefreshWorkspace)
+        );
         assert_eq!(ControlCommand::parse("nope"), None);
         assert_eq!(ControlCommand::parse(""), None);
         // CamelCase / wrong separators stay unknown (snake_case wire only).
@@ -313,6 +323,10 @@ mod tests {
             ControlCommand::ToggleCaffeine.to_action(),
             CommandAction::ToggleCaffeine
         );
+        assert_eq!(
+            ControlCommand::RefreshWorkspace.to_action(),
+            CommandAction::RefreshWorkspace
+        );
     }
 
     #[test]
@@ -329,6 +343,7 @@ mod tests {
             ControlCommand::NewTab,
             ControlCommand::NewWindow,
             ControlCommand::ToggleCaffeine,
+            ControlCommand::RefreshWorkspace,
         ];
         for cmd in all {
             assert_eq!(ControlCommand::parse(cmd.as_str()), Some(cmd));

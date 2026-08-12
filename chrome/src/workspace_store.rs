@@ -45,6 +45,27 @@ pub const STATUS_WAITING: &str = "waiting";
 pub const STATUS_BLOCKED: &str = "blocked";
 pub const STATUS_AWAY: &str = "away";
 
+/// Cycle order for local human status (Ctrl+Shift+A / presence chip).
+pub const AVAILABILITY_CYCLE: &[&str] = &[
+    STATUS_IDLE,
+    STATUS_WORKING,
+    STATUS_WAITING,
+    STATUS_BLOCKED,
+    STATUS_AWAY,
+];
+
+/// Next status in [`AVAILABILITY_CYCLE`] after normalizing `current`.
+///
+/// Unknown / custom values restart at idle's successor (`working`).
+pub fn next_availability(current: &str) -> &'static str {
+    let cur = normalize_availability(current);
+    let idx = AVAILABILITY_CYCLE
+        .iter()
+        .position(|&s| s == cur.as_str())
+        .unwrap_or(0);
+    AVAILABILITY_CYCLE[(idx + 1) % AVAILABILITY_CYCLE.len()]
+}
+
 /// File attached to a channel message (product `FileRef`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WsFileRef {
@@ -1070,6 +1091,24 @@ mod tests {
         assert_eq!(normalize_availability(""), STATUS_IDLE);
         assert_eq!(normalize_availability("busy"), STATUS_WORKING);
         assert_eq!(normalize_availability("away"), STATUS_AWAY);
+    }
+
+    #[test]
+    fn next_availability_cycles() {
+        assert_eq!(next_availability(STATUS_IDLE), STATUS_WORKING);
+        assert_eq!(next_availability(STATUS_WORKING), STATUS_WAITING);
+        assert_eq!(next_availability(STATUS_WAITING), STATUS_BLOCKED);
+        assert_eq!(next_availability(STATUS_BLOCKED), STATUS_AWAY);
+        assert_eq!(next_availability(STATUS_AWAY), STATUS_IDLE);
+        // Aliases normalize first.
+        assert_eq!(next_availability("busy"), STATUS_WAITING);
+        assert_eq!(next_availability("pending"), STATUS_BLOCKED);
+        // Full cycle length.
+        let mut s = STATUS_IDLE;
+        for _ in 0..AVAILABILITY_CYCLE.len() {
+            s = next_availability(s);
+        }
+        assert_eq!(s, STATUS_IDLE);
     }
 
     #[test]

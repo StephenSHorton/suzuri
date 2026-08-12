@@ -513,6 +513,24 @@ impl ChromeApp {
                 self.rename.close();
                 self.workspace_ui.open();
             }
+            CommandAction::RefreshWorkspace => {
+                // Soft no-op when closed (product RefreshWorkspaceMsg).
+                if self.workspace_ui.open {
+                    self.workspace_ui.refresh();
+                }
+            }
+            CommandAction::CycleWorkspaceStatus => {
+                if !self.workspace_ui.open {
+                    self.palette.close();
+                    self.settings.close();
+                    self.help.close();
+                    self.notes.close();
+                    self.transfer.close();
+                    self.rename.close();
+                    self.workspace_ui.open();
+                }
+                self.workspace_ui.cycle_status();
+            }
             CommandAction::OpenTransferSend => {
                 self.palette.close();
                 self.settings.close();
@@ -1280,6 +1298,28 @@ impl ChromeApp {
                         }
                         return;
                     }
+                    Key::Named(NamedKey::Tab) => {
+                        self.workspace_ui
+                            .cycle_channel(if shift { -1 } else { 1 });
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.workspace_ui.scroll_up(1);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.workspace_ui.scroll_down(1);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     Key::Character(s) => {
                         for ch in s.chars() {
                             if !ch.is_control() {
@@ -1369,6 +1409,42 @@ impl ChromeApp {
                         }
                         "z" | "Z" => {
                             let _ = self.notes.undo();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Workspace: Ctrl+R refresh, Ctrl+Shift+A cycle presence (while open).
+            if self.workspace_ui.open {
+                if let Key::Character(ref s) = event.logical_key {
+                    match s.as_str() {
+                        "r" | "R" if !shift => {
+                            self.workspace_ui.refresh();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        "a" | "A" if shift => {
+                            self.workspace_ui.cycle_status();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        "n" | "N" if !shift => {
+                            self.workspace_ui.begin_new_channel();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        "u" | "U" if !shift => {
+                            self.workspace_ui.begin_attach();
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
