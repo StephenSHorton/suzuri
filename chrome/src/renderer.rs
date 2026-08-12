@@ -353,7 +353,8 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let panel_capacity = 32u64;
+        // Help sheet alone can push 30+ frost rows; start with headroom (shader MAX_PANELS=128).
+        let panel_capacity = 64u64;
         let panel_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("panels"),
             size: panel_capacity * std::mem::size_of::<PanelInstance>() as u64,

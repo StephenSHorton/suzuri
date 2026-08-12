@@ -33,6 +33,9 @@ struct Panel {
 const PI: f32 = 3.14159265358979;
 const AIR_IOR: f32 = 1.0003;
 const INCIDENT: vec3f = vec3f(0.0, 0.0, 1.0);
+// Hard cap on panel iteration (storage array is unbounded; this is GPU loop limit).
+// Help sheet alone can be ~30 frost rows + chrome + modal → need well above 32.
+const MAX_PANELS: u32 = 128u;
 
 struct VsOut {
     @builtin(position) pos: vec4f,
@@ -106,7 +109,7 @@ fn blob_blend_k(kind: f32) -> f32 {
 fn blob_sd(px: vec2f, n: u32) -> f32 {
     var d = 1e5;
     var any = false;
-    for (var i = 0u; i < 32u; i++) {
+    for (var i = 0u; i < MAX_PANELS; i++) {
         if (i >= n) { break; }
         let p = panels[i];
         if (!is_blob_kind(p.kind)) { continue; }
@@ -131,7 +134,7 @@ fn active_tab_spot_mask(px: vec2f, n: u32) -> f32 {
         return 0.0;
     }
     var mask = 0.0;
-    for (var i = 0u; i < 32u; i++) {
+    for (var i = 0u; i < MAX_PANELS; i++) {
         if (i >= n) { break; }
         let p = panels[i];
         // ChipActive = 2
@@ -426,7 +429,7 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     }
 
     // --- 2) Discrete overlays: traffic lights, idle chips, scrim, modal ---
-    for (var i = 0u; i < 32u; i++) {
+    for (var i = 0u; i < MAX_PANELS; i++) {
         if (i >= n) { break; }
         let p = panels[i];
         // Skip blob members — already drawn
