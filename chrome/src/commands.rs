@@ -637,17 +637,18 @@ pub struct HelpLayout {
 }
 
 impl HelpLayout {
-    pub const ROW_H: f32 = 28.0;
-    pub const ROW_GAP: f32 = 4.0;
-    pub const SEC_GAP: f32 = 8.0;
-    pub const HEADER_H: f32 = 16.0;
+    pub const ROW_H: f32 = 26.0;
+    pub const ROW_GAP: f32 = 3.0;
+    pub const SEC_GAP: f32 = 6.0;
+    pub const HEADER_H: f32 = 14.0;
 
     pub fn new(window_w: f32, window_h: f32) -> Self {
         let modal = Self::modal_rect(window_w, window_h);
         let pad = 14.0;
         let sections = help_sections();
-        let two_col = modal.w >= 560.0;
-        let col_gap = 14.0;
+        // Prefer two columns so every product row fits with a glass chip.
+        let two_col = modal.w >= 520.0;
+        let col_gap = 12.0;
         let col_w = if two_col {
             (modal.w - pad * 2.0 - col_gap) * 0.5
         } else {
@@ -655,11 +656,12 @@ impl HelpLayout {
         };
         let left_x = modal.x + pad;
         let right_x = left_x + col_w + col_gap;
-        let footer_y = modal.y + modal.h - 24.0;
-        let max_y = footer_y - 8.0;
-        let mut y_left = modal.y + 42.0;
-        let mut y_right = modal.y + 42.0;
-        let mid = (sections.len() + 1) / 2;
+        let footer_y = modal.y + modal.h - 22.0;
+        let max_y = footer_y - 6.0;
+        let mut y_left = modal.y + 40.0;
+        let mut y_right = modal.y + 40.0;
+        // Split after Command line / Terminal so columns stay balanced.
+        let mid = 3; // Tabs + Command line + Terminal | Panes + Chrome
         let mut headers = Vec::new();
         let mut rows = Vec::new();
 
@@ -670,10 +672,10 @@ impl HelpLayout {
                 (left_x, &mut y_left)
             };
             if *y + Self::HEADER_H > max_y {
-                break;
+                continue;
             }
             headers.push((x, *y, sec.title));
-            *y += Self::HEADER_H + 4.0;
+            *y += Self::HEADER_H + 3.0;
             for row in &sec.rows {
                 if *y + Self::ROW_H > max_y {
                     break;
@@ -695,10 +697,10 @@ impl HelpLayout {
     }
 
     pub fn modal_rect(window_w: f32, window_h: f32) -> crate::layout::Rect {
-        // Tall enough for full product shortcut list (~28 row chips + headers).
-        let w = (window_w - 48.0).min(760.0).max(320.0);
-        let h = (window_h - 64.0).min(560.0).max(360.0);
-        crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.42, w, h)
+        // Two-col stack needs ~40 title + ~15×29 rows + headers ≈ 520+.
+        let w = (window_w - 40.0).min(800.0).max(360.0);
+        let h = (window_h - 48.0).min(640.0).max(520.0);
+        crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.40, w, h)
     }
 }
 
