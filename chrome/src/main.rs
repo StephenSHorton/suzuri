@@ -2,7 +2,7 @@
 //!
 //! Owns the framebuffer (wgpu). No React, no HTML, no Chromium.
 //! Layout contract matches the surface spike: traffic / title · tabs · cell well · warp.
-//! Terminal cells are painted as mono text labels inside the glass well (mock shell).
+//! Terminal cells are painted as mono text labels inside the glass well (live PTY).
 
 mod ansi;
 mod app;
@@ -18,18 +18,18 @@ mod macos_window;
 mod notes;
 mod notes_ops;
 mod panes;
-mod transfer_ui;
-mod workspace_store;
-mod workspace_ui;
 mod pty;
 mod rain_atlas;
 mod rain_sim;
 mod renderer;
+mod selection;
 mod session;
 mod settings;
 mod shell;
 mod text;
 mod transfer_ui;
+mod workspace_store;
+mod workspace_ui;
 
 use winit::event_loop::EventLoop;
 

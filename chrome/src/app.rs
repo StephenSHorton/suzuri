@@ -26,7 +26,8 @@ use crate::layout::{FrameLayout, Metrics};
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
-use crate::renderer::{self, Renderer};
+use crate::renderer::{self, Renderer, CELL_H, CELL_W};
+use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome};
 use crate::settings::SettingsState;
 use crate::transfer_ui::TransferUi;
@@ -66,6 +67,9 @@ pub struct ChromeApp {
     middle_press_hit: Option<HitTarget>,
     /// Last empty title-bar click (time + logical xy) for OS zoom double-click.
     last_title_click: Option<(Instant, f32, f32)>,
+    /// Terminal cell selection (absolute document rows).
+    term_selection: Selection,
+    selecting_term: bool,
 }
 
 impl Default for ChromeApp {
@@ -105,6 +109,8 @@ impl Default for ChromeApp {
             press_hit: None,
             middle_press_hit: None,
             last_title_click: None,
+            term_selection: Selection::new(),
+            selecting_term: false,
         }
     }
 }
@@ -272,6 +278,9 @@ impl ChromeApp {
                 }
                 if let Some(cwd) = rt.ansi.take_cwd() {
                     self.session.set_cwd(id, cwd);
+                }
+                if let Some(title) = rt.ansi.take_title() {
+                    self.session.set_pane_title(id, title);
                 }
             }
             if let Some(p) = self.session.panes.get_mut(&id) {
@@ -578,6 +587,47 @@ impl ChromeApp {
             self.cursor.y,
             is_mac(),
         )
+    }
+
+    /// Map pointer → absolute cell pos in the focused pane's cell well.
+    fn term_cell_at_cursor(&self) -> Option<CellPos> {
+        if self.overlay_open() {
+            return None;
+        }
+        let layout = self.current_layout();
+        let focus = self.session.focus_pane_id();
+        let pl = layout.panes.iter().find(|p| p.pane_id == focus)?;
+        let cells = pl.cells;
+        let x = self.cursor.x;
+        let y = self.cursor.y;
+        if !cells.contains(x, y) {
+            return None;
+        }
+        let pane = self.session.panes.get(&focus)?;
+        let grid = &pane.grid;
+        let col = ((x - cells.x) / CELL_W).floor() as i32;
+        let row = ((y - cells.y) / CELL_H).floor() as i32;
+        let col = col.clamp(0, grid.cols().saturating_sub(1) as i32) as u16;
+        let row = row.clamp(0, grid.rows().saturating_sub(1) as i32) as u16;
+        let abs = grid.viewport_to_abs(row);
+        Some(clamp_pos(grid, col, abs))
+    }
+
+    fn copy_selection_if_any(&mut self) {
+        if self.term_selection.is_empty() {
+            return;
+        }
+        let id = self.session.focus_pane_id();
+        let Some(pane) = self.session.panes.get(&id) else {
+            return;
+        };
+        let text = self.term_selection.text(&pane.grid);
+        if text.is_empty() {
+            return;
+        }
+        if let Some(cb) = &mut self.clipboard {
+            let _ = cb.set_text(text);
+        }
     }
 
     /// True if the pointer is over any open modal card (input, buttons, body).
@@ -967,6 +1017,13 @@ impl ChromeApp {
                         }
                         return;
                     }
+                    "c" | "C" if !shift => {
+                        self.copy_selection_if_any();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     _ => {}
                 }
             }
@@ -1259,6 +1316,14 @@ impl ApplicationHandler for ChromeApp {
                 let logical: LogicalPosition<f64> = position.to_logical(scale);
                 self.cursor = LogicalPosition::new(logical.x as f32, logical.y as f32);
                 self.pointer_inside = true;
+                if self.selecting_term {
+                    if let Some(pos) = self.term_cell_at_cursor() {
+                        self.term_selection.update(pos);
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
             }
 
             WindowEvent::CursorLeft { .. } => {
@@ -1273,6 +1338,16 @@ impl ApplicationHandler for ChromeApp {
                 self.chip_ui.pressed = true;
                 let hit = self.hit_at_cursor();
                 self.press_hit = Some(hit);
+                // Terminal selection drag
+                if matches!(hit, HitTarget::Terminal(_)) && !self.overlay_open() {
+                    if let Some(pos) = self.term_cell_at_cursor() {
+                        self.term_selection.begin(pos);
+                        self.selecting_term = true;
+                    }
+                } else if !matches!(hit, HitTarget::Terminal(_)) {
+                    self.term_selection.clear();
+                    self.selecting_term = false;
+                }
                 // Empty title-bar / nav chrome (not chips): drag, or double-click zoom.
                 // macOS: double-click title bar = zoom to fill (maximize), not fullscreen
                 // (green button is separate). Same maximize toggle on other platforms.
@@ -1315,10 +1390,22 @@ impl ApplicationHandler for ChromeApp {
                 ..
             } => {
                 self.chip_ui.pressed = false;
+                if self.selecting_term {
+                    self.term_selection.end();
+                    self.selecting_term = false;
+                }
                 // Activate only on release, and only if still over the same target.
+                // Skip chrome activation if we were selecting terminal text.
                 if let Some(start) = self.press_hit.take() {
                     let end = self.hit_at_cursor();
-                    if start == end && start != HitTarget::TitleDrag && start != HitTarget::None {
+                    if start == end
+                        && start != HitTarget::TitleDrag
+                        && start != HitTarget::None
+                        && !matches!(start, HitTarget::Terminal(_))
+                    {
+                        self.handle_activation(event_loop, start);
+                    } else if start == end && matches!(start, HitTarget::Terminal(_)) {
+                        // Focus pane on click without killing a drag selection end.
                         self.handle_activation(event_loop, start);
                     }
                 }
