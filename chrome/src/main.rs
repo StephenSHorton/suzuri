@@ -21,6 +21,7 @@ mod session;
 mod settings;
 mod shell;
 mod text;
+mod transfer_ui;
 
 use winit::event_loop::EventLoop;
 
