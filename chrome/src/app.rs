@@ -349,7 +349,16 @@ impl ChromeApp {
                     })
                     .collect();
             }
-            layout.apply_pane_rects(self.metrics, &leafs, tab.focus_pane);
+            // Alt-screen panes get full glass (no path/warp strip).
+            let alt_ids: std::collections::HashSet<u64> = self
+                .runtimes
+                .iter()
+                .filter(|(_, rt)| rt.ansi.on_alt_screen())
+                .map(|(id, _)| *id)
+                .collect();
+            layout.apply_pane_rects(self.metrics, &leafs, tab.focus_pane, &|id| {
+                alt_ids.contains(&id)
+            });
         }
         layout
     }
@@ -420,6 +429,15 @@ impl ChromeApp {
                 if !filtered.is_empty() {
                     if let Some(grid) = self.session.grid_mut(id) {
                         rt.ansi.feed(grid, &filtered);
+                    }
+                }
+                // Device-attribute / probe replies → PTY (never the screen).
+                let replies = rt.ansi.take_replies();
+                if !replies.is_empty() {
+                    if let Some(pty) = &mut rt.pty {
+                        for r in replies {
+                            let _ = pty.write_all(&r);
+                        }
                     }
                 }
                 if let Some(cwd) = rt.ansi.take_cwd() {
@@ -815,8 +833,9 @@ impl ChromeApp {
         self.chip_ui.set_hover(hit, (x, y));
     }
 
-    /// While a pane is on the alt screen (vim, grok, etc.), route keys to PTY;
-    /// when it leaves, restore command-line focus.
+    /// While a pane is on the alt screen (vim, grok, etc.), route keys to PTY,
+    /// clear the warp draft, and expand the cell grid (no path/warp strip).
+    /// When it leaves, restore command-line focus and resize back.
     fn sync_focus_for_alt_screen(&mut self) {
         let id = self.session.focus_pane_id();
         let alt = self
@@ -827,12 +846,17 @@ impl ChromeApp {
         if alt {
             self.terminal_focused = true;
             self.warp_focused = false;
+            // Don't leave shell draft visible under the TUI strip (if any).
+            if let Some(p) = self.session.panes.get_mut(&id) {
+                p.draft.clear();
+            }
         } else if self.terminal_focused {
-            // Left alt screen — back to command line unless user explicitly… 
-            // (we only auto-clear when we auto-set; keep simple: always restore)
+            // Left alt screen — back to command line.
             self.terminal_focused = false;
             self.warp_focused = true;
         }
+        // Alt enter/leave changes cells height — keep grid/PTY in sync.
+        self.sync_grids_to_panes();
     }
 
     fn hit_at_cursor(&self) -> HitTarget {
@@ -1926,6 +1950,16 @@ impl ChromeApp {
     }
 
     fn submit_line(&mut self) {
+        // Full-screen TUI owns the keyboard — don't inject warp commands.
+        let id = self.session.focus_pane_id();
+        if self
+            .runtimes
+            .get(&id)
+            .map(|rt| rt.ansi.on_alt_screen())
+            .unwrap_or(false)
+        {
+            return;
+        }
         let line = self.session.draft().trim_end().to_string();
         if line.is_empty() {
             return;

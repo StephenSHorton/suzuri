@@ -1310,54 +1310,56 @@ fn chrome_labels(
             cell,
         );
 
-        // Footer is UI chrome (not terminal grid) — no ASCII dashes, no cell overflow.
-        // Hairline is drawn as a glass panel; path + input are normal UI labels.
-        let path_size = 12.0;
-        let input_size = 13.0;
-        let char_w = cell.w.max(1.0);
+        // Footer (path + warp) only when the command strip is present.
+        // Alt-screen panes collapse the strip to zero height — skip paint.
+        if pl.warp.h >= 1.0 && pl.path.h >= 1.0 {
+            let path_size = 12.0;
+            let input_size = 13.0;
+            let char_w = cell.w.max(1.0);
 
-        let path_str = crate::session::display_path(&pane.cwd);
-        if !path_str.is_empty() {
-            // Never drop a lone `~` — always reserve room for at least that glyph.
-            let max_c = ((pl.path.w / char_w).floor() as usize).max(1);
-            let path_draw = truncate_chars(&path_str, max_c);
-            // Left-align path like product chrome (not centered — `~` was easy to miss).
-            let py = pl.path.y + (pl.path.h - path_size).max(0.0) * 0.5;
-            labels.push(TextLabel::new(
-                path_draw,
-                pl.path.x,
-                py,
-                path_size,
-                dim,
-            ));
-        }
-
-        let draft = pane.draft.as_str();
-        let max_c = ((pl.warp.w / char_w).floor() as usize).max(4);
-        let warp_text = truncate_chars(&format!("❯ {draft}"), max_c);
-        let input_bright = if pl.focused { bright } else { dim };
-        // Left-align inside warp band (not full-center — reads as an input line).
-        let iy = pl.warp.y + (pl.warp.h - input_size).max(0.0) * 0.5;
-        labels.push(TextLabel::new(
-            warp_text,
-            pl.warp.x,
-            iy,
-            input_size,
-            input_bright,
-        ));
-
-        if pl.focused {
-            let a = input_caret_alpha.clamp(0.0, 1.0);
-            if a > 0.02 {
-                let caret_cols = (2 + draft.chars().count()).min(max_c.saturating_sub(1));
-                let caret_x = pl.warp.x + caret_cols as f32 * char_w;
+            let path_str = crate::session::display_path(&pane.cwd);
+            if !path_str.is_empty() {
+                // Never drop a lone `~` — always reserve room for at least that glyph.
+                let max_c = ((pl.path.w / char_w).floor() as usize).max(1);
+                let path_draw = truncate_chars(&path_str, max_c);
+                // Left-align path like product chrome (not centered — `~` was easy to miss).
+                let py = pl.path.y + (pl.path.h - path_size).max(0.0) * 0.5;
                 labels.push(TextLabel::new(
-                    CARET_BLOCK,
-                    caret_x,
-                    iy,
-                    input_size,
-                    [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], a],
+                    path_draw,
+                    pl.path.x,
+                    py,
+                    path_size,
+                    dim,
                 ));
+            }
+
+            let draft = pane.draft.as_str();
+            let max_c = ((pl.warp.w / char_w).floor() as usize).max(4);
+            let warp_text = truncate_chars(&format!("❯ {draft}"), max_c);
+            let input_bright = if pl.focused { bright } else { dim };
+            // Left-align inside warp band (not full-center — reads as an input line).
+            let iy = pl.warp.y + (pl.warp.h - input_size).max(0.0) * 0.5;
+            labels.push(TextLabel::new(
+                warp_text,
+                pl.warp.x,
+                iy,
+                input_size,
+                input_bright,
+            ));
+
+            if pl.focused {
+                let a = input_caret_alpha.clamp(0.0, 1.0);
+                if a > 0.02 {
+                    let caret_cols = (2 + draft.chars().count()).min(max_c.saturating_sub(1));
+                    let caret_x = pl.warp.x + caret_cols as f32 * char_w;
+                    labels.push(TextLabel::new(
+                        CARET_BLOCK,
+                        caret_x,
+                        iy,
+                        input_size,
+                        [CARET_RGB[0], CARET_RGB[1], CARET_RGB[2], a],
+                    ));
+                }
             }
         }
     }

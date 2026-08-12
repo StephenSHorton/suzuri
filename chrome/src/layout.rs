@@ -218,7 +218,13 @@ impl FrameLayout {
         };
         let mut panes = Vec::with_capacity(specs.len());
         if specs.len() == 1 {
-            panes.push(pane_layout_in_glass(specs[0].0, workspace, m, specs[0].1));
+            panes.push(pane_layout_in_glass(
+                specs[0].0,
+                workspace,
+                m,
+                specs[0].1,
+                false,
+            ));
         } else {
             // Equal columns fallback if caller didn't apply tree layout.
             let gap = m.stack();
@@ -228,7 +234,7 @@ impl FrameLayout {
             for (i, (id, foc)) in specs.iter().enumerate() {
                 let x = term_x + i as f32 * (pw + gap);
                 let glass = Rect::new(x, term_y, pw, term_h);
-                panes.push(pane_layout_in_glass(*id, glass, m, *foc));
+                panes.push(pane_layout_in_glass(*id, glass, m, *foc, false));
             }
         }
 
@@ -295,11 +301,24 @@ impl FrameLayout {
     }
 
     /// Replace pane glass rects from a split-tree layout pass.
-    pub fn apply_pane_rects(&mut self, m: Metrics, leaf_rects: &[(u64, Rect)], focus: u64) {
+    ///
+    /// `fullscreen` is true for panes on the VT alt screen (hide path/warp strip).
+    pub fn apply_pane_rects(
+        &mut self,
+        m: Metrics,
+        leaf_rects: &[(u64, Rect)],
+        focus: u64,
+        fullscreen: &dyn Fn(u64) -> bool,
+    ) {
         self.panes.clear();
         for (id, glass) in leaf_rects {
-            self.panes
-                .push(pane_layout_in_glass(*id, *glass, m, *id == focus));
+            self.panes.push(pane_layout_in_glass(
+                *id,
+                *glass,
+                m,
+                *id == focus,
+                fullscreen(*id),
+            ));
         }
         if let Some(f) = self.panes.iter().find(|p| p.focused).cloned() {
             self.terminal = f.glass;
@@ -343,12 +362,14 @@ impl FrameLayout {
         // (surface tension / stretchy glass, not separate cubes).
         for pl in &self.panes {
             out.push(PanelInstance::glass(pl.glass, m.radius, PanelKind::Terminal));
-            // Footer hairline (replaces overflowing ASCII ───)
-            let mid_y = pl.divider.y + pl.divider.h * 0.5 - 0.75;
-            let line = Rect::new(pl.divider.x, mid_y, pl.divider.w, 1.5);
-            out.push(
-                PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9),
-            );
+            // Footer hairline only when the command strip is present (not alt-screen).
+            if pl.divider.h >= 1.0 {
+                let mid_y = pl.divider.y + pl.divider.h * 0.5 - 0.75;
+                let line = Rect::new(pl.divider.x, mid_y, pl.divider.w, 1.5);
+                out.push(
+                    PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9),
+                );
+            }
         }
 
         // Active goo — slides under tabs via jelly (unscaled so switch = pure slide).
@@ -419,12 +440,43 @@ impl FrameLayout {
     }
 }
 
-fn pane_layout_in_glass(pane_id: u64, glass: Rect, m: Metrics, focused: bool) -> PaneLayout {
+/// Layout cells + optional command strip inside a pane glass.
+///
+/// When `fullscreen` is true (VT alt screen), path/warp/divider collapse and the
+/// cell grid fills the glass — full-screen TUIs (vim, grok, etc.).
+fn pane_layout_in_glass(
+    pane_id: u64,
+    glass: Rect,
+    m: Metrics,
+    focused: bool,
+    fullscreen: bool,
+) -> PaneLayout {
     let inset = m.inset();
+    let inner_x = glass.x + inset;
+    let inner_w = (glass.w - inset * 2.0).max(40.0);
+    let inner_top = glass.y + inset;
+    let inner_bottom = glass.y + glass.h - inset;
+    let avail = (inner_bottom - inner_top).max(0.0);
+
+    if fullscreen {
+        let cells_h = avail.max(CELL_H_MIN);
+        let cells = Rect::new(inner_x, inner_top, inner_w, cells_h);
+        // Zero-size strip so paint/hit-test skip path & warp.
+        let empty = Rect::new(inner_x, cells.y + cells.h, inner_w, 0.0);
+        return PaneLayout {
+            pane_id,
+            glass,
+            cells,
+            divider: empty,
+            path: empty,
+            warp: empty,
+            focused,
+        };
+    }
+
     // Three fixed mono rows (divider / path / input) — each = one cell height so
     // 14px Gohu never overflows its band or the glass bottom.
     let row: f32 = 14.0;
-    let avail: f32 = (glass.h - inset * 2.0).max(0.0);
     let strip_want: f32 = row * 3.0;
     let strip: f32 = strip_want.min(avail);
     let row_h: f32 = if strip >= strip_want {
@@ -434,11 +486,7 @@ fn pane_layout_in_glass(pane_id: u64, glass: Rect, m: Metrics, focused: bool) ->
     };
     let strip: f32 = row_h * 3.0;
 
-    let inner_x = glass.x + inset;
-    let inner_w = (glass.w - inset * 2.0).max(40.0);
-    let inner_top = glass.y + inset;
-    let inner_bottom = glass.y + glass.h - inset;
-    let cells_h = (inner_bottom - inner_top - strip).max(CELL_H_MIN);
+    let cells_h = (avail - strip).max(CELL_H_MIN);
     let cells = Rect::new(inner_x, inner_top, inner_w, cells_h);
 
     let divider = Rect::new(inner_x, cells.y + cells.h, inner_w, row_h);

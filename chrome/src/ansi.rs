@@ -18,6 +18,8 @@ pub struct AnsiDecoder {
     csi_has_num: bool,
     /// Private CSI (`?`) marker.
     csi_priv: bool,
+    /// CSI private prefix: `?` `>` `=` `<` (0 when none).
+    csi_prefix: u8,
     /// Whether the hardware/cursor should be drawn (`CSI ? 25 h/l`).
     pub cursor_visible: bool,
     /// Saved primary buffer while on the alternate screen.
@@ -32,6 +34,8 @@ pub struct AnsiDecoder {
     pending_cwd: Option<String>,
     /// Latest window/icon title from OSC 0 / 2 (consumed by the host).
     pending_title: Option<String>,
+    /// Bytes to write back to the PTY (DA / DECRQM answers). Host drains.
+    pending_replies: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,6 +46,8 @@ enum EscState {
     Csi,
     /// Skip OSC until BEL or ST
     Osc,
+    /// Device Control String — skip until ST (ESC \ ) or BEL.
+    Dcs,
 }
 
 impl Default for AnsiDecoder {
@@ -53,6 +59,7 @@ impl Default for AnsiDecoder {
             csi_num: 0,
             csi_has_num: false,
             csi_priv: false,
+            csi_prefix: 0,
             cursor_visible: true,
             primary_backup: None,
             scroll_region: None,
@@ -60,6 +67,7 @@ impl Default for AnsiDecoder {
             osc_buf: Vec::new(),
             pending_cwd: None,
             pending_title: None,
+            pending_replies: Vec::new(),
         }
     }
 }
@@ -82,6 +90,15 @@ impl AnsiDecoder {
     /// Take the latest OSC 0 / 2 window title, if any.
     pub fn take_title(&mut self) -> Option<String> {
         self.pending_title.take()
+    }
+
+    /// Drain PTY write-back replies (device attributes, mode reports, …).
+    pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.pending_replies)
+    }
+
+    fn reply(&mut self, bytes: &[u8]) {
+        self.pending_replies.push(bytes.to_vec());
     }
 
     fn finish_osc(&mut self) {
@@ -159,15 +176,24 @@ impl AnsiDecoder {
                     self.csi_num = 0;
                     self.csi_has_num = false;
                     self.csi_priv = false;
+                    self.csi_prefix = 0;
                 }
                 b']' => {
                     self.osc_buf.clear();
                     self.esc = EscState::Osc;
                 }
+                // DCS — skip payload until ST so probes never print as text.
+                b'P' => self.esc = EscState::Dcs,
                 // IND — index (move down / scroll)
-                b'D' => self.index_down(grid),
+                b'D' => {
+                    self.index_down(grid);
+                    self.esc = EscState::Ground;
+                }
                 // RI — reverse index
-                b'M' => self.index_up(grid),
+                b'M' => {
+                    self.index_up(grid);
+                    self.esc = EscState::Ground;
+                }
                 _ => self.esc = EscState::Ground,
             },
             EscState::Osc => {
@@ -184,10 +210,24 @@ impl AnsiDecoder {
                     self.osc_buf.push(b);
                 }
             }
-            EscState::Csi => match b {
-                b'?' if !self.csi_has_num && self.csi_params.is_empty() => {
-                    self.csi_priv = true;
+            EscState::Dcs => {
+                // Swallow DCS body; BEL or ESC ends (ESC \ = ST).
+                if b == 0x07 {
+                    self.esc = EscState::Ground;
+                } else if b == 0x1b {
+                    self.esc = EscState::Esc; // next `\` completes ST; other → Esc handler
                 }
+            }
+            EscState::Csi => match b {
+                // Private / intermediate parameter bytes at sequence start.
+                b'?' | b'>' | b'=' | b'<'
+                    if !self.csi_has_num && self.csi_params.is_empty() && self.csi_prefix == 0 =>
+                {
+                    self.csi_prefix = b;
+                    self.csi_priv = b == b'?' || b == b'>' || b == b'=' || b == b'<';
+                }
+                // Intermediate bytes (0x20–0x2F) — e.g. `$` in DECRQM. Stay in CSI.
+                0x20..=0x2f => {}
                 b'0'..=b'9' => {
                     self.csi_has_num = true;
                     self.csi_num = self.csi_num.saturating_mul(10).saturating_add((b - b'0') as u16);
@@ -197,33 +237,72 @@ impl AnsiDecoder {
                     self.csi_num = 0;
                     self.csi_has_num = false;
                 }
-                b'A'..=b'Z' | b'a'..=b'z' => {
+                // Final byte 0x40–0x7E (ECMA-48).
+                0x40..=0x7e => {
                     self.csi_params.push(if self.csi_has_num { self.csi_num } else { 0 });
                     let params = std::mem::take(&mut self.csi_params);
                     let priv_ = self.csi_priv;
+                    let prefix = self.csi_prefix;
+                    self.csi_priv = false;
+                    self.csi_prefix = 0;
                     self.esc = EscState::Ground;
-                    if priv_ {
-                        self.exec_priv_csi(grid, b, &params);
+                    if priv_ || prefix != 0 {
+                        self.exec_priv_csi(grid, b, &params, prefix);
                     } else {
                         self.exec_csi(grid, b, &params);
                     }
                 }
-                _ => self.esc = EscState::Ground,
+                // Cancel on C0 (except we already handled digits etc.).
+                _ => {
+                    self.esc = EscState::Ground;
+                    self.csi_priv = false;
+                    self.csi_prefix = 0;
+                    self.csi_params.clear();
+                    self.csi_num = 0;
+                    self.csi_has_num = false;
+                }
             },
         }
     }
 
-    fn exec_priv_csi(&mut self, grid: &mut CellGrid, final_byte: u8, params: &[u16]) {
-        match final_byte {
-            b'h' => {
+    fn exec_priv_csi(
+        &mut self,
+        grid: &mut CellGrid,
+        final_byte: u8,
+        params: &[u16],
+        prefix: u8,
+    ) {
+        match (prefix, final_byte) {
+            // CSI ? … h/l — DEC private modes
+            (b'?' | 0, b'h') => {
                 for &p in params {
                     self.set_priv_mode(grid, p, true);
                 }
             }
-            b'l' => {
+            (b'?' | 0, b'l') => {
                 for &p in params {
                     self.set_priv_mode(grid, p, false);
                 }
+            }
+            // CSI c / CSI 0 c — primary DA
+            (0, b'c') => {
+                // VT100-ish: ESC [ ? 1 ; 2 c
+                self.reply(b"\x1b[?1;2c");
+            }
+            // CSI > c / CSI > 0 c — secondary DA
+            (b'>', b'c') => {
+                // xterm-like: ESC [ > 0 ; 100 ; 0 c
+                self.reply(b"\x1b[>0;100;0c");
+            }
+            // CSI ? … n — DSR private (e.g. DECXCPR). Report none / ignore.
+            (b'?', b'n') => {}
+            // CSI ? … $ p — DECRQM: report mode as reset (2) so apps don't hang.
+            // Final is `p` after intermediate `$` (already consumed).
+            (b'?', b'p') => {
+                let mode = params.first().copied().unwrap_or(0);
+                // ESC [ ? mode ; 2 $ y  (2 = reset)
+                let s = format!("\x1b[?{mode};2$y");
+                self.reply(s.as_bytes());
             }
             _ => {}
         }
@@ -274,6 +353,21 @@ impl AnsiDecoder {
                 .unwrap_or(default)
         };
         match final_byte {
+            b'c' => {
+                // Primary Device Attributes (CSI c / CSI 0 c)
+                self.reply(b"\x1b[?1;2c");
+            }
+            b'n' => {
+                // DSR — status report. CSI 5 n → OK; CSI 6 n → cursor pos.
+                let what = params.first().copied().unwrap_or(0);
+                if what == 5 {
+                    self.reply(b"\x1b[0n");
+                } else if what == 6 {
+                    let c = grid.cursor();
+                    let s = format!("\x1b[{};{}R", c.row + 1, c.col + 1);
+                    self.reply(s.as_bytes());
+                }
+            }
             b'm' => self.sgr(grid, params),
             b'H' | b'f' => {
                 let row = p(0, 1).saturating_sub(1);
@@ -680,6 +774,41 @@ mod tests {
             dec.take_cwd().as_deref(),
             Some("/Users/stephen/projects")
         );
+    }
+
+    #[test]
+    fn primary_da_replies_not_printed() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(40, 5);
+        dec.feed(&mut grid, b"\x1b[0c");
+        let replies = dec.take_replies();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0], b"\x1b[?1;2c");
+        // Must not dump into the cell grid
+        assert!(grid.snapshot_strings().iter().all(|s| s.is_empty()));
+    }
+
+    #[test]
+    fn csi_intermediate_does_not_print_final() {
+        // Old bug: `$` dropped CSI to Ground, then `p` printed as text.
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(40, 5);
+        dec.feed(&mut grid, b"\x1b[?2026$p");
+        let snap = grid.snapshot_strings();
+        assert!(!snap[0].contains('p'), "got {:?}", snap[0]);
+        let replies = dec.take_replies();
+        assert!(!replies.is_empty());
+    }
+
+    #[test]
+    fn alt_screen_sets_suppress_scrollback() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        dec.feed(&mut grid, b"\x1b[?1049h");
+        assert!(dec.on_alt_screen());
+        assert!(grid.suppress_scrollback);
+        dec.feed(&mut grid, b"\x1b[?1049l");
+        assert!(!dec.on_alt_screen());
     }
 
     #[test]
