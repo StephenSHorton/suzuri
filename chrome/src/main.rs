@@ -4,6 +4,10 @@
 //! Layout contract matches the surface spike: traffic / title · tabs · cell well · warp.
 //! Terminal cells are painted as mono text labels inside the glass well (live PTY).
 
+// Dual bin/lib crate: many helpers are host/API surface used by the library or
+// future hosts; the binary path does not exercise every method.
+#![allow(dead_code)]
+
 mod ansi;
 mod app;
 mod caffeine;

@@ -98,12 +98,17 @@ pub struct CellGrid {
     bg: Option<[f32; 3]>,
     /// Rows scrolled off the top (oldest first). Each row is `cols` cells.
     scrollback: Vec<Vec<Cell>>,
-    /// How many rows above the live viewport the user is viewing (0 = live).
+    /// Integer scroll target (rows above stick-bottom). Wheel/keys update this.
     view_offset: usize,
+    /// Smoothed offset for paint (product `scrollback.visual` / `tickSmooth`).
+    visual_offset: f32,
     /// After `clear`/`cls`, stick-bottom floors here (scroll-up still reaches pre-pin).
     /// Absolute scrollback index; `0` = no pin.
     scrollback_pin: usize,
 }
+
+/// Exponential ease rate for [`CellGrid::tick_scroll`] (~product k=16).
+const SCROLL_EASE_K: f32 = 16.0;
 
 impl CellGrid {
     pub fn new(cols: u16, rows: u16) -> Self {
@@ -119,6 +124,7 @@ impl CellGrid {
             bg: None,
             scrollback: Vec::new(),
             view_offset: 0,
+            visual_offset: 0.0,
             scrollback_pin: 0,
         }
     }
@@ -135,9 +141,43 @@ impl CellGrid {
         self.cursor
     }
 
-    /// Rows the user has scrolled up from the live bottom.
+    /// Integer scroll target (rows above stick-bottom).
     pub fn view_offset(&self) -> usize {
         self.view_offset
+    }
+
+    /// Smoothed scroll offset used for paint / scrollbar (may lag the target).
+    pub fn visual_offset(&self) -> f32 {
+        self.visual_offset
+    }
+
+    /// Ease `visual_offset` toward `view_offset`. Returns true if still moving.
+    pub fn tick_scroll(&mut self, dt: f32) -> bool {
+        let target = self.view_offset as f32;
+        let dt = dt.clamp(0.0, 0.05);
+        if dt <= 0.0 {
+            return (self.visual_offset - target).abs() > 0.02;
+        }
+        let prev = self.visual_offset;
+        let alpha = 1.0 - (-SCROLL_EASE_K * dt).exp();
+        self.visual_offset += (target - self.visual_offset) * alpha;
+        if (target - self.visual_offset).abs() < 0.02 {
+            self.visual_offset = target;
+        }
+        // Clamp to legal range if document shrank.
+        let max = self.max_view_offset() as f32;
+        if self.visual_offset > max {
+            self.visual_offset = max;
+        }
+        if self.visual_offset < 0.0 {
+            self.visual_offset = 0.0;
+        }
+        (self.visual_offset - prev).abs() > 0.001
+    }
+
+    /// Snap visual to the integer target (drag scrub / stick-bottom).
+    pub fn snap_scroll_visual(&mut self) {
+        self.visual_offset = self.view_offset as f32;
     }
 
     /// Number of rows retained in scrollback (oldest first).
@@ -152,12 +192,12 @@ impl CellGrid {
 
     /// Absolute document row for viewport row 0 (pin-aware stick-bottom).
     ///
-    /// Stick-bottom (`view_offset == 0`) composes post-pin scrollback + live
-    /// extent so command blocks stay visible above shell output (product
-    /// `viewWindow`). Scrolling up reveals pre-pin history.
+    /// Uses smoothed [`visual_offset`] for paint. Stick-bottom composes post-pin
+    /// scrollback + live extent so command blocks stay visible above shell
+    /// output (product `viewWindow`). Scrolling up reveals pre-pin history.
     pub fn view_top_abs(&self) -> usize {
-        self.stick_bottom_top()
-            .saturating_sub(self.view_offset)
+        let vis = self.visual_offset.max(0.0) as usize;
+        self.stick_bottom_top().saturating_sub(vis)
     }
 
     /// Top absolute row when fully stuck to the bottom (offset 0).
@@ -207,7 +247,7 @@ impl CellGrid {
         let thumb_h = (track_h * ratio).max(18.0).min(track_h);
         let travel = (track_h - thumb_h).max(0.0);
         let t = if max_off > 0 {
-            (self.view_offset as f32 / max_off as f32).clamp(0.0, 1.0)
+            (self.visual_offset / max_off as f32).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -222,10 +262,12 @@ impl CellGrid {
     }
 
     /// Set scroll position from a 0..=1 fraction (0 = stick bottom, 1 = oldest).
+    /// Snaps visual for responsive scrollbar scrubbing.
     pub fn set_scroll_fraction(&mut self, t: f32) {
         let max = self.max_view_offset();
         if max == 0 {
             self.view_offset = 0;
+            self.visual_offset = 0.0;
             return;
         }
         let t = t.clamp(0.0, 1.0);
@@ -233,6 +275,7 @@ impl CellGrid {
         if self.view_offset > max {
             self.view_offset = max;
         }
+        self.snap_scroll_visual();
     }
 
     /// Map a Y position within a track (0 at top) to scroll fraction.
@@ -317,6 +360,7 @@ impl CellGrid {
     }
 
     /// Scroll the view into history (positive = up into scrollback).
+    /// Updates the integer target; paint eases via [`tick_scroll`].
     pub fn scroll_view(&mut self, delta_rows: i32) {
         if delta_rows == 0 {
             return;
@@ -330,9 +374,10 @@ impl CellGrid {
         }
     }
 
-    /// Jump back to the live bottom of the viewport.
+    /// Jump back to the live bottom of the viewport (snaps visual).
     pub fn scroll_to_bottom(&mut self) {
         self.view_offset = 0;
+        self.visual_offset = 0.0;
     }
 
     /// Stick-bottom pin after clear (product `pinHere`).
@@ -344,6 +389,7 @@ impl CellGrid {
     pub fn pin_here(&mut self) {
         self.scrollback_pin = self.scrollback.len();
         self.view_offset = 0;
+        self.visual_offset = 0.0;
     }
 
     /// How many leading live rows have content (trailing blank PTY rows omitted).
@@ -397,6 +443,7 @@ impl CellGrid {
         self.cursor = Cursor::default();
         self.reset_pen();
         self.view_offset = 0;
+        self.visual_offset = 0.0;
         out
     }
 
@@ -435,6 +482,9 @@ impl CellGrid {
         let max = self.max_view_offset();
         if self.view_offset > max {
             self.view_offset = max;
+        }
+        if self.visual_offset > max as f32 {
+            self.visual_offset = max as f32;
         }
     }
 
@@ -519,6 +569,7 @@ impl CellGrid {
         if cols != self.cols {
             self.scrollback.clear();
             self.view_offset = 0;
+            self.visual_offset = 0.0;
             self.scrollback_pin = 0;
         }
         let mut next = vec![Cell::blank(); (cols as usize) * (rows as usize)];
@@ -546,6 +597,7 @@ impl CellGrid {
         self.cursor = Cursor::default();
         self.reset_pen();
         self.view_offset = 0;
+        self.visual_offset = 0.0;
     }
 
     /// Scroll the buffer up by `n` rows (content moves up; blank lines at bottom).
@@ -907,6 +959,7 @@ mod tests {
         let travel = sb.track_h - sb.thumb_h;
         assert!(sb.thumb_y >= travel * 0.9 - 1.0);
         g.scroll_view(g.max_view_offset() as i32);
+        g.snap_scroll_visual();
         let sb2 = g.scrollbar(200.0);
         assert!(sb2.thumb_y <= travel * 0.1 + 1.0);
     }
@@ -924,6 +977,23 @@ mod tests {
         g.set_scroll_fraction(0.5);
         let mid = g.max_view_offset() / 2;
         assert!((g.view_offset() as i32 - mid as i32).abs() <= 1);
+        assert!((g.visual_offset() - g.view_offset() as f32).abs() < 0.01);
+    }
+
+    #[test]
+    fn tick_scroll_eases_toward_target() {
+        let mut g = CellGrid::new(20, 6);
+        for i in 0..40 {
+            g.push_scrollback_text(&format!("y{i}"), None);
+        }
+        g.scroll_view(20);
+        assert_eq!(g.view_offset(), 20);
+        // Visual lags until tick.
+        assert!(g.visual_offset() < 5.0);
+        for _ in 0..30 {
+            g.tick_scroll(1.0 / 60.0);
+        }
+        assert!((g.visual_offset() - 20.0).abs() < 0.5);
     }
 
     #[test]
@@ -942,6 +1012,7 @@ mod tests {
         assert_eq!(g.view_top_abs(), g.scrollback_pin());
         // Scroll up can reach pre-pin history.
         g.scroll_view(g.max_view_offset() as i32);
+        g.snap_scroll_visual(); // tests: settle ease immediately
         assert_eq!(g.view_top_abs(), 0);
         let line: String = g.visible_row_cells(0).iter().map(|c| c.ch).collect();
         assert!(line.contains("old0"), "got {line:?}");

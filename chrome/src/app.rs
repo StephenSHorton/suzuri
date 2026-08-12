@@ -510,7 +510,7 @@ impl ChromeApp {
         {
             return;
         }
-        for (i, &idx) in filtered.iter().enumerate().take(6) {
+        for (_i, &idx) in filtered.iter().enumerate().take(6) {
             if cy >= y && cy <= y + btn_h && x >= modal.x + pad && x <= modal.x + modal.w - pad {
                 let action = self.commands[idx].action;
                 self.palette.close();
@@ -2375,6 +2375,10 @@ impl ApplicationHandler for ChromeApp {
                 // Publish rich status for Go bridge proxy (`chrome_status.json`).
                 self.publish_bridge_status();
                 let dt = 1.0 / 60.0;
+                // Smooth scroll ease (product tickSmooth) on every pane grid.
+                for pane in self.session.panes.values_mut() {
+                    let _ = pane.grid.tick_scroll(dt);
+                }
                 self.settings.tick(dt);
                 self.palette.tick(dt);
                 self.help.tick(dt);

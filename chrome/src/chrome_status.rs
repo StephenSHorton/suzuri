@@ -9,7 +9,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::cells::CellGrid;
 use crate::config_store;
@@ -420,6 +420,7 @@ pub fn clear_status() {
 mod tests {
     use super::*;
     use crate::session::ChromeSession;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_path(name: &str) -> PathBuf {
         let n = SystemTime::now()

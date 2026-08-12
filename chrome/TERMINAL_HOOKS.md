@@ -245,4 +245,5 @@ Wheel still calls `scroll_view(±lines)`.
 |-------|----------|
 | Thumb | Frost chip; size ∝ viewport/doc; bottom when `view_offset == 0` |
 | Hit | `HitTarget::ScrollBar` when pointer in right ~10px of cells |
-| Drag | `set_scroll_fraction` from track Y (product invert) |
+| Drag | `set_scroll_fraction` from track Y (product invert; snaps visual) |
+| Ease | `tick_scroll(dt)` eases `visual_offset` toward integer target (k≈16) |

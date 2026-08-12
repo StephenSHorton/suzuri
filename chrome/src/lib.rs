@@ -34,6 +34,8 @@
 //! replacement. Terminal mouse/OSC: `TERMINAL_HOOKS.md`. Settings: `SETTINGS_HOOKS.md`.
 
 #![doc(html_no_source)]
+// Host-facing re-exports and helpers may not all be used inside this crate.
+#![allow(dead_code)]
 
 pub mod ansi;
 pub mod cells;

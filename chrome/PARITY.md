@@ -72,6 +72,11 @@ go build -o suzuri ./cmd/suzuri && ./suzuri
 - Click/drag scrollbar track to scrub history
 - Scrollbar geom matches product (bottom = newest)
 
+## Wave 12 polish ✅
+- Smooth scroll ease (`visual_offset` → target, product `tickSmooth`)
+- Scrollbar scrub snaps; wheel/Page keys ease
+- Quieter dual bin/lib dead_code surface
+
 ## Later
 - Full in-process GPU present loop (cgo + host window)
 - Package install always ships `suzuri-chrome` sibling binary
