@@ -630,6 +630,18 @@ impl ChromeApp {
         }
     }
 
+    /// ⌘C / Ctrl+C while transfer is open: prefer ticket when present.
+    /// Falls back to terminal selection when transfer is closed (caller gates).
+    fn copy_transfer_ticket_if_any(&mut self) -> bool {
+        let Some(ticket) = self.transfer.copy_ticket() else {
+            return false;
+        };
+        if let Some(cb) = &mut self.clipboard {
+            let _ = cb.set_text(ticket);
+        }
+        true
+    }
+
     /// True if the pointer is over any open modal card (input, buttons, body).
     fn pointer_in_open_modal(&self) -> bool {
         let layout = self.current_layout();
@@ -696,6 +708,9 @@ impl ChromeApp {
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
                     self.workspace_ui
                         .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                } else if self.transfer.visible() && !self.transfer.ticket.is_empty() {
+                    // Click progress card / ticket chip → copy ticket (product parity).
+                    let _ = self.copy_transfer_ticket_if_any();
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -1047,6 +1062,15 @@ impl ChromeApp {
                         return;
                     }
                     "c" | "C" if !shift => {
+                        // Transfer open + ticket → copy ticket; else terminal selection.
+                        if self.transfer.open || self.transfer.visible() {
+                            if self.copy_transfer_ticket_if_any() {
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                        }
                         self.copy_selection_if_any();
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -1545,6 +1569,31 @@ impl ApplicationHandler for ChromeApp {
 
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_key(event_loop, &event);
+            }
+
+            // OS file drop → send path when transfer send prompt is open.
+            WindowEvent::HoveredFile(_) => {
+                if self.transfer.accepts_file_drop() {
+                    self.transfer.set_drop_hover(true);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::HoveredFileCancelled => {
+                if self.transfer.drop_hover {
+                    self.transfer.set_drop_hover(false);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::DroppedFile(path) => {
+                if self.transfer.on_path_dropped(path) {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
             }
 
             WindowEvent::Resized(size) => {

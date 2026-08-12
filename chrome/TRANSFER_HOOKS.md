@@ -8,11 +8,12 @@ references: `internal/chrome/transfer.go`, `internal/transfer/*`,
 
 | File | Role |
 |------|------|
-| `src/transfer_ui.rs` | Glass modal state: open/close/tick, path/ticket buffer, status fields |
+| `src/transfer_ui.rs` | Glass modal state: open/close/tick, path/ticket buffer, drop hover, copy flash |
 | `src/transfer_engine.rs` | Binary discovery, process spawn, NDJSON parse, background worker |
 
 `TransferUi` is owned by `ChromeApp` (`app.rs`). The renderer only reads public
-fields (`mode`, `buf`, `status`, `ticket`, animation helpers).
+fields (`mode`, `buf`, `status`, `ticket`, `drop_hover`, `copy_flash`, animation
+helpers).
 
 ## Public API (`TransferUi`) — keep compatible with `app.rs`
 
@@ -20,11 +21,17 @@ fields (`mode`, `buf`, `status`, `ticket`, animation helpers).
 |----------------|-----|
 | `open`, `mode`, `buf`, `status`, `ticket` | Render + input |
 | `phase`, `done_bytes`, `total_bytes` | Progress parity (optional in UI) |
+| `drop_hover`, `drop_hint`, `queue` | OS drag-drop (send) |
+| `copy_flash` | "Copied!" after ticket copy |
 | `open_send()` / `open_receive()` | Palette actions |
 | `close()` | Esc / overlay dismiss (cancels in-flight engine) |
-| `tick(dt)` | Animation + **drain engine channel** into status fields |
+| `tick(dt)` | Animation + **drain engine channel** + flash timeout |
 | `animated_modal_rect` / `content_ease` / `scrim_alpha` / `visible` | Layout |
 | `insert_char` / `backspace` / `submit` | Keyboard while prompt open |
+| `accepts_file_drop()` | Host gate: send open && not running |
+| `set_drop_hover(bool)` | `HoveredFile` / `HoveredFileCancelled` |
+| `on_paths_dropped` / `on_path_dropped` | `DroppedFile` → `buf` (+ `queue` multi) |
+| `copy_ticket() -> Option<String>` | Arms flash; host writes clipboard |
 
 Do not rename these without updating `app.rs` and `renderer.rs`.
 
@@ -59,6 +66,7 @@ submit()
               stdout → NDJSON lines → mpsc::Sender<EngineUpdate>
 tick(dt)
   └─ try_recv() → update phase / ticket / done / total / status
+  └─ decay copy_flash (~1.6s)
 close() / Drop
   └─ cancel flag → SIGINT then SIGKILL on child
 ```
@@ -107,7 +115,7 @@ Palette (product names):
 - **Send file (ticket)…** → `transfer.open_send()`
 - **Receive ticket…** → `transfer.open_receive()`
 
-Suggested key handling while `transfer.open`:
+### Keyboard while `transfer.open`
 
 | Key | Action |
 |-----|--------|
@@ -115,8 +123,43 @@ Suggested key handling while `transfer.open`:
 | Backspace | `backspace` |
 | Enter | `submit` |
 | Esc | `close` (cancels engine) |
+| ⌘C / Ctrl+C | `copy_ticket()` when ticket non-empty; else terminal selection copy |
 
-Each frame: `transfer.tick(dt)` before render so progress text stays live.
+When transfer is **closed**, ⌘C only copies the terminal selection (unchanged).
+
+### OS file drop (winit 0.30)
+
+| `WindowEvent` | Action |
+|---------------|--------|
+| `HoveredFile` | `set_drop_hover(true)` if `accepts_file_drop()` |
+| `HoveredFileCancelled` | `set_drop_hover(false)` |
+| `DroppedFile(path)` | `on_path_dropped(path)` → first path in `buf`, extras in `queue` |
+
+Drop is **send-only** and ignored while a job is running (does not steal drops
+from other contexts). Multi-file: first path is used; status notes count.
+
+### Ticket copy
+
+| Trigger | Action |
+|---------|--------|
+| ⌘C / Ctrl+C (transfer open, ticket set) | `copy_ticket()` + arboard |
+| Click transfer modal (ticket set) | same |
+| Glass chip label | `"Copy ticket"` or `"Copied!"` flash (~1.6s) |
+
+Each frame: `transfer.tick(dt)` before render so progress text and flash stay live.
+
+## Renderer
+
+Send idle modal:
+
+1. Title + status
+2. Drop zone glass (highlighted when `drop_hover`)
+3. Path field (`/path/to/file · or drop`)
+
+When `ticket` non-empty:
+
+1. Truncated ticket line
+2. Centered glass chip: **Copy ticket** / **Copied!**
 
 ## Parity vs product Go chrome
 
@@ -126,8 +169,8 @@ Each frame: `transfer.tick(dt)` before render so progress text stays live.
 | NDJSON progress / ticket | yes | yes (status + `ticket` field) |
 | Background engine | yes (`transferCtl`) | yes (`EngineJob` thread) |
 | Missing binary message | toast | status line |
-| Copy ticket (`c` / click) | yes | not yet (ticket shown; host can copy) |
-| OS drag-drop send | yes | not yet |
+| Copy ticket (`c` / click / chip) | yes | yes (⌘C + click + chip flash) |
+| OS drag-drop send | yes | yes (`DroppedFile` / hover) |
 | Progress bar glyph | yes | text `%` / bytes in `status` |
 
 ## Tests
