@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
-// Dir is %LOCALAPPDATA%\suzuri (or temp fallback).
+// Dir is the product config/data directory (same as notes, workspace, chrome mailboxes).
+// Falls back to LOCALAPPDATA/suzuri or temp for edge environments without config.
 func Dir() string {
+	if d := config.Dir(); d != "" {
+		return d
+	}
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
 		base = os.TempDir()

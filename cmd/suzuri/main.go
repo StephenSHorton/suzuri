@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
+	"github.com/StephenSHorton/suzuri/internal/chromehost"
 	"github.com/StephenSHorton/suzuri/internal/mcpsrv"
 	"github.com/StephenSHorton/suzuri/internal/transfer"
 	"github.com/StephenSHorton/suzuri/internal/ui"
@@ -49,6 +50,17 @@ func main() {
 	if len(os.Args) > 1 && transfer.IsTransferArg(os.Args[1]) {
 		winconsole.AttachParent()
 		os.Exit(transfer.RunCLI(os.Args[1:]))
+	}
+	// Native GPU chrome: explicit `suzuri chrome` always; bare `suzuri` when
+	// PreferChromeUI (SUZURI_UI=chrome|native, or chrome binary resolvable).
+	// Force classic ebiten with SUZURI_UI=classic.
+	if len(os.Args) > 1 && os.Args[1] == "chrome" {
+		winconsole.AttachParent()
+		os.Exit(chromehost.RunCLI(os.Args[2:]))
+	}
+	if len(os.Args) == 1 && chromehost.PreferChromeUI() {
+		winconsole.AttachParent()
+		os.Exit(chromehost.RunCLI(nil))
 	}
 
 	defer func() {
