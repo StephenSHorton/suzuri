@@ -16,6 +16,7 @@ use crate::layout::{FrameLayout, Metrics, PaneLayout, PanelInstance};
 use crate::rain_atlas::RainAtlas;
 use crate::rain_sim;
 use crate::rename::RenameState;
+use crate::links::LinkHoverSpan;
 use crate::selection::Selection;
 use crate::session::ChromeSession;
 use crate::caffeine::Caffeine;
@@ -28,6 +29,8 @@ use crate::text::{TextLabel, TextLayer, CARET_BLOCK, CARET_RGB};
 
 /// Jade selection wash alpha for full-block underlay (`█` mono labels).
 const SELECTION_ALPHA: f32 = 0.32;
+/// Primary wash under a hovered URL span (product link hover ≈ 12% BG blend).
+const LINK_HOVER_ALPHA: f32 = 0.14;
 
 /// Mono cell metrics for GohuFont uni14 (product design size 14px).
 /// Width ≈ half em of a 14px bitmap mono; height matches line box used in text layer.
@@ -665,6 +668,8 @@ impl Renderer {
         chip_ui: &ChipUi,
         // Active terminal selection (focused pane only; empty is a no-op).
         term_selection: &Selection,
+        // Hovered URL span for primary tint (focused pane; None = no-op).
+        hovered_link: Option<&LinkHoverSpan>,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -1026,6 +1031,7 @@ impl Renderer {
             chip_ui,
             &self.tab_jelly,
             term_selection,
+            hovered_link,
         );
         self.text.prepare(&self.device, &self.queue, &labels);
         self.text
@@ -1132,6 +1138,7 @@ fn chrome_labels(
     chip_ui: &ChipUi,
     tab_jelly: &TabJelly,
     term_selection: &Selection,
+    hovered_link: Option<&LinkHoverSpan>,
 ) -> Vec<TextLabel> {
     use crate::chrome_ui::{scale_rect, ChipId};
     // Chrome label colors track prefs theme (see SETTINGS_HOOKS.md / theme.rs).
@@ -1148,6 +1155,7 @@ fn chrome_labels(
     let cafe_on = [1.0, 0.82, 0.45, 0.95];
     let cafe_off = [0.45, 0.55, 0.48, 0.70];
     let selection_rgb = pal.jade;
+    let link_hover_rgb = pal.jade;
 
     let mut labels = Vec::with_capacity(128);
     let _ = tab_jelly; // labels no longer follow jelly
@@ -1234,9 +1242,14 @@ fn chrome_labels(
             continue;
         };
         let show_cursor = terminal_cursor_visible && pl.pane_id == focus;
-        // Selection is one global model for the focused leaf; other panes get none.
+        // Selection + link hover are one global model for the focused leaf.
         let pane_sel = if pl.pane_id == focus {
             Some(term_selection)
+        } else {
+            None
+        };
+        let pane_link = if pl.pane_id == focus {
+            hovered_link
         } else {
             None
         };
@@ -1247,6 +1260,8 @@ fn chrome_labels(
             show_cursor,
             pane_sel,
             selection_rgb,
+            pane_link,
+            link_hover_rgb,
         );
 
         // Footer is UI chrome (not terminal grid) — no ASCII dashes, no cell overflow.
@@ -2390,11 +2405,17 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// Paint terminal cells; optional selection underlay for the focused pane.
+/// Paint terminal cells; optional selection underlay + link-hover primary tint.
 ///
 /// # Selection highlight
 /// Uses full-block mono glyphs (`█`) with theme jade at [`SELECTION_ALPHA`]
 /// behind cell text — same pipeline as ANSI bg, no glass/shader fill pass.
+///
+/// # Link hover
+/// Product `applyLinkHoverTint`: primary FG + light primary BG blend on the
+/// hovered URL span. We paint a light jade underlay ([`LINK_HOVER_ALPHA`]) and
+/// recolor glyphs to theme primary. Selection underlay (if any) still paints
+/// first so drag-select remains visible over a hovered link.
 ///
 /// Remaining hooks (app / host): multi-click word/line select, right-click
 /// copy-or-paste, clear on focus change / resize / alt-screen, optional
@@ -2406,6 +2427,8 @@ fn push_pane_cells(
     cursor_visible: bool,
     selection: Option<&Selection>,
     selection_rgb: [f32; 3],
+    link_hover: Option<&LinkHoverSpan>,
+    link_hover_rgb: [f32; 3],
 ) {
     let mono_size = 14.0; // Gohu design size (product FontSizePx)
     let origin_x = pl.cells.x;
@@ -2425,7 +2448,9 @@ fn push_pane_cells(
         let has_cursor = cursor_visible && live_view && cursor.row == row;
         let has_selection =
             sel.is_some_and(|s| (0..grid.cols()).any(|c| s.contains(c, abs_row)));
-        if !has_content && !has_cursor && !has_selection {
+        let has_link_hover =
+            link_hover.is_some_and(|h| h.abs_row == abs_row && h.col0 < h.col1);
+        if !has_content && !has_cursor && !has_selection && !has_link_hover {
             continue;
         }
 
@@ -2437,25 +2462,57 @@ fn push_pane_cells(
 
         // Selection wash under glyphs (and under ANSI cell bg when both apply).
         if let Some(s) = sel {
-            push_selection_row(
+            push_accent_row(
                 labels,
-                s,
                 origin_x,
                 y,
                 mono_size,
                 grid.cols(),
                 abs_row,
                 selection_rgb,
+                SELECTION_ALPHA,
+                |col, ar| s.contains(col, ar),
             );
+        }
+
+        // Link hover wash (lighter than selection; product primary blend).
+        if let Some(h) = link_hover {
+            if h.abs_row == abs_row {
+                push_accent_row(
+                    labels,
+                    origin_x,
+                    y,
+                    mono_size,
+                    grid.cols(),
+                    abs_row,
+                    link_hover_rgb,
+                    LINK_HOVER_ALPHA,
+                    |col, ar| h.contains(col, ar),
+                );
+            }
         }
 
         let mut col = 0usize;
         while col < cells.len() {
             let start = col;
-            let fg = cells[col].fg;
+            let hover_cell = link_hover.is_some_and(|h| h.contains(col as u16, abs_row));
+            let fg = if hover_cell {
+                link_hover_rgb
+            } else {
+                cells[col].fg
+            };
             let bg = cells[col].bg;
             let mut text = String::new();
-            while col < cells.len() && cells[col].fg == fg && cells[col].bg == bg {
+            while col < cells.len() {
+                let ch_hover = link_hover.is_some_and(|h| h.contains(col as u16, abs_row));
+                let ch_fg = if ch_hover {
+                    link_hover_rgb
+                } else {
+                    cells[col].fg
+                };
+                if ch_fg != fg || cells[col].bg != bg || ch_hover != hover_cell {
+                    break;
+                }
                 text.push(cells[col].ch);
                 col += 1;
             }
@@ -2506,26 +2563,27 @@ fn push_pane_cells(
     }
 }
 
-/// Contiguous accent full-block runs for one viewport row of the selection.
-fn push_selection_row(
+/// Contiguous accent full-block runs for one viewport row (selection or link hover).
+fn push_accent_row(
     labels: &mut Vec<TextLabel>,
-    selection: &Selection,
     origin_x: f32,
     y: f32,
     mono_size: f32,
     cols: u16,
     abs_row: usize,
     accent: [f32; 3],
+    alpha: f32,
+    mut contains: impl FnMut(u16, usize) -> bool,
 ) {
     let mut col = 0u16;
     while col < cols {
-        if !selection.contains(col, abs_row) {
+        if !contains(col, abs_row) {
             col += 1;
             continue;
         }
         let start = col;
         col += 1;
-        while col < cols && selection.contains(col, abs_row) {
+        while col < cols && contains(col, abs_row) {
             col += 1;
         }
         let n = (col - start) as usize;
@@ -2536,7 +2594,7 @@ fn push_selection_row(
             x,
             y,
             mono_size,
-            [accent[0], accent[1], accent[2], SELECTION_ALPHA],
+            [accent[0], accent[1], accent[2], alpha],
         ));
     }
 }
