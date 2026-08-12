@@ -1,6 +1,24 @@
 //! Canvas UI GlyphRain defaults (motion/color params for the WGSL rain pass).
 //! The actual reveal is per-fragment in `shaders/rain.wgsl` — not labels.
 
+use bytemuck::{Pod, Zeroable};
+
+/// GPU uniform block for `shaders/rain.wgsl` (std140-ish 16-byte rows).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct RainUniforms {
+    /// xy = fb size, z = time, w = unused
+    pub res_time: [f32; 4],
+    /// x=cell, y=speed, z=speedVar, w=density
+    pub params: [f32; 4],
+    /// x=trail, y=glow, z=mutate, w=flicker
+    pub params2: [f32; 4],
+    /// x=layers, y=glyphCount, z=atlasGrid, w=unused
+    pub params3: [f32; 4],
+    pub color: [f32; 4],
+    pub head_color: [f32; 4],
+}
+
 /// Canvas UI DEFAULTS from GlyphRainVanilla.ts (jade body for suzuri chrome).
 pub const CELL: f32 = 15.0;
 /// Base phase rate — a bit lower so the slow-skewed median crawls.

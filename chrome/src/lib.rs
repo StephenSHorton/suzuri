@@ -50,6 +50,7 @@ pub mod echo_filter;
 pub mod input;
 pub mod layout;
 pub mod links;
+pub mod mouse_pty;
 pub mod new_window;
 pub mod notes;
 pub mod notes_ops;
@@ -102,6 +103,7 @@ pub use links::{
     clean_url, find_links_in_line, link_at, link_span_at_col, link_url_at_col, normalize_url,
     open_url_in_browser, LinkHoverSpan, LinkSpan,
 };
+pub use mouse_pty::encode_mouse_wheel;
 pub use new_window::{canonicalize_exe, resolve_self_exe, spawn_new_window};
 pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
 pub use pty::PtySession;

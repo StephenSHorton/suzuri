@@ -23,6 +23,7 @@ mod echo_filter;
 mod input;
 mod layout;
 mod links;
+mod mouse_pty;
 #[cfg(target_os = "macos")]
 mod macos_window;
 mod new_window;
@@ -32,6 +33,7 @@ mod panes;
 mod pty;
 mod rain_atlas;
 mod rain_sim;
+mod rain_thread;
 mod rename;
 mod renderer;
 mod selection;
