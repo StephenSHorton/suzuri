@@ -2545,7 +2545,16 @@ impl ApplicationHandler for ChromeApp {
                     if lines != 0 {
                         // Slightly faster than 1:1 so history feels snappy (product ~half-viewport on keys).
                         let step = (lines * 2).clamp(-12, 12);
-                        self.session.active_grid_mut().scroll_view(step);
+                        // Workspace chat owns the wheel while open (not the terminal).
+                        if self.workspace_ui.open {
+                            if step > 0 {
+                                self.workspace_ui.scroll_up(step as usize);
+                            } else {
+                                self.workspace_ui.scroll_down((-step) as usize);
+                            }
+                        } else {
+                            self.session.active_grid_mut().scroll_view(step);
+                        }
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }

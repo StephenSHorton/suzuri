@@ -586,6 +586,8 @@ pub struct PanelInstance {
     pub kind: f32,
     /// `_pad[0]` = opacity (Scrim/Modal) or 1; `_pad[1]` = press light 0..1 for chips.
     pub _pad: [f32; 2],
+    /// Optional glass face tint: rgb + strength 0..1 (workspace bubbles, etc.).
+    pub tint: [f32; 4],
 }
 
 impl PanelInstance {
@@ -595,6 +597,7 @@ impl PanelInstance {
             radius,
             kind: kind as u32 as f32,
             _pad: [1.0, 0.0],
+            tint: [0.0, 0.0, 0.0, 0.0],
         }
     }
 
@@ -605,6 +608,17 @@ impl PanelInstance {
 
     pub fn with_press(mut self, press: f32) -> Self {
         self._pad[1] = press.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Soft color wash on glass (`strength` 0..1; 0 = no tint).
+    pub fn with_tint(mut self, rgb: [f32; 3], strength: f32) -> Self {
+        self.tint = [
+            rgb[0].clamp(0.0, 1.0),
+            rgb[1].clamp(0.0, 1.0),
+            rgb[2].clamp(0.0, 1.0),
+            strength.clamp(0.0, 1.0),
+        ];
         self
     }
 }

@@ -38,6 +38,74 @@ pub const CHANNEL_LIST_TOP: f32 = MODAL_PAD + 18.0;
 pub const COMPOSE_H: f32 = 44.0;
 /// Height reserved under the title for the presence strip (message pane).
 pub const PRESENCE_STRIP_H: f32 = 18.0;
+/// Max message bubbles painted at once (also scroll window size).
+pub const VISIBLE_BUBBLE_CAP: usize = 14;
+/// Vertical gap between chat bubbles.
+pub const BUBBLE_GAP: f32 = 8.0;
+/// Min bubble height (header + body + padding).
+pub const BUBBLE_MIN_H: f32 = 48.0;
+
+/// Product `memberPalette` — stable FNV-picked colors for participants.
+pub const MEMBER_PALETTE: &[[f32; 3]] = &[
+    [0.498, 0.859, 1.0],   // #7FDBFF aqua
+    [1.0, 0.863, 0.0],     // #FFDC00 gold
+    [1.0, 0.522, 0.106],   // #FF851B orange
+    [0.694, 0.051, 0.788], // #B10DC9 purple
+    [0.180, 0.800, 0.251], // #2ECC40 green
+    [1.0, 0.255, 0.212],   // #FF4136 red
+    [0.224, 0.800, 0.800], // #39CCCC teal
+    [0.941, 0.071, 0.745], // #F012BE fuchsia
+    [0.004, 1.0, 0.439],   // #01FF70 lime
+    [0.498, 0.859, 0.792], // #7FDBCA mint
+    [0.902, 0.859, 0.455], // #E6DB74 soft yellow
+    [0.682, 0.506, 1.0],   // #AE81FF soft violet
+    [0.400, 0.851, 0.937], // #66D9EF soft cyan
+    [0.992, 0.592, 0.122], // #FD971F soft orange
+    [0.651, 0.886, 0.180], // #A6E22E soft green
+    [0.976, 0.149, 0.447], // #F92672 pink
+];
+
+/// Glyphs from product `memberGlyphs` (subset that bitmap fonts usually cover).
+pub const MEMBER_GLYPHS: &[&str] = &[
+    "◆", "◇", "●", "○", "▲", "△", "■", "□", "★", "☆", "✦", "✧", "◉", "◎", "⬡", "⬢",
+];
+
+/// One painted chat bubble (geometry + content for panels / labels).
+#[derive(Clone, Debug)]
+pub struct MsgBubble {
+    pub rect: Rect,
+    /// True when this is the local human's message (right-aligned, accent tint).
+    pub mine: bool,
+    pub system: bool,
+    /// Glass face tint RGB (member color or theme accent for mine).
+    pub tint: [f32; 3],
+    /// Tint strength 0..1 for the glass shader wash.
+    pub tint_strength: f32,
+    pub header: String,
+    pub body: String,
+}
+
+/// FNV-1a 32-bit (matches Go `hash/fnv` New32a).
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    let mut h: u32 = 2166136261;
+    for &b in bytes {
+        h ^= b as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    h
+}
+
+/// Stable member color + glyph (product `memberIdentity`).
+pub fn member_identity(name: &str, kind: &str) -> ([f32; 3], &'static str) {
+    let mut key = name.trim().to_ascii_lowercase().into_bytes();
+    if kind.eq_ignore_ascii_case("agent") {
+        key.push(0x01);
+    }
+    let n = fnv1a32(&key);
+    let color = MEMBER_PALETTE[(n as usize) % MEMBER_PALETTE.len()];
+    let glyph = MEMBER_GLYPHS[((n >> 8) as usize) % MEMBER_GLYPHS.len()];
+    (color, glyph)
+}
 
 /// What the compose line is editing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -598,6 +666,161 @@ impl WorkspaceUi {
     pub fn scroll_down(&mut self, lines: usize) {
         self.scroll = self.scroll.saturating_sub(lines);
     }
+
+    /// Message column rect (right of channel list, above compose).
+    pub fn message_pane_rect(&self, win_w: f32, win_h: f32) -> Rect {
+        let modal = self.animated_modal_rect(win_w, win_h);
+        let pad = MODAL_PAD;
+        let ch_x = modal.x + pad;
+        let ch_w = CHANNEL_LIST_W;
+        let msg_x = ch_x + ch_w + 10.0;
+        let msg_w = (modal.x + modal.w - pad - msg_x).max(40.0);
+        let msg_y = modal.y + pad + PRESENCE_STRIP_H;
+        let msg_h = (modal.h - pad * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - 4.0).max(40.0);
+        Rect::new(msg_x, msg_y, msg_w, msg_h)
+    }
+
+    /// Whether `from` is the local human (mine → right + accent).
+    pub fn is_mine(&self, msg: &WsMessage) -> bool {
+        msg.from_kind.eq_ignore_ascii_case("human")
+            && msg.from.trim().eq_ignore_ascii_case(self.human.trim())
+    }
+
+    /// Layout bubbles for the visible window (top → bottom, newest at bottom when stick).
+    ///
+    /// `accent` is theme primary (jade) used for the local user's bubbles.
+    pub fn layout_bubbles(
+        &self,
+        win_w: f32,
+        win_h: f32,
+        accent: [f32; 3],
+    ) -> Vec<MsgBubble> {
+        let pane = self.message_pane_rect(win_w, win_h);
+        let msgs = self.visible_messages(VISIBLE_BUBBLE_CAP);
+        if msgs.is_empty() {
+            return Vec::new();
+        }
+
+        let inner_pad = 8.0;
+        let col_w = (pane.w - inner_pad * 2.0).max(80.0);
+        // Product ~96% of column; keep a side margin for alignment.
+        let max_bubble_w = (col_w * 0.92).max(120.0).min(col_w);
+
+        // Measure heights first, then pack from the bottom so stick-bottom feels right.
+        let mut measured: Vec<(f32, &WsMessage)> = Vec::with_capacity(msgs.len());
+        for msg in &msgs {
+            let h = if msg.kind == "system" {
+                28.0
+            } else {
+                // header + body (+ optional second wrap line for long bodies)
+                let body_lines = if msg.body.chars().count() > 48 { 2.0 } else { 1.0 };
+                (BUBBLE_MIN_H + (body_lines - 1.0) * 14.0).max(BUBBLE_MIN_H)
+            };
+            measured.push((h, *msg));
+        }
+
+        let total_h: f32 = measured.iter().map(|(h, _)| h + BUBBLE_GAP).sum::<f32>() - BUBBLE_GAP;
+        let mut y = if total_h < pane.h - inner_pad * 2.0 {
+            // Few messages: pin to bottom of pane.
+            pane.y + pane.h - inner_pad - total_h
+        } else {
+            pane.y + inner_pad
+        };
+
+        let mut out = Vec::with_capacity(measured.len());
+        for (h, msg) in measured {
+            if y + h > pane.y + pane.h - 2.0 {
+                break;
+            }
+            let system = msg.kind == "system";
+            let mine = !system && self.is_mine(msg);
+            let (mem_color, glyph) = member_identity(&msg.from, &msg.from_kind);
+            let (tint, tint_strength) = if system {
+                ([0.45, 0.5, 0.48], 0.12)
+            } else if mine {
+                (accent, 0.62)
+            } else {
+                (mem_color, 0.48)
+            };
+
+            let bw = if system {
+                col_w
+            } else {
+                // Hug content a bit: short bodies get a tighter bubble.
+                let chars = msg.body.chars().count().max(msg.from.chars().count() + 8);
+                let est = (chars as f32 * 7.2 + 28.0).clamp(100.0, max_bubble_w);
+                est
+            };
+            let bx = if system {
+                pane.x + inner_pad
+            } else if mine {
+                pane.x + pane.w - inner_pad - bw
+            } else {
+                pane.x + inner_pad
+            };
+
+            let name = if msg.from.is_empty() {
+                "?"
+            } else {
+                msg.from.as_str()
+            };
+            let header = if system {
+                format!("— {} —", truncate_runes(&msg.body, 48))
+            } else if msg.from_kind.eq_ignore_ascii_case("agent") {
+                format!("{glyph} {name} · ai")
+            } else if msg.kind == "file" {
+                format!("{glyph} {name} · file")
+            } else {
+                format!("{glyph} {name}")
+            };
+            let body = if system {
+                String::new()
+            } else if msg.kind == "file" {
+                if let Some(f) = &msg.file {
+                    format!("📎 {} ({})", f.name, human_bytes(f.bytes))
+                } else {
+                    truncate_runes(&msg.body, 64)
+                }
+            } else {
+                truncate_runes(&msg.body, 72)
+            };
+
+            out.push(MsgBubble {
+                rect: Rect::new(bx, y, bw, h),
+                mine,
+                system,
+                tint,
+                tint_strength,
+                header,
+                body,
+            });
+            y += h + BUBBLE_GAP;
+        }
+        out
+    }
+}
+
+fn truncate_runes(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
+    t.push('…');
+    t
+}
+
+fn human_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let f = n as f64;
+    if f >= MB {
+        format!("{:.1} MB", f / MB)
+    } else if f >= KB {
+        format!("{:.1} KB", f / KB)
+    } else {
+        format!("{n} B")
+    }
 }
 
 #[cfg(test)]
@@ -623,6 +846,60 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn member_identity_stable_and_distinct() {
+        let (c1, g1) = member_identity("alice", "human");
+        let (c2, g2) = member_identity("alice", "human");
+        assert_eq!(c1, c2);
+        assert_eq!(g1, g2);
+        let (c3, _) = member_identity("bob", "human");
+        // Different names usually differ; allow rare collision but hash must run.
+        let _ = c3;
+        let (agent, _) = member_identity("alice", "agent");
+        // Agent salt separates same display name.
+        assert_ne!(c1, agent);
+    }
+
+    #[test]
+    fn layout_bubbles_tints_mine_with_accent() {
+        let dir = temp_root("bubbles");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.human = "me".into();
+        ui.messages.push(WsMessage {
+            id: "1".into(),
+            channel: "general".into(),
+            from: "me".into(),
+            from_kind: "human".into(),
+            kind: "text".into(),
+            body: "hello self".into(),
+            ts: 1,
+            file: None,
+        });
+        ui.messages.push(WsMessage {
+            id: "2".into(),
+            channel: "general".into(),
+            from: "other".into(),
+            from_kind: "human".into(),
+            kind: "text".into(),
+            body: "hello other".into(),
+            ts: 2,
+            file: None,
+        });
+        let accent = [0.0, 0.9, 0.46];
+        let bubbles = ui.layout_bubbles(900.0, 700.0, accent);
+        assert_eq!(bubbles.len(), 2);
+        let mine = bubbles.iter().find(|b| b.mine).expect("mine bubble");
+        assert!((mine.tint[1] - accent[1]).abs() < 0.01);
+        assert!(mine.tint_strength > 0.5);
+        let other = bubbles.iter().find(|b| !b.mine).expect("other");
+        assert!(!other.mine);
+        // Other uses member palette, not accent.
+        assert!((other.tint[1] - accent[1]).abs() > 0.05 || (other.tint[0] - accent[0]).abs() > 0.05);
+        // Mine sits further right than other.
+        assert!(mine.rect.x > other.rect.x);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

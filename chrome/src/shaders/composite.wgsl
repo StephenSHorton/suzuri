@@ -23,6 +23,8 @@ struct Panel {
     radius: f32,
     kind: f32,
     _pad: vec2f,
+    // rgb + strength (0 = no wash). Workspace chat bubbles / accent panes.
+    tint: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> u: FrameUniforms;
@@ -505,6 +507,11 @@ fn fs(in: VsOut) -> @location(0) vec4f {
         // Selected option button — soft primary tint
         if (p.kind > 14.5 && p.kind < 15.5) {
             rgb = mix(rgb, jade * 0.35 + rgb * 0.65, 0.35 * g.a);
+        }
+        // Per-panel tint (member colors / theme accent on message bubbles).
+        if (p.tint.w > 0.001) {
+            let t = clamp(p.tint.w, 0.0, 1.0) * g.a;
+            rgb = mix(rgb, p.tint.xyz * 0.55 + rgb * 0.45, t * 0.72);
         }
         col = mix(col, rgb, g.a * 0.96 * fade);
     }

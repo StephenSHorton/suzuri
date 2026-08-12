@@ -1629,6 +1629,20 @@ fn push_modal_glass(
         panels.push(
             PanelInstance::glass(msg, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
         );
+        // Chat bubbles — tinted glass (member palette / theme accent for mine).
+        let accent = settings.prefs.theme_colors().jade;
+        for b in workspace_ui.layout_bubbles(win_w, win_h, accent) {
+            let kind = if b.mine {
+                PanelKind::ModalButtonActive
+            } else {
+                PanelKind::ModalFrost
+            };
+            panels.push(
+                PanelInstance::glass(b.rect, m.chip_radius + 2.0, kind)
+                    .with_opacity(ease)
+                    .with_tint(b.tint, b.tint_strength),
+            );
+        }
         let input = Rect::new(
             modal.x + pad,
             modal.y + modal.h - pad - 44.0,
@@ -2235,7 +2249,6 @@ fn push_modal_labels(
     if workspace_ui.visible() {
         use crate::workspace_ui::{
             ComposeMode, CHANNEL_LIST_TOP, CHANNEL_LIST_W, CHANNEL_ROW_H, COMPOSE_H, MODAL_PAD,
-            PRESENCE_STRIP_H,
         };
         let ease = workspace_ui.content_ease().clamp(0.0, 1.0);
         let modal = workspace_ui.animated_modal_rect(win_w, win_h);
@@ -2292,31 +2305,50 @@ fn push_modal_labels(
                 tc,
             ));
         }
-        let msg_x = modal.x + pad + list_w + 10.0;
-        let mut my = modal.y + pad + 8.0 + PRESENCE_STRIP_H;
-        let msg_bottom = modal.y + modal.h - pad - COMPOSE_H - 8.0;
-        for msg in workspace_ui.visible_messages(12) {
-            if my > msg_bottom - 20.0 {
-                break;
+        // Chat bubble labels (geometry matches glass panels above).
+        let accent = settings.prefs.theme_colors().jade;
+        for b in workspace_ui.layout_bubbles(win_w, win_h, accent) {
+            let r = b.rect;
+            if b.system {
+                let mut sc = dim;
+                sc[3] *= ease;
+                labels.push(TextLabel::centered(
+                    b.header.clone(),
+                    [r.x, r.y, r.w, r.h],
+                    11.0,
+                    sc,
+                ));
+                continue;
             }
-            let mut fc = dim;
-            fc[3] *= ease;
-            let mut bc = muted;
+            // Header in member/accent color; body readable FG.
+            let mut hc = [
+                b.tint[0],
+                b.tint[1],
+                b.tint[2],
+                0.95 * ease,
+            ];
+            if b.mine {
+                // Accent header on self bubbles (theme primary).
+                hc = [accent[0], accent[1], accent[2], 0.98 * ease];
+            }
+            let mut bc = bright;
             bc[3] *= ease;
-            let from_label = if msg.kind == "file" {
-                format!("{} [file]:", msg.from)
-            } else {
-                format!("{}:", msg.from)
-            };
-            labels.push(TextLabel::new(from_label, msg_x, my, 11.0, fc));
             labels.push(TextLabel::new(
-                truncate_chars(&msg.body, 56),
-                msg_x + 8.0,
-                my + 14.0,
-                12.0,
-                bc,
+                b.header.clone(),
+                r.x + 10.0,
+                r.y + 8.0,
+                11.0,
+                hc,
             ));
-            my += 36.0;
+            if !b.body.is_empty() {
+                labels.push(TextLabel::new(
+                    b.body.clone(),
+                    r.x + 10.0,
+                    r.y + 24.0,
+                    12.0,
+                    bc,
+                ));
+            }
         }
         let input_y = modal.y + modal.h - pad - COMPOSE_H;
         let placeholder = match workspace_ui.mode {
