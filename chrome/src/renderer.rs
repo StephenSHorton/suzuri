@@ -2363,38 +2363,76 @@ fn push_modal_labels(
             }
         }
         let input_y = modal.y + modal.h - pad - COMPOSE_H;
+        // @mention picker above compose (message mode only).
+        if workspace_ui.mention_picker_open() {
+            let cands = workspace_ui.mention_candidates();
+            let sel = workspace_ui.mention_selected();
+            let row_h = 18.0;
+            let show_n = cands.len().min(6);
+            let box_h = row_h * show_n as f32 + 8.0;
+            let box_y = input_y - box_h - 4.0;
+            let box_x = modal.x + pad + list_w + 10.0;
+            for (i, m) in cands.iter().take(show_n).enumerate() {
+                let (rgb, glyph) = crate::workspace_ui::member_identity(&m.name, &m.kind);
+                let tc = if i == sel {
+                    [rgb[0], rgb[1], rgb[2], 0.98 * ease]
+                } else {
+                    let mut d = dim;
+                    d[3] *= ease;
+                    d
+                };
+                let kind = if m.kind.eq_ignore_ascii_case("agent") {
+                    " · ai"
+                } else {
+                    ""
+                };
+                labels.push(TextLabel::new(
+                    format!("{glyph} @{}{kind}", m.name),
+                    box_x,
+                    box_y + 4.0 + i as f32 * row_h,
+                    12.0,
+                    tc,
+                ));
+            }
+        }
         let placeholder = match workspace_ui.mode {
             ComposeMode::NewChannel => "Channel name · Enter to create",
             ComposeMode::AttachPath => "Path to attach · Enter to upload",
-            ComposeMode::Message => "Message #… · Enter to send · drop file to attach",
+            ComposeMode::Message => "Message #… · @mention · Enter to send",
         };
-        let draft = if workspace_ui.draft.is_empty() {
-            placeholder
+        let draft_x = modal.x + pad + 14.0;
+        let draft_y = input_y + 14.0;
+        if workspace_ui.draft.is_empty() {
+            let mut dc = dim;
+            dc[3] *= ease;
+            labels.push(TextLabel::new(
+                placeholder.to_string(),
+                draft_x,
+                draft_y,
+                13.0,
+                dc,
+            ));
         } else {
-            workspace_ui.draft.as_str()
-        };
-        let mut dc = if workspace_ui.draft.is_empty() {
-            dim
-        } else {
-            bright
-        };
-        dc[3] *= ease;
-        labels.push(TextLabel::new(
-            draft.to_string(),
-            modal.x + pad + 14.0,
-            input_y + 14.0,
-            13.0,
-            dc,
-        ));
+            // Paint @mentions in member color; rest in FG.
+            let mut x = draft_x;
+            for seg in workspace_ui.compose_highlight_segments() {
+                let c = if let Some(rgb) = seg.mention_rgb {
+                    [rgb[0], rgb[1], rgb[2], 0.98 * ease]
+                } else {
+                    let mut b = bright;
+                    b[3] *= ease;
+                    b
+                };
+                labels.push(TextLabel::new(seg.text.clone(), x, draft_y, 13.0, c));
+                x += seg.text.chars().count() as f32 * 7.5;
+            }
+        }
         if !workspace_ui.draft.is_empty() || caret_a > 0.02 {
-            let cx = modal.x
-                + pad
-                + 14.0
-                + workspace_ui.draft.chars().count() as f32 * 7.5;
+            let cx = draft_x + workspace_ui.draft.chars().count() as f32 * 7.5;
             labels.push(TextLabel::new(
                 CARET_BLOCK,
                 cx,
-                input_y + 14.0,
+                draft_y,
                 13.0,
                 caret_rgba(caret_a * ease),
             ));
