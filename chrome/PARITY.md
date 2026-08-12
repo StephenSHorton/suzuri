@@ -27,9 +27,13 @@ go build -o suzuri ./cmd/suzuri && ./suzuri chrome
 - First-run splash (`splash_seen` in chrome_prefs)
 - Tab / pane rename dialog (F2 + palette)
 
+## Wave 5 ✅
+- Link hover paint (primary FG + light underlay on span)
+- Expanded `chrome_cmd` IPC (settings/help/transfer/new_tab/caffeine)
+- Copy toasts (`Copied` / `Ticket copied`)
+
 ## Later
 - Multi-window
 - In-process FFI / deeper Go embed
 - MCP attach polish
 - Selection word/line UX polish
-- Link hover paint (primary tint under URL span)
