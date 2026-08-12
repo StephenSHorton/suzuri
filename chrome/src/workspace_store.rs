@@ -16,9 +16,11 @@
 //! `~/Library/Application Support/suzuri/workspace`.
 
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 /// Default channel slug (matches product `workspace.DefaultChannel`).
 pub const DEFAULT_CHANNEL: &str = "general";
@@ -519,16 +521,17 @@ impl WorkspaceStore {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent).map_err(err)?;
         }
-        fs::copy(&src_path, &dst).map_err(|e| {
-            let _ = fs::remove_file(&dst);
-            e.to_string()
-        })?;
+        // Copy + SHA-256 in one pass (matches Go Store.Upload / copyFileSHA256).
         let bytes = meta.len();
+        let sha256 = copy_file_sha256(&src_path, &dst).map_err(|e| {
+            let _ = fs::remove_file(&dst);
+            e
+        })?;
         let ref_ = WsFileRef {
             id: file_id,
             name: base.clone(),
             bytes,
-            sha256: String::new(),
+            sha256,
             rel_path: rel,
         };
         let body = {
@@ -906,6 +909,26 @@ fn format_members_json(members: &[WsMember]) -> String {
     out
 }
 
+
+fn copy_file_sha256(src: &Path, dst: &Path) -> Result<String, String> {
+    let mut in_f = fs::File::open(src).map_err(|e| format!("open src: {e}"))?;
+    let mut out_f = fs::File::create(dst).map_err(|e| format!("create dst: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = in_f.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        out_f
+            .write_all(&buf[..n])
+            .map_err(|e| format!("write: {e}"))?;
+    }
+    out_f.flush().map_err(|e| format!("flush: {e}"))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 fn sanitize_file_name(name: &str) -> String {
     let name = Path::new(name)
         .file_name()
@@ -1207,6 +1230,7 @@ mod tests {
         let f = msg.file.as_ref().unwrap();
         assert_eq!(f.name, "src-hello.txt");
         assert_eq!(f.bytes, 12);
+        assert_eq!(f.sha256, "1b6409e937d5bf13ad8e21ff4ba46e2aae2d5c3884f74d3cfd1a8d5ce79c4fab");
         let abs = store.root().join(&f.rel_path);
         assert_eq!(fs::read_to_string(&abs).unwrap(), "hello attach");
         let hist = store.history("general", 10).unwrap();
