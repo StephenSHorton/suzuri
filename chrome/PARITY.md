@@ -57,6 +57,11 @@ go build -o suzuri ./cmd/suzuri && ./suzuri
 - Host command blocks: scrollback rule + `❯ cmd` + MCP `blocks[]` / history kinds
 - Snapshot notes include armed echo + recent blocks for `suzuri_diag`
 
+## Wave 9 polish ✅
+- `commit_live` before each block (previous output → history, live blanked)
+- Clear pin (`clear`/`cls`/`Clear-Host`) + stick-bottom
+- PTY payload uses CR (product `sendBarPayload`), multi-line → CR
+
 ## Later
 - Full in-process GPU present loop (cgo + host window)
 - Package install always ships `suzuri-chrome` sibling binary

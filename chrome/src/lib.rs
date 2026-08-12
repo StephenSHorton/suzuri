@@ -79,7 +79,9 @@ pub use chrome_status::{
     submit_path, take_submit, viewport_lines_of, ChromeSnapOut, PaneSnapExtra, StatusPublisher,
     TabSnapOut, HISTORY_TAIL, PUBLISH_INTERVAL, STATUS_FILE, SUBMIT_FILE,
 };
-pub use cmd_blocks::{CmdBlockLog, HIST_META_CAP, RECENT_BLOCKS};
+pub use cmd_blocks::{
+    is_clear_command, pty_submit_payload, CmdBlockLog, HIST_META_CAP, RECENT_BLOCKS,
+};
 pub use echo_filter::{EchoFilter, ECHO_FILTER_GIVE_UP};
 pub use confirm::{ConfirmChoice, ConfirmState};
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};

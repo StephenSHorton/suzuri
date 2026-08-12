@@ -90,6 +90,9 @@ pub struct CellGrid {
     scrollback: Vec<Vec<Cell>>,
     /// How many rows above the live viewport the user is viewing (0 = live).
     view_offset: usize,
+    /// After `clear`/`cls`, stick-bottom floors here (scroll-up still reaches pre-pin).
+    /// Absolute scrollback index; `0` = no pin.
+    scrollback_pin: usize,
 }
 
 impl CellGrid {
@@ -106,6 +109,7 @@ impl CellGrid {
             bg: None,
             scrollback: Vec::new(),
             view_offset: 0,
+            scrollback_pin: 0,
         }
     }
 
@@ -218,6 +222,71 @@ impl CellGrid {
         self.view_offset = 0;
     }
 
+    /// Stick-bottom pin after clear (product `pinHere`).
+    pub fn scrollback_pin(&self) -> usize {
+        self.scrollback_pin
+    }
+
+    /// Floor stick-bottom at current scrollback length (pre-pin history via scroll-up).
+    pub fn pin_here(&mut self) {
+        self.scrollback_pin = self.scrollback.len();
+        self.view_offset = 0;
+    }
+
+    /// How many leading live rows have content (trailing blank PTY rows omitted).
+    /// Product `liveExtent` — used by [`commit_live`].
+    pub fn live_extent(&self) -> usize {
+        let rows = self.rows as usize;
+        if rows == 0 {
+            return 0;
+        }
+        let mut last = self.cursor.row as isize;
+        for r in 0..rows {
+            let row = self.row_cells(r as u16);
+            if row.iter().any(|c| c.ch != ' ' && c.ch != '\0') {
+                last = last.max(r as isize);
+            }
+        }
+        if last < 0 {
+            0
+        } else {
+            (last as usize) + 1
+        }
+    }
+
+    /// Fold non-blank live rows into scrollback and blank the live grid (product `commitLive`).
+    ///
+    /// Skips when `on_alt_screen` (fullscreen TUI owns the grid). Returns committed
+    /// line texts (trimmed) for host history meta. Does not write to the real PTY.
+    pub fn commit_live(&mut self, on_alt_screen: bool) -> Vec<String> {
+        if on_alt_screen {
+            return Vec::new();
+        }
+        let extent = self.live_extent();
+        let mut out = Vec::new();
+        for r in 0..extent {
+            let line: String = self
+                .row_cells(r as u16)
+                .iter()
+                .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+                .collect();
+            let t = line.trim_end_matches([' ', '\t']).to_string();
+            if t.trim().is_empty() {
+                continue;
+            }
+            out.push(t.clone());
+            self.push_scrollback_text(&t, None);
+        }
+        // Host-side clear live region only (shell stream will repaint).
+        for cell in &mut self.cells {
+            *cell = Cell::blank();
+        }
+        self.cursor = Cursor::default();
+        self.reset_pen();
+        self.view_offset = 0;
+        out
+    }
+
     /// Cells for a visible row accounting for `view_offset` (scrollback + live).
     pub fn visible_row_cells(&self, row: u16) -> Vec<Cell> {
         let cols = self.cols as usize;
@@ -248,6 +317,7 @@ impl CellGrid {
             let drop_n = self.scrollback.len() - MAX_SCROLLBACK;
             self.scrollback.drain(0..drop_n);
             self.view_offset = self.view_offset.saturating_sub(drop_n);
+            self.scrollback_pin = self.scrollback_pin.saturating_sub(drop_n);
         }
     }
 
@@ -332,6 +402,7 @@ impl CellGrid {
         if cols != self.cols {
             self.scrollback.clear();
             self.view_offset = 0;
+            self.scrollback_pin = 0;
         }
         let mut next = vec![Cell::blank(); (cols as usize) * (rows as usize)];
         let copy_cols = (self.cols.min(cols)) as usize;

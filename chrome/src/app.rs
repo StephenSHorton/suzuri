@@ -19,7 +19,7 @@ use crate::ansi::AnsiDecoder;
 use crate::caffeine::Caffeine;
 use crate::chrome_status::{self, PaneSnapExtra, StatusPublisher};
 use crate::chrome_ui::{ChipId, ChipUi};
-use crate::cmd_blocks::CmdBlockLog;
+use crate::cmd_blocks::{self, CmdBlockLog};
 use crate::echo_filter::EchoFilter;
 use crate::commands::{
     default_commands, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
@@ -1843,22 +1843,26 @@ impl ChromeApp {
         let id = self.session.focus_pane_id();
         let cwd_display = self.session.display_cwd();
 
-        // Host command block + echo arm (even for mock path).
+        // Product applyBarSubmitToTab: commitLive → pushBlock → pin clear → arm echo.
+        let alt = self
+            .runtimes
+            .get(&id)
+            .map(|rt| rt.ansi.on_alt_screen())
+            .unwrap_or(false);
         if let Some(rt) = self.runtimes.get_mut(&id) {
             if let Some(grid) = self.session.grid_mut(id) {
-                rt.blocks.push_block(&line, grid, &cwd_display);
+                let _ = rt.blocks.prepare_submit(&line, grid, &cwd_display, alt);
             }
             rt.echo.arm(&line);
         } else if let Some(grid) = self.session.grid_mut(id) {
-            // No runtime — still paint a block for visibility.
             let mut log = CmdBlockLog::new();
-            log.push_block(&line, grid, &cwd_display);
+            let _ = log.prepare_submit(&line, grid, &cwd_display, false);
         }
 
+        // Product sendBarPayload: newlines → CR, trailing CR (not LF).
         let used_pty = if let Some(rt) = self.runtimes.get_mut(&id) {
             if let Some(pty) = &mut rt.pty {
-                let mut buf = line.as_bytes().to_vec();
-                buf.push(b'\n');
+                let buf = cmd_blocks::pty_submit_payload(&line);
                 let _ = pty.write_all(&buf);
                 true
             } else {

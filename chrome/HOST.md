@@ -181,9 +181,17 @@ Chrome writes a **bridge.Snapshot-compatible** document:
 | `tabs[].pty_tail` | Debug-quoted recent raw PTY bytes (~2 KiB) |
 | `notes[]` | Agent tags (`ui=chrome`, version, armed echo, recent blocks) |
 
-On warp submit chrome injects a rule + `❯ cmd` into scrollback (product
-`pushBlock`) and arms the echo filter so shell local-echo of the same line is
-stripped before the VT decoder.
+On warp submit chrome follows product `applyBarSubmitToTab` / `sendBarPayload`:
+
+1. **`commit_live`** — non-blank live rows → scrollback, blank host live grid  
+   (skipped on alt-screen)
+2. **`push_block`** — spacer + rule + `❯ cmd` (optional cwd)
+3. **`pin_here`** if command is `clear` / `cls` / `Clear-Host`
+4. **Arm echo filter** on the submitted line
+5. **PTY write** with newlines → CR and trailing CR (not LF)
+
+Echo-filtered PTY bytes then feed the VT decoder so local shell echo does not
+double-print the command.
 
 Go `chromehost.SnapshotFromChromeStatus` maps this into `bridge.Snapshot` for
 `/v1/status`, `/v1/snapshot`, `/v1/diag`. Legacy thin status (`tabs` as a count)
