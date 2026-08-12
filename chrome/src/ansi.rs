@@ -48,6 +48,11 @@ enum EscState {
     Osc,
     /// Device Control String — skip until ST (ESC \ ) or BEL.
     Dcs,
+    /// Application Program Command (`ESC _ … ST`) — Kitty graphics uses this
+    /// (`ESC _ G a=… ST`). Must not print the payload.
+    Apc,
+    /// Privacy Message (`ESC ^ … ST`) — swallow like APC/DCS.
+    Pm,
 }
 
 impl Default for AnsiDecoder {
@@ -184,6 +189,10 @@ impl AnsiDecoder {
                 }
                 // DCS — skip payload until ST so probes never print as text.
                 b'P' => self.esc = EscState::Dcs,
+                // APC — Kitty graphics: ESC _ G a=d,d=i,i=1,q=2 ST
+                b'_' => self.esc = EscState::Apc,
+                // PM — privacy message (rare); same swallow rule.
+                b'^' => self.esc = EscState::Pm,
                 // IND — index (move down / scroll)
                 b'D' => {
                     self.index_down(grid);
@@ -194,6 +203,8 @@ impl AnsiDecoder {
                     self.index_up(grid);
                     self.esc = EscState::Ground;
                 }
+                // ST alone (ESC \) — no-op if we got here without open string.
+                b'\\' => self.esc = EscState::Ground,
                 _ => self.esc = EscState::Ground,
             },
             EscState::Osc => {
@@ -210,13 +221,15 @@ impl AnsiDecoder {
                     self.osc_buf.push(b);
                 }
             }
-            EscState::Dcs => {
-                // Swallow DCS body; BEL or ESC ends (ESC \ = ST).
+            // DCS / APC / PM: swallow body until BEL or ESC (then ST via `\`).
+            EscState::Dcs | EscState::Apc | EscState::Pm => {
                 if b == 0x07 {
                     self.esc = EscState::Ground;
                 } else if b == 0x1b {
-                    self.esc = EscState::Esc; // next `\` completes ST; other → Esc handler
+                    // Next `\` = ST terminator; any other sequence restarts Esc.
+                    self.esc = EscState::Esc;
                 }
+                // else: discard payload byte (never put_char)
             }
             EscState::Csi => match b {
                 // Private / intermediate parameter bytes at sequence start.
@@ -296,6 +309,13 @@ impl AnsiDecoder {
             }
             // CSI ? … n — DSR private (e.g. DECXCPR). Report none / ignore.
             (b'?', b'n') => {}
+            // CSI ? u — Kitty keyboard progressive enhancement query.
+            // Reply with flags=0 (no enhancement) so apps don't hang or mis-parse.
+            (b'?', b'u') => {
+                self.reply(b"\x1b[?0u");
+            }
+            // CSI > flags u / CSI < n u — push/pop keyboard enhancement: accept silently.
+            (b'>' | b'<' | b'=', b'u') => {}
             // CSI ? … $ p — DECRQM: report mode as reset (2) so apps don't hang.
             // Final is `p` after intermediate `$` (already consumed).
             (b'?', b'p') => {
@@ -786,6 +806,35 @@ mod tests {
         assert_eq!(replies[0], b"\x1b[?1;2c");
         // Must not dump into the cell grid
         assert!(grid.snapshot_strings().iter().all(|s| s.is_empty()));
+    }
+
+    #[test]
+    fn kitty_graphics_apc_not_printed() {
+        // Grok (and product chrome) emit Kitty graphics: ESC _ G a=d,d=i,i=1,q=2 ST
+        // Without APC handling this leaked as literal "Ga=d,d=i,i=1,q=2" into the TUI.
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(80, 5);
+        dec.feed(&mut grid, b"hello\x1b_Ga=d,d=i,i=1,q=2\x1b\\world");
+        let snap = grid.snapshot_strings();
+        let row0 = &snap[0];
+        assert!(
+            !row0.contains("Ga=") && !row0.contains("q=2") && !row0.contains("d=i"),
+            "kitty graphics payload leaked: {row0:?}"
+        );
+        assert!(row0.contains("hello"), "got {row0:?}");
+        assert!(row0.contains("world"), "got {row0:?}");
+    }
+
+    #[test]
+    fn kitty_keyboard_query_silent() {
+        // crossterm supports_keyboard_enhancement: CSI ? u then CSI c
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(40, 5);
+        dec.feed(&mut grid, b"\x1b[?u\x1b[c");
+        assert!(grid.snapshot_strings().iter().all(|s| s.is_empty()));
+        // DA still replies
+        let replies = dec.take_replies();
+        assert!(replies.iter().any(|r| r == b"\x1b[?1;2c"));
     }
 
     #[test]
