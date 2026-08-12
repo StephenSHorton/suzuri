@@ -73,8 +73,9 @@ pub use commands::{
     PaletteState, SplashState,
 };
 pub use chrome_status::{
-    clear_status, publish_status, status_path, submit_path, take_submit, StatusPublisher,
-    PUBLISH_INTERVAL, STATUS_FILE, SUBMIT_FILE,
+    clear_status, history_tail_of, live_lines_of, publish_status, snap_from_session, status_path,
+    submit_path, take_submit, viewport_lines_of, ChromeSnapOut, StatusPublisher, TabSnapOut,
+    HISTORY_TAIL, PUBLISH_INTERVAL, STATUS_FILE, SUBMIT_FILE,
 };
 pub use confirm::{ConfirmChoice, ConfirmState};
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};

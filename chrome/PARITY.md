@@ -47,7 +47,12 @@ go build -o suzuri ./cmd/suzuri && ./suzuri
 - `chrome_status.json` + `chrome_submit` mailboxes
 - FFI `present` / `present_available` stubs (GPU remains process-spawn)
 
+## Wave 8 ✅
+- Rich chrome→bridge snapshot: tabs, viewport, live_lines, history_tail, pty_tail
+- Go `SnapshotFromChromeStatus` for MCP diag/status/snapshot
+- Legacy thin status still accepted
+
 ## Later
 - Full in-process GPU present loop (cgo + host window)
-- Chrome→bridge viewport/PTY diag snapshot (richer than status file)
+- Command blocks + echo filter in chrome status
 - Package install always ships `suzuri-chrome` sibling binary

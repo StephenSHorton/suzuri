@@ -165,8 +165,26 @@ same loopback MCP bridge as classic ebiten:
 | Status / snapshot | From `{config}/chrome_status.json` (chrome publishes ~750ms) |
 | Submit | `{config}/chrome_submit` one line → chrome warp/PTY path |
 
-`suzuri mcp` attaches unchanged. Full PTY diag/viewport text still needs deeper
-chrome→host snapshot wiring; status + tabs + submit + notes/workspace work today.
+#### Rich `chrome_status.json` (diag / snapshot)
+
+Chrome writes a **bridge.Snapshot-compatible** document:
+
+| Field | Content |
+|-------|---------|
+| `pid`, `cols`, `rows`, `active_tab`, `version` | Process + grid |
+| `tabs[]` | Per-tab: `title`, `alive`, `input` (warp draft), `alt_screen` |
+| `tabs[].live_lines` | Live grid rows (trailing spaces trimmed) |
+| `tabs[].viewport` | What the user sees (`view_offset` respected) |
+| `tabs[].history_tail` | Recent scrollback lines (`kind: normal`) |
+| `tabs[].pty_tail` | Debug-quoted recent raw PTY bytes (~2 KiB) |
+| `notes[]` | Agent tags (`ui=chrome`, version) |
+
+Go `chromehost.SnapshotFromChromeStatus` maps this into `bridge.Snapshot` for
+`/v1/status`, `/v1/snapshot`, `/v1/diag`. Legacy thin status (`tabs` as a count)
+is still accepted.
+
+`suzuri mcp` attaches unchanged: notes/workspace work offline; status/diag/submit
+work when chrome is running with the bridge proxy.
 
 **Defaults stay simple:** spawn does **not** require the mailbox file. Chrome
 fails soft if files are missing.

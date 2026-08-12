@@ -40,10 +40,33 @@ use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
 use crate::workspace_ui::WorkspaceUi;
 
+/// Max raw PTY bytes retained for MCP `pty_tail` (recent end of stream).
+const PTY_TAIL_CAP: usize = 2048;
+
 /// Per-pane live shell state (keyed by pane id).
 struct PaneRuntime {
     pty: Option<PtySession>,
     ansi: AnsiDecoder,
+    /// Recent raw PTY bytes (ring-ish: keep last PTY_TAIL_CAP).
+    pty_tail: String,
+}
+
+impl PaneRuntime {
+    fn push_pty_tail(&mut self, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.pty_tail.push_str(chunk);
+        if self.pty_tail.len() > PTY_TAIL_CAP {
+            let drop_n = self.pty_tail.len() - PTY_TAIL_CAP;
+            // Drop whole chars from the front.
+            let mut cut = drop_n;
+            while !self.pty_tail.is_char_boundary(cut) && cut < self.pty_tail.len() {
+                cut += 1;
+            }
+            self.pty_tail = self.pty_tail[cut..].to_string();
+        }
+    }
 }
 
 pub struct ChromeApp {
@@ -169,6 +192,7 @@ fn spawn_pane_runtime(
             PaneRuntime {
                 pty: Some(pty),
                 ansi: AnsiDecoder::new(),
+                pty_tail: String::new(),
             }
         }
         Err(e) => {
@@ -177,6 +201,7 @@ fn spawn_pane_runtime(
             PaneRuntime {
                 pty: None,
                 ansi: AnsiDecoder::new(),
+                pty_tail: String::new(),
             }
         }
     }
@@ -330,6 +355,7 @@ impl ChromeApp {
             if let Some(pty) = &mut rt.pty {
                 let chunk = pty.try_read();
                 if !chunk.is_empty() {
+                    rt.push_pty_tail(&chunk);
                     pending.push((*id, chunk));
                 }
             }
@@ -1759,6 +1785,25 @@ impl ChromeApp {
         self.submit_line_text(&line);
     }
 
+    /// Snapshot for MCP bridge: tabs + viewport/live lines + PTY meta.
+    fn publish_bridge_status(&mut self) {
+        let mut meta: Vec<(u64, bool, bool, String, String)> = Vec::new();
+        for (pane_id, rt) in &mut self.runtimes {
+            let alive = rt.pty.as_mut().map(|p| p.is_alive()).unwrap_or(false);
+            let alt = rt.ansi.on_alt_screen();
+            // Debug-quoted tail matches product bridge.TabSnap.PtyTail style.
+            let tail = if rt.pty_tail.is_empty() {
+                String::new()
+            } else {
+                format!("{:?}", rt.pty_tail)
+            };
+            meta.push((*pane_id, alive, alt, String::new(), tail));
+        }
+        // Panes without a runtime still appear via session tabs.
+        let snap = chrome_status::snap_from_session(&self.session, &meta);
+        self.status_publisher.tick(&snap);
+    }
+
     /// Host / MCP submit path: run `line` as if entered in the warp bar.
     fn submit_line_text(&mut self, line: &str) {
         let line = line.trim_end();
@@ -2189,8 +2234,8 @@ impl ApplicationHandler for ChromeApp {
                 if let Some(line) = chrome_status::take_submit() {
                     self.submit_line_text(&line);
                 }
-                // Publish status for Go bridge proxy (`chrome_status.json`).
-                self.status_publisher.tick(&self.session);
+                // Publish rich status for Go bridge proxy (`chrome_status.json`).
+                self.publish_bridge_status();
                 let dt = 1.0 / 60.0;
                 self.settings.tick(dt);
                 self.palette.tick(dt);

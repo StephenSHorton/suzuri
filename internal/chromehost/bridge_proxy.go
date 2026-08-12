@@ -32,15 +32,32 @@ func SubmitPath() string {
 	return filepath.Join(config.Dir(), SubmitFile)
 }
 
-// ChromeStatus is the JSON shape written by native chrome (best-effort).
+// ChromeStatus is the JSON shape written by native chrome (rich snapshot).
+// Field names align with bridge.Snapshot / bridge.TabSnap where possible.
 type ChromeStatus struct {
-	PID         int    `json:"pid"`
-	Tabs        int    `json:"tabs"`
-	ActiveTab   int    `json:"active_tab"`
+	PID       int              `json:"pid"`
+	Version   string           `json:"version,omitempty"`
+	Cols      int              `json:"cols,omitempty"`
+	Rows      int              `json:"rows,omitempty"`
+	ActiveTab int              `json:"active_tab"`
+	Tabs      []bridge.TabSnap `json:"-"` // parsed from raw "tabs" (array or legacy count)
+	Notes     []string         `json:"notes,omitempty"`
+	// Legacy flat fields (wave 7 thin status) — still accepted.
+	TabsCount   int    `json:"-"`
 	ActiveTitle string `json:"active_title,omitempty"`
-	Cols        int    `json:"cols,omitempty"`
-	Rows        int    `json:"rows,omitempty"`
-	Version     string `json:"version,omitempty"`
+}
+
+// chromeStatusWire is the on-disk JSON form. "tabs" may be an array (rich) or
+// a number (wave-7 thin status).
+type chromeStatusWire struct {
+	PID         int             `json:"pid"`
+	Version     string          `json:"version,omitempty"`
+	Cols        int             `json:"cols,omitempty"`
+	Rows        int             `json:"rows,omitempty"`
+	ActiveTab   int             `json:"active_tab"`
+	Tabs        json.RawMessage `json:"tabs,omitempty"`
+	Notes       []string        `json:"notes,omitempty"`
+	ActiveTitle string          `json:"active_title,omitempty"`
 }
 
 // ReadChromeStatus loads chrome_status.json if present.
@@ -49,11 +66,112 @@ func ReadChromeStatus() (ChromeStatus, error) {
 	if err != nil {
 		return ChromeStatus{}, err
 	}
-	var st ChromeStatus
-	if err := json.Unmarshal(b, &st); err != nil {
+	return ParseChromeStatus(b)
+}
+
+// ParseChromeStatus unmarshals a chrome_status.json document.
+func ParseChromeStatus(b []byte) (ChromeStatus, error) {
+	var wire chromeStatusWire
+	if err := json.Unmarshal(b, &wire); err != nil {
 		return ChromeStatus{}, err
 	}
+	st := ChromeStatus{
+		PID:         wire.PID,
+		Version:     wire.Version,
+		Cols:        wire.Cols,
+		Rows:        wire.Rows,
+		ActiveTab:   wire.ActiveTab,
+		Notes:       wire.Notes,
+		ActiveTitle: wire.ActiveTitle,
+	}
+	if len(wire.Tabs) > 0 {
+		// Prefer array of tab snaps; fall back to integer tab count.
+		var tabs []bridge.TabSnap
+		if err := json.Unmarshal(wire.Tabs, &tabs); err == nil {
+			st.Tabs = tabs
+		} else {
+			var n int
+			if err2 := json.Unmarshal(wire.Tabs, &n); err2 == nil {
+				st.TabsCount = n
+			}
+		}
+	}
 	return st, nil
+}
+
+// SnapshotFromChromeStatus maps chrome_status.json into a bridge.Snapshot.
+func SnapshotFromChromeStatus(st ChromeStatus, fallbackPID int) bridge.Snapshot {
+	pid := st.PID
+	if pid <= 0 {
+		pid = fallbackPID
+	}
+	cols, rows := st.Cols, st.Rows
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+
+	tabs := st.Tabs
+	if len(tabs) == 0 {
+		// Legacy thin status: synthesize one tab.
+		n := st.TabsCount
+		if n < 1 {
+			n = 1
+		}
+		title := st.ActiveTitle
+		if title == "" {
+			title = "suzuri-chrome"
+		}
+		tabs = make([]bridge.TabSnap, 0, n)
+		for i := 0; i < n; i++ {
+			t := bridge.TabSnap{ID: i, Alive: true}
+			if i == st.ActiveTab {
+				t.Title = title
+			} else {
+				t.Title = fmt.Sprintf("tab %d", i)
+			}
+			tabs = append(tabs, t)
+		}
+	}
+
+	// Ensure every tab has non-nil slices (JSON null → nil).
+	for i := range tabs {
+		if tabs[i].LiveLines == nil {
+			tabs[i].LiveLines = []string{}
+		}
+		if tabs[i].Viewport == nil {
+			tabs[i].Viewport = []string{}
+		}
+		if tabs[i].Blocks == nil {
+			tabs[i].Blocks = []bridge.Block{}
+		}
+		if tabs[i].History == nil {
+			tabs[i].History = []bridge.HLine{}
+		}
+	}
+
+	notes := st.Notes
+	if len(notes) == 0 {
+		notes = []string{
+			"ui=chrome",
+			"bridge=chromehost proxy",
+		}
+	}
+	// Tag version for agents.
+	if st.Version != "" {
+		notes = append(notes, "chrome_version="+st.Version)
+	}
+
+	return bridge.Snapshot{
+		PID:       pid,
+		Cols:      cols,
+		Rows:      rows,
+		ActiveTab: st.ActiveTab,
+		Tabs:      tabs,
+		Notes:     notes,
+	}
 }
 
 // WriteSubmit writes a line for chrome to feed into the focused warp/PTY path.
@@ -101,7 +219,6 @@ func startChromeBridge(chromePID int) (*bridge.Host, error) {
 	h := bridge.NewHost()
 	h.BindNotes(func(req bridge.NotesRequest) bridge.NotesResult {
 		off := chrome.ApplyNotesDiskOp(string(req.Op), req.ID, req.Title, req.Body, req.SetActive)
-		// Nudge open chrome UI if notes changed.
 		switch req.Op {
 		case bridge.NotesOpCreate, bridge.NotesOpUpdate, bridge.NotesOpDelete:
 			_ = SendCommand(CmdOpenNotes)
@@ -125,7 +242,6 @@ func startChromeBridge(chromePID int) (*bridge.Host, error) {
 			Status:     req.Status,
 			StatusNote: req.StatusNote,
 		})
-		// Soft-refresh open workspace panel (chrome polls mailbox).
 		_ = SendCommand(CmdRefreshWorkspace)
 		return workspaceBridgeFromResult(r)
 	})
@@ -137,7 +253,6 @@ func startChromeBridge(chromePID int) (*bridge.Host, error) {
 	if _, err := h.Start(); err != nil {
 		return nil, err
 	}
-	// Seed snapshot so status is OK before chrome_status.json exists.
 	h.Publish(bridge.Snapshot{
 		PID:       chromePID,
 		ActiveTab: 0,
@@ -146,62 +261,21 @@ func startChromeBridge(chromePID int) (*bridge.Host, error) {
 			Title: "suzuri-chrome",
 			Alive: true,
 		}},
-		Notes: []string{"ui=chrome", "bridge=chromehost proxy (disk notes/workspace + mailboxes)"},
+		Notes: []string{"ui=chrome", "bridge=chromehost proxy (waiting for chrome_status.json)"},
 	})
 	return h, nil
 }
 
 func publishChromeStatus(h *bridge.Host, chromePID int) {
 	st, err := ReadChromeStatus()
-	tabs := 1
-	active := 0
-	title := "suzuri-chrome"
-	cols, rows := 80, 24
-	if err == nil {
-		if st.Tabs > 0 {
-			tabs = st.Tabs
-		}
-		active = st.ActiveTab
-		if st.ActiveTitle != "" {
-			title = st.ActiveTitle
-		}
-		if st.Cols > 0 {
-			cols = st.Cols
-		}
-		if st.Rows > 0 {
-			rows = st.Rows
-		}
-		if st.PID > 0 {
-			chromePID = st.PID
-		}
+	if err != nil {
+		// Keep last good snapshot; only seed a minimal one if never published.
+		return
 	}
-	tabSnaps := make([]bridge.TabSnap, 0, tabs)
-	for i := 0; i < tabs; i++ {
-		t := bridge.TabSnap{ID: i, Alive: true}
-		if i == active {
-			t.Title = title
-		} else {
-			t.Title = fmt.Sprintf("tab %d", i)
-		}
-		tabSnaps = append(tabSnaps, t)
-	}
-	h.Publish(bridge.Snapshot{
-		PID:       chromePID,
-		Cols:      cols,
-		Rows:      rows,
-		ActiveTab: active,
-		Tabs:      tabSnaps,
-		Notes: []string{
-			"ui=chrome",
-			"bridge=chromehost proxy",
-			"submit=chrome_submit mailbox",
-			"workspace/notes=disk + refresh_workspace",
-		},
-	})
+	h.Publish(SnapshotFromChromeStatus(st, chromePID))
 }
 
 func notesBridgeFromDisk(off chrome.NotesBridgeResult) bridge.NotesResult {
-	// Field-compatible shapes — JSON round-trip is the safest converter.
 	b, err := json.Marshal(off)
 	if err != nil {
 		return bridge.NotesResult{OK: false, Error: err.Error()}
@@ -227,7 +301,7 @@ func workspaceBridgeFromResult(r workspace.Result) bridge.WorkspaceResult {
 
 // runStatusPublisher publishes chrome_status.json into the bridge until stop closes.
 func runStatusPublisher(h *bridge.Host, chromePID int, stop <-chan struct{}) {
-	t := time.NewTicker(500 * time.Millisecond)
+	t := time.NewTicker(400 * time.Millisecond)
 	defer t.Stop()
 	for {
 		select {
