@@ -130,4 +130,4 @@ Prefer `member_id` from join. If omitted, `name` auto-joins as an agent.
 
 ## Later
 
-- Iroh / multi-machine workspace link
+- Multi-machine workspace: opt-in Iroh message sync — see [workspace-iroh.md](workspace-iroh.md)
