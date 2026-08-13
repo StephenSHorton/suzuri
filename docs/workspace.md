@@ -106,7 +106,9 @@ Agents with suzuri MCP should call **`workspace_guide`** first if unsure.
 | `workspace_download` | Resolve `file_id` → absolute `local_path` |
 
 Works **offline** (disk store) if the GUI is down. When the GUI is up, the
-bridge refreshes an open Workspace panel after mutations.
+bridge refreshes an open Workspace panel after mutations. Chrome also watches
+the workspace directory (native FS events) so MCP / other-client JSONL writes
+show up immediately; a ~1s poll is the fallback if watch setup fails.
 
 ## Agent flow
 
