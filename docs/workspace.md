@@ -53,7 +53,9 @@ chat bubbles (viewport scroll) · compose · short status · key footer.
 | **+** chip (or Ctrl+N) | New channel — type name, Enter |
 | Click channel tab | Switch channel |
 | Ctrl+D | Delete current channel (press twice to confirm; not on #general) |
-| Ctrl+F | Attach file (type `~/path` or absolute path, Enter) |
+| Ctrl+U | Attach file — type `~/path` or absolute path, Enter |
+| Ctrl+Shift+U | Native OS file picker (also palette **Attach file…**) |
+| Drop file onto window | Attach into the active channel |
 | ↑ / ↓ / wheel / PgUp / PgDn | Scroll **chat** history (not the terminal under the modal) |
 | Ctrl+R | Reload from disk |
 | Esc | Cancel mode, or close panel |
@@ -61,7 +63,8 @@ chat bubbles (viewport scroll) · compose · short status · key footer.
 Members get a stable color + symbol in the presence strip and on message headers.
 
 File messages show as `📎 name (size)` in the stream. Files are **copied** into
-`channels/<slug>/files/` (max 64 MiB).
+`channels/<slug>/files/` (max 64 MiB). Path compose (Ctrl+U), native picker
+(Ctrl+Shift+U / palette **Attach file…**), and drag-drop all use the same copy path.
 
 ### Availability (presence)
 
@@ -128,4 +131,3 @@ Prefer `member_id` from join. If omitted, `name` auto-joins as an agent.
 ## Later
 
 - Iroh / multi-machine workspace link
-- OS drag-and-drop into the workspace panel
