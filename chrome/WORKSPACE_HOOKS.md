@@ -68,7 +68,7 @@ Preserve these for `app` / `renderer`:
 | `open()` | Open + join self + reload channels/history/members |
 | `close()` | Close + clear draft |
 | `toggle()` | |
-| `tick(dt)` | Spring `present` + scrim `overlay` |
+| `tick(dt)` | Spring `present` + scrim `overlay`; native FS watch + 1s poll reload while open |
 | `content_ease()` | Smoothstep of `present` |
 | `scrim_alpha()` | Overlay dim `[0, 0.5]` |
 | `animated_modal_rect(win_w, win_h)` | Centered card with scale-in |
@@ -104,7 +104,9 @@ Store: `list_members`, `join`, `set_status`, `normalize_availability`, `next_ava
 
 ### Auto-refresh while open
 
-`WorkspaceUi::tick` accumulates time; every ~1s (`AUTO_REFRESH_INTERVAL_SECS`) while `open`, calls `reload_from_disk(false)` so MCP / other clients’ JSONL posts appear without thrashing the status line or scroll.
+Native recursive FS watch (`notify` crate — FSEvents / inotify / ReadDirectoryChanges) on the **workspace root**. A background thread sets an atomic dirty flag; `tick` reloads after a short debounce (`WATCH_DEBOUNCE_SECS`, ~50ms) so MCP / other clients’ JSONL posts appear immediately without thrashing the status line or scroll.
+
+If watch setup fails, the existing ~1s poll (`AUTO_REFRESH_INTERVAL_SECS`) is the refresh path. While watch is healthy the 1s poll stays as a safety net (skipped on a tick that already reloaded from watch).
 
 Manual: **Ctrl+R** (⌘R) while open → `refresh()`. Mailbox: `refresh_workspace` → `CommandAction::RefreshWorkspace` (soft no-op if closed).
 
@@ -198,5 +200,4 @@ cd chrome && cargo test && cargo build --release
 
 ## Out of scope (later)
 
-- Native FS watch (polling ~1s is enough for MCP attach)
 - OS file picker dialog (path string + drop is enough)

@@ -10,12 +10,16 @@
 //! - compose: `insert_char`, `backspace`, `send`, `@mention` picker / complete
 //! - channels: `select_channel`
 //! - presence / attach: `join_self`, `attach_path`, `members_strip_text`,
-//!   `cycle_status`, `refresh` / soft auto-reload while open
+//!   `cycle_status`, `refresh` / native FS watch + 1s poll fallback while open
 //!
 //! See `chrome/WORKSPACE_HOOKS.md` for hit-test layout constants and hooks.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
+
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::layout::Rect;
 use crate::workspace_store::{
@@ -23,9 +27,12 @@ use crate::workspace_store::{
     HISTORY_LIMIT, MAX_BODY_RUNES, STATUS_IDLE,
 };
 
-/// How often an open workspace reloads channels / messages / members from disk
-/// (MCP posts write JSONL; product `RefreshWorkspaceMsg` equivalent).
+/// How often an open workspace reloads from disk as a safety net (and the
+/// only path if native FS watch setup fails). MCP / other clients write JSONL.
 pub const AUTO_REFRESH_INTERVAL_SECS: f32 = 1.0;
+
+/// Coalesce bursty native FS events (atomic rename + JSONL append) before reload.
+pub const WATCH_DEBOUNCE_SECS: f32 = 0.05;
 
 /// How long a pending Ctrl+D delete stays armed before it expires.
 pub const DELETE_CONFIRM_SECS: f32 = 2.5;
@@ -144,6 +151,12 @@ pub struct WorkspaceUi {
     pub scroll: usize,
     /// Accumulator for auto-refresh while open (seconds).
     refresh_accum: f32,
+    /// Native recursive watch on the workspace root. `None` if setup failed.
+    fs_watch: Option<RecommendedWatcher>,
+    /// Set from the notify thread; `tick` reloads when this is true.
+    watch_dirty: Arc<AtomicBool>,
+    /// Accumulator for watch debounce (seconds).
+    watch_debounce: f32,
     /// Armed delete: first Ctrl+D sets slug + time; second confirms.
     delete_pending: Option<(String, Instant)>,
 }
@@ -165,6 +178,7 @@ impl WorkspaceUi {
     }
 
     fn from_store(store: WorkspaceStore, human: String) -> Self {
+        let (fs_watch, watch_dirty) = start_workspace_watch(store.root());
         let mut s = Self {
             open: false,
             present: 0.0,
@@ -182,12 +196,41 @@ impl WorkspaceUi {
             human,
             scroll: 0,
             refresh_accum: 0.0,
+            fs_watch,
+            watch_dirty,
+            watch_debounce: 0.0,
             delete_pending: None,
         };
         s.reload_channels();
         s.reload_messages();
         s.reload_members();
+        // Drain ensure/join events from the initial snapshot load.
+        s.watch_dirty.store(false, Ordering::Release);
         s
+    }
+
+    /// True when a native recursive watch is running on the workspace root.
+    pub fn watch_active(&self) -> bool {
+        self.fs_watch.is_some()
+    }
+
+    #[cfg(test)]
+    fn watch_pending(&self) -> bool {
+        self.watch_dirty.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn clear_watch_dirty(&mut self) {
+        self.watch_dirty.store(false, Ordering::Release);
+        self.watch_debounce = 0.0;
+    }
+
+    /// Drop the watcher so tests can exercise the 1s poll fallback alone.
+    #[cfg(test)]
+    fn drop_watch(&mut self) {
+        self.fs_watch = None;
+        self.watch_dirty.store(false, Ordering::Release);
+        self.watch_debounce = 0.0;
     }
 
     pub fn human_name(&self) -> &str {
@@ -204,12 +247,14 @@ impl WorkspaceUi {
         self.status.clear();
         self.scroll = 0;
         self.refresh_accum = 0.0;
+        self.watch_debounce = 0.0;
         self.delete_pending = None;
         // Join self as human if not already present (product open path).
         self.join_self();
         self.reload_channels();
         self.reload_messages();
         self.reload_members();
+        self.watch_dirty.store(false, Ordering::Release);
     }
 
     /// Register `$USER` as a human member (no-op update if already joined).
@@ -227,6 +272,7 @@ impl WorkspaceUi {
         self.mode = ComposeMode::Message;
         self.mention_sel = 0;
         self.refresh_accum = 0.0;
+        self.watch_debounce = 0.0;
         self.delete_pending = None;
     }
 
@@ -250,14 +296,32 @@ impl WorkspaceUi {
                     }
                 }
             }
+            // Native FS watch: reload as soon as disk changes (debounced).
+            let mut reloaded = false;
+            if self.watch_dirty.load(Ordering::Acquire) {
+                self.watch_debounce += wall;
+                if self.watch_debounce >= WATCH_DEBOUNCE_SECS {
+                    self.watch_dirty.store(false, Ordering::Release);
+                    self.watch_debounce = 0.0;
+                    self.reload_from_disk(false);
+                    reloaded = true;
+                }
+            } else {
+                self.watch_debounce = 0.0;
+            }
+
+            // 1s poll safety net (also the only path if watch setup failed).
             self.refresh_accum += wall;
             if self.refresh_accum >= AUTO_REFRESH_INTERVAL_SECS {
                 // Keep residual so hitch-heavy loops do not drift forever.
                 self.refresh_accum %= AUTO_REFRESH_INTERVAL_SECS;
-                self.reload_from_disk(false);
+                if !reloaded {
+                    self.reload_from_disk(false);
+                }
             }
         } else {
             self.refresh_accum = 0.0;
+            self.watch_debounce = 0.0;
         }
 
         let dt = wall.clamp(0.0, 1.0 / 20.0);
@@ -439,10 +503,7 @@ impl WorkspaceUi {
         if body.is_empty() {
             return;
         }
-        match self
-            .store
-            .post(&self.channel, &body, &self.human, "human")
-        {
+        match self.store.post(&self.channel, &body, &self.human, "human") {
             Ok(msg) => {
                 self.messages.push(msg);
                 if self.messages.len() > HISTORY_LIMIT {
@@ -869,12 +930,7 @@ impl WorkspaceUi {
     /// Layout bubbles for the visible window (top → bottom, newest at bottom when stick).
     ///
     /// `accent` is theme primary (jade) used for the local user's bubbles.
-    pub fn layout_bubbles(
-        &self,
-        win_w: f32,
-        win_h: f32,
-        accent: [f32; 3],
-    ) -> Vec<MsgBubble> {
+    pub fn layout_bubbles(&self, win_w: f32, win_h: f32, accent: [f32; 3]) -> Vec<MsgBubble> {
         let pane = self.message_pane_rect(win_w, win_h);
         let msgs = self.visible_messages(VISIBLE_BUBBLE_CAP);
         if msgs.is_empty() {
@@ -893,7 +949,11 @@ impl WorkspaceUi {
                 28.0
             } else {
                 // header + body (+ optional second wrap line for long bodies)
-                let body_lines = if msg.body.chars().count() > 48 { 2.0 } else { 1.0 };
+                let body_lines = if msg.body.chars().count() > 48 {
+                    2.0
+                } else {
+                    1.0
+                };
                 (BUBBLE_MIN_H + (body_lines - 1.0) * 14.0).max(BUBBLE_MIN_H)
             };
             measured.push((h, *msg));
@@ -980,6 +1040,32 @@ impl WorkspaceUi {
     }
 }
 
+/// Recursive native watch on `root`. Returns `(None, flag)` if setup fails;
+/// the 1s poll in `tick` then remains the only refresh path.
+fn start_workspace_watch(root: &Path) -> (Option<RecommendedWatcher>, Arc<AtomicBool>) {
+    let dirty = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&dirty);
+    let mut watcher =
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            match res {
+                Ok(event) => {
+                    // Ignore access/read from our own history() so reloads do not loop.
+                    if matches!(event.kind, EventKind::Access(_) | EventKind::Other) {
+                        return;
+                    }
+                    flag.store(true, Ordering::Release);
+                }
+                Err(_) => flag.store(true, Ordering::Release),
+            }
+        }) {
+            Ok(w) => w,
+            Err(_) => return (None, dirty),
+        };
+    if watcher.watch(root, RecursiveMode::Recursive).is_err() {
+        return (None, dirty);
+    }
+    (Some(watcher), dirty)
+}
 
 /// One painted run of compose text (mention highlight).
 #[derive(Clone, Debug, PartialEq)]
@@ -1023,16 +1109,16 @@ fn highlight_mention_segments(draft: &str, members: &[WsMember]) -> Vec<ComposeS
         if chars[i] == '@' && at_boundary {
             let mut j = i + 1;
             while j < chars.len()
-                && (chars[j].is_alphanumeric() || chars[j] == '_' || chars[j] == '-' || chars[j] == '.')
+                && (chars[j].is_alphanumeric()
+                    || chars[j] == '_'
+                    || chars[j] == '-'
+                    || chars[j] == '.')
             {
                 j += 1;
             }
             if j > i + 1 {
                 let name: String = chars[i + 1..j].iter().collect();
-                if let Some(m) = members
-                    .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(&name))
-                {
+                if let Some(m) = members.iter().find(|m| m.name.eq_ignore_ascii_case(&name)) {
                     if !plain.is_empty() {
                         out.push(ComposeSeg {
                             text: std::mem::take(&mut plain),
@@ -1089,11 +1175,10 @@ fn human_bytes(n: u64) -> String {
 mod tests {
     use super::*;
     use crate::workspace_store::{
-        next_availability, STATUS_AWAY, STATUS_BLOCKED, STATUS_IDLE, STATUS_WAITING,
-        STATUS_WORKING,
+        next_availability, STATUS_AWAY, STATUS_BLOCKED, STATUS_IDLE, STATUS_WAITING, STATUS_WORKING,
     };
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_root(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -1158,7 +1243,9 @@ mod tests {
         let other = bubbles.iter().find(|b| !b.mine).expect("other");
         assert!(!other.mine);
         // Other uses member palette, not accent.
-        assert!((other.tint[1] - accent[1]).abs() > 0.05 || (other.tint[0] - accent[0]).abs() > 0.05);
+        assert!(
+            (other.tint[1] - accent[1]).abs() > 0.05 || (other.tint[0] - accent[0]).abs() > 0.05
+        );
         // Mine sits further right than other.
         assert!(mine.rect.x > other.rect.x);
         let _ = fs::remove_dir_all(&dir);
@@ -1249,10 +1336,10 @@ mod tests {
         let dir = temp_root("auto");
         let mut ui = WorkspaceUi::open_at(&dir);
         ui.open();
+        // Isolate the 1s poll fallback from native watch.
+        ui.drop_watch();
         let store = WorkspaceStore::open_at(&dir);
-        store
-            .post("general", "tick-msg", "bot", "agent")
-            .unwrap();
+        store.post("general", "tick-msg", "bot", "agent").unwrap();
         // Half second — not yet.
         ui.tick(0.5);
         assert!(
@@ -1271,6 +1358,48 @@ mod tests {
     }
 
     #[test]
+    fn fs_watch_picks_up_jsonl_write_without_full_poll() {
+        let dir = temp_root("watch");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        assert!(
+            ui.watch_active(),
+            "native FS watch should start on the workspace root"
+        );
+        ui.clear_watch_dirty();
+
+        let store = WorkspaceStore::open_at(&dir);
+        store
+            .post("general", "watch-msg", "agent-bot", "agent")
+            .expect("post");
+
+        // Wait for the notify thread to flip the dirty flag, then tick past debounce.
+        // Do not sleep a full AUTO_REFRESH_INTERVAL_SECS.
+        let start = Instant::now();
+        let deadline = Duration::from_millis(500);
+        while !ui.watch_pending() {
+            assert!(
+                start.elapsed() < deadline,
+                "watch did not observe JSONL write within {deadline:?}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ui.tick(WATCH_DEBOUNCE_SECS + 0.01);
+        assert!(
+            ui.messages.iter().any(|m| m.body == "watch-msg"),
+            "watch should surface JSONL write on a tiny tick; got {:?}",
+            ui.messages.iter().map(|m| &m.body).collect::<Vec<_>>()
+        );
+        assert!(
+            start.elapsed().as_secs_f32() < AUTO_REFRESH_INTERVAL_SECS,
+            "must observe the write without waiting a full poll interval ({:?})",
+            start.elapsed()
+        );
+        assert_ne!(ui.status, "refreshed");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn mention_query_and_complete() {
         let dir = temp_root("mention");
         let mut ui = WorkspaceUi::open_at(&dir);
@@ -1284,7 +1413,11 @@ mod tests {
 
         ui.draft = "hi @b".into();
         assert_eq!(ui.mention_query(), Some("b"));
-        let names: Vec<_> = ui.mention_candidates().iter().map(|m| m.name.as_str()).collect();
+        let names: Vec<_> = ui
+            .mention_candidates()
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
         assert!(names.contains(&"bob"));
         assert!(names.contains(&"bot"));
         assert!(ui.mention_picker_open());
@@ -1297,7 +1430,9 @@ mod tests {
 
         // Highlight completed mention.
         let segs = ui.compose_highlight_segments();
-        assert!(segs.iter().any(|s| s.text == "@bob" && s.mention_rgb.is_some()));
+        assert!(segs
+            .iter()
+            .any(|s| s.text == "@bob" && s.mention_rgb.is_some()));
 
         // Tab cycles when picker open (via tab()).
         ui.draft = "@".into();
@@ -1319,7 +1454,4 @@ mod tests {
         assert_eq!(active_mention_query("@al").unwrap().1, "al");
         assert_eq!(active_mention_query("hey @Al").unwrap().1, "Al");
     }
-
 }
-
-
