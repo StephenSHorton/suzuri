@@ -9,8 +9,8 @@
 //!   `scrim_alpha`, `animated_modal_rect`
 //! - compose: `insert_char`, `backspace`, `send`, `@mention` picker / complete
 //! - channels: `select_channel`
-//! - presence / attach: `join_self`, `attach_path`, `members_strip_text`,
-//!   `cycle_status`, `refresh` / native FS watch + 1s poll fallback while open
+//! - presence / attach: `join_self`, `attach_path`, `begin_attach`, `pick_and_attach`,
+//!   `members_strip_text`, `cycle_status`, `refresh` / native FS watch + 1s poll fallback while open
 //!
 //! See `chrome/WORKSPACE_HOOKS.md` for hit-test layout constants and hooks.
 
@@ -522,7 +522,7 @@ impl WorkspaceUi {
     }
 
     /// Copy `path` into the active channel `files/` and post a file message.
-    /// Accepts a filesystem path string (no OS file dialog required).
+    /// Path string, drop, or native picker (`pick_and_attach`) all land here.
     pub fn attach_path(&mut self, path: impl AsRef<Path>) {
         let path = path.as_ref();
         let path_str = path.to_string_lossy();
@@ -563,6 +563,15 @@ impl WorkspaceUi {
         self.mode = ComposeMode::AttachPath;
         self.draft.clear();
         self.status = "path to attach — Enter to upload".into();
+    }
+
+    /// Native OS file picker (macOS / Windows / Linux) then [`attach_path`].
+    /// Cancel leaves compose unchanged. Blocking — call from an explicit attach action.
+    pub fn pick_and_attach(&mut self) {
+        let Some(path) = rfd::FileDialog::new().set_title("Attach file").pick_file() else {
+            return;
+        };
+        self.attach_path(path);
     }
 
     fn commit_new_channel(&mut self) {
@@ -1454,4 +1463,31 @@ mod tests {
         assert_eq!(active_mention_query("@al").unwrap().1, "al");
         assert_eq!(active_mention_query("hey @Al").unwrap().1, "Al");
     }
+
+    #[test]
+    fn begin_attach_sets_path_mode() {
+        let dir = temp_root("begin-attach");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        ui.begin_attach();
+        assert_eq!(ui.mode, ComposeMode::AttachPath);
+        assert!(ui.draft.is_empty());
+        assert_eq!(ui.status, "path to attach — Enter to upload");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attach_path_posts_file_message() {
+        let dir = temp_root("attach-path");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        let src = dir.join("notes.txt");
+        fs::write(&src, b"hello picker").unwrap();
+        ui.attach_path(&src);
+        assert_eq!(ui.mode, ComposeMode::Message);
+        assert_eq!(ui.status, "attached notes.txt");
+        assert_eq!(ui.messages.last().map(|m| m.kind.as_str()), Some("file"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
 }

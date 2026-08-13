@@ -731,6 +731,18 @@ impl ChromeApp {
                 }
                 self.workspace_ui.cycle_status();
             }
+            CommandAction::WorkspaceAttachFile => {
+                if !self.workspace_ui.open {
+                    self.palette.close();
+                    self.settings.close();
+                    self.help.close();
+                    self.notes.close();
+                    self.transfer.close();
+                    self.rename.close();
+                    self.workspace_ui.open();
+                }
+                self.workspace_ui.pick_and_attach();
+            }
             CommandAction::OpenTransferSend => {
                 self.palette.close();
                 self.settings.close();
@@ -1720,7 +1732,7 @@ impl ChromeApp {
                     }
                 }
             }
-            // Workspace: Ctrl+R refresh, Ctrl+Shift+A cycle presence, Ctrl+D×2 delete channel (while open).
+            // Workspace: Ctrl+R refresh, Ctrl+Shift+A cycle presence, Ctrl+U path attach, Ctrl+Shift+U picker, Ctrl+D×2 delete channel (while open).
             if self.workspace_ui.open {
                 if let Key::Character(ref s) = event.logical_key {
                     match s.as_str() {
@@ -1747,6 +1759,13 @@ impl ChromeApp {
                         }
                         "u" | "U" if !shift => {
                             self.workspace_ui.begin_attach();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        "u" | "U" if shift => {
+                            self.workspace_ui.pick_and_attach();
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }

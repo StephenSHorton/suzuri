@@ -145,9 +145,11 @@ Posts append one product JSONL line under `channels/<slug>/messages.jsonl`.
 |--------|----------|
 | `attach_path(path)` | Copy into `channels/<slug>/files/`, post `kind=file` message |
 | `begin_attach()` | Compose mode = path entry (Enter uploads) |
+| `pick_and_attach()` | Native OS file dialog (`rfd`) then `attach_path`; cancel is a no-op |
 
-- No OS file dialog required — path string is enough.
+- Path string (Ctrl+U), native picker (Ctrl+Shift+U / palette **Attach file…**), and drop all call `attach_path`.
 - `app` wires `WindowEvent::DroppedFile` when workspace is open → `attach_path` (first path).
+- Picker is blocking (`rfd::FileDialog::pick_file`) — only from an explicit attach action.
 - Upload cap: 64 MiB (product `maxUploadBytes`).
 - Store API: `WorkspaceStore::upload(channel, src_path, from_name, from_kind, caption)`.
 
@@ -186,7 +188,7 @@ PRESENCE_STRIP_H   = 18               // members line above messages
 2. Esc: if `mode != Message` → `cancel_mode()`; else `close()`
 3. Enter → `send()` (completes `@mention` when picker open); printable → `insert_char`; Backspace → `backspace`
 4. Tab / Shift+Tab → `tab()` (mention cycle when picker open, else `cycle_channel`); ↑/↓ → scroll
-5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path; Ctrl+D ×2 → `request_delete_channel()` (blocks `#general`)
+5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path; Ctrl+Shift+U / palette `WorkspaceAttachFile` → `pick_and_attach()`; Ctrl+D ×2 → `request_delete_channel()` (blocks `#general`)
 6. Pointer inside `animated_modal_rect` → keep open; `try_click` for channel rail / presence strip
 7. Outside click → `close()` (via `close_all_overlays`)
 8. `DroppedFile` while workspace open → `workspace_ui.attach_path(path)` (before transfer)
@@ -200,4 +202,4 @@ cd chrome && cargo test && cargo build --release
 
 ## Out of scope (later)
 
-- OS file picker dialog (path string + drop is enough)
+None right now — FS watch and OS file picker are both in.

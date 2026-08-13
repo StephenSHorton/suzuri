@@ -39,6 +39,8 @@ pub enum CommandAction {
     RefreshWorkspace,
     /// Cycle local human presence (idle→working→waiting→blocked→away).
     CycleWorkspaceStatus,
+    /// Native OS file picker → workspace attach (while workspace open, or opens it).
+    WorkspaceAttachFile,
     /// Query GitHub Releases (host may open confirm).
     CheckUpdates,
     Quit,
@@ -131,6 +133,13 @@ pub fn default_commands() -> Vec<Command> {
             desc: format!("{} · idle→working→waiting·… · Workspace", chord(&ms, "A")),
             category: "Workspace",
             action: CommandAction::CycleWorkspaceStatus,
+        },
+        Command {
+            id: "workspace_attach_file",
+            title: "Attach file…",
+            desc: format!("{} · native picker · Workspace", chord(&ms, "U")),
+            category: "Workspace",
+            action: CommandAction::WorkspaceAttachFile,
         },
         Command {
             id: "transfer_send",
@@ -1015,6 +1024,20 @@ mod tests {
         assert!(all.iter().any(|c| c.action == CommandAction::NewWindow));
         let idx = filter_commands(&all, "new window");
         assert!(idx.iter().any(|&i| all[i].id == "new_window"));
+    }
+
+    #[test]
+    fn registry_contains_workspace_attach_file() {
+        let all = default_commands();
+        let cmd = all
+            .iter()
+            .find(|c| c.id == "workspace_attach_file")
+            .expect("workspace_attach_file command");
+        assert_eq!(cmd.title, "Attach file…");
+        assert_eq!(cmd.category, "Workspace");
+        assert_eq!(cmd.action, CommandAction::WorkspaceAttachFile);
+        let idx = filter_commands(&all, "attach");
+        assert!(idx.iter().any(|&i| all[i].id == "workspace_attach_file"));
     }
 
     #[test]
