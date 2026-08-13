@@ -1,0 +1,22 @@
+[package]
+name = "suzuri-workspace-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Opt-in iroh sync for suzuri workspace channel messages."
+
+[[bin]]
+name = "suzuri-workspace-sync"
+path = "src/main.rs"
+
+[dependencies]
+iroh = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
