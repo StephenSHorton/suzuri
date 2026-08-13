@@ -16,6 +16,7 @@ use winit::{
 };
 
 use crate::ansi::AnsiDecoder;
+use crate::cells::CellGrid;
 use crate::caffeine::Caffeine;
 use crate::chrome_status::{self, PaneSnapExtra, StatusPublisher};
 use crate::chrome_ui::{ChipId, ChipUi};
@@ -58,6 +59,9 @@ struct PaneRuntime {
     echo: EchoFilter,
     /// Host-injected command blocks + MCP history kinds.
     blocks: CmdBlockLog,
+    /// Warp compose owns the prompt: hide PTY paint until the first submit
+    /// so a fresh pane is empty (no leaked zsh/cmd prompt).
+    suppress_paint: bool,
 }
 
 impl PaneRuntime {
@@ -237,6 +241,7 @@ fn spawn_pane_runtime_px(
                 pty_tail: String::new(),
                 echo: EchoFilter::new(),
                 blocks: CmdBlockLog::new(),
+                suppress_paint: true,
             }
         }
         Err(e) => {
@@ -248,6 +253,7 @@ fn spawn_pane_runtime_px(
                 pty_tail: String::new(),
                 echo: EchoFilter::new(),
                 blocks: CmdBlockLog::new(),
+                suppress_paint: true,
             }
         }
     }
@@ -478,7 +484,11 @@ impl ChromeApp {
                 // Suppress local echo of warp-submitted command when armed.
                 let filtered = rt.echo.feed(chunk.as_bytes());
                 if !filtered.is_empty() {
-                    if let Some(grid) = self.session.grid_mut(id) {
+                    if rt.suppress_paint {
+                        // Parse OSC 7 / DA / title without painting the shell prompt.
+                        let mut scratch = CellGrid::new(80, 24);
+                        rt.ansi.feed(&mut scratch, &filtered);
+                    } else if let Some(grid) = self.session.grid_mut(id) {
                         rt.ansi.feed(grid, &filtered);
                     }
                 }
@@ -2325,6 +2335,7 @@ impl ChromeApp {
             .map(|rt| rt.ansi.on_alt_screen())
             .unwrap_or(false);
         if let Some(rt) = self.runtimes.get_mut(&id) {
+            rt.suppress_paint = false;
             if let Some(grid) = self.session.grid_mut(id) {
                 let _ = rt.blocks.prepare_submit(&line, grid, &cwd_display, alt);
             }

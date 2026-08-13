@@ -820,9 +820,26 @@ fn looks_like_source_tree(dir: &std::path::Path) -> bool {
     dir.join("go.mod").is_file() && dir.join("chrome").join("Cargo.toml").is_file()
 }
 
+fn is_filesystem_root(cwd_n: &str) -> bool {
+    let u = slashify_display(cwd_n);
+    if u == "/" {
+        return true;
+    }
+    // Windows drive root: "C:" or "C:/"
+    let b = u.as_bytes();
+    b.len() <= 3
+        && b.first().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
+        && b.get(1) == Some(&b':')
+        && (b.len() == 2 || b[2] == b'/')
+}
+
 fn is_unhelpful_cwd_ex(cwd: &str, exe_dir: Option<&str>) -> bool {
     let cwd_n = normalize_abs_path(cwd);
     if cwd_n.is_empty() {
+        return true;
+    }
+    // Finder / Dock / many GUI launches start at filesystem root (`/`).
+    if is_filesystem_root(&cwd_n) {
         return true;
     }
     let slash = slashify_display(&cwd_n);
@@ -1029,6 +1046,14 @@ mod tests {
         ));
         assert!(!is_unhelpful_cwd_ex("/tmp", Some("/usr/local/bin")));
         assert!(is_unhelpful_cwd_ex("", None));
+        // Finder/Dock often start GUI apps at `/`.
+        assert!(is_unhelpful_cwd_ex("/", None));
+        assert!(is_unhelpful_cwd_ex(
+            "/",
+            Some("/Applications/suzuri.app/Contents/MacOS")
+        ));
+        assert!(is_unhelpful_cwd_ex("C:\\", Some("C:\\Program Files\\suzuri")));
+        assert!(is_unhelpful_cwd_ex("C:/", None));
     }
 
     #[test]
