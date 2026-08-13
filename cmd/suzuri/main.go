@@ -10,6 +10,7 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/transfer"
 	"github.com/StephenSHorton/suzuri/internal/update"
 	"github.com/StephenSHorton/suzuri/internal/winconsole"
+	"github.com/StephenSHorton/suzuri/internal/workspacesync"
 )
 
 // version is injected at release build time:
@@ -42,6 +43,11 @@ func main() {
 		winconsole.AttachParent()
 		os.Exit(transfer.RunCLI(os.Args[1:]))
 	}
+	// Opt-in workspace iroh sync (shells out to suzuri-workspace-sync).
+	if len(os.Args) > 1 && workspacesync.IsArg(os.Args[1]) {
+		winconsole.AttachParent()
+		os.Exit(workspacesync.RunCLI(os.Args[1:]))
+	}
 
 	// Product GUI is native only (Rust/wgpu). There is no Charm/ebiten path.
 	// `suzuri chrome …` remains as an explicit alias that forwards extra args.
@@ -61,7 +67,7 @@ func main() {
 		args = os.Args[2:]
 	} else if len(os.Args) > 1 {
 		fmt.Fprintf(os.Stderr, "suzuri: unknown command %q\n", os.Args[1])
-		fmt.Fprintln(os.Stderr, "usage: suzuri | suzuri mcp | suzuri version | suzuri transfer …")
+		fmt.Fprintln(os.Stderr, "usage: suzuri | suzuri mcp | suzuri version | suzuri transfer … | suzuri workspace-sync …")
 		os.Exit(2)
 	}
 	os.Exit(chromehost.RunCLI(version, args))

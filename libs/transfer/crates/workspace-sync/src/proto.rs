@@ -40,3 +40,22 @@ pub async fn read_msg<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<WireMsg>
     let msg = serde_json::from_slice(&buf).context("parse wire msg")?;
     Ok(Some(msg))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wire_msg_v0_roundtrip_json() {
+        let msg = WireMsg {
+            v: 0,
+            channel: "general".into(),
+            id: "msg_1".into(),
+            line: r#"{"id":"msg_1"}"#.into(),
+        };
+        let buf = serde_json::to_vec(&msg).unwrap();
+        let got: WireMsg = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(got.v, 0);
+        assert_eq!(got.id, "msg_1");
+    }
+}

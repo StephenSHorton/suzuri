@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Opt-in iroh sync for suzuri workspace channel messages."
+description = "Opt-in iroh sync of suzuri workspace channel messages (jsonl)."
 
 [[bin]]
 name = "suzuri-workspace-sync"

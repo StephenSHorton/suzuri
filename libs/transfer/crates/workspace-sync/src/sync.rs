@@ -21,7 +21,8 @@ const IDENTITY_FILE: &str = "identity.secret";
 /// Load the secret key from disk, or generate and persist a new one.
 ///
 /// The key file is written with mode `0600` on Unix. Inlined from hato-core
-/// so this crate does not depend on hato-core.
+/// so this crate does not depend on hato-core (two local processes need
+/// distinct endpoint ids under `--iroh-dir`).
 pub fn load_or_create_secret_key_in(dir: &Path) -> Result<SecretKey> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(IDENTITY_FILE);
@@ -74,13 +75,27 @@ async fn bind_endpoint(sk: SecretKey) -> Result<Endpoint> {
         .context("bind iroh endpoint")
 }
 
-/// Bind, print a greppable `ticket: …` line, accept joiners until Ctrl+C.
+/// iroh 1.0 EndpointAddr encoding: compact JSON (Display is not parseable).
+pub fn encode_ticket(addr: &EndpointAddr) -> Result<String> {
+    serde_json::to_string(addr).context("serialize EndpointAddr")
+}
+
+/// Parse a JSON EndpointAddr, optionally prefixed with `ticket: `.
+pub fn parse_ticket(s: &str) -> Result<EndpointAddr> {
+    let s = s.trim().strip_prefix("ticket:").unwrap_or(s).trim();
+    if s.is_empty() {
+        bail!("empty ticket");
+    }
+    serde_json::from_str(s).context("parse ticket EndpointAddr")
+}
+
+/// Bind, print a one-line ticket, accept joiners until Ctrl+C.
 pub async fn listen(root: PathBuf, iroh_dir: PathBuf) -> Result<()> {
     let sk = load_or_create_secret_key_in(&iroh_dir)?;
     let endpoint = bind_endpoint(sk).await?;
     let _ = tokio::time::timeout(ONLINE_WAIT, endpoint.online()).await;
-    let ticket = serde_json::to_string(&endpoint.addr()).context("serialize EndpointAddr")?;
-    println!("ticket: {ticket}");
+    let ticket = encode_ticket(&endpoint.addr())?;
+    println!("{ticket}");
     let _ = std::io::stdout().flush();
     eprintln!("listening for workspace message sync (Ctrl+C to stop)");
 
@@ -115,10 +130,9 @@ pub async fn listen(root: PathBuf, iroh_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Dial a listen ticket (JSON EndpointAddr) and sync until the connection ends or Ctrl+C.
+/// Dial a listen ticket and sync until the connection ends or Ctrl+C.
 pub async fn join(root: PathBuf, iroh_dir: PathBuf, ticket: &str) -> Result<()> {
-    let ticket = ticket.trim().strip_prefix("ticket:").unwrap_or(ticket).trim();
-    let addr: EndpointAddr = serde_json::from_str(ticket).context("parse ticket EndpointAddr")?;
+    let addr = parse_ticket(ticket)?;
     let sk = load_or_create_secret_key_in(&iroh_dir)?;
     let endpoint = bind_endpoint(sk).await?;
     let _ = tokio::time::timeout(ONLINE_WAIT, endpoint.online()).await;
@@ -138,7 +152,7 @@ pub async fn join(root: PathBuf, iroh_dir: PathBuf, ticket: &str) -> Result<()> 
     Ok(())
 }
 
-/// After a connection is up: open_bi for send, accept_bi for recv (retried on race).
+/// After a connection is up: each side open_bi for send and accept_bi for recv.
 pub async fn run_connection(conn: Connection, root: PathBuf) -> Result<()> {
     let (mut send, mut recv, _keep) = open_sync_streams(&conn).await?;
     let sent = Arc::new(Mutex::new(HashSet::<String>::new()));
@@ -194,7 +208,7 @@ async fn send_loop(
                 }
             }
             let msg = WireMsg {
-                v: 1,
+                v: 0,
                 channel,
                 id: id.clone(),
                 line,
@@ -233,13 +247,12 @@ async fn recv_loop(
     }
 }
 
-/// Bind two ephemeral endpoints, connect A→B, copy a jsonl line from A into B.
+/// Bind two ephemeral endpoints, connect A→B, copy jsonl both ways.
 ///
 /// Used by tests. Times out connect/relay waits so CI without net can skip.
 pub async fn sync_pair_inprocess(root_a: &Path, root_b: &Path) -> Result<()> {
     let ep_a = bind_endpoint(SecretKey::generate()).await?;
     let ep_b = bind_endpoint(SecretKey::generate()).await?;
-    // Do not wait forever for a relay; local addrs are enough for in-process.
     let _ = tokio::time::timeout(Duration::from_secs(2), ep_a.online()).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), ep_b.online()).await;
 
@@ -262,7 +275,6 @@ pub async fn sync_pair_inprocess(root_a: &Path, root_b: &Path) -> Result<()> {
     let join_root = root_a.to_path_buf();
     let join_task = tokio::spawn(async move { run_connection(conn_a, join_root).await });
 
-    // Wait until B has every id currently on A (caller seeds A first).
     let want: HashSet<String> = snapshot(root_a)?
         .into_iter()
         .map(|(_, id, _)| id)
@@ -284,6 +296,30 @@ pub async fn sync_pair_inprocess(root_a: &Path, root_b: &Path) -> Result<()> {
             listen_task.abort();
             ep_a.close().await;
             bail!("root B did not receive ids {want:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    ingest_line(
+        root_b,
+        "general",
+        "msg_from_b",
+        r#"{"id":"msg_from_b","channel":"general","body":"hello-from-b"}"#,
+    )?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    loop {
+        let have: HashSet<String> = snapshot(root_a)?
+            .into_iter()
+            .map(|(_, id, _)| id)
+            .collect();
+        if have.contains("msg_from_b") {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            join_task.abort();
+            listen_task.abort();
+            ep_a.close().await;
+            bail!("root A did not receive msg_from_b");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -324,6 +360,17 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn ticket_roundtrip_endpoint_addr_json() {
+        let sk = SecretKey::generate();
+        let addr = EndpointAddr::new(sk.public());
+        let s = encode_ticket(&addr).unwrap();
+        let parsed = parse_ticket(&s).unwrap();
+        assert_eq!(parsed.id, addr.id);
+        let prefixed = format!("ticket: {s}");
+        assert_eq!(parse_ticket(&prefixed).unwrap().id, addr.id);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn inprocess_syncs_one_message() {
         let root_a = tmp_root("a");
@@ -332,7 +379,7 @@ mod tests {
         assert!(ingest_line(&root_a, "general", "msg_inproc", line).unwrap());
 
         let result = tokio::time::timeout(
-            Duration::from_secs(25),
+            Duration::from_secs(40),
             sync_pair_inprocess(&root_a, &root_b),
         )
         .await;
@@ -345,6 +392,15 @@ mod tests {
                     .map(|(_, id, _)| id)
                     .collect();
                 assert!(ids.contains(&"msg_inproc".to_string()), "ids={ids:?}");
+                let ids_a: Vec<_> = snapshot(&root_a)
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, id, _)| id)
+                    .collect();
+                assert!(
+                    ids_a.contains(&"msg_from_b".to_string()),
+                    "root A missing reverse sync, ids={ids_a:?}"
+                );
             }
             Ok(Err(e)) => {
                 eprintln!("skipping iroh in-process test: {e:#}");

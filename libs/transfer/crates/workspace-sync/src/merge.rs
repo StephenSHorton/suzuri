@@ -107,6 +107,27 @@ pub fn snapshot(root: &Path) -> Result<Vec<(String, String, String)>> {
     Ok(rows)
 }
 
+/// Merge two jsonl documents: first-seen id wins, order is `a` then unique from `b`.
+/// Idempotent: `merge(merge(a, b), b) == merge(a, b)`. Does not rewrite history.
+pub fn merge_jsonl(a: &str, b: &str) -> String {
+    let mut seen = HashSet::new();
+    let mut out = String::new();
+    for src in [a, b] {
+        for line in src.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let key = extract_id(line).unwrap_or_else(|| line.to_string());
+            if seen.insert(key) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 pub fn normalize_channel(s: &str) -> String {
     let s = s.trim().trim_start_matches('#');
     let mut out = String::new();
@@ -168,5 +189,20 @@ mod tests {
         assert!(ids.contains(&"msg_a".into()));
         assert!(ids.contains(&"msg_b".into()));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_jsonl_two_files_idempotent() {
+        let a = "{\"id\":\"msg_a\",\"body\":\"from-a\"}\n{\"id\":\"msg_shared\",\"body\":\"a-wins\"}\n";
+        let b = "{\"id\":\"msg_shared\",\"body\":\"b-loses\"}\n{\"id\":\"msg_b\",\"body\":\"from-b\"}\n";
+        let once = merge_jsonl(a, b);
+        assert_eq!(once, merge_jsonl(&once, b));
+        assert_eq!(once, merge_jsonl(&once, a));
+        assert!(once.contains("from-a"));
+        assert!(once.contains("from-b"));
+        assert!(once.contains("a-wins"));
+        assert!(!once.contains("b-loses"));
+        let ids: Vec<_> = once.lines().filter_map(extract_id).collect();
+        assert_eq!(ids, vec!["msg_a", "msg_shared", "msg_b"]);
     }
 }

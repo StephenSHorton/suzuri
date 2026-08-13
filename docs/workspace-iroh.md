@@ -5,8 +5,8 @@ suzuri config directory. This slice adds **opt-in** peer-to-peer sync of
 channel `messages.jsonl` between two workspace roots, using the same iroh 1.0
 stack as `suzuri-transfer`.
 
-It is **not** product UX (no chrome panel, no auto-start, not in release
-packaging). Run the Rust binary directly.
+It is **not** full product UX (no chrome panel, no auto-start). Run the sidecar
+binary, or `suzuri workspace-sync …` if the host can find it.
 
 ## Enable
 
@@ -31,14 +31,10 @@ If neither is set the binary prints a short error and exits 2.
 
 ## Ticket = pairing
 
-`listen` prints a **single line** to stdout:
-
-```
-ticket: <JSON EndpointAddr>
-```
-
-Anyone who has the ticket can `join`. There is **no extra auth** (no contact
-book, no SAS). Treat the ticket like a capability: do not post it publicly.
+`listen` prints a **single-line JSON `EndpointAddr`** (iroh 1.0 encoding) on
+stdout. `join` also accepts a `ticket: ` prefix. Anyone who has the ticket can
+`join`. There is **no extra auth** (no contact book, no SAS). Treat the ticket
+like a capability: do not post it publicly.
 
 Each process keeps its own secret key as 32 raw bytes in
 `<iroh-dir>/identity.secret` (default `--iroh-dir` is `<root>/.iroh`). Two
@@ -56,25 +52,20 @@ Append-only jsonl. Dedup by message `id`.
 
 ## Two-root local demo
 
-Build the binary:
+Build the binary (iroh 1.0.1 needs rustc 1.91+):
 
 ```
 cargo build -p suzuri-workspace-sync --manifest-path libs/transfer/Cargo.toml
-BIN=libs/transfer/target/debug/suzuri-workspace-sync
 ```
-
-Terminal 1 (listen). The `ticket: …` line is greppable on stdout:
 
 ```
 # terminal 1
-$BIN listen --root /tmp/ws-a --enable
+SUZURI_WORKSPACE_IROH=1 suzuri-workspace-sync listen --root /tmp/ws-a
 ```
 
-Terminal 2 (paste the JSON after `ticket: `):
-
 ```
-# terminal 2
-$BIN join --root /tmp/ws-b --ticket '<json>' --enable
+# terminal 2 (paste ticket)
+SUZURI_WORKSPACE_IROH=1 suzuri-workspace-sync join --root /tmp/ws-b --ticket '<ticket>'
 ```
 
 Then drop a jsonl line into A's general channel and see it appear in B:
@@ -90,7 +81,14 @@ contain the same id. A line posted on B flows back to A the same way.
 Same-machine note: defaults (`<root>/.iroh`) already give A and B distinct
 identities. Override with `--iroh-dir` if you need to.
 
-Go host wiring is intentionally skipped in this slice — run the rust binary.
+Host wrapper (if `suzuri-workspace-sync` is next to `suzuri`, on `PATH`, or
+`SUZURI_WORKSPACE_SYNC_BIN` is set):
+
+```
+SUZURI_WORKSPACE_IROH=1 suzuri workspace-sync listen --root /tmp/ws-a
+```
+
+You can also run the rust binary directly; the Go command is a thin exec.
 
 ## Out of scope (this slice)
 
@@ -99,4 +97,3 @@ Go host wiring is intentionally skipped in this slice — run the rust binary.
 - Presence
 - CRDTs / last-write-wins field merge
 - Sync of members or workspace metadata
-- Release packaging / `suzuri workspace-sync` host wrapper

@@ -24,7 +24,7 @@
 
 | Piece | Language | Role |
 |-------|----------|------|
-| **`suzuri`** | Go | Product entrypoint. Subcommands: `mcp`, `version`, `transfer`. Default (no args) launches the UI. |
+| **`suzuri`** | Go | Product entrypoint. Subcommands: `mcp`, `version`, `transfer`, `workspace-sync`. Default (no args) launches the UI. |
 | **UI process** | Rust (`chrome/` crate) | The entire interactive GUI (wgpu glass, rain, tabs, settings, workspace chat, notes UI, …). |
 | **`suzuri-transfer`** | Rust (`libs/transfer`) | Peer-to-peer file transfer engine. |
 | **`suzuri-workspace-sync`** | Rust (`libs/transfer/crates/workspace-sync`) | Optional sidecar: iroh sync of workspace `messages.jsonl`. Not shipped in release yet. |
@@ -53,6 +53,7 @@ shared by the host bridge and agents — not a second UI.
 | `SUZURI_VERSION` | Host release version (updater; `dev` never offers) |
 | `SUZURI_UI` | **Ignored for product path.** Classic/ebiten is gone. |
 | `SUZURI_WORKSPACE_IROH` | Opt in to workspace message sync (`=1` / `true` / `yes`). Default is local-only. |
+| `SUZURI_WORKSPACE_SYNC_BIN` | Explicit path to `suzuri-workspace-sync` (dev / override) |
 
 ## Build (dev)
 
@@ -70,6 +71,7 @@ go build -o suzuri ./cmd/suzuri
 Release packaging places `suzuri`, `suzuri-chrome`, and `suzuri-transfer`
 side by side (see `.github/workflows/release.yml`). `suzuri-workspace-sync` is
 an optional sidecar in the same transfer workspace and is **not** included in
-release packaging yet. Build it with
+release packaging yet. `suzuri workspace-sync …` is a thin exec wrapper (same
+pattern as transfer). Build the engine with
 `cargo build -p suzuri-workspace-sync --manifest-path libs/transfer/Cargo.toml`.
 See [workspace-iroh.md](workspace-iroh.md).

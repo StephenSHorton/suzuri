@@ -16,6 +16,10 @@ const ENABLE_ENV: &str = "SUZURI_WORKSPACE_IROH";
     about = "Opt-in iroh sync of suzuri workspace channel messages (jsonl)"
 )]
 struct Cli {
+    /// Opt in to iroh sync (otherwise set SUZURI_WORKSPACE_IROH=1). Default is local-only.
+    #[arg(long, global = true)]
+    enable: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -30,24 +34,18 @@ enum Cmd {
         /// Distinct iroh identity dir (default: `<root>/.iroh`).
         #[arg(long)]
         iroh_dir: Option<PathBuf>,
-        /// Opt in to iroh sync (otherwise set SUZURI_WORKSPACE_IROH=1).
-        #[arg(long)]
-        enable: bool,
     },
     /// Connect to a listen ticket and sync messages both ways.
     Join {
         /// Workspace store root (contains `channels/<slug>/messages.jsonl`).
         #[arg(long)]
         root: PathBuf,
-        /// Ticket printed by `listen` (`ticket: …` JSON EndpointAddr).
+        /// Ticket printed by `listen` (JSON EndpointAddr).
         #[arg(long)]
         ticket: String,
         /// Distinct iroh identity dir (default: `<root>/.iroh`).
         #[arg(long)]
         iroh_dir: Option<PathBuf>,
-        /// Opt in to iroh sync (otherwise set SUZURI_WORKSPACE_IROH=1).
-        #[arg(long)]
-        enable: bool,
     },
 }
 
@@ -69,10 +67,7 @@ async fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
-    let enable = match &cli.cmd {
-        Cmd::Listen { enable, .. } | Cmd::Join { enable, .. } => *enable,
-    };
-    if !is_enabled(enable) {
+    if !is_enabled(cli.enable) {
         eprintln!(
             "workspace iroh sync is opt-in (default is local-only).\nset {ENABLE_ENV}=1 or pass --enable"
         );
@@ -87,11 +82,7 @@ async fn main() -> ExitCode {
 
 async fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
-        Cmd::Listen {
-            root,
-            iroh_dir,
-            enable: _,
-        } => {
+        Cmd::Listen { root, iroh_dir } => {
             let iroh_dir = iroh_dir.unwrap_or_else(|| root.join(".iroh"));
             listen(root, iroh_dir).await
         }
@@ -99,7 +90,6 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
             root,
             ticket,
             iroh_dir,
-            enable: _,
         } => {
             let iroh_dir = iroh_dir.unwrap_or_else(|| root.join(".iroh"));
             join(root, iroh_dir, &ticket).await
