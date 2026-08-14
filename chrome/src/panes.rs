@@ -326,6 +326,31 @@ impl SplitNode {
         }
     }
 
+    /// Pane that should keep focus when `id` closes: the sibling that expands
+    /// into the hole (not the first leftover leaf in tree order).
+    pub fn focus_after_close(&self, id: u64) -> Option<u64> {
+        match self {
+            Self::Leaf(_) => None,
+            Self::Branch { a, b, .. } => {
+                if a.is_only(id) {
+                    return Some(b.first_leaf());
+                }
+                if b.is_only(id) {
+                    return Some(a.first_leaf());
+                }
+                a.focus_after_close(id)
+                    .or_else(|| b.focus_after_close(id))
+            }
+        }
+    }
+
+    fn is_only(&self, id: u64) -> bool {
+        match self {
+            Self::Leaf(p) => *p == id,
+            Self::Branch { .. } => self.leaf_ids() == [id],
+        }
+    }
+
     /// Split sashes (the gap between children). `a_leaf` identifies the branch.
     pub fn collect_sashes(&self, area: Rect, gap: f32, out: &mut Vec<SashHit>) {
         match self {
@@ -739,6 +764,30 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(root, SplitNode::Leaf(1)));
+    }
+
+    #[test]
+    fn close_right_stack_keeps_focus_on_that_column() {
+        // [1] [2]
+        //     [3]
+        let mut root = SplitNode::leaf(1);
+        root.split_leaf(1, 2, SplitAxis::Vertical);
+        root.split_leaf(2, 3, SplitAxis::Horizontal);
+        assert_eq!(root.focus_after_close(3), Some(2));
+        assert_eq!(root.focus_after_close(2), Some(3));
+        assert_eq!(root.focus_after_close(1), Some(2));
+    }
+
+    #[test]
+    fn close_left_stack_keeps_focus_on_that_column() {
+        // [1] [3]
+        // [2]
+        let mut root = SplitNode::leaf(1);
+        root.split_leaf(1, 3, SplitAxis::Vertical);
+        root.split_leaf(1, 2, SplitAxis::Horizontal);
+        assert_eq!(root.focus_after_close(1), Some(2));
+        assert_eq!(root.focus_after_close(2), Some(1));
+        assert_eq!(root.focus_after_close(3), Some(1));
     }
 
     #[test]

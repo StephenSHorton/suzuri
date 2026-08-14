@@ -526,9 +526,14 @@ impl ChromeSession {
         }
 
         if tab.root.begin_close_leaf(pane_id) {
-            // Focus a survivor if we're closing the focused pane.
+            // Focus the sibling that expands into the hole — not the first
+            // leftover leaf in tree order (that is usually the far-left pane).
             if tab.focus_pane == pane_id {
-                if let Some(other) = tab.root.leaf_ids().into_iter().find(|id| *id != pane_id) {
+                if let Some(other) = tab.root.focus_after_close(pane_id) {
+                    tab.focus_pane = other;
+                } else if let Some(other) =
+                    tab.root.leaf_ids().into_iter().find(|id| *id != pane_id)
+                {
                     tab.focus_pane = other;
                 }
             }
@@ -1833,6 +1838,29 @@ mod tests {
             .expect("solo exit");
         assert!(anim.fade_window);
         assert!(anim.opacity() > 0.9);
+    }
+
+    #[test]
+    fn close_right_stack_pane_focuses_remaining_right() {
+        let mut s = ChromeSession::new(80, 24);
+        let right_top = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        let right_bottom = s.split_focused(SplitAxis::Horizontal, 40, 12).unwrap();
+        assert_eq!(s.focus_pane_id(), right_bottom);
+        assert!(s.begin_close_pane(right_bottom));
+        assert_eq!(s.focus_pane_id(), right_top);
+        assert_ne!(s.focus_pane_id(), 1);
+    }
+
+    #[test]
+    fn close_left_stack_pane_focuses_remaining_left() {
+        let mut s = ChromeSession::new(80, 24);
+        let right = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        assert!(s.set_focus_pane(1));
+        let left_bottom = s.split_focused(SplitAxis::Horizontal, 40, 12).unwrap();
+        assert_eq!(s.focus_pane_id(), left_bottom);
+        assert!(s.begin_close_pane(left_bottom));
+        assert_eq!(s.focus_pane_id(), 1);
+        assert_ne!(s.focus_pane_id(), right);
     }
 
     #[test]
