@@ -1624,7 +1624,7 @@ fn chrome_labels(
         }
     }
 
-    // Ghost + : no hover recolor — just dim.
+    // Ghost + : dim idle; hover/press show the same glass shell as pane ×.
     {
         let id = ChipId::NewTab;
         let r = scale_rect(layout.tab_new, chip_ui.scale_for(id));
@@ -1705,7 +1705,7 @@ fn chrome_labels(
                 let ty = pl.title_pill.y + (pl.title_pill.h - ts).max(0.0) * 0.5;
                 labels.push(TextLabel::new(
                     draw,
-                    pl.title_pill.x + 5.0,
+                    pl.title_pill.x + 2.0,
                     ty,
                     ts,
                     if pl.focused { bright } else { dim },
@@ -1716,7 +1716,13 @@ fn chrome_labels(
             let cid = ChipId::PaneClose(pl.pane_id);
             let cr = scale_rect(pl.close, chip_ui.scale_for(cid));
             let xc = chip_ui.dim_color(cid, dim);
-            labels.push(TextLabel::centered("×", [cr.x, cr.y, cr.w, cr.h], 12.0, xc));
+            // Gohu × sits high/left in the em box — nudge into the glass.
+            labels.push(TextLabel::centered(
+                "×",
+                [cr.x + 0.5, cr.y + 1.0, cr.w, cr.h],
+                11.0,
+                xc,
+            ));
         }
         if pane.kind.is_workspace() {
             if workspace_ui.is_docked() {

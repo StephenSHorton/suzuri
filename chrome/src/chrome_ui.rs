@@ -151,7 +151,11 @@ impl ChipUi {
     }
 
     /// Label / icon multiplier: 50% when hovered, else full.
+    /// Ghost + / pane × keep full glyph strength — the shell is the hover signal.
     pub fn hover_dim(&self, id: ChipId) -> f32 {
+        if matches!(id, ChipId::NewTab | ChipId::PaneClose(_)) {
+            return 1.0;
+        }
         if self.hover == Some(id) {
             Self::HOVER_DIM
         } else {
@@ -178,10 +182,9 @@ impl ChipUi {
             .clamp(0.0, 1.0)
     }
 
-    /// Ghost + shell only while pressing (no hover-only shell).
-    /// Pane close also lights on hover so the × is findable.
+    /// Ghost + / pane × shell on hover or press (no idle glass).
     pub fn ghost_shell_visible(&self, id: ChipId) -> bool {
-        if matches!(id, ChipId::PaneClose(_)) && self.hover == Some(id) {
+        if matches!(id, ChipId::NewTab | ChipId::PaneClose(_)) && self.hover == Some(id) {
             return true;
         }
         self.press_light(id) > 0.04
@@ -349,6 +352,17 @@ mod tests {
         assert!((c[3] - 0.9).abs() < 0.001); // alpha preserved
         ui.set_hover(None, (10.0, 10.0));
         assert!((ui.hover_dim(ChipId::Logo) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn new_tab_shell_appears_on_hover() {
+        let mut ui = ChipUi::default();
+        assert!(!ui.ghost_shell_visible(ChipId::NewTab));
+        ui.set_hover(Some(ChipId::NewTab), (80.0, 12.0));
+        assert!(ui.ghost_shell_visible(ChipId::NewTab));
+        assert!((ui.hover_dim(ChipId::NewTab) - 1.0).abs() < 0.001);
+        ui.set_hover(None, (80.0, 12.0));
+        assert!(!ui.ghost_shell_visible(ChipId::NewTab));
     }
 
     #[test]

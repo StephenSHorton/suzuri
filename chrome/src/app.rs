@@ -3672,11 +3672,19 @@ impl ApplicationHandler for ChromeApp {
                         }
                     }
                 }
+                let prev_hover = self.chip_ui.hover;
+                self.update_chip_hover();
+                if self.chip_ui.hover != prev_hover {
+                    self.request_redraw();
+                }
                 self.update_link_hover();
             }
 
             WindowEvent::CursorLeft { .. } => {
                 self.pointer_inside = false;
+                if self.chip_ui.hover.take().is_some() {
+                    self.request_redraw();
+                }
                 self.clear_link_hover();
                 let tear = self.pane_drag.as_ref().is_some_and(|d| d.active)
                     && matches!(self.pointer_loc(), PointerLoc::Outside);

@@ -147,7 +147,7 @@ pub struct PaneLayout {
     pub divider: Rect,
     pub path: Rect,
     pub warp: Rect,
-    /// Top chrome strip (title pill + close).
+    /// Top chrome strip (title + close).
     pub header: Rect,
     pub title_pill: Rect,
     pub close: Rect,
@@ -240,9 +240,9 @@ impl FrameLayout {
     }
 }
 
-/// Height of the pane header strip (title pill + close).
+/// Height of the pane header strip (title + close).
 pub const PANE_HEADER_H: f32 = 22.0;
-/// Title pill height inside the header.
+/// Title text band height inside the header.
 pub const PANE_PILL_H: f32 = 16.0;
 /// Ghost close button size (matches the + chip feel).
 pub const PANE_CLOSE_SZ: f32 = 16.0;
@@ -467,14 +467,6 @@ impl FrameLayout {
         // (surface tension / stretchy glass, not separate cubes).
         for pl in &self.panes {
             out.push(PanelInstance::glass(pl.glass, m.radius, PanelKind::Terminal));
-            if pl.title_pill.w > 2.0 && pl.title_pill.h > 2.0 {
-                let id = ChipId::PaneTitle(pl.pane_id);
-                let r = scale_rect(pl.title_pill, chip_ui.scale_for(id));
-                out.push(
-                    PanelInstance::glass(r, (m.chip_radius * 0.7).max(4.0), PanelKind::ChipIdle)
-                        .with_press(chip_ui.press_light(id)),
-                );
-            }
             {
                 let id = ChipId::PaneClose(pl.pane_id);
                 if pl.close.w > 2.0 && chip_ui.ghost_shell_visible(id) {
@@ -485,6 +477,18 @@ impl FrameLayout {
                             .with_press(chip_ui.press_light(id)),
                     );
                 }
+            }
+            // Header rule — same hairline as the warp strip (no glass on the name).
+            if pl.header.h > 2.0 && pl.header.w > 4.0 {
+                let line = Rect::new(
+                    pl.header.x,
+                    pl.header.y + pl.header.h - 1.0,
+                    pl.header.w,
+                    1.5,
+                );
+                out.push(
+                    PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9),
+                );
             }
             // Footer hairline only when the command strip is present (not alt-screen).
             if pl.divider.h >= 1.0 {
@@ -590,11 +594,11 @@ fn pane_header_rects(glass: Rect, inset: f32) -> (Rect, Rect, Rect) {
         PANE_CLOSE_SZ,
         PANE_CLOSE_SZ,
     );
-    let pill_w = (header.w - PANE_CLOSE_SZ - 8.0).clamp(20.0, 92.0);
+    let title_w = (header.w - PANE_CLOSE_SZ - 8.0).max(20.0);
     let title_pill = Rect::new(
         header.x + 2.0,
         header.y + (header.h - PANE_PILL_H) * 0.5,
-        pill_w,
+        title_w,
         PANE_PILL_H,
     );
     (header, title_pill, close)
@@ -873,6 +877,30 @@ mod tests {
         assert!(pl.title_pill.x < pl.close.x);
         assert!(pl.close.x + pl.close.w <= pl.header.x + pl.header.w + 0.5);
         assert!(pl.cells.y >= pl.header.y + pl.header.h);
+    }
+
+    #[test]
+    fn pane_title_is_hairline_not_glass_pill() {
+        let m = Metrics::default();
+        let l = FrameLayout::compute(800.0, 600.0, m, 1);
+        let chip = crate::chrome_ui::ChipUi::default();
+        let jelly = crate::chrome_ui::TabJelly::default();
+        let panels = l.glass_panels(m, 0, None, &chip, &jelly);
+        let pl = &l.panes[0];
+        let title_glass = panels.iter().any(|p| {
+            (p.kind - PanelKind::ChipIdle as u32 as f32).abs() < 0.1
+                && (p.rect[0] - pl.title_pill.x).abs() < 1.0
+                && (p.rect[1] - pl.title_pill.y).abs() < 1.0
+        });
+        assert!(!title_glass, "pane name should not sit in a glass chip");
+        let hair = panels
+            .iter()
+            .filter(|p| (p.kind - PanelKind::Hairline as u32 as f32).abs() < 0.1)
+            .count();
+        assert!(
+            hair >= 2,
+            "header + footer hairlines expected, got {hair}"
+        );
     }
 
     #[test]
