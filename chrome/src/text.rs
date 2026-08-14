@@ -65,6 +65,9 @@ pub struct TextLabel {
     pub center_in: Option<[f32; 4]>,
     /// Optional clip rect in logical px `[x, y, w, h]` (terminal pane hole).
     pub clip: Option<[f32; 4]>,
+    /// Line box = font size (no 1.2 leading). Needed so a single glyph
+    /// centers on `center_in` instead of sitting low in the extra leading.
+    pub tight: bool,
 }
 
 impl TextLabel {
@@ -81,6 +84,7 @@ impl TextLabel {
             key_chord: false,
             center_in: None,
             clip: None,
+            tight: false,
         }
     }
 
@@ -97,6 +101,7 @@ impl TextLabel {
             key_chord: false,
             center_in: None,
             clip: None,
+            tight: false,
         }
     }
 
@@ -118,7 +123,20 @@ impl TextLabel {
             key_chord: false,
             center_in: Some(rect),
             clip: None,
+            tight: false,
         }
+    }
+
+    /// Center a chrome icon (pane/tab ×) on `rect` using a tight line box.
+    pub fn icon_centered(
+        text: impl Into<String>,
+        rect: [f32; 4],
+        size: f32,
+        color: [f32; 4],
+    ) -> Self {
+        let mut label = Self::centered(text, rect, size, color);
+        label.tight = true;
+        label
     }
 
     /// Clip this label to a logical rect (e.g. terminal cells hole).
@@ -162,6 +180,7 @@ impl TextLabel {
             key_chord: true,
             center_in: None,
             clip: None,
+            tight: false,
         }
     }
 
@@ -183,6 +202,7 @@ impl TextLabel {
             key_chord: false,
             center_in: Some(rect),
             clip: None,
+            tight: false,
         }
     }
 }
@@ -454,7 +474,11 @@ impl TextLayer {
         for (i, label) in labels.iter().enumerate() {
             // Prefer integer physical px (bitmap-friendly).
             let size_px = (label.size * scale).max(1.0).round().max(1.0);
-            let line_height = (size_px * 1.2).round().max(size_px);
+            let line_height = if label.tight {
+                size_px
+            } else {
+                (size_px * 1.2).round().max(size_px)
+            };
             let metrics = FontMetrics::new(size_px, line_height);
             let max_w = (self.width as f32).max(1.0);
             let text = label.text.as_str();
@@ -626,4 +650,19 @@ fn rgba_u8(c: [f32; 4]) -> Color {
         (c[2].clamp(0.0, 1.0) * 255.0) as u8,
         (c[3].clamp(0.0, 1.0) * 255.0) as u8,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_centered_is_tight_on_the_hit_rect() {
+        let hit = [80.0, 12.0, 16.0, 16.0];
+        let label = TextLabel::icon_centered("×", hit, 14.0, [1.0; 4]);
+        assert!(label.tight);
+        assert_eq!(label.center_in, Some(hit));
+        assert_eq!(label.size, 14.0);
+        assert!(!TextLabel::centered("×", hit, 11.0, [1.0; 4]).tight);
+    }
 }

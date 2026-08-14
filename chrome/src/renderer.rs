@@ -1632,7 +1632,7 @@ fn chrome_labels(
                     xc[3] *= exit.t.clamp(0.0, 1.0);
                 }
             }
-            labels.push(TextLabel::centered(
+            labels.push(TextLabel::icon_centered(
                 "×",
                 [cr.x, cr.y, cr.w, cr.h],
                 13.0,
@@ -1733,11 +1733,10 @@ fn chrome_labels(
             let cid = ChipId::PaneClose(pl.pane_id);
             let cr = scale_rect(pl.close, chip_ui.scale_for(cid));
             let xc = chip_ui.dim_color(cid, dim);
-            // Gohu × sits high/left in the em box — nudge into the glass.
-            labels.push(TextLabel::centered(
+            labels.push(TextLabel::icon_centered(
                 "×",
-                [cr.x + 0.5, cr.y + 1.0, cr.w, cr.h],
-                11.0,
+                [cr.x, cr.y, cr.w, cr.h],
+                14.0,
                 xc,
             ));
         }
