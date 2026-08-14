@@ -9,8 +9,9 @@
 //!   `scrim_alpha`, `animated_modal_rect`
 //! - compose: `insert_char`, `backspace`, `send`, `@mention` picker / complete
 //! - channels: `select_channel`
-//! - presence / attach: `join_self`, `attach_path`, `begin_attach`, `pick_and_attach`,
-//!   `members_strip_text`, `cycle_status`, `refresh` / native FS watch + 1s poll fallback while open
+//! - presence / attach: `join_self` (quiet), `attach_path`, `begin_attach`, `pick_and_attach`,
+//!   `members_strip_chips`, `cycle_status`, `begin_add_agent`, `begin_set_topic`,
+//!   `refresh` / native FS watch + 1s poll fallback while open
 //!
 //! See `chrome/WORKSPACE_HOOKS.md` for hit-test layout constants and hooks.
 
@@ -23,8 +24,8 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::layout::Rect;
 use crate::workspace_store::{
-    local_human_name, member_chip, next_availability, WorkspaceStore, DEFAULT_CHANNEL,
-    HISTORY_LIMIT, MAX_BODY_RUNES, STATUS_IDLE,
+    agent_kickoff_text, local_human_name, next_availability, normalize_agent_role, presence_chip,
+    WorkspaceStore, AGENT_ROLES, DEFAULT_CHANNEL, HISTORY_LIMIT, MAX_BODY_RUNES, STATUS_IDLE,
 };
 
 /// How often an open workspace reloads from disk as a safety net (and the
@@ -49,6 +50,10 @@ pub const CHANNEL_LIST_TOP: f32 = MODAL_PAD + 18.0;
 pub const COMPOSE_H: f32 = 44.0;
 /// Height reserved under the title for the presence strip (message pane).
 pub const PRESENCE_STRIP_H: f32 = 18.0;
+/// Pinned topic line under the presence strip (does not scroll with chat).
+pub const TOPIC_PIN_H: f32 = 16.0;
+/// Width of the +Agent chip at the right of the presence strip.
+pub const ADD_AGENT_CHIP_W: f32 = 64.0;
 /// Floor for visible bubbles (larger panes raise this via [`WorkspaceUi::visible_bubble_cap`]).
 pub const VISIBLE_BUBBLE_CAP: usize = 14;
 /// Vertical gap between chat bubbles.
@@ -127,6 +132,10 @@ pub enum ComposeMode {
     NewChannel,
     /// Draft is a filesystem path to attach (Enter → `attach_path`).
     AttachPath,
+    /// Pick a +Agent role (`pm` / `engine` / `content`) then copy kickoff.
+    PickAgentRole,
+    /// Draft is the channel topic (Enter writes `meta.json`).
+    SetTopic,
 }
 
 pub struct WorkspaceUi {
@@ -144,6 +153,10 @@ pub struct WorkspaceUi {
     pub channels: Vec<String>,
     /// Presence list for paint (product `members.json`).
     pub members: Vec<WsMember>,
+    /// Pinned topic for the active channel (`meta.json`).
+    pub channel_topic: String,
+    /// Kickoff snippet waiting for the host to copy (drained by `app`).
+    pending_clipboard: Option<String>,
     /// Ephemeral status (create errors, etc.).
     pub status: String,
     pub mode: ComposeMode,
@@ -197,6 +210,8 @@ impl WorkspaceUi {
             messages: Vec::new(),
             channels: vec![DEFAULT_CHANNEL.into()],
             members: Vec::new(),
+            channel_topic: String::new(),
+            pending_clipboard: None,
             status: String::new(),
             mode: ComposeMode::Message,
             mention_sel: 0,
@@ -213,6 +228,7 @@ impl WorkspaceUi {
         s.reload_channels();
         s.reload_messages();
         s.reload_members();
+        s.reload_topic();
         // Drain ensure/join events from the initial snapshot load.
         s.watch_dirty.store(false, Ordering::Release);
         s
@@ -281,7 +297,8 @@ impl WorkspaceUi {
     /// How many bubbles fit the current card (larger pane → more history).
     pub fn visible_bubble_cap(&self, win_w: f32, win_h: f32) -> usize {
         let host = self.card_rect(win_w, win_h);
-        let usable = (host.h - MODAL_PAD * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - 8.0).max(80.0);
+        let usable =
+            (host.h - MODAL_PAD * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - TOPIC_PIN_H - 8.0).max(80.0);
         ((usable / (BUBBLE_MIN_H + BUBBLE_GAP)).floor() as usize).clamp(VISIBLE_BUBBLE_CAP, 48)
     }
 
@@ -298,6 +315,7 @@ impl WorkspaceUi {
         self.reload_channels();
         self.reload_messages();
         self.reload_members();
+        self.reload_topic();
         self.watch_dirty.store(false, Ordering::Release);
     }
 
@@ -312,6 +330,7 @@ impl WorkspaceUi {
 
     /// Register `$USER` as a human member (no-op update if already joined).
     /// Uses a stable local session id so reopen does not mint a new human.
+    /// Identity join never posts a #general system line.
     pub fn join_self(&mut self) {
         let sess = crate::workspace_store::local_human_session(&self.human);
         match self.store.join(&self.human, "human", &sess) {
@@ -330,6 +349,7 @@ impl WorkspaceUi {
         self.host = None;
         self.draft.clear();
         self.status.clear();
+        self.pending_clipboard = None;
         self.mode = ComposeMode::Message;
         self.mention_sel = 0;
         self.refresh_accum = 0.0;
@@ -465,6 +485,8 @@ impl WorkspaceUi {
                 let path = self.draft.clone();
                 self.attach_path(path.trim());
             }
+            ComposeMode::PickAgentRole => self.commit_agent_role(),
+            ComposeMode::SetTopic => self.commit_topic(),
             ComposeMode::Message => self.post_draft(),
         }
     }
@@ -687,13 +709,70 @@ impl WorkspaceUi {
         self.status = "new channel name — Enter to create".into();
     }
 
-    /// Cancel new-channel / attach mode back to message compose.
+    /// Cancel new-channel / attach / +Agent / topic mode back to message compose.
     pub fn cancel_mode(&mut self) {
         if self.mode != ComposeMode::Message {
             self.mode = ComposeMode::Message;
             self.draft.clear();
             self.status.clear();
         }
+    }
+
+    /// Open the +Agent role picker (does not launch a Grok process).
+    pub fn begin_add_agent(&mut self) {
+        self.mode = ComposeMode::PickAgentRole;
+        self.draft.clear();
+        self.status = "pick role: pm · engine · content — copies kickoff".into();
+    }
+
+    /// Copy a role kickoff snippet to the host clipboard queue.
+    pub fn pick_agent_role(&mut self, role: &str) -> bool {
+        let Some(role) = normalize_agent_role(role) else {
+            self.status = "role must be pm, engine, or content".into();
+            return false;
+        };
+        let text = agent_kickoff_text(role);
+        self.pending_clipboard = Some(text);
+        self.mode = ComposeMode::Message;
+        self.draft.clear();
+        self.status = format!("+Agent {role} kickoff copied — paste into a new Grok session");
+        true
+    }
+
+    fn commit_agent_role(&mut self) {
+        let role = self.draft.clone();
+        if !self.pick_agent_role(role.trim()) && self.draft.trim().is_empty() {
+            self.status = "pick role: pm · engine · content".into();
+        }
+    }
+
+    /// Edit the pinned topic for the active channel.
+    pub fn begin_set_topic(&mut self) {
+        self.mode = ComposeMode::SetTopic;
+        self.draft = self.channel_topic.clone();
+        self.status = "channel topic — Enter to pin".into();
+    }
+
+    fn commit_topic(&mut self) {
+        let topic = self.draft.clone();
+        match self.store.set_channel_topic(&self.channel, topic.trim()) {
+            Ok(saved) => {
+                self.channel_topic = saved;
+                self.draft.clear();
+                self.mode = ComposeMode::Message;
+                if self.channel_topic.is_empty() {
+                    self.status = "topic cleared".into();
+                } else {
+                    self.status = format!("topic: {}", self.channel_topic);
+                }
+            }
+            Err(e) => self.status = e,
+        }
+    }
+
+    /// Host drains this after click/send to copy kickoff text.
+    pub fn take_pending_clipboard(&mut self) -> Option<String> {
+        self.pending_clipboard.take()
     }
 
     // ── channels ─────────────────────────────────────────────────────────────
@@ -705,6 +784,7 @@ impl WorkspaceUi {
             self.scroll = 0;
             self.delete_pending = None;
             self.reload_messages();
+            self.reload_topic();
         }
     }
 
@@ -795,6 +875,7 @@ impl WorkspaceUi {
         self.reload_channels();
         self.reload_messages();
         self.reload_members();
+        self.reload_topic();
         if stick_bottom {
             self.scroll = 0;
         } else {
@@ -882,10 +963,17 @@ impl WorkspaceUi {
         }
     }
 
-    /// One-line presence strip for renderer paint (humans first, then agents).
-    pub fn members_strip_text(&self) -> String {
+    fn reload_topic(&mut self) {
+        match self.store.channel_topic(&self.channel) {
+            Ok(t) => self.channel_topic = t,
+            Err(_) => {}
+        }
+    }
+
+    /// One chip per member (humans first). Never unique-by-name.
+    pub fn members_strip_chips(&self) -> Vec<String> {
         if self.members.is_empty() {
-            return "no members yet".into();
+            return vec!["no members yet".into()];
         }
         let mut humans: Vec<&WsMember> = Vec::new();
         let mut agents: Vec<&WsMember> = Vec::new();
@@ -896,31 +984,82 @@ impl WorkspaceUi {
                 agents.push(m);
             }
         }
-        let mut chips: Vec<String> = humans
-            .iter()
-            .chain(agents.iter())
-            .map(|m| member_chip(m))
-            .collect();
-        // Soft cap so the strip stays one visual line in the modal.
-        const MAX_CHIPS: usize = 6;
-        let hidden = chips.len().saturating_sub(MAX_CHIPS);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let ordered: Vec<&WsMember> = humans.into_iter().chain(agents).collect();
+        // Soft cap, but never hide a member that shares a display name with one shown.
+        const MAX_CHIPS: usize = 8;
+        let mut shown_names: Vec<&str> = Vec::new();
+        let mut chips: Vec<String> = Vec::new();
+        let mut hidden = 0usize;
+        for m in ordered {
+            let shares = shown_names.iter().any(|n| *n == m.name.as_str());
+            if chips.len() >= MAX_CHIPS && !shares {
+                hidden += 1;
+                continue;
+            }
+            chips.push(presence_chip(m, &self.members, now));
+            shown_names.push(m.name.as_str());
+        }
         if hidden > 0 {
-            chips.truncate(MAX_CHIPS);
             chips.push(format!("+{hidden}"));
         }
-        chips.join("  ")
+        chips
+    }
+
+    /// One-line presence strip for renderer paint (humans first, then agents).
+    pub fn members_strip_text(&self) -> String {
+        self.members_strip_chips().join("  ")
     }
 
     /// Hit rect for the presence strip (title row, message pane side). Click cycles status.
+    /// Stops short of the +Agent chip on the right.
     pub fn presence_strip_rect(&self, win_w: f32, win_h: f32) -> Rect {
+        let modal = self.card_rect(win_w, win_h);
+        let list_w = self.channel_list_w(win_w, win_h);
+        let full_w = (modal.w - MODAL_PAD * 2.0 - list_w - 10.0).max(40.0);
+        Rect::new(
+            modal.x + MODAL_PAD + list_w + 10.0,
+            modal.y + 4.0,
+            (full_w - ADD_AGENT_CHIP_W - 4.0).max(20.0),
+            PRESENCE_STRIP_H + 4.0,
+        )
+    }
+
+    /// +Agent chip to the right of the presence strip.
+    pub fn add_agent_chip_rect(&self, win_w: f32, win_h: f32) -> Rect {
+        let modal = self.card_rect(win_w, win_h);
+        let x = modal.x + modal.w - MODAL_PAD - ADD_AGENT_CHIP_W;
+        Rect::new(x, modal.y + 4.0, ADD_AGENT_CHIP_W, PRESENCE_STRIP_H + 4.0)
+    }
+
+    /// Pinned topic line under the presence strip (does not scroll).
+    pub fn topic_pin_rect(&self, win_w: f32, win_h: f32) -> Rect {
         let modal = self.card_rect(win_w, win_h);
         let list_w = self.channel_list_w(win_w, win_h);
         Rect::new(
             modal.x + MODAL_PAD + list_w + 10.0,
-            modal.y + 4.0,
+            modal.y + MODAL_PAD + PRESENCE_STRIP_H,
             (modal.w - MODAL_PAD * 2.0 - list_w - 10.0).max(40.0),
-            PRESENCE_STRIP_H + 4.0,
+            TOPIC_PIN_H,
         )
+    }
+
+    /// Role chip `i` in the +Agent picker (`pm` / `engine` / `content`).
+    pub fn agent_role_rect(&self, i: usize, win_w: f32, win_h: f32) -> Rect {
+        let pin = self.topic_pin_rect(win_w, win_h);
+        let w = 72.0;
+        Rect::new(pin.x + i as f32 * (w + 8.0), pin.y, w, TOPIC_PIN_H)
+    }
+
+    pub fn topic_pin_text(&self) -> String {
+        if self.channel_topic.is_empty() {
+            "📌 set topic…".into()
+        } else {
+            format!("📌 {}", self.channel_topic)
+        }
     }
 
     // ── hit-test ─────────────────────────────────────────────────────────────
@@ -985,6 +1124,22 @@ impl WorkspaceUi {
             self.begin_new_channel();
             return true;
         }
+        if self.add_agent_chip_rect(win_w, win_h).contains(x, y) {
+            self.begin_add_agent();
+            return true;
+        }
+        if self.mode == ComposeMode::PickAgentRole {
+            for (i, role) in AGENT_ROLES.iter().enumerate() {
+                if self.agent_role_rect(i, win_w, win_h).contains(x, y) {
+                    self.pick_agent_role(role);
+                    return true;
+                }
+            }
+        }
+        if self.topic_pin_rect(win_w, win_h).contains(x, y) {
+            self.begin_set_topic();
+            return true;
+        }
         if self.presence_strip_rect(win_w, win_h).contains(x, y) {
             self.cycle_status();
             return true;
@@ -1017,8 +1172,8 @@ impl WorkspaceUi {
         let ch_w = self.channel_list_w(win_w, win_h);
         let msg_x = ch_x + ch_w + 10.0;
         let msg_w = (modal.x + modal.w - pad - msg_x).max(40.0);
-        let msg_y = modal.y + pad + PRESENCE_STRIP_H;
-        let msg_h = (modal.h - pad * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - 4.0).max(40.0);
+        let msg_y = modal.y + pad + PRESENCE_STRIP_H + TOPIC_PIN_H;
+        let msg_h = (modal.h - pad * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - TOPIC_PIN_H - 4.0).max(40.0);
         Rect::new(msg_x, msg_y, msg_w, msg_h)
     }
 
@@ -1671,4 +1826,74 @@ mod tests {
         assert_eq!(last.from, "alice");
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn strip_keeps_engine_and_engine_2() {
+        let dir = temp_root("strip-names");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        let store = WorkspaceStore::open_at(&dir);
+        store.join("engine", "agent", "s1").unwrap();
+        store.join("engine-2", "agent", "s2").unwrap();
+        ui.reload_members();
+        let text = ui.members_strip_text();
+        assert!(text.contains("engine"), "{text}");
+        assert!(text.contains("engine-2"), "{text}");
+        let chips = ui.members_strip_chips();
+        let named: Vec<_> = chips.iter().filter(|c| c.contains("engine")).collect();
+        assert!(named.len() >= 2, "expected two engine chips, got {chips:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_does_not_post_join_noise() {
+        let dir = temp_root("quiet-open");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        assert!(
+            ui.messages
+                .iter()
+                .all(|m| !m.body.contains("joined the workspace")),
+            "UI join must be quiet: {:?}",
+            ui.messages.iter().map(|m| &m.body).collect::<Vec<_>>()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pick_agent_role_queues_kickoff() {
+        let dir = temp_root("kickoff-ui");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        ui.begin_add_agent();
+        assert_eq!(ui.mode, ComposeMode::PickAgentRole);
+        assert!(ui.pick_agent_role("engine"));
+        let text = ui.take_pending_clipboard().expect("kickoff");
+        assert!(text.contains("engine"));
+        assert!(text.contains("workspace_guide"));
+        assert!(text.contains("workspace_claim_role"));
+        assert!(text.contains("workspace_wait"));
+        assert_eq!(ui.mode, ComposeMode::Message);
+        assert!(ui.status.contains("engine"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_topic_pins_above_chat() {
+        let dir = temp_root("topic-ui");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        assert!(ui.topic_pin_text().contains("set topic"));
+        ui.begin_set_topic();
+        ui.draft = "control plane".into();
+        ui.send();
+        assert_eq!(ui.channel_topic, "control plane");
+        assert!(ui.topic_pin_text().contains("control plane"));
+        assert_eq!(ui.mode, ComposeMode::Message);
+        let pin = ui.topic_pin_rect(900.0, 700.0);
+        let pane = ui.message_pane_rect(900.0, 700.0);
+        assert!(pin.y + pin.h <= pane.y + 0.5, "pin must not scroll with chat");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
 }

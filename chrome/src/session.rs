@@ -166,6 +166,8 @@ pub struct ChromeSession {
     history_stash: String,
     next_tab_id: u64,
     next_pane_id: u64,
+    /// Snap-finished pane ids waiting for the host to drop PTYs.
+    pending_drops: Vec<u64>,
 }
 
 impl ChromeSession {
@@ -194,6 +196,7 @@ impl ChromeSession {
             history_stash: String::new(),
             next_tab_id: 2,
             next_pane_id: 2,
+            pending_drops: Vec::new(),
         }
     }
 
@@ -385,6 +388,7 @@ impl ChromeSession {
         for pid in finished {
             self.finalize_pane_close(pid, &mut result);
         }
+        result.finished_closes.extend(self.pending_drops.drain(..));
         for (tab_id, pane_id) in solo_finished {
             result.finished_closes.push(pane_id);
             self.finalize_solo_close(tab_id, pane_id, &mut result);
@@ -492,49 +496,101 @@ impl ChromeSession {
     /// Begin graceful exit of a pane (shell died or user closed).
     /// Returns true if an animation was started (or already in progress).
     pub fn begin_close_pane(&mut self, pane_id: u64) -> bool {
-        let Some(pane) = self.panes.get_mut(&pane_id) else {
+        if !self.panes.contains_key(&pane_id) {
             return false;
-        };
-        if pane.exiting {
-            return true;
         }
-        pane.exiting = true;
 
-        let tab_meta = self.tabs.iter().find(|t| {
+        let Some(tab_id) = self.tabs.iter().find(|t| {
             t.root.contains_pane(pane_id)
                 || t.solo_exit.as_ref().map(|s| s.pane_id) == Some(pane_id)
-        });
-        let Some(tab_id) = tab_meta.map(|t| t.id) else {
+        }).map(|t| t.id) else {
             return false;
         };
+
+        let already_closing = self.tabs.iter().any(|t| t.id == tab_id && t.root.is_closing(pane_id));
+        if self.panes.get(&pane_id).is_some_and(|p| p.exiting) && already_closing {
+            return true;
+        }
+
+        // Snap other in-progress jelly-closes. Starting a second close on the
+        // same branch used to overwrite CloseSide and leave the first pane
+        // stuck at exiting=true (× / ⌘W then did nothing).
+        self.snap_finish_closes(tab_id, Some(pane_id));
+
+        if !self.panes.contains_key(&pane_id) {
+            return true;
+        }
+        if let Some(p) = self.panes.get_mut(&pane_id) {
+            p.exiting = false;
+        }
+
         let last_on_window = self.is_last_tab_on_surface(tab_id);
-
-        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
-            return false;
-        };
-
-        let leaf_count = tab.root.leaf_ids().len();
+        let leaf_count = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.root.leaf_ids().len())
+            .unwrap_or(0);
         if leaf_count <= 1 {
+            if let Some(p) = self.panes.get_mut(&pane_id) {
+                p.exiting = true;
+            }
             if last_on_window {
-                if tab.solo_exit.is_none() {
-                    tab.solo_exit = Some(SoloExitAnim::start_window(pane_id));
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                    if tab.solo_exit.is_none() {
+                        tab.solo_exit = Some(SoloExitAnim::start_window(pane_id));
+                    }
                 }
                 return true;
             }
-            // Sole pane of a tab that has neighbors — strip handoff, not pane shrink.
             return self.begin_close_tab(tab_id);
         }
 
-        if tab.root.begin_close_leaf(pane_id) {
-            // Focus a survivor if we're closing the focused pane.
+        let started = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == tab_id)
+            .is_some_and(|tab| tab.root.begin_close_leaf(pane_id));
+        if !started {
+            return false;
+        }
+        if let Some(p) = self.panes.get_mut(&pane_id) {
+            p.exiting = true;
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             if tab.focus_pane == pane_id {
-                if let Some(other) = tab.root.leaf_ids().into_iter().find(|id| *id != pane_id) {
+                if let Some(other) = tab.root.focus_after_close(pane_id) {
+                    tab.focus_pane = other;
+                } else if let Some(other) =
+                    tab.root.leaf_ids().into_iter().find(|id| *id != pane_id)
+                {
                     tab.focus_pane = other;
                 }
             }
-            true
-        } else {
-            false
+        }
+        true
+    }
+
+    /// Instantly collapse every jelly-close on `tab_id` except `keep`.
+    fn snap_finish_closes(&mut self, tab_id: u64, keep: Option<u64>) {
+        loop {
+            let ids: Vec<u64> = match self.tabs.iter().find(|t| t.id == tab_id) {
+                Some(tab) => tab
+                    .root
+                    .closing_leaf_ids()
+                    .into_iter()
+                    .filter(|id| keep != Some(*id))
+                    .collect(),
+                None => return,
+            };
+            if ids.is_empty() {
+                return;
+            }
+            for id in ids {
+                let mut dummy = TickResult::default();
+                self.finalize_pane_close(id, &mut dummy);
+                self.pending_drops.push(id);
+            }
         }
     }
 
@@ -552,7 +608,9 @@ impl ChromeSession {
         let tab = &mut self.tabs[tab_idx];
         match tab.root.remove_leaf(pane_id) {
             RemoveResult::Removed { focus_hint } => {
-                tab.focus_pane = focus_hint;
+                if tab.focus_pane == pane_id || !tab.root.contains_pane(tab.focus_pane) {
+                    tab.focus_pane = focus_hint;
+                }
                 self.panes.remove(&pane_id);
             }
             RemoveResult::RemovedEmpty => {
@@ -1833,6 +1891,74 @@ mod tests {
             .expect("solo exit");
         assert!(anim.fade_window);
         assert!(anim.opacity() > 0.9);
+    }
+
+    #[test]
+    fn close_right_stack_pane_focuses_remaining_right() {
+        let mut s = ChromeSession::new(80, 24);
+        let right_top = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        let right_bottom = s.split_focused(SplitAxis::Horizontal, 40, 12).unwrap();
+        assert_eq!(s.focus_pane_id(), right_bottom);
+        assert!(s.begin_close_pane(right_bottom));
+        assert_eq!(s.focus_pane_id(), right_top);
+        assert_ne!(s.focus_pane_id(), 1);
+    }
+
+    #[test]
+    fn close_left_stack_pane_focuses_remaining_left() {
+        let mut s = ChromeSession::new(80, 24);
+        let right = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        assert!(s.set_focus_pane(1));
+        let left_bottom = s.split_focused(SplitAxis::Horizontal, 40, 12).unwrap();
+        assert_eq!(s.focus_pane_id(), left_bottom);
+        assert!(s.begin_close_pane(left_bottom));
+        assert_eq!(s.focus_pane_id(), 1);
+        assert_ne!(s.focus_pane_id(), right);
+    }
+
+    #[test]
+    fn rapid_close_right_stack_does_not_stick() {
+        let mut s = ChromeSession::new(80, 24);
+        let right_top = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        let right_bottom = s.split_focused(SplitAxis::Horizontal, 40, 12).unwrap();
+        assert!(s.begin_close_pane(right_bottom));
+        assert!(s.panes.get(&right_bottom).unwrap().exiting);
+        assert!(s.begin_close_pane(right_top));
+        assert!(
+            !s.panes.contains_key(&right_bottom),
+            "first close should snap-finish so the second can start"
+        );
+        assert!(s.panes.get(&right_top).unwrap().exiting);
+        assert!(s.begin_close_pane(1), "remaining pane must still close");
+    }
+
+    #[test]
+    fn rapid_close_left_stack_does_not_stick() {
+        let mut s = ChromeSession::new(80, 24);
+        let right = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        assert!(s.set_focus_pane(1));
+        let left_bottom = s.split_focused(SplitAxis::Horizontal, 40, 12).unwrap();
+        assert!(s.begin_close_pane(left_bottom));
+        assert!(s.begin_close_pane(1));
+        assert!(
+            !s.panes.contains_key(&left_bottom),
+            "first close should snap-finish so the second can start"
+        );
+        assert!(s.panes.get(&1).unwrap().exiting);
+        assert!(s.begin_close_pane(right), "remaining pane must still close");
+    }
+
+    #[test]
+    fn stuck_exiting_flag_recovers() {
+        let mut s = ChromeSession::new(80, 24);
+        let right = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        s.panes.get_mut(&right).unwrap().exiting = true;
+        assert!(
+            !s.active_tab().unwrap().root.is_closing(right),
+            "precondition: tree is not closing the pane"
+        );
+        assert!(s.begin_close_pane(right));
+        assert!(s.active_tab().unwrap().root.is_closing(right));
     }
 
     #[test]

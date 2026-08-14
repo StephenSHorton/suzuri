@@ -219,6 +219,8 @@ impl SplitNode {
     /// Start a jelly-close of leaf `id`. Returns false if not found or already sole leaf.
     ///
     /// For a sole leaf, the caller should run a tab-level exit anim instead.
+    /// Refuses to start a second close on a branch that is already collapsing
+    /// a different child — the caller should snap-finish that close first.
     pub fn begin_close_leaf(&mut self, id: u64) -> bool {
         match self {
             Self::Leaf(_) => false,
@@ -231,6 +233,17 @@ impl SplitNode {
                 closing,
                 ..
             } => {
+                if *jelly_target <= 0.0 && *closing != CloseSide::None {
+                    let already = match *closing {
+                        CloseSide::A => a.leaf_ids(),
+                        CloseSide::B => b.leaf_ids(),
+                        CloseSide::None => Vec::new(),
+                    };
+                    if already.contains(&id) {
+                        return true;
+                    }
+                    return false;
+                }
                 // Prefer recurse so nested closes work.
                 if a.begin_close_leaf(id) || b.begin_close_leaf(id) {
                     return true;
@@ -261,6 +274,44 @@ impl SplitNode {
                     return true;
                 }
                 false
+            }
+        }
+    }
+
+    /// Leaves currently mid jelly-close.
+    pub fn closing_leaf_ids(&self) -> Vec<u64> {
+        let mut out = Vec::new();
+        self.collect_closing_leaves(&mut out);
+        out
+    }
+
+    fn collect_closing_leaves(&self, out: &mut Vec<u64>) {
+        match self {
+            Self::Leaf(_) => {}
+            Self::Branch {
+                a,
+                b,
+                closing,
+                jelly_target,
+                ..
+            } => {
+                if *jelly_target <= 0.0 {
+                    match *closing {
+                        CloseSide::A => {
+                            out.extend(a.leaf_ids());
+                            b.collect_closing_leaves(out);
+                            return;
+                        }
+                        CloseSide::B => {
+                            out.extend(b.leaf_ids());
+                            a.collect_closing_leaves(out);
+                            return;
+                        }
+                        CloseSide::None => {}
+                    }
+                }
+                a.collect_closing_leaves(out);
+                b.collect_closing_leaves(out);
             }
         }
     }
@@ -323,6 +374,31 @@ impl SplitNode {
         match self {
             Self::Leaf(id) => *id,
             Self::Branch { a, .. } => a.first_leaf(),
+        }
+    }
+
+    /// Pane that should keep focus when `id` closes: the sibling that expands
+    /// into the hole (not the first leftover leaf in tree order).
+    pub fn focus_after_close(&self, id: u64) -> Option<u64> {
+        match self {
+            Self::Leaf(_) => None,
+            Self::Branch { a, b, .. } => {
+                if a.is_only(id) {
+                    return Some(b.first_leaf());
+                }
+                if b.is_only(id) {
+                    return Some(a.first_leaf());
+                }
+                a.focus_after_close(id)
+                    .or_else(|| b.focus_after_close(id))
+            }
+        }
+    }
+
+    fn is_only(&self, id: u64) -> bool {
+        match self {
+            Self::Leaf(p) => *p == id,
+            Self::Branch { .. } => self.leaf_ids() == [id],
         }
     }
 
@@ -739,6 +815,41 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(root, SplitNode::Leaf(1)));
+    }
+
+    #[test]
+    fn close_right_stack_keeps_focus_on_that_column() {
+        // [1] [2]
+        //     [3]
+        let mut root = SplitNode::leaf(1);
+        root.split_leaf(1, 2, SplitAxis::Vertical);
+        root.split_leaf(2, 3, SplitAxis::Horizontal);
+        assert_eq!(root.focus_after_close(3), Some(2));
+        assert_eq!(root.focus_after_close(2), Some(3));
+        assert_eq!(root.focus_after_close(1), Some(2));
+    }
+
+    #[test]
+    fn begin_close_leaf_does_not_steal_in_progress_close() {
+        let mut root = SplitNode::leaf(1);
+        root.split_leaf(1, 2, SplitAxis::Vertical);
+        root.split_leaf(2, 3, SplitAxis::Horizontal);
+        assert!(root.begin_close_leaf(3));
+        assert!(!root.begin_close_leaf(2), "must not overwrite CloseSide");
+        assert!(root.is_closing(3));
+        assert!(!root.is_closing(2));
+    }
+
+    #[test]
+    fn close_left_stack_keeps_focus_on_that_column() {
+        // [1] [3]
+        // [2]
+        let mut root = SplitNode::leaf(1);
+        root.split_leaf(1, 3, SplitAxis::Vertical);
+        root.split_leaf(1, 2, SplitAxis::Horizontal);
+        assert_eq!(root.focus_after_close(1), Some(2));
+        assert_eq!(root.focus_after_close(2), Some(1));
+        assert_eq!(root.focus_after_close(3), Some(1));
     }
 
     #[test]

@@ -237,11 +237,22 @@ func startChromeBridge(chromePID int) (*bridge.Host, error) {
 			ReplyTo:    req.ReplyTo,
 			Topic:      req.Topic,
 			Limit:      req.Limit,
+			SinceID:    req.SinceID,
+			AfterTS:    req.AfterTS,
+			Since:      req.Since,
+			Timeout:    req.Timeout,
 			FilePath:   req.FilePath,
 			FileID:     req.FileID,
 			Status:     req.Status,
 			StatusNote: req.StatusNote,
 			Role:       req.Role,
+			TaskID:     req.TaskID,
+			Title:      req.Title,
+			Files:      req.Files,
+			TaskStatus: req.TaskStatus,
+			Path:       req.Path,
+			TTL:        req.TTL,
+			Steal:      req.Steal,
 		})
 		_ = SendCommand(CmdRefreshWorkspace)
 		return workspaceBridgeFromResult(r)

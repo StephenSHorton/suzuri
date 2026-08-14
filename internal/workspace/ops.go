@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Op is a workspace operation for bridge/MCP.
@@ -19,10 +20,19 @@ const (
 	OpChannelDelete Op = "channel_delete"
 	OpPost          Op = "post"
 	OpHistory       Op = "history"
+	OpWait          Op = "wait"
+	OpInbox         Op = "inbox"
 	OpUpload        Op = "upload"
 	OpDownload      Op = "download"
 	OpSetStatus     Op = "set_status" // member availability (idle|working|waiting|blocked|away)
 	OpClaimRole     Op = "claim_role" // exclusive role: pm|engine|content
+	OpTaskCreate    Op = "task_create"
+	OpTaskList      Op = "task_list"
+	OpTaskClaim     Op = "task_claim"
+	OpTaskAssign    Op = "assign"
+	OpTaskSetStatus Op = "task_set_status"
+	OpLease         Op = "lease"
+	OpLeaseList     Op = "lease_list"
 )
 
 // Request is the unified workspace RPC body.
@@ -37,6 +47,14 @@ type Request struct {
 	ReplyTo   string `json:"reply_to,omitempty"`
 	Topic     string `json:"topic,omitempty"`
 	Limit     int    `json:"limit,omitempty"`
+	// SinceID is a history/inbox cursor: return messages after this id.
+	SinceID string `json:"since_id,omitempty"`
+	// AfterTS is an RFC3339 timestamp cursor for history (exclusive).
+	AfterTS string `json:"after_ts,omitempty"`
+	// Since is the wait cursor (message id). Alias of since_id for workspace_wait.
+	Since string `json:"since,omitempty"`
+	// Timeout is wait timeout in seconds (default/max 60).
+	Timeout int `json:"timeout,omitempty"`
 	// FilePath is a local path for upload (source file).
 	FilePath string `json:"file_path,omitempty"`
 	// FileID is a stored file id (or message id) for download.
@@ -48,6 +66,20 @@ type Request struct {
 	StatusNote *string `json:"status_note,omitempty"`
 	// Role is for OpClaimRole (pm|engine|content|"").
 	Role string `json:"role,omitempty"`
+	// TaskID is E7 / C1 / etc. for task ops (alias of MCP "task").
+	TaskID string `json:"task_id,omitempty"`
+	// Title for task_create.
+	Title string `json:"title,omitempty"`
+	// Files are paths a task may touch.
+	Files []string `json:"files,omitempty"`
+	// TaskStatus for task_set_status (todo|claimed|done|blocked).
+	TaskStatus string `json:"task_status,omitempty"`
+	// Path is a workspace-relative file path for lease.
+	Path string `json:"path,omitempty"`
+	// TTL is a duration string (e.g. 10m) for lease.
+	TTL string `json:"ttl,omitempty"`
+	// Steal allows taking an existing path lease.
+	Steal bool `json:"steal,omitempty"`
 }
 
 // Result is a JSON-friendly workspace response.
@@ -64,11 +96,15 @@ type Result struct {
 	Messages []Message      `json:"messages,omitempty"`
 	File     *FileRef       `json:"file,omitempty"`
 	// LocalPath is the absolute path for download/upload destination.
-	LocalPath string `json:"local_path,omitempty"`
-	Count     int    `json:"count,omitempty"`
+	LocalPath string  `json:"local_path,omitempty"`
+	Count     int     `json:"count,omitempty"`
 	// SessionID / MemberID are set on join so agents do not have to dig into member.
-	SessionID string `json:"session_id,omitempty"`
-	MemberID  string `json:"member_id,omitempty"`
+	SessionID string  `json:"session_id,omitempty"`
+	MemberID  string  `json:"member_id,omitempty"`
+	Task      *Task   `json:"task,omitempty"`
+	Tasks     []Task  `json:"tasks,omitempty"`
+	Lease     *Lease  `json:"lease,omitempty"`
+	Leases    []Lease `json:"leases,omitempty"`
 }
 
 // Apply runs req against Default (or s if non-nil).
@@ -173,9 +209,59 @@ func Apply(s *Store, req Request) Result {
 		return Result{OK: true, Path: path, Message: &msg}
 
 	case OpHistory:
-		list, err := s.History(req.Channel, req.Limit)
+		var after time.Time
+		if strings.TrimSpace(req.AfterTS) != "" {
+			t, err := parseAfterTS(req.AfterTS)
+			if err != nil {
+				return Result{OK: false, Path: path, Error: err.Error()}
+			}
+			after = t
+		}
+		sinceID := strings.TrimSpace(req.SinceID)
+		if sinceID == "" {
+			sinceID = strings.TrimSpace(req.Since)
+		}
+		list, err := s.HistorySince(req.Channel, req.Limit, sinceID, after)
 		if err != nil {
 			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		if list == nil {
+			list = []Message{}
+		}
+		return Result{OK: true, Path: path, Messages: list, Count: len(list)}
+
+	case OpWait:
+		sinceID := strings.TrimSpace(req.Since)
+		if sinceID == "" {
+			sinceID = strings.TrimSpace(req.SinceID)
+		}
+		if req.MemberID != "" {
+			_ = s.Touch(req.MemberID)
+		}
+		timeout := time.Duration(req.Timeout) * time.Second
+		list, err := s.Wait(req.Channel, sinceID, timeout)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		if list == nil {
+			list = []Message{}
+		}
+		return Result{OK: true, Path: path, Messages: list, Count: len(list)}
+
+	case OpInbox:
+		if req.MemberID != "" {
+			_ = s.Touch(req.MemberID)
+		}
+		sinceID := strings.TrimSpace(req.SinceID)
+		if sinceID == "" {
+			sinceID = strings.TrimSpace(req.Since)
+		}
+		list, err := s.Inbox(req.MemberID, sinceID, req.Limit)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		if list == nil {
+			list = []Message{}
 		}
 		return Result{OK: true, Path: path, Messages: list, Count: len(list)}
 
@@ -202,6 +288,59 @@ func Apply(s *Store, req Request) Result {
 		}
 		return Result{OK: true, Path: path, File: &ref, LocalPath: abs}
 
+	case OpTaskCreate:
+		t, err := s.CreateTask(req.Title, req.TaskID, req.Files, req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Task: &t}
+
+	case OpTaskList:
+		list, err := s.ListTasks()
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Tasks: list, Count: len(list)}
+
+	case OpTaskClaim:
+		t, err := s.ClaimTask(req.TaskID, req.MemberID, req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Task: &t}
+
+	case OpTaskAssign:
+		t, err := s.AssignTask(req.TaskID, req.MemberID, req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Task: &t}
+
+	case OpTaskSetStatus:
+		t, err := s.SetTaskStatus(req.TaskID, TaskStatus(req.TaskStatus), req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Task: &t}
+
+	case OpLease:
+		leasePath := req.Path
+		if leasePath == "" {
+			leasePath = req.FilePath
+		}
+		l, err := s.AcquireLease(leasePath, req.MemberID, req.TTL, req.Steal, req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Lease: &l}
+
+	case OpLeaseList:
+		list, err := s.ListLeases()
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Leases: list, Count: len(list)}
+
 	default:
 		return Result{
 			OK:    false,
@@ -213,4 +352,14 @@ func Apply(s *Store, req Request) Result {
 
 func filepathJoinRoot(s *Store, rel string) string {
 	return filepath.Join(s.Root(), filepath.FromSlash(rel))
+}
+
+func parseAfterTS(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid after_ts %q (use RFC3339)", s)
 }

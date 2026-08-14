@@ -142,10 +142,19 @@ const (
 	WorkspaceOpChannelDelete WorkspaceOp = "channel_delete"
 	WorkspaceOpPost          WorkspaceOp = "post"
 	WorkspaceOpHistory       WorkspaceOp = "history"
+	WorkspaceOpWait          WorkspaceOp = "wait"
+	WorkspaceOpInbox         WorkspaceOp = "inbox"
 	WorkspaceOpUpload        WorkspaceOp = "upload"
 	WorkspaceOpDownload      WorkspaceOp = "download"
 	WorkspaceOpSetStatus     WorkspaceOp = "set_status"
 	WorkspaceOpClaimRole     WorkspaceOp = "claim_role"
+	WorkspaceOpTaskCreate    WorkspaceOp = "task_create"
+	WorkspaceOpTaskList      WorkspaceOp = "task_list"
+	WorkspaceOpTaskClaim     WorkspaceOp = "task_claim"
+	WorkspaceOpTaskAssign    WorkspaceOp = "assign"
+	WorkspaceOpTaskSetStatus WorkspaceOp = "task_set_status"
+	WorkspaceOpLease         WorkspaceOp = "lease"
+	WorkspaceOpLeaseList     WorkspaceOp = "lease_list"
 )
 
 // WorkspaceRequest mutates or reads the shared workspace (channels / messages).
@@ -160,27 +169,41 @@ type WorkspaceRequest struct {
 	ReplyTo   string      `json:"reply_to,omitempty"`
 	Topic     string      `json:"topic,omitempty"`
 	Limit     int         `json:"limit,omitempty"`
+	SinceID   string      `json:"since_id,omitempty"`  // history/inbox cursor
+	AfterTS   string      `json:"after_ts,omitempty"`  // RFC3339 history cursor
+	Since     string      `json:"since,omitempty"`     // wait cursor (msg id)
+	Timeout   int         `json:"timeout,omitempty"`   // wait timeout seconds
 	FilePath  string      `json:"file_path,omitempty"` // local source for upload
 	FileID    string      `json:"file_id,omitempty"`   // stored file or message id for download
 	// Status is availability for set_status (idle|working|waiting|blocked|away).
 	Status string `json:"status,omitempty"`
 	// StatusNote optional free text; nil leaves unchanged when set_status runs.
-	StatusNote *string `json:"status_note,omitempty"`
+	StatusNote *string  `json:"status_note,omitempty"`
 	// Role is for claim_role (pm|engine|content).
-	Role string `json:"role,omitempty"`
+	Role       string   `json:"role,omitempty"`
+	TaskID     string   `json:"task_id,omitempty"`
+	Title      string   `json:"title,omitempty"`
+	Files      []string `json:"files,omitempty"`
+	TaskStatus string   `json:"task_status,omitempty"`
+	Path       string   `json:"path,omitempty"`
+	TTL        string   `json:"ttl,omitempty"`
+	Steal      bool     `json:"steal,omitempty"`
 }
 
 // WorkspaceMember is one human or agent in the workspace.
 type WorkspaceMember struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Kind       string    `json:"kind"`
-	SessionID  string    `json:"session_id,omitempty"`
-	Role       string    `json:"role,omitempty"`
-	Status     string    `json:"status,omitempty"`
-	StatusNote string    `json:"status_note,omitempty"`
-	JoinedAt   time.Time `json:"joined_at"`
-	LastSeen   time.Time `json:"last_seen"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Kind         string    `json:"kind"`
+	SessionID    string    `json:"session_id,omitempty"`
+	Role         string    `json:"role,omitempty"`
+	Status       string    `json:"status,omitempty"`
+	StatusNote   string    `json:"status_note,omitempty"`
+	JoinedAt     time.Time `json:"joined_at"`
+	LastSeen     time.Time `json:"last_seen"`
+	Polling      *bool     `json:"polling,omitempty"`
+	Stale        bool      `json:"stale,omitempty"`
+	PresenceNote string    `json:"presence_note,omitempty"`
 }
 
 // WorkspaceChannel is a named room.
@@ -232,4 +255,24 @@ type WorkspaceResult struct {
 	Count     int                `json:"count,omitempty"`
 	SessionID string             `json:"session_id,omitempty"`
 	MemberID  string             `json:"member_id,omitempty"`
+	Task      *WorkspaceTask     `json:"task,omitempty"`
+	Tasks     []WorkspaceTask    `json:"tasks,omitempty"`
+	Lease     *WorkspaceLease    `json:"lease,omitempty"`
+	Leases    []WorkspaceLease   `json:"leases,omitempty"`
+}
+
+// WorkspaceTask is a claimable unit of work (tasks.json).
+type WorkspaceTask struct {
+	ID     string   `json:"id"`
+	Title  string   `json:"title"`
+	Owner  string   `json:"owner,omitempty"`
+	Status string   `json:"status"`
+	Files  []string `json:"files,omitempty"`
+}
+
+// WorkspaceLease is an exclusive path hold (leases.json).
+type WorkspaceLease struct {
+	Path     string    `json:"path"`
+	MemberID string    `json:"member_id"`
+	Until    time.Time `json:"until"`
 }

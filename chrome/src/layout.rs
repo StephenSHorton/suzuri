@@ -896,6 +896,8 @@ mod tests {
         assert!(pl.title_pill.x < pl.close.x);
         assert!(pl.close.x + pl.close.w <= pl.header.x + pl.header.w + 0.5);
         assert!(pl.cells.y >= pl.header.y + pl.header.h);
+        assert_eq!(pl.close.w, PANE_CLOSE_SZ);
+        assert_eq!(pl.close.h, PANE_CLOSE_SZ);
     }
 
     #[test]

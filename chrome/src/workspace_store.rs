@@ -34,6 +34,15 @@ pub const MAX_BODY_RUNES: usize = 2000;
 /// Product `maxMembers`.
 pub const MAX_MEMBERS: usize = 128;
 
+/// A `working` member whose `last_seen` is older than this is "not polling".
+pub const STALE_WORKING_SECS: u64 = 120;
+
+/// Roles the +Agent picker can kick off (UI control-plane only).
+pub const AGENT_ROLES: &[&str] = &["pm", "engine", "content"];
+
+/// Max runes stored on channel `meta.json` topic.
+pub const MAX_TOPIC_RUNES: usize = 120;
+
 /// Product `maxUploadBytes` (64 MiB).
 pub const MAX_UPLOAD_BYTES: u64 = 64 << 20;
 
@@ -106,6 +115,11 @@ impl WsMember {
         } else {
             self.status.as_str()
         }
+    }
+
+    /// `working` and `last_seen` older than [`STALE_WORKING_SECS`].
+    pub fn is_stale(&self, now: u64) -> bool {
+        member_is_stale(self, now)
     }
 }
 
@@ -267,6 +281,45 @@ impl WorkspaceStore {
                 .map_err(err)?;
         }
         Ok(())
+    }
+
+    /// Topic from `channels/<slug>/meta.json` (empty if missing).
+    pub fn channel_topic(&self, slug: &str) -> Result<String, String> {
+        self.ensure()?;
+        let slug = normalize_channel(slug);
+        if slug.is_empty() {
+            return Ok(String::new());
+        }
+        let path = self.root.join("channels").join(&slug).join("meta.json");
+        let Ok(text) = fs::read_to_string(&path) else {
+            return Ok(String::new());
+        };
+        Ok(extract_str(&text, "topic").unwrap_or_default())
+    }
+
+    /// Rewrite `channels/<slug>/meta.json` topic, preserving id/name/created_at.
+    pub fn set_channel_topic(&self, slug: &str, topic: &str) -> Result<String, String> {
+        self.ensure()?;
+        let slug = normalize_channel(slug);
+        if slug.is_empty() {
+            return Err("invalid channel name".into());
+        }
+        self.ensure_channel(&slug, "")?;
+        let path = self.root.join("channels").join(&slug).join("meta.json");
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        let id = extract_str(&existing, "id").unwrap_or_else(|| slug.clone());
+        let name = extract_str(&existing, "name").unwrap_or_else(|| slug.clone());
+        let created = extract_str(&existing, "created_at").unwrap_or_else(iso_now);
+        let topic: String = topic.trim().chars().take(MAX_TOPIC_RUNES).collect();
+        let body = format!(
+            "{{\n  \"id\": {},\n  \"name\": {},\n  \"created_at\": {},\n  \"topic\": {}\n}}\n",
+            json_str(&id),
+            json_str(&name),
+            json_str(&created),
+            json_str(&topic),
+        );
+        atomic_write(&path, body.as_bytes())?;
+        Ok(topic)
     }
 
     /// Last `limit` messages, oldest first.
@@ -457,6 +510,11 @@ impl WorkspaceStore {
         members.push(m.clone());
         self.write_members(&members)?;
         Ok(m)
+    }
+
+    /// Same as [`join`]. Identity never posts a #general system line.
+    pub fn join_quiet(&self, name: &str, kind: &str, session_id: &str) -> Result<WsMember, String> {
+        self.join(name, kind, session_id)
     }
 
     /// Claim an exclusive role (`pm`|`engine`|`content`) for a live member.
@@ -824,6 +882,34 @@ pub fn normalize_availability(s: &str) -> String {
     }
 }
 
+/// `working` + `last_seen` older than two minutes.
+pub fn member_is_stale(m: &WsMember, now: u64) -> bool {
+    m.presence() == STATUS_WORKING && now.saturating_sub(m.last_seen) > STALE_WORKING_SECS
+}
+
+/// Empty `session_id` while another member uses the exact same display name.
+pub fn member_has_fuse_warning(m: &WsMember, members: &[WsMember]) -> bool {
+    if m.session_id.is_empty() {
+        members.iter().any(|o| o.id != m.id && o.name == m.name)
+    } else {
+        false
+    }
+}
+
+/// Normalize a +Agent role (`pm` / `engine` / `content`).
+pub fn normalize_agent_role(role: &str) -> Option<&'static str> {
+    let r = role.trim().to_ascii_lowercase();
+    AGENT_ROLES.iter().copied().find(|k| *k == r)
+}
+
+/// Paste-ready kickoff for a new Grok session. Does not launch a process.
+pub fn agent_kickoff_text(role: &str) -> String {
+    let role = normalize_agent_role(role).unwrap_or(role.trim());
+    format!(
+        "You are joining the suzuri workspace as the {role} role.\nCall workspace_guide first (read the room; no side effects).\nThen call workspace_join, workspace_claim_role role=\"{role}\", and workspace_wait.\nStay in workspace_wait after claiming the role. Do not skip the guide."
+    )
+}
+
 /// Single-line chip for presence strip paint (`● name` / `◐ name · note`).
 pub fn member_chip(m: &WsMember) -> String {
     let st = m.presence();
@@ -851,6 +937,19 @@ pub fn member_chip(m: &WsMember) -> String {
         }
         chip.push_str(" · ");
         chip.push_str(&note);
+    }
+    chip
+}
+
+/// Presence chip plus stale / fuse annotations. One chip per member (never
+/// collapsed by display name).
+pub fn presence_chip(m: &WsMember, members: &[WsMember], now: u64) -> String {
+    let mut chip = member_chip(m);
+    if member_is_stale(m, now) {
+        chip.push_str(" · not polling");
+    }
+    if member_has_fuse_warning(m, members) {
+        chip.push_str(" · fuse");
     }
     chip
 }
@@ -1601,6 +1700,99 @@ mod tests {
     }
 
     #[test]
+    fn stale_working_older_than_two_minutes() {
+        let now = 1_800_000_000;
+        let mut m = WsMember {
+            id: "m_1".into(),
+            name: "engine".into(),
+            kind: "agent".into(),
+            session_id: "s1".into(),
+            role: String::new(),
+            status: STATUS_WORKING.into(),
+            status_note: String::new(),
+            joined_at: now - 400,
+            last_seen: now - 121,
+        };
+        assert!(member_is_stale(&m, now));
+        assert!(presence_chip(&m, std::slice::from_ref(&m), now).contains("not polling"));
+        m.last_seen = now - 30;
+        assert!(!member_is_stale(&m, now));
+        assert!(!presence_chip(&m, std::slice::from_ref(&m), now).contains("not polling"));
+        m.last_seen = now - 400;
+        m.status = STATUS_IDLE.into();
+        assert!(!member_is_stale(&m, now));
+    }
+
+    #[test]
+    fn kickoff_text_contains_role() {
+        for role in AGENT_ROLES {
+            let text = agent_kickoff_text(role);
+            assert!(text.contains(role), "kickoff missing role {role}: {text}");
+            assert!(text.contains("workspace_guide"));
+            assert!(text.contains("workspace_join"));
+            assert!(text.contains("workspace_claim_role"));
+            assert!(text.contains("workspace_wait"));
+        }
+        let engine = agent_kickoff_text("ENGINE");
+        assert!(engine.contains("engine"));
+        assert!(normalize_agent_role("nope").is_none());
+    }
+
+    #[test]
+    fn fuse_warning_empty_session_same_name() {
+        let a = WsMember {
+            id: "m_a".into(),
+            name: "engine".into(),
+            kind: "agent".into(),
+            session_id: String::new(),
+            role: String::new(),
+            status: STATUS_IDLE.into(),
+            status_note: String::new(),
+            joined_at: 1,
+            last_seen: 1,
+        };
+        let b = WsMember {
+            id: "m_b".into(),
+            name: "engine".into(),
+            kind: "agent".into(),
+            session_id: "sess-2".into(),
+            role: String::new(),
+            status: STATUS_IDLE.into(),
+            status_note: String::new(),
+            joined_at: 1,
+            last_seen: 1,
+        };
+        let list = vec![a.clone(), b.clone()];
+        assert!(member_has_fuse_warning(&a, &list));
+        assert!(!member_has_fuse_warning(&b, &list));
+        assert!(presence_chip(&a, &list, 10).contains("fuse"));
+        assert!(!presence_chip(&b, &list, 10).contains("fuse"));
+    }
+
+    #[test]
+    fn topic_roundtrip_rewrites_meta() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-ws-topic-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WorkspaceStore::open_at(&dir);
+        assert_eq!(store.channel_topic("general").unwrap(), "");
+        store
+            .set_channel_topic("general", "ship the control plane")
+            .unwrap();
+        assert_eq!(
+            store.channel_topic("general").unwrap(),
+            "ship the control plane"
+        );
+        let meta = fs::read_to_string(dir.join("channels/general/meta.json")).unwrap();
+        assert!(meta.contains("ship the control plane"));
+        assert!(meta.contains("\"id\""));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn chrome_post_uses_joiner_member_id() {
         let dir = std::env::temp_dir().join(format!(
             "suzuri-ws-fromid-{}-{}",
@@ -1654,6 +1846,26 @@ mod tests {
         assert_eq!(list[1].name, "engine-2");
         assert_eq!(msg.from, "engine-2");
         assert_eq!(msg.from_id, list[1].id);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn join_quiet_skips_general_system_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-ws-quiet-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WorkspaceStore::open_at(&dir);
+        store.join_quiet("alice", "human", "").unwrap();
+        let hist = store.history("general", 20).unwrap();
+        assert!(
+            hist.iter()
+                .all(|m| !m.body.contains("joined the workspace")),
+            "quiet join must not post: {:?}",
+            hist.iter().map(|m| &m.body).collect::<Vec<_>>()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -41,6 +41,10 @@ pub enum CommandAction {
     CycleWorkspaceStatus,
     /// Native OS file picker → workspace attach (while workspace open, or opens it).
     WorkspaceAttachFile,
+    /// +Agent: pick role and copy a kickoff snippet (does not launch Grok).
+    WorkspaceAddAgent,
+    /// Edit the pinned channel topic (`meta.json`).
+    WorkspaceSetTopic,
     /// Query GitHub Releases (host may open confirm).
     CheckUpdates,
     Quit,
@@ -140,6 +144,20 @@ pub fn default_commands() -> Vec<Command> {
             desc: format!("{} · native picker · Workspace", chord(&ms, "U")),
             category: "Workspace",
             action: CommandAction::WorkspaceAttachFile,
+        },
+        Command {
+            id: "workspace_add_agent",
+            title: "Add agent…",
+            desc: "+Agent · copy kickoff · Workspace".into(),
+            category: "Workspace",
+            action: CommandAction::WorkspaceAddAgent,
+        },
+        Command {
+            id: "workspace_set_topic",
+            title: "Set channel topic…",
+            desc: format!("{} · pin above chat · Workspace", chord(&ms, "T")),
+            category: "Workspace",
+            action: CommandAction::WorkspaceSetTopic,
         },
         Command {
             id: "transfer_send",
@@ -1039,6 +1057,27 @@ mod tests {
         assert_eq!(cmd.action, CommandAction::WorkspaceAttachFile);
         let idx = filter_commands(&all, "attach");
         assert!(idx.iter().any(|&i| all[i].id == "workspace_attach_file"));
+    }
+
+    #[test]
+    fn registry_contains_workspace_add_agent_and_topic() {
+        let all = default_commands();
+        let add = all
+            .iter()
+            .find(|c| c.id == "workspace_add_agent")
+            .expect("workspace_add_agent");
+        assert_eq!(add.action, CommandAction::WorkspaceAddAgent);
+        let topic = all
+            .iter()
+            .find(|c| c.id == "workspace_set_topic")
+            .expect("workspace_set_topic");
+        assert_eq!(topic.action, CommandAction::WorkspaceSetTopic);
+        assert!(filter_commands(&all, "agent")
+            .iter()
+            .any(|&i| all[i].id == "workspace_add_agent"));
+        assert!(filter_commands(&all, "topic")
+            .iter()
+            .any(|&i| all[i].id == "workspace_set_topic"));
     }
 
     #[test]
