@@ -5,7 +5,7 @@ Track B / Wave 3 Track K of product parity. Implementation lives in:
 | Module | Role |
 |--------|------|
 | `src/workspace_store.rs` | File-backed store (channels, members, messages, file attach) |
-| `src/workspace_ui.rs` | Glass modal state + compose + presence + hit-test |
+| `src/workspace_ui.rs` | Split-pane / modal state + compose + presence + +Agent + topic pin + hit-test |
 | `src/app.rs` | Keys, palette action, click routing, drop → attach |
 | `src/renderer.rs` | Paint labels inside animated modal (incl. members strip) |
 
@@ -53,7 +53,16 @@ Human display name: `$USER` (fallback `$USERNAME`, then `"human"`).
 
 Availability codes (simple presence for paint): `idle` · `working` · `waiting` · `blocked` · `away`.
 
-On `WorkspaceUi::open()` chrome calls `join_self()` so `$USER` is registered as a human if not already present (updates `last_seen` when already joined).
+On `WorkspaceUi::open()` chrome calls `join_self()` so `$USER` is registered as a human if not already present (updates `last_seen` when already joined). `join_self` uses `join_quiet` — **the UI does not post a “joined” system line to `#general`**.
+
+Presence chips are **one per member** (never unique-by-name), so `engine` and `engine-2` both show. Extra annotations:
+
+- **not polling** — `status=working` and `last_seen` older than 2 minutes
+- **fuse** — this member has an empty `session_id` and another member has the exact same display name
+
+`+ Agent` (right of the strip, or palette **Add agent…**) picks `pm` / `engine` / `content` and copies a kickoff snippet (call `workspace_guide` first, then `workspace_join` → `workspace_claim_role` → `workspace_wait`). Chrome does **not** launch a Grok process.
+
+Channel `meta.json` already has `topic`. Chrome pins it above the chat (does not scroll) and can set it via the pin row, palette **Set channel topic…**, or Ctrl+Shift+T. Writes go through `WorkspaceStore::set_channel_topic` (same atomic `meta.json` rewrite as other workspace files).
 
 ## Public API — `WorkspaceUi`
 
@@ -82,9 +91,10 @@ Preserve these for `app` / `renderer`:
 - `channels: Vec<String>` — list (`general` first)
 - `messages: Vec<WsMessage>` — history (oldest → newest)
 - `members: Vec<WsMember>` — presence list for paint
+- `channel_topic: String` — pinned topic for the active channel
 - `draft: String` — compose buffer
 - `status: String` — ephemeral feedback
-- `mode: ComposeMode` — `Message` \| `NewChannel` \| `AttachPath`
+- `mode: ComposeMode` — `Message` \| `NewChannel` \| `AttachPath` \| `PickAgentRole` \| `SetTopic`
 - `scroll: usize` — messages hidden from the end
 
 `WsMessage { id, channel, from, from_kind, kind, body, ts, file, mentions }` — `from` is display name (`from_name` on disk); `file` is `Option<WsFileRef>` for attaches; `mentions` is member ids resolved from `@name` at post time.
@@ -95,17 +105,20 @@ Preserve these for `app` / `renderer`:
 
 | Method | Behavior |
 |--------|----------|
-| `join_self()` | `store.join($USER, "human", "chrome-local:$USER")` — stable session so reopen does not mint a new human |
-| `members_strip_text()` | One-line chip list (humans first; soft cap + overflow) |
-| `refresh()` | Reload channels + messages + members; status = `"refreshed"` |
+| `join_self()` | `store.join($USER, "human", "chrome-local:$USER")` — stable session so reopen does not mint a new human; no #general join line |
+| `members_strip_text()` / `members_strip_chips()` | One chip per member (humans first; never collapse same display name) |
+| `refresh()` | Reload channels + messages + members + topic; status = `"refreshed"` |
 | `reload_from_disk(announce)` | Soft reload (no status thrash when `announce=false`); preserves stick-to-bottom |
 | `cycle_status()` | Local human: idle→working→waiting→blocked→away→idle via `set_status` |
 | `self_status()` | Current local human presence code |
-| `presence_strip_rect` | Click target for cycle (title strip) |
+| `presence_strip_rect` | Click target for cycle (title strip; excludes +Agent) |
+| `add_agent_chip_rect` / `begin_add_agent` / `pick_agent_role` | +Agent → role → clipboard kickoff |
+| `topic_pin_rect` / `begin_set_topic` | Pinned topic above chat; writes `meta.json` |
+| `take_pending_clipboard()` | Host copies kickoff after click/Enter |
 
-Store: `list_members`, `join`, `claim_role`, `set_status`, `normalize_availability`, `normalize_role`, `next_availability`, `member_chip`, `resolve_mentions`.
+Store: `list_members`, `join` / `join_quiet`, `claim_role`, `set_status`, `channel_topic`, `set_channel_topic`, `normalize_availability`, `normalize_role`, `next_availability`, `member_chip`, `presence_chip`, `member_is_stale`, `resolve_mentions`, `agent_kickoff_text`.
 
-`join` reuses a member only on a non-empty `session_id` match. Empty session always creates a new member; taken names get a suffix (`engine`, `engine-2`). Join/leave do **not** post system lines to `#general`.
+`join` reuses a member only on a non-empty `session_id` match. Empty session always creates a new member; taken names get a suffix (`engine`, `engine-2`). Join/leave do **not** post system lines to `#general`. `join_quiet` is the same (identity never announces).
 
 ### Auto-refresh while open
 
@@ -171,6 +184,8 @@ CHANNEL_ROW_H      = 28
 CHANNEL_LIST_TOP   = MODAL_PAD + 18   // first row under title
 COMPOSE_H          = 44
 PRESENCE_STRIP_H   = 18               // members line above messages
+TOPIC_PIN_H        = 16               // pinned topic (does not scroll)
+ADD_AGENT_CHIP_W   = 64               // +Agent at right of presence strip
 ```
 
 | Method | Returns |
@@ -195,8 +210,8 @@ PRESENCE_STRIP_H   = 18               // members line above messages
 2. Esc: if `mode != Message` → `cancel_mode()`; docked pane stays (⌘W closes). Modal path still `close()`
 3. Enter → `send()` (completes `@mention` when picker open); printable → `insert_char`; Backspace → `backspace`
 4. Tab / Shift+Tab → `tab()` (mention cycle when picker open, else `cycle_channel`); ↑/↓ → scroll
-5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path; Ctrl+Shift+U / palette `WorkspaceAttachFile` → `pick_and_attach()`; Ctrl+D ×2 → `request_delete_channel()` (blocks `#general`)
-6. Pointer inside docked pane / `card_rect` → keep focused; `try_click` for channel rail / presence strip
+5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path; Ctrl+Shift+U / palette `WorkspaceAttachFile` → `pick_and_attach()`; Ctrl+Shift+T / palette `WorkspaceSetTopic` → topic; palette `WorkspaceAddAgent` / +Agent chip → role kickoff; Ctrl+D ×2 → `request_delete_channel()` (blocks `#general`)
+6. Pointer inside docked pane / `card_rect` → keep focused; `try_click` for channel rail / presence / +Agent / topic pin
 7. Outside click on a modal overlay → `close_all_overlays` (does not close a docked workspace pane)
 8. `DroppedFile` while workspace open → `workspace_ui.attach_path(path)` (before transfer)
 9. Mailbox `refresh_workspace` → soft reload if open
@@ -209,4 +224,4 @@ cd chrome && cargo test && cargo build --release
 
 ## Out of scope (later)
 
-None right now — FS watch and OS file picker are both in.
+Go Join merge rules, MCP `workspace_wait` / inbox, and task/lease store logic — other slices.
