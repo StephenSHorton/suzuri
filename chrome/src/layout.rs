@@ -507,7 +507,7 @@ impl FrameLayout {
                 );
                 out.push(
                     PanelInstance::glass(rim, (m.radius - 1.0).max(2.0), PanelKind::PaneFocus)
-                        .with_opacity(0.32),
+                        .with_opacity(0.38),
                 );
             }
         }

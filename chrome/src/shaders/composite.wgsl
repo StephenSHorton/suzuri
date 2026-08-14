@@ -500,26 +500,26 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             continue;
         }
 
-        // Focused-pane glow (17) — dim primary lamp + smoke, not a symmetric ring.
+        // Focused-pane glow (17) — dim edge rim, a little extra lamp/smoke at top-left.
         if (p.kind > 16.5 && p.kind < 17.5) {
             let local = px - center;
             let d = sd_round_box(local, half, max(p.radius, 0.5));
-            let inside = 1.0 - smoothstep(-2.2, 1.6, d);
+            let inside = 1.0 - smoothstep(-2.0, 1.4, d);
             if (inside > 0.001) {
                 let depth = max(-d, 0.0);
-                let hug = exp(-depth / 26.0);
-                let pool = exp(-depth / 64.0);
+                let rim = exp(-depth / 13.0);
+                let bleed = exp(-depth / 36.0);
                 let uv = local / max(half, vec2f(1.0));
-                // Lamp sits top-left; far corner stays almost dark.
-                let lamp_w = exp(-pow2(length(uv - vec2f(-0.70, -0.76))) * 1.25);
-                let far = smoothstep(0.2, 1.6, length(uv - vec2f(0.88, 0.82)));
+                let lamp = exp(-pow2(length(uv - vec2f(-0.68, -0.74))) * 1.15);
                 let t = u.misc.x;
-                let n1 = vnoise(px * 0.042 + vec2f(t * 2.4, t * 1.15));
-                let n2 = vnoise(px * 0.019 + vec2f(-t * 0.85, t * 1.7));
-                let smoke = 0.42 + 0.40 * n1 + 0.22 * n2;
-                let glow = inside * lamp_w * (hug * (0.38 + 0.22 * n2) + pool * far * smoke * 0.55);
+                let n1 = vnoise(px * 0.038 + vec2f(t * 2.1, t * 1.05));
+                let n2 = vnoise(px * 0.017 + vec2f(-t * 0.7, t * 1.5));
+                let smoke = 0.78 + 0.22 * n1 + 0.10 * n2;
+                // Whole perimeter stays connected; lamp only weights the rim.
+                let around = 0.62 + 0.38 * lamp;
+                let glow = inside * (rim * around * smoke + bleed * lamp * (0.28 + 0.18 * n2));
                 let a = clamp(p._pad.x, 0.0, 1.0);
-                col = mix(col, jade * 0.32, glow * a * 0.085);
+                col = mix(col, jade * 0.36, glow * a * 0.10);
             }
             continue;
         }
