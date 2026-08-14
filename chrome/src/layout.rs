@@ -766,6 +766,25 @@ impl PanelInstance {
 unsafe impl bytemuck::Pod for PanelInstance {}
 unsafe impl bytemuck::Zeroable for PanelInstance {}
 
+/// ⌘± view zoom (not font size, not PTY cols/rows).
+pub const UI_ZOOM_MIN: f32 = 0.5;
+pub const UI_ZOOM_MAX: f32 = 2.5;
+pub const UI_ZOOM_STEP: f32 = 0.1;
+
+pub fn clamp_ui_zoom(z: f32) -> f32 {
+    z.clamp(UI_ZOOM_MIN, UI_ZOOM_MAX)
+}
+
+/// Map a screen-space pointer to scene space under a view zoom around `origin`.
+/// Matches `view_unmap` in `shaders/lens.wgsl`.
+pub fn scene_from_screen(sx: f32, sy: f32, origin: (f32, f32), zoom: f32) -> (f32, f32) {
+    let z = clamp_ui_zoom(zoom).max(0.05);
+    (
+        origin.0 + (sx - origin.0) / z,
+        origin.1 + (sy - origin.1) / z,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -915,5 +934,37 @@ mod tests {
             "next chip should pull into the closed slot"
         );
         assert!(l.tab_chips[2].x < x1 + TAB_CHIP_W);
+    }
+
+    #[test]
+    fn scene_from_screen_identity_at_1x() {
+        let (x, y) = scene_from_screen(120.0, 80.0, (400.0, 300.0), 1.0);
+        assert!((x - 120.0).abs() < 1e-5);
+        assert!((y - 80.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scene_from_screen_origin_stays_put() {
+        let o = (400.0, 300.0);
+        let (x, y) = scene_from_screen(o.0, o.1, o, 2.0);
+        assert!((x - o.0).abs() < 1e-5);
+        assert!((y - o.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scene_from_screen_zoom_in_maps_toward_origin() {
+        // Screen point 100px right of center at 2× shows scene 50px right of center.
+        let o = (400.0, 300.0);
+        let (x, y) = scene_from_screen(500.0, 300.0, o, 2.0);
+        assert!((x - 450.0).abs() < 1e-5);
+        assert!((y - 300.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scene_from_screen_zoom_out_maps_away_from_origin() {
+        let o = (400.0, 300.0);
+        let (x, y) = scene_from_screen(500.0, 300.0, o, 0.5);
+        assert!((x - 600.0).abs() < 1e-5);
+        assert!((y - 300.0).abs() < 1e-5);
     }
 }

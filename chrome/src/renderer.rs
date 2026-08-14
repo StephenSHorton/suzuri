@@ -83,6 +83,8 @@ struct LensUniforms {
     glass2: [f32; 4],
     /// x = last-tab dissolve blur radius (logical px).
     exit: [f32; 4],
+    /// x = ⌘± view zoom, yz = origin logical px, w unused.
+    view: [f32; 4],
 }
 
 /// Canvas UI `GlassVanilla` DEFAULTS — https://github.com/DavidHDev/canvas-ui
@@ -166,6 +168,8 @@ pub struct Renderer {
     surface_format: wgpu::TextureFormat,
     /// Last-tab dissolve blur (logical px). Set per frame before [`render`].
     pub window_exit_blur: f32,
+    /// ⌘± view zoom (1 = identity). Applied in the lens blit; PTY grid unchanged.
+    view_zoom: f32,
 }
 
 impl Renderer {
@@ -524,6 +528,7 @@ impl Renderer {
                     GLASS_SHINE,
                 ],
                 exit: [0.0, 0.0, 0.0, 0.0],
+                view: [1.0, 0.5, 0.5, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -630,7 +635,13 @@ impl Renderer {
             tab_jelly: TabJelly::default(),
             surface_format: format,
             window_exit_blur: 0.0,
+            view_zoom: 1.0,
         }
+    }
+
+    /// ⌘± view zoom. Does not change cell pitch or PTY cols/rows.
+    pub fn set_view_zoom(&mut self, z: f32) {
+        self.view_zoom = crate::layout::clamp_ui_zoom(z);
     }
 
     /// Track pointer for magnifier center (logical px, top-left origin).
@@ -663,7 +674,7 @@ impl Renderer {
         self.mag_level > 0.02 || self.mag_level_smooth > 0.02
     }
 
-    /// Measured mono cell (logical px) — use for PTY cols/rows and paint pitch.
+    /// Measured mono cell (logical px) — PTY cols/rows and paint pitch (not view zoom).
     pub fn cell_metrics(&self) -> MonoCellMetrics {
         self.text.mono_cell()
     }
@@ -1300,6 +1311,12 @@ impl Renderer {
                     GLASS_SHINE.max(0.1),
                 ],
                 exit: [self.window_exit_blur.max(0.0), 0.0, 0.0, 0.0],
+                view: [
+                    self.view_zoom.max(0.05),
+                    logical_w * 0.5,
+                    logical_h * 0.5,
+                    0.0,
+                ],
             }),
         );
 

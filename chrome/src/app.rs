@@ -31,7 +31,9 @@ use crate::input::{
     classify_drop, classify_tab_drop, hit_test, is_mac, term_select_drag_started,
     window_origin_for_tab_drop, DropKind, HitTarget,
 };
-use crate::layout::{FrameLayout, Metrics};
+use crate::layout::{
+    clamp_ui_zoom, scene_from_screen, FrameLayout, Metrics, UI_ZOOM_STEP,
+};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
 use crate::mouse_pty::encode_mouse_wheel;
 use crate::notes::NotesState;
@@ -147,7 +149,7 @@ pub struct ChromeApp {
     update_mailbox: UpdateMailbox,
     /// Publish `chrome_status.json` for Go MCP bridge proxy.
     status_publisher: StatusPublisher,
-    /// UI / terminal zoom multiplier (⌘± / ⌘0). 1.0 = design size.
+    /// View zoom multiplier (⌘± / ⌘0). 1.0 = identity. GPU blit only — no PTY resize.
     ui_zoom: f32,
 
     /// Last applied mono font id (avoid re-resolve every paint).
@@ -936,28 +938,33 @@ impl ChromeApp {
         layout
     }
 
-    /// Mono cell pitch (logical px) — measured Gohu when renderer is up, × zoom.
+    /// Native mono cell pitch (logical px). View zoom does not change this —
+    /// PTY cols/rows stay put so fullscreen TUIs do not reflow.
     fn cell_metrics(&self) -> MonoCellMetrics {
-        let base = self
-            .renderer()
+        self.renderer()
             .map(|r| r.cell_metrics())
-            .unwrap_or_default();
-        let z = self.ui_zoom.clamp(0.75, 1.75);
-        MonoCellMetrics {
-            w: (base.w * z).max(1.0),
-            h: (base.h * z).max(1.0),
-        }
+            .unwrap_or_default()
+    }
+
+    /// Scene-space pointer under ⌘± view zoom (matches `lens.wgsl` `view_unmap`).
+    fn pointer(&self) -> (f32, f32) {
+        let origin = self
+            .renderer()
+            .map(|r| {
+                let (w, h) = r.logical_size();
+                (w * 0.5, h * 0.5)
+            })
+            .unwrap_or((0.0, 0.0));
+        scene_from_screen(self.cursor.x, self.cursor.y, origin, self.ui_zoom)
     }
 
     fn nudge_zoom(&mut self, delta: f32) {
-        self.ui_zoom = (self.ui_zoom + delta).clamp(0.75, 1.75);
-        self.sync_grids_to_panes();
+        self.ui_zoom = clamp_ui_zoom(self.ui_zoom + delta);
         self.toast.show(format!("Zoom {:.0}%", self.ui_zoom * 100.0));
     }
 
     fn reset_zoom(&mut self) {
         self.ui_zoom = 1.0;
-        self.sync_grids_to_panes();
         self.toast.show("Zoom 100%");
     }
 
@@ -1137,16 +1144,17 @@ impl ChromeApp {
         let layout = self.current_layout();
         let win_w = layout.title.w;
         let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+        let (px, py) = self.pointer();
         if let Some(id) = self.workspace_ui.docked_pane {
             if let Some(pl) = layout.panes.iter().find(|p| p.pane_id == id) {
-                return pl.glass.contains(self.cursor.x, self.cursor.y);
+                return pl.glass.contains(px, py);
             }
         }
         self.workspace_ui.is_modal()
             && self
                 .workspace_ui
                 .card_rect(win_w, win_h)
-                .contains(self.cursor.x, self.cursor.y)
+                .contains(px, py)
     }
 
     /// Default open: split the last-focused pane and dock workspace there.
@@ -1296,8 +1304,7 @@ impl ChromeApp {
         let gap = 6.0;
         let mut y = input_bottom + 12.0;
         let filtered = filter_commands(&self.commands, &self.palette.query);
-        let x = self.cursor.x;
-        let cy = self.cursor.y;
+        let (x, cy) = self.pointer();
         // Click on input: stay open, do nothing
         if x >= modal.x + pad
             && x <= modal.x + modal.w - pad
@@ -1795,8 +1802,7 @@ impl ChromeApp {
     /// Update chip hover from current pointer + layout (scale / press light).
     fn update_chip_hover(&mut self) {
         let layout = self.current_layout();
-        let x = self.cursor.x;
-        let y = self.cursor.y;
+        let (x, y) = self.pointer();
         let mut hit = None;
         if self.pointer_inside {
             if layout.logo.contains(x, y) {
@@ -1858,13 +1864,8 @@ impl ChromeApp {
 
     fn hit_at_cursor(&self) -> HitTarget {
         let layout = self.current_layout();
-        hit_test(
-            &layout,
-            &self.metrics,
-            self.cursor.x,
-            self.cursor.y,
-            is_mac(),
-        )
+        let (x, y) = self.pointer();
+        hit_test(&layout, &self.metrics, x, y, is_mac())
     }
 
     /// 1-based viewport cell under the pointer (xterm mouse protocol).
@@ -1881,8 +1882,9 @@ impl ChromeApp {
         let cells = pl.cells;
         let grid = &pane.grid;
         let cell = self.cell_metrics();
-        let col = ((self.cursor.x - cells.x) / cell.w.max(1.0)).floor() as i32;
-        let row = ((self.cursor.y - cells.y) / cell.h.max(1.0)).floor() as i32;
+        let (px, py) = self.pointer();
+        let col = ((px - cells.x) / cell.w.max(1.0)).floor() as i32;
+        let row = ((py - cells.y) / cell.h.max(1.0)).floor() as i32;
         let col = col.clamp(0, grid.cols().saturating_sub(1) as i32) as u16;
         let row = row.clamp(0, grid.rows().saturating_sub(1) as i32) as u16;
         (col + 1, row + 1)
@@ -1919,8 +1921,7 @@ impl ChromeApp {
         let focus = self.session.focus_pane_id();
         let pl = layout.panes.iter().find(|p| p.pane_id == focus)?;
         let cells = pl.cells;
-        let x = self.cursor.x;
-        let y = self.cursor.y;
+        let (x, y) = self.pointer();
         if !cells.contains(x, y) {
             return None;
         }
@@ -2108,8 +2109,7 @@ impl ChromeApp {
         let layout = self.current_layout();
         let win_w = layout.title.w;
         let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-        let x = self.cursor.x;
-        let y = self.cursor.y;
+        let (x, y) = self.pointer();
         if self.settings.visible() && self.settings.animated_modal_rect(win_w, win_h).contains(x, y)
         {
             return true;
@@ -2222,9 +2222,8 @@ impl ChromeApp {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    if let Some(choice) =
-                        self.confirm
-                            .hit_button(self.cursor.x, self.cursor.y, win_w, win_h)
+                    let (px, py) = self.pointer();
+                    if let Some(choice) = self.confirm.hit_button(px, py, win_w, win_h)
                     {
                         self.apply_confirm_choice(event_loop, choice);
                     }
@@ -2237,24 +2236,23 @@ impl ChromeApp {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    let _ = self
-                        .settings
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    let _ = self.settings.try_click(px, py, win_w, win_h);
                 } else if self.palette.open {
                     self.try_palette_click(event_loop);
                 } else if self.notes.open {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    self.notes
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    self.notes.try_click(px, py, win_w, win_h);
                 } else if self.workspace_ui.is_modal() {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
                     self.sync_workspace_host();
-                    self.workspace_ui
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    self.workspace_ui.try_click(px, py, win_w, win_h);
                 } else if self.transfer.visible() && !self.transfer.ticket.is_empty() {
                     // Click progress card / ticket chip → copy ticket (product parity).
                     let _ = self.copy_transfer_ticket_if_any();
@@ -2350,9 +2348,8 @@ impl ChromeApp {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    let _ = self
-                        .workspace_ui
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    let _ = self.workspace_ui.try_click(px, py, win_w, win_h);
                     self.warp_focused = false;
                     self.terminal_focused = false;
                 } else {
@@ -2367,9 +2364,8 @@ impl ChromeApp {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    let _ = self
-                        .workspace_ui
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    let _ = self.workspace_ui.try_click(px, py, win_w, win_h);
                     self.warp_focused = false;
                     self.terminal_focused = false;
                 } else {
@@ -2866,14 +2862,14 @@ impl ChromeApp {
                     }
                     // Zoom: ⌘+ / ⌘= / ⌘- / ⌘0
                     "+" | "=" if !shift || ch == "+" => {
-                        self.nudge_zoom(0.1);
+                        self.nudge_zoom(UI_ZOOM_STEP);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
                     "-" | "_" => {
-                        self.nudge_zoom(-0.1);
+                        self.nudge_zoom(-UI_ZOOM_STEP);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -3261,7 +3257,7 @@ impl ChromeApp {
         if track_h < 8.0 {
             return;
         }
-        let y_in = (self.cursor.y - pl.cells.y).clamp(0.0, track_h);
+        let y_in = (self.pointer().1 - pl.cells.y).clamp(0.0, track_h);
         if let Some(grid) = self.session.grid_mut(pane_id) {
             let frac = grid.scroll_fraction_from_track_y(y_in, track_h);
             grid.set_scroll_fraction(frac);
@@ -4193,6 +4189,7 @@ impl ApplicationHandler for ChromeApp {
                     .unwrap_or(0.0);
                 if let Some(r) = self.surfaces.get_mut(&id).map(|s| &mut s.renderer) {
                     r.window_exit_blur = exit_blur;
+                    r.set_view_zoom(self.ui_zoom);
                     match r.render(
                         &self.session,
                         &self.settings,

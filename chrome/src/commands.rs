@@ -635,7 +635,7 @@ pub fn help_sections() -> Vec<HelpSection> {
                 },
                 HelpRow {
                     keys: format!("{} / {}", chord(m, "+"), chord(m, "-")),
-                    desc: "Zoom",
+                    desc: "View zoom",
                 },
                 HelpRow {
                     keys: chord(m, "0"),

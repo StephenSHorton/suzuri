@@ -13,6 +13,8 @@ struct LensUniforms {
     glass2: vec4f,
     // x = last-tab dissolve blur radius (logical px)
     exit: vec4f,
+    // x = view zoom (⌘±, 1 = identity), yz = origin LOGICAL px, w unused
+    view: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> u: LensUniforms;
@@ -45,24 +47,42 @@ fn ign(v: vec2f) -> f32 {
 // Sample scene: framebuffer / texture coords, origin top-left (WebGPU).
 fn sample_scene_fb(fb_px: vec2f, lod: f32) -> vec3f {
     let fb = max(u.size.zw, vec2f(1.0));
+    // Zoom-out letterbox (and any unmap outside the RT) stays empty — do not
+    // smear the edge via UV clamp.
+    if (fb_px.x < 0.0 || fb_px.y < 0.0 || fb_px.x >= fb.x || fb_px.y >= fb.y) {
+        return vec3f(0.0);
+    }
     var uv = fb_px / fb;
     uv = clamp(uv, vec2f(0.001), vec2f(0.999));
     return textureSampleLevel(scene_tex, scene_samp, uv, lod).rgb;
 }
 
+// ⌘± view zoom: same unmap as the magnifier (`local / magnify`) around origin.
+fn view_unmap(fb_px: vec2f) -> vec2f {
+    let zoom = max(u.view.x, 0.05);
+    let logical = max(u.size.xy, vec2f(1.0));
+    let fb = max(u.size.zw, vec2f(1.0));
+    let origin_fb = u.view.yz * (fb / logical);
+    return origin_fb + (fb_px - origin_fb) / zoom;
+}
+
+fn sample_view(fb_px: vec2f, lod: f32) -> vec3f {
+    return sample_scene_fb(view_unmap(fb_px), lod);
+}
+
 /// Dual-ring disk blur for last-tab dissolve (radius in framebuffer px).
 fn sample_scene_blur(fb_px: vec2f, radius_fb: f32) -> vec3f {
     if (radius_fb < 0.55) {
-        return sample_scene_fb(fb_px, 0.0);
+        return sample_view(fb_px, 0.0);
     }
-    var acc = sample_scene_fb(fb_px, 0.0) * 0.16;
+    var acc = sample_view(fb_px, 0.0) * 0.16;
     var wsum = 0.16;
     for (var i = 0; i < 8; i++) {
         let a = f32(i) * (PI * 0.25);
         let d = vec2f(cos(a), sin(a));
-        acc += sample_scene_fb(fb_px + d * radius_fb * 0.48, 0.0) * 0.068;
+        acc += sample_view(fb_px + d * radius_fb * 0.48, 0.0) * 0.068;
         wsum += 0.068;
-        acc += sample_scene_fb(fb_px + d * radius_fb, 0.0) * 0.042;
+        acc += sample_view(fb_px + d * radius_fb, 0.0) * 0.042;
         wsum += 0.042;
     }
     return acc / wsum;
@@ -106,7 +126,7 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let logical = max(u.size.xy, vec2f(1.0));
     let fb_px = frag.xy;
 
-    // Underlay: blit scene (blurred while a last-tab window dissolves).
+    // Underlay: view zoom, then last-tab dissolve blur.
     let blur_log = max(u.exit.x, 0.0);
     let scale0 = fb / logical;
     let blur_fb = blur_log * min(scale0.x, scale0.y);
@@ -180,12 +200,12 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
         let d2 = sample_local * (ior_for_wavelength(ior, aberration, 464.2) / ior);
         // Keep CA subtle relative to mag offset
         let base = center_fb + local / mag_ease;
-        let r = sample_scene_fb(base + d0 * 0.25, 0.0).r;
-        let g = sample_scene_fb(base + d1 * 0.25, 0.0).g;
-        let b = sample_scene_fb(base + d2 * 0.25, 0.0).b;
+        let r = sample_view(base + d0 * 0.25, 0.0).r;
+        let g = sample_view(base + d1 * 0.25, 0.0).g;
+        let b = sample_view(base + d2 * 0.25, 0.0).b;
         refracted = vec3f(r, g, b);
     } else {
-        refracted = sample_scene_fb(center_fb + sample_local, 0.0);
+        refracted = sample_view(center_fb + sample_local, 0.0);
     }
 
     var glass = refracted;
