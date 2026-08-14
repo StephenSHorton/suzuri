@@ -494,6 +494,18 @@ impl FrameLayout {
                     PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9),
                 );
             }
+            if pl.focused && pl.glass.w > 4.0 && pl.glass.h > 4.0 {
+                let rim = Rect::new(
+                    pl.glass.x + 1.0,
+                    pl.glass.y + 1.0,
+                    (pl.glass.w - 2.0).max(2.0),
+                    (pl.glass.h - 2.0).max(2.0),
+                );
+                out.push(
+                    PanelInstance::glass(rim, (m.radius - 1.0).max(2.0), PanelKind::PaneFocus)
+                        .with_opacity(0.72),
+                );
+            }
         }
 
         // Active goo — slides under tabs via jelly (unscaled so switch = pure slide).
@@ -695,6 +707,8 @@ pub enum PanelKind {
     ModalButtonActive = 15,
     /// Thin solid rule (pane footer, list separators).
     Hairline = 16,
+    /// Dim primary rim on the focused pane.
+    PaneFocus = 17,
 }
 
 /// GPU-ready panel instance.
@@ -829,6 +843,25 @@ mod tests {
         assert!(!a.intersects(c));
         assert!(a.contains(0.0, 0.0));
         assert!(!a.contains(10.0, 10.0));
+    }
+
+    #[test]
+    fn focused_pane_emits_dim_primary_rim() {
+        let m = Metrics::default();
+        let l = FrameLayout::compute(800.0, 600.0, m, 1);
+        let chip = crate::chrome_ui::ChipUi::default();
+        let jelly = crate::chrome_ui::TabJelly::default();
+        let panels = l.glass_panels(m, 0, None, &chip, &jelly);
+        let rims = panels
+            .iter()
+            .filter(|p| (p.kind - PanelKind::PaneFocus as u32 as f32).abs() < 0.1)
+            .count();
+        assert_eq!(rims, 1);
+        let rim = panels
+            .iter()
+            .find(|p| (p.kind - PanelKind::PaneFocus as u32 as f32).abs() < 0.1)
+            .unwrap();
+        assert!(rim._pad[0] < 0.85, "rim should stay dim");
     }
 
     #[test]
