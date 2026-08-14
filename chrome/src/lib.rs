@@ -48,6 +48,7 @@ pub mod config_store;
 pub mod control_mailbox;
 pub mod echo_filter;
 pub mod input;
+pub mod kitty;
 pub mod layout;
 pub mod links;
 pub mod mouse_pty;

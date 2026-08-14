@@ -4,6 +4,7 @@
 //! Not a full VT100 / xterm.
 
 use crate::cells::{theme, CellGrid};
+use crate::kitty::KittyKeyboard;
 
 /// Stateful decoder for a byte stream from a PTY.
 #[derive(Debug)]
@@ -46,6 +47,8 @@ pub struct AnsiDecoder {
     pub mouse_any: bool,
     /// CSI ? 1006 h — SGR mouse encoding.
     pub mouse_sgr: bool,
+    /// Kitty keyboard progressive-enhancement flags (`CSI ?/=/</> u`).
+    kitty: KittyKeyboard,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -88,6 +91,7 @@ impl Default for AnsiDecoder {
             mouse_drag: false,
             mouse_any: false,
             mouse_sgr: false,
+            kitty: KittyKeyboard::new(),
         }
     }
 }
@@ -115,6 +119,11 @@ impl AnsiDecoder {
     /// Drain PTY write-back replies (device attributes, mode reports, …).
     pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.pending_replies)
+    }
+
+    /// Kitty disambiguate / all-keys-as-escapes is on (child pushed flags).
+    pub fn kitty_active(&self) -> bool {
+        self.kitty.active()
     }
 
     fn reply(&mut self, bytes: &[u8]) {
@@ -324,13 +333,26 @@ impl AnsiDecoder {
             }
             // CSI ? … n — DSR private (e.g. DECXCPR). Report none / ignore.
             (b'?', b'n') => {}
-            // CSI ? u — Kitty keyboard progressive enhancement query.
-            // Reply with flags=0 (no enhancement) so apps don't hang or mis-parse.
+            // CSI ? u / CSI ? 0 u — Kitty keyboard progressive enhancement query.
             (b'?', b'u') => {
-                self.reply(b"\x1b[?0u");
+                self.reply(&self.kitty.query_reply());
             }
-            // CSI > flags u / CSI < n u — push/pop keyboard enhancement: accept silently.
-            (b'>' | b'<' | b'=', b'u') => {}
+            // CSI > flags u — push
+            (b'>', b'u') => {
+                let flags = params.first().copied().unwrap_or(0);
+                self.kitty.push(flags);
+            }
+            // CSI < n u — pop (n default 1; parser yields 0 when omitted)
+            (b'<', b'u') => {
+                let n = params.first().copied().unwrap_or(1);
+                self.kitty.pop(if n == 0 { 1 } else { n });
+            }
+            // CSI = flags ; mode u — set / or / clear
+            (b'=', b'u') => {
+                let flags = params.first().copied().unwrap_or(0);
+                let mode = params.get(1).copied().unwrap_or(1);
+                self.kitty.apply(flags, mode);
+            }
             // CSI ? … $ p — DECRQM. 1 = set, 2 = reset.
             (b'?', b'p') => {
                 let mode = params.first().copied().unwrap_or(0);
@@ -883,7 +905,26 @@ mod tests {
         assert!(grid.snapshot_strings().iter().all(|s| s.is_empty()));
         // DA still replies
         let replies = dec.take_replies();
+        assert!(replies.iter().any(|r| r == b"\x1b[?0u"));
         assert!(replies.iter().any(|r| r == b"\x1b[?1;2c"));
+        assert!(!dec.kitty_active());
+    }
+
+    #[test]
+    fn kitty_keyboard_push_query_pop() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(40, 5);
+        // Grok: probe, then push disambiguate (CSI > 1 u).
+        dec.feed(&mut grid, b"\x1b[?u\x1b[>1u");
+        assert!(dec.kitty_active());
+        dec.feed(&mut grid, b"\x1b[?u");
+        let replies = dec.take_replies();
+        assert!(
+            replies.iter().any(|r| r == b"\x1b[?1u"),
+            "query after push should report flags=1: {replies:?}"
+        );
+        dec.feed(&mut grid, b"\x1b[<u");
+        assert!(!dec.kitty_active());
     }
 
     #[test]

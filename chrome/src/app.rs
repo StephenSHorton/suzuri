@@ -3154,7 +3154,16 @@ impl ChromeApp {
                 if let Some(pty) = &mut rt.pty {
                     match &event.logical_key {
                         Key::Named(NamedKey::Enter) => {
-                            let _ = pty.write_all(b"\r");
+                            // Shift/Cmd+Enter → CSI-u so Grok inserts a newline
+                            // instead of submitting. Bare Enter stays CR.
+                            let bytes = crate::kitty::encode_enter(
+                                self.modifiers.shift_key(),
+                                self.modifiers.alt_key(),
+                                self.modifiers.control_key(),
+                                self.modifiers.super_key(),
+                                rt.ansi.kitty_active(),
+                            );
+                            let _ = pty.write_all(&bytes);
                         }
                         Key::Named(NamedKey::Backspace) => {
                             let _ = pty.write_all(&[0x7f]);
