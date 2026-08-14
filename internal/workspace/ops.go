@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Op is a workspace operation for bridge/MCP.
@@ -19,6 +20,8 @@ const (
 	OpChannelDelete Op = "channel_delete"
 	OpPost          Op = "post"
 	OpHistory       Op = "history"
+	OpWait          Op = "wait"
+	OpInbox         Op = "inbox"
 	OpUpload        Op = "upload"
 	OpDownload      Op = "download"
 	OpSetStatus     Op = "set_status" // member availability (idle|working|waiting|blocked|away)
@@ -37,6 +40,14 @@ type Request struct {
 	ReplyTo   string `json:"reply_to,omitempty"`
 	Topic     string `json:"topic,omitempty"`
 	Limit     int    `json:"limit,omitempty"`
+	// SinceID is a history/inbox cursor: return messages after this id.
+	SinceID string `json:"since_id,omitempty"`
+	// AfterTS is an RFC3339 timestamp cursor for history (exclusive).
+	AfterTS string `json:"after_ts,omitempty"`
+	// Since is the wait cursor (message id). Alias of since_id for workspace_wait.
+	Since string `json:"since,omitempty"`
+	// Timeout is wait timeout in seconds (default/max 60).
+	Timeout int `json:"timeout,omitempty"`
 	// FilePath is a local path for upload (source file).
 	FilePath string `json:"file_path,omitempty"`
 	// FileID is a stored file id (or message id) for download.
@@ -173,9 +184,59 @@ func Apply(s *Store, req Request) Result {
 		return Result{OK: true, Path: path, Message: &msg}
 
 	case OpHistory:
-		list, err := s.History(req.Channel, req.Limit)
+		var after time.Time
+		if strings.TrimSpace(req.AfterTS) != "" {
+			t, err := parseAfterTS(req.AfterTS)
+			if err != nil {
+				return Result{OK: false, Path: path, Error: err.Error()}
+			}
+			after = t
+		}
+		sinceID := strings.TrimSpace(req.SinceID)
+		if sinceID == "" {
+			sinceID = strings.TrimSpace(req.Since)
+		}
+		list, err := s.HistorySince(req.Channel, req.Limit, sinceID, after)
 		if err != nil {
 			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		if list == nil {
+			list = []Message{}
+		}
+		return Result{OK: true, Path: path, Messages: list, Count: len(list)}
+
+	case OpWait:
+		sinceID := strings.TrimSpace(req.Since)
+		if sinceID == "" {
+			sinceID = strings.TrimSpace(req.SinceID)
+		}
+		if req.MemberID != "" {
+			_ = s.Touch(req.MemberID)
+		}
+		timeout := time.Duration(req.Timeout) * time.Second
+		list, err := s.Wait(req.Channel, sinceID, timeout)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		if list == nil {
+			list = []Message{}
+		}
+		return Result{OK: true, Path: path, Messages: list, Count: len(list)}
+
+	case OpInbox:
+		if req.MemberID != "" {
+			_ = s.Touch(req.MemberID)
+		}
+		sinceID := strings.TrimSpace(req.SinceID)
+		if sinceID == "" {
+			sinceID = strings.TrimSpace(req.Since)
+		}
+		list, err := s.Inbox(req.MemberID, sinceID, req.Limit)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		if list == nil {
+			list = []Message{}
 		}
 		return Result{OK: true, Path: path, Messages: list, Count: len(list)}
 
@@ -213,4 +274,14 @@ func Apply(s *Store, req Request) Result {
 
 func filepathJoinRoot(s *Store, rel string) string {
 	return filepath.Join(s.Root(), filepath.FromSlash(rel))
+}
+
+func parseAfterTS(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid after_ts %q (use RFC3339)", s)
 }
