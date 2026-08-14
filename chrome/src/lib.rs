@@ -97,7 +97,10 @@ pub use control_mailbox::{
     chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
     POLL_INTERVAL,
 };
-pub use input::{hit_test, is_mac, traffic_light_rects, HitTarget};
+pub use input::{
+    classify_drop, drop_edge_rect, edge_of, hit_test, is_mac, traffic_light_rects, DropKind,
+    HitTarget,
+};
 pub use layout::{FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect, Spacing};
 pub use links::{
     clean_url, find_links_in_line, link_at, link_span_at_col, link_url_at_col, normalize_url,
@@ -105,7 +108,7 @@ pub use links::{
 };
 pub use mouse_pty::encode_mouse_wheel;
 pub use new_window::{canonicalize_exe, resolve_self_exe, spawn_new_window};
-pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
+pub use panes::{DockEdge, FocusDir, RemoveResult, SplitAxis, SplitNode};
 pub use pty::PtySession;
 pub use rename::{RenameState, RenameTarget};
 pub use selection::Selection;

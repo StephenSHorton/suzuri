@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 
 use crate::cells::{theme, CellGrid};
-use crate::panes::{FocusDir, RemoveResult, SoloExitAnim, SplitAxis, SplitNode, TickResult};
+use crate::panes::{
+    DockEdge, FocusDir, RemoveResult, SoloExitAnim, SplitAxis, SplitNode, TickResult,
+};
 use crate::shell::{self, ShellOutput};
 
 /// What a leaf pane hosts. Terminals own a PTY; widgets reuse the split tree
@@ -666,6 +668,118 @@ impl ChromeSession {
         self.pane_kind(self.focus_pane_id()).is_workspace()
     }
 
+    /// Tab that currently owns `pane_id` in its split tree.
+    pub fn tab_id_for_pane(&self, pane_id: u64) -> Option<u64> {
+        self.tabs
+            .iter()
+            .find(|t| t.root.contains_pane(pane_id))
+            .map(|t| t.id)
+    }
+
+    /// Re-dock `moving` beside `target` (same or other tab). Keeps the Pane + PTY.
+    ///
+    /// Refuses the last pane of the last tab (nowhere to land without a new window).
+    pub fn reparent_pane(&mut self, moving: u64, target: u64, edge: DockEdge) -> bool {
+        if moving == target {
+            return false;
+        }
+        if !self.panes.contains_key(&moving) || !self.panes.contains_key(&target) {
+            return false;
+        }
+        let Some(src_tab) = self.tab_id_for_pane(moving) else {
+            return false;
+        };
+        let Some(dst_tab) = self.tab_id_for_pane(target) else {
+            return false;
+        };
+
+        if src_tab == dst_tab {
+            let tab = match self.tabs.iter_mut().find(|t| t.id == src_tab) {
+                Some(t) => t,
+                None => return false,
+            };
+            if tab.root.leaf_ids().len() <= 1 {
+                return false;
+            }
+            match tab.root.remove_leaf(moving) {
+                RemoveResult::Removed { focus_hint } => {
+                    if tab.focus_pane == moving {
+                        tab.focus_pane = focus_hint;
+                    }
+                }
+                RemoveResult::RemovedEmpty | RemoveResult::NotFound => return false,
+            }
+            if !tab.root.split_leaf_edge(target, moving, edge) {
+                return false;
+            }
+            tab.focus_pane = moving;
+            return true;
+        }
+
+        // Cross-tab: detach from source, then split the destination target.
+        let src_idx = match self.tabs.iter().position(|t| t.id == src_tab) {
+            Some(i) => i,
+            None => return false,
+        };
+        let src_sole = self.tabs[src_idx].root.leaf_ids().len() <= 1;
+        if src_sole && self.tabs.len() <= 1 {
+            return false;
+        }
+
+        if src_sole {
+            // Drop the empty tab; keep the pane map entry.
+            let _ = self.tabs.remove(src_idx);
+            if self.active_id == src_tab {
+                self.active_id = dst_tab;
+            }
+        } else if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == src_tab) {
+            match tab.root.remove_leaf(moving) {
+                RemoveResult::Removed { focus_hint } => {
+                    if tab.focus_pane == moving {
+                        tab.focus_pane = focus_hint;
+                    }
+                }
+                RemoveResult::RemovedEmpty | RemoveResult::NotFound => return false,
+            }
+        } else {
+            return false;
+        }
+
+        let Some(dst) = self.tabs.iter_mut().find(|t| t.id == dst_tab) else {
+            return false;
+        };
+        if !dst.root.split_leaf_edge(target, moving, edge) {
+            return false;
+        }
+        dst.focus_pane = moving;
+        self.active_id = dst_tab;
+        true
+    }
+
+    /// Move `moving` onto `tab_id`, splitting the tab's focused leaf to the right.
+    pub fn move_pane_to_tab(&mut self, moving: u64, tab_id: u64) -> bool {
+        let Some(target) = self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.focus_pane)
+        else {
+            return false;
+        };
+        if moving == target {
+            if self
+                .tabs
+                .iter()
+                .find(|t| t.id == tab_id)
+                .map(|t| t.root.leaf_ids().len())
+                == Some(1)
+            {
+                return false;
+            }
+        }
+        self.reparent_pane(moving, target, DockEdge::Right)
+    }
+
     /// Close focused pane with jelly animation (same path as shell exit).
     pub fn close_focused_pane_or_tab(&mut self) -> CloseOutcome {
         let focus = self.focus_pane_id();
@@ -1131,6 +1245,7 @@ fn cwd_after_command(cwd: &str, line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::panes::DockEdge;
 
     #[test]
     fn app_bundle_cwd_is_unhelpful() {
@@ -1270,6 +1385,39 @@ mod tests {
         s.rename_focused_pane("");
         assert_eq!(s.active_pane().unwrap().title, "shell 1");
         assert_eq!(s.active_tab().unwrap().title, "shell 1");
+    }
+
+    #[test]
+    fn reparent_same_tab_docks_left() {
+        let mut s = ChromeSession::new(80, 24);
+        let right = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        let left = 1;
+        assert!(s.reparent_pane(right, left, DockEdge::Left));
+        let ids = s.active_tab().unwrap().root.leaf_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(s.panes.contains_key(&right));
+        assert_eq!(s.focus_pane_id(), right);
+    }
+
+    #[test]
+    fn reparent_to_other_tab_closes_empty_source() {
+        let mut s = ChromeSession::new(80, 24);
+        let (_tid, pid) = s.new_tab(80, 24);
+        assert_eq!(s.tabs.len(), 2);
+        // Move the new tab's sole pane onto the first tab.
+        assert!(s.reparent_pane(pid, 1, DockEdge::Right));
+        assert_eq!(s.tabs.len(), 1);
+        assert!(s.panes.contains_key(&pid));
+        assert_eq!(s.active_tab().unwrap().root.leaf_ids().len(), 2);
+    }
+
+    #[test]
+    fn reparent_refuses_last_pane_of_last_tab() {
+        let mut s = ChromeSession::new(80, 24);
+        assert!(!s.reparent_pane(1, 1, DockEdge::Right));
+        let (_tid, pid) = s.new_tab(80, 24);
+        // Can't dock a pane onto itself when it's the sole leaf.
+        assert!(!s.move_pane_to_tab(pid, s.active_id));
     }
 
     #[test]

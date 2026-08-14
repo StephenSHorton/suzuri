@@ -42,6 +42,8 @@ workspace/
 
 Command palette → **Workspace** (category Workspace). Opens as a **split pane**
 beside the last-focused terminal (not a covering modal). ⌘W closes the pane.
+Drag the path strip (or the top of the glass) onto another pane’s edge or a
+tab chip to re-dock it.
 
 Layout (top → bottom): **channel tabs** · **presence strip** (members + availability) ·
 chat bubbles (viewport scroll) · compose · short status · key footer.

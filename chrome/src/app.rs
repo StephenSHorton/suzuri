@@ -27,7 +27,7 @@ use crate::commands::{
 };
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
-use crate::input::{hit_test, is_mac, HitTarget};
+use crate::input::{classify_drop, hit_test, is_mac, DropKind, HitTarget};
 use crate::layout::{FrameLayout, Metrics};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
 use crate::mouse_pty::encode_mouse_wheel;
@@ -141,6 +141,15 @@ pub struct ChromeApp {
     applied_font: String,
     /// Accumulated trackpad pixel-delta (macOS sends many sub-line events).
     wheel_accum: f32,
+    /// In-window pane re-dock (grab path/divider, drop on an edge or tab).
+    pane_drag: Option<PaneDrag>,
+}
+
+struct PaneDrag {
+    pane_id: u64,
+    start: (f32, f32),
+    active: bool,
+    drop: Option<DropKind>,
 }
 
 impl Default for ChromeApp {
@@ -198,6 +207,7 @@ impl Default for ChromeApp {
 
             applied_font: String::new(),
             wheel_accum: 0.0,
+            pane_drag: None,
         };
         // First-run overlay only — PTY already spawned above.
         if !app.settings.prefs.splash_seen {
@@ -969,6 +979,32 @@ impl ChromeApp {
         }
     }
 
+    /// Apply an in-window pane re-dock. Returns true if a drag was active
+    /// (so the mouse-up should not also click-activate chrome).
+    fn finish_pane_drag(&mut self) -> bool {
+        let Some(drag) = self.pane_drag.take() else {
+            return false;
+        };
+        if !drag.active {
+            return false;
+        }
+        let ok = match drag.drop {
+            Some(DropKind::Edge { pane_id, edge }) => {
+                self.session.reparent_pane(drag.pane_id, pane_id, edge)
+            }
+            Some(DropKind::Tab { tab_id }) => self.session.move_pane_to_tab(drag.pane_id, tab_id),
+            None => false,
+        };
+        if ok {
+            self.sync_workspace_host();
+            self.warp_focused = !self.session.is_widget(drag.pane_id);
+            self.terminal_focused = false;
+        } else if drag.drop.is_none() {
+            // Dragged off a legal target — leave layout as-is (no toast noise).
+        }
+        true
+    }
+
     fn focus_dir(&mut self, dir: FocusDir) {
         let layout = self.current_layout();
         self.session
@@ -1506,6 +1542,17 @@ impl ChromeApp {
                 self.notes.close();
                 self.settings.toggle();
             }
+            HitTarget::PaneChrome(pane_id) => {
+                self.session.set_focus_pane(pane_id);
+                if self.session.pane_kind(pane_id).is_workspace() {
+                    self.sync_workspace_host();
+                    self.warp_focused = false;
+                    self.terminal_focused = false;
+                } else {
+                    self.warp_focused = true;
+                    self.terminal_focused = false;
+                }
+            }
             HitTarget::WarpBar(pane_id) => {
                 self.session.set_focus_pane(pane_id);
                 if self.session.pane_kind(pane_id).is_workspace() {
@@ -1572,6 +1619,13 @@ impl ChromeApp {
             // Confirm is topmost: Esc / N dismisses without quitting.
             if self.confirm.open {
                 self.apply_confirm_choice(event_loop, ConfirmChoice::No);
+                return;
+            }
+            if self.pane_drag.is_some() {
+                self.pane_drag = None;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
                 return;
             }
             // Workspace: Esc cancels new-channel compose. Docked pane stays open (⌘W).
@@ -2544,7 +2598,11 @@ impl ChromeApp {
             }
         }
         // Caret blink while an input path is focused.
-        if self.warp_focused || self.terminal_focused || self.workspace_captures_input() {
+        if self.warp_focused
+            || self.terminal_focused
+            || self.workspace_captures_input()
+            || self.pane_drag.as_ref().is_some_and(|d| d.active)
+        {
             return true;
         }
         false
@@ -2685,6 +2743,32 @@ impl ApplicationHandler for ChromeApp {
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
+                } else if self.pane_drag.is_some() {
+                    let (sx, sy, pane_id) = {
+                        let d = self.pane_drag.as_ref().expect("just checked");
+                        (d.start.0, d.start.1, d.pane_id)
+                    };
+                    let dx = self.cursor.x - sx;
+                    let dy = self.cursor.y - sy;
+                    let active = dx.hypot(dy) >= 8.0
+                        || self.pane_drag.as_ref().is_some_and(|d| d.active);
+                    if active {
+                        let layout = self.current_layout();
+                        let drop = classify_drop(
+                            &layout,
+                            &self.session,
+                            self.cursor.x,
+                            self.cursor.y,
+                            pane_id,
+                        );
+                        if let Some(d) = self.pane_drag.as_mut() {
+                            d.active = true;
+                            d.drop = drop;
+                        }
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 } else if self.selecting_term {
                     if let Some(pos) = self.term_cell_at_cursor() {
                         let id = self.session.focus_pane_id();
@@ -2727,6 +2811,16 @@ impl ApplicationHandler for ChromeApp {
                             w.request_redraw();
                         }
                         return;
+                    }
+                }
+                if let HitTarget::PaneChrome(pane_id) = hit {
+                    if !self.overlay_open() {
+                        self.pane_drag = Some(PaneDrag {
+                            pane_id,
+                            start: (self.cursor.x, self.cursor.y),
+                            active: false,
+                            drop: None,
+                        });
                     }
                 }
                 // Scrollbar track/thumb drag (right gutter of cell well).
@@ -2809,6 +2903,7 @@ impl ApplicationHandler for ChromeApp {
             } => {
                 self.chip_ui.pressed = false;
                 let was_scroll = self.scroll_dragging.take().is_some();
+                let pane_drag_done = self.finish_pane_drag();
                 if self.selecting_term {
                     self.term_selection.end();
                     self.selecting_term = false;
@@ -2821,7 +2916,7 @@ impl ApplicationHandler for ChromeApp {
                 // Skip chrome activation if we were selecting terminal text or scrolling.
                 if let Some(start) = self.press_hit.take() {
                     let end = self.hit_at_cursor();
-                    if was_scroll {
+                    if was_scroll || pane_drag_done {
                         // already applied on drag
                     } else if start == end
                         && start != HitTarget::TitleDrag
@@ -3116,6 +3211,10 @@ impl ApplicationHandler for ChromeApp {
                         &self.chip_ui,
                         &self.term_selection,
                         self.hovered_link_span.as_ref(),
+                        self.pane_drag
+                            .as_ref()
+                            .filter(|d| d.active)
+                            .and_then(|d| d.drop),
                     ) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {

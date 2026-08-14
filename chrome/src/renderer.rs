@@ -684,6 +684,7 @@ impl Renderer {
         term_selection: &Selection,
         // Hovered URL span for primary tint (focused pane; None = no-op).
         hovered_link: Option<&LinkHoverSpan>,
+        pane_drop: Option<crate::input::DropKind>,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -797,6 +798,39 @@ impl Renderer {
             chip_ui,
             &self.tab_jelly,
         );
+        if let Some(drop) = pane_drop {
+            use crate::input::{drop_edge_rect, DropKind};
+            use crate::layout::{PanelInstance, PanelKind};
+            match drop {
+                DropKind::Edge { pane_id, edge } => {
+                    if let Some(pl) = layout.panes.iter().find(|p| p.pane_id == pane_id) {
+                        let strip = drop_edge_rect(pl.glass, edge);
+                        panels.push(
+                            PanelInstance::glass(
+                                strip,
+                                self.metrics.chip_radius,
+                                PanelKind::ModalButtonActive,
+                            )
+                            .with_opacity(0.85),
+                        );
+                    }
+                }
+                DropKind::Tab { tab_id } => {
+                    if let Some(i) = session.tabs.iter().position(|t| t.id == tab_id) {
+                        if let Some(chip) = layout.tab_chips.get(i) {
+                            panels.push(
+                                PanelInstance::glass(
+                                    *chip,
+                                    self.metrics.chip_radius,
+                                    PanelKind::ModalButtonActive,
+                                )
+                                .with_opacity(0.9),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         // Workspace interiors live in the pane (under overlay scrim), not as a modal.
         if workspace_ui.is_docked() {
             if let Some(host) = workspace_host_rect(workspace_ui, layout) {

@@ -1,6 +1,8 @@
 //! Pure hit-test for window chrome. Logical f32 coords only — no winit types.
 
 use crate::layout::{FrameLayout, Metrics, Rect};
+use crate::panes::DockEdge;
+use crate::session::ChromeSession;
 
 /// Interactive region under a pointer (logical coordinates).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +20,8 @@ pub enum HitTarget {
     Caffeine,
     /// Local input strip for pane id.
     WarpBar(u64),
+    /// Path / divider chrome of a pane — grab handle for re-dock drag.
+    PaneChrome(u64),
     /// History cells for pane id.
     Terminal(u64),
     /// Scrollbar track / thumb on the right of the cell well (pane id).
@@ -114,9 +118,17 @@ pub fn hit_test(
         return HitTarget::NewTab;
     }
 
-    // Multi-pane: footer → command line; cells → history/PTY surface.
+    // Multi-pane: path/divider = drag chrome; warp = command line; cells = PTY.
+    // Top 8px of glass is a grab band so widget / alt-screen panes (no path) can move.
+    const GRAB_BAND: f32 = 8.0;
     for pl in &layout.panes {
-        if pl.warp.contains(x, y) || pl.path.contains(x, y) || pl.divider.contains(x, y) {
+        if pl.glass.contains(x, y) && y < pl.glass.y + GRAB_BAND {
+            return HitTarget::PaneChrome(pl.pane_id);
+        }
+        if pl.path.contains(x, y) || pl.divider.contains(x, y) {
+            return HitTarget::PaneChrome(pl.pane_id);
+        }
+        if pl.warp.contains(x, y) {
             return HitTarget::WarpBar(pl.pane_id);
         }
         if pl.cells.contains(x, y) {
@@ -143,6 +155,81 @@ pub fn hit_test(
     }
 
     HitTarget::None
+}
+
+/// Where a dragged pane would land if dropped at `(x, y)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropKind {
+    Edge { pane_id: u64, edge: DockEdge },
+    Tab { tab_id: u64 },
+}
+
+/// Classify a drop. `None` = no legal landing (including over the moving pane).
+pub fn classify_drop(
+    layout: &FrameLayout,
+    session: &ChromeSession,
+    x: f32,
+    y: f32,
+    moving: u64,
+) -> Option<DropKind> {
+    for (i, chip) in layout.tab_chips.iter().enumerate() {
+        if !chip.contains(x, y) {
+            continue;
+        }
+        let tab = session.tabs.get(i)?;
+        if tab.root.contains_pane(moving) && tab.root.leaf_ids().len() <= 1 {
+            return None;
+        }
+        return Some(DropKind::Tab { tab_id: tab.id });
+    }
+    for pl in &layout.panes {
+        if !pl.glass.contains(x, y) {
+            continue;
+        }
+        if pl.pane_id == moving {
+            return None;
+        }
+        return Some(DropKind::Edge {
+            pane_id: pl.pane_id,
+            edge: edge_of(pl.glass, x, y),
+        });
+    }
+    None
+}
+
+/// Outer 28% of each side is that edge; the center docks to the right.
+pub fn edge_of(r: Rect, x: f32, y: f32) -> DockEdge {
+    let u = ((x - r.x) / r.w.max(1.0)).clamp(0.0, 1.0);
+    let v = ((y - r.y) / r.h.max(1.0)).clamp(0.0, 1.0);
+    const BAND: f32 = 0.28;
+    let dl = u;
+    let dr = 1.0 - u;
+    let dt = v;
+    let db = 1.0 - v;
+    let m = dl.min(dr).min(dt).min(db);
+    if m > BAND {
+        return DockEdge::Right;
+    }
+    if (dl - m).abs() < f32::EPSILON {
+        DockEdge::Left
+    } else if (dr - m).abs() < f32::EPSILON {
+        DockEdge::Right
+    } else if (dt - m).abs() < f32::EPSILON {
+        DockEdge::Top
+    } else {
+        DockEdge::Bottom
+    }
+}
+
+/// Highlight strip for a drop edge, inset inside `glass`.
+pub fn drop_edge_rect(glass: Rect, edge: DockEdge) -> Rect {
+    let t = (glass.w.min(glass.h) * 0.12).clamp(8.0, 28.0);
+    match edge {
+        DockEdge::Left => Rect::new(glass.x, glass.y, t, glass.h),
+        DockEdge::Right => Rect::new(glass.x + glass.w - t, glass.y, t, glass.h),
+        DockEdge::Top => Rect::new(glass.x, glass.y, glass.w, t),
+        DockEdge::Bottom => Rect::new(glass.x, glass.y + glass.h - t, glass.w, t),
+    }
 }
 
 #[cfg(test)]
@@ -264,6 +351,27 @@ mod tests {
             false,
         );
         assert!(matches!(t, HitTarget::Terminal(_)));
+        let chrome = hit_test(
+            &layout,
+            &m,
+            layout.path.x + 4.0,
+            layout.path.y + layout.path.h * 0.5,
+            false,
+        );
+        assert!(
+            matches!(chrome, HitTarget::PaneChrome(_)),
+            "path strip is the pane grab handle, got {chrome:?}"
+        );
+    }
+
+    #[test]
+    fn edge_of_corners_pick_nearest_side() {
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        assert_eq!(edge_of(r, 5.0, 50.0), crate::panes::DockEdge::Left);
+        assert_eq!(edge_of(r, 95.0, 50.0), crate::panes::DockEdge::Right);
+        assert_eq!(edge_of(r, 50.0, 5.0), crate::panes::DockEdge::Top);
+        assert_eq!(edge_of(r, 50.0, 95.0), crate::panes::DockEdge::Bottom);
+        assert_eq!(edge_of(r, 50.0, 50.0), crate::panes::DockEdge::Right);
     }
 
     #[test]

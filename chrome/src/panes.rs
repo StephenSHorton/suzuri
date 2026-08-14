@@ -167,6 +167,35 @@ impl SplitNode {
         }
     }
 
+    /// Like [`split_leaf`], then swap children when the new pane should sit
+    /// left / above the target (split_leaf always opens `new_id` as `b`).
+    pub fn split_leaf_edge(&mut self, target: u64, new_id: u64, edge: DockEdge) -> bool {
+        if !self.split_leaf(target, new_id, edge.axis()) {
+            return false;
+        }
+        if !edge.moving_is_second() {
+            self.swap_direct_children(target, new_id);
+        }
+        true
+    }
+
+    fn swap_direct_children(&mut self, a_id: u64, b_id: u64) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch { a, b, .. } => {
+                let is_pair = matches!(
+                    (a.as_ref(), b.as_ref()),
+                    (Self::Leaf(x), Self::Leaf(y)) if *x == a_id && *y == b_id
+                );
+                if is_pair {
+                    std::mem::swap(a, b);
+                    return true;
+                }
+                a.swap_direct_children(a_id, b_id) || b.swap_direct_children(a_id, b_id)
+            }
+        }
+    }
+
     /// Start a jelly-close of leaf `id`. Returns false if not found or already sole leaf.
     ///
     /// For a sole leaf, the caller should run a tab-level exit anim instead.
@@ -368,6 +397,29 @@ pub enum FocusDir {
     Down,
 }
 
+/// Which side of a target pane a dragged leaf should occupy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl DockEdge {
+    pub fn axis(self) -> SplitAxis {
+        match self {
+            Self::Left | Self::Right => SplitAxis::Vertical,
+            Self::Top | Self::Bottom => SplitAxis::Horizontal,
+        }
+    }
+
+    /// `split_leaf` opens the new id as child `b` (right / below).
+    pub fn moving_is_second(self) -> bool {
+        matches!(self, Self::Right | Self::Bottom)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum RemoveResult {
     NotFound,
@@ -476,6 +528,22 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(root, SplitNode::Leaf(1)));
+    }
+
+    #[test]
+    fn split_leaf_edge_puts_new_on_left() {
+        let mut root = SplitNode::leaf(1);
+        assert!(root.split_leaf_edge(1, 2, DockEdge::Left));
+        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+            *jelly = 1.0;
+            *jelly_target = 1.0;
+        }
+        let mut out = Vec::new();
+        root.layout_into(Rect::new(0.0, 0.0, 200.0, 100.0), 0.0, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, 2, "new pane should be left (first)");
+        assert_eq!(out[1].0, 1);
+        assert!(out[0].1.x < out[1].1.x);
     }
 
     #[test]
