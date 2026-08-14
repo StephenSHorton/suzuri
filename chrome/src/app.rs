@@ -1403,6 +1403,30 @@ impl ChromeApp {
                 }
                 self.workspace_ui.pick_and_attach();
             }
+            CommandAction::WorkspaceAddAgent => {
+                if !self.workspace_ui.open {
+                    self.palette.close();
+                    self.settings.close();
+                    self.help.close();
+                    self.notes.close();
+                    self.transfer.close();
+                    self.rename.close();
+                    self.open_workspace_pane();
+                }
+                self.workspace_ui.begin_add_agent();
+            }
+            CommandAction::WorkspaceSetTopic => {
+                if !self.workspace_ui.open {
+                    self.palette.close();
+                    self.settings.close();
+                    self.help.close();
+                    self.notes.close();
+                    self.transfer.close();
+                    self.rename.close();
+                    self.open_workspace_pane();
+                }
+                self.workspace_ui.begin_set_topic();
+            }
             CommandAction::OpenTransferSend => {
                 self.palette.close();
                 self.settings.close();
@@ -2238,6 +2262,18 @@ impl ChromeApp {
         true
     }
 
+    /// Copy a pending workspace kickoff snippet (from +Agent).
+    fn drain_workspace_clipboard(&mut self) {
+        let Some(text) = self.workspace_ui.take_pending_clipboard() else {
+            return;
+        };
+        if let Some(cb) = &mut self.clipboard {
+            if cb.set_text(text).is_ok() {
+                self.toast.show("Kickoff copied");
+            }
+        }
+    }
+
     /// True if the pointer is over any open modal card (input, buttons, body).
     fn pointer_in_open_modal(&self) -> bool {
         let layout = self.current_layout();
@@ -2387,6 +2423,7 @@ impl ChromeApp {
                     self.sync_workspace_host();
                     let (px, py) = self.pointer();
                     self.workspace_ui.try_click(px, py, win_w, win_h);
+                    self.drain_workspace_clipboard();
                 } else if self.transfer.visible() && !self.transfer.ticket.is_empty() {
                     // Click progress card / ticket chip → copy ticket (product parity).
                     let _ = self.copy_transfer_ticket_if_any();
@@ -2484,6 +2521,7 @@ impl ChromeApp {
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
                     let (px, py) = self.pointer();
                     let _ = self.workspace_ui.try_click(px, py, win_w, win_h);
+                    self.drain_workspace_clipboard();
                     self.warp_focused = false;
                     self.terminal_focused = false;
                 } else {
@@ -2500,6 +2538,7 @@ impl ChromeApp {
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
                     let (px, py) = self.pointer();
                     let _ = self.workspace_ui.try_click(px, py, win_w, win_h);
+                    self.drain_workspace_clipboard();
                     self.warp_focused = false;
                     self.terminal_focused = false;
                 } else {
@@ -2713,6 +2752,7 @@ impl ChromeApp {
                     Key::Named(NamedKey::Enter) => {
                         // Completes @mention when picker open; otherwise posts.
                         self.workspace_ui.send();
+                        self.drain_workspace_clipboard();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -2838,7 +2878,7 @@ impl ChromeApp {
                     }
                 }
             }
-            // Workspace: Ctrl+R refresh, Ctrl+Shift+A cycle presence, Ctrl+U path attach, Ctrl+Shift+U picker, Ctrl+D×2 delete channel.
+            // Workspace: Ctrl+R refresh, Ctrl+Shift+A cycle presence, Ctrl+U path attach, Ctrl+Shift+U picker, Ctrl+Shift+T topic, Ctrl+D×2 delete channel.
             if self.workspace_captures_input() {
                 if let Key::Character(ref s) = event.logical_key {
                     match s.as_str() {
@@ -2879,6 +2919,13 @@ impl ChromeApp {
                         }
                         "d" | "D" if !shift => {
                             self.workspace_ui.request_delete_channel();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        "t" | "T" if shift => {
+                            self.workspace_ui.begin_set_topic();
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }

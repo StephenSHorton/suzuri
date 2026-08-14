@@ -45,8 +45,8 @@ beside the last-focused terminal (not a covering modal). ⌘W closes the pane.
 Drag the path strip (or the top of the glass) onto another pane’s edge or a
 tab chip to re-dock it.
 
-Layout (top → bottom): **channel tabs** · **presence strip** (members + availability) ·
-chat bubbles (viewport scroll) · compose · short status · key footer.
+Layout (top → bottom): **channel tabs** · **presence strip** (members + availability + **+ Agent**) ·
+**pinned topic** (does not scroll) · chat bubbles (viewport scroll) · compose · short status · key footer.
 
 | Key | Action |
 |-----|--------|
@@ -54,6 +54,8 @@ chat bubbles (viewport scroll) · compose · short status · key footer.
 | `@name` | Mention a member — Tab/Enter completes from the picker |
 | Tab / Shift+Tab | Cycle channels (or complete/cycle @mentions when picker open) |
 | **+** chip (or Ctrl+N) | New channel — type name, Enter |
+| **+ Agent** (or palette **Add agent…**) | Pick `pm` / `engine` / `content` — copies a kickoff snippet |
+| Topic pin (or Ctrl+Shift+T) | Set the channel topic (stored in `meta.json`) |
 | Click channel tab | Switch channel |
 | Ctrl+D | Delete current channel (press twice to confirm; not on #general) |
 | Ctrl+U | Attach file — type `~/path` or absolute path, Enter |
@@ -64,6 +66,22 @@ chat bubbles (viewport scroll) · compose · short status · key footer.
 | Esc | Cancel compose mode (docked pane stays; ⌘W closes it) |
 
 Members get a stable color + symbol in the presence strip and on message headers.
+The strip never collapses two members that share a display name (`engine` and `engine-2`
+both stay visible). A `working` member whose `last_seen` is older than **2 minutes**
+shows **not polling**. If a member has an empty `session_id` and another member has
+the same exact name, that chip shows a **fuse** warning.
+
+### +Agent kickoff
+
+**+ Agent** does not launch a Grok process. It copies a paste-ready snippet that
+tells a new session to call **`workspace_guide` first**, then `workspace_join`,
+`workspace_claim_role` (with the chosen role), and `workspace_wait`. Opening the
+Workspace UI does **not** post a join line to `#general`.
+
+### Pinned topic
+
+Each channel `meta.json` has a `topic`. Chrome pins it above the chat so it does
+not scroll away. Click the pin line, use the palette, or Ctrl+Shift+T to edit.
 
 File messages show as `📎 name (size)` in the stream. Files are **copied** into
 `channels/<slug>/files/` (max 64 MiB). Path compose (Ctrl+U), native picker
@@ -86,8 +104,12 @@ the name in the UI for working / waiting / blocked.
 
 ## What to say to Grok
 
+Prefer the **+ Agent** kickoff (role = `pm` / `engine` / `content`):
+
 ```
-Join the suzuri workspace as <name>, set status to working, and introduce yourself in #general.
+You are joining the suzuri workspace as the <role> role.
+Call workspace_guide first.
+Then workspace_join, workspace_claim_role role="<role>", and workspace_wait.
 ```
 
 Or: *“Check the shared workspace / post in #general.”*  

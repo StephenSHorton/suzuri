@@ -2240,17 +2240,54 @@ fn push_workspace_labels(
         ));
     }
     {
-        let strip = workspace_ui.members_strip_text();
-        let mut sc = dim;
-        sc[3] *= ease;
-        let x = modal.x + pad + list_w + 10.0;
-        if !skip(x, modal.y + 8.0) {
+        // One label per chip so engine + engine-2 are never collapsed by truncate.
+        let chips = workspace_ui.members_strip_chips();
+        let mut x = modal.x + pad + list_w + 10.0;
+        let add = workspace_ui.add_agent_chip_rect(win_w, win_h);
+        for chip in chips {
+            if x + 8.0 >= add.x {
+                break;
+            }
+            if !skip(x, modal.y + 8.0) {
+                let mut sc = dim;
+                sc[3] *= ease;
+                labels.push(TextLabel::new(chip.clone(), x, modal.y + 8.0, 11.0, sc));
+            }
+            x += chip.chars().count() as f32 * 6.4 + 10.0;
+        }
+        if !skip(add.x, modal.y + 8.0) {
+            let mut ac = bright;
+            ac[3] *= ease;
             labels.push(TextLabel::new(
-                truncate_chars(&strip, 72),
-                x,
+                "+ Agent".to_string(),
+                add.x,
                 modal.y + 8.0,
                 11.0,
-                sc,
+                ac,
+            ));
+        }
+    }
+    {
+        let pin = workspace_ui.topic_pin_rect(win_w, win_h);
+        if workspace_ui.mode == ComposeMode::PickAgentRole {
+            for (i, role) in crate::workspace_store::AGENT_ROLES.iter().enumerate() {
+                let r = workspace_ui.agent_role_rect(i, win_w, win_h);
+                if skip(r.x, pin.y) {
+                    continue;
+                }
+                let mut tc = bright;
+                tc[3] *= ease;
+                labels.push(TextLabel::new((*role).to_string(), r.x, pin.y, 11.0, tc));
+            }
+        } else if !skip(pin.x, pin.y) {
+            let mut tc = dim;
+            tc[3] *= ease;
+            labels.push(TextLabel::new(
+                truncate_chars(&workspace_ui.topic_pin_text(), 64),
+                pin.x,
+                pin.y,
+                11.0,
+                tc,
             ));
         }
     }
@@ -2365,6 +2402,8 @@ fn push_workspace_labels(
         let placeholder = match workspace_ui.mode {
             ComposeMode::NewChannel => "Channel name · Enter to create",
             ComposeMode::AttachPath => "Path to attach · Enter to upload",
+            ComposeMode::PickAgentRole => "Role: pm · engine · content · Enter copies kickoff",
+            ComposeMode::SetTopic => "Topic · Enter to pin on this channel",
             ComposeMode::Message => "Message #… · @mention · Enter to send",
         };
         let draft_x = modal.x + pad + 14.0;
