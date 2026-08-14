@@ -22,16 +22,25 @@ pub enum SplitNode {
         axis: SplitAxis,
         /// Settled split ratio for the first child (a). Usually 0.5.
         ratio: f32,
-        /// Jelly scale for the **second** child (0 = collapsed, 1 = full).
+        /// Jelly scale for the side that is opening or closing (0 = collapsed, 1 = full).
         jelly: f32,
         jelly_vel: f32,
         /// Spring target for jelly (1 = open, 0 = closing).
         jelly_target: f32,
-        /// When set, leaf `b` is animating closed and should be removed at settle.
-        closing_b: bool,
+        /// Which child is collapsing (None = opening / idle, jelly applies to `b`).
+        closing: CloseSide,
         a: Box<SplitNode>,
         b: Box<SplitNode>,
     },
+}
+
+/// Which child of a branch is mid close-jelly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum CloseSide {
+    #[default]
+    None,
+    A,
+    B,
 }
 
 /// Result of advancing close animations.
@@ -85,7 +94,7 @@ impl SplitNode {
                 jelly,
                 jelly_vel,
                 jelly_target,
-                closing_b,
+                closing,
                 a,
                 b,
                 ..
@@ -123,15 +132,26 @@ impl SplitNode {
                 if settled {
                     *jelly = target;
                     *jelly_vel = 0.0;
-                    if *closing_b && target <= 0.0 {
-                        // Second child is a leaf we're closing
-                        if let Self::Leaf(id) = b.as_ref() {
-                            result.finished_closes.push(*id);
-                        } else {
-                            // Nested: take first leaf of b
-                            result.finished_closes.push(b.first_leaf());
+                    if target <= 0.0 {
+                        match *closing {
+                            CloseSide::B => {
+                                if let Self::Leaf(id) = b.as_ref() {
+                                    result.finished_closes.push(*id);
+                                } else {
+                                    result.finished_closes.push(b.first_leaf());
+                                }
+                                *closing = CloseSide::None;
+                            }
+                            CloseSide::A => {
+                                if let Self::Leaf(id) = a.as_ref() {
+                                    result.finished_closes.push(*id);
+                                } else {
+                                    result.finished_closes.push(a.first_leaf());
+                                }
+                                *closing = CloseSide::None;
+                            }
+                            CloseSide::None => {}
                         }
-                        *closing_b = false;
                     }
                 } else {
                     result.moving = true;
@@ -154,7 +174,7 @@ impl SplitNode {
                     jelly: 0.0,
                     jelly_vel: 0.0,
                     jelly_target: 1.0,
-                    closing_b: false,
+                    closing: CloseSide::None,
                     a: Box::new(Self::Leaf(focus)),
                     b: Box::new(Self::Leaf(new_id)),
                 };
@@ -208,7 +228,7 @@ impl SplitNode {
                 jelly,
                 jelly_vel,
                 jelly_target,
-                closing_b,
+                closing,
                 ..
             } => {
                 // Prefer recurse so nested closes work.
@@ -223,8 +243,7 @@ impl SplitNode {
 
                 if b_is {
                     *jelly_target = 0.0;
-                    *closing_b = true;
-                    // Ensure we animate from current open state
+                    *closing = CloseSide::B;
                     if *jelly < 0.05 {
                         *jelly = 1.0;
                     }
@@ -232,12 +251,13 @@ impl SplitNode {
                     return true;
                 }
                 if a_is {
-                    // Swap so the closing pane is always `b` (jelly shrinks b).
-                    std::mem::swap(a, b);
-                    *jelly = 1.0;
-                    *jelly_vel = 0.0;
+                    // Stay put — shrink `a` (left / top) so it doesn't teleport to `b`.
                     *jelly_target = 0.0;
-                    *closing_b = true;
+                    *closing = CloseSide::A;
+                    if *jelly < 0.05 {
+                        *jelly = 1.0;
+                    }
+                    *jelly_vel = 0.0;
                     return true;
                 }
                 false
@@ -250,14 +270,18 @@ impl SplitNode {
         match self {
             Self::Leaf(_) => false,
             Self::Branch {
-                closing_b,
+                closing,
                 b,
                 a,
                 jelly_target,
                 ..
             } => {
-                if *closing_b && *jelly_target <= 0.0 && b.contains_pane(id) {
-                    return true;
+                if *jelly_target <= 0.0 {
+                    match *closing {
+                        CloseSide::B if b.contains_pane(id) => return true,
+                        CloseSide::A if a.contains_pane(id) => return true,
+                        _ => {}
+                    }
                 }
                 a.is_closing(id) || b.is_closing(id)
             }
@@ -312,11 +336,15 @@ impl SplitNode {
                 jelly,
                 a,
                 b,
-                closing_b,
+                closing,
                 ..
             } => {
-                if *closing_b {
+                if *closing == CloseSide::B {
                     a.collect_sashes(area, gap, out);
+                    return;
+                }
+                if *closing == CloseSide::A {
+                    b.collect_sashes(area, gap, out);
                     return;
                 }
                 let j = jelly.clamp(0.0, 1.0);
@@ -395,44 +423,62 @@ impl SplitNode {
                 axis,
                 ratio,
                 jelly,
+                closing,
                 a,
                 b,
                 ..
             } => {
                 let j = jelly.clamp(0.0, 1.15);
+                let close_a = *closing == CloseSide::A;
                 match axis {
                     SplitAxis::Vertical => {
-                        let total = area.w;
-                        let usable = (total - gap).max(0.0);
-                        let b_share = usable * (1.0 - *ratio) * j.min(1.0);
-                        let b_share = if j > 1.0 {
-                            b_share * (1.0 + (j - 1.0) * 0.35)
+                        let usable = (area.w - gap).max(0.0);
+                        let (a_w, b_w) = if close_a {
+                            let mut share = usable * *ratio * j.min(1.0);
+                            if j > 1.0 {
+                                share *= 1.0 + (j - 1.0) * 0.35;
+                            }
+                            let a_w = share.min(usable * 0.92).max(0.0);
+                            (a_w, (usable - a_w).max(0.0))
                         } else {
-                            b_share
+                            let mut share = usable * (1.0 - *ratio) * j.min(1.0);
+                            if j > 1.0 {
+                                share *= 1.0 + (j - 1.0) * 0.35;
+                            }
+                            let b_w = share.min(usable * 0.92).max(0.0);
+                            ((usable - b_w).max(0.0), b_w)
                         };
-                        let b_w = b_share.min(usable * 0.92).max(0.0);
-                        let a_w = (usable - b_w).max(0.0);
                         let a_rect = Rect::new(area.x, area.y, a_w, area.h);
                         let b_rect = Rect::new(area.x + a_w + gap, area.y, b_w, area.h);
-                        a.layout_into(a_rect, gap, out);
+                        if a_w > 1.0 {
+                            a.layout_into(a_rect, gap, out);
+                        }
                         if b_w > 1.0 {
                             b.layout_into(b_rect, gap, out);
                         }
                     }
                     SplitAxis::Horizontal => {
-                        let total = area.h;
-                        let usable = (total - gap).max(0.0);
-                        let b_share = usable * (1.0 - *ratio) * j.min(1.0);
-                        let b_share = if j > 1.0 {
-                            b_share * (1.0 + (j - 1.0) * 0.35)
+                        let usable = (area.h - gap).max(0.0);
+                        let (a_h, b_h) = if close_a {
+                            let mut share = usable * *ratio * j.min(1.0);
+                            if j > 1.0 {
+                                share *= 1.0 + (j - 1.0) * 0.35;
+                            }
+                            let a_h = share.min(usable * 0.92).max(0.0);
+                            (a_h, (usable - a_h).max(0.0))
                         } else {
-                            b_share
+                            let mut share = usable * (1.0 - *ratio) * j.min(1.0);
+                            if j > 1.0 {
+                                share *= 1.0 + (j - 1.0) * 0.35;
+                            }
+                            let b_h = share.min(usable * 0.92).max(0.0);
+                            ((usable - b_h).max(0.0), b_h)
                         };
-                        let b_h = b_share.min(usable * 0.92).max(0.0);
-                        let a_h = (usable - b_h).max(0.0);
                         let a_rect = Rect::new(area.x, area.y, area.w, a_h);
                         let b_rect = Rect::new(area.x, area.y + a_h + gap, area.w, b_h);
-                        a.layout_into(a_rect, gap, out);
+                        if a_h > 1.0 {
+                            a.layout_into(a_rect, gap, out);
+                        }
                         if b_h > 1.0 {
                             b.layout_into(b_rect, gap, out);
                         }
@@ -655,6 +701,33 @@ mod tests {
             }
         }
         assert!(finished, "close should complete");
+    }
+
+    #[test]
+    fn close_left_pane_stays_on_the_left() {
+        let mut root = SplitNode::leaf(1);
+        root.split_leaf(1, 2, SplitAxis::Vertical);
+        root.split_leaf(2, 3, SplitAxis::Horizontal);
+        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+            *jelly = 1.0;
+            *jelly_target = 1.0;
+        }
+        assert!(root.begin_close_leaf(1));
+        if let SplitNode::Branch { jelly, closing, .. } = &mut root {
+            *jelly = 0.45;
+            assert_eq!(*closing, CloseSide::A);
+        }
+        let mut out = Vec::new();
+        root.layout_into(Rect::new(0.0, 0.0, 200.0, 100.0), 4.0, &mut out);
+        let left = out.iter().find(|(id, _)| *id == 1).expect("left pane still laid out");
+        let right = out.iter().find(|(id, _)| *id == 2).expect("right stack still laid out");
+        assert!(
+            left.1.x < right.1.x,
+            "closing left pane must stay on the left, got left.x={} right.x={}",
+            left.1.x,
+            right.1.x
+        );
+        assert!(left.1.w < right.1.w, "left pane should be shrinking");
     }
 
     #[test]
