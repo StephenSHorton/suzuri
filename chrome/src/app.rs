@@ -31,9 +31,11 @@ use crate::input::{
     classify_drop, classify_tab_drop, hit_test, is_mac, term_select_drag_started,
     window_origin_for_tab_drop, DropKind, HitTarget,
 };
-use crate::layout::{FrameLayout, Metrics};
+use crate::layout::{
+    clamp_ui_zoom, scene_from_screen, FrameLayout, Metrics, UI_ZOOM_STEP,
+};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
-use crate::mouse_pty::encode_mouse_wheel;
+use crate::mouse_pty::{encode_mouse_button, encode_mouse_motion, encode_mouse_wheel};
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
@@ -135,6 +137,10 @@ pub struct ChromeApp {
     paint_dirty: bool,
     /// Dragging the terminal scrollbar thumb/track (pane id).
     scroll_dragging: Option<u64>,
+    /// Last 1-based SGR motion cell sent to an alt-screen TUI (dedupe).
+    alt_mouse_cell: Option<(u16, u16)>,
+    /// Left button is down after an alt-screen SGR press (awaiting release).
+    alt_mouse_down: bool,
     /// URL under the pointer in the focused terminal (for hand cursor / Cmd-click).
     hovered_link: Option<String>,
     /// Exact cell range of [`Self::hovered_link`] for primary hover paint.
@@ -147,7 +153,7 @@ pub struct ChromeApp {
     update_mailbox: UpdateMailbox,
     /// Publish `chrome_status.json` for Go MCP bridge proxy.
     status_publisher: StatusPublisher,
-    /// UI / terminal zoom multiplier (⌘± / ⌘0). 1.0 = design size.
+    /// View zoom multiplier (⌘± / ⌘0). 1.0 = identity. GPU blit only — no PTY resize.
     ui_zoom: f32,
 
     /// Last applied mono font id (avoid re-resolve every paint).
@@ -254,6 +260,8 @@ impl Default for ChromeApp {
             pending_term_select: None,
             paint_dirty: false,
             scroll_dragging: None,
+            alt_mouse_cell: None,
+            alt_mouse_down: false,
             hovered_link: None,
             hovered_link_span: None,
             link_cursor_on: false,
@@ -936,28 +944,33 @@ impl ChromeApp {
         layout
     }
 
-    /// Mono cell pitch (logical px) — measured Gohu when renderer is up, × zoom.
+    /// Native mono cell pitch (logical px). View zoom does not change this —
+    /// PTY cols/rows stay put so fullscreen TUIs do not reflow.
     fn cell_metrics(&self) -> MonoCellMetrics {
-        let base = self
-            .renderer()
+        self.renderer()
             .map(|r| r.cell_metrics())
-            .unwrap_or_default();
-        let z = self.ui_zoom.clamp(0.75, 1.75);
-        MonoCellMetrics {
-            w: (base.w * z).max(1.0),
-            h: (base.h * z).max(1.0),
-        }
+            .unwrap_or_default()
+    }
+
+    /// Scene-space pointer under ⌘± view zoom (matches `lens.wgsl` `view_unmap`).
+    fn pointer(&self) -> (f32, f32) {
+        let origin = self
+            .renderer()
+            .map(|r| {
+                let (w, h) = r.logical_size();
+                (w * 0.5, h * 0.5)
+            })
+            .unwrap_or((0.0, 0.0));
+        scene_from_screen(self.cursor.x, self.cursor.y, origin, self.ui_zoom)
     }
 
     fn nudge_zoom(&mut self, delta: f32) {
-        self.ui_zoom = (self.ui_zoom + delta).clamp(0.75, 1.75);
-        self.sync_grids_to_panes();
+        self.ui_zoom = clamp_ui_zoom(self.ui_zoom + delta);
         self.toast.show(format!("Zoom {:.0}%", self.ui_zoom * 100.0));
     }
 
     fn reset_zoom(&mut self) {
         self.ui_zoom = 1.0;
-        self.sync_grids_to_panes();
         self.toast.show("Zoom 100%");
     }
 
@@ -1137,16 +1150,17 @@ impl ChromeApp {
         let layout = self.current_layout();
         let win_w = layout.title.w;
         let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+        let (px, py) = self.pointer();
         if let Some(id) = self.workspace_ui.docked_pane {
             if let Some(pl) = layout.panes.iter().find(|p| p.pane_id == id) {
-                return pl.glass.contains(self.cursor.x, self.cursor.y);
+                return pl.glass.contains(px, py);
             }
         }
         self.workspace_ui.is_modal()
             && self
                 .workspace_ui
                 .card_rect(win_w, win_h)
-                .contains(self.cursor.x, self.cursor.y)
+                .contains(px, py)
     }
 
     /// Default open: split the last-focused pane and dock workspace there.
@@ -1296,8 +1310,7 @@ impl ChromeApp {
         let gap = 6.0;
         let mut y = input_bottom + 12.0;
         let filtered = filter_commands(&self.commands, &self.palette.query);
-        let x = self.cursor.x;
-        let cy = self.cursor.y;
+        let (x, cy) = self.pointer();
         // Click on input: stay open, do nothing
         if x >= modal.x + pad
             && x <= modal.x + modal.w - pad
@@ -1795,8 +1808,7 @@ impl ChromeApp {
     /// Update chip hover from current pointer + layout (scale / press light).
     fn update_chip_hover(&mut self) {
         let layout = self.current_layout();
-        let x = self.cursor.x;
-        let y = self.cursor.y;
+        let (x, y) = self.pointer();
         let mut hit = None;
         if self.pointer_inside {
             if layout.logo.contains(x, y) {
@@ -1830,6 +1842,36 @@ impl ChromeApp {
         self.chip_ui.set_hover(hit, (x, y));
     }
 
+    /// Fullscreen TUI (Grok, vim, …) owns the focused pane’s keyboard.
+    fn alt_owns_keyboard(&self) -> bool {
+        let id = self.session.focus_pane_id();
+        self.runtimes
+            .get(&id)
+            .is_some_and(|rt| rt.ansi.on_alt_screen())
+    }
+
+    /// Host chrome modifier. On macOS alt-screen, only ⌘ is host — bare Ctrl
+    /// must reach the PTY (Grok interrupt / cancel / chords). Elsewhere
+    /// Ctrl and ⌘ both steal, matching product `hostMod`.
+    fn host_mod(&self) -> bool {
+        let cmd = self.modifiers.super_key();
+        let ctrl = self.modifiers.control_key();
+        if is_mac() && self.alt_owns_keyboard() {
+            cmd
+        } else {
+            cmd || ctrl
+        }
+    }
+
+    fn write_focused_pty(&mut self, bytes: &[u8]) {
+        let id = self.session.focus_pane_id();
+        if let Some(rt) = self.runtimes.get_mut(&id) {
+            if let Some(pty) = &mut rt.pty {
+                let _ = pty.write_all(bytes);
+            }
+        }
+    }
+
     /// While a pane is on the alt screen (vim, grok, etc.), route keys to PTY,
     /// clear the warp draft, and expand the cell grid (no path/warp strip).
     /// When it leaves, restore command-line focus and resize back.
@@ -1851,6 +1893,8 @@ impl ChromeApp {
             // Left alt screen — back to command line.
             self.terminal_focused = false;
             self.warp_focused = true;
+            self.alt_mouse_cell = None;
+            self.alt_mouse_down = false;
         }
         // Alt enter/leave changes cells height — keep grid/PTY in sync.
         self.sync_grids_to_panes();
@@ -1858,13 +1902,8 @@ impl ChromeApp {
 
     fn hit_at_cursor(&self) -> HitTarget {
         let layout = self.current_layout();
-        hit_test(
-            &layout,
-            &self.metrics,
-            self.cursor.x,
-            self.cursor.y,
-            is_mac(),
-        )
+        let (x, y) = self.pointer();
+        hit_test(&layout, &self.metrics, x, y, is_mac())
     }
 
     /// 1-based viewport cell under the pointer (xterm mouse protocol).
@@ -1881,11 +1920,108 @@ impl ChromeApp {
         let cells = pl.cells;
         let grid = &pane.grid;
         let cell = self.cell_metrics();
-        let col = ((self.cursor.x - cells.x) / cell.w.max(1.0)).floor() as i32;
-        let row = ((self.cursor.y - cells.y) / cell.h.max(1.0)).floor() as i32;
+        let (px, py) = self.pointer();
+        let col = ((px - cells.x) / cell.w.max(1.0)).floor() as i32;
+        let row = ((py - cells.y) / cell.h.max(1.0)).floor() as i32;
         let col = col.clamp(0, grid.cols().saturating_sub(1) as i32) as u16;
         let row = row.clamp(0, grid.rows().saturating_sub(1) as i32) as u16;
         (col + 1, row + 1)
+    }
+
+    /// 1-based cell only when the pointer is inside the focused cell well.
+    fn term_cell_in_well_1based(&self) -> Option<(u16, u16)> {
+        if !matches!(self.hit_at_cursor(), HitTarget::Terminal(_)) {
+            return None;
+        }
+        let layout = self.current_layout();
+        let focus = self.session.focus_pane_id();
+        let pl = layout.panes.iter().find(|p| p.pane_id == focus)?;
+        let pane = self.session.panes.get(&focus)?;
+        let cells = pl.cells;
+        let (px, py) = self.pointer();
+        if !cells.contains(px, py) {
+            return None;
+        }
+        let cell = self.cell_metrics();
+        let col = ((px - cells.x) / cell.w.max(1.0)).floor() as i32;
+        let row = ((py - cells.y) / cell.h.max(1.0)).floor() as i32;
+        if col < 0 || row < 0 {
+            return None;
+        }
+        let col = col.min(pane.grid.cols().saturating_sub(1) as i32) as u16;
+        let row = row.min(pane.grid.rows().saturating_sub(1) as i32) as u16;
+        Some((col + 1, row + 1))
+    }
+
+    /// SGR press/release for an alt-screen TUI with mouse tracking (Grok buttons).
+    /// `btn`: 0=left, 1=middle, 2=right.
+    fn try_alt_mouse(&mut self, press: bool) -> bool {
+        self.try_alt_mouse_btn(0, press)
+    }
+
+    fn try_alt_mouse_btn(&mut self, btn: u16, press: bool) -> bool {
+        if self.overlay_open() || !self.alt_owns_keyboard() {
+            return false;
+        }
+        let id = self.session.focus_pane_id();
+        let Some(rt) = self.runtimes.get(&id) else {
+            return false;
+        };
+        if !rt.ansi.mouse_tracking {
+            return false;
+        }
+        let tracking = rt.ansi.mouse_tracking;
+        let sgr = rt.ansi.mouse_sgr;
+        let Some((col, row)) = self.term_cell_in_well_1based() else {
+            return false;
+        };
+        let bytes = encode_mouse_button(col, row, btn, press, tracking, sgr);
+        if bytes.is_empty() {
+            return false;
+        }
+        self.alt_mouse_cell = Some((col, row));
+        if btn == 0 {
+            self.alt_mouse_down = press;
+        }
+        self.write_focused_pty(&bytes);
+        self.drain_all_ptys();
+        true
+    }
+
+    /// Hover (1003) / drag (1002) motion — Grok button highlight needs this.
+    fn maybe_send_alt_mouse_motion(&mut self) {
+        if self.overlay_open() || !self.alt_owns_keyboard() {
+            self.alt_mouse_cell = None;
+            return;
+        }
+        let id = self.session.focus_pane_id();
+        let Some(rt) = self.runtimes.get(&id) else {
+            return;
+        };
+        let tracking = rt.ansi.mouse_tracking;
+        let any = rt.ansi.mouse_any;
+        let drag = rt.ansi.mouse_drag;
+        let sgr = rt.ansi.mouse_sgr;
+        if !any && !(drag && self.alt_mouse_down) {
+            return;
+        }
+        let Some((col, row)) = self.term_cell_in_well_1based() else {
+            return;
+        };
+        if self.alt_mouse_cell == Some((col, row)) {
+            return;
+        }
+        let bytes =
+            encode_mouse_motion(col, row, self.alt_mouse_down, tracking, any, drag, sgr);
+        if bytes.is_empty() {
+            return;
+        }
+        self.alt_mouse_cell = Some((col, row));
+        self.write_focused_pty(&bytes);
+        self.drain_all_ptys();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     /// Forward a wheel step to an alt-screen TUI (SGR 64/65 or arrow keys).
@@ -1919,8 +2055,7 @@ impl ChromeApp {
         let focus = self.session.focus_pane_id();
         let pl = layout.panes.iter().find(|p| p.pane_id == focus)?;
         let cells = pl.cells;
-        let x = self.cursor.x;
-        let y = self.cursor.y;
+        let (x, y) = self.pointer();
         if !cells.contains(x, y) {
             return None;
         }
@@ -2108,8 +2243,7 @@ impl ChromeApp {
         let layout = self.current_layout();
         let win_w = layout.title.w;
         let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-        let x = self.cursor.x;
-        let y = self.cursor.y;
+        let (x, y) = self.pointer();
         if self.settings.visible() && self.settings.animated_modal_rect(win_w, win_h).contains(x, y)
         {
             return true;
@@ -2222,9 +2356,8 @@ impl ChromeApp {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    if let Some(choice) =
-                        self.confirm
-                            .hit_button(self.cursor.x, self.cursor.y, win_w, win_h)
+                    let (px, py) = self.pointer();
+                    if let Some(choice) = self.confirm.hit_button(px, py, win_w, win_h)
                     {
                         self.apply_confirm_choice(event_loop, choice);
                     }
@@ -2237,24 +2370,23 @@ impl ChromeApp {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    let _ = self
-                        .settings
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    let _ = self.settings.try_click(px, py, win_w, win_h);
                 } else if self.palette.open {
                     self.try_palette_click(event_loop);
                 } else if self.notes.open {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    self.notes
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    self.notes.try_click(px, py, win_w, win_h);
                 } else if self.workspace_ui.is_modal() {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
                     self.sync_workspace_host();
-                    self.workspace_ui
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    self.workspace_ui.try_click(px, py, win_w, win_h);
                 } else if self.transfer.visible() && !self.transfer.ticket.is_empty() {
                     // Click progress card / ticket chip → copy ticket (product parity).
                     let _ = self.copy_transfer_ticket_if_any();
@@ -2350,9 +2482,8 @@ impl ChromeApp {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    let _ = self
-                        .workspace_ui
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    let _ = self.workspace_ui.try_click(px, py, win_w, win_h);
                     self.warp_focused = false;
                     self.terminal_focused = false;
                 } else {
@@ -2367,9 +2498,8 @@ impl ChromeApp {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
-                    let _ = self
-                        .workspace_ui
-                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    let (px, py) = self.pointer();
+                    let _ = self.workspace_ui.try_click(px, py, win_w, win_h);
                     self.warp_focused = false;
                     self.terminal_focused = false;
                 } else {
@@ -2684,8 +2814,8 @@ impl ChromeApp {
             }
         }
 
-        // Global shortcuts
-        if super_or_ctrl {
+        // Global shortcuts (⌘, or Ctrl when a TUI is not owning the keyboard).
+        if self.host_mod() {
             // Notes body undo/redo (⌘Z / ⇧⌘Z) while notes overlay is open.
             if self.notes.open {
                 if let Key::Character(ref s) = event.logical_key {
@@ -2866,14 +2996,14 @@ impl ChromeApp {
                     }
                     // Zoom: ⌘+ / ⌘= / ⌘- / ⌘0
                     "+" | "=" if !shift || ch == "+" => {
-                        self.nudge_zoom(0.1);
+                        self.nudge_zoom(UI_ZOOM_STEP);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
                     "-" | "_" => {
-                        self.nudge_zoom(-0.1);
+                        self.nudge_zoom(-UI_ZOOM_STEP);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -2894,41 +3024,47 @@ impl ChromeApp {
                         }
                         return;
                     }
-                    "v" | "V" if !shift => {
+                    "v" | "V" if !shift && !self.alt_owns_keyboard() => {
                         self.paste_clipboard();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
-                    // Product: ⇧⌘C copy; also ⌘C when selection / transfer ticket.
-                    "c" | "C" if shift || !self.warp_focused || !self.term_selection.is_empty() => {
-                        if self.transfer.open || self.transfer.visible() {
-                            if self.copy_transfer_ticket_if_any() {
+                    // ⌘C copies (selection / ticket). Ctrl+C is host only off
+                    // alt-screen (host_mod): clear warp or send ^C to the shell.
+                    "c" | "C" if !shift => {
+                        if self.modifiers.super_key() {
+                            if self.transfer.open || self.transfer.visible() {
+                                if self.copy_transfer_ticket_if_any() {
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                    return;
+                                }
+                            }
+                            if !self.term_selection.is_empty() {
+                                self.copy_selection_if_any();
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
                                 }
                                 return;
                             }
-                        }
-                        if !self.term_selection.is_empty() {
-                            self.copy_selection_if_any();
+                            if self.warp_focused {
+                                self.session.draft_mut().clear();
+                            }
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
                             return;
                         }
-                        // Warp focus + no selection: ⌘C clears draft (product clear/interrupt).
-                        if self.warp_focused && !shift {
+                        // Ctrl+C (not alt-screen): clear draft, else interrupt PTY.
+                        if self.warp_focused && !self.session.draft().is_empty() {
                             self.session.draft_mut().clear();
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
-                            }
-                            return;
+                        } else {
+                            self.write_focused_pty(&[0x03]);
+                            self.drain_all_ptys();
                         }
-                    }
-                    "c" | "C" if !shift && self.warp_focused => {
-                        self.session.draft_mut().clear();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -3005,6 +3141,7 @@ impl ChromeApp {
             && !shift
             && !alt
             && !self.overlay_open()
+            && !self.alt_owns_keyboard()
             && matches!(event.logical_key, Key::Named(NamedKey::F2))
         {
             self.open_rename(RenameTarget::Pane);
@@ -3156,37 +3293,55 @@ impl ChromeApp {
             let id = self.session.focus_pane_id();
             if let Some(rt) = self.runtimes.get_mut(&id) {
                 if let Some(pty) = &mut rt.pty {
-                    match &event.logical_key {
-                        Key::Named(NamedKey::Enter) => {
-                            let _ = pty.write_all(b"\r");
+                    let mods = crate::kitty::KeyMods {
+                        shift: self.modifiers.shift_key(),
+                        alt: self.modifiers.alt_key(),
+                        ctrl: self.modifiers.control_key(),
+                        super_key: self.modifiers.super_key(),
+                    };
+                    let kitty_on = rt.ansi.kitty_active();
+                    let app_cur = rt.ansi.app_cursor;
+                    let named = match &event.logical_key {
+                        Key::Named(NamedKey::Enter) => Some(crate::kitty::NamedKey::Enter),
+                        Key::Named(NamedKey::Escape) => Some(crate::kitty::NamedKey::Esc),
+                        Key::Named(NamedKey::Tab) => Some(crate::kitty::NamedKey::Tab),
+                        Key::Named(NamedKey::Backspace) => Some(crate::kitty::NamedKey::Backspace),
+                        Key::Named(NamedKey::Delete) => Some(crate::kitty::NamedKey::Delete),
+                        Key::Named(NamedKey::Insert) => Some(crate::kitty::NamedKey::Insert),
+                        Key::Named(NamedKey::Home) => Some(crate::kitty::NamedKey::Home),
+                        Key::Named(NamedKey::End) => Some(crate::kitty::NamedKey::End),
+                        Key::Named(NamedKey::PageUp) => Some(crate::kitty::NamedKey::PageUp),
+                        Key::Named(NamedKey::PageDown) => Some(crate::kitty::NamedKey::PageDown),
+                        Key::Named(NamedKey::ArrowUp) => Some(crate::kitty::NamedKey::ArrowUp),
+                        Key::Named(NamedKey::ArrowDown) => Some(crate::kitty::NamedKey::ArrowDown),
+                        Key::Named(NamedKey::ArrowRight) => Some(crate::kitty::NamedKey::ArrowRight),
+                        Key::Named(NamedKey::ArrowLeft) => Some(crate::kitty::NamedKey::ArrowLeft),
+                        Key::Named(NamedKey::F1) => Some(crate::kitty::NamedKey::F(1)),
+                        Key::Named(NamedKey::F2) => Some(crate::kitty::NamedKey::F(2)),
+                        Key::Named(NamedKey::F3) => Some(crate::kitty::NamedKey::F(3)),
+                        Key::Named(NamedKey::F4) => Some(crate::kitty::NamedKey::F(4)),
+                        Key::Named(NamedKey::F5) => Some(crate::kitty::NamedKey::F(5)),
+                        Key::Named(NamedKey::F6) => Some(crate::kitty::NamedKey::F(6)),
+                        Key::Named(NamedKey::F7) => Some(crate::kitty::NamedKey::F(7)),
+                        Key::Named(NamedKey::F8) => Some(crate::kitty::NamedKey::F(8)),
+                        Key::Named(NamedKey::F9) => Some(crate::kitty::NamedKey::F(9)),
+                        Key::Named(NamedKey::F10) => Some(crate::kitty::NamedKey::F(10)),
+                        Key::Named(NamedKey::F11) => Some(crate::kitty::NamedKey::F(11)),
+                        Key::Named(NamedKey::F12) => Some(crate::kitty::NamedKey::F(12)),
+                        _ => None,
+                    };
+                    if let Some(nk) = named {
+                        let bytes = crate::kitty::encode_named(nk, app_cur, kitty_on, mods);
+                        if !bytes.is_empty() {
+                            let _ = pty.write_all(&bytes);
                         }
-                        Key::Named(NamedKey::Backspace) => {
-                            let _ = pty.write_all(&[0x7f]);
+                    } else if let Key::Character(s) = &event.logical_key {
+                        if let Some(bytes) = crate::kitty::encode_character(s, mods) {
+                            let _ = pty.write_all(&bytes);
                         }
-                        Key::Named(NamedKey::Tab) => {
-                            let _ = pty.write_all(b"\t");
-                        }
-                        Key::Named(NamedKey::ArrowUp) => {
-                            let _ = pty.write_all(b"\x1b[A");
-                        }
-                        Key::Named(NamedKey::ArrowDown) => {
-                            let _ = pty.write_all(b"\x1b[B");
-                        }
-                        Key::Named(NamedKey::ArrowRight) => {
-                            let _ = pty.write_all(b"\x1b[C");
-                        }
-                        Key::Named(NamedKey::ArrowLeft) => {
-                            let _ = pty.write_all(b"\x1b[D");
-                        }
-                        Key::Character(s) if !super_or_ctrl => {
-                            let _ = pty.write_all(s.as_bytes());
-                        }
-                        _ => {
-                            if let Some(text) = &event.text {
-                                if !super_or_ctrl {
-                                    let _ = pty.write_all(text.as_bytes());
-                                }
-                            }
+                    } else if let Some(text) = &event.text {
+                        if !mods.ctrl && !mods.super_key {
+                            let _ = pty.write_all(text.as_bytes());
                         }
                     }
                     self.drain_all_ptys();
@@ -3261,7 +3416,7 @@ impl ChromeApp {
         if track_h < 8.0 {
             return;
         }
-        let y_in = (self.cursor.y - pl.cells.y).clamp(0.0, track_h);
+        let y_in = (self.pointer().1 - pl.cells.y).clamp(0.0, track_h);
         if let Some(grid) = self.session.grid_mut(pane_id) {
             let frac = grid.scroll_fraction_from_track_y(y_in, track_h);
             grid.set_scroll_fraction(frac);
@@ -3678,6 +3833,7 @@ impl ApplicationHandler for ChromeApp {
                     self.request_redraw();
                 }
                 self.update_link_hover();
+                self.maybe_send_alt_mouse_motion();
             }
 
             WindowEvent::CursorLeft { .. } => {
@@ -3802,8 +3958,14 @@ impl ApplicationHandler for ChromeApp {
                 else if matches!(hit, HitTarget::Terminal(_)) && !self.overlay_open() {
                     if let Some(pos) = self.term_cell_at_cursor() {
                         let clicks = self.term_click_count(pos);
+                        // Alt-screen (Grok): single-click + hover go to the TUI.
+                        // Double/triple-click still host-selects word/line.
                         if clicks >= 2 {
                             self.apply_term_click_selection(pos, clicks);
+                            self.request_redraw();
+                        } else if self.try_alt_mouse(true) {
+                            self.term_selection.clear();
+                            self.selecting_term = false;
                             self.request_redraw();
                         } else {
                             if !self.term_selection.is_empty() {
@@ -3874,6 +4036,9 @@ impl ApplicationHandler for ChromeApp {
                 let was_scroll = self.scroll_dragging.take().is_some();
                 let was_sash = self.sash_drag.take().is_some();
                 let pane_drag_done = self.finish_pane_drag(event_loop);
+                if self.alt_mouse_down {
+                    self.try_alt_mouse(false);
+                }
                 if self.selecting_term {
                     self.term_selection.end();
                     self.selecting_term = false;
@@ -3906,10 +4071,43 @@ impl ApplicationHandler for ChromeApp {
 
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                let hit = self.hit_at_cursor();
+                if matches!(hit, HitTarget::Terminal(_)) && self.try_alt_mouse_btn(2, true) {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                } else if !self.overlay_open() {
+                    // Product: right-click paste when the TUI does not take the click.
+                    self.paste_clipboard();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if matches!(self.hit_at_cursor(), HitTarget::Terminal(_)) {
+                    let _ = self.try_alt_mouse_btn(2, false);
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
                 button: MouseButton::Middle,
                 ..
             } => {
-                self.middle_press_hit = Some(self.hit_at_cursor());
+                let hit = self.hit_at_cursor();
+                self.middle_press_hit = Some(hit);
+                if matches!(hit, HitTarget::Terminal(_)) {
+                    let _ = self.try_alt_mouse_btn(1, true);
+                }
             }
 
             WindowEvent::MouseInput {
@@ -3919,6 +4117,9 @@ impl ApplicationHandler for ChromeApp {
             } => {
                 if let Some(start) = self.middle_press_hit.take() {
                     let end = self.hit_at_cursor();
+                    if matches!(start, HitTarget::Terminal(_)) {
+                        let _ = self.try_alt_mouse_btn(1, false);
+                    }
                     if start == end {
                         let idx = match start {
                             HitTarget::Tab(i) | HitTarget::TabClose(i) => Some(i),
@@ -4193,6 +4394,7 @@ impl ApplicationHandler for ChromeApp {
                     .unwrap_or(0.0);
                 if let Some(r) = self.surfaces.get_mut(&id).map(|s| &mut s.renderer) {
                     r.window_exit_blur = exit_blur;
+                    r.set_view_zoom(self.ui_zoom);
                     match r.render(
                         &self.session,
                         &self.settings,

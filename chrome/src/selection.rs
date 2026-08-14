@@ -61,7 +61,7 @@ impl Selection {
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.active
+        self.normalized().is_none()
     }
 
     pub fn mode(&self) -> SelectMode {
@@ -77,6 +77,9 @@ impl Selection {
     }
 
     /// Begin a cell-mode drag at `pos` (clamped by the host to grid bounds).
+    ///
+    /// The click origin is not a painted selection until [`update`] /
+    /// [`update_drag`] moves to another cell.
     pub fn begin(&mut self, pos: CellPos) {
         self.active = true;
         self.dragging = true;
@@ -164,18 +167,25 @@ impl Selection {
         }
     }
 
-    /// End the drag; keep the selection if non-empty (including single cell).
+    /// End the drag. A cell-mode click (no range) is discarded; word/line
+    /// multi-click and a real drag stay selected.
     pub fn end(&mut self) {
         self.dragging = false;
-        if !self.active {
-            return;
+        if self.is_empty() {
+            self.clear();
         }
-        // Single-cell click still counts as a selection (copy one char).
     }
 
     /// Normalized inclusive range: start is top-left in document order.
+    ///
+    /// Cell-mode click origin (`anchor == focus`) is not a range — that is a
+    /// click, not a drag. Word/line modes keep a one-cell range so a
+    /// one-character double-click still highlights.
     pub fn normalized(&self) -> Option<(CellPos, CellPos)> {
         if !self.active {
+            return None;
+        }
+        if self.mode == SelectMode::Cell && self.anchor == self.focus {
             return None;
         }
         let a = self.anchor;
@@ -261,10 +271,10 @@ impl Selection {
         out
     }
 
-    /// Select a single cell (click without drag).
+    /// Park a cell-mode click origin (no drag). Not a painted selection.
     pub fn select_cell(&mut self, pos: CellPos) {
         self.begin(pos);
-        self.dragging = false;
+        self.end();
     }
 
     /// Select whole absolute line `abs_row` (columns `0..cols-1`). Sets [`SelectMode::Line`].
@@ -531,8 +541,12 @@ mod tests {
     fn clear_empties() {
         let g = grid_with_lines(10, 2, &["xyz"]);
         let mut sel = Selection::new();
-        sel.select_cell(CellPos {
+        sel.begin(CellPos {
             col: 0,
+            abs_row: 0,
+        });
+        sel.update(CellPos {
+            col: 2,
             abs_row: 0,
         });
         assert!(!sel.is_empty());
@@ -541,6 +555,66 @@ mod tests {
         assert!(sel.is_empty());
         assert_eq!(sel.mode(), SelectMode::Cell);
         assert_eq!(sel.text(&g), "");
+    }
+
+    #[test]
+    fn click_without_drag_is_not_a_selection() {
+        let g = grid_with_lines(10, 2, &["xyz"]);
+        let mut sel = Selection::new();
+        let pos = CellPos {
+            col: 1,
+            abs_row: 0,
+        };
+        sel.begin(pos);
+        // Pressing a cell must not paint / copy a one-glyph square.
+        assert!(sel.is_empty());
+        assert!(sel.is_dragging());
+        assert!(!sel.contains(1, 0));
+        assert_eq!(sel.text(&g), "");
+        sel.end();
+        assert!(sel.is_empty());
+        assert!(!sel.is_active());
+        assert!(!sel.is_dragging());
+        assert_eq!(sel.text(&g), "");
+    }
+
+    #[test]
+    fn drag_keeps_range_after_end() {
+        let g = grid_with_lines(10, 2, &["xyz"]);
+        let mut sel = Selection::new();
+        sel.begin(CellPos {
+            col: 0,
+            abs_row: 0,
+        });
+        sel.update(CellPos {
+            col: 2,
+            abs_row: 0,
+        });
+        sel.end();
+        assert!(!sel.is_empty());
+        assert!(!sel.is_dragging());
+        assert_eq!(sel.text(&g), "xyz");
+        assert!(sel.contains(0, 0));
+        assert!(sel.contains(2, 0));
+    }
+
+    #[test]
+    fn one_char_word_click_still_selects() {
+        let g = grid_with_lines(8, 2, &["a bc"]);
+        let mut sel = Selection::new();
+        sel.select_word(
+            &g,
+            CellPos {
+                col: 0,
+                abs_row: 0,
+            },
+        );
+        sel.end();
+        assert_eq!(sel.mode(), SelectMode::Word);
+        assert!(!sel.is_empty());
+        assert_eq!(sel.text(&g), "a");
+        assert!(sel.contains(0, 0));
+        assert!(!sel.contains(1, 0));
     }
 
     #[test]

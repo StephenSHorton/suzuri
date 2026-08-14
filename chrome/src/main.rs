@@ -21,6 +21,7 @@ mod config_store;
 mod control_mailbox;
 mod echo_filter;
 mod input;
+mod kitty;
 mod layout;
 mod links;
 mod mouse_pty;
