@@ -413,6 +413,7 @@ impl ChromeSession {
     }
 
     /// Neighbor that will take this tab's place on the strip (`dir`: +1 = right).
+    /// Prefers the immediate left neighbor; the first chip falls through to the right.
     pub fn tab_close_handoff(&self, tab_id: u64) -> Option<(u64, f32)> {
         let surface = self.surface_of_tab(tab_id)?;
         let strip = self.tabs_on_surface(surface);
@@ -420,10 +421,10 @@ impl ChromeSession {
         if strip.len() <= 1 {
             return None;
         }
-        if idx + 1 < strip.len() {
-            Some((strip[idx + 1], 1.0))
-        } else {
+        if idx > 0 {
             Some((strip[idx - 1], -1.0))
+        } else {
+            Some((strip[idx + 1], 1.0))
         }
     }
 
@@ -657,11 +658,14 @@ impl ChromeSession {
                 .filter(|t| t.surface == surface)
                 .map(|t| t.id)
                 .collect();
-            let next = others
-                .get(strip_idx)
-                .or_else(|| others.last())
-                .copied()
-                .or_else(|| self.tabs.first().map(|t| t.id));
+            let next = if strip_idx > 0 {
+                others.get(strip_idx - 1)
+            } else {
+                others.first()
+            }
+            .copied()
+            .or_else(|| others.last().copied())
+            .or_else(|| self.tabs.first().map(|t| t.id));
             if let Some(nid) = next {
                 self.active_id = nid;
             }
@@ -1647,6 +1651,17 @@ mod tests {
     }
 
     #[test]
+    fn close_tab_selects_left_neighbor_not_first() {
+        let mut s = ChromeSession::new(80, 24);
+        let (t2, _) = s.new_tab(80, 24);
+        let (t3, _) = s.new_tab(80, 24);
+        s.select_tab(t3);
+        let _ = s.close_tab(t3);
+        assert_eq!(s.active_id, t2);
+        assert_ne!(s.active_id, 1);
+    }
+
+    #[test]
     fn close_tab_stays_on_same_surface() {
         let mut s = ChromeSession::new(80, 24);
         let (a2, _) = s.new_tab(80, 24);
@@ -1785,17 +1800,18 @@ mod tests {
     }
 
     #[test]
-    fn close_tab_handoff_pulls_right_neighbor() {
+    fn close_tab_handoff_pulls_left_neighbor() {
         let mut s = ChromeSession::new(80, 24);
         let (t2, _) = s.new_tab(80, 24);
         let (t3, _) = s.new_tab(80, 24);
+        let _ = t3;
         s.select_tab(t2);
         assert!(s.begin_close_tab(t2));
         assert_eq!(s.tabs.len(), 3, "tab stays until the strip anim finishes");
-        assert_eq!(s.active_id, t3);
+        assert_eq!(s.active_id, 1, "handoff is the immediate left tab, not the first leftover");
         let exit = s.tabs.iter().find(|t| t.id == t2).unwrap().exit.as_ref().unwrap();
         assert!(exit.slide_content);
-        assert!(exit.dir > 0.0);
+        assert!(exit.dir < 0.0);
         let mut dt = 0.0;
         while dt < 1.0 {
             let r = s.tick_splits(1.0 / 60.0);

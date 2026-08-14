@@ -448,22 +448,39 @@ impl ChromeApp {
     }
 
     fn surface_focus_tab(&self, key: u64) -> Option<u64> {
-        if let Some(tid) = self
+        if let Some((_, exit)) = self.session.tab_exit_on_surface(key) {
+            if exit.slide_content {
+                return Some(exit.next_id);
+            }
+        }
+        let stored = self
             .surfaces
             .values()
             .find(|s| s.key == key)
-            .map(|s| s.focus_tab)
-        {
-            if self
-                .session
-                .tabs
-                .iter()
-                .any(|t| t.id == tid && t.surface == key)
-            {
+            .map(|s| s.focus_tab);
+        if let Some(tid) = stored {
+            if self.session.tabs.iter().any(|t| {
+                t.id == tid && t.surface == key && t.exit.is_none()
+            }) {
                 return Some(tid);
             }
         }
-        self.session.tabs_on_surface(key).first().copied()
+        if let Some(t) = self.session.active_tab() {
+            if t.surface == key && t.exit.is_none() {
+                return Some(t.id);
+            }
+        }
+        self.session
+            .tabs_on_surface(key)
+            .into_iter()
+            .rev()
+            .find(|&id| {
+                self.session
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == id)
+                    .is_some_and(|t| t.exit.is_none())
+            })
     }
 
     fn set_surface_focus(&mut self, key: u64, tab_id: u64) {
@@ -1683,6 +1700,11 @@ impl ChromeApp {
                 }
             }
             CloseOutcome::Animating | CloseOutcome::None => {}
+        }
+        if let Some(tab) = self.session.active_tab() {
+            let id = tab.id;
+            let surface = tab.surface;
+            self.set_surface_focus(surface, id);
         }
     }
 
