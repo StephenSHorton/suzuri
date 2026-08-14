@@ -8,11 +8,50 @@ use crate::cells::{theme, CellGrid};
 use crate::panes::{FocusDir, RemoveResult, SoloExitAnim, SplitAxis, SplitNode, TickResult};
 use crate::shell::{self, ShellOutput};
 
-/// One terminal leaf (grid + cwd). PTY lives in the app, keyed by `id`.
+/// What a leaf pane hosts. Terminals own a PTY; widgets reuse the split tree
+/// without a shell (workspace chat now, notes/transfer later).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidgetKind {
+    Workspace,
+}
+
+impl WidgetKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneKind {
+    Terminal,
+    Widget(WidgetKind),
+}
+
+impl PaneKind {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Terminal)
+    }
+
+    pub fn is_workspace(self) -> bool {
+        matches!(self, Self::Widget(WidgetKind::Workspace))
+    }
+
+    pub fn widget(self) -> Option<WidgetKind> {
+        match self {
+            Self::Widget(k) => Some(k),
+            Self::Terminal => None,
+        }
+    }
+}
+
+/// One leaf (grid + cwd). PTY lives in the app, keyed by `id`.
 #[derive(Clone, Debug)]
 pub struct Pane {
     pub id: u64,
     pub title: String,
+    pub kind: PaneKind,
     pub busy: bool,
     pub grid: CellGrid,
     pub pty_mode: bool,
@@ -21,6 +60,36 @@ pub struct Pane {
     pub draft: String,
     /// Shell exited / user closed — animating out; don't re-trigger.
     pub exiting: bool,
+}
+
+fn new_terminal_pane(id: u64, cols: u16, rows: u16, cwd: String) -> Pane {
+    Pane {
+        id,
+        title: format!("shell {id}"),
+        kind: PaneKind::Terminal,
+        busy: false,
+        grid: CellGrid::new(cols, rows),
+        pty_mode: false,
+        cwd,
+        draft: String::new(),
+        exiting: false,
+    }
+}
+
+fn new_widget_pane(id: u64, kind: WidgetKind, cwd: String) -> Pane {
+    Pane {
+        id,
+        title: kind.title().into(),
+        kind: PaneKind::Widget(kind),
+        busy: false,
+        // Unused — widgets don't paint a cell grid — but keep a tiny buffer so
+        // existing session helpers that touch `grid` stay panic-free.
+        grid: CellGrid::new(8, 4),
+        pty_mode: false,
+        cwd,
+        draft: String::new(),
+        exiting: false,
+    }
 }
 
 /// One chrome-strip tab that may hold a split tree of panes.
@@ -54,16 +123,7 @@ impl ChromeSession {
         let mut panes = HashMap::new();
         panes.insert(
             pane_id,
-            Pane {
-                id: pane_id,
-                title: "shell 1".into(),
-                busy: false,
-                grid: CellGrid::new(cols, rows),
-                pty_mode: false,
-                cwd: initial_cwd(),
-                draft: String::new(),
-                exiting: false,
-            },
+            new_terminal_pane(pane_id, cols, rows, initial_cwd()),
         );
         let tab = Tab {
             id: 1,
@@ -212,7 +272,10 @@ impl ChromeSession {
         let focus = self.focus_pane_id();
         let leaf_count = self.active_leaf_count();
         let resolved = if name.is_empty() {
-            format!("shell {focus}")
+            match self.panes.get(&focus).map(|p| p.kind) {
+                Some(PaneKind::Widget(k)) => k.title().to_string(),
+                _ => format!("shell {focus}"),
+            }
         } else {
             name.to_string()
         };
@@ -387,16 +450,7 @@ impl ChromeSession {
 
         self.panes.insert(
             pane_id,
-            Pane {
-                id: pane_id,
-                title: format!("shell {pane_id}"),
-                busy: false,
-                grid: CellGrid::new(cols, rows),
-                pty_mode: false,
-                cwd,
-                draft: String::new(),
-                exiting: false,
-            },
+            new_terminal_pane(pane_id, cols, rows, cwd),
         );
         self.tabs.push(Tab {
             id: tab_id,
@@ -550,18 +604,66 @@ impl ChromeSession {
 
         self.panes.insert(
             new_id,
-            Pane {
-                id: new_id,
-                title: format!("shell {new_id}"),
-                busy: false,
-                grid: CellGrid::new(cols, rows),
-                pty_mode: false,
-                cwd,
-                draft: String::new(),
-                exiting: false,
-            },
+            new_terminal_pane(new_id, cols, rows, cwd),
         );
         Some(new_id)
+    }
+
+    /// Split the focused pane and insert a widget leaf (no PTY). Returns new id.
+    pub fn split_focused_widget(
+        &mut self,
+        axis: SplitAxis,
+        kind: WidgetKind,
+    ) -> Option<u64> {
+        if let Some(existing) = self.find_widget(kind) {
+            self.set_focus_pane(existing);
+            return Some(existing);
+        }
+        let tab_id = self.active_id;
+        let focus = self.focus_pane_id();
+        let cwd = self
+            .panes
+            .get(&focus)
+            .map(|p| p.cwd.clone())
+            .unwrap_or_else(initial_cwd);
+
+        let new_id = self.next_pane_id;
+        self.next_pane_id = self.next_pane_id.saturating_add(1);
+
+        let tab = self.tabs.iter_mut().find(|t| t.id == tab_id)?;
+        if !tab.root.split_leaf(focus, new_id, axis) {
+            return None;
+        }
+        tab.focus_pane = new_id;
+
+        self.panes.insert(new_id, new_widget_pane(new_id, kind, cwd));
+        Some(new_id)
+    }
+
+    /// First non-exiting pane hosting `kind`, if any (any tab).
+    pub fn find_widget(&self, kind: WidgetKind) -> Option<u64> {
+        self.panes.iter().find_map(|(id, p)| {
+            if p.kind == PaneKind::Widget(kind) && !p.exiting {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn pane_kind(&self, id: u64) -> PaneKind {
+        self.panes
+            .get(&id)
+            .map(|p| p.kind)
+            .unwrap_or(PaneKind::Terminal)
+    }
+
+    pub fn is_widget(&self, id: u64) -> bool {
+        self.pane_kind(id).widget().is_some()
+    }
+
+    pub fn focused_is_workspace(&self) -> bool {
+        self.pane_kind(self.focus_pane_id()).is_workspace()
     }
 
     /// Close focused pane with jelly animation (same path as shell exit).
@@ -1168,5 +1270,40 @@ mod tests {
         s.rename_focused_pane("");
         assert_eq!(s.active_pane().unwrap().title, "shell 1");
         assert_eq!(s.active_tab().unwrap().title, "shell 1");
+    }
+
+    #[test]
+    fn split_widget_docks_workspace_once() {
+        let mut s = ChromeSession::new(80, 24);
+        let id = s
+            .split_focused_widget(SplitAxis::Vertical, WidgetKind::Workspace)
+            .unwrap();
+        assert!(s.pane_kind(id).is_workspace());
+        assert_eq!(s.panes.get(&id).unwrap().title, "workspace");
+        assert_eq!(s.active_tab().unwrap().root.leaf_ids().len(), 2);
+        assert_eq!(s.focus_pane_id(), id);
+        // Second open focuses the existing leaf — no duplicate widget.
+        let again = s
+            .split_focused_widget(SplitAxis::Horizontal, WidgetKind::Workspace)
+            .unwrap();
+        assert_eq!(again, id);
+        assert_eq!(
+            s.panes
+                .values()
+                .filter(|p| p.kind.is_workspace())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn find_widget_skips_exiting() {
+        let mut s = ChromeSession::new(80, 24);
+        let id = s
+            .split_focused_widget(SplitAxis::Vertical, WidgetKind::Workspace)
+            .unwrap();
+        assert_eq!(s.find_widget(WidgetKind::Workspace), Some(id));
+        s.panes.get_mut(&id).unwrap().exiting = true;
+        assert_eq!(s.find_widget(WidgetKind::Workspace), None);
     }
 }

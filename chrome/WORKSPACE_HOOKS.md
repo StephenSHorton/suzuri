@@ -65,13 +65,16 @@ Preserve these for `app` / `renderer`:
 |--------|--------|
 | `open` field | Logical open flag |
 | `visible()` | `open \|\| present > 0.01` (closing animation) |
-| `open()` | Open + join self + reload channels/history/members |
-| `close()` | Close + clear draft |
+| `open()` | Load data (modal path / tests) |
+| `dock(pane_id)` | Host in a split-pane leaf (product default) |
+| `close()` | Close + clear draft; undocks |
 | `toggle()` | |
 | `tick(dt)` | Spring `present` + scrim `overlay`; native FS watch + 1s poll reload while open |
 | `content_ease()` | Smoothstep of `present` |
-| `scrim_alpha()` | Overlay dim `[0, 0.5]` |
-| `animated_modal_rect(win_w, win_h)` | Centered card with scale-in |
+| `scrim_alpha()` | Overlay dim `[0, 0.5]` (0 when docked) |
+| `animated_modal_rect(win_w, win_h)` | Large centered card (pop-out / tests) |
+| `card_rect(win_w, win_h)` | Pane glass when docked, else modal |
+| `is_docked()` / `is_modal()` | Surface mode |
 
 ### Fields painted by renderer
 
@@ -184,13 +187,13 @@ PRESENCE_STRIP_H   = 18               // members line above messages
 
 ## App wiring checklist
 
-1. Palette action `OpenWorkspace` → close other overlays → `workspace_ui.open()`
-2. Esc: if `mode != Message` → `cancel_mode()`; else `close()`
+1. Palette action `OpenWorkspace` → close other overlays → `session.split_focused_widget(Vertical, Workspace)` + `workspace_ui.dock(id)` (or focus existing)
+2. Esc: if `mode != Message` → `cancel_mode()`; docked pane stays (⌘W closes). Modal path still `close()`
 3. Enter → `send()` (completes `@mention` when picker open); printable → `insert_char`; Backspace → `backspace`
 4. Tab / Shift+Tab → `tab()` (mention cycle when picker open, else `cycle_channel`); ↑/↓ → scroll
 5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path; Ctrl+Shift+U / palette `WorkspaceAttachFile` → `pick_and_attach()`; Ctrl+D ×2 → `request_delete_channel()` (blocks `#general`)
-6. Pointer inside `animated_modal_rect` → keep open; `try_click` for channel rail / presence strip
-7. Outside click → `close()` (via `close_all_overlays`)
+6. Pointer inside docked pane / `card_rect` → keep focused; `try_click` for channel rail / presence strip
+7. Outside click on a modal overlay → `close_all_overlays` (does not close a docked workspace pane)
 8. `DroppedFile` while workspace open → `workspace_ui.attach_path(path)` (before transfer)
 9. Mailbox `refresh_workspace` → soft reload if open
 

@@ -39,7 +39,7 @@ use crate::rename::{RenameState, RenameTarget};
 use crate::renderer::{self, Renderer};
 use crate::text::MonoCellMetrics;
 use crate::selection::{clamp_pos, CellPos, Selection};
-use crate::session::{ChromeSession, CloseOutcome};
+use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
 use crate::settings::SettingsState;
 use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
@@ -297,7 +297,7 @@ impl ChromeApp {
     }
 
     fn input_caret_alpha(&self) -> f32 {
-        if !self.warp_focused {
+        if !self.warp_focused && !self.workspace_captures_input() {
             return 0.0;
         }
         let t = self.started.elapsed().as_secs_f32();
@@ -325,6 +325,17 @@ impl ChromeApp {
         if self.palette.open {
             self.palette.query.push_str(text.split(['\n', '\r']).next().unwrap_or(""));
             self.palette.selected = 0;
+            return;
+        }
+        if self.workspace_captures_input() {
+            for ch in text.chars() {
+                if ch == '\n' || ch == '\r' {
+                    break;
+                }
+                if !ch.is_control() {
+                    self.workspace_ui.insert_char(ch);
+                }
+            }
             return;
         }
         if self.warp_focused {
@@ -384,7 +395,7 @@ impl ChromeApp {
                 .map(|(id, _)| *id)
                 .collect();
             layout.apply_pane_rects(self.metrics, &leafs, tab.focus_pane, &|id| {
-                alt_ids.contains(&id)
+                alt_ids.contains(&id) || self.session.is_widget(id)
             });
         }
         layout
@@ -446,6 +457,9 @@ impl ChromeApp {
         let layout = self.current_layout();
         let cell = self.cell_metrics();
         for pl in &layout.panes {
+            if self.session.is_widget(pl.pane_id) {
+                continue;
+            }
             let (cols, rows) =
                 renderer::terminal_grid_size_with(&pl.cells, cell.w, cell.h);
             let need = self
@@ -524,9 +538,81 @@ impl ChromeApp {
             || self.confirm.open
             || self.splash.open
             || self.notes.open
-            || self.workspace_ui.open
+            || self.workspace_ui.is_modal()
             || self.transfer.open
             || self.rename.open
+    }
+
+    /// Workspace compose / scroll / drop when the pane is focused or still a modal.
+    fn workspace_captures_input(&self) -> bool {
+        if !self.workspace_ui.open {
+            return false;
+        }
+        if self.workspace_ui.is_modal() {
+            return true;
+        }
+        // Docked: yield to true overlays (palette, settings, …) so ⌘K still types
+        // into the filter instead of the chat compose line.
+        self.session.focused_is_workspace()
+            && !self.palette.open
+            && !self.settings.open
+            && !self.help.open
+            && !self.confirm.open
+            && !self.splash.open
+            && !self.notes.open
+            && !self.transfer.open
+            && !self.rename.open
+    }
+
+    fn sync_workspace_host(&mut self) {
+        let host = self.workspace_ui.docked_pane.and_then(|id| {
+            self.current_layout()
+                .panes
+                .iter()
+                .find(|p| p.pane_id == id)
+                .map(|p| p.glass)
+        });
+        self.workspace_ui.set_host(host);
+    }
+
+    fn pointer_over_workspace(&self) -> bool {
+        if !self.workspace_ui.open {
+            return false;
+        }
+        let layout = self.current_layout();
+        let win_w = layout.title.w;
+        let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+        if let Some(id) = self.workspace_ui.docked_pane {
+            if let Some(pl) = layout.panes.iter().find(|p| p.pane_id == id) {
+                return pl.glass.contains(self.cursor.x, self.cursor.y);
+            }
+        }
+        self.workspace_ui.is_modal()
+            && self
+                .workspace_ui
+                .card_rect(win_w, win_h)
+                .contains(self.cursor.x, self.cursor.y)
+    }
+
+    /// Default open: split the last-focused pane and dock workspace there.
+    fn open_workspace_pane(&mut self) {
+        if let Some(id) = self.session.find_widget(WidgetKind::Workspace) {
+            self.session.set_focus_pane(id);
+            self.workspace_ui.dock(id);
+            self.sync_workspace_host();
+            self.warp_focused = false;
+            self.terminal_focused = false;
+            return;
+        }
+        if let Some(id) = self
+            .session
+            .split_focused_widget(SplitAxis::Vertical, WidgetKind::Workspace)
+        {
+            self.workspace_ui.dock(id);
+            self.sync_workspace_host();
+            self.warp_focused = false;
+            self.terminal_focused = false;
+        }
     }
 
     fn close_all_overlays(&mut self) {
@@ -540,7 +626,9 @@ impl ChromeApp {
         self.help.close();
         self.confirm.close();
         self.notes.close();
-        self.workspace_ui.close();
+        if self.workspace_ui.is_modal() {
+            self.workspace_ui.close();
+        }
         self.transfer.close();
     }
 
@@ -550,7 +638,9 @@ impl ChromeApp {
         self.palette.close();
         self.help.close();
         self.notes.close();
-        self.workspace_ui.close();
+        if self.workspace_ui.is_modal() {
+            self.workspace_ui.close();
+        }
         self.transfer.close();
         self.rename.close();
     }
@@ -699,7 +789,9 @@ impl ChromeApp {
                 self.palette.close();
                 self.settings.close();
                 self.help.close();
-                self.workspace_ui.close();
+                if self.workspace_ui.is_modal() {
+                    self.workspace_ui.close();
+                }
                 self.transfer.close();
                 self.rename.close();
                 self.notes.open();
@@ -711,7 +803,7 @@ impl ChromeApp {
                 self.notes.close();
                 self.transfer.close();
                 self.rename.close();
-                self.workspace_ui.open();
+                self.open_workspace_pane();
             }
             CommandAction::RefreshWorkspace => {
                 // Soft no-op when closed (product RefreshWorkspaceMsg).
@@ -727,7 +819,7 @@ impl ChromeApp {
                     self.notes.close();
                     self.transfer.close();
                     self.rename.close();
-                    self.workspace_ui.open();
+                    self.open_workspace_pane();
                 }
                 self.workspace_ui.cycle_status();
             }
@@ -739,7 +831,7 @@ impl ChromeApp {
                     self.notes.close();
                     self.transfer.close();
                     self.rename.close();
-                    self.workspace_ui.open();
+                    self.open_workspace_pane();
                 }
                 self.workspace_ui.pick_and_attach();
             }
@@ -748,7 +840,9 @@ impl ChromeApp {
                 self.settings.close();
                 self.help.close();
                 self.notes.close();
-                self.workspace_ui.close();
+                if self.workspace_ui.is_modal() {
+                    self.workspace_ui.close();
+                }
                 self.rename.close();
                 self.transfer.open_send();
             }
@@ -757,7 +851,9 @@ impl ChromeApp {
                 self.settings.close();
                 self.help.close();
                 self.notes.close();
-                self.workspace_ui.close();
+                if self.workspace_ui.is_modal() {
+                    self.workspace_ui.close();
+                }
                 self.rename.close();
                 self.transfer.open_receive();
             }
@@ -925,6 +1021,13 @@ impl ChromeApp {
     }
 
     fn finish_closed_panes(&mut self, event_loop: &ActiveEventLoop, finished: &[u64]) {
+        if self
+            .workspace_ui
+            .docked_pane
+            .is_some_and(|id| finished.contains(&id))
+        {
+            self.workspace_ui.close();
+        }
         for id in finished {
             self.runtimes.remove(id);
         }
@@ -1269,8 +1372,8 @@ impl ChromeApp {
         if self.notes.visible() && self.notes.animated_modal_rect(win_w, win_h).contains(x, y) {
             return true;
         }
-        if self.workspace_ui.visible()
-            && self.workspace_ui.animated_modal_rect(win_w, win_h).contains(x, y)
+        if self.workspace_ui.is_modal()
+            && self.workspace_ui.card_rect(win_w, win_h).contains(x, y)
         {
             return true;
         }
@@ -1292,7 +1395,9 @@ impl ChromeApp {
             HitTarget::Close | HitTarget::Minimize | HitTarget::Zoom
         ) {
             // fall through to match below
-        } else if self.overlay_open() || self.notes.visible() || self.workspace_ui.visible()
+        } else if self.overlay_open()
+            || self.notes.visible()
+            || self.workspace_ui.is_modal()
             || self.transfer.visible()
             || self.palette.visible()
             || self.help.visible()
@@ -1334,10 +1439,11 @@ impl ChromeApp {
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
                     self.notes
                         .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
-                } else if self.workspace_ui.open {
+                } else if self.workspace_ui.is_modal() {
                     let layout = self.current_layout();
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+                    self.sync_workspace_host();
                     self.workspace_ui
                         .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
                 } else if self.transfer.visible() && !self.transfer.ticket.is_empty() {
@@ -1402,23 +1508,47 @@ impl ChromeApp {
             }
             HitTarget::WarpBar(pane_id) => {
                 self.session.set_focus_pane(pane_id);
-                self.warp_focused = true;
-                self.terminal_focused = false;
-            }
-            HitTarget::Terminal(pane_id) => {
-                self.session.set_focus_pane(pane_id);
-                // Alt-screen TUIs own the keyboard; otherwise click focuses warp.
-                let alt = self
-                    .runtimes
-                    .get(&pane_id)
-                    .map(|rt| rt.ansi.on_alt_screen())
-                    .unwrap_or(false);
-                if alt {
-                    self.terminal_focused = true;
+                if self.session.pane_kind(pane_id).is_workspace() {
+                    self.sync_workspace_host();
+                    let layout = self.current_layout();
+                    let win_w = layout.title.w;
+                    let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+                    let _ = self
+                        .workspace_ui
+                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
                     self.warp_focused = false;
+                    self.terminal_focused = false;
                 } else {
                     self.warp_focused = true;
                     self.terminal_focused = false;
+                }
+            }
+            HitTarget::Terminal(pane_id) => {
+                self.session.set_focus_pane(pane_id);
+                if self.session.pane_kind(pane_id).is_workspace() {
+                    self.sync_workspace_host();
+                    let layout = self.current_layout();
+                    let win_w = layout.title.w;
+                    let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+                    let _ = self
+                        .workspace_ui
+                        .try_click(self.cursor.x, self.cursor.y, win_w, win_h);
+                    self.warp_focused = false;
+                    self.terminal_focused = false;
+                } else {
+                    // Alt-screen TUIs own the keyboard; otherwise click focuses warp.
+                    let alt = self
+                        .runtimes
+                        .get(&pane_id)
+                        .map(|rt| rt.ansi.on_alt_screen())
+                        .unwrap_or(false);
+                    if alt {
+                        self.terminal_focused = true;
+                        self.warp_focused = false;
+                    } else {
+                        self.warp_focused = true;
+                        self.terminal_focused = false;
+                    }
                 }
             }
             // Scrollbar clicks are handled on press/drag; release is a no-op.
@@ -1444,8 +1574,8 @@ impl ChromeApp {
                 self.apply_confirm_choice(event_loop, ConfirmChoice::No);
                 return;
             }
-            // Workspace: Esc cancels new-channel compose before closing.
-            if self.workspace_ui.open
+            // Workspace: Esc cancels new-channel compose. Docked pane stays open (⌘W).
+            if self.workspace_captures_input()
                 && self.workspace_ui.mode
                     != crate::workspace_ui::ComposeMode::Message
             {
@@ -1462,7 +1592,7 @@ impl ChromeApp {
                 || self.confirm.visible()
                 || self.splash.visible()
                 || self.notes.visible()
-                || self.workspace_ui.visible()
+                || self.workspace_ui.is_modal()
                 || self.transfer.visible()
                 || self.rename.visible()
             {
@@ -1595,7 +1725,7 @@ impl ChromeApp {
                     _ => {}
                 }
             }
-            if self.workspace_ui.open {
+            if self.workspace_captures_input() {
                 match &event.logical_key {
                     Key::Named(NamedKey::Backspace) => {
                         self.workspace_ui.backspace();
@@ -1732,8 +1862,8 @@ impl ChromeApp {
                     }
                 }
             }
-            // Workspace: Ctrl+R refresh, Ctrl+Shift+A cycle presence, Ctrl+U path attach, Ctrl+Shift+U picker, Ctrl+D×2 delete channel (while open).
-            if self.workspace_ui.open {
+            // Workspace: Ctrl+R refresh, Ctrl+Shift+A cycle presence, Ctrl+U path attach, Ctrl+Shift+U picker, Ctrl+D×2 delete channel.
+            if self.workspace_captures_input() {
                 if let Key::Character(ref s) = event.logical_key {
                     match s.as_str() {
                         "r" | "R" if !shift => {
@@ -2414,7 +2544,7 @@ impl ChromeApp {
             }
         }
         // Caret blink while an input path is focused.
-        if self.warp_focused || self.terminal_focused {
+        if self.warp_focused || self.terminal_focused || self.workspace_captures_input() {
             return true;
         }
         false
@@ -2803,8 +2933,8 @@ impl ApplicationHandler for ChromeApp {
                     };
                     if lines != 0 {
                         let step = lines.clamp(-24, 24);
-                        // Workspace chat owns the wheel while its modal is open.
-                        if self.workspace_ui.open {
+                        // Workspace chat owns the wheel over its pane (or modal).
+                        if self.pointer_over_workspace() {
                             if step > 0 {
                                 self.workspace_ui.scroll_up(step as usize);
                             } else {
@@ -2957,6 +3087,7 @@ impl ApplicationHandler for ChromeApp {
                 let pty_on = self.any_pty_alive();
                 let term_cursor = self.terminal_cursor_visible();
                 let caret_alpha = self.input_caret_alpha();
+                self.sync_workspace_host();
                 let layout = self.current_layout();
 
                 if let Some(r) = self.renderer.as_mut() {

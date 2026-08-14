@@ -1,4 +1,4 @@
-//! Shared workspace chat — glass modal over local channels + messages.
+//! Shared workspace chat — default surface is a split pane; modal is a pop-out.
 //!
 //! Data lives under `~/Library/Application Support/suzuri/workspace/` (macOS)
 //! via [`crate::workspace_store`], matching product `internal/workspace`.
@@ -49,7 +49,7 @@ pub const CHANNEL_LIST_TOP: f32 = MODAL_PAD + 18.0;
 pub const COMPOSE_H: f32 = 44.0;
 /// Height reserved under the title for the presence strip (message pane).
 pub const PRESENCE_STRIP_H: f32 = 18.0;
-/// Max message bubbles painted at once (also scroll window size).
+/// Floor for visible bubbles (larger panes raise this via [`WorkspaceUi::visible_bubble_cap`]).
 pub const VISIBLE_BUBBLE_CAP: usize = 14;
 /// Vertical gap between chat bubbles.
 pub const BUBBLE_GAP: f32 = 8.0;
@@ -134,6 +134,10 @@ pub struct WorkspaceUi {
     present: f32,
     present_vel: f32,
     overlay: f32,
+    /// When set, chat is hosted in this split-pane leaf (not a floating modal).
+    pub docked_pane: Option<u64>,
+    /// Live glass rect of the host pane, filled each frame by the app.
+    host: Option<Rect>,
     pub channel: String,
     pub draft: String,
     pub messages: Vec<WsMessage>,
@@ -184,6 +188,8 @@ impl WorkspaceUi {
             present: 0.0,
             present_vel: 0.0,
             overlay: 0.0,
+            docked_pane: None,
+            host: None,
             channel: DEFAULT_CHANNEL.into(),
             draft: String::new(),
             messages: Vec::new(),
@@ -241,6 +247,43 @@ impl WorkspaceUi {
         self.open || self.present > 0.01
     }
 
+    /// Docked in a split pane (default product surface).
+    pub fn is_docked(&self) -> bool {
+        self.docked_pane.is_some() && self.open
+    }
+
+    /// Floating overlay card (legacy / pop-out). Not used for the default open path.
+    pub fn is_modal(&self) -> bool {
+        self.visible() && self.docked_pane.is_none()
+    }
+
+    pub fn set_host(&mut self, host: Option<Rect>) {
+        self.host = host;
+    }
+
+    /// Card used for hit-test + layout: pane glass when docked, else centered modal.
+    pub fn card_rect(&self, win_w: f32, win_h: f32) -> Rect {
+        self.host
+            .unwrap_or_else(|| self.animated_modal_rect(win_w, win_h))
+    }
+
+    /// Channel rail width — shrinks in a narrow pane.
+    pub fn channel_list_w(&self, win_w: f32, win_h: f32) -> f32 {
+        let host = self.card_rect(win_w, win_h);
+        CHANNEL_LIST_W
+            .min((host.w * 0.32).max(88.0))
+            .min((host.w - 96.0).max(72.0))
+    }
+
+    /// How many bubbles fit the current card (larger pane → more history).
+    pub fn visible_bubble_cap(&self, win_w: f32, win_h: f32) -> usize {
+        let host = self.card_rect(win_w, win_h);
+        let usable =
+            (host.h - MODAL_PAD * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - 8.0).max(80.0);
+        ((usable / (BUBBLE_MIN_H + BUBBLE_GAP)).floor() as usize)
+            .clamp(VISIBLE_BUBBLE_CAP, 48)
+    }
+
     pub fn open(&mut self) {
         self.open = true;
         self.mode = ComposeMode::Message;
@@ -257,6 +300,15 @@ impl WorkspaceUi {
         self.watch_dirty.store(false, Ordering::Release);
     }
 
+    /// Host in a split-pane leaf. Skips the modal spring — jelly split is the motion.
+    pub fn dock(&mut self, pane_id: u64) {
+        self.docked_pane = Some(pane_id);
+        self.open();
+        self.present = 1.0;
+        self.present_vel = 0.0;
+        self.overlay = 0.0;
+    }
+
     /// Register `$USER` as a human member (no-op update if already joined).
     pub fn join_self(&mut self) {
         match self.store.join(&self.human, "human", "") {
@@ -266,7 +318,10 @@ impl WorkspaceUi {
     }
 
     pub fn close(&mut self) {
+        let was_docked = self.docked_pane.is_some();
         self.open = false;
+        self.docked_pane = None;
+        self.host = None;
         self.draft.clear();
         self.status.clear();
         self.mode = ComposeMode::Message;
@@ -274,6 +329,12 @@ impl WorkspaceUi {
         self.refresh_accum = 0.0;
         self.watch_debounce = 0.0;
         self.delete_pending = None;
+        if was_docked {
+            // No floating modal shrink after a pane close.
+            self.present = 0.0;
+            self.present_vel = 0.0;
+            self.overlay = 0.0;
+        }
     }
 
     pub fn toggle(&mut self) {
@@ -338,23 +399,31 @@ impl WorkspaceUi {
     }
 
     pub fn content_ease(&self) -> f32 {
+        if self.docked_pane.is_some() {
+            return 1.0;
+        }
         let t = self.present.clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
 
     pub fn scrim_alpha(&self) -> f32 {
+        if self.docked_pane.is_some() {
+            return 0.0;
+        }
         self.overlay.clamp(0.0, 0.5)
     }
 
+    /// Centered overlay card (pop-out / tests). Default open path uses a pane.
     pub fn animated_modal_rect(&self, win_w: f32, win_h: f32) -> Rect {
         let t = self.content_ease();
-        let base_w = 720.0_f32.min(win_w * 0.92).max(400.0);
-        let base_h = 440.0_f32.min(win_h * 0.78).max(280.0);
-        let w = base_w * (0.9 + 0.1 * t);
-        let h = base_h * (0.92 + 0.08 * t);
+        // Large: ~92% of the window, capped so ultrawide doesn't go unbounded.
+        let base_w = (win_w * 0.92).min(1400.0).max(480.0);
+        let base_h = (win_h * 0.88).min(920.0).max(360.0);
+        let w = base_w * (0.94 + 0.06 * t);
+        let h = base_h * (0.94 + 0.06 * t);
         Rect::new(
             (win_w - w) * 0.5,
-            (win_h - h) * 0.42 + (1.0 - t) * -16.0,
+            (win_h - h) * 0.46 + (1.0 - t) * -12.0,
             w,
             h,
         )
@@ -822,35 +891,36 @@ impl WorkspaceUi {
 
     /// Hit rect for the presence strip (title row, message pane side). Click cycles status.
     pub fn presence_strip_rect(&self, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.animated_modal_rect(win_w, win_h);
+        let modal = self.card_rect(win_w, win_h);
+        let list_w = self.channel_list_w(win_w, win_h);
         Rect::new(
-            modal.x + MODAL_PAD + CHANNEL_LIST_W + 10.0,
+            modal.x + MODAL_PAD + list_w + 10.0,
             modal.y + 4.0,
-            (modal.w - MODAL_PAD * 2.0 - CHANNEL_LIST_W - 10.0).max(40.0),
+            (modal.w - MODAL_PAD * 2.0 - list_w - 10.0).max(40.0),
             PRESENCE_STRIP_H + 4.0,
         )
     }
 
     // ── hit-test ─────────────────────────────────────────────────────────────
 
-    /// Left rail rect holding channel rows (inside the animated modal).
+    /// Left rail rect holding channel rows (inside the host card).
     pub fn channel_list_rect(&self, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.animated_modal_rect(win_w, win_h);
+        let modal = self.card_rect(win_w, win_h);
         Rect::new(
             modal.x + MODAL_PAD,
             modal.y + CHANNEL_LIST_TOP,
-            CHANNEL_LIST_W,
+            self.channel_list_w(win_w, win_h),
             (modal.h - CHANNEL_LIST_TOP - COMPOSE_H - MODAL_PAD).max(0.0),
         )
     }
 
     /// Hit rect for channel index `i` (same geometry as renderer labels).
     pub fn channel_row_rect(&self, i: usize, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.animated_modal_rect(win_w, win_h);
+        let modal = self.card_rect(win_w, win_h);
         Rect::new(
             modal.x + MODAL_PAD,
             modal.y + CHANNEL_LIST_TOP + i as f32 * CHANNEL_ROW_H,
-            CHANNEL_LIST_W,
+            self.channel_list_w(win_w, win_h),
             CHANNEL_ROW_H,
         )
     }
@@ -882,7 +952,7 @@ impl WorkspaceUi {
     /// Click inside workspace modal: select channel, cycle status, or start new-channel.
     /// Returns true if the click was handled.
     pub fn try_click(&mut self, x: f32, y: f32, win_w: f32, win_h: f32) -> bool {
-        if !self.animated_modal_rect(win_w, win_h).contains(x, y) {
+        if !self.card_rect(win_w, win_h).contains(x, y) {
             return false;
         }
         if let Some(ch) = self.channel_at(x, y, win_w, win_h) {
@@ -919,10 +989,10 @@ impl WorkspaceUi {
 
     /// Message column rect (right of channel list, above compose).
     pub fn message_pane_rect(&self, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.animated_modal_rect(win_w, win_h);
+        let modal = self.card_rect(win_w, win_h);
         let pad = MODAL_PAD;
         let ch_x = modal.x + pad;
-        let ch_w = CHANNEL_LIST_W;
+        let ch_w = self.channel_list_w(win_w, win_h);
         let msg_x = ch_x + ch_w + 10.0;
         let msg_w = (modal.x + modal.w - pad - msg_x).max(40.0);
         let msg_y = modal.y + pad + PRESENCE_STRIP_H;
@@ -941,7 +1011,8 @@ impl WorkspaceUi {
     /// `accent` is theme primary (jade) used for the local user's bubbles.
     pub fn layout_bubbles(&self, win_w: f32, win_h: f32, accent: [f32; 3]) -> Vec<MsgBubble> {
         let pane = self.message_pane_rect(win_w, win_h);
-        let msgs = self.visible_messages(VISIBLE_BUBBLE_CAP);
+        let cap = self.visible_bubble_cap(win_w, win_h);
+        let msgs = self.visible_messages(cap);
         if msgs.is_empty() {
             return Vec::new();
         }
@@ -1283,6 +1354,41 @@ mod tests {
         );
         assert_eq!(ui.status, "refreshed");
         assert_eq!(ui.scroll, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn docked_card_uses_host_rect_and_no_scrim() {
+        let dir = temp_root("dock");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.dock(7);
+        assert!(ui.is_docked());
+        assert!(!ui.is_modal());
+        assert_eq!(ui.scrim_alpha(), 0.0);
+        assert!((ui.content_ease() - 1.0).abs() < f32::EPSILON);
+        let host = Rect::new(100.0, 80.0, 400.0, 500.0);
+        ui.set_host(Some(host));
+        let card = ui.card_rect(1200.0, 800.0);
+        assert!((card.x - host.x).abs() < 0.01);
+        assert!((card.w - host.w).abs() < 0.01);
+        assert!((card.h - host.h).abs() < 0.01);
+        // Narrow pane shrinks the channel rail.
+        assert!(ui.channel_list_w(1200.0, 800.0) < CHANNEL_LIST_W);
+        ui.close();
+        assert!(!ui.is_docked());
+        assert!(!ui.visible());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modal_card_is_large() {
+        let dir = temp_root("modal-size");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        ui.present = 1.0;
+        let r = ui.animated_modal_rect(1200.0, 800.0);
+        assert!(r.w > 1000.0, "w={}", r.w);
+        assert!(r.h > 650.0, "h={}", r.h);
         let _ = fs::remove_dir_all(&dir);
     }
 
