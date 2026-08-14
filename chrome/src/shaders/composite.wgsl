@@ -18,6 +18,8 @@ struct FrameUniforms {
     hover: vec4f,
     // Theme primary RGB (user settings) + pad — active buttons, hairlines, press wash
     primary: vec4f,
+    // x=1 → transparent outside panels (cursor-follow drag chip)
+    flags: vec4f,
 }
 
 struct Panel {
@@ -257,6 +259,17 @@ fn ign(v: vec2f) -> f32 {
     return fract(52.9829189 * fract(0.06711056 * v.x + 0.00583715 * v.y));
 }
 
+fn vnoise(p: vec2f) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(ign(i), ign(i + vec2f(1.0, 0.0)), u.x),
+        mix(ign(i + vec2f(0.0, 1.0)), ign(i + vec2f(1.0, 1.0)), u.x),
+        u.y,
+    );
+}
+
 fn ior_for_wavelength(base_ior: f32, aberration: f32, wavelength: f32) -> f32 {
     let ab = aberration * 0.1;
     return mix(
@@ -411,7 +424,9 @@ fn fs(in: VsOut) -> @location(0) vec4f {
     let px = in.uv * logical; // top-left origin
 
     // No title-bar fill — rain shows through; traffic lights + title text only.
-    var col = sample_rain_raw(px, 0.0);
+    let overlay = u.flags.x > 0.5;
+    var col = select(sample_rain_raw(px, 0.0), vec3f(0.0), overlay);
+    var cov = select(1.0, 0.0, overlay);
     // Brand primary from settings (not hardcoded inkstone jade).
     let jade = u.primary.xyz;
     let n = u32(u.misc.z);
@@ -430,6 +445,9 @@ fn fs(in: VsOut) -> @location(0) vec4f {
                 rgb = rgb + jade * tab_spot * 0.50 * g.a;
             }
             col = mix(col, rgb, g.a * 0.96);
+            if (overlay) {
+                cov = max(cov, g.a * 0.96);
+            }
         }
     }
 
@@ -482,6 +500,30 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             continue;
         }
 
+        // Focused-pane glow (17) — dim edge rim, a little extra lamp/smoke at top-left.
+        if (p.kind > 16.5 && p.kind < 17.5) {
+            let local = px - center;
+            let d = sd_round_box(local, half, max(p.radius, 0.5));
+            let inside = 1.0 - smoothstep(-2.0, 1.4, d);
+            if (inside > 0.001) {
+                let depth = max(-d, 0.0);
+                let rim = exp(-depth / 13.0);
+                let bleed = exp(-depth / 36.0);
+                let uv = local / max(half, vec2f(1.0));
+                let lamp = exp(-pow2(length(uv - vec2f(-0.68, -0.74))) * 1.15);
+                let t = u.misc.x;
+                let n1 = vnoise(px * 0.038 + vec2f(t * 2.1, t * 1.05));
+                let n2 = vnoise(px * 0.017 + vec2f(-t * 0.7, t * 1.5));
+                let smoke = 0.78 + 0.22 * n1 + 0.10 * n2;
+                // Whole perimeter stays connected; lamp only weights the rim.
+                let around = 0.62 + 0.38 * lamp;
+                let glow = inside * (rim * around * smoke + bleed * lamp * (0.28 + 0.18 * n2));
+                let a = clamp(p._pad.x, 0.0, 1.0);
+                col = mix(col, jade * 0.36, glow * a * 0.10);
+            }
+            continue;
+        }
+
         // Idle chips / logo / + / modal / modal buttons — discrete glass
         let g = eval_glass_panel(px, center, half, p.radius, p.kind);
         if (g.a <= 0.001) { continue; }
@@ -519,7 +561,13 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             rgb = mix(rgb, p.tint.xyz * 0.55 + rgb * 0.45, t * 0.72);
         }
         col = mix(col, rgb, g.a * 0.96 * fade);
+        if (overlay) {
+            cov = max(cov, g.a * 0.96 * fade);
+        }
     }
 
+    if (overlay) {
+        return vec4f(col * cov, cov);
+    }
     return vec4f(col, 1.0);
 }

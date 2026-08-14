@@ -169,11 +169,16 @@ impl PtySession {
             Err(_) => false,
         }
     }
+
+    /// Kill the shell child. Closing the PTY master then SIGHUPs the fg group.
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+    }
 }
 
 impl Drop for PtySession {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.kill();
         // Reader thread exits on EOF after slave dies; don't join (may block
         // briefly). Handle is dropped with the struct.
         let _ = self._reader.take();

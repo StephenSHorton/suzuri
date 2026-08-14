@@ -44,10 +44,39 @@ pub fn configure_rounded_window(window: &Window, radius_pts: f64) {
 
         if let Some(ns_window) = view.window() {
             ns_window.setOpaque(false);
-            ns_window.setBackgroundColor(Some(&NSColor::clearColor()));
+            // Fully clear windows force WindowServer to sample GPU alpha
+            // before delivering mouseDown — clicks wait on the next present.
+            // A near-zero fill keeps the silhouette hittable immediately.
+            let bg = NSColor::colorWithWhite_alpha(0.0, 0.001);
+            ns_window.setBackgroundColor(Some(&bg));
+            ns_window.setAcceptsMouseMovedEvents(true);
             ns_window.setHasShadow(true);
             ns_window.invalidateShadow();
             // Keep a local retain so the temporary doesn't drop mid-call.
+            let _keep: Retained<objc2_app_kit::NSWindow> = ns_window;
+        }
+    }
+}
+
+/// Fade the whole OS window (chrome + content + shadow) for last-tab close.
+pub fn set_window_alpha(window: &Window, alpha: f64) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return;
+    };
+    unsafe {
+        use objc2::rc::Retained;
+        use objc2_app_kit::NSView;
+
+        let ns_view = appkit.ns_view.as_ptr() as *const NSView;
+        if ns_view.is_null() {
+            return;
+        }
+        let view: &NSView = &*ns_view;
+        if let Some(ns_window) = view.window() {
+            ns_window.setAlphaValue(alpha.clamp(0.0, 1.0));
             let _keep: Retained<objc2_app_kit::NSWindow> = ns_window;
         }
     }

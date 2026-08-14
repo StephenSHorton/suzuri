@@ -22,16 +22,25 @@ pub enum SplitNode {
         axis: SplitAxis,
         /// Settled split ratio for the first child (a). Usually 0.5.
         ratio: f32,
-        /// Jelly scale for the **second** child (0 = collapsed, 1 = full).
+        /// Jelly scale for the side that is opening or closing (0 = collapsed, 1 = full).
         jelly: f32,
         jelly_vel: f32,
         /// Spring target for jelly (1 = open, 0 = closing).
         jelly_target: f32,
-        /// When set, leaf `b` is animating closed and should be removed at settle.
-        closing_b: bool,
+        /// Which child is collapsing (None = opening / idle, jelly applies to `b`).
+        closing: CloseSide,
         a: Box<SplitNode>,
         b: Box<SplitNode>,
     },
+}
+
+/// Which child of a branch is mid close-jelly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum CloseSide {
+    #[default]
+    None,
+    A,
+    B,
 }
 
 /// Result of advancing close animations.
@@ -85,7 +94,7 @@ impl SplitNode {
                 jelly,
                 jelly_vel,
                 jelly_target,
-                closing_b,
+                closing,
                 a,
                 b,
                 ..
@@ -123,15 +132,26 @@ impl SplitNode {
                 if settled {
                     *jelly = target;
                     *jelly_vel = 0.0;
-                    if *closing_b && target <= 0.0 {
-                        // Second child is a leaf we're closing
-                        if let Self::Leaf(id) = b.as_ref() {
-                            result.finished_closes.push(*id);
-                        } else {
-                            // Nested: take first leaf of b
-                            result.finished_closes.push(b.first_leaf());
+                    if target <= 0.0 {
+                        match *closing {
+                            CloseSide::B => {
+                                if let Self::Leaf(id) = b.as_ref() {
+                                    result.finished_closes.push(*id);
+                                } else {
+                                    result.finished_closes.push(b.first_leaf());
+                                }
+                                *closing = CloseSide::None;
+                            }
+                            CloseSide::A => {
+                                if let Self::Leaf(id) = a.as_ref() {
+                                    result.finished_closes.push(*id);
+                                } else {
+                                    result.finished_closes.push(a.first_leaf());
+                                }
+                                *closing = CloseSide::None;
+                            }
+                            CloseSide::None => {}
                         }
-                        *closing_b = false;
                     }
                 } else {
                     result.moving = true;
@@ -154,7 +174,7 @@ impl SplitNode {
                     jelly: 0.0,
                     jelly_vel: 0.0,
                     jelly_target: 1.0,
-                    closing_b: false,
+                    closing: CloseSide::None,
                     a: Box::new(Self::Leaf(focus)),
                     b: Box::new(Self::Leaf(new_id)),
                 };
@@ -163,6 +183,35 @@ impl SplitNode {
             Self::Leaf(_) => false,
             Self::Branch { a, b, .. } => {
                 a.split_leaf(focus, new_id, axis) || b.split_leaf(focus, new_id, axis)
+            }
+        }
+    }
+
+    /// Like [`split_leaf`], then swap children when the new pane should sit
+    /// left / above the target (split_leaf always opens `new_id` as `b`).
+    pub fn split_leaf_edge(&mut self, target: u64, new_id: u64, edge: DockEdge) -> bool {
+        if !self.split_leaf(target, new_id, edge.axis()) {
+            return false;
+        }
+        if !edge.moving_is_second() {
+            self.swap_direct_children(target, new_id);
+        }
+        true
+    }
+
+    fn swap_direct_children(&mut self, a_id: u64, b_id: u64) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch { a, b, .. } => {
+                let is_pair = matches!(
+                    (a.as_ref(), b.as_ref()),
+                    (Self::Leaf(x), Self::Leaf(y)) if *x == a_id && *y == b_id
+                );
+                if is_pair {
+                    std::mem::swap(a, b);
+                    return true;
+                }
+                a.swap_direct_children(a_id, b_id) || b.swap_direct_children(a_id, b_id)
             }
         }
     }
@@ -179,7 +228,7 @@ impl SplitNode {
                 jelly,
                 jelly_vel,
                 jelly_target,
-                closing_b,
+                closing,
                 ..
             } => {
                 // Prefer recurse so nested closes work.
@@ -194,8 +243,7 @@ impl SplitNode {
 
                 if b_is {
                     *jelly_target = 0.0;
-                    *closing_b = true;
-                    // Ensure we animate from current open state
+                    *closing = CloseSide::B;
                     if *jelly < 0.05 {
                         *jelly = 1.0;
                     }
@@ -203,12 +251,13 @@ impl SplitNode {
                     return true;
                 }
                 if a_is {
-                    // Swap so the closing pane is always `b` (jelly shrinks b).
-                    std::mem::swap(a, b);
-                    *jelly = 1.0;
-                    *jelly_vel = 0.0;
+                    // Stay put — shrink `a` (left / top) so it doesn't teleport to `b`.
                     *jelly_target = 0.0;
-                    *closing_b = true;
+                    *closing = CloseSide::A;
+                    if *jelly < 0.05 {
+                        *jelly = 1.0;
+                    }
+                    *jelly_vel = 0.0;
                     return true;
                 }
                 false
@@ -221,14 +270,18 @@ impl SplitNode {
         match self {
             Self::Leaf(_) => false,
             Self::Branch {
-                closing_b,
+                closing,
                 b,
                 a,
                 jelly_target,
                 ..
             } => {
-                if *closing_b && *jelly_target <= 0.0 && b.contains_pane(id) {
-                    return true;
+                if *jelly_target <= 0.0 {
+                    match *closing {
+                        CloseSide::B if b.contains_pane(id) => return true,
+                        CloseSide::A if a.contains_pane(id) => return true,
+                        _ => {}
+                    }
                 }
                 a.is_closing(id) || b.is_closing(id)
             }
@@ -273,6 +326,95 @@ impl SplitNode {
         }
     }
 
+    /// Split sashes (the gap between children). `a_leaf` identifies the branch.
+    pub fn collect_sashes(&self, area: Rect, gap: f32, out: &mut Vec<SashHit>) {
+        match self {
+            Self::Leaf(_) => {}
+            Self::Branch {
+                axis,
+                ratio,
+                jelly,
+                a,
+                b,
+                closing,
+                ..
+            } => {
+                if *closing == CloseSide::B {
+                    a.collect_sashes(area, gap, out);
+                    return;
+                }
+                if *closing == CloseSide::A {
+                    b.collect_sashes(area, gap, out);
+                    return;
+                }
+                let j = jelly.clamp(0.0, 1.0);
+                if j < 0.5 {
+                    a.collect_sashes(area, gap, out);
+                    return;
+                }
+                match axis {
+                    SplitAxis::Vertical => {
+                        let usable = (area.w - gap).max(0.0);
+                        let b_w = (usable * (1.0 - *ratio)).min(usable * 0.92).max(0.0);
+                        let a_w = (usable - b_w).max(0.0);
+                        let sash = Rect::new(area.x + a_w, area.y, gap.max(4.0), area.h);
+                        out.push(SashHit {
+                            a_leaf: a.first_leaf(),
+                            axis: *axis,
+                            rect: sash,
+                            parent: area,
+                        });
+                        a.collect_sashes(Rect::new(area.x, area.y, a_w, area.h), gap, out);
+                        if b_w > 1.0 {
+                            b.collect_sashes(
+                                Rect::new(area.x + a_w + gap, area.y, b_w, area.h),
+                                gap,
+                                out,
+                            );
+                        }
+                    }
+                    SplitAxis::Horizontal => {
+                        let usable = (area.h - gap).max(0.0);
+                        let b_h = (usable * (1.0 - *ratio)).min(usable * 0.92).max(0.0);
+                        let a_h = (usable - b_h).max(0.0);
+                        let sash = Rect::new(area.x, area.y + a_h, area.w, gap.max(4.0));
+                        out.push(SashHit {
+                            a_leaf: a.first_leaf(),
+                            axis: *axis,
+                            rect: sash,
+                            parent: area,
+                        });
+                        a.collect_sashes(Rect::new(area.x, area.y, area.w, a_h), gap, out);
+                        if b_h > 1.0 {
+                            b.collect_sashes(
+                                Rect::new(area.x, area.y + a_h + gap, area.w, b_h),
+                                gap,
+                                out,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set the settled split ratio on the branch whose first `a` leaf is `a_leaf`.
+    pub fn set_ratio(&mut self, a_leaf: u64, ratio: f32) -> bool {
+        let ratio = ratio.clamp(0.15, 0.85);
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch {
+                a, b, ratio: slot, ..
+            } => {
+                if a.first_leaf() == a_leaf {
+                    *slot = ratio;
+                    return true;
+                }
+                a.set_ratio(a_leaf, ratio) || b.set_ratio(a_leaf, ratio)
+            }
+        }
+    }
+
     /// Layout leaves into `out` with animated jelly sizes. `gap` is sash thickness.
     pub fn layout_into(&self, area: Rect, gap: f32, out: &mut Vec<(u64, Rect)>) {
         match self {
@@ -281,44 +423,62 @@ impl SplitNode {
                 axis,
                 ratio,
                 jelly,
+                closing,
                 a,
                 b,
                 ..
             } => {
                 let j = jelly.clamp(0.0, 1.15);
+                let close_a = *closing == CloseSide::A;
                 match axis {
                     SplitAxis::Vertical => {
-                        let total = area.w;
-                        let usable = (total - gap).max(0.0);
-                        let b_share = usable * (1.0 - *ratio) * j.min(1.0);
-                        let b_share = if j > 1.0 {
-                            b_share * (1.0 + (j - 1.0) * 0.35)
+                        let usable = (area.w - gap).max(0.0);
+                        let (a_w, b_w) = if close_a {
+                            let mut share = usable * *ratio * j.min(1.0);
+                            if j > 1.0 {
+                                share *= 1.0 + (j - 1.0) * 0.35;
+                            }
+                            let a_w = share.min(usable * 0.92).max(0.0);
+                            (a_w, (usable - a_w).max(0.0))
                         } else {
-                            b_share
+                            let mut share = usable * (1.0 - *ratio) * j.min(1.0);
+                            if j > 1.0 {
+                                share *= 1.0 + (j - 1.0) * 0.35;
+                            }
+                            let b_w = share.min(usable * 0.92).max(0.0);
+                            ((usable - b_w).max(0.0), b_w)
                         };
-                        let b_w = b_share.min(usable * 0.92).max(0.0);
-                        let a_w = (usable - b_w).max(0.0);
                         let a_rect = Rect::new(area.x, area.y, a_w, area.h);
                         let b_rect = Rect::new(area.x + a_w + gap, area.y, b_w, area.h);
-                        a.layout_into(a_rect, gap, out);
+                        if a_w > 1.0 {
+                            a.layout_into(a_rect, gap, out);
+                        }
                         if b_w > 1.0 {
                             b.layout_into(b_rect, gap, out);
                         }
                     }
                     SplitAxis::Horizontal => {
-                        let total = area.h;
-                        let usable = (total - gap).max(0.0);
-                        let b_share = usable * (1.0 - *ratio) * j.min(1.0);
-                        let b_share = if j > 1.0 {
-                            b_share * (1.0 + (j - 1.0) * 0.35)
+                        let usable = (area.h - gap).max(0.0);
+                        let (a_h, b_h) = if close_a {
+                            let mut share = usable * *ratio * j.min(1.0);
+                            if j > 1.0 {
+                                share *= 1.0 + (j - 1.0) * 0.35;
+                            }
+                            let a_h = share.min(usable * 0.92).max(0.0);
+                            (a_h, (usable - a_h).max(0.0))
                         } else {
-                            b_share
+                            let mut share = usable * (1.0 - *ratio) * j.min(1.0);
+                            if j > 1.0 {
+                                share *= 1.0 + (j - 1.0) * 0.35;
+                            }
+                            let b_h = share.min(usable * 0.92).max(0.0);
+                            ((usable - b_h).max(0.0), b_h)
                         };
-                        let b_h = b_share.min(usable * 0.92).max(0.0);
-                        let a_h = (usable - b_h).max(0.0);
                         let a_rect = Rect::new(area.x, area.y, area.w, a_h);
                         let b_rect = Rect::new(area.x, area.y + a_h + gap, area.w, b_h);
-                        a.layout_into(a_rect, gap, out);
+                        if a_h > 1.0 {
+                            a.layout_into(a_rect, gap, out);
+                        }
                         if b_h > 1.0 {
                             b.layout_into(b_rect, gap, out);
                         }
@@ -368,6 +528,40 @@ pub enum FocusDir {
     Down,
 }
 
+/// One split sash between two children.
+#[derive(Clone, Copy, Debug)]
+pub struct SashHit {
+    /// First leaf of child `a` — stable id for the branch.
+    pub a_leaf: u64,
+    pub axis: SplitAxis,
+    pub rect: Rect,
+    /// Parent area of the branch (for converting pointer → ratio).
+    pub parent: Rect,
+}
+
+/// Which side of a target pane a dragged leaf should occupy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl DockEdge {
+    pub fn axis(self) -> SplitAxis {
+        match self {
+            Self::Left | Self::Right => SplitAxis::Vertical,
+            Self::Top | Self::Bottom => SplitAxis::Horizontal,
+        }
+    }
+
+    /// `split_leaf` opens the new id as child `b` (right / below).
+    pub fn moving_is_second(self) -> bool {
+        matches!(self, Self::Right | Self::Bottom)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum RemoveResult {
     NotFound,
@@ -382,6 +576,9 @@ pub struct SoloExitAnim {
     pub pane_id: u64,
     pub jelly: f32,
     pub jelly_vel: f32,
+    /// Last tab on this window — shrink *and* fade the frame out.
+    pub fade_window: bool,
+    elapsed: f32,
 }
 
 impl SoloExitAnim {
@@ -390,12 +587,51 @@ impl SoloExitAnim {
             pane_id,
             jelly: 1.0,
             jelly_vel: 0.0,
+            fade_window: false,
+            elapsed: 0.0,
         }
+    }
+
+    pub fn start_window(pane_id: u64) -> Self {
+        Self {
+            pane_id,
+            jelly: 1.0,
+            jelly_vel: 0.0,
+            fade_window: true,
+            elapsed: 0.0,
+        }
+    }
+
+    /// Window alpha. Stays readable a beat, then dissolves.
+    pub fn opacity(&self) -> f32 {
+        if self.fade_window {
+            self.jelly.clamp(0.0, 1.0).powf(1.35)
+        } else {
+            1.0
+        }
+    }
+
+    /// Logical-px Gaussian radius for the dissolve blur (0 = sharp).
+    pub fn blur_px(&self) -> f32 {
+        if !self.fade_window {
+            return 0.0;
+        }
+        let gone = (1.0 - self.jelly.clamp(0.0, 1.0)).powf(0.72);
+        gone * 26.0
     }
 
     /// Returns true while still animating; false when settled closed.
     pub fn tick(&mut self, dt: f32) -> bool {
         let dt = dt.clamp(0.0, 1.0 / 20.0);
+        if self.fade_window {
+            // Timed ease — the jelly spring finishes too fast for a dissolve.
+            self.elapsed += dt;
+            const DUR: f32 = 0.52;
+            let p = (self.elapsed / DUR).clamp(0.0, 1.0);
+            let e = p * p * (3.0 - 2.0 * p);
+            self.jelly = 1.0 - e;
+            return p < 1.0;
+        }
         const K: f32 = 160.0;
         const C: f32 = 16.0;
         let target = 0.0;
@@ -468,6 +704,33 @@ mod tests {
     }
 
     #[test]
+    fn close_left_pane_stays_on_the_left() {
+        let mut root = SplitNode::leaf(1);
+        root.split_leaf(1, 2, SplitAxis::Vertical);
+        root.split_leaf(2, 3, SplitAxis::Horizontal);
+        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+            *jelly = 1.0;
+            *jelly_target = 1.0;
+        }
+        assert!(root.begin_close_leaf(1));
+        if let SplitNode::Branch { jelly, closing, .. } = &mut root {
+            *jelly = 0.45;
+            assert_eq!(*closing, CloseSide::A);
+        }
+        let mut out = Vec::new();
+        root.layout_into(Rect::new(0.0, 0.0, 200.0, 100.0), 4.0, &mut out);
+        let left = out.iter().find(|(id, _)| *id == 1).expect("left pane still laid out");
+        let right = out.iter().find(|(id, _)| *id == 2).expect("right stack still laid out");
+        assert!(
+            left.1.x < right.1.x,
+            "closing left pane must stay on the left, got left.x={} right.x={}",
+            left.1.x,
+            right.1.x
+        );
+        assert!(left.1.w < right.1.w, "left pane should be shrinking");
+    }
+
+    #[test]
     fn remove_collapses() {
         let mut root = SplitNode::leaf(1);
         root.split_leaf(1, 2, SplitAxis::Vertical);
@@ -476,6 +739,41 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(root, SplitNode::Leaf(1)));
+    }
+
+    #[test]
+    fn split_leaf_edge_puts_new_on_left() {
+        let mut root = SplitNode::leaf(1);
+        assert!(root.split_leaf_edge(1, 2, DockEdge::Left));
+        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+            *jelly = 1.0;
+            *jelly_target = 1.0;
+        }
+        let mut out = Vec::new();
+        root.layout_into(Rect::new(0.0, 0.0, 200.0, 100.0), 0.0, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, 2, "new pane should be left (first)");
+        assert_eq!(out[1].0, 1);
+        assert!(out[0].1.x < out[1].1.x);
+    }
+
+    #[test]
+    fn sash_ratio_moves_split() {
+        let mut root = SplitNode::leaf(1);
+        assert!(root.split_leaf(1, 2, SplitAxis::Vertical));
+        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+            *jelly = 1.0;
+            *jelly_target = 1.0;
+        }
+        assert!(root.set_ratio(1, 0.25));
+        let mut sashes = Vec::new();
+        root.collect_sashes(Rect::new(0.0, 0.0, 200.0, 100.0), 8.0, &mut sashes);
+        assert_eq!(sashes.len(), 1);
+        assert_eq!(sashes[0].a_leaf, 1);
+        assert_eq!(sashes[0].axis, SplitAxis::Vertical);
+        let mut out = Vec::new();
+        root.layout_into(Rect::new(0.0, 0.0, 200.0, 100.0), 8.0, &mut out);
+        assert!(out[0].1.w < out[1].1.w, "0.25 ratio should shrink a");
     }
 
     #[test]
@@ -490,5 +788,23 @@ mod tests {
         }
         assert!(!moving);
         assert!(a.jelly.abs() < 0.01);
+    }
+
+    #[test]
+    fn window_exit_is_slower_and_blurs() {
+        let mut a = SoloExitAnim::start_window(1);
+        assert!(a.blur_px() < 0.5);
+        assert!(a.opacity() > 0.95);
+        let mut t = 0.0;
+        while a.tick(1.0 / 60.0) {
+            t += 1.0 / 60.0;
+            if t > 2.0 {
+                break;
+            }
+        }
+        assert!(t > 0.45, "dissolve too fast: {t}");
+        assert!(t < 0.65, "dissolve too slow: {t}");
+        assert!(a.opacity() < 0.02);
+        assert!(a.blur_px() > 20.0);
     }
 }

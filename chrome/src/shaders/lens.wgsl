@@ -11,6 +11,8 @@ struct LensUniforms {
     glass: vec4f,
     // aberration, magnify (>=1), reflection, shine
     glass2: vec4f,
+    // x = last-tab dissolve blur radius (logical px)
+    exit: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> u: LensUniforms;
@@ -46,6 +48,24 @@ fn sample_scene_fb(fb_px: vec2f, lod: f32) -> vec3f {
     var uv = fb_px / fb;
     uv = clamp(uv, vec2f(0.001), vec2f(0.999));
     return textureSampleLevel(scene_tex, scene_samp, uv, lod).rgb;
+}
+
+/// Dual-ring disk blur for last-tab dissolve (radius in framebuffer px).
+fn sample_scene_blur(fb_px: vec2f, radius_fb: f32) -> vec3f {
+    if (radius_fb < 0.55) {
+        return sample_scene_fb(fb_px, 0.0);
+    }
+    var acc = sample_scene_fb(fb_px, 0.0) * 0.16;
+    var wsum = 0.16;
+    for (var i = 0; i < 8; i++) {
+        let a = f32(i) * (PI * 0.25);
+        let d = vec2f(cos(a), sin(a));
+        acc += sample_scene_fb(fb_px + d * radius_fb * 0.48, 0.0) * 0.068;
+        wsum += 0.068;
+        acc += sample_scene_fb(fb_px + d * radius_fb, 0.0) * 0.042;
+        wsum += 0.042;
+    }
+    return acc / wsum;
 }
 
 // Rounded window silhouette (logical px). Matches Metrics.radius / macOS CALayer.
@@ -86,8 +106,11 @@ fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
     let logical = max(u.size.xy, vec2f(1.0));
     let fb_px = frag.xy;
 
-    // Underlay: blit scene 1:1
-    var col = sample_scene_fb(fb_px, 0.0);
+    // Underlay: blit scene (blurred while a last-tab window dissolves).
+    let blur_log = max(u.exit.x, 0.0);
+    let scale0 = fb / logical;
+    let blur_fb = blur_log * min(scale0.x, scale0.y);
+    var col = sample_scene_blur(fb_px, blur_fb);
 
     let presence = clamp(u.lens.w, 0.0, 1.0);
     let radius_log = u.lens.z;

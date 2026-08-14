@@ -1,6 +1,8 @@
 //! Pure hit-test for window chrome. Logical f32 coords only — no winit types.
 
 use crate::layout::{FrameLayout, Metrics, Rect};
+use crate::panes::DockEdge;
+use crate::session::ChromeSession;
 
 /// Interactive region under a pointer (logical coordinates).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +20,12 @@ pub enum HitTarget {
     Caffeine,
     /// Local input strip for pane id.
     WarpBar(u64),
+    /// Path / divider / header chrome of a pane — grab handle for re-dock drag.
+    PaneChrome(u64),
+    /// Close × on a pane header.
+    PaneClose(u64),
+    /// Split sash (a_leaf identifies the branch).
+    Sash(u64),
     /// History cells for pane id.
     Terminal(u64),
     /// Scrollbar track / thumb on the right of the cell well (pane id).
@@ -29,6 +37,16 @@ pub enum HitTarget {
 
 /// Width of the scroll hit gutter inside the cell well (logical px).
 pub const SCROLL_GUTTER_W: f32 = 10.0;
+
+/// Pointer slop before a terminal press becomes a cell selection.
+/// A click under this distance only changes pane focus (same as the keyboard).
+pub const TERM_SELECT_DRAG_PX: f32 = 4.0;
+
+/// True once the pointer has moved far enough to start a terminal selection.
+#[inline]
+pub fn term_select_drag_started(dx: f32, dy: f32) -> bool {
+    dx.hypot(dy) >= TERM_SELECT_DRAG_PX
+}
 
 /// Platform detection for chrome affordances (traffic lights, etc.).
 #[inline]
@@ -114,9 +132,24 @@ pub fn hit_test(
         return HitTarget::NewTab;
     }
 
-    // Multi-pane: footer → command line; cells → history/PTY surface.
+    for sash in &layout.sashes {
+        if sash.rect.contains(x, y) {
+            return HitTarget::Sash(sash.a_leaf);
+        }
+    }
+
+    // Multi-pane: header / path / divider = drag chrome; warp = command line; cells = PTY.
     for pl in &layout.panes {
-        if pl.warp.contains(x, y) || pl.path.contains(x, y) || pl.divider.contains(x, y) {
+        if pl.close.w > 1.0 && pl.close.contains(x, y) {
+            return HitTarget::PaneClose(pl.pane_id);
+        }
+        if pl.header.h > 1.0 && pl.header.contains(x, y) {
+            return HitTarget::PaneChrome(pl.pane_id);
+        }
+        if pl.path.contains(x, y) || pl.divider.contains(x, y) {
+            return HitTarget::PaneChrome(pl.pane_id);
+        }
+        if pl.warp.contains(x, y) {
             return HitTarget::WarpBar(pl.pane_id);
         }
         if pl.cells.contains(x, y) {
@@ -143,6 +176,158 @@ pub fn hit_test(
     }
 
     HitTarget::None
+}
+
+/// Where a dragged pane would land if dropped at `(x, y)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropKind {
+    Edge { pane_id: u64, edge: DockEdge },
+    Tab { tab_id: u64 },
+    /// Insert a dragged tab before this strip index (same window).
+    TabInsert { index: usize },
+    /// Pointer left the frame — tear the dragged tab into a new window.
+    TearOff,
+}
+
+/// Classify a drop. `None` = no legal landing (including over the moving pane).
+/// `surface` selects which window's tab strip `layout.tab_chips` maps to.
+pub fn classify_drop(
+    layout: &FrameLayout,
+    session: &ChromeSession,
+    surface: u64,
+    x: f32,
+    y: f32,
+    moving: u64,
+) -> Option<DropKind> {
+    let strip = session.tabs_on_surface(surface);
+    for (i, chip) in layout.tab_chips.iter().enumerate() {
+        if !chip.contains(x, y) {
+            continue;
+        }
+        let tab_id = *strip.get(i)?;
+        let tab = session.tabs.iter().find(|t| t.id == tab_id)?;
+        if tab.root.contains_pane(moving) && tab.root.leaf_ids().len() <= 1 {
+            return None;
+        }
+        return Some(DropKind::Tab { tab_id: tab.id });
+    }
+    for pl in &layout.panes {
+        if !pl.glass.contains(x, y) {
+            continue;
+        }
+        if pl.pane_id == moving {
+            return None;
+        }
+        if session.panes.get(&pl.pane_id).is_some_and(|p| p.exiting) {
+            return None;
+        }
+        return Some(DropKind::Edge {
+            pane_id: pl.pane_id,
+            edge: edge_of(pl.glass, x, y),
+        });
+    }
+    None
+}
+
+/// Tab-strip drop on `layout`.
+///
+/// `from_idx` is this strip's chip index when the tab already lives here.
+/// `None` means the tab came from another window (insert, do not collapse).
+/// Leaving the **window frame** is TearOff; dropping into the workspace of
+/// the same window is a no-op (not a tear).
+pub fn classify_tab_drop(
+    layout: &FrameLayout,
+    x: f32,
+    y: f32,
+    from_idx: Option<usize>,
+) -> Option<DropKind> {
+    let win_h = layout.workspace.y + layout.workspace.h;
+    let off_frame = y < -8.0 || x < -24.0 || x > layout.title.w + 24.0 || y > win_h + 8.0;
+    if off_frame {
+        return Some(DropKind::TearOff);
+    }
+    if layout.tab_chips.is_empty() {
+        return match from_idx {
+            Some(_) => None,
+            None => Some(DropKind::TabInsert { index: 0 }),
+        };
+    }
+    let mut insert = layout.tab_chips.len();
+    for (i, chip) in layout.tab_chips.iter().enumerate() {
+        if x < chip.x + chip.w * 0.5 {
+            insert = i;
+            break;
+        }
+    }
+    // Below the tab strip, still inside the window: same-window no-op;
+    // cross-window drop docks the tab at the end of this strip.
+    if y >= layout.workspace.y {
+        return match from_idx {
+            Some(_) => None,
+            None => Some(DropKind::TabInsert {
+                index: layout.tab_chips.len(),
+            }),
+        };
+    }
+    let to = match from_idx {
+        Some(from) if insert > from => insert.saturating_sub(1),
+        Some(_) => insert,
+        None => insert,
+    };
+    if from_idx == Some(to) {
+        return None;
+    }
+    if from_idx.is_some() && to >= layout.tab_chips.len() {
+        return None;
+    }
+    Some(DropKind::TabInsert { index: to })
+}
+
+/// Outer 28% of each side is that edge; the center docks to the right.
+pub fn edge_of(r: Rect, x: f32, y: f32) -> DockEdge {
+    let u = ((x - r.x) / r.w.max(1.0)).clamp(0.0, 1.0);
+    let v = ((y - r.y) / r.h.max(1.0)).clamp(0.0, 1.0);
+    const BAND: f32 = 0.28;
+    let dl = u;
+    let dr = 1.0 - u;
+    let dt = v;
+    let db = 1.0 - v;
+    let m = dl.min(dr).min(dt).min(db);
+    if m > BAND {
+        return DockEdge::Right;
+    }
+    if (dl - m).abs() < f32::EPSILON {
+        DockEdge::Left
+    } else if (dr - m).abs() < f32::EPSILON {
+        DockEdge::Right
+    } else if (dt - m).abs() < f32::EPSILON {
+        DockEdge::Top
+    } else {
+        DockEdge::Bottom
+    }
+}
+
+/// Physical outer origin so `chip`'s center sits on `screen` (pointer).
+/// `scale` is the destination window's scale factor.
+pub fn window_origin_for_tab_drop(
+    screen: (i32, i32),
+    chip: Rect,
+    scale: f64,
+) -> (i32, i32) {
+    let ax = ((chip.x + chip.w * 0.5) as f64 * scale).round() as i32;
+    let ay = ((chip.y + chip.h * 0.5) as f64 * scale).round() as i32;
+    (screen.0 - ax, screen.1 - ay)
+}
+
+/// Highlight strip for a drop edge, inset inside `glass`.
+pub fn drop_edge_rect(glass: Rect, edge: DockEdge) -> Rect {
+    let t = (glass.w.min(glass.h) * 0.12).clamp(8.0, 28.0);
+    match edge {
+        DockEdge::Left => Rect::new(glass.x, glass.y, t, glass.h),
+        DockEdge::Right => Rect::new(glass.x + glass.w - t, glass.y, t, glass.h),
+        DockEdge::Top => Rect::new(glass.x, glass.y, glass.w, t),
+        DockEdge::Bottom => Rect::new(glass.x, glass.y + glass.h - t, glass.w, t),
+    }
 }
 
 #[cfg(test)]
@@ -264,6 +449,52 @@ mod tests {
             false,
         );
         assert!(matches!(t, HitTarget::Terminal(_)));
+        let chrome = hit_test(
+            &layout,
+            &m,
+            layout.path.x + 4.0,
+            layout.path.y + layout.path.h * 0.5,
+            false,
+        );
+        assert!(
+            matches!(chrome, HitTarget::PaneChrome(_)),
+            "path strip is the pane grab handle, got {chrome:?}"
+        );
+        let header = hit_test(
+            &layout,
+            &m,
+            layout.panes[0].header.x + 4.0,
+            layout.panes[0].header.y + 4.0,
+            false,
+        );
+        assert!(
+            matches!(header, HitTarget::PaneChrome(_)),
+            "header is pane chrome, got {header:?}"
+        );
+        let px = layout.panes[0].close;
+        let xhit = hit_test(&layout, &m, px.x + px.w * 0.5, px.y + px.h * 0.5, false);
+        assert!(
+            matches!(xhit, HitTarget::PaneClose(_)),
+            "pane × should close, got {xhit:?}"
+        );
+    }
+
+    #[test]
+    fn term_select_waits_for_a_small_drag() {
+        assert!(!term_select_drag_started(0.0, 0.0));
+        assert!(!term_select_drag_started(2.0, 2.0));
+        assert!(term_select_drag_started(TERM_SELECT_DRAG_PX, 0.0));
+        assert!(term_select_drag_started(3.0, 3.0));
+    }
+
+    #[test]
+    fn edge_of_corners_pick_nearest_side() {
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        assert_eq!(edge_of(r, 5.0, 50.0), crate::panes::DockEdge::Left);
+        assert_eq!(edge_of(r, 95.0, 50.0), crate::panes::DockEdge::Right);
+        assert_eq!(edge_of(r, 50.0, 5.0), crate::panes::DockEdge::Top);
+        assert_eq!(edge_of(r, 50.0, 95.0), crate::panes::DockEdge::Bottom);
+        assert_eq!(edge_of(r, 50.0, 50.0), crate::panes::DockEdge::Right);
     }
 
     #[test]
@@ -281,5 +512,77 @@ mod tests {
             ),
             HitTarget::Tab(3)
         );
+    }
+
+    #[test]
+    fn tab_drop_reorders_along_strip() {
+        let (layout, _) = demo_layout();
+        let mid_second = layout.tab_chips[1].x + layout.tab_chips[1].w * 0.6;
+        let y = layout.tab_chips[1].y + layout.tab_chips[1].h * 0.5;
+        assert_eq!(
+            classify_tab_drop(&layout, mid_second, y, Some(0)),
+            Some(DropKind::TabInsert { index: 1 })
+        );
+        assert_eq!(
+            classify_tab_drop(&layout, layout.tab_chips[0].x + 4.0, y, Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_drop_in_workspace_does_not_tear() {
+        let (layout, _) = demo_layout();
+        let y = layout.workspace.y + layout.workspace.h * 0.4;
+        assert_eq!(
+            classify_tab_drop(&layout, layout.title.w * 0.5, y, Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_drop_off_frame_tears() {
+        let (layout, _) = demo_layout();
+        assert_eq!(
+            classify_tab_drop(&layout, 40.0, -40.0, Some(0)),
+            Some(DropKind::TearOff)
+        );
+    }
+
+    #[test]
+    fn tab_drop_from_other_window_appends() {
+        let (layout, _) = demo_layout();
+        let y = layout.workspace.y + 20.0;
+        assert_eq!(
+            classify_tab_drop(&layout, 80.0, y, None),
+            Some(DropKind::TabInsert { index: 2 })
+        );
+    }
+
+    #[test]
+    fn tearoff_origin_puts_chip_under_pointer() {
+        let chip = Rect::new(48.0, 6.0, 112.0, 20.0);
+        let (x, y) = window_origin_for_tab_drop((800, 400), chip, 2.0);
+        // chip center = (104, 16) logical → (208, 32) physical
+        assert_eq!((x, y), (592, 368));
+    }
+
+    #[test]
+    fn classify_drop_uses_surface_tabs() {
+        let (layout, _) = demo_layout();
+        let mut session = crate::session::ChromeSession::new(80, 24);
+        let (t2, pid2) = session.new_tab(80, 24);
+        assert!(session.place_tab_on_surface(t2, 1, 0));
+        // Surface 0 strip is only tab 1; chip 0 should not resolve to t2.
+        let chip = layout.tab_chips[0];
+        let drop = classify_drop(
+            &layout,
+            &session,
+            0,
+            chip.x + 8.0,
+            chip.y + chip.h * 0.5,
+            pid2,
+        );
+        assert_eq!(drop, Some(DropKind::Tab { tab_id: 1 }));
+        let _ = t2;
     }
 }

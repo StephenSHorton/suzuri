@@ -147,6 +147,10 @@ pub struct PaneLayout {
     pub divider: Rect,
     pub path: Rect,
     pub warp: Rect,
+    /// Top chrome strip (title + close).
+    pub header: Rect,
+    pub title_pill: Rect,
+    pub close: Rect,
     pub focused: bool,
 }
 
@@ -179,7 +183,69 @@ pub struct FrameLayout {
     pub tab_new: Rect,
     /// Same as [`logo`] — settings is the logo button.
     pub settings: Rect,
+    /// Split sashes for the active tab (filled by the app after tree layout).
+    pub sashes: Vec<crate::panes::SashHit>,
 }
+
+impl FrameLayout {
+    /// Collapse chip `index` and pull later chips over. `t` is 1 (full) → 0 (gone).
+    pub fn apply_tab_exit(&mut self, index: usize, t: f32) {
+        if index >= self.tab_chips.len() {
+            return;
+        }
+        let t = t.clamp(0.0, 1.0);
+        let ease = 1.0 - t; // 0 start, 1 end
+        let cluster = if self.tab_chips.len() >= 2 {
+            (self.tab_chips[1].x - (self.tab_chips[0].x + self.tab_chips[0].w)).max(0.0)
+        } else {
+            8.0
+        };
+        let lift = 12.0 * ease;
+        let start_x = self.tab_chips[0].x;
+        let chip_y = self.tab_chips[0].y;
+        let chip_h = self.tab_chips[0].h;
+        let mut x = start_x;
+        for i in 0..self.tab_chips.len() {
+            let full = TAB_CHIP_W;
+            let w = if i == index {
+                (full * t).max(0.0)
+            } else {
+                full
+            };
+            let y = if i == index { chip_y - lift } else { chip_y };
+            let h = if i == index {
+                (chip_h * (0.78 + 0.22 * t)).max(1.0)
+            } else {
+                chip_h
+            };
+            if w > 0.5 {
+                self.tab_chips[i] = Rect::new(x, y, w, h);
+                if let Some(close) = self.tab_closes.get_mut(i) {
+                    let cx = x + w - TAB_CLOSE_TRAIL - TAB_CLOSE_SZ;
+                    let cy = y + (h - TAB_CLOSE_SZ) * 0.5;
+                    *close = Rect::new(cx, cy, TAB_CLOSE_SZ, TAB_CLOSE_SZ);
+                }
+                let gap = if i == index { cluster * t } else { cluster };
+                x += w + gap;
+            } else {
+                self.tab_chips[i] = Rect::new(x, y, 0.0, h);
+                if let Some(close) = self.tab_closes.get_mut(i) {
+                    *close = Rect::new(x, y, 0.0, 0.0);
+                }
+            }
+        }
+        let new_size = self.tab_new.w;
+        let new_y = chip_y + (chip_h - new_size) * 0.5;
+        self.tab_new = Rect::new(x, new_y, new_size, new_size);
+    }
+}
+
+/// Height of the pane header strip (title + close).
+pub const PANE_HEADER_H: f32 = 22.0;
+/// Title text band height inside the header.
+pub const PANE_PILL_H: f32 = 16.0;
+/// Ghost close button size (matches the + chip feel).
+pub const PANE_CLOSE_SZ: f32 = 16.0;
 
 /// Tab chip width (room for title + gap + close ×).
 pub const TAB_CHIP_W: f32 = 112.0;
@@ -324,6 +390,7 @@ impl FrameLayout {
             tab_idle,
             tab_new,
             settings,
+            sashes: Vec::new(),
         }
     }
 
@@ -400,12 +467,47 @@ impl FrameLayout {
         // (surface tension / stretchy glass, not separate cubes).
         for pl in &self.panes {
             out.push(PanelInstance::glass(pl.glass, m.radius, PanelKind::Terminal));
+            {
+                let id = ChipId::PaneClose(pl.pane_id);
+                if pl.close.w > 2.0 && chip_ui.ghost_shell_visible(id) {
+                    let r = scale_rect(pl.close, chip_ui.scale_for(id));
+                    let rr = (m.chip_radius * 0.75).max(4.0);
+                    out.push(
+                        PanelInstance::glass(r, rr, PanelKind::NewTab)
+                            .with_press(chip_ui.press_light(id)),
+                    );
+                }
+            }
+            // Header rule — same hairline as the warp strip (no glass on the name).
+            if pl.header.h > 2.0 && pl.header.w > 4.0 {
+                let line = Rect::new(
+                    pl.header.x,
+                    pl.header.y + pl.header.h - 1.0,
+                    pl.header.w,
+                    1.5,
+                );
+                out.push(
+                    PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9),
+                );
+            }
             // Footer hairline only when the command strip is present (not alt-screen).
             if pl.divider.h >= 1.0 {
                 let mid_y = pl.divider.y + pl.divider.h * 0.5 - 0.75;
                 let line = Rect::new(pl.divider.x, mid_y, pl.divider.w, 1.5);
                 out.push(
                     PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9),
+                );
+            }
+            if pl.focused && pl.glass.w > 4.0 && pl.glass.h > 4.0 {
+                let rim = Rect::new(
+                    pl.glass.x + 1.0,
+                    pl.glass.y + 1.0,
+                    (pl.glass.w - 2.0).max(2.0),
+                    (pl.glass.h - 2.0).max(2.0),
+                );
+                out.push(
+                    PanelInstance::glass(rim, (m.radius - 1.0).max(2.0), PanelKind::PaneFocus)
+                        .with_opacity(0.38),
                 );
             }
         }
@@ -482,6 +584,26 @@ impl FrameLayout {
 ///
 /// When `fullscreen` is true (VT alt screen), path/warp/divider collapse and the
 /// cell grid fills the glass — full-screen TUIs (vim, grok, etc.).
+fn pane_header_rects(glass: Rect, inset: f32) -> (Rect, Rect, Rect) {
+    let inner_x = glass.x + inset;
+    let inner_w = (glass.w - inset * 2.0).max(24.0);
+    let header = Rect::new(inner_x, glass.y + 3.0, inner_w, PANE_HEADER_H);
+    let close = Rect::new(
+        header.x + header.w - PANE_CLOSE_SZ,
+        header.y + (header.h - PANE_CLOSE_SZ) * 0.5,
+        PANE_CLOSE_SZ,
+        PANE_CLOSE_SZ,
+    );
+    let title_w = (header.w - PANE_CLOSE_SZ - 8.0).max(20.0);
+    let title_pill = Rect::new(
+        header.x + 2.0,
+        header.y + (header.h - PANE_PILL_H) * 0.5,
+        title_w,
+        PANE_PILL_H,
+    );
+    (header, title_pill, close)
+}
+
 fn pane_layout_in_glass(
     pane_id: u64,
     glass: Rect,
@@ -490,9 +612,10 @@ fn pane_layout_in_glass(
     fullscreen: bool,
 ) -> PaneLayout {
     let inset = m.inset();
+    let (header, title_pill, close) = pane_header_rects(glass, inset);
     let inner_x = glass.x + inset;
     let inner_w = (glass.w - inset * 2.0).max(40.0);
-    let inner_top = glass.y + inset;
+    let inner_top = (header.y + header.h + 2.0).max(glass.y + inset);
     let inner_bottom = glass.y + glass.h - inset;
     let avail = (inner_bottom - inner_top).max(0.0);
 
@@ -508,6 +631,9 @@ fn pane_layout_in_glass(
             divider: empty,
             path: empty,
             warp: empty,
+            header,
+            title_pill,
+            close,
             focused,
         };
     }
@@ -541,6 +667,9 @@ fn pane_layout_in_glass(
         divider,
         path,
         warp,
+        header,
+        title_pill,
+        close,
         focused,
     }
 }
@@ -582,6 +711,8 @@ pub enum PanelKind {
     ModalButtonActive = 15,
     /// Thin solid rule (pane footer, list separators).
     Hairline = 16,
+    /// Dim primary glow / smoke on the focused pane.
+    PaneFocus = 17,
 }
 
 /// GPU-ready panel instance.
@@ -716,5 +847,73 @@ mod tests {
         assert!(!a.intersects(c));
         assert!(a.contains(0.0, 0.0));
         assert!(!a.contains(10.0, 10.0));
+    }
+
+    #[test]
+    fn focused_pane_emits_dim_primary_rim() {
+        let m = Metrics::default();
+        let l = FrameLayout::compute(800.0, 600.0, m, 1);
+        let chip = crate::chrome_ui::ChipUi::default();
+        let jelly = crate::chrome_ui::TabJelly::default();
+        let panels = l.glass_panels(m, 0, None, &chip, &jelly);
+        let rims = panels
+            .iter()
+            .filter(|p| (p.kind - PanelKind::PaneFocus as u32 as f32).abs() < 0.1)
+            .count();
+        assert_eq!(rims, 1);
+        let rim = panels
+            .iter()
+            .find(|p| (p.kind - PanelKind::PaneFocus as u32 as f32).abs() < 0.1)
+            .unwrap();
+        assert!(rim._pad[0] < 0.40, "rim should stay dim");
+    }
+
+    #[test]
+    fn pane_header_has_title_pill_and_close() {
+        let m = Metrics::default();
+        let l = FrameLayout::compute(800.0, 600.0, m, 1);
+        let pl = &l.panes[0];
+        assert!(pl.header.h > 10.0);
+        assert!(pl.title_pill.x < pl.close.x);
+        assert!(pl.close.x + pl.close.w <= pl.header.x + pl.header.w + 0.5);
+        assert!(pl.cells.y >= pl.header.y + pl.header.h);
+    }
+
+    #[test]
+    fn pane_title_is_hairline_not_glass_pill() {
+        let m = Metrics::default();
+        let l = FrameLayout::compute(800.0, 600.0, m, 1);
+        let chip = crate::chrome_ui::ChipUi::default();
+        let jelly = crate::chrome_ui::TabJelly::default();
+        let panels = l.glass_panels(m, 0, None, &chip, &jelly);
+        let pl = &l.panes[0];
+        let title_glass = panels.iter().any(|p| {
+            (p.kind - PanelKind::ChipIdle as u32 as f32).abs() < 0.1
+                && (p.rect[0] - pl.title_pill.x).abs() < 1.0
+                && (p.rect[1] - pl.title_pill.y).abs() < 1.0
+        });
+        assert!(!title_glass, "pane name should not sit in a glass chip");
+        let hair = panels
+            .iter()
+            .filter(|p| (p.kind - PanelKind::Hairline as u32 as f32).abs() < 0.1)
+            .count();
+        assert!(
+            hair >= 2,
+            "header + footer hairlines expected, got {hair}"
+        );
+    }
+
+    #[test]
+    fn tab_exit_collapses_and_pulls_neighbors() {
+        let m = Metrics::default();
+        let mut l = FrameLayout::compute(1120.0, 740.0, m, 3);
+        let x1 = l.tab_chips[1].x;
+        l.apply_tab_exit(0, 0.0);
+        assert!(l.tab_chips[0].w < 1.0);
+        assert!(
+            (l.tab_chips[1].x - l.tab_chips[0].x).abs() < 1.0,
+            "next chip should pull into the closed slot"
+        );
+        assert!(l.tab_chips[2].x < x1 + TAB_CHIP_W);
     }
 }

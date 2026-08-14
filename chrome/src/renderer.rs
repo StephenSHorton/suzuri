@@ -70,6 +70,8 @@ struct FrameUniforms {
     hover: [f32; 4],
     /// Theme primary RGB + pad (ModalButtonActive, hairlines, chip press).
     primary: [f32; 4],
+    /// x=1 → transparent outside panels (cursor-follow drag chip).
+    flags: [f32; 4],
 }
 
 #[repr(C)]
@@ -79,6 +81,8 @@ struct LensUniforms {
     lens: [f32; 4],
     glass: [f32; 4],
     glass2: [f32; 4],
+    /// x = last-tab dissolve blur radius (logical px).
+    exit: [f32; 4],
 }
 
 /// Canvas UI `GlassVanilla` DEFAULTS — https://github.com/DavidHDev/canvas-ui
@@ -97,7 +101,20 @@ const MAG_LEVEL_MAX: f32 = 2.8;
 /// Canvas UI follow feel when the bubble is alive (~follow 0.2).
 const LENS_FOLLOW: f32 = 0.2;
 
+/// Click-through chip that follows the pointer during a pane/tab drag.
+pub struct GhostLayer {
+    pub window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    text: crate::text::TextLayer,
+    frame_uniform_buf: wgpu::Buffer,
+    panel_buf: wgpu::Buffer,
+    size: winit::dpi::PhysicalSize<u32>,
+    scale: f32,
+}
+
 pub struct Renderer {
+    instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -110,6 +127,7 @@ pub struct Renderer {
     rain_thread: RainThread,
 
     composite_pipeline: wgpu::RenderPipeline,
+    composite_overlay_pipeline: wgpu::RenderPipeline,
     composite_bgl: wgpu::BindGroupLayout,
     frame_uniform_buf: wgpu::Buffer,
     panel_buf: wgpu::Buffer,
@@ -146,6 +164,8 @@ pub struct Renderer {
     /// Active-tab jelly connector (shared with app tick).
     pub tab_jelly: TabJelly,
     surface_format: wgpu::TextureFormat,
+    /// Last-tab dissolve blur (logical px). Set per frame before [`render`].
+    pub window_exit_blur: f32,
 }
 
 impl Renderer {
@@ -360,6 +380,7 @@ impl Renderer {
                     crate::theme::DEFAULT_PRIMARY[2],
                     1.0,
                 ],
+                flags: [0.0, 0.0, 0.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -447,6 +468,39 @@ impl Renderer {
             cache: None,
         });
 
+        let composite_overlay_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("composite overlay pipeline"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("composite overlay pl"),
+                        bind_group_layouts: &[&composite_bgl],
+                        push_constant_ranges: &[],
+                    }),
+                ),
+                vertex: wgpu::VertexState {
+                    module: &composite_shader,
+                    entry_point: Some("vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_shader,
+                    entry_point: Some("fs"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
         let mut text = TextLayer::new(&device, &queue, format);
         text.resize(size, scale_factor);
 
@@ -469,6 +523,7 @@ impl Renderer {
                     GLASS_REFLECTION,
                     GLASS_SHINE,
                 ],
+                exit: [0.0, 0.0, 0.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -539,6 +594,7 @@ impl Renderer {
         let cy = (size.height as f32 / scale_factor) * 0.5;
 
         Self {
+            instance,
             surface,
             device,
             queue,
@@ -548,6 +604,7 @@ impl Renderer {
             rain_atlas,
             rain_thread,
             composite_pipeline,
+            composite_overlay_pipeline,
             composite_bgl,
             frame_uniform_buf,
             panel_buf,
@@ -572,6 +629,7 @@ impl Renderer {
             pointer_inside: false,
             tab_jelly: TabJelly::default(),
             surface_format: format,
+            window_exit_blur: 0.0,
         }
     }
 
@@ -658,6 +716,207 @@ impl Renderer {
         self.text.resize(new_size, scale_factor);
     }
 
+    /// Small always-on-top surface that shares this GPU device (no second adapter).
+    pub fn spawn_ghost(&self, window: Arc<Window>) -> GhostLayer {
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let surface = self
+            .instance
+            .create_surface(window.clone())
+            .expect("ghost surface");
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: self.surface_format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: wgpu::PresentMode::AutoVsync,
+            alpha_mode: self.config.alpha_mode,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&self.device, &config);
+        let mut text = crate::text::TextLayer::new(&self.device, &self.queue, self.surface_format);
+        text.resize(size, scale.max(0.01));
+        let frame_uniform_buf =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("ghost uniforms"),
+                    contents: bytemuck::bytes_of(&FrameUniforms {
+                        size: [1.0, 1.0, 1.0, 1.0],
+                        misc: [0.0, 1.0, 1.0, crate::settings::GLASS_DARKEN_DEFAULT],
+                        glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
+                        glass2: [
+                            GLASS_ABERRATION,
+                            GLASS_BLUR,
+                            GLASS_REFLECTION,
+                            GLASS_SHINE.max(0.1),
+                        ],
+                        hover: [0.0, 0.0, 28.0, 0.0],
+                        primary: [0.0, 0.0, 0.0, 1.0],
+                        flags: [1.0, 0.0, 0.0, 0.0],
+                    }),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
+        let panel_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ghost panels"),
+            size: 4 * std::mem::size_of::<crate::layout::PanelInstance>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        GhostLayer {
+            window,
+            surface,
+            config,
+            text,
+            frame_uniform_buf,
+            panel_buf,
+            size,
+            scale,
+        }
+    }
+
+    pub fn render_ghost(
+        &self,
+        ghost: &mut GhostLayer,
+        title: &str,
+        settings: &SettingsState,
+        tab: bool,
+    ) -> Result<(), wgpu::SurfaceError> {
+        let size = ghost.window.inner_size();
+        let scale = ghost.window.scale_factor() as f32;
+        if size.width != ghost.size.width
+            || size.height != ghost.size.height
+            || (scale - ghost.scale).abs() > 0.01
+        {
+            if size.width == 0 || size.height == 0 {
+                return Ok(());
+            }
+            ghost.size = size;
+            ghost.scale = scale.max(0.01);
+            ghost.config.width = size.width;
+            ghost.config.height = size.height;
+            ghost.surface.configure(&self.device, &ghost.config);
+            ghost.text.resize(size, ghost.scale);
+        }
+        let frame = ghost.surface.get_current_texture()?;
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let fw = ghost.size.width as f32;
+        let fh = ghost.size.height as f32;
+        let logical_w = fw / ghost.scale;
+        let logical_h = fh / ghost.scale;
+        let pad = 2.0;
+        let rect = crate::layout::Rect::new(
+            pad,
+            pad,
+            (logical_w - pad * 2.0).max(4.0),
+            (logical_h - pad * 2.0).max(4.0),
+        );
+        let kind = if tab {
+            crate::layout::PanelKind::ChipActive
+        } else {
+            crate::layout::PanelKind::Terminal
+        };
+        let radius = if tab {
+            self.metrics.chip_radius
+        } else {
+            self.metrics.radius
+        };
+        let panel = crate::layout::PanelInstance::glass(rect, radius, kind).with_opacity(0.92);
+        let mut panels = [panel; 4];
+        panels[1] = panel;
+        panels[2] = panel;
+        panels[3] = panel;
+        self.queue
+            .write_buffer(&ghost.panel_buf, 0, bytemuck::cast_slice(&panels));
+        let j = settings.prefs.theme_colors().jade;
+        let pal = settings.prefs.theme_colors();
+        self.queue.write_buffer(
+            &ghost.frame_uniform_buf,
+            0,
+            bytemuck::bytes_of(&FrameUniforms {
+                size: [logical_w, logical_h, fw, fh],
+                misc: [
+                    0.0,
+                    ghost.scale,
+                    1.0,
+                    settings.prefs.glass_darken.clamp(0.0, 0.95),
+                ],
+                glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
+                glass2: [
+                    GLASS_ABERRATION,
+                    GLASS_BLUR,
+                    GLASS_REFLECTION,
+                    GLASS_SHINE.max(0.1),
+                ],
+                hover: [0.0, 0.0, 28.0, 0.0],
+                primary: [j[0], j[1], j[2], 1.0],
+                flags: [1.0, 0.0, 0.0, 0.0],
+            }),
+        );
+        let rain_view = self.rain_thread.front_view();
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ghost composite"),
+            layout: &self.composite_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ghost.frame_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&rain_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: ghost.panel_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ghost frame"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ghost composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.composite_overlay_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        let label = crate::text::TextLabel::centered(
+            title,
+            [rect.x, rect.y, rect.w, rect.h],
+            14.0,
+            [pal.fg[0], pal.fg[1], pal.fg[2], 0.95],
+        );
+        ghost
+            .text
+            .prepare(&self.device, &self.queue, std::slice::from_ref(&label));
+        ghost.text.render(&self.device, &mut encoder, &view);
+        self.queue.submit(Some(encoder.finish()));
+        frame.present();
+        Ok(())
+    }
+
     pub fn render(
         &mut self,
         session: &ChromeSession,
@@ -684,6 +943,8 @@ impl Renderer {
         term_selection: &Selection,
         // Hovered URL span for primary tint (focused pane; None = no-op).
         hovered_link: Option<&LinkHoverSpan>,
+        pane_drop: Option<crate::input::DropKind>,
+        drag_ghost: Option<crate::layout::Rect>,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -776,9 +1037,11 @@ impl Renderer {
         let rain_view = self.rain_thread.front_view();
         let _ = t; // wall-clock still used by composite glass time
 
+        let surface = session.active_tab().map(|t| t.surface).unwrap_or(0);
         let active_idx = session
             .tabs
             .iter()
+            .filter(|tab| tab.surface == surface)
             .position(|tab| tab.id == session.active_id)
             .unwrap_or(0);
         let lights = if is_mac() {
@@ -797,6 +1060,67 @@ impl Renderer {
             chip_ui,
             &self.tab_jelly,
         );
+        if let Some(drop) = pane_drop {
+            use crate::input::{drop_edge_rect, DropKind};
+            use crate::layout::{PanelInstance, PanelKind};
+            match drop {
+                DropKind::Edge { pane_id, edge } => {
+                    if let Some(pl) = layout.panes.iter().find(|p| p.pane_id == pane_id) {
+                        let strip = drop_edge_rect(pl.glass, edge);
+                        panels.push(
+                            PanelInstance::glass(
+                                strip,
+                                self.metrics.chip_radius,
+                                PanelKind::ModalButtonActive,
+                            )
+                            .with_opacity(0.85),
+                        );
+                    }
+                }
+                DropKind::Tab { tab_id } => {
+                    let surface = session.active_tab().map(|t| t.surface).unwrap_or(0);
+                    if let Some(i) = session
+                        .tabs
+                        .iter()
+                        .filter(|t| t.surface == surface)
+                        .position(|t| t.id == tab_id)
+                    {
+                        if let Some(chip) = layout.tab_chips.get(i) {
+                            panels.push(
+                                PanelInstance::glass(
+                                    *chip,
+                                    self.metrics.chip_radius,
+                                    PanelKind::ModalButtonActive,
+                                )
+                                .with_opacity(0.9),
+                            );
+                        }
+                    }
+                }
+                DropKind::TabInsert { index } => {
+                    if let Some(chip) = layout.tab_chips.get(index) {
+                        let gap = crate::layout::Rect::new(
+                            chip.x - 3.0,
+                            chip.y,
+                            6.0,
+                            chip.h,
+                        );
+                        panels.push(
+                            PanelInstance::glass(gap, 2.0, PanelKind::ModalButtonActive)
+                                .with_opacity(0.95),
+                        );
+                    }
+                }
+                DropKind::TearOff => {}
+            }
+        }
+        if let Some(ghost) = drag_ghost {
+            use crate::layout::{PanelInstance, PanelKind};
+            panels.push(
+                PanelInstance::glass(ghost, self.metrics.radius, PanelKind::ModalFrost)
+                    .with_opacity(0.55),
+            );
+        }
         // Workspace interiors live in the pane (under overlay scrim), not as a modal.
         if workspace_ui.is_docked() {
             if let Some(host) = workspace_host_rect(workspace_ui, layout) {
@@ -953,6 +1277,7 @@ impl Renderer {
                     let j = settings.prefs.theme_colors().jade;
                     [j[0], j[1], j[2], 1.0]
                 },
+                flags: [0.0, 0.0, 0.0, 0.0],
             }),
         );
 
@@ -974,6 +1299,7 @@ impl Renderer {
                     GLASS_REFLECTION,
                     GLASS_SHINE.max(0.1),
                 ],
+                exit: [self.window_exit_blur.max(0.0), 0.0, 0.0, 0.0],
             }),
         );
 
@@ -1256,12 +1582,20 @@ fn chrome_labels(
     let tab_size = 14.0;
     for (i, chip) in layout.tab_chips.iter().enumerate() {
         let id = ChipId::Tab(i);
+        let surface = session.active_tab().map(|t| t.surface).unwrap_or(0);
         let title = session
             .tabs
-            .get(i)
+            .iter()
+            .filter(|t| t.surface == surface)
+            .nth(i)
             .map(|t| t.title.as_str())
             .unwrap_or("?");
-        let color = chip_ui.dim_color(id, if i == active_idx { bright } else { dim });
+        let mut color = chip_ui.dim_color(id, if i == active_idx { bright } else { dim });
+        if let Some((xi, exit)) = session.tab_exit_on_surface(surface) {
+            if xi == i {
+                color[3] *= exit.t.clamp(0.0, 1.0);
+            }
+        }
         // Labels sit on layout chips — no hover scale.
         let r = scale_rect(*chip, chip_ui.scale_for(id));
         // Title sits in the left band; close × has its own rect on the right.
@@ -1275,7 +1609,12 @@ fn chrome_labels(
         if let Some(close) = layout.tab_closes.get(i) {
             let cr = scale_rect(*close, chip_ui.scale_for(id));
             // × only dims on hover — no red flash.
-            let xc = chip_ui.dim_color(id, dim);
+            let mut xc = chip_ui.dim_color(id, dim);
+            if let Some((xi, exit)) = session.tab_exit_on_surface(surface) {
+                if xi == i {
+                    xc[3] *= exit.t.clamp(0.0, 1.0);
+                }
+            }
             labels.push(TextLabel::centered(
                 "×",
                 [cr.x, cr.y, cr.w, cr.h],
@@ -1285,11 +1624,11 @@ fn chrome_labels(
         }
     }
 
-    // Ghost + : no hover recolor — just dim.
+    // Ghost + : dim idle; hover/press keep the glyph bright on the shell.
     {
         let id = ChipId::NewTab;
         let r = scale_rect(layout.tab_new, chip_ui.scale_for(id));
-        let color = chip_ui.dim_color(id, dim);
+        let color = if chip_ui.is_lit(id) { bright } else { dim };
         labels.push(TextLabel::centered("+", [r.x, r.y, r.w, r.h], 14.0, color));
     }
 
@@ -1351,12 +1690,40 @@ fn chrome_labels(
     );
     let dim_term = !cover_cards.is_empty();
 
-    // Every leaf pane: cells + footer
+    // Every leaf pane: header + cells + footer
     let focus = session.focus_pane_id();
     for pl in &layout.panes {
         let Some(pane) = session.panes.get(&pl.pane_id) else {
             continue;
         };
+        if pl.title_pill.w > 2.0 {
+            let title = pane.title.as_str();
+            if !title.is_empty() {
+                let max_c = ((pl.title_pill.w / cell.w.max(1.0)).floor() as usize).max(1);
+                let draw = truncate_chars(title, max_c);
+                let ts = 11.0;
+                let ty = pl.title_pill.y + (pl.title_pill.h - ts).max(0.0) * 0.5;
+                labels.push(TextLabel::new(
+                    draw,
+                    pl.title_pill.x + 2.0,
+                    ty,
+                    ts,
+                    if pl.focused { bright } else { dim },
+                ));
+            }
+        }
+        if pl.close.w > 2.0 {
+            let cid = ChipId::PaneClose(pl.pane_id);
+            let cr = scale_rect(pl.close, chip_ui.scale_for(cid));
+            let xc = chip_ui.dim_color(cid, dim);
+            // Gohu × sits high/left in the em box — nudge into the glass.
+            labels.push(TextLabel::centered(
+                "×",
+                [cr.x + 0.5, cr.y + 1.0, cr.w, cr.h],
+                11.0,
+                xc,
+            ));
+        }
         if pane.kind.is_workspace() {
             if workspace_ui.is_docked() {
                 push_workspace_labels(

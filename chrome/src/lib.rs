@@ -21,7 +21,7 @@
 //! | [`control_mailbox`] | Phase 2 light IPC (`chrome_cmd` file) |
 //! | [`commands`] | Palette / shortcuts registry |
 //! | [`confirm`] | Crush-style yes/no confirm (quit) |
-//! | [`new_window`] | Spawn a second OS window (new process) |
+//! | [`new_window`] | Resolve/spawn a second process (New Window is in-process) |
 //! | [`rename`] | Tab / pane rename dialog |
 //! | [`toast`] | Ephemeral frost-chip status ("Copied") |
 //! | [`shell`] | Mock shell helpers (fallback when no PTY) |
@@ -97,7 +97,11 @@ pub use control_mailbox::{
     chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
     POLL_INTERVAL,
 };
-pub use input::{hit_test, is_mac, traffic_light_rects, HitTarget};
+pub use input::{
+    classify_drop, classify_tab_drop, drop_edge_rect, edge_of, hit_test, is_mac,
+    term_select_drag_started, traffic_light_rects, window_origin_for_tab_drop, DropKind,
+    HitTarget, TERM_SELECT_DRAG_PX,
+};
 pub use layout::{FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect, Spacing};
 pub use links::{
     clean_url, find_links_in_line, link_at, link_span_at_col, link_url_at_col, normalize_url,
@@ -105,13 +109,13 @@ pub use links::{
 };
 pub use mouse_pty::encode_mouse_wheel;
 pub use new_window::{canonicalize_exe, resolve_self_exe, spawn_new_window};
-pub use panes::{FocusDir, RemoveResult, SplitAxis, SplitNode};
+pub use panes::{DockEdge, FocusDir, RemoveResult, SashHit, SplitAxis, SplitNode};
 pub use pty::PtySession;
 pub use rename::{RenameState, RenameTarget};
 pub use selection::Selection;
 pub use session::{
     initial_cwd, is_unhelpful_cwd, normalize_process_cwd, user_home_dir, ChromeSession,
-    CloseOutcome, Pane, PaneKind, Tab, WidgetKind,
+    CloseOutcome, Pane, PaneKind, Tab, TabExitAnim, WidgetKind,
 };
 pub use settings::{ChromePrefs, SettingsState, GLASS_DARKEN_DEFAULT};
 pub use shell::{ShellOutput, PROMPT_GLYPH};
