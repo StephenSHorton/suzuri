@@ -83,10 +83,12 @@ func NormalizeAvailability(s string) Availability {
 
 // Member is a workspace participant.
 type Member struct {
-	ID        string       `json:"id"`
-	Name      string       `json:"name"`
-	Kind      MemberKind   `json:"kind"`
-	SessionID string       `json:"session_id,omitempty"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Kind      MemberKind `json:"kind"`
+	SessionID string     `json:"session_id,omitempty"`
+	// Role is a claimed function (pm|engine|content). Distinct from Name.
+	Role Role `json:"role,omitempty"`
 	// Status is a short code (idle|working|waiting|blocked|away|custom).
 	Status Availability `json:"status,omitempty"`
 	// StatusNote is optional free text (e.g. "waiting on review from bob").
@@ -124,6 +126,8 @@ type Message struct {
 	Body     string     `json:"body"`
 	ReplyTo  string     `json:"reply_to,omitempty"`
 	File     *FileRef   `json:"file,omitempty"`
+	// Mentions are member ids resolved from @display-name tokens at post time.
+	Mentions []string `json:"mentions,omitempty"`
 }
 
 // Meta is workspace-level metadata.
@@ -345,6 +349,10 @@ func (s *Store) DeleteChannel(name string) (string, error) {
 }
 
 // Join registers or updates a member.
+// A member is reused only when sessionID is non-empty and matches an existing
+// session_id. An empty sessionID always creates a new member. If the display
+// name is taken, a numeric suffix is added (engine, engine-2).
+// Join does not post a system line to #general.
 func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -358,34 +366,27 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 	if kind != KindHuman && kind != KindAgent {
 		kind = KindAgent
 	}
+	sessionID = strings.TrimSpace(sessionID)
 	members, err := s.readMembersLocked()
 	if err != nil {
 		return Member{}, err
 	}
 	now := time.Now().UTC()
-	// Match existing by session_id (agents) or exact name+kind.
-	for i, m := range members {
-		if sessionID != "" && m.SessionID != "" && m.SessionID == sessionID {
-			members[i].Name = name
-			members[i].Kind = kind
-			members[i].LastSeen = now
-			if members[i].Status == "" {
-				members[i].Status = AvailIdle
+	// Reuse only on a non-empty session_id match. Never merge on display name.
+	if sessionID != "" {
+		for i, m := range members {
+			if m.SessionID != "" && m.SessionID == sessionID {
+				members[i].Name = uniqueDisplayName(name, members, m.ID)
+				members[i].Kind = kind
+				members[i].LastSeen = now
+				if members[i].Status == "" {
+					members[i].Status = AvailIdle
+				}
+				if err := s.writeMembersLocked(members); err != nil {
+					return Member{}, err
+				}
+				return members[i], nil
 			}
-			if err := s.writeMembersLocked(members); err != nil {
-				return Member{}, err
-			}
-			return members[i], nil
-		}
-		if sessionID == "" && m.Name == name && m.Kind == kind {
-			members[i].LastSeen = now
-			if members[i].Status == "" {
-				members[i].Status = AvailIdle
-			}
-			if err := s.writeMembersLocked(members); err != nil {
-				return Member{}, err
-			}
-			return members[i], nil
 		}
 	}
 	if len(members) >= maxMembers {
@@ -393,7 +394,7 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 	}
 	m := Member{
 		ID:        newID("m"),
-		Name:      name,
+		Name:      uniqueDisplayName(name, members, ""),
 		Kind:      kind,
 		SessionID: sessionID,
 		Status:    AvailIdle,
@@ -404,8 +405,6 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 	if err := s.writeMembersLocked(members); err != nil {
 		return Member{}, err
 	}
-	// System line in #general.
-	_, _ = s.postLocked(DefaultChannel, m, "system", fmt.Sprintf("%s joined the workspace", name), "", nil)
 	return m, nil
 }
 
@@ -471,8 +470,6 @@ func (s *Store) Leave(memberID, name string) error {
 	if err := s.writeMembersLocked(out); err != nil {
 		return err
 	}
-	sys := Member{ID: "system", Name: "system", Kind: KindHuman}
-	_, _ = s.postLocked(DefaultChannel, sys, "system", fmt.Sprintf("%s left the workspace", left.Name), "", nil)
 	return nil
 }
 
@@ -517,6 +514,12 @@ func (s *Store) Post(channel, body, memberID, name string, kind MemberKind, repl
 }
 
 func (s *Store) postLocked(channel string, from Member, kind, body, replyTo string, file *FileRef) (Message, error) {
+	var mentions []string
+	if kind != "system" && body != "" {
+		if mems, err := s.readMembersLocked(); err == nil {
+			mentions = ResolveMentions(body, mems)
+		}
+	}
 	msg := Message{
 		ID:       newID("msg"),
 		Channel:  channel,
@@ -528,6 +531,7 @@ func (s *Store) postLocked(channel string, from Member, kind, body, replyTo stri
 		Body:     body,
 		ReplyTo:  replyTo,
 		File:     file,
+		Mentions: mentions,
 	}
 	path := filepath.Join(s.rootLocked(), "channels", channel, messagesFileName)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -618,17 +622,17 @@ func (s *Store) resolveMemberLocked(id, name string, kind MemberKind) (Member, e
 	if kind == "" {
 		kind = KindAgent
 	}
-	for _, m := range members {
-		if m.Name == name && (kind == "" || m.Kind == kind) {
-			return m, nil
-		}
+	// Never merge on display name. Auto-join always creates a new member
+	// (suffix if the name is taken). Empty session_id never fuses.
+	if len(members) >= maxMembers {
+		return Member{}, fmt.Errorf("member limit reached (%d)", maxMembers)
 	}
-	// Auto-join for convenience (agents forget to join).
 	now := time.Now().UTC()
 	m := Member{
 		ID:       newID("m"),
-		Name:     name,
+		Name:     uniqueDisplayName(name, members, ""),
 		Kind:     kind,
+		Status:   AvailIdle,
 		JoinedAt: now,
 		LastSeen: now,
 	}

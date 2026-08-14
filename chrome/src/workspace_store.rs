@@ -87,6 +87,8 @@ pub struct WsMember {
     /// `"human"` | `"agent"`.
     pub kind: String,
     pub session_id: String,
+    /// `pm` | `engine` | `content` | empty. Distinct from display name.
+    pub role: String,
     /// `idle` | `working` | `waiting` | `blocked` | `away` | custom.
     pub status: String,
     pub status_note: String,
@@ -112,6 +114,8 @@ impl WsMember {
 pub struct WsMessage {
     pub id: String,
     pub channel: String,
+    /// Member id (`from_id` in product JSONL). Never mint a fresh id per message.
+    pub from_id: String,
     /// Display name (`from_name` in product JSONL).
     pub from: String,
     pub from_kind: String,
@@ -121,6 +125,8 @@ pub struct WsMessage {
     /// Unix seconds (parsed from RFC3339 `ts` when present).
     pub ts: u64,
     pub file: Option<WsFileRef>,
+    /// Member ids resolved from @display-name tokens at post time.
+    pub mentions: Vec<String>,
 }
 
 /// Handle rooted at the suzuri workspace directory.
@@ -309,6 +315,19 @@ impl WorkspaceStore {
         from_name: &str,
         from_kind: &str,
     ) -> Result<WsMessage, String> {
+        self.post_as(channel, body, "", from_name, from_kind)
+    }
+
+    /// Post as an existing member. `member_id` is required for attribution;
+    /// empty falls back to auto-join (never merges on name).
+    pub fn post_as(
+        &self,
+        channel: &str,
+        body: &str,
+        member_id: &str,
+        from_name: &str,
+        from_kind: &str,
+    ) -> Result<WsMessage, String> {
         self.ensure()?;
         let body = body.trim();
         if body.is_empty() {
@@ -322,23 +341,60 @@ impl WorkspaceStore {
             slug = DEFAULT_CHANNEL.into();
         }
         self.ensure_channel(&slug, "")?;
-        let name = from_name.trim();
-        if name.is_empty() {
-            return Err("name required".into());
-        }
-        let kind = if from_kind == "agent" { "agent" } else { "human" };
+        let from = self.resolve_member(member_id, from_name, from_kind)?;
+        let members = self.read_members().unwrap_or_default();
+        let mentions = resolve_mentions(body, &members);
         let msg = WsMessage {
             id: new_id("msg"),
-            channel: slug.clone(),
-            from: name.to_string(),
-            from_kind: kind.into(),
+            channel: slug,
+            from_id: from.id,
+            from: from.name,
+            from_kind: from.kind,
             kind: "text".into(),
             body: body.to_string(),
             ts: now_secs(),
             file: None,
+            mentions,
         };
         self.append_message(&msg)?;
         Ok(msg)
+    }
+
+    /// Look up by member_id, or auto-join a *new* member (never merge on name).
+    fn resolve_member(&self, member_id: &str, name: &str, kind: &str) -> Result<WsMember, String> {
+        let mut members = self.read_members()?;
+        let member_id = member_id.trim();
+        if !member_id.is_empty() {
+            for m in &members {
+                if m.id == member_id {
+                    return Ok(m.clone());
+                }
+            }
+            return Err("member id not found; call workspace_join first".into());
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("name or member_id required".into());
+        }
+        let kind = if kind == "human" { "human" } else { "agent" };
+        if members.len() >= MAX_MEMBERS {
+            return Err(format!("member limit reached ({MAX_MEMBERS})"));
+        }
+        let now = now_secs();
+        let m = WsMember {
+            id: new_id("m"),
+            name: unique_display_name(name, &members, ""),
+            kind: kind.into(),
+            session_id: String::new(),
+            role: String::new(),
+            status: STATUS_IDLE.into(),
+            status_note: String::new(),
+            joined_at: now,
+            last_seen: now,
+        };
+        members.push(m.clone());
+        self.write_members(&members)?;
+        Ok(m)
     }
 
     // ── members / presence ───────────────────────────────────────────────────
@@ -349,14 +405,11 @@ impl WorkspaceStore {
         self.read_members()
     }
 
-    /// Register or refresh a member (product `Join`). Matches by session_id or name+kind.
-    /// Posts a system line in #general only when a new member is created.
-    pub fn join(
-        &self,
-        name: &str,
-        kind: &str,
-        session_id: &str,
-    ) -> Result<WsMember, String> {
+    /// Register or refresh a member (product `Join`).
+    /// Reuses a member only when `session_id` is non-empty and matches.
+    /// Empty session_id always creates a new member; taken names get a suffix
+    /// (`engine`, `engine-2`). Does not post a system line to #general.
+    pub fn join(&self, name: &str, kind: &str, session_id: &str) -> Result<WsMember, String> {
         self.ensure()?;
         let name = name.trim();
         if name.is_empty() {
@@ -367,28 +420,20 @@ impl WorkspaceStore {
         let mut members = self.read_members()?;
         let now = now_secs();
 
-        // Match existing by session_id (agents) or exact name+kind.
-        for m in &mut members {
-            if !session_id.is_empty()
-                && !m.session_id.is_empty()
-                && m.session_id == session_id
+        if !session_id.is_empty() {
+            if let Some(i) = members
+                .iter()
+                .position(|m| !m.session_id.is_empty() && m.session_id == session_id)
             {
-                m.name = name.to_string();
-                m.kind = kind.into();
-                m.last_seen = now;
-                if m.status.is_empty() {
-                    m.status = STATUS_IDLE.into();
+                let id = members[i].id.clone();
+                let display = unique_display_name(name, &members, &id);
+                members[i].name = display;
+                members[i].kind = kind.into();
+                members[i].last_seen = now;
+                if members[i].status.is_empty() {
+                    members[i].status = STATUS_IDLE.into();
                 }
-                let out = m.clone();
-                self.write_members(&members)?;
-                return Ok(out);
-            }
-            if session_id.is_empty() && m.name == name && m.kind == kind {
-                m.last_seen = now;
-                if m.status.is_empty() {
-                    m.status = STATUS_IDLE.into();
-                }
-                let out = m.clone();
+                let out = members[i].clone();
                 self.write_members(&members)?;
                 return Ok(out);
             }
@@ -397,11 +442,13 @@ impl WorkspaceStore {
         if members.len() >= MAX_MEMBERS {
             return Err(format!("member limit reached ({MAX_MEMBERS})"));
         }
+        let display = unique_display_name(name, &members, "");
         let m = WsMember {
             id: new_id("m"),
-            name: name.to_string(),
+            name: display,
             kind: kind.into(),
             session_id: session_id.to_string(),
+            role: String::new(),
             status: STATUS_IDLE.into(),
             status_note: String::new(),
             joined_at: now,
@@ -409,20 +456,35 @@ impl WorkspaceStore {
         };
         members.push(m.clone());
         self.write_members(&members)?;
-        // System line in #general (product Join).
-        let sys = WsMessage {
-            id: new_id("msg"),
-            channel: DEFAULT_CHANNEL.into(),
-            from: m.name.clone(),
-            from_kind: m.kind.clone(),
-            kind: "system".into(),
-            body: format!("{} joined the workspace", m.name),
-            ts: now,
-            file: None,
-        };
-        let _ = self.ensure_channel(DEFAULT_CHANNEL, "");
-        let _ = self.append_message(&sys);
         Ok(m)
+    }
+
+    /// Claim an exclusive role (`pm`|`engine`|`content`) for a live member.
+    /// Fails if another member already holds it. Empty role clears.
+    pub fn claim_role(&self, member_id: &str, role: &str) -> Result<WsMember, String> {
+        self.ensure()?;
+        let member_id = member_id.trim();
+        if member_id.is_empty() {
+            return Err("member_id required".into());
+        }
+        let role = normalize_role(role)?;
+        let mut members = self.read_members()?;
+        let idx = members
+            .iter()
+            .position(|m| m.id == member_id)
+            .ok_or_else(|| "member not found".to_string())?;
+        if !role.is_empty() {
+            for (i, m) in members.iter().enumerate() {
+                if i != idx && m.role == role {
+                    return Err(format!("role {role} already held by {}", m.name));
+                }
+            }
+        }
+        members[idx].role = role;
+        members[idx].last_seen = now_secs();
+        let out = members[idx].clone();
+        self.write_members(&members)?;
+        Ok(out)
     }
 
     /// Update availability. Identify by member_id or name.
@@ -507,7 +569,11 @@ impl WorkspaceStore {
         if name.is_empty() {
             return Err("name required".into());
         }
-        let from_kind = if from_kind == "agent" { "agent" } else { "human" };
+        let from_kind = if from_kind == "agent" {
+            "agent"
+        } else {
+            "human"
+        };
 
         let file_id = new_id("f");
         let base = src_path
@@ -542,15 +608,20 @@ impl WorkspaceStore {
                 c.to_string()
             }
         };
+        let from = self.resolve_member("", name, from_kind)?;
+        let members = self.read_members().unwrap_or_default();
+        let mentions = resolve_mentions(&body, &members);
         let msg = WsMessage {
             id: new_id("msg"),
             channel: slug,
-            from: name.to_string(),
-            from_kind: from_kind.into(),
+            from_id: from.id,
+            from: from.name,
+            from_kind: from.kind,
             kind: "file".into(),
             body,
             ts: now_secs(),
             file: Some(ref_),
+            mentions,
         };
         self.append_message(&msg)?;
         Ok(msg)
@@ -612,6 +683,94 @@ pub fn local_human_name() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "human".into())
+}
+
+/// Stable session id for the local chrome human so reopen does not mint duplicates.
+pub fn local_human_session(name: &str) -> String {
+    format!("chrome-local:{}", name.trim())
+}
+
+/// Product `NormalizeRole`: `pm`|`engine`|`content` or empty. Unknown is an error.
+pub fn normalize_role(s: &str) -> Result<String, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "none" | "clear" => Ok(String::new()),
+        "pm" => Ok("pm".into()),
+        "engine" => Ok("engine".into()),
+        "content" => Ok("content".into()),
+        other => Err(format!("invalid role {other:?} (want pm|engine|content)")),
+    }
+}
+
+fn unique_display_name(want: &str, members: &[WsMember], except_id: &str) -> String {
+    let base = want.trim();
+    let base = if base.is_empty() { "member" } else { base };
+    let taken: Vec<String> = members
+        .iter()
+        .filter(|m| m.id != except_id)
+        .map(|m| m.name.to_ascii_lowercase())
+        .collect();
+    if !taken.iter().any(|n| n == &base.to_ascii_lowercase()) {
+        return base.to_string();
+    }
+    for i in 2..10000 {
+        let cand = format!("{base}-{i}");
+        if !taken.iter().any(|n| n == &cand.to_ascii_lowercase()) {
+            return cand;
+        }
+    }
+    format!("{base}-x")
+}
+
+/// Map `@display-name` tokens in `body` to member ids (exact, case-insensitive).
+/// Longest name wins so `@engine-2` is distinct from `@engine`.
+pub fn resolve_mentions(body: &str, members: &[WsMember]) -> Vec<String> {
+    if body.is_empty() || members.is_empty() {
+        return Vec::new();
+    }
+    let mut names: Vec<(String, String)> = members
+        .iter()
+        .filter(|m| !m.name.is_empty() && !m.id.is_empty())
+        .map(|m| (m.name.to_ascii_lowercase(), m.id.clone()))
+        .collect();
+    names.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for tok in mention_tokens(body) {
+        let tok = tok.to_ascii_lowercase();
+        if let Some((_, id)) = names.iter().find(|(n, _)| n == &tok) {
+            if seen.insert(id.clone()) {
+                out.push(id.clone());
+            }
+        }
+    }
+    out
+}
+
+fn mention_tokens(body: &str) -> Vec<String> {
+    let chars: Vec<char> = body.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let at_boundary = i == 0 || chars[i - 1].is_whitespace();
+        if chars[i] == '@' && at_boundary {
+            let mut j = i + 1;
+            while j < chars.len()
+                && (chars[j].is_alphanumeric()
+                    || chars[j] == '_'
+                    || chars[j] == '-'
+                    || chars[j] == '.')
+            {
+                j += 1;
+            }
+            if j > i + 1 {
+                out.push(chars[i + 1..j].iter().collect());
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Product `NormalizeChannel`: `"#Fix Auth"` → `"fix-auth"`.
@@ -684,9 +843,7 @@ pub fn member_chip(m: &WsMember) -> String {
         name = rs.into_iter().take(13).collect::<String>() + "…";
     }
     let mut chip = format!("{glyph} {name}");
-    if !m.status_note.is_empty()
-        && matches!(st, STATUS_WAITING | STATUS_BLOCKED | STATUS_WORKING)
-    {
+    if !m.status_note.is_empty() && matches!(st, STATUS_WAITING | STATUS_BLOCKED | STATUS_WORKING) {
         let mut note = m.status_note.clone();
         let nrs: Vec<char> = note.chars().collect();
         if nrs.len() > 18 {
@@ -703,13 +860,12 @@ pub fn member_chip(m: &WsMember) -> String {
 fn format_product_line(msg: &WsMessage) -> String {
     // Product Message shape so Go MCP / chrome share the same file.
     let ts = iso_from_secs(msg.ts);
-    let from_id = new_id("m");
     let mut line = format!(
         "{{\"id\":{},\"channel\":{},\"ts\":{},\"from_id\":{},\"from_name\":{},\"from_kind\":{},\"kind\":{},\"body\":{}",
         json_str(&msg.id),
         json_str(&msg.channel),
         json_str(&ts),
-        json_str(&from_id),
+        json_str(&msg.from_id),
         json_str(&msg.from),
         json_str(&msg.from_kind),
         json_str(&msg.kind),
@@ -725,6 +881,16 @@ fn format_product_line(msg: &WsMessage) -> String {
             json_str(&f.rel_path),
         ));
     }
+    if !msg.mentions.is_empty() {
+        line.push_str(",\"mentions\":[");
+        for (i, id) in msg.mentions.iter().enumerate() {
+            if i > 0 {
+                line.push(',');
+            }
+            line.push_str(&json_str(id));
+        }
+        line.push(']');
+    }
     line.push_str("}\n");
     line
 }
@@ -737,19 +903,23 @@ fn parse_msg_line(line: &str) -> Option<WsMessage> {
     let body = extract_str(line, "body")?;
     let id = extract_str(line, "id").unwrap_or_default();
     let channel = extract_str(line, "channel").unwrap_or_else(|| DEFAULT_CHANNEL.into());
+    let from_id = extract_str(line, "from_id").unwrap_or_default();
     let from_kind = extract_str(line, "from_kind").unwrap_or_else(|| "human".into());
     let kind = extract_str(line, "kind").unwrap_or_else(|| "text".into());
     let ts = parse_ts(line);
     let file = parse_file_ref(line);
+    let mentions = extract_str_array(line, "mentions");
     Some(WsMessage {
         id,
         channel,
+        from_id,
         from,
         from_kind,
         kind,
         body,
         ts,
         file,
+        mentions,
     })
 }
 
@@ -799,10 +969,7 @@ fn extract_u64(s: &str, key: &str) -> Option<u64> {
     let rest = &s[i + pat.len()..];
     let colon = rest.find(':')?;
     let rest = rest[colon + 1..].trim_start();
-    let num: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     num.parse().ok()
 }
 
@@ -843,6 +1010,7 @@ fn parse_member_obj(obj: &str) -> Option<WsMember> {
     let id = extract_str(obj, "id").unwrap_or_default();
     let kind = extract_str(obj, "kind").unwrap_or_else(|| "agent".into());
     let session_id = extract_str(obj, "session_id").unwrap_or_default();
+    let role = extract_str(obj, "role").unwrap_or_default();
     let status = extract_str(obj, "status").unwrap_or_default();
     let status_note = extract_str(obj, "status_note").unwrap_or_default();
     let joined_at = extract_str(obj, "joined_at")
@@ -856,6 +1024,7 @@ fn parse_member_obj(obj: &str) -> Option<WsMember> {
         name,
         kind,
         session_id,
+        role,
         status,
         status_note,
         joined_at,
@@ -878,6 +1047,9 @@ fn format_members_json(members: &[WsMember]) -> String {
                 "    \"session_id\": {},\n",
                 json_str(&m.session_id)
             ));
+        }
+        if !m.role.is_empty() {
+            out.push_str(&format!("    \"role\": {},\n", json_str(&m.role)));
         }
         let st = if m.status.is_empty() {
             STATUS_IDLE
@@ -908,7 +1080,6 @@ fn format_members_json(members: &[WsMember]) -> String {
     out.push_str("]\n");
     out
 }
-
 
 fn copy_file_sha256(src: &Path, dst: &Path) -> Result<String, String> {
     let mut in_f = fs::File::open(src).map_err(|e| format!("open src: {e}"))?;
@@ -1002,6 +1173,56 @@ fn parse_rfc3339_secs(s: &str) -> Option<u64> {
     }
 }
 
+fn extract_str_array(s: &str, key: &str) -> Vec<String> {
+    let pat = format!("\"{key}\"");
+    let Some(i) = s.find(&pat) else {
+        return Vec::new();
+    };
+    let rest = &s[i + pat.len()..];
+    let Some(colon) = rest.find(':') else {
+        return Vec::new();
+    };
+    let rest = rest[colon + 1..].trim_start();
+    if !rest.starts_with('[') {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut cur = String::new();
+    for c in rest.chars() {
+        if in_str {
+            if esc {
+                cur.push(c);
+                esc = false;
+                continue;
+            }
+            match c {
+                '\\' => esc = true,
+                '"' => {
+                    out.push(std::mem::take(&mut cur));
+                    in_str = false;
+                }
+                c => cur.push(c),
+            }
+            continue;
+        }
+        match c {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            '"' => in_str = true,
+            _ => {}
+        }
+    }
+    out
+}
+
 fn extract_str(s: &str, key: &str) -> Option<String> {
     let pat = format!("\"{key}\"");
     let i = s.find(&pat)?;
@@ -1059,9 +1280,17 @@ fn json_str(s: &str) -> String {
 }
 
 fn new_id(prefix: &str) -> String {
-    let n = now_secs();
-    let r = (n.wrapping_mul(0x9E37_79B9_7F4A_7C15)) ^ (std::process::id() as u64);
-    format!("{prefix}_{r:016x}")
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let r = n.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (std::process::id() as u64).wrapping_shl(16)
+        ^ seq.wrapping_mul(0xA24B_AED4_96E1_7B19);
+    format!("{prefix}_{r:012x}{seq:04x}")
 }
 
 fn now_secs() -> u64 {
@@ -1194,11 +1423,11 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         let store = WorkspaceStore::open_at(&dir);
-        let m = store.join("alice", "human", "").unwrap();
+        let m = store.join("alice", "human", "sess-alice").unwrap();
         assert_eq!(m.name, "alice");
         assert_eq!(m.presence(), STATUS_IDLE);
-        // Second join updates last_seen, no duplicate.
-        let m2 = store.join("alice", "human", "").unwrap();
+        // Same session_id reuses the member.
+        let m2 = store.join("alice", "human", "sess-alice").unwrap();
         assert_eq!(m2.id, m.id);
         let list = store.list_members().unwrap();
         assert_eq!(list.len(), 1);
@@ -1208,6 +1437,71 @@ mod tests {
         let list = store.list_members().unwrap();
         assert_eq!(list[0].status, STATUS_WORKING);
         assert_eq!(list[0].status_note, "shipping");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_empty_session_joins_are_distinct() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-ws-id-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WorkspaceStore::open_at(&dir);
+        let a = store.join("engine", "agent", "").unwrap();
+        let b = store.join("engine", "agent", "").unwrap();
+        assert_ne!(a.id, b.id);
+        assert_eq!(a.name, "engine");
+        assert_eq!(b.name, "engine-2");
+        assert_eq!(store.list_members().unwrap().len(), 2);
+        // No join system line in #general.
+        let hist = store.history("general", 20).unwrap();
+        assert!(hist.iter().all(|m| m.kind != "system"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claim_role_exclusive() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-ws-role-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WorkspaceStore::open_at(&dir);
+        let a = store.join("engine", "agent", "s1").unwrap();
+        let b = store.join("engine", "agent", "s2").unwrap();
+        assert_eq!(b.name, "engine-2");
+        let got = store.claim_role(&a.id, "engine").unwrap();
+        assert_eq!(got.role, "engine");
+        assert_eq!(got.name, "engine"); // role ≠ name field
+        assert!(store.claim_role(&b.id, "engine").is_err());
+        let pm = store.claim_role(&b.id, "pm").unwrap();
+        assert_eq!(pm.role, "pm");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mention_targets_member_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-ws-men-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WorkspaceStore::open_at(&dir);
+        let e1 = store.join("engine", "agent", "").unwrap();
+        let e2 = store.join("engine", "agent", "").unwrap();
+        assert_eq!(e2.name, "engine-2");
+        let msg = store
+            .post("general", "@engine-2 hello", "alice", "human")
+            .unwrap();
+        assert_eq!(msg.mentions, vec![e2.id.clone()]);
+        let msg2 = store
+            .post("general", "hey @engine", "alice", "human")
+            .unwrap();
+        assert_eq!(msg2.mentions, vec![e1.id.clone()]);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1230,7 +1524,10 @@ mod tests {
         let f = msg.file.as_ref().unwrap();
         assert_eq!(f.name, "src-hello.txt");
         assert_eq!(f.bytes, 12);
-        assert_eq!(f.sha256, "1b6409e937d5bf13ad8e21ff4ba46e2aae2d5c3884f74d3cfd1a8d5ce79c4fab");
+        assert_eq!(
+            f.sha256,
+            "1b6409e937d5bf13ad8e21ff4ba46e2aae2d5c3884f74d3cfd1a8d5ce79c4fab"
+        );
         let abs = store.root().join(&f.rel_path);
         assert_eq!(fs::read_to_string(&abs).unwrap(), "hello attach");
         let hist = store.history("general", 10).unwrap();
@@ -1267,13 +1564,96 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let store = WorkspaceStore::open_at(&dir);
         store.create_channel("temp-room", "").unwrap();
-        assert!(store.list_channels().unwrap().iter().any(|c| c == "temp-room"));
+        assert!(store
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|c| c == "temp-room"));
         let slug = store.delete_channel("temp-room").unwrap();
         assert_eq!(slug, "temp-room");
-        assert!(!store.list_channels().unwrap().iter().any(|c| c == "temp-room"));
+        assert!(!store
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|c| c == "temp-room"));
         assert!(!dir.join("channels").join("temp-room").exists());
         assert!(store.delete_channel("general").is_err());
         assert!(store.delete_channel("missing-room").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_join_does_not_merge_into_sessioned_same_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-ws-fuse-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WorkspaceStore::open_at(&dir);
+        let existing = store.join("engine", "agent", "sess-already").unwrap();
+        let newbie = store.join("engine", "agent", "").unwrap();
+        assert_ne!(existing.id, newbie.id);
+        assert_eq!(existing.name, "engine");
+        assert_eq!(newbie.name, "engine-2");
+        assert_eq!(store.list_members().unwrap().len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chrome_post_uses_joiner_member_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-ws-fromid-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WorkspaceStore::open_at(&dir);
+        let m = store.join("alice", "human", "chrome-local:alice").unwrap();
+        let msg = store
+            .post_as("general", "hello room", &m.id, &m.name, "human")
+            .unwrap();
+        assert_eq!(msg.from_id, m.id);
+        assert_eq!(msg.from, "alice");
+        // Disk line must use the joiner id, not a minted from_id.
+        let raw = fs::read_to_string(
+            store
+                .root()
+                .join("channels")
+                .join("general")
+                .join("messages.jsonl"),
+        )
+        .unwrap();
+        let needle = format!("\"from_id\":\"{0}\"", m.id);
+        assert!(raw.contains(&needle), "{raw} missing {needle}");
+        // Second post same member keeps the same from_id.
+        let msg2 = store
+            .post_as("general", "again", &m.id, &m.name, "human")
+            .unwrap();
+        assert_eq!(msg2.from_id, m.id);
+        assert_ne!(msg2.id, msg.id);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn post_without_join_never_merges_on_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-ws-auto-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WorkspaceStore::open_at(&dir);
+        let existing = store.join("engine", "agent", "sess-1").unwrap();
+        let msg = store
+            .post("general", "drive-by", "engine", "agent")
+            .unwrap();
+        assert_ne!(msg.from_id, existing.id);
+        let list = store.list_members().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1].name, "engine-2");
+        assert_eq!(msg.from, "engine-2");
+        assert_eq!(msg.from_id, list[1].id);
         let _ = fs::remove_dir_all(&dir);
     }
 }

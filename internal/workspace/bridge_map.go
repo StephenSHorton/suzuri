@@ -43,5 +43,11 @@ func (r Result) ToMap() map[string]any {
 	if r.Count > 0 && out["count"] == nil {
 		out["count"] = r.Count
 	}
+	if r.SessionID != "" {
+		out["session_id"] = r.SessionID
+	}
+	if r.MemberID != "" {
+		out["member_id"] = r.MemberID
+	}
 	return out
 }
