@@ -489,14 +489,14 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             continue;
         }
 
-        // Focused-pane rim (17) — dim theme-primary glow on the glass edge.
+        // Focused-pane rim (17) — dim primary light along the inner edge, not a beam.
         if (p.kind > 16.5 && p.kind < 17.5) {
             let d = sd_round_box(px - center, half, max(p.radius, 0.5));
-            let ring = 1.0 - smoothstep(0.0, 1.8, abs(d));
-            let halo = 1.0 - smoothstep(0.0, 6.5, abs(d));
+            let inside = 1.0 - smoothstep(-1.5, 1.2, d);
+            let from_edge = 1.0 - smoothstep(0.0, 16.0, max(-d, 0.0));
+            let glow = inside * from_edge * from_edge;
             let a = clamp(p._pad.x, 0.0, 1.0);
-            col = mix(col, jade, halo * a * 0.10);
-            col = mix(col, jade, ring * a * 0.22);
+            col = mix(col, jade * 0.45, glow * a * 0.16);
             continue;
         }
 

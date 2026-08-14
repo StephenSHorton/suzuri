@@ -2144,6 +2144,40 @@ impl ChromeApp {
     }
 
     /// Activate a control (runs on **mouse-up** when press & release share a target).
+    /// Apply pane focus on press so the rim doesn't wait for mouse-up.
+    fn focus_hit_pane(&mut self, hit: HitTarget) {
+        let pane_id = match hit {
+            HitTarget::Terminal(id)
+            | HitTarget::WarpBar(id)
+            | HitTarget::ScrollBar(id)
+            | HitTarget::PaneChrome(id)
+            | HitTarget::PaneClose(id) => id,
+            _ => return,
+        };
+        self.session.set_focus_pane(pane_id);
+        if self.session.pane_kind(pane_id).is_workspace() {
+            self.sync_workspace_host();
+            self.warp_focused = false;
+            self.terminal_focused = false;
+        } else {
+            let alt = self
+                .runtimes
+                .get(&pane_id)
+                .map(|rt| rt.ansi.on_alt_screen())
+                .unwrap_or(false);
+            if alt {
+                self.terminal_focused = true;
+                self.warp_focused = false;
+            } else if matches!(hit, HitTarget::Terminal(_) | HitTarget::ScrollBar(_)) {
+                self.terminal_focused = true;
+                self.warp_focused = false;
+            } else {
+                self.warp_focused = true;
+                self.terminal_focused = false;
+            }
+        }
+    }
+
     fn handle_activation(&mut self, event_loop: &ActiveEventLoop, target: HitTarget) {
         // Traffic lights always work
         if matches!(
@@ -3630,6 +3664,12 @@ impl ApplicationHandler for ChromeApp {
                 self.chip_ui.pressed = true;
                 let hit = self.hit_at_cursor();
                 self.press_hit = Some(hit);
+                if !self.overlay_open() {
+                    self.focus_hit_pane(hit);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
                 // Cmd/Ctrl+click on a terminal URL → open browser (no selection).
                 if matches!(hit, HitTarget::Terminal(_))
                     && !self.overlay_open()

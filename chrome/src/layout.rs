@@ -503,7 +503,7 @@ impl FrameLayout {
                 );
                 out.push(
                     PanelInstance::glass(rim, (m.radius - 1.0).max(2.0), PanelKind::PaneFocus)
-                        .with_opacity(0.72),
+                        .with_opacity(0.55),
                 );
             }
         }
@@ -861,7 +861,7 @@ mod tests {
             .iter()
             .find(|p| (p.kind - PanelKind::PaneFocus as u32 as f32).abs() < 0.1)
             .unwrap();
-        assert!(rim._pad[0] < 0.85, "rim should stay dim");
+        assert!(rim._pad[0] < 0.65, "rim should stay dim");
     }
 
     #[test]
