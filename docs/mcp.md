@@ -47,6 +47,13 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | `workspace_history` | Read recent messages from a channel |
 | `workspace_upload` | Attach a local file to a channel (max 64MiB) |
 | `workspace_download` | Resolve a file attachment to a local path |
+| `workspace_task_create` | Create a claimable task (`tasks.json`; no TASKS.md) |
+| `workspace_task_list` | List tasks |
+| `workspace_task_claim` | Exclusive claim (second claim fails) |
+| `workspace_assign` | Assign task to a `member_id` (owner + claimed + mention) |
+| `workspace_task_set_status` | Set task `todo`/`claimed`/`done`/`blocked` |
+| `workspace_lease` | Exclusive path lease (`steal` posts a system line) |
+| `workspace_lease_list` | List active path leases |
 
 **Shell output vs app log vs notes**
 
