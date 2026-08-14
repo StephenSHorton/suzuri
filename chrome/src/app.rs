@@ -1836,6 +1836,36 @@ impl ChromeApp {
         self.chip_ui.set_hover(hit, (x, y));
     }
 
+    /// Fullscreen TUI (Grok, vim, …) owns the focused pane’s keyboard.
+    fn alt_owns_keyboard(&self) -> bool {
+        let id = self.session.focus_pane_id();
+        self.runtimes
+            .get(&id)
+            .is_some_and(|rt| rt.ansi.on_alt_screen())
+    }
+
+    /// Host chrome modifier. On macOS alt-screen, only ⌘ is host — bare Ctrl
+    /// must reach the PTY (Grok interrupt / cancel / chords). Elsewhere
+    /// Ctrl and ⌘ both steal, matching product `hostMod`.
+    fn host_mod(&self) -> bool {
+        let cmd = self.modifiers.super_key();
+        let ctrl = self.modifiers.control_key();
+        if is_mac() && self.alt_owns_keyboard() {
+            cmd
+        } else {
+            cmd || ctrl
+        }
+    }
+
+    fn write_focused_pty(&mut self, bytes: &[u8]) {
+        let id = self.session.focus_pane_id();
+        if let Some(rt) = self.runtimes.get_mut(&id) {
+            if let Some(pty) = &mut rt.pty {
+                let _ = pty.write_all(bytes);
+            }
+        }
+    }
+
     /// While a pane is on the alt screen (vim, grok, etc.), route keys to PTY,
     /// clear the warp draft, and expand the cell grid (no path/warp strip).
     /// When it leaves, restore command-line focus and resize back.
@@ -2680,8 +2710,8 @@ impl ChromeApp {
             }
         }
 
-        // Global shortcuts
-        if super_or_ctrl {
+        // Global shortcuts (⌘, or Ctrl when a TUI is not owning the keyboard).
+        if self.host_mod() {
             // Notes body undo/redo (⌘Z / ⇧⌘Z) while notes overlay is open.
             if self.notes.open {
                 if let Key::Character(ref s) = event.logical_key {
@@ -2897,34 +2927,40 @@ impl ChromeApp {
                         }
                         return;
                     }
-                    // Product: ⇧⌘C copy; also ⌘C when selection / transfer ticket.
-                    "c" | "C" if shift || !self.warp_focused || !self.term_selection.is_empty() => {
-                        if self.transfer.open || self.transfer.visible() {
-                            if self.copy_transfer_ticket_if_any() {
+                    // ⌘C copies (selection / ticket). Ctrl+C is host only off
+                    // alt-screen (host_mod): clear warp or send ^C to the shell.
+                    "c" | "C" if !shift => {
+                        if self.modifiers.super_key() {
+                            if self.transfer.open || self.transfer.visible() {
+                                if self.copy_transfer_ticket_if_any() {
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                    return;
+                                }
+                            }
+                            if !self.term_selection.is_empty() {
+                                self.copy_selection_if_any();
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
                                 }
                                 return;
                             }
-                        }
-                        if !self.term_selection.is_empty() {
-                            self.copy_selection_if_any();
+                            if self.warp_focused {
+                                self.session.draft_mut().clear();
+                            }
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
                             return;
                         }
-                        // Warp focus + no selection: ⌘C clears draft (product clear/interrupt).
-                        if self.warp_focused && !shift {
+                        // Ctrl+C (not alt-screen): clear draft, else interrupt PTY.
+                        if self.warp_focused && !self.session.draft().is_empty() {
                             self.session.draft_mut().clear();
-                            if let Some(w) = &self.window {
-                                w.request_redraw();
-                            }
-                            return;
+                        } else {
+                            self.write_focused_pty(&[0x03]);
+                            self.drain_all_ptys();
                         }
-                    }
-                    "c" | "C" if !shift && self.warp_focused => {
-                        self.session.draft_mut().clear();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -3183,12 +3219,39 @@ impl ChromeApp {
                         Key::Named(NamedKey::ArrowLeft) => {
                             let _ = pty.write_all(b"\x1b[D");
                         }
-                        Key::Character(s) if !super_or_ctrl => {
-                            let _ = pty.write_all(s.as_bytes());
+                        Key::Character(s) => {
+                            let ctrl = self.modifiers.control_key();
+                            let super_key = self.modifiers.super_key();
+                            let shift = self.modifiers.shift_key();
+                            let alt = self.modifiers.alt_key();
+                            if ctrl && !super_key && !alt {
+                                if !shift {
+                                    if let Some(b) = crate::kitty::encode_ctrl_char(s) {
+                                        let _ = pty.write_all(&[b]);
+                                    } else if let Some(buf) = crate::kitty::encode_ctrl_punct(s) {
+                                        let _ = pty.write_all(&buf);
+                                    }
+                                } else if let Some(ch) = s.chars().next().map(|c| c.to_ascii_lowercase()) {
+                                    if ch.is_ascii_lowercase() {
+                                        let mods = crate::kitty::kitty_mods(true, false, true, false);
+                                        let _ = pty.write_all(&crate::kitty::kitty_csi_u(
+                                            ch as u16,
+                                            mods,
+                                        ));
+                                    }
+                                }
+                            } else if super_key && !ctrl && !alt && !shift {
+                                // Grok undo accepts Cmd+Z as well as Ctrl+Z.
+                                if matches!(s.as_str(), "z" | "Z") {
+                                    let _ = pty.write_all(&[0x1a]);
+                                }
+                            } else if !ctrl && !super_key {
+                                let _ = pty.write_all(s.as_bytes());
+                            }
                         }
                         _ => {
                             if let Some(text) = &event.text {
-                                if !super_or_ctrl {
+                                if !self.modifiers.control_key() && !self.modifiers.super_key() {
                                     let _ = pty.write_all(text.as_bytes());
                                 }
                             }

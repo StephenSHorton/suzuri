@@ -129,6 +129,34 @@ pub fn encode_enter(
     kitty_csi_u(13, mods)
 }
 
+/// Classic C0 for Ctrl+letter (`A`=1 … `Z`=26). Space → NUL, `\` → FS.
+pub fn encode_ctrl_char(s: &str) -> Option<u8> {
+    let mut cs = s.chars();
+    let c = cs.next()?.to_ascii_lowercase();
+    if cs.next().is_some() {
+        return None;
+    }
+    match c {
+        'a'..='z' => Some(c as u8 - b'a' + 1),
+        ' ' => Some(0),
+        '\\' => Some(0x1c),
+        _ => None,
+    }
+}
+
+/// Ctrl+punctuation that has no C0 (Grok queue / settings / search).
+pub fn encode_ctrl_punct(s: &str) -> Option<Vec<u8>> {
+    let mut cs = s.chars();
+    let c = cs.next()?;
+    if cs.next().is_some() {
+        return None;
+    }
+    match c {
+        ';' | '\'' | '.' | ',' | '/' => Some(kitty_csi_u(c as u16, kitty_mods(false, false, true, false))),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +219,19 @@ mod tests {
         assert_eq!(k.flags(), 3);
         k.apply(DISAMBIGUATE, 3);
         assert_eq!(k.flags(), 2);
+    }
+
+    #[test]
+    fn ctrl_c_is_etx() {
+        assert_eq!(encode_ctrl_char("c"), Some(0x03));
+        assert_eq!(encode_ctrl_char("C"), Some(0x03));
+        assert_eq!(encode_ctrl_char("v"), Some(0x16));
+        assert_eq!(encode_ctrl_char("z"), Some(0x1a));
+        assert_eq!(encode_ctrl_char(";"), None);
+    }
+
+    #[test]
+    fn ctrl_semicolon_is_csi_u() {
+        assert_eq!(encode_ctrl_punct(";").as_deref(), Some(&b"\x1b[59;5u"[..]));
     }
 }
