@@ -21,7 +21,7 @@
 //! | [`control_mailbox`] | Phase 2 light IPC (`chrome_cmd` file) |
 //! | [`commands`] | Palette / shortcuts registry |
 //! | [`confirm`] | Crush-style yes/no confirm (quit) |
-//! | [`new_window`] | Spawn a second OS window (new process) |
+//! | [`new_window`] | Resolve/spawn a second process (New Window is in-process) |
 //! | [`rename`] | Tab / pane rename dialog |
 //! | [`toast`] | Ephemeral frost-chip status ("Copied") |
 //! | [`shell`] | Mock shell helpers (fallback when no PTY) |
@@ -98,8 +98,8 @@ pub use control_mailbox::{
     POLL_INTERVAL,
 };
 pub use input::{
-    classify_drop, drop_edge_rect, edge_of, hit_test, is_mac, traffic_light_rects, DropKind,
-    HitTarget,
+    classify_drop, classify_tab_drop, drop_edge_rect, edge_of, hit_test, is_mac,
+    traffic_light_rects, DropKind, HitTarget,
 };
 pub use layout::{FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect, Spacing};
 pub use links::{
@@ -108,7 +108,7 @@ pub use links::{
 };
 pub use mouse_pty::encode_mouse_wheel;
 pub use new_window::{canonicalize_exe, resolve_self_exe, spawn_new_window};
-pub use panes::{DockEdge, FocusDir, RemoveResult, SplitAxis, SplitNode};
+pub use panes::{DockEdge, FocusDir, RemoveResult, SashHit, SplitAxis, SplitNode};
 pub use pty::PtySession;
 pub use rename::{RenameState, RenameTarget};
 pub use selection::Selection;

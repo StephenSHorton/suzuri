@@ -302,6 +302,91 @@ impl SplitNode {
         }
     }
 
+    /// Split sashes (the gap between children). `a_leaf` identifies the branch.
+    pub fn collect_sashes(&self, area: Rect, gap: f32, out: &mut Vec<SashHit>) {
+        match self {
+            Self::Leaf(_) => {}
+            Self::Branch {
+                axis,
+                ratio,
+                jelly,
+                a,
+                b,
+                closing_b,
+                ..
+            } => {
+                if *closing_b {
+                    a.collect_sashes(area, gap, out);
+                    return;
+                }
+                let j = jelly.clamp(0.0, 1.0);
+                if j < 0.5 {
+                    a.collect_sashes(area, gap, out);
+                    return;
+                }
+                match axis {
+                    SplitAxis::Vertical => {
+                        let usable = (area.w - gap).max(0.0);
+                        let b_w = (usable * (1.0 - *ratio)).min(usable * 0.92).max(0.0);
+                        let a_w = (usable - b_w).max(0.0);
+                        let sash = Rect::new(area.x + a_w, area.y, gap.max(4.0), area.h);
+                        out.push(SashHit {
+                            a_leaf: a.first_leaf(),
+                            axis: *axis,
+                            rect: sash,
+                            parent: area,
+                        });
+                        a.collect_sashes(Rect::new(area.x, area.y, a_w, area.h), gap, out);
+                        if b_w > 1.0 {
+                            b.collect_sashes(
+                                Rect::new(area.x + a_w + gap, area.y, b_w, area.h),
+                                gap,
+                                out,
+                            );
+                        }
+                    }
+                    SplitAxis::Horizontal => {
+                        let usable = (area.h - gap).max(0.0);
+                        let b_h = (usable * (1.0 - *ratio)).min(usable * 0.92).max(0.0);
+                        let a_h = (usable - b_h).max(0.0);
+                        let sash = Rect::new(area.x, area.y + a_h, area.w, gap.max(4.0));
+                        out.push(SashHit {
+                            a_leaf: a.first_leaf(),
+                            axis: *axis,
+                            rect: sash,
+                            parent: area,
+                        });
+                        a.collect_sashes(Rect::new(area.x, area.y, area.w, a_h), gap, out);
+                        if b_h > 1.0 {
+                            b.collect_sashes(
+                                Rect::new(area.x, area.y + a_h + gap, area.w, b_h),
+                                gap,
+                                out,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Set the settled split ratio on the branch whose first `a` leaf is `a_leaf`.
+    pub fn set_ratio(&mut self, a_leaf: u64, ratio: f32) -> bool {
+        let ratio = ratio.clamp(0.15, 0.85);
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch {
+                a, b, ratio: slot, ..
+            } => {
+                if a.first_leaf() == a_leaf {
+                    *slot = ratio;
+                    return true;
+                }
+                a.set_ratio(a_leaf, ratio) || b.set_ratio(a_leaf, ratio)
+            }
+        }
+    }
+
     /// Layout leaves into `out` with animated jelly sizes. `gap` is sash thickness.
     pub fn layout_into(&self, area: Rect, gap: f32, out: &mut Vec<(u64, Rect)>) {
         match self {
@@ -395,6 +480,17 @@ pub enum FocusDir {
     Right,
     Up,
     Down,
+}
+
+/// One split sash between two children.
+#[derive(Clone, Copy, Debug)]
+pub struct SashHit {
+    /// First leaf of child `a` — stable id for the branch.
+    pub a_leaf: u64,
+    pub axis: SplitAxis,
+    pub rect: Rect,
+    /// Parent area of the branch (for converting pointer → ratio).
+    pub parent: Rect,
 }
 
 /// Which side of a target pane a dragged leaf should occupy.
@@ -544,6 +640,25 @@ mod tests {
         assert_eq!(out[0].0, 2, "new pane should be left (first)");
         assert_eq!(out[1].0, 1);
         assert!(out[0].1.x < out[1].1.x);
+    }
+
+    #[test]
+    fn sash_ratio_moves_split() {
+        let mut root = SplitNode::leaf(1);
+        assert!(root.split_leaf(1, 2, SplitAxis::Vertical));
+        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+            *jelly = 1.0;
+            *jelly_target = 1.0;
+        }
+        assert!(root.set_ratio(1, 0.25));
+        let mut sashes = Vec::new();
+        root.collect_sashes(Rect::new(0.0, 0.0, 200.0, 100.0), 8.0, &mut sashes);
+        assert_eq!(sashes.len(), 1);
+        assert_eq!(sashes[0].a_leaf, 1);
+        assert_eq!(sashes[0].axis, SplitAxis::Vertical);
+        let mut out = Vec::new();
+        root.layout_into(Rect::new(0.0, 0.0, 200.0, 100.0), 8.0, &mut out);
+        assert!(out[0].1.w < out[1].1.w, "0.25 ratio should shrink a");
     }
 
     #[test]

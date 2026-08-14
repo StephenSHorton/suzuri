@@ -179,6 +179,8 @@ pub struct FrameLayout {
     pub tab_new: Rect,
     /// Same as [`logo`] — settings is the logo button.
     pub settings: Rect,
+    /// Split sashes for the active tab (filled by the app after tree layout).
+    pub sashes: Vec<crate::panes::SashHit>,
 }
 
 /// Tab chip width (room for title + gap + close ×).
@@ -324,6 +326,7 @@ impl FrameLayout {
             tab_idle,
             tab_new,
             settings,
+            sashes: Vec::new(),
         }
     }
 

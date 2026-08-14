@@ -22,6 +22,8 @@ pub enum HitTarget {
     WarpBar(u64),
     /// Path / divider chrome of a pane — grab handle for re-dock drag.
     PaneChrome(u64),
+    /// Split sash (a_leaf identifies the branch).
+    Sash(u64),
     /// History cells for pane id.
     Terminal(u64),
     /// Scrollbar track / thumb on the right of the cell well (pane id).
@@ -118,6 +120,12 @@ pub fn hit_test(
         return HitTarget::NewTab;
     }
 
+    for sash in &layout.sashes {
+        if sash.rect.contains(x, y) {
+            return HitTarget::Sash(sash.a_leaf);
+        }
+    }
+
     // Multi-pane: path/divider = drag chrome; warp = command line; cells = PTY.
     // Top 8px of glass is a grab band so widget / alt-screen panes (no path) can move.
     const GRAB_BAND: f32 = 8.0;
@@ -162,21 +170,29 @@ pub fn hit_test(
 pub enum DropKind {
     Edge { pane_id: u64, edge: DockEdge },
     Tab { tab_id: u64 },
+    /// Insert a dragged tab before this strip index (same window).
+    TabInsert { index: usize },
+    /// Pointer left the frame — tear the dragged tab into a new window.
+    TearOff,
 }
 
 /// Classify a drop. `None` = no legal landing (including over the moving pane).
+/// `surface` selects which window's tab strip `layout.tab_chips` maps to.
 pub fn classify_drop(
     layout: &FrameLayout,
     session: &ChromeSession,
+    surface: u64,
     x: f32,
     y: f32,
     moving: u64,
 ) -> Option<DropKind> {
+    let strip = session.tabs_on_surface(surface);
     for (i, chip) in layout.tab_chips.iter().enumerate() {
         if !chip.contains(x, y) {
             continue;
         }
-        let tab = session.tabs.get(i)?;
+        let tab_id = *strip.get(i)?;
+        let tab = session.tabs.iter().find(|t| t.id == tab_id)?;
         if tab.root.contains_pane(moving) && tab.root.leaf_ids().len() <= 1 {
             return None;
         }
@@ -198,6 +214,60 @@ pub fn classify_drop(
         });
     }
     None
+}
+
+/// Tab-strip drop on `layout`.
+///
+/// `from_idx` is this strip's chip index when the tab already lives here.
+/// `None` means the tab came from another window (insert, do not collapse).
+/// Leaving the **window frame** is TearOff; dropping into the workspace of
+/// the same window is a no-op (not a tear).
+pub fn classify_tab_drop(
+    layout: &FrameLayout,
+    x: f32,
+    y: f32,
+    from_idx: Option<usize>,
+) -> Option<DropKind> {
+    let win_h = layout.workspace.y + layout.workspace.h;
+    let off_frame = y < -8.0 || x < -24.0 || x > layout.title.w + 24.0 || y > win_h + 8.0;
+    if off_frame {
+        return Some(DropKind::TearOff);
+    }
+    if layout.tab_chips.is_empty() {
+        return match from_idx {
+            Some(_) => None,
+            None => Some(DropKind::TabInsert { index: 0 }),
+        };
+    }
+    let mut insert = layout.tab_chips.len();
+    for (i, chip) in layout.tab_chips.iter().enumerate() {
+        if x < chip.x + chip.w * 0.5 {
+            insert = i;
+            break;
+        }
+    }
+    // Below the tab strip, still inside the window: same-window no-op;
+    // cross-window drop docks the tab at the end of this strip.
+    if y >= layout.workspace.y {
+        return match from_idx {
+            Some(_) => None,
+            None => Some(DropKind::TabInsert {
+                index: layout.tab_chips.len(),
+            }),
+        };
+    }
+    let to = match from_idx {
+        Some(from) if insert > from => insert.saturating_sub(1),
+        Some(_) => insert,
+        None => insert,
+    };
+    if from_idx == Some(to) {
+        return None;
+    }
+    if from_idx.is_some() && to >= layout.tab_chips.len() {
+        return None;
+    }
+    Some(DropKind::TabInsert { index: to })
 }
 
 /// Outer 28% of each side is that edge; the center docks to the right.
@@ -392,5 +462,69 @@ mod tests {
             ),
             HitTarget::Tab(3)
         );
+    }
+
+    #[test]
+    fn tab_drop_reorders_along_strip() {
+        let (layout, _) = demo_layout();
+        let mid_second = layout.tab_chips[1].x + layout.tab_chips[1].w * 0.6;
+        let y = layout.tab_chips[1].y + layout.tab_chips[1].h * 0.5;
+        assert_eq!(
+            classify_tab_drop(&layout, mid_second, y, Some(0)),
+            Some(DropKind::TabInsert { index: 1 })
+        );
+        assert_eq!(
+            classify_tab_drop(&layout, layout.tab_chips[0].x + 4.0, y, Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_drop_in_workspace_does_not_tear() {
+        let (layout, _) = demo_layout();
+        let y = layout.workspace.y + layout.workspace.h * 0.4;
+        assert_eq!(
+            classify_tab_drop(&layout, layout.title.w * 0.5, y, Some(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_drop_off_frame_tears() {
+        let (layout, _) = demo_layout();
+        assert_eq!(
+            classify_tab_drop(&layout, 40.0, -40.0, Some(0)),
+            Some(DropKind::TearOff)
+        );
+    }
+
+    #[test]
+    fn tab_drop_from_other_window_appends() {
+        let (layout, _) = demo_layout();
+        let y = layout.workspace.y + 20.0;
+        assert_eq!(
+            classify_tab_drop(&layout, 80.0, y, None),
+            Some(DropKind::TabInsert { index: 2 })
+        );
+    }
+
+    #[test]
+    fn classify_drop_uses_surface_tabs() {
+        let (layout, _) = demo_layout();
+        let mut session = crate::session::ChromeSession::new(80, 24);
+        let (t2, pid2) = session.new_tab(80, 24);
+        assert!(session.place_tab_on_surface(t2, 1, 0));
+        // Surface 0 strip is only tab 1; chip 0 should not resolve to t2.
+        let chip = layout.tab_chips[0];
+        let drop = classify_drop(
+            &layout,
+            &session,
+            0,
+            chip.x + 8.0,
+            chip.y + chip.h * 0.5,
+            pid2,
+        );
+        assert_eq!(drop, Some(DropKind::Tab { tab_id: 1 }));
+        let _ = t2;
     }
 }

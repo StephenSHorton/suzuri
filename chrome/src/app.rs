@@ -27,11 +27,12 @@ use crate::commands::{
 };
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
-use crate::input::{classify_drop, hit_test, is_mac, DropKind, HitTarget};
+use crate::input::{
+    classify_drop, classify_tab_drop, hit_test, is_mac, DropKind, HitTarget,
+};
 use crate::layout::{FrameLayout, Metrics};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
 use crate::mouse_pty::encode_mouse_wheel;
-use crate::new_window::spawn_new_window;
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
@@ -84,7 +85,13 @@ impl PaneRuntime {
 
 pub struct ChromeApp {
     window: Option<Arc<Window>>,
-    renderer: Option<Renderer>,
+    /// In-process windows (tear-off / New Window). Keyed by winit id.
+    surfaces: HashMap<WindowId, Surface>,
+    event_win: Option<WindowId>,
+    /// Last window that received `Focused(true)` — keyboard + overlays.
+    focus_win: Option<WindowId>,
+    next_surface_key: u64,
+    last_world_tick: Instant,
     session: ChromeSession,
     metrics: Metrics,
     cursor: LogicalPosition<f32>,
@@ -141,15 +148,47 @@ pub struct ChromeApp {
     applied_font: String,
     /// Accumulated trackpad pixel-delta (macOS sends many sub-line events).
     wheel_accum: f32,
-    /// In-window pane re-dock (grab path/divider, drop on an edge or tab).
-    pane_drag: Option<PaneDrag>,
+    /// Pane / tab drag (grab path, glass band, or a tab chip).
+    pane_drag: Option<LayoutDrag>,
+    sash_drag: Option<SashDrag>,
 }
 
-struct PaneDrag {
-    pane_id: u64,
+enum DragSubject {
+    Pane { pane_id: u64, source: crate::layout::Rect },
+    Tab { tab_id: u64, from_idx: usize },
+}
+
+struct LayoutDrag {
+    subject: DragSubject,
     start: (f32, f32),
     active: bool,
     drop: Option<DropKind>,
+    dest_surface: u64,
+}
+
+enum SurfaceAdopt {
+    Fresh,
+    Tab(u64),
+    Pane(u64),
+}
+
+enum PointerLoc {
+    Surface { key: u64, x: f32, y: f32 },
+    Outside,
+}
+
+#[derive(Clone, Copy)]
+struct SashDrag {
+    a_leaf: u64,
+    parent: crate::layout::Rect,
+    axis: crate::panes::SplitAxis,
+}
+
+struct Surface {
+    key: u64,
+    window: Arc<Window>,
+    renderer: Renderer,
+    focus_tab: u64,
 }
 
 impl Default for ChromeApp {
@@ -166,7 +205,6 @@ impl Default for ChromeApp {
 
         let mut app = Self {
             window: None,
-            renderer: None,
             session,
             metrics: Metrics::default(),
             cursor: LogicalPosition::new(0.0, 0.0),
@@ -208,6 +246,12 @@ impl Default for ChromeApp {
             applied_font: String::new(),
             wheel_accum: 0.0,
             pane_drag: None,
+            sash_drag: None,
+            surfaces: HashMap::new(),
+            event_win: None,
+            focus_win: None,
+            next_surface_key: 1,
+            last_world_tick: Instant::now(),
         };
         // First-run overlay only — PTY already spawned above.
         if !app.settings.prefs.splash_seen {
@@ -362,60 +406,269 @@ impl ChromeApp {
         self.session.paste_draft(&text);
     }
 
+    fn event_surface_key(&self) -> u64 {
+        self.event_win
+            .and_then(|id| self.surfaces.get(&id).map(|s| s.key))
+            .unwrap_or(0)
+    }
+
+    fn bind_win(&mut self, id: WindowId) {
+        self.event_win = Some(id);
+        if let Some(s) = self.surfaces.get(&id) {
+            self.window = Some(s.window.clone());
+        }
+    }
+
+    fn renderer(&self) -> Option<&Renderer> {
+        let id = self.event_win.or_else(|| self.surfaces.keys().next().copied())?;
+        self.surfaces.get(&id).map(|s| &s.renderer)
+    }
+
+    fn renderer_mut(&mut self) -> Option<&mut Renderer> {
+        let id = self.event_win.or_else(|| self.surfaces.keys().next().copied())?;
+        self.surfaces.get_mut(&id).map(|s| &mut s.renderer)
+    }
+
+    fn renderer_for(&self, key: u64) -> Option<&Renderer> {
+        self.surfaces.values().find(|s| s.key == key).map(|s| &s.renderer)
+    }
+
+    fn surface_focus_tab(&self, key: u64) -> Option<u64> {
+        if let Some(tid) = self
+            .surfaces
+            .values()
+            .find(|s| s.key == key)
+            .map(|s| s.focus_tab)
+        {
+            if self
+                .session
+                .tabs
+                .iter()
+                .any(|t| t.id == tid && t.surface == key)
+            {
+                return Some(tid);
+            }
+        }
+        self.session.tabs_on_surface(key).first().copied()
+    }
+
+    fn set_surface_focus(&mut self, key: u64, tab_id: u64) {
+        for s in self.surfaces.values_mut() {
+            if s.key == key {
+                s.focus_tab = tab_id;
+            }
+        }
+        self.session.select_tab(tab_id);
+    }
+
+    fn focus_surface_window(&mut self, id: WindowId) {
+        self.focus_win = Some(id);
+        self.bind_win(id);
+        if let Some(key) = self.surfaces.get(&id).map(|s| s.key) {
+            if let Some(tid) = self.surface_focus_tab(key) {
+                self.session.select_tab(tid);
+            }
+        }
+    }
+
+    fn request_redraw(&self) {
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn request_redraw_all(&self) {
+        for s in self.surfaces.values() {
+            s.window.request_redraw();
+        }
+    }
+
+    fn pointer_loc(&self) -> PointerLoc {
+        let Some(src_id) = self.event_win.or_else(|| self.surfaces.keys().next().copied()) else {
+            return PointerLoc::Outside;
+        };
+        let Some(src) = self.surfaces.get(&src_id) else {
+            return PointerLoc::Outside;
+        };
+        let scale = src.window.scale_factor();
+        let src_size = src.window.inner_size();
+        let in_src = self.cursor.x >= 0.0
+            && self.cursor.y >= 0.0
+            && (self.cursor.x as f64 * scale) < src_size.width as f64
+            && (self.cursor.y as f64 * scale) < src_size.height as f64;
+        let origin = src.window.inner_position().ok();
+        let (sx, sy) = match origin {
+            Some(o) => (
+                o.x as f64 + self.cursor.x as f64 * scale,
+                o.y as f64 + self.cursor.y as f64 * scale,
+            ),
+            None => {
+                return if in_src {
+                    PointerLoc::Surface {
+                        key: src.key,
+                        x: self.cursor.x,
+                        y: self.cursor.y,
+                    }
+                } else {
+                    PointerLoc::Outside
+                };
+            }
+        };
+        let mut hit = if in_src {
+            Some((src.key, self.cursor.x, self.cursor.y))
+        } else {
+            None
+        };
+        for (id, s) in &self.surfaces {
+            if *id == src_id {
+                continue;
+            }
+            let Ok(o) = s.window.inner_position() else {
+                continue;
+            };
+            let size = s.window.inner_size();
+            if sx >= o.x as f64
+                && sy >= o.y as f64
+                && sx < (o.x + size.width as i32) as f64
+                && sy < (o.y + size.height as i32) as f64
+            {
+                let sc = s.window.scale_factor();
+                let lx = ((sx - o.x as f64) / sc) as f32;
+                let ly = ((sy - o.y as f64) / sc) as f32;
+                hit = Some((s.key, lx, ly));
+            }
+        }
+        match hit {
+            Some((key, x, y)) => PointerLoc::Surface { key, x, y },
+            None => PointerLoc::Outside,
+        }
+    }
+
+    fn open_surface(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        adopt: SurfaceAdopt,
+    ) -> Option<u64> {
+        let offset = self
+            .window
+            .as_ref()
+            .and_then(|w| w.outer_position().ok())
+            .map(|p| (p.x + 36, p.y + 36))
+            .unwrap_or((80, 60));
+        let attrs = WindowAttributes::default()
+            .with_title("suzuri · chrome")
+            .with_inner_size(LogicalSize::new(1120.0, 740.0))
+            .with_min_inner_size(LogicalSize::new(720.0, 440.0))
+            .with_position(winit::dpi::PhysicalPosition::new(offset.0, offset.1))
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_resizable(true);
+        let window = Arc::new(event_loop.create_window(attrs).ok()?);
+        #[cfg(target_os = "macos")]
+        crate::macos_window::configure_rounded_window(&window, 16.0);
+        let renderer = pollster::block_on(Renderer::new(window.clone()));
+        let key = self.next_surface_key;
+        self.next_surface_key = self.next_surface_key.saturating_add(1);
+        let wid = window.id();
+        let mut focus_tab = self.session.active_id;
+        self.surfaces.insert(
+            wid,
+            Surface {
+                key,
+                window: window.clone(),
+                renderer,
+                focus_tab,
+            },
+        );
+        self.bind_win(wid);
+        self.focus_win = Some(wid);
+        match adopt {
+            SurfaceAdopt::Tab(tab_id) => {
+                let _ = self.session.place_tab_on_surface(tab_id, key, usize::MAX);
+                focus_tab = tab_id;
+            }
+            SurfaceAdopt::Pane(pane_id) => {
+                if let Some(tid) = self.session.extract_pane_to_new_tab(pane_id, key) {
+                    focus_tab = tid;
+                }
+            }
+            SurfaceAdopt::Fresh => {
+                let cell = self.cell_metrics();
+                let layout = self.layout_for_surface(key);
+                let (cols, rows) = renderer::terminal_grid_size_with(
+                    layout.panes.first().map(|p| &p.cells).unwrap_or(&layout.cells),
+                    cell.w,
+                    cell.h,
+                );
+                let (pw, ph) = self.pty_pixel_size(cols, rows);
+                let (tid, pane_id) = self.session.new_tab_on_surface(cols, rows, key);
+                let rt = spawn_pane_runtime_px(cols, rows, pw, ph, &mut self.session, pane_id);
+                self.runtimes.insert(pane_id, rt);
+                focus_tab = tid;
+            }
+        }
+        self.set_surface_focus(key, focus_tab);
+        window.request_redraw();
+        Some(key)
+    }
+
     fn current_layout(&self) -> FrameLayout {
-        let tab_count = self.session.tabs.len();
-        let mut layout = if let Some(r) = &self.renderer {
+        self.layout_for_surface(self.event_surface_key())
+    }
+
+    fn layout_for_surface(&self, surface: u64) -> FrameLayout {
+        let tab_count = self.session.tabs_on_surface(surface).len().max(1);
+        let mut layout = if let Some(r) = self.renderer_for(surface).or_else(|| self.renderer()) {
             r.layout(tab_count)
         } else {
             FrameLayout::compute(1120.0, 740.0, self.metrics, tab_count)
         };
 
-        // Apply split-tree leaf rects for the active tab.
-        if let Some(tab) = self.session.active_tab() {
-            let mut leafs = Vec::new();
-            let gap = self.metrics.stack();
-            tab.root
-                .layout_into(layout.workspace, gap, &mut leafs);
-            // Solo-exit: scale the glass toward center while jelly closes.
-            if let Some(anim) = &tab.solo_exit {
-                let s = anim.jelly.clamp(0.0, 1.15);
-                leafs = leafs
-                    .into_iter()
-                    .map(|(id, r)| {
-                        if id == anim.pane_id {
-                            let cx = r.x + r.w * 0.5;
-                            let cy = r.y + r.h * 0.5;
-                            let nw = (r.w * s).max(1.0);
-                            let nh = (r.h * s).max(1.0);
-                            (
-                                id,
-                                crate::layout::Rect::new(cx - nw * 0.5, cy - nh * 0.5, nw, nh),
-                            )
-                        } else {
-                            (id, r)
-                        }
-                    })
-                    .collect();
-            }
-            // Alt-screen panes get full glass (no path/warp strip).
-            let alt_ids: std::collections::HashSet<u64> = self
-                .runtimes
-                .iter()
-                .filter(|(_, rt)| rt.ansi.on_alt_screen())
-                .map(|(id, _)| *id)
+        let shown = self.surface_focus_tab(surface);
+        let Some(tab) = shown.and_then(|id| self.session.tabs.iter().find(|t| t.id == id)) else {
+            return layout;
+        };
+        let mut leafs = Vec::new();
+        let gap = self.metrics.stack();
+        tab.root.layout_into(layout.workspace, gap, &mut leafs);
+        if let Some(anim) = &tab.solo_exit {
+            let s = anim.jelly.clamp(0.0, 1.15);
+            leafs = leafs
+                .into_iter()
+                .map(|(id, r)| {
+                    if id == anim.pane_id {
+                        let cx = r.x + r.w * 0.5;
+                        let cy = r.y + r.h * 0.5;
+                        let nw = (r.w * s).max(1.0);
+                        let nh = (r.h * s).max(1.0);
+                        (
+                            id,
+                            crate::layout::Rect::new(cx - nw * 0.5, cy - nh * 0.5, nw, nh),
+                        )
+                    } else {
+                        (id, r)
+                    }
+                })
                 .collect();
-            layout.apply_pane_rects(self.metrics, &leafs, tab.focus_pane, &|id| {
-                alt_ids.contains(&id) || self.session.is_widget(id)
-            });
         }
+        let alt_ids: std::collections::HashSet<u64> = self
+            .runtimes
+            .iter()
+            .filter(|(_, rt)| rt.ansi.on_alt_screen())
+            .map(|(id, _)| *id)
+            .collect();
+        layout.apply_pane_rects(self.metrics, &leafs, tab.focus_pane, &|id| {
+            alt_ids.contains(&id) || self.session.is_widget(id)
+        });
+        tab.root
+            .collect_sashes(layout.workspace, gap, &mut layout.sashes);
         layout
     }
 
     /// Mono cell pitch (logical px) — measured Gohu when renderer is up, × zoom.
     fn cell_metrics(&self) -> MonoCellMetrics {
         let base = self
-            .renderer
-            .as_ref()
+            .renderer()
             .map(|r| r.cell_metrics())
             .unwrap_or_default();
         let z = self.ui_zoom.clamp(0.75, 1.75);
@@ -447,14 +700,14 @@ impl ChromeApp {
         for id in pane_ids {
             self.runtimes.remove(&id);
         }
+        self.prune_empty_surfaces(event_loop);
     }
 
     /// Physical pixel size of a terminal grid for `TIOCGWINSZ`.
     fn pty_pixel_size(&self, cols: u16, rows: u16) -> (u16, u16) {
         let cell = self.cell_metrics();
         let scale = self
-            .renderer
-            .as_ref()
+            .renderer()
             .map(|r| r.scale_factor())
             .unwrap_or(1.0)
             .max(0.5);
@@ -464,25 +717,32 @@ impl ChromeApp {
     }
 
     fn sync_grids_to_panes(&mut self) {
-        let layout = self.current_layout();
+        let keys: Vec<u64> = if self.surfaces.is_empty() {
+            vec![self.event_surface_key()]
+        } else {
+            self.surfaces.values().map(|s| s.key).collect()
+        };
         let cell = self.cell_metrics();
-        for pl in &layout.panes {
-            if self.session.is_widget(pl.pane_id) {
-                continue;
-            }
-            let (cols, rows) =
-                renderer::terminal_grid_size_with(&pl.cells, cell.w, cell.h);
-            let need = self
-                .session
-                .grid(pl.pane_id)
-                .map(|g| g.cols() != cols || g.rows() != rows)
-                .unwrap_or(true);
-            if need {
-                self.session.resize_pane(pl.pane_id, cols, rows);
-                let (pw, ph) = self.pty_pixel_size(cols, rows);
-                if let Some(rt) = self.runtimes.get_mut(&pl.pane_id) {
-                    if let Some(pty) = &mut rt.pty {
-                        let _ = pty.resize_with_pixels(cols, rows, pw, ph);
+        for key in keys {
+            let layout = self.layout_for_surface(key);
+            for pl in &layout.panes {
+                if self.session.is_widget(pl.pane_id) {
+                    continue;
+                }
+                let (cols, rows) =
+                    renderer::terminal_grid_size_with(&pl.cells, cell.w, cell.h);
+                let need = self
+                    .session
+                    .grid(pl.pane_id)
+                    .map(|g| g.cols() != cols || g.rows() != rows)
+                    .unwrap_or(true);
+                if need {
+                    self.session.resize_pane(pl.pane_id, cols, rows);
+                    let (pw, ph) = self.pty_pixel_size(cols, rows);
+                    if let Some(rt) = self.runtimes.get_mut(&pl.pane_id) {
+                        if let Some(pty) = &mut rt.pty {
+                            let _ = pty.resize_with_pixels(cols, rows, pw, ph);
+                        }
                     }
                 }
             }
@@ -912,9 +1172,8 @@ impl ChromeApp {
                 self.caffeine.deactivate();
             }
             CommandAction::NewWindow => {
-                if let Err(e) = spawn_new_window() {
-                    eprintln!("suzuri-chrome: new window failed: {e}");
-                    self.toast.show(format!("New window failed: {e}"));
+                if self.open_surface(event_loop, SurfaceAdopt::Fresh).is_none() {
+                    self.toast.show("Couldn't open window");
                 }
             }
             CommandAction::CheckUpdates => {
@@ -933,7 +1192,8 @@ impl ChromeApp {
     }
 
     fn new_tab(&mut self) {
-        let layout = self.current_layout();
+        let surface = self.event_surface_key();
+        let layout = self.layout_for_surface(surface);
         let cell = self.cell_metrics();
         let (cols, rows) = renderer::terminal_grid_size_with(
             layout.panes.first().map(|p| &p.cells).unwrap_or(&layout.cells),
@@ -941,9 +1201,10 @@ impl ChromeApp {
             cell.h,
         );
         let (pw, ph) = self.pty_pixel_size(cols, rows);
-        let (_tid, pane_id) = self.session.new_tab(cols, rows);
+        let (tid, pane_id) = self.session.new_tab_on_surface(cols, rows, surface);
         let rt = spawn_pane_runtime_px(cols, rows, pw, ph, &mut self.session, pane_id);
         self.runtimes.insert(pane_id, rt);
+        self.set_surface_focus(surface, tid);
         self.warp_focused = true;
         self.terminal_focused = false;
     }
@@ -979,30 +1240,150 @@ impl ChromeApp {
         }
     }
 
-    /// Apply an in-window pane re-dock. Returns true if a drag was active
+    /// Apply a pane / tab re-dock. Returns true if a drag was active
     /// (so the mouse-up should not also click-activate chrome).
-    fn finish_pane_drag(&mut self) -> bool {
+    fn finish_pane_drag(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let Some(drag) = self.pane_drag.take() else {
             return false;
         };
         if !drag.active {
             return false;
         }
-        let ok = match drag.drop {
-            Some(DropKind::Edge { pane_id, edge }) => {
-                self.session.reparent_pane(drag.pane_id, pane_id, edge)
+        match (drag.subject, drag.drop) {
+            (
+                DragSubject::Pane { pane_id, .. },
+                Some(DropKind::Edge {
+                    pane_id: target,
+                    edge,
+                }),
+            ) => {
+                if self.session.reparent_pane(pane_id, target, edge) {
+                    self.sync_workspace_host();
+                    self.warp_focused = !self.session.is_widget(pane_id);
+                    self.terminal_focused = false;
+                }
             }
-            Some(DropKind::Tab { tab_id }) => self.session.move_pane_to_tab(drag.pane_id, tab_id),
-            None => false,
-        };
-        if ok {
-            self.sync_workspace_host();
-            self.warp_focused = !self.session.is_widget(drag.pane_id);
-            self.terminal_focused = false;
-        } else if drag.drop.is_none() {
-            // Dragged off a legal target — leave layout as-is (no toast noise).
+            (DragSubject::Pane { pane_id, .. }, Some(DropKind::Tab { tab_id })) => {
+                if self.session.move_pane_to_tab(pane_id, tab_id) {
+                    self.sync_workspace_host();
+                    self.warp_focused = !self.session.is_widget(pane_id);
+                    self.terminal_focused = false;
+                }
+            }
+            (DragSubject::Pane { pane_id, .. }, Some(DropKind::TearOff)) => {
+                self.tear_off_pane(event_loop, pane_id);
+            }
+            (DragSubject::Tab { tab_id, .. }, Some(DropKind::TabInsert { index })) => {
+                let _ = self
+                    .session
+                    .place_tab_on_surface(tab_id, drag.dest_surface, index);
+                self.set_surface_focus(drag.dest_surface, tab_id);
+            }
+            (DragSubject::Tab { tab_id, .. }, Some(DropKind::TearOff)) => {
+                self.tear_off_tab(event_loop, tab_id);
+            }
+            _ => {}
         }
+        self.prune_empty_surfaces(event_loop);
         true
+    }
+
+    fn tear_off_tab(&mut self, event_loop: &ActiveEventLoop, tab_id: u64) {
+        let Some(src_key) = self.session.surface_of_tab(tab_id) else {
+            return;
+        };
+        let remaining = self.session.tabs_on_surface(src_key).len();
+        if remaining <= 1 && self.surfaces.len() <= 1 {
+            return;
+        }
+        if self
+            .open_surface(event_loop, SurfaceAdopt::Tab(tab_id))
+            .is_none()
+        {
+            self.toast.show("Couldn't open window");
+        }
+    }
+
+    fn tear_off_pane(&mut self, event_loop: &ActiveEventLoop, pane_id: u64) {
+        let Some(src_tab) = self.session.tab_id_for_pane(pane_id) else {
+            return;
+        };
+        let sole = self
+            .session
+            .tabs
+            .iter()
+            .find(|t| t.id == src_tab)
+            .map(|t| t.root.leaf_ids().len() <= 1)
+            .unwrap_or(true);
+        if sole {
+            self.tear_off_tab(event_loop, src_tab);
+            return;
+        }
+        if self
+            .open_surface(event_loop, SurfaceAdopt::Pane(pane_id))
+            .is_none()
+        {
+            self.toast.show("Couldn't open window");
+        }
+    }
+
+    fn prune_empty_surfaces(&mut self, event_loop: &ActiveEventLoop) {
+        let empty: Vec<WindowId> = self
+            .surfaces
+            .iter()
+            .filter(|(_, s)| self.session.tabs_on_surface(s.key).is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in empty {
+            self.surfaces.remove(&id);
+            if self.event_win == Some(id) {
+                self.event_win = self.surfaces.keys().next().copied();
+                self.window = self
+                    .event_win
+                    .and_then(|eid| self.surfaces.get(&eid).map(|s| s.window.clone()));
+            }
+            if self.focus_win == Some(id) {
+                self.focus_win = self.event_win;
+            }
+        }
+        if self.surfaces.is_empty() || self.session.is_empty() {
+            chrome_status::clear_status();
+            event_loop.exit();
+        }
+    }
+
+    fn close_surface(&mut self, event_loop: &ActiveEventLoop, id: WindowId) {
+        if self.surfaces.len() <= 1 {
+            self.request_quit(event_loop);
+            return;
+        }
+        let Some(key) = self.surfaces.get(&id).map(|s| s.key) else {
+            return;
+        };
+        let tabs = self.session.tabs_on_surface(key);
+        for tid in tabs {
+            for pid in self.session.close_tab(tid) {
+                self.runtimes.remove(&pid);
+            }
+        }
+        self.surfaces.remove(&id);
+        if self.event_win == Some(id) {
+            self.event_win = self.surfaces.keys().next().copied();
+            self.window = self
+                .event_win
+                .and_then(|eid| self.surfaces.get(&eid).map(|s| s.window.clone()));
+        }
+        if self.focus_win == Some(id) {
+            self.focus_win = self.event_win;
+            if let Some(eid) = self.focus_win {
+                if let Some(key) = self.surfaces.get(&eid).map(|s| s.key) {
+                    if let Some(tid) = self.surface_focus_tab(key) {
+                        self.session.select_tab(tid);
+                    }
+                }
+            }
+        }
+        self.prune_empty_surfaces(event_loop);
     }
 
     fn focus_dir(&mut self, dir: FocusDir) {
@@ -1025,6 +1406,11 @@ impl ChromeApp {
 
     fn select_tab_index(&mut self, index: usize) {
         if self.session.select_tab_index(index) {
+            if let Some(tab) = self.session.active_tab() {
+                let id = tab.id;
+                let surface = tab.surface;
+                self.set_surface_focus(surface, id);
+            }
             self.warp_focused = true;
             self.terminal_focused = false;
         }
@@ -1500,7 +1886,13 @@ impl ChromeApp {
         }
 
         match target {
-            HitTarget::Close => self.request_quit(event_loop),
+            HitTarget::Close => {
+                if let Some(id) = self.event_win {
+                    self.close_surface(event_loop, id);
+                } else {
+                    self.request_quit(event_loop);
+                }
+            }
             HitTarget::Minimize => {
                 if let Some(w) = &self.window {
                     w.set_minimized(true);
@@ -1520,15 +1912,16 @@ impl ChromeApp {
             // Title drag is started on press (OS requirement), not here.
             HitTarget::TitleDrag => {}
             HitTarget::Tab(i) => {
-                if let Some(tab) = self.session.tabs.get(i) {
-                    let id = tab.id;
-                    self.session.select_tab(id);
+                let surface = self.event_surface_key();
+                if let Some(id) = self.session.tabs_on_surface(surface).get(i).copied() {
+                    self.set_surface_focus(surface, id);
                     self.warp_focused = true;
                     self.terminal_focused = false;
                 }
             }
             HitTarget::TabClose(i) => {
-                if let Some(tab) = self.session.tabs.get(i).map(|t| t.id) {
+                let surface = self.event_surface_key();
+                if let Some(tab) = self.session.tabs_on_surface(surface).get(i).copied() {
                     self.close_tab_by_id(event_loop, tab);
                 }
             }
@@ -1542,6 +1935,7 @@ impl ChromeApp {
                 self.notes.close();
                 self.settings.toggle();
             }
+            HitTarget::Sash(_) => {}
             HitTarget::PaneChrome(pane_id) => {
                 self.session.set_focus_pane(pane_id);
                 if self.session.pane_kind(pane_id).is_workspace() {
@@ -2602,6 +2996,7 @@ impl ChromeApp {
             || self.terminal_focused
             || self.workspace_captures_input()
             || self.pane_drag.as_ref().is_some_and(|d| d.active)
+            || self.sash_drag.is_some()
         {
             return true;
         }
@@ -2612,7 +3007,7 @@ impl ChromeApp {
 
 impl ApplicationHandler for ChromeApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if !self.surfaces.is_empty() {
             return;
         }
 
@@ -2635,8 +3030,19 @@ impl ApplicationHandler for ChromeApp {
 
         let renderer = pollster::block_on(Renderer::new(window.clone()));
         self.metrics = renderer.metrics();
+        let wid = window.id();
+        self.surfaces.insert(
+            wid,
+            Surface {
+                key: 0,
+                window: window.clone(),
+                renderer,
+                focus_tab: self.session.active_id,
+            },
+        );
         self.window = Some(window);
-        self.renderer = Some(renderer);
+        self.event_win = Some(wid);
+        self.focus_win = Some(wid);
         self.sync_grids_to_panes();
 
         if let Some(w) = &self.window {
@@ -2672,9 +3078,7 @@ impl ApplicationHandler for ChromeApp {
         };
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + wake));
         if self.needs_anim_frame() {
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+            self.request_redraw_all();
         }
     }
 
@@ -2719,11 +3123,13 @@ impl ApplicationHandler for ChromeApp {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _id: WindowId,
+        id: WindowId,
         event: WindowEvent,
     ) {
+        self.bind_win(id);
         match event {
-            WindowEvent::CloseRequested => self.request_quit(event_loop),
+            WindowEvent::CloseRequested => self.close_surface(event_loop, id),
+            WindowEvent::Focused(true) => self.focus_surface_window(id),
 
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
@@ -2743,32 +3149,63 @@ impl ApplicationHandler for ChromeApp {
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
+                } else if let Some(sash) = self.sash_drag {
+                    let t = match sash.axis {
+                        crate::panes::SplitAxis::Vertical => {
+                            (self.cursor.x - sash.parent.x) / sash.parent.w.max(1.0)
+                        }
+                        crate::panes::SplitAxis::Horizontal => {
+                            (self.cursor.y - sash.parent.y) / sash.parent.h.max(1.0)
+                        }
+                    };
+                    let _ = self.session.set_sash_ratio(sash.a_leaf, t);
+                    self.sync_grids_to_panes();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 } else if self.pane_drag.is_some() {
-                    let (sx, sy, pane_id) = {
+                    let (sx, sy) = {
                         let d = self.pane_drag.as_ref().expect("just checked");
-                        (d.start.0, d.start.1, d.pane_id)
+                        (d.start.0, d.start.1)
                     };
                     let dx = self.cursor.x - sx;
                     let dy = self.cursor.y - sy;
                     let active = dx.hypot(dy) >= 8.0
                         || self.pane_drag.as_ref().is_some_and(|d| d.active);
                     if active {
-                        let layout = self.current_layout();
-                        let drop = classify_drop(
-                            &layout,
-                            &self.session,
-                            self.cursor.x,
-                            self.cursor.y,
-                            pane_id,
-                        );
+                        let (drop, dest_surface) = match self.pointer_loc() {
+                            PointerLoc::Outside => (Some(DropKind::TearOff), self.event_surface_key()),
+                            PointerLoc::Surface { key, x, y } => {
+                                let layout = self.layout_for_surface(key);
+                                let drop = match self.pane_drag.as_ref().map(|d| &d.subject) {
+                                    Some(DragSubject::Pane { pane_id, .. }) => classify_drop(
+                                        &layout,
+                                        &self.session,
+                                        key,
+                                        x,
+                                        y,
+                                        *pane_id,
+                                    ),
+                                    Some(DragSubject::Tab { tab_id, from_idx }) => {
+                                        let from = self
+                                            .session
+                                            .surface_of_tab(*tab_id)
+                                            .filter(|s| *s == key)
+                                            .map(|_| *from_idx);
+                                        classify_tab_drop(&layout, x, y, from)
+                                    }
+                                    None => None,
+                                };
+                                (drop, key)
+                            }
+                        };
                         if let Some(d) = self.pane_drag.as_mut() {
                             d.active = true;
                             d.drop = drop;
+                            d.dest_surface = dest_surface;
                         }
                     }
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
+                    self.request_redraw_all();
                 } else if self.selecting_term {
                     if let Some(pos) = self.term_cell_at_cursor() {
                         let id = self.session.focus_pane_id();
@@ -2788,6 +3225,13 @@ impl ApplicationHandler for ChromeApp {
             WindowEvent::CursorLeft { .. } => {
                 self.pointer_inside = false;
                 self.clear_link_hover();
+                let tear = self.pane_drag.as_ref().is_some_and(|d| d.active)
+                    && matches!(self.pointer_loc(), PointerLoc::Outside);
+                if tear {
+                    if let Some(d) = self.pane_drag.as_mut() {
+                        d.drop = Some(DropKind::TearOff);
+                    }
+                }
             }
 
             WindowEvent::MouseInput {
@@ -2815,12 +3259,49 @@ impl ApplicationHandler for ChromeApp {
                 }
                 if let HitTarget::PaneChrome(pane_id) = hit {
                     if !self.overlay_open() {
-                        self.pane_drag = Some(PaneDrag {
-                            pane_id,
+                        let source = self
+                            .current_layout()
+                            .panes
+                            .iter()
+                            .find(|p| p.pane_id == pane_id)
+                            .map(|p| p.glass)
+                            .unwrap_or_default();
+                        self.pane_drag = Some(LayoutDrag {
+                            subject: DragSubject::Pane { pane_id, source },
                             start: (self.cursor.x, self.cursor.y),
                             active: false,
                             drop: None,
+                            dest_surface: self.event_surface_key(),
                         });
+                    }
+                }
+                if let HitTarget::Tab(i) = hit {
+                    if !self.overlay_open() {
+                        let surface = self.event_surface_key();
+                        if let Some(tab_id) = self.session.tabs_on_surface(surface).get(i).copied() {
+                            self.pane_drag = Some(LayoutDrag {
+                                subject: DragSubject::Tab {
+                                    tab_id,
+                                    from_idx: i,
+                                },
+                                start: (self.cursor.x, self.cursor.y),
+                                active: false,
+                                drop: None,
+                                dest_surface: surface,
+                            });
+                        }
+                    }
+                }
+                if let HitTarget::Sash(a_leaf) = hit {
+                    if !self.overlay_open() {
+                        let layout = self.current_layout();
+                        if let Some(s) = layout.sashes.iter().find(|s| s.a_leaf == a_leaf) {
+                            self.sash_drag = Some(SashDrag {
+                                a_leaf,
+                                parent: s.parent,
+                                axis: s.axis,
+                            });
+                        }
                     }
                 }
                 // Scrollbar track/thumb drag (right gutter of cell well).
@@ -2903,7 +3384,8 @@ impl ApplicationHandler for ChromeApp {
             } => {
                 self.chip_ui.pressed = false;
                 let was_scroll = self.scroll_dragging.take().is_some();
-                let pane_drag_done = self.finish_pane_drag();
+                let was_sash = self.sash_drag.take().is_some();
+                let pane_drag_done = self.finish_pane_drag(event_loop);
                 if self.selecting_term {
                     self.term_selection.end();
                     self.selecting_term = false;
@@ -2916,7 +3398,7 @@ impl ApplicationHandler for ChromeApp {
                 // Skip chrome activation if we were selecting terminal text or scrolling.
                 if let Some(start) = self.press_hit.take() {
                     let end = self.hit_at_cursor();
-                    if was_scroll || pane_drag_done {
+                    if was_scroll || was_sash || pane_drag_done {
                         // already applied on drag
                     } else if start == end
                         && start != HitTarget::TitleDrag
@@ -2955,7 +3437,9 @@ impl ApplicationHandler for ChromeApp {
                             _ => None,
                         };
                         if let Some(i) = idx {
-                            if let Some(tab) = self.session.tabs.get(i).map(|t| t.id) {
+                            let surface = self.event_surface_key();
+                            if let Some(tab) = self.session.tabs_on_surface(surface).get(i).copied()
+                            {
                                 self.close_tab_by_id(event_loop, tab);
                             }
                         }
@@ -2971,7 +3455,7 @@ impl ApplicationHandler for ChromeApp {
                         let d = delta as f32;
                         if d.is_finite() {
                             // Scale so a normal pinch covers a useful range quickly.
-                            if let Some(r) = self.renderer.as_mut() {
+                            if let Some(r) = self.renderer_mut() {
                                 r.magnify_delta(d * 2.8);
                             }
                         }
@@ -2992,7 +3476,7 @@ impl ApplicationHandler for ChromeApp {
                         MouseScrollDelta::PixelDelta(p) => (p.y as f32 / 80.0) * 0.22,
                     };
                     if step.abs() > 1e-5 {
-                        if let Some(r) = self.renderer.as_mut() {
+                        if let Some(r) = self.renderer_mut() {
                             r.magnify_delta(step);
                         }
                         if let Some(w) = &self.window {
@@ -3093,8 +3577,9 @@ impl ApplicationHandler for ChromeApp {
             }
 
             WindowEvent::Resized(size) => {
-                if let (Some(r), Some(w)) = (self.renderer.as_mut(), self.window.as_ref()) {
-                    r.resize(size, w.scale_factor() as f32);
+                let scale = self.window.as_ref().map(|w| w.scale_factor() as f32);
+                if let (Some(r), Some(scale)) = (self.renderer_mut(), scale) {
+                    r.resize(size, scale);
                 }
                 self.sync_grids_to_panes();
                 if let Some(w) = &self.window {
@@ -3103,8 +3588,9 @@ impl ApplicationHandler for ChromeApp {
             }
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let (Some(r), Some(w)) = (self.renderer.as_mut(), self.window.as_ref()) {
-                    r.resize(w.inner_size(), scale_factor as f32);
+                let size = self.window.as_ref().map(|w| w.inner_size());
+                if let (Some(r), Some(size)) = (self.renderer_mut(), size) {
+                    r.resize(size, scale_factor as f32);
                 }
                 self.sync_grids_to_panes();
                 if let Some(w) = &self.window {
@@ -3135,25 +3621,31 @@ impl ApplicationHandler for ChromeApp {
                 }
                 // Publish rich status for Go bridge proxy (`chrome_status.json`).
                 self.publish_bridge_status();
+                let now = Instant::now();
+                let should_tick =
+                    now.duration_since(self.last_world_tick) >= Duration::from_millis(8);
                 let dt = 1.0 / 60.0;
-                // Smooth scroll ease (product tickSmooth) on every pane grid.
-                for pane in self.session.panes.values_mut() {
-                    let _ = pane.grid.tick_scroll(dt);
-                }
-                self.settings.tick(dt);
-                self.palette.tick(dt);
-                self.help.tick(dt);
-                self.confirm.tick(dt);
-                self.splash.tick(dt);
-                self.notes.tick(dt);
-                self.workspace_ui.tick(dt);
-                self.transfer.tick(dt);
-                self.rename.tick(dt);
-                self.toast.tick(dt);
-                let _ = self.caffeine.tick();
-                let tick = self.session.tick_splits(dt);
-                if !tick.finished_closes.is_empty() {
-                    self.finish_closed_panes(event_loop, &tick.finished_closes);
+                if should_tick {
+                    self.last_world_tick = now;
+                    for pane in self.session.panes.values_mut() {
+                        let _ = pane.grid.tick_scroll(dt);
+                    }
+                    self.settings.tick(dt);
+                    self.palette.tick(dt);
+                    self.help.tick(dt);
+                    self.confirm.tick(dt);
+                    self.splash.tick(dt);
+                    self.notes.tick(dt);
+                    self.workspace_ui.tick(dt);
+                    self.transfer.tick(dt);
+                    self.rename.tick(dt);
+                    self.toast.tick(dt);
+                    let _ = self.caffeine.tick();
+                    let tick = self.session.tick_splits(dt);
+                    if !tick.finished_closes.is_empty() {
+                        self.finish_closed_panes(event_loop, &tick.finished_closes);
+                    }
+                    self.chip_ui.tick(dt);
                 }
                 if self.session.is_empty() {
                     chrome_status::clear_status();
@@ -3163,32 +3655,47 @@ impl ApplicationHandler for ChromeApp {
                 // Apply mono font only when prefs change (not every paint).
                 let want_font = self.settings.prefs.font.clone();
                 if self.applied_font != want_font {
-                    let changed = self
-                        .renderer
-                        .as_mut()
-                        .map(|r| r.set_mono_font_id(&want_font))
-                        .unwrap_or(false);
-                    self.applied_font = want_font;
-                    if changed {
-                        // Cell pitch changed with font — re-grid below.
+                    for s in self.surfaces.values_mut() {
+                        s.renderer.set_mono_font_id(&want_font);
                     }
+                    self.applied_font = want_font;
                 }
 
                 // Cheap when cols/rows unchanged; needed during split animations.
                 self.sync_grids_to_panes();
                 self.update_chip_hover();
-                self.chip_ui.tick(dt);
 
                 let pty_on = self.any_pty_alive();
                 let term_cursor = self.terminal_cursor_visible();
                 let caret_alpha = self.input_caret_alpha();
                 self.sync_workspace_host();
-                let layout = self.current_layout();
+                let paint_key = self
+                    .surfaces
+                    .get(&id)
+                    .map(|s| s.key)
+                    .unwrap_or_else(|| self.event_surface_key());
+                let layout = self.layout_for_surface(paint_key);
+                let prev_active = self.session.active_id;
+                if let Some(tid) = self.surface_focus_tab(paint_key) {
+                    self.session.active_id = tid;
+                }
+                let loc = self.pointer_loc();
+                let pointer = match loc {
+                    PointerLoc::Surface { key, x, y } if key == paint_key => Some((x, y)),
+                    _ => None,
+                };
+                let (ghost_x, ghost_y) = match loc {
+                    PointerLoc::Surface { key, x, y } if key == paint_key => (x, y),
+                    _ => (self.cursor.x, self.cursor.y),
+                };
+                let show_drag = self.pane_drag.as_ref().is_some_and(|d| d.active)
+                    && matches!(loc, PointerLoc::Surface { key, .. } if key == paint_key)
+                    || matches!(
+                        self.pane_drag.as_ref().map(|d| d.drop),
+                        Some(Some(DropKind::TearOff))
+                    ) && self.focus_win == Some(id);
 
-                if let Some(r) = self.renderer.as_mut() {
-                    let pointer = self
-                        .pointer_inside
-                        .then_some((self.cursor.x, self.cursor.y));
+                if let Some(r) = self.surfaces.get_mut(&id).map(|s| &mut s.renderer) {
                     match r.render(
                         &self.session,
                         &self.settings,
@@ -3213,8 +3720,33 @@ impl ApplicationHandler for ChromeApp {
                         self.hovered_link_span.as_ref(),
                         self.pane_drag
                             .as_ref()
-                            .filter(|d| d.active)
+                            .filter(|d| d.active && show_drag)
                             .and_then(|d| d.drop),
+                        self.pane_drag
+                            .as_ref()
+                            .filter(|d| d.active && show_drag)
+                            .and_then(|d| {
+                            match &d.subject {
+                                DragSubject::Pane { source, .. } => {
+                                    let w = (source.w * 0.72).max(48.0);
+                                    let h = (source.h * 0.72).max(36.0);
+                                    Some(crate::layout::Rect::new(
+                                        ghost_x - w * 0.3,
+                                        ghost_y - 12.0,
+                                        w,
+                                        h,
+                                    ))
+                                }
+                                DragSubject::Tab { .. } => {
+                                    Some(crate::layout::Rect::new(
+                                        ghost_x - 48.0,
+                                        ghost_y - 16.0,
+                                        96.0,
+                                        32.0,
+                                    ))
+                                }
+                            }
+                        }),
                     ) {
                         Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -3229,6 +3761,7 @@ impl ApplicationHandler for ChromeApp {
                         Err(e) => eprintln!("wgpu render: {e:?}"),
                     }
                 }
+                self.session.active_id = prev_active;
                 // Do NOT always chain request_redraw — that + heavy frames
                 // starved keyboard repeat. Continuous frames are scheduled
                 // from about_to_wait via needs_anim_frame().

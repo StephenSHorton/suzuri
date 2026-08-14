@@ -685,6 +685,7 @@ impl Renderer {
         // Hovered URL span for primary tint (focused pane; None = no-op).
         hovered_link: Option<&LinkHoverSpan>,
         pane_drop: Option<crate::input::DropKind>,
+        drag_ghost: Option<crate::layout::Rect>,
     ) -> Result<(), wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame
@@ -777,9 +778,11 @@ impl Renderer {
         let rain_view = self.rain_thread.front_view();
         let _ = t; // wall-clock still used by composite glass time
 
+        let surface = session.active_tab().map(|t| t.surface).unwrap_or(0);
         let active_idx = session
             .tabs
             .iter()
+            .filter(|tab| tab.surface == surface)
             .position(|tab| tab.id == session.active_id)
             .unwrap_or(0);
         let lights = if is_mac() {
@@ -816,7 +819,13 @@ impl Renderer {
                     }
                 }
                 DropKind::Tab { tab_id } => {
-                    if let Some(i) = session.tabs.iter().position(|t| t.id == tab_id) {
+                    let surface = session.active_tab().map(|t| t.surface).unwrap_or(0);
+                    if let Some(i) = session
+                        .tabs
+                        .iter()
+                        .filter(|t| t.surface == surface)
+                        .position(|t| t.id == tab_id)
+                    {
                         if let Some(chip) = layout.tab_chips.get(i) {
                             panels.push(
                                 PanelInstance::glass(
@@ -829,7 +838,29 @@ impl Renderer {
                         }
                     }
                 }
+                DropKind::TabInsert { index } => {
+                    if let Some(chip) = layout.tab_chips.get(index) {
+                        let gap = crate::layout::Rect::new(
+                            chip.x - 3.0,
+                            chip.y,
+                            6.0,
+                            chip.h,
+                        );
+                        panels.push(
+                            PanelInstance::glass(gap, 2.0, PanelKind::ModalButtonActive)
+                                .with_opacity(0.95),
+                        );
+                    }
+                }
+                DropKind::TearOff => {}
             }
+        }
+        if let Some(ghost) = drag_ghost {
+            use crate::layout::{PanelInstance, PanelKind};
+            panels.push(
+                PanelInstance::glass(ghost, self.metrics.radius, PanelKind::ModalFrost)
+                    .with_opacity(0.55),
+            );
         }
         // Workspace interiors live in the pane (under overlay scrim), not as a modal.
         if workspace_ui.is_docked() {
@@ -1290,9 +1321,12 @@ fn chrome_labels(
     let tab_size = 14.0;
     for (i, chip) in layout.tab_chips.iter().enumerate() {
         let id = ChipId::Tab(i);
+        let surface = session.active_tab().map(|t| t.surface).unwrap_or(0);
         let title = session
             .tabs
-            .get(i)
+            .iter()
+            .filter(|t| t.surface == surface)
+            .nth(i)
             .map(|t| t.title.as_str())
             .unwrap_or("?");
         let color = chip_ui.dim_color(id, if i == active_idx { bright } else { dim });

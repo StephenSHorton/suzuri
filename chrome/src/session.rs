@@ -103,6 +103,8 @@ pub struct Tab {
     pub focus_pane: u64,
     /// Sole-pane graceful exit (no split branch to reverse-jelly).
     pub solo_exit: Option<SoloExitAnim>,
+    /// In-process window this tab is painted on (`0` = first window).
+    pub surface: u64,
 }
 
 /// Application-facing session. Panes are addressable by id across tabs.
@@ -133,6 +135,7 @@ impl ChromeSession {
             root: SplitNode::leaf(pane_id),
             focus_pane: pane_id,
             solo_exit: None,
+            surface: 0,
         };
         Self {
             tabs: vec![tab],
@@ -454,12 +457,17 @@ impl ChromeSession {
             pane_id,
             new_terminal_pane(pane_id, cols, rows, cwd),
         );
+        let surface = self
+            .active_tab()
+            .map(|t| t.surface)
+            .unwrap_or(0);
         self.tabs.push(Tab {
             id: tab_id,
             title: format!("shell {pane_id}"),
             root: SplitNode::leaf(pane_id),
             focus_pane: pane_id,
             solo_exit: None,
+            surface,
         });
         self.active_id = tab_id;
         (tab_id, pane_id)
@@ -498,47 +506,43 @@ impl ChromeSession {
 
     /// Jump to tab by strip index (0-based). Product ⌘1–⌘9.
     pub fn select_tab_index(&mut self, index: usize) -> bool {
-        if let Some(tab) = self.tabs.get(index) {
-            self.active_id = tab.id;
+        let surface = self.active_tab().map(|t| t.surface).unwrap_or(0);
+        let ids = self.tabs_on_surface(surface);
+        if let Some(&id) = ids.get(index) {
+            self.active_id = id;
             true
         } else {
             false
         }
     }
 
-    /// Active tab's index in the strip, if any.
+    /// Active tab's index in its surface strip, if any.
     pub fn active_tab_index(&self) -> Option<usize> {
-        self.tabs.iter().position(|t| t.id == self.active_id)
+        let surface = self.active_tab().map(|t| t.surface)?;
+        self.tabs_on_surface(surface)
+            .iter()
+            .position(|id| *id == self.active_id)
     }
 
     pub fn next_tab(&mut self) {
-        if self.tabs.is_empty() {
+        let surface = self.active_tab().map(|t| t.surface).unwrap_or(0);
+        let ids = self.tabs_on_surface(surface);
+        if ids.is_empty() {
             return;
         }
-        let pos = self
-            .tabs
-            .iter()
-            .position(|t| t.id == self.active_id)
-            .unwrap_or(0);
-        let next = (pos + 1) % self.tabs.len();
-        self.active_id = self.tabs[next].id;
+        let pos = ids.iter().position(|id| *id == self.active_id).unwrap_or(0);
+        self.active_id = ids[(pos + 1) % ids.len()];
     }
 
     pub fn prev_tab(&mut self) {
-        if self.tabs.is_empty() {
+        let surface = self.active_tab().map(|t| t.surface).unwrap_or(0);
+        let ids = self.tabs_on_surface(surface);
+        if ids.is_empty() {
             return;
         }
-        let pos = self
-            .tabs
-            .iter()
-            .position(|t| t.id == self.active_id)
-            .unwrap_or(0);
-        let next = if pos == 0 {
-            self.tabs.len() - 1
-        } else {
-            pos - 1
-        };
-        self.active_id = self.tabs[next].id;
+        let pos = ids.iter().position(|id| *id == self.active_id).unwrap_or(0);
+        let next = if pos == 0 { ids.len() - 1 } else { pos - 1 };
+        self.active_id = ids[next];
     }
 
     pub fn resize_all(&mut self, cols: u16, rows: u16) {
@@ -792,6 +796,133 @@ impl ChromeSession {
             }
         }
         self.reparent_pane(moving, target, DockEdge::Right)
+    }
+
+    /// Reorder tabs on the same surface. `from`/`to` are indices into that surface's strip.
+    pub fn reorder_tab_on_surface(&mut self, surface: u64, from: usize, to: usize) -> bool {
+        let ids = self.tabs_on_surface(surface);
+        if from == to {
+            return false;
+        }
+        let Some(&tid) = ids.get(from) else {
+            return false;
+        };
+        self.place_tab_on_surface(tid, surface, to)
+    }
+
+    /// Move `tab_id` onto `surface` and insert it at strip index `index`
+    /// (clamped to the end). Works for same-window reorder and cross-window drop.
+    pub fn place_tab_on_surface(&mut self, tab_id: u64, surface: u64, index: usize) -> bool {
+        let Some(pos) = self.tabs.iter().position(|t| t.id == tab_id) else {
+            return false;
+        };
+        let mut tab = self.tabs.remove(pos);
+        tab.surface = surface;
+        let dest: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.surface == surface)
+            .map(|(i, _)| i)
+            .collect();
+        let insert_at = if dest.is_empty() {
+            self.tabs.len()
+        } else if index >= dest.len() {
+            dest[dest.len() - 1] + 1
+        } else {
+            dest[index]
+        };
+        self.tabs.insert(insert_at, tab);
+        self.active_id = tab_id;
+        true
+    }
+
+    pub fn set_sash_ratio(&mut self, a_leaf: u64, ratio: f32) -> bool {
+        for tab in &mut self.tabs {
+            if tab.root.set_ratio(a_leaf, ratio) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn tabs_on_surface(&self, surface: u64) -> Vec<u64> {
+        self.tabs
+            .iter()
+            .filter(|t| t.surface == surface)
+            .map(|t| t.id)
+            .collect()
+    }
+
+    pub fn new_tab_on_surface(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        surface: u64,
+    ) -> (u64, u64) {
+        let (tid, pid) = self.new_tab(cols, rows);
+        if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tid) {
+            t.surface = surface;
+        }
+        (tid, pid)
+    }
+
+    /// Move a whole tab (and its leaves) onto another in-process surface.
+    pub fn move_tab_to_surface(&mut self, tab_id: u64, surface: u64) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return false;
+        };
+        if tab.surface == surface {
+            return false;
+        }
+        tab.surface = surface;
+        self.active_id = tab_id;
+        true
+    }
+
+    pub fn surface_of_tab(&self, tab_id: u64) -> Option<u64> {
+        self.tabs.iter().find(|t| t.id == tab_id).map(|t| t.surface)
+    }
+
+    /// Detach `pane_id` into its own tab on `surface`. Sole-pane tabs just move.
+    /// Returns the (possibly new) tab id.
+    pub fn extract_pane_to_new_tab(&mut self, pane_id: u64, surface: u64) -> Option<u64> {
+        if self.panes.get(&pane_id).is_some_and(|p| p.exiting) {
+            return None;
+        }
+        let src_tab = self.tab_id_for_pane(pane_id)?;
+        let src_idx = self.tabs.iter().position(|t| t.id == src_tab)?;
+        let sole = self.tabs[src_idx].root.leaf_ids().len() <= 1;
+        if sole {
+            self.tabs[src_idx].surface = surface;
+            self.active_id = src_tab;
+            return Some(src_tab);
+        }
+        match self.tabs[src_idx].root.remove_leaf(pane_id) {
+            RemoveResult::Removed { focus_hint } => {
+                if self.tabs[src_idx].focus_pane == pane_id {
+                    self.tabs[src_idx].focus_pane = focus_hint;
+                }
+            }
+            RemoveResult::RemovedEmpty | RemoveResult::NotFound => return None,
+        }
+        let title = self
+            .panes
+            .get(&pane_id)
+            .map(|p| p.title.clone())
+            .unwrap_or_else(|| format!("shell {pane_id}"));
+        let tab_id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
+        self.tabs.push(Tab {
+            id: tab_id,
+            title,
+            root: SplitNode::leaf(pane_id),
+            focus_pane: pane_id,
+            solo_exit: None,
+            surface,
+        });
+        self.active_id = tab_id;
+        Some(tab_id)
     }
 
     /// Close focused pane with jelly animation (same path as shell exit).
@@ -1423,6 +1554,68 @@ mod tests {
         assert_eq!(s.tabs.len(), 1);
         assert!(s.panes.contains_key(&pid));
         assert_eq!(s.active_tab().unwrap().root.leaf_ids().len(), 2);
+    }
+
+    #[test]
+    fn reorder_tabs_on_surface() {
+        let mut s = ChromeSession::new(80, 24);
+        let (t2, _) = s.new_tab(80, 24);
+        let (t3, _) = s.new_tab(80, 24);
+        let _ = t2;
+        assert_eq!(s.tabs_on_surface(0).len(), 3);
+        assert!(s.reorder_tab_on_surface(0, 0, 2));
+        assert_eq!(s.tabs[2].id, 1);
+        assert_eq!(s.tabs[0].id, t2);
+        assert_eq!(s.tabs[1].id, t3);
+    }
+
+    #[test]
+    fn place_tab_cross_surface_inserts() {
+        let mut s = ChromeSession::new(80, 24);
+        let (t2, _) = s.new_tab(80, 24);
+        let (t3, _) = s.new_tab(80, 24);
+        assert!(s.place_tab_on_surface(t2, 1, 0));
+        assert!(s.place_tab_on_surface(t3, 1, 1));
+        assert_eq!(s.tabs_on_surface(0), vec![1]);
+        assert_eq!(s.tabs_on_surface(1), vec![t2, t3]);
+        assert!(s.place_tab_on_surface(1, 1, 1));
+        assert!(s.tabs_on_surface(0).is_empty());
+        assert_eq!(s.tabs_on_surface(1), vec![t2, 1, t3]);
+    }
+
+    #[test]
+    fn extract_pane_makes_new_tab() {
+        let mut s = ChromeSession::new(80, 24);
+        let right = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        let tid = s.extract_pane_to_new_tab(right, 1).unwrap();
+        assert_eq!(s.tabs.len(), 2);
+        assert_eq!(s.surface_of_tab(tid), Some(1));
+        assert_eq!(s.tabs_on_surface(0)[0], 1);
+        assert_eq!(s.active_tab().unwrap().root.leaf_ids(), vec![right]);
+        assert!(s.panes.contains_key(&right));
+        assert!(s.panes.contains_key(&1));
+    }
+
+    #[test]
+    fn extract_sole_pane_moves_tab() {
+        let mut s = ChromeSession::new(80, 24);
+        let tid = s.extract_pane_to_new_tab(1, 3).unwrap();
+        assert_eq!(tid, 1);
+        assert_eq!(s.tabs.len(), 1);
+        assert_eq!(s.surface_of_tab(1), Some(3));
+    }
+
+    #[test]
+    fn set_sash_ratio_on_active_split() {
+        let mut s = ChromeSession::new(80, 24);
+        let _ = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        assert!(s.set_sash_ratio(1, 0.3));
+        match &s.active_tab().unwrap().root {
+            crate::panes::SplitNode::Branch { ratio, .. } => {
+                assert!((*ratio - 0.3).abs() < 1e-4);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
