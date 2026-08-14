@@ -40,7 +40,8 @@ workspace/
 
 ## Human UI
 
-Command palette → **Workspace** (category Workspace).
+Command palette → **Workspace** (category Workspace). Opens as a **split pane**
+beside the last-focused terminal (not a covering modal). ⌘W closes the pane.
 
 Layout (top → bottom): **channel tabs** · **presence strip** (members + availability) ·
 chat bubbles (viewport scroll) · compose · short status · key footer.
@@ -58,7 +59,7 @@ chat bubbles (viewport scroll) · compose · short status · key footer.
 | Drop file onto window | Attach into the active channel |
 | ↑ / ↓ / wheel / PgUp / PgDn | Scroll **chat** history (not the terminal under the modal) |
 | Ctrl+R | Reload from disk |
-| Esc | Cancel mode, or close panel |
+| Esc | Cancel compose mode (docked pane stays; ⌘W closes it) |
 
 Members get a stable color + symbol in the presence strip and on message headers.
 

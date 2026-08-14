@@ -123,7 +123,7 @@ pub fn default_commands() -> Vec<Command> {
         Command {
             id: "workspace",
             title: "Workspace",
-            desc: "Shared channels · humans + AIs".into(),
+            desc: "Shared channels · splits as a pane".into(),
             category: "Workspace",
             action: CommandAction::OpenWorkspace,
         },
@@ -395,7 +395,8 @@ impl PaletteState {
     pub fn scrim_alpha(&self) -> f32 {
         let t = self.overlay.clamp(0.0, 1.0);
         let e = t * t * (3.0 - 2.0 * t);
-        e * 0.50
+        // Heavier frost than other overlays so the palette reads above panes.
+        e * 0.62
     }
 
     /// Result row height (title + shortcut subtext).

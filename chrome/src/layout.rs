@@ -127,6 +127,15 @@ impl Rect {
     pub fn contains(self, x: f32, y: f32) -> bool {
         x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
     }
+
+    /// Axis-aligned overlap (used to clip terminal glyphs under overlay cards).
+    #[inline]
+    pub fn intersects(self, other: Rect) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
 }
 
 /// Per-pane geometry inside the workspace (one glass + footer per leaf).
@@ -695,5 +704,17 @@ mod tests {
         let l = FrameLayout::compute(800.0, 600.0, m, 2);
         let gap = l.tab_chips[1].x - (l.tab_chips[0].x + l.tab_chips[0].w);
         assert!((gap - m.cluster()).abs() < 0.01);
+    }
+
+    #[test]
+    fn rect_intersects() {
+        let a = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let b = Rect::new(5.0, 5.0, 10.0, 10.0);
+        let c = Rect::new(20.0, 20.0, 4.0, 4.0);
+        assert!(a.intersects(b));
+        assert!(b.intersects(a));
+        assert!(!a.intersects(c));
+        assert!(a.contains(0.0, 0.0));
+        assert!(!a.contains(10.0, 10.0));
     }
 }

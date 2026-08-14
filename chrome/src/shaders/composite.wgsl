@@ -460,12 +460,14 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             continue;
         }
 
-        // Scrim (9)
+        // Scrim (9) — frosted backdrop: blurred rain + dark, not a flat black sheet.
         if (p.kind > 8.5 && p.kind < 9.5) {
             let d = sd_round_box(px - center, half, max(p.radius, 0.0));
             let inside = 1.0 - smoothstep(-1.0, 1.0, d);
             let a = clamp(p._pad.x, 0.0, 1.0) * inside;
-            col = mix(col, vec3f(0.0, 0.0, 0.0), a);
+            let frost = sample_rain_raw(px, 2.4);
+            let tinted = mix(frost * 0.30, vec3f(0.02, 0.025, 0.03), 0.58);
+            col = mix(col, tinted, a);
             continue;
         }
 
