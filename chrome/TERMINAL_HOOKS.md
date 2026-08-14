@@ -70,7 +70,7 @@ Hold one `Selection` (recommend: on the app or keyed by `pane_id`).
 |-------|--------|
 | Left **down** in terminal | multi-click → begin / word / line (see below) |
 | Left **move** while dragging | `sel.update_drag(grid, pos)` (cell / word / line mode) |
-| Left **up** | `sel.end()` |
+| Left **up** | `sel.end()` — discards a cell-mode click (no range); keeps word/line and real drags |
 | Click elsewhere / Escape (no overlay) | `sel.clear()` |
 | Scroll wheel while selecting | still absolute rows — update via new `viewport_to_abs` under cursor if desired |
 
