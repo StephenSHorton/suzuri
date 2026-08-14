@@ -81,6 +81,8 @@ struct LensUniforms {
     lens: [f32; 4],
     glass: [f32; 4],
     glass2: [f32; 4],
+    /// x = last-tab dissolve blur radius (logical px).
+    exit: [f32; 4],
 }
 
 /// Canvas UI `GlassVanilla` DEFAULTS — https://github.com/DavidHDev/canvas-ui
@@ -162,6 +164,8 @@ pub struct Renderer {
     /// Active-tab jelly connector (shared with app tick).
     pub tab_jelly: TabJelly,
     surface_format: wgpu::TextureFormat,
+    /// Last-tab dissolve blur (logical px). Set per frame before [`render`].
+    pub window_exit_blur: f32,
 }
 
 impl Renderer {
@@ -519,6 +523,7 @@ impl Renderer {
                     GLASS_REFLECTION,
                     GLASS_SHINE,
                 ],
+                exit: [0.0, 0.0, 0.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -624,6 +629,7 @@ impl Renderer {
             pointer_inside: false,
             tab_jelly: TabJelly::default(),
             surface_format: format,
+            window_exit_blur: 0.0,
         }
     }
 
@@ -1293,6 +1299,7 @@ impl Renderer {
                     GLASS_REFLECTION,
                     GLASS_SHINE.max(0.1),
                 ],
+                exit: [self.window_exit_blur.max(0.0), 0.0, 0.0, 0.0],
             }),
         );
 

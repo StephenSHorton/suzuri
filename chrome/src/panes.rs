@@ -532,6 +532,7 @@ pub struct SoloExitAnim {
     pub jelly_vel: f32,
     /// Last tab on this window — shrink *and* fade the frame out.
     pub fade_window: bool,
+    elapsed: f32,
 }
 
 impl SoloExitAnim {
@@ -541,6 +542,7 @@ impl SoloExitAnim {
             jelly: 1.0,
             jelly_vel: 0.0,
             fade_window: false,
+            elapsed: 0.0,
         }
     }
 
@@ -550,20 +552,40 @@ impl SoloExitAnim {
             jelly: 1.0,
             jelly_vel: 0.0,
             fade_window: true,
+            elapsed: 0.0,
         }
     }
 
+    /// Window alpha. Stays readable a beat, then dissolves.
     pub fn opacity(&self) -> f32 {
         if self.fade_window {
-            self.jelly.clamp(0.0, 1.0)
+            self.jelly.clamp(0.0, 1.0).powf(1.35)
         } else {
             1.0
         }
     }
 
+    /// Logical-px Gaussian radius for the dissolve blur (0 = sharp).
+    pub fn blur_px(&self) -> f32 {
+        if !self.fade_window {
+            return 0.0;
+        }
+        let gone = (1.0 - self.jelly.clamp(0.0, 1.0)).powf(0.72);
+        gone * 26.0
+    }
+
     /// Returns true while still animating; false when settled closed.
     pub fn tick(&mut self, dt: f32) -> bool {
         let dt = dt.clamp(0.0, 1.0 / 20.0);
+        if self.fade_window {
+            // Timed ease — the jelly spring finishes too fast for a dissolve.
+            self.elapsed += dt;
+            const DUR: f32 = 0.52;
+            let p = (self.elapsed / DUR).clamp(0.0, 1.0);
+            let e = p * p * (3.0 - 2.0 * p);
+            self.jelly = 1.0 - e;
+            return p < 1.0;
+        }
         const K: f32 = 160.0;
         const C: f32 = 16.0;
         let target = 0.0;
@@ -693,5 +715,23 @@ mod tests {
         }
         assert!(!moving);
         assert!(a.jelly.abs() < 0.01);
+    }
+
+    #[test]
+    fn window_exit_is_slower_and_blurs() {
+        let mut a = SoloExitAnim::start_window(1);
+        assert!(a.blur_px() < 0.5);
+        assert!(a.opacity() > 0.95);
+        let mut t = 0.0;
+        while a.tick(1.0 / 60.0) {
+            t += 1.0 / 60.0;
+            if t > 2.0 {
+                break;
+            }
+        }
+        assert!(t > 0.45, "dissolve too fast: {t}");
+        assert!(t < 0.65, "dissolve too slow: {t}");
+        assert!(a.opacity() < 0.02);
+        assert!(a.blur_px() > 20.0);
     }
 }

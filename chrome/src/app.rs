@@ -835,6 +835,8 @@ impl ChromeApp {
         if let Some(anim) = &tab.solo_exit {
             let s = anim.jelly.clamp(0.0, 1.15);
             if anim.fade_window {
+                // Recede, don't collapse to a point — blur + fade finish the dissolve.
+                let s = 0.72 + 0.28 * anim.jelly.clamp(0.0, 1.0);
                 let wr = layout.workspace;
                 let cx = wr.x + wr.w * 0.5;
                 let cy = wr.y + wr.h * 0.5;
@@ -4012,7 +4014,14 @@ impl ApplicationHandler for ChromeApp {
                         Some(Some(DropKind::TearOff))
                     ) && self.focus_win == Some(id);
 
+                let exit_blur = self
+                    .surface_focus_tab(paint_key)
+                    .and_then(|tid| self.session.tabs.iter().find(|t| t.id == tid))
+                    .and_then(|t| t.solo_exit.as_ref())
+                    .map(|a| a.blur_px())
+                    .unwrap_or(0.0);
                 if let Some(r) = self.surfaces.get_mut(&id).map(|s| &mut s.renderer) {
+                    r.window_exit_blur = exit_blur;
                     match r.render(
                         &self.session,
                         &self.settings,
