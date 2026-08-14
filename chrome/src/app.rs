@@ -28,7 +28,8 @@ use crate::commands::{
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
 use crate::input::{
-    classify_drop, classify_tab_drop, hit_test, is_mac, DropKind, HitTarget,
+    classify_drop, classify_tab_drop, hit_test, is_mac, window_origin_for_tab_drop, DropKind,
+    HitTarget,
 };
 use crate::layout::{FrameLayout, Metrics};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
@@ -170,6 +171,11 @@ enum SurfaceAdopt {
     Fresh,
     Tab(u64),
     Pane(u64),
+}
+
+enum SurfacePlace {
+    Cascade,
+    UnderPointer,
 }
 
 enum PointerLoc {
@@ -471,6 +477,28 @@ impl ChromeApp {
         }
     }
 
+    fn remember_event_surface_tab(&mut self) {
+        let key = self.event_surface_key();
+        let tid = self.session.active_id;
+        if self.session.surface_of_tab(tid) == Some(key) {
+            for s in self.surfaces.values_mut() {
+                if s.key == key {
+                    s.focus_tab = tid;
+                }
+            }
+        }
+    }
+
+    fn pointer_screen_physical(&self) -> Option<(i32, i32)> {
+        let w = self.window.as_ref()?;
+        let origin = w.inner_position().ok()?;
+        let scale = w.scale_factor();
+        Some((
+            origin.x + (self.cursor.x as f64 * scale).round() as i32,
+            origin.y + (self.cursor.y as f64 * scale).round() as i32,
+        ))
+    }
+
     fn request_redraw(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -548,21 +576,47 @@ impl ChromeApp {
         &mut self,
         event_loop: &ActiveEventLoop,
         adopt: SurfaceAdopt,
+        place: SurfacePlace,
     ) -> Option<u64> {
-        let offset = self
+        let src_size = self.window.as_ref().map(|w| w.inner_size());
+        let src_scale = self
             .window
             .as_ref()
-            .and_then(|w| w.outer_position().ok())
-            .map(|p| (p.x + 36, p.y + 36))
-            .unwrap_or((80, 60));
-        let attrs = WindowAttributes::default()
+            .map(|w| w.scale_factor())
+            .unwrap_or(1.0);
+        let pos = match place {
+            SurfacePlace::Cascade => self
+                .window
+                .as_ref()
+                .and_then(|w| w.outer_position().ok())
+                .map(|p| (p.x + 36, p.y + 36))
+                .unwrap_or((80, 60)),
+            SurfacePlace::UnderPointer => {
+                let logical_w = src_size
+                    .map(|s| s.width as f64 / src_scale)
+                    .unwrap_or(1120.0) as f32;
+                let logical_h = src_size
+                    .map(|s| s.height as f64 / src_scale)
+                    .unwrap_or(740.0) as f32;
+                let layout = FrameLayout::compute(logical_w, logical_h, self.metrics, 1);
+                let chip = layout.tab_chips.first().copied().unwrap_or(
+                    crate::layout::Rect::new(80.0, 6.0, crate::layout::TAB_CHIP_W, 20.0),
+                );
+                let screen = self.pointer_screen_physical().unwrap_or((80, 60));
+                window_origin_for_tab_drop(screen, chip, src_scale)
+            }
+        };
+        let mut attrs = WindowAttributes::default()
             .with_title("suzuri · chrome")
             .with_inner_size(LogicalSize::new(1120.0, 740.0))
             .with_min_inner_size(LogicalSize::new(720.0, 440.0))
-            .with_position(winit::dpi::PhysicalPosition::new(offset.0, offset.1))
+            .with_position(winit::dpi::PhysicalPosition::new(pos.0, pos.1))
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(true);
+        if let (SurfacePlace::UnderPointer, Some(size)) = (&place, src_size) {
+            attrs = attrs.with_inner_size(size);
+        }
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
         #[cfg(target_os = "macos")]
         crate::macos_window::configure_rounded_window(&window, 16.0);
@@ -608,6 +662,7 @@ impl ChromeApp {
             }
         }
         self.set_surface_focus(key, focus_tab);
+        window.focus_window();
         window.request_redraw();
         Some(key)
     }
@@ -1172,7 +1227,10 @@ impl ChromeApp {
                 self.caffeine.deactivate();
             }
             CommandAction::NewWindow => {
-                if self.open_surface(event_loop, SurfaceAdopt::Fresh).is_none() {
+                if self
+                    .open_surface(event_loop, SurfaceAdopt::Fresh, SurfacePlace::Cascade)
+                    .is_none()
+                {
                     self.toast.show("Couldn't open window");
                 }
             }
@@ -1297,7 +1355,7 @@ impl ChromeApp {
             return;
         }
         if self
-            .open_surface(event_loop, SurfaceAdopt::Tab(tab_id))
+            .open_surface(event_loop, SurfaceAdopt::Tab(tab_id), SurfacePlace::UnderPointer)
             .is_none()
         {
             self.toast.show("Couldn't open window");
@@ -1320,7 +1378,11 @@ impl ChromeApp {
             return;
         }
         if self
-            .open_surface(event_loop, SurfaceAdopt::Pane(pane_id))
+            .open_surface(
+                event_loop,
+                SurfaceAdopt::Pane(pane_id),
+                SurfacePlace::UnderPointer,
+            )
             .is_none()
         {
             self.toast.show("Couldn't open window");
@@ -1349,6 +1411,19 @@ impl ChromeApp {
         if self.surfaces.is_empty() || self.session.is_empty() {
             chrome_status::clear_status();
             event_loop.exit();
+            return;
+        }
+        if let Some(eid) = self.focus_win.or(self.event_win) {
+            let grabbed = self
+                .surfaces
+                .get(&eid)
+                .map(|s| (s.key, s.window.clone()));
+            if let Some((key, win)) = grabbed {
+                win.focus_window();
+                if let Some(tid) = self.surface_focus_tab(key) {
+                    self.set_surface_focus(key, tid);
+                }
+            }
         }
     }
 
@@ -1455,6 +1530,13 @@ impl ChromeApp {
         }
         if self.session.is_empty() {
             event_loop.exit();
+            return;
+        }
+        self.prune_empty_surfaces(event_loop);
+        if let Some(tid) = self.session.active_tab().map(|t| t.id) {
+            if let Some(surface) = self.session.surface_of_tab(tid) {
+                self.set_surface_focus(surface, tid);
+            }
         }
     }
 
@@ -1998,6 +2080,7 @@ impl ChromeApp {
             }
             HitTarget::None => {}
         }
+        self.remember_event_surface_tab();
 
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -3239,6 +3322,7 @@ impl ApplicationHandler for ChromeApp {
                 button: MouseButton::Left,
                 ..
             } => {
+                self.focus_surface_window(id);
                 self.chip_ui.pressed = true;
                 let hit = self.hit_at_cursor();
                 self.press_hit = Some(hit);
@@ -3542,6 +3626,7 @@ impl ApplicationHandler for ChromeApp {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
+                self.focus_surface_window(id);
                 self.handle_key(event_loop, &event);
             }
 

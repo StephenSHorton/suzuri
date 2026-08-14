@@ -480,17 +480,33 @@ impl ChromeSession {
         let Some(pos) = self.tabs.iter().position(|t| t.id == id) else {
             return Vec::new();
         };
+        let surface = self.tabs[pos].surface;
+        let strip_idx = self
+            .tabs
+            .iter()
+            .filter(|t| t.surface == surface)
+            .position(|t| t.id == id)
+            .unwrap_or(0);
         let tab = self.tabs.remove(pos);
         let pane_ids = tab.root.leaf_ids();
         for pid in &pane_ids {
             self.panes.remove(pid);
         }
         if self.active_id == id {
-            let next = self
+            let others: Vec<u64> = self
                 .tabs
-                .get(pos)
-                .or_else(|| self.tabs.get(pos.saturating_sub(1)));
-            self.active_id = next.map(|t| t.id).unwrap_or(self.tabs[0].id);
+                .iter()
+                .filter(|t| t.surface == surface)
+                .map(|t| t.id)
+                .collect();
+            let next = others
+                .get(strip_idx)
+                .or_else(|| others.last())
+                .copied()
+                .or_else(|| self.tabs.first().map(|t| t.id));
+            if let Some(nid) = next {
+                self.active_id = nid;
+            }
         }
         pane_ids
     }
@@ -1469,6 +1485,19 @@ mod tests {
         let removed = s.close_tab(tid);
         assert_eq!(removed.len(), 1);
         assert_eq!(s.tabs.len(), 1);
+    }
+
+    #[test]
+    fn close_tab_stays_on_same_surface() {
+        let mut s = ChromeSession::new(80, 24);
+        let (a2, _) = s.new_tab(80, 24);
+        let (b1, _) = s.new_tab_on_surface(80, 24, 1);
+        let (b2, _) = s.new_tab_on_surface(80, 24, 1);
+        s.select_tab(b1);
+        let _ = s.close_tab(b1);
+        assert_eq!(s.active_id, b2);
+        assert_eq!(s.surface_of_tab(s.active_id), Some(1));
+        let _ = a2;
     }
 
     #[test]

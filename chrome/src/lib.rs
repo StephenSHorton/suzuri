@@ -99,7 +99,7 @@ pub use control_mailbox::{
 };
 pub use input::{
     classify_drop, classify_tab_drop, drop_edge_rect, edge_of, hit_test, is_mac,
-    traffic_light_rects, DropKind, HitTarget,
+    traffic_light_rects, window_origin_for_tab_drop, DropKind, HitTarget,
 };
 pub use layout::{FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect, Spacing};
 pub use links::{

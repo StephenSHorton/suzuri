@@ -294,6 +294,18 @@ pub fn edge_of(r: Rect, x: f32, y: f32) -> DockEdge {
     }
 }
 
+/// Physical outer origin so `chip`'s center sits on `screen` (pointer).
+/// `scale` is the destination window's scale factor.
+pub fn window_origin_for_tab_drop(
+    screen: (i32, i32),
+    chip: Rect,
+    scale: f64,
+) -> (i32, i32) {
+    let ax = ((chip.x + chip.w * 0.5) as f64 * scale).round() as i32;
+    let ay = ((chip.y + chip.h * 0.5) as f64 * scale).round() as i32;
+    (screen.0 - ax, screen.1 - ay)
+}
+
 /// Highlight strip for a drop edge, inset inside `glass`.
 pub fn drop_edge_rect(glass: Rect, edge: DockEdge) -> Rect {
     let t = (glass.w.min(glass.h) * 0.12).clamp(8.0, 28.0);
@@ -506,6 +518,14 @@ mod tests {
             classify_tab_drop(&layout, 80.0, y, None),
             Some(DropKind::TabInsert { index: 2 })
         );
+    }
+
+    #[test]
+    fn tearoff_origin_puts_chip_under_pointer() {
+        let chip = Rect::new(48.0, 6.0, 112.0, 20.0);
+        let (x, y) = window_origin_for_tab_drop((800, 400), chip, 2.0);
+        // chip center = (104, 16) logical → (208, 32) physical
+        assert_eq!((x, y), (592, 368));
     }
 
     #[test]
