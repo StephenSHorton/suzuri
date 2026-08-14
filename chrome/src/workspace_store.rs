@@ -361,12 +361,7 @@ impl WorkspaceStore {
     }
 
     /// Look up by member_id, or auto-join a *new* member (never merge on name).
-    fn resolve_member(
-        &self,
-        member_id: &str,
-        name: &str,
-        kind: &str,
-    ) -> Result<WsMember, String> {
+    fn resolve_member(&self, member_id: &str, name: &str, kind: &str) -> Result<WsMember, String> {
         let mut members = self.read_members()?;
         let member_id = member_id.trim();
         if !member_id.is_empty() {
@@ -414,12 +409,7 @@ impl WorkspaceStore {
     /// Reuses a member only when `session_id` is non-empty and matches.
     /// Empty session_id always creates a new member; taken names get a suffix
     /// (`engine`, `engine-2`). Does not post a system line to #general.
-    pub fn join(
-        &self,
-        name: &str,
-        kind: &str,
-        session_id: &str,
-    ) -> Result<WsMember, String> {
+    pub fn join(&self, name: &str, kind: &str, session_id: &str) -> Result<WsMember, String> {
         self.ensure()?;
         let name = name.trim();
         if name.is_empty() {
@@ -579,7 +569,11 @@ impl WorkspaceStore {
         if name.is_empty() {
             return Err("name required".into());
         }
-        let from_kind = if from_kind == "agent" { "agent" } else { "human" };
+        let from_kind = if from_kind == "agent" {
+            "agent"
+        } else {
+            "human"
+        };
 
         let file_id = new_id("f");
         let base = src_path
@@ -849,9 +843,7 @@ pub fn member_chip(m: &WsMember) -> String {
         name = rs.into_iter().take(13).collect::<String>() + "…";
     }
     let mut chip = format!("{glyph} {name}");
-    if !m.status_note.is_empty()
-        && matches!(st, STATUS_WAITING | STATUS_BLOCKED | STATUS_WORKING)
-    {
+    if !m.status_note.is_empty() && matches!(st, STATUS_WAITING | STATUS_BLOCKED | STATUS_WORKING) {
         let mut note = m.status_note.clone();
         let nrs: Vec<char> = note.chars().collect();
         if nrs.len() > 18 {
@@ -977,10 +969,7 @@ fn extract_u64(s: &str, key: &str) -> Option<u64> {
     let rest = &s[i + pat.len()..];
     let colon = rest.find(':')?;
     let rest = rest[colon + 1..].trim_start();
-    let num: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     num.parse().ok()
 }
 
@@ -1091,7 +1080,6 @@ fn format_members_json(members: &[WsMember]) -> String {
     out.push_str("]\n");
     out
 }
-
 
 fn copy_file_sha256(src: &Path, dst: &Path) -> Result<String, String> {
     let mut in_f = fs::File::open(src).map_err(|e| format!("open src: {e}"))?;
@@ -1299,8 +1287,7 @@ fn new_id(prefix: &str) -> String {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let r = n
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    let r = n.wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ (std::process::id() as u64).wrapping_shl(16)
         ^ seq.wrapping_mul(0xA24B_AED4_96E1_7B19);
     format!("{prefix}_{r:012x}{seq:04x}")
@@ -1511,7 +1498,9 @@ mod tests {
             .post("general", "@engine-2 hello", "alice", "human")
             .unwrap();
         assert_eq!(msg.mentions, vec![e2.id.clone()]);
-        let msg2 = store.post("general", "hey @engine", "alice", "human").unwrap();
+        let msg2 = store
+            .post("general", "hey @engine", "alice", "human")
+            .unwrap();
         assert_eq!(msg2.mentions, vec![e1.id.clone()]);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1535,7 +1524,10 @@ mod tests {
         let f = msg.file.as_ref().unwrap();
         assert_eq!(f.name, "src-hello.txt");
         assert_eq!(f.bytes, 12);
-        assert_eq!(f.sha256, "1b6409e937d5bf13ad8e21ff4ba46e2aae2d5c3884f74d3cfd1a8d5ce79c4fab");
+        assert_eq!(
+            f.sha256,
+            "1b6409e937d5bf13ad8e21ff4ba46e2aae2d5c3884f74d3cfd1a8d5ce79c4fab"
+        );
         let abs = store.root().join(&f.rel_path);
         assert_eq!(fs::read_to_string(&abs).unwrap(), "hello attach");
         let hist = store.history("general", 10).unwrap();
@@ -1572,10 +1564,18 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let store = WorkspaceStore::open_at(&dir);
         store.create_channel("temp-room", "").unwrap();
-        assert!(store.list_channels().unwrap().iter().any(|c| c == "temp-room"));
+        assert!(store
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|c| c == "temp-room"));
         let slug = store.delete_channel("temp-room").unwrap();
         assert_eq!(slug, "temp-room");
-        assert!(!store.list_channels().unwrap().iter().any(|c| c == "temp-room"));
+        assert!(!store
+            .list_channels()
+            .unwrap()
+            .iter()
+            .any(|c| c == "temp-room"));
         assert!(!dir.join("channels").join("temp-room").exists());
         assert!(store.delete_channel("general").is_err());
         assert!(store.delete_channel("missing-room").is_err());
@@ -1645,7 +1645,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let store = WorkspaceStore::open_at(&dir);
         let existing = store.join("engine", "agent", "sess-1").unwrap();
-        let msg = store.post("general", "drive-by", "engine", "agent").unwrap();
+        let msg = store
+            .post("general", "drive-by", "engine", "agent")
+            .unwrap();
         assert_ne!(msg.from_id, existing.id);
         let list = store.list_members().unwrap();
         assert_eq!(list.len(), 2);

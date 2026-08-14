@@ -281,10 +281,8 @@ impl WorkspaceUi {
     /// How many bubbles fit the current card (larger pane → more history).
     pub fn visible_bubble_cap(&self, win_w: f32, win_h: f32) -> usize {
         let host = self.card_rect(win_w, win_h);
-        let usable =
-            (host.h - MODAL_PAD * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - 8.0).max(80.0);
-        ((usable / (BUBBLE_MIN_H + BUBBLE_GAP)).floor() as usize)
-            .clamp(VISIBLE_BUBBLE_CAP, 48)
+        let usable = (host.h - MODAL_PAD * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - 8.0).max(80.0);
+        ((usable / (BUBBLE_MIN_H + BUBBLE_GAP)).floor() as usize).clamp(VISIBLE_BUBBLE_CAP, 48)
     }
 
     pub fn open(&mut self) {
@@ -822,7 +820,10 @@ impl WorkspaceUi {
             .map(|m| m.presence().to_string())
             .unwrap_or_else(|| STATUS_IDLE.into());
         let next = next_availability(&current);
-        match self.store.set_status(&self.human_id, &self.human, next, None) {
+        match self
+            .store
+            .set_status(&self.human_id, &self.human, next, None)
+        {
             Ok(m) => {
                 self.reload_members();
                 self.status = format!("status: {}", m.presence());
@@ -1654,7 +1655,6 @@ mod tests {
         assert_eq!(ui.messages.last().map(|m| m.kind.as_str()), Some("file"));
         let _ = fs::remove_dir_all(&dir);
     }
-
 
     #[test]
     fn chrome_ui_post_uses_joiner_member_id() {
