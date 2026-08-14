@@ -114,7 +114,7 @@ pub use rename::{RenameState, RenameTarget};
 pub use selection::Selection;
 pub use session::{
     initial_cwd, is_unhelpful_cwd, normalize_process_cwd, user_home_dir, ChromeSession,
-    CloseOutcome, Pane, PaneKind, Tab, WidgetKind,
+    CloseOutcome, Pane, PaneKind, Tab, TabExitAnim, WidgetKind,
 };
 pub use settings::{ChromePrefs, SettingsState, GLASS_DARKEN_DEFAULT};
 pub use shell::{ShellOutput, PROMPT_GLYPH};

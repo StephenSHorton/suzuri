@@ -825,6 +825,10 @@ impl ChromeApp {
             FrameLayout::compute(1120.0, 740.0, self.metrics, tab_count)
         };
 
+        if let Some((idx, exit)) = self.session.tab_exit_on_surface(surface) {
+            layout.apply_tab_exit(idx, exit.t);
+        }
+
         let shown = self.surface_focus_tab(surface);
         let Some(tab) = shown.and_then(|id| self.session.tabs.iter().find(|t| t.id == id)) else {
             return layout;
@@ -881,6 +885,22 @@ impl ChromeApp {
         });
         tab.root
             .collect_sashes(layout.workspace, gap, &mut layout.sashes);
+        if let Some((_, exit)) = self.session.tab_exit_on_surface(surface) {
+            if exit.slide_content && shown == Some(exit.next_id) {
+                let dx = exit.dir * layout.workspace.w * exit.t;
+                for pl in &mut layout.panes {
+                    pl.glass.x += dx;
+                    pl.cells.x += dx;
+                    pl.warp.x += dx;
+                    pl.path.x += dx;
+                    pl.divider.x += dx;
+                }
+                for s in &mut layout.sashes {
+                    s.rect.x += dx;
+                    s.parent.x += dx;
+                }
+            }
+        }
         layout
     }
 
@@ -920,6 +940,13 @@ impl ChromeApp {
         }
         if self.session.is_last_tab_on_surface(tab_id) {
             let _ = self.session.begin_close_last_window_tab(tab_id);
+            return;
+        }
+        let surface = self.session.surface_of_tab(tab_id).unwrap_or(0);
+        if self.session.begin_close_tab(tab_id) {
+            if let Some(tid) = self.session.active_tab().map(|t| t.id) {
+                self.set_surface_focus(surface, tid);
+            }
             return;
         }
         let pane_ids = self.session.close_tab(tab_id);
@@ -3261,7 +3288,11 @@ impl ChromeApp {
             || self.workspace_captures_input()
             || self.pane_drag.as_ref().is_some_and(|d| d.active)
             || self.sash_drag.is_some()
-            || self.session.tabs.iter().any(|t| t.solo_exit.is_some())
+            || self
+                .session
+                .tabs
+                .iter()
+                .any(|t| t.solo_exit.is_some() || t.exit.is_some())
         {
             return true;
         }

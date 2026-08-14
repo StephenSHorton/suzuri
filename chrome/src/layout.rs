@@ -183,6 +183,59 @@ pub struct FrameLayout {
     pub sashes: Vec<crate::panes::SashHit>,
 }
 
+impl FrameLayout {
+    /// Collapse chip `index` and pull later chips over. `t` is 1 (full) → 0 (gone).
+    pub fn apply_tab_exit(&mut self, index: usize, t: f32) {
+        if index >= self.tab_chips.len() {
+            return;
+        }
+        let t = t.clamp(0.0, 1.0);
+        let ease = 1.0 - t; // 0 start, 1 end
+        let cluster = if self.tab_chips.len() >= 2 {
+            (self.tab_chips[1].x - (self.tab_chips[0].x + self.tab_chips[0].w)).max(0.0)
+        } else {
+            8.0
+        };
+        let lift = 12.0 * ease;
+        let start_x = self.tab_chips[0].x;
+        let chip_y = self.tab_chips[0].y;
+        let chip_h = self.tab_chips[0].h;
+        let mut x = start_x;
+        for i in 0..self.tab_chips.len() {
+            let full = TAB_CHIP_W;
+            let w = if i == index {
+                (full * t).max(0.0)
+            } else {
+                full
+            };
+            let y = if i == index { chip_y - lift } else { chip_y };
+            let h = if i == index {
+                (chip_h * (0.78 + 0.22 * t)).max(1.0)
+            } else {
+                chip_h
+            };
+            if w > 0.5 {
+                self.tab_chips[i] = Rect::new(x, y, w, h);
+                if let Some(close) = self.tab_closes.get_mut(i) {
+                    let cx = x + w - TAB_CLOSE_TRAIL - TAB_CLOSE_SZ;
+                    let cy = y + (h - TAB_CLOSE_SZ) * 0.5;
+                    *close = Rect::new(cx, cy, TAB_CLOSE_SZ, TAB_CLOSE_SZ);
+                }
+                let gap = if i == index { cluster * t } else { cluster };
+                x += w + gap;
+            } else {
+                self.tab_chips[i] = Rect::new(x, y, 0.0, h);
+                if let Some(close) = self.tab_closes.get_mut(i) {
+                    *close = Rect::new(x, y, 0.0, 0.0);
+                }
+            }
+        }
+        let new_size = self.tab_new.w;
+        let new_y = chip_y + (chip_h - new_size) * 0.5;
+        self.tab_new = Rect::new(x, new_y, new_size, new_size);
+    }
+}
+
 /// Tab chip width (room for title + gap + close ×).
 pub const TAB_CHIP_W: f32 = 112.0;
 /// Close × size inside a tab chip.
@@ -719,5 +772,19 @@ mod tests {
         assert!(!a.intersects(c));
         assert!(a.contains(0.0, 0.0));
         assert!(!a.contains(10.0, 10.0));
+    }
+
+    #[test]
+    fn tab_exit_collapses_and_pulls_neighbors() {
+        let m = Metrics::default();
+        let mut l = FrameLayout::compute(1120.0, 740.0, m, 3);
+        let x1 = l.tab_chips[1].x;
+        l.apply_tab_exit(0, 0.0);
+        assert!(l.tab_chips[0].w < 1.0);
+        assert!(
+            (l.tab_chips[1].x - l.tab_chips[0].x).abs() < 1.0,
+            "next chip should pull into the closed slot"
+        );
+        assert!(l.tab_chips[2].x < x1 + TAB_CHIP_W);
     }
 }

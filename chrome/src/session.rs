@@ -94,6 +94,47 @@ fn new_widget_pane(id: u64, kind: WidgetKind, cwd: String) -> Pane {
     }
 }
 
+/// Strip + content handoff when closing a tab that isn't the last on its window.
+#[derive(Clone, Debug)]
+pub struct TabExitAnim {
+    /// 1 = just started, 0 = gone.
+    pub t: f32,
+    elapsed: f32,
+    pub next_id: u64,
+    /// +1 next is to the right (incoming slides from the right).
+    pub dir: f32,
+    /// Slide workspace content (only when the closing tab was focused).
+    pub slide_content: bool,
+}
+
+impl TabExitAnim {
+    const DUR: f32 = 0.30;
+
+    pub fn start(next_id: u64, dir: f32, slide_content: bool) -> Self {
+        Self {
+            t: 1.0,
+            elapsed: 0.0,
+            next_id,
+            dir,
+            slide_content,
+        }
+    }
+
+    pub fn ease(&self) -> f32 {
+        let p = (1.0 - self.t).clamp(0.0, 1.0);
+        p * p * (3.0 - 2.0 * p)
+    }
+
+    /// Returns true while still animating.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        self.elapsed += dt.clamp(0.0, 1.0 / 20.0);
+        let p = (self.elapsed / Self::DUR).clamp(0.0, 1.0);
+        let e = p * p * (3.0 - 2.0 * p);
+        self.t = 1.0 - e;
+        p < 1.0
+    }
+}
+
 /// One chrome-strip tab that may hold a split tree of panes.
 #[derive(Clone, Debug)]
 pub struct Tab {
@@ -105,6 +146,8 @@ pub struct Tab {
     pub solo_exit: Option<SoloExitAnim>,
     /// In-process window this tab is painted on (`0` = first window).
     pub surface: u64,
+    /// Non-last-tab close: chip collapses while the next tab pulls over.
+    pub exit: Option<TabExitAnim>,
 }
 
 /// Application-facing session. Panes are addressable by id across tabs.
@@ -136,6 +179,7 @@ impl ChromeSession {
             focus_pane: pane_id,
             solo_exit: None,
             surface: 0,
+            exit: None,
         };
         Self {
             tabs: vec![tab],
@@ -329,6 +373,8 @@ impl ChromeSession {
         let mut result = TickResult::default();
         let mut solo_finished: Vec<(u64, u64)> = Vec::new(); // (tab_id, pane_id)
 
+        let mut strip_finished: Vec<u64> = Vec::new();
+
         for tab in &mut self.tabs {
             let r = tab.root.tick(dt);
             result.moving |= r.moving;
@@ -342,6 +388,13 @@ impl ChromeSession {
                     tab.solo_exit = None;
                 }
             }
+            if let Some(anim) = &mut tab.exit {
+                if anim.tick(dt) {
+                    result.moving = true;
+                } else {
+                    strip_finished.push(tab.id);
+                }
+            }
         }
 
         // Finalize branch closes that finished jelly
@@ -353,7 +406,74 @@ impl ChromeSession {
             result.finished_closes.push(pane_id);
             self.finalize_solo_close(tab_id, pane_id, &mut result);
         }
+        for tab_id in strip_finished {
+            result.finished_closes.extend(self.close_tab(tab_id));
+        }
         result
+    }
+
+    /// Neighbor that will take this tab's place on the strip (`dir`: +1 = right).
+    pub fn tab_close_handoff(&self, tab_id: u64) -> Option<(u64, f32)> {
+        let surface = self.surface_of_tab(tab_id)?;
+        let strip = self.tabs_on_surface(surface);
+        let idx = strip.iter().position(|&id| id == tab_id)?;
+        if strip.len() <= 1 {
+            return None;
+        }
+        if idx + 1 < strip.len() {
+            Some((strip[idx + 1], 1.0))
+        } else {
+            Some((strip[idx - 1], -1.0))
+        }
+    }
+
+    /// Close a tab that has neighbors: chip shifts away, next tab pulls over.
+    pub fn begin_close_tab(&mut self, tab_id: u64) -> bool {
+        if self.is_last_tab_on_surface(tab_id) {
+            return self.begin_close_last_window_tab(tab_id);
+        }
+        if self
+            .tabs
+            .iter()
+            .find(|t| t.id == tab_id)
+            .is_some_and(|t| t.exit.is_some() || t.solo_exit.is_some())
+        {
+            return true;
+        }
+        let Some((next_id, dir)) = self.tab_close_handoff(tab_id) else {
+            return false;
+        };
+        let slide = self.active_id == tab_id;
+        if slide {
+            self.active_id = next_id;
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            for pid in tab.root.leaf_ids() {
+                if let Some(p) = self.panes.get_mut(&pid) {
+                    p.exiting = true;
+                }
+            }
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.exit = Some(TabExitAnim::start(next_id, dir, slide));
+        }
+        true
+    }
+
+    /// Closing tab on this surface, if any: (strip index, anim).
+    pub fn tab_exit_on_surface(&self, surface: u64) -> Option<(usize, &TabExitAnim)> {
+        let strip = self.tabs_on_surface(surface);
+        for (i, id) in strip.iter().enumerate() {
+            if let Some(exit) = self
+                .tabs
+                .iter()
+                .find(|t| t.id == *id)
+                .and_then(|t| t.exit.as_ref())
+            {
+                return Some((i, exit));
+            }
+        }
+        None
     }
 
     /// Last tab on `surface` — close should shrink+fade the window.
@@ -411,15 +531,14 @@ impl ChromeSession {
 
         let leaf_count = tab.root.leaf_ids().len();
         if leaf_count <= 1 {
-            // Sole pane — jelly-scale the well; last tab of a window also fades.
-            if tab.solo_exit.is_none() {
-                tab.solo_exit = Some(if last_on_window {
-                    SoloExitAnim::start_window(pane_id)
-                } else {
-                    SoloExitAnim::start(pane_id)
-                });
+            if last_on_window {
+                if tab.solo_exit.is_none() {
+                    tab.solo_exit = Some(SoloExitAnim::start_window(pane_id));
+                }
+                return true;
             }
-            return true;
+            // Sole pane of a tab that has neighbors — strip handoff, not pane shrink.
+            return self.begin_close_tab(tab_id);
         }
 
         if tab.root.begin_close_leaf(pane_id) {
@@ -506,6 +625,7 @@ impl ChromeSession {
             focus_pane: pane_id,
             solo_exit: None,
             surface,
+            exit: None,
         });
         self.active_id = tab_id;
         (tab_id, pane_id)
@@ -974,6 +1094,7 @@ impl ChromeSession {
             focus_pane: pane_id,
             solo_exit: None,
             surface,
+            exit: None,
         });
         self.active_id = tab_id;
         Some(tab_id)
@@ -1664,6 +1785,30 @@ mod tests {
     }
 
     #[test]
+    fn close_tab_handoff_pulls_right_neighbor() {
+        let mut s = ChromeSession::new(80, 24);
+        let (t2, _) = s.new_tab(80, 24);
+        let (t3, _) = s.new_tab(80, 24);
+        s.select_tab(t2);
+        assert!(s.begin_close_tab(t2));
+        assert_eq!(s.tabs.len(), 3, "tab stays until the strip anim finishes");
+        assert_eq!(s.active_id, t3);
+        let exit = s.tabs.iter().find(|t| t.id == t2).unwrap().exit.as_ref().unwrap();
+        assert!(exit.slide_content);
+        assert!(exit.dir > 0.0);
+        let mut dt = 0.0;
+        while dt < 1.0 {
+            let r = s.tick_splits(1.0 / 60.0);
+            dt += 1.0 / 60.0;
+            if !r.moving && s.tabs.iter().all(|t| t.exit.is_none()) {
+                break;
+            }
+        }
+        assert_eq!(s.tabs.len(), 2);
+        assert!(s.tabs.iter().all(|t| t.id != t2));
+    }
+
+    #[test]
     fn last_tab_on_surface_fades_window() {
         let mut s = ChromeSession::new(80, 24);
         let _ = s.new_tab(80, 24); // second tab on surface 0
@@ -1682,14 +1827,15 @@ mod tests {
     }
 
     #[test]
-    fn sole_pane_on_shared_window_does_not_fade() {
+    fn sole_pane_on_shared_window_uses_strip_exit() {
         let mut s = ChromeSession::new(80, 24);
-        let _ = s.new_tab(80, 24);
+        let (t2, _) = s.new_tab(80, 24);
         s.select_tab(1);
         assert!(s.begin_close_pane(1));
-        let anim = s.tabs[0].solo_exit.as_ref().expect("solo exit");
-        assert!(!anim.fade_window);
-        assert_eq!(anim.opacity(), 1.0);
+        assert!(s.tabs[0].solo_exit.is_none());
+        let exit = s.tabs[0].exit.as_ref().expect("strip exit");
+        assert!(exit.slide_content);
+        assert_eq!(exit.next_id, t2);
     }
 
     #[test]
