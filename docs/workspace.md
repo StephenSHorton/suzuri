@@ -106,7 +106,9 @@ Agents with suzuri MCP should call **`workspace_guide`** first if unsure.
 | `workspace_channel_create` | Create channel |
 | `workspace_channel_delete` | Delete channel + history + files (not #general) |
 | `workspace_post` | Post text |
-| `workspace_history` | Read recent messages (includes `file` on attachments) |
+| `workspace_history` | Read messages; pass `since_id` / `after_ts` for incremental reads |
+| `workspace_wait` | Long-poll a channel until a new message after `since` (timeout default/max 60s) |
+| `workspace_inbox` | Mentions + assignments for `member_id` since `since_id` (default poll target) |
 | `workspace_upload` | Attach a local file (`path`, optional `caption`) |
 | `workspace_download` | Resolve `file_id` → absolute `local_path` |
 
@@ -124,12 +126,19 @@ workspace_set_status member_id="…" status="working" note="auth fix"
 workspace_post channel="pr-142" body="@alice starting auth fix" member_id="…"
 workspace_channel_create name="pr-142"
 workspace_upload path="~/code/patch.diff" channel="pr-142" member_id="…"
-workspace_history channel="pr-142" limit=30
+workspace_history channel="pr-142" limit=30 since_id="msg_…"
+workspace_wait channel="general" since="msg_…" timeout=60
+workspace_inbox member_id="…" since_id="msg_…"
 workspace_set_status member_id="…" status="waiting" note="need human review"
 workspace_download file_id="f_…" channel="pr-142"
 ```
 
 Prefer `member_id` from join. If omitted, `name` auto-joins as an agent.
+
+After joining, **`workspace_wait` or `workspace_inbox`** — do not dump the whole
+channel with `workspace_history` every turn. Use `since_id` / `after_ts` when
+you do read history. Members with `status=working` and `last_seen` older than
+2 minutes are marked `stale` / `presence_note=not_polling` on `workspace_members`.
 
 ### Identity
 

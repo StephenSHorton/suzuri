@@ -142,6 +142,8 @@ const (
 	WorkspaceOpChannelDelete WorkspaceOp = "channel_delete"
 	WorkspaceOpPost          WorkspaceOp = "post"
 	WorkspaceOpHistory       WorkspaceOp = "history"
+	WorkspaceOpWait          WorkspaceOp = "wait"
+	WorkspaceOpInbox         WorkspaceOp = "inbox"
 	WorkspaceOpUpload        WorkspaceOp = "upload"
 	WorkspaceOpDownload      WorkspaceOp = "download"
 	WorkspaceOpSetStatus     WorkspaceOp = "set_status"
@@ -160,6 +162,10 @@ type WorkspaceRequest struct {
 	ReplyTo   string      `json:"reply_to,omitempty"`
 	Topic     string      `json:"topic,omitempty"`
 	Limit     int         `json:"limit,omitempty"`
+	SinceID   string      `json:"since_id,omitempty"`  // history/inbox cursor
+	AfterTS   string      `json:"after_ts,omitempty"`  // RFC3339 history cursor
+	Since     string      `json:"since,omitempty"`     // wait cursor (msg id)
+	Timeout   int         `json:"timeout,omitempty"`   // wait timeout seconds
 	FilePath  string      `json:"file_path,omitempty"` // local source for upload
 	FileID    string      `json:"file_id,omitempty"`   // stored file or message id for download
 	// Status is availability for set_status (idle|working|waiting|blocked|away).
@@ -172,15 +178,18 @@ type WorkspaceRequest struct {
 
 // WorkspaceMember is one human or agent in the workspace.
 type WorkspaceMember struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Kind       string    `json:"kind"`
-	SessionID  string    `json:"session_id,omitempty"`
-	Role       string    `json:"role,omitempty"`
-	Status     string    `json:"status,omitempty"`
-	StatusNote string    `json:"status_note,omitempty"`
-	JoinedAt   time.Time `json:"joined_at"`
-	LastSeen   time.Time `json:"last_seen"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Kind         string    `json:"kind"`
+	SessionID    string    `json:"session_id,omitempty"`
+	Role         string    `json:"role,omitempty"`
+	Status       string    `json:"status,omitempty"`
+	StatusNote   string    `json:"status_note,omitempty"`
+	JoinedAt     time.Time `json:"joined_at"`
+	LastSeen     time.Time `json:"last_seen"`
+	Polling      *bool     `json:"polling,omitempty"`
+	Stale        bool      `json:"stale,omitempty"`
+	PresenceNote string    `json:"presence_note,omitempty"`
 }
 
 // WorkspaceChannel is a named room.
