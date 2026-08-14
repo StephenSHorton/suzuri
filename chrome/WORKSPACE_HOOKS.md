@@ -87,15 +87,15 @@ Preserve these for `app` / `renderer`:
 - `mode: ComposeMode` — `Message` \| `NewChannel` \| `AttachPath`
 - `scroll: usize` — messages hidden from the end
 
-`WsMessage { id, channel, from, from_kind, kind, body, ts, file }` — `from` is display name (`from_name` on disk); `file` is `Option<WsFileRef>` for attaches.
+`WsMessage { id, channel, from, from_kind, kind, body, ts, file, mentions }` — `from` is display name (`from_name` on disk); `file` is `Option<WsFileRef>` for attaches; `mentions` is member ids resolved from `@name` at post time.
 
-`WsMember { id, name, kind, session_id, status, status_note, joined_at, last_seen }` — `presence()` returns status or `idle`.
+`WsMember { id, name, kind, session_id, role, status, status_note, joined_at, last_seen }` — `presence()` returns status or `idle`. `role` is `pm`\|`engine`\|`content` (exclusive; not the display name).
 
 ### Presence / members
 
 | Method | Behavior |
 |--------|----------|
-| `join_self()` | `store.join($USER, "human", "")` |
+| `join_self()` | `store.join($USER, "human", "chrome-local:$USER")` — stable session so reopen does not mint a new human |
 | `members_strip_text()` | One-line chip list (humans first; soft cap + overflow) |
 | `refresh()` | Reload channels + messages + members; status = `"refreshed"` |
 | `reload_from_disk(announce)` | Soft reload (no status thrash when `announce=false`); preserves stick-to-bottom |
@@ -103,7 +103,9 @@ Preserve these for `app` / `renderer`:
 | `self_status()` | Current local human presence code |
 | `presence_strip_rect` | Click target for cycle (title strip) |
 
-Store: `list_members`, `join`, `set_status`, `normalize_availability`, `next_availability`, `member_chip`.
+Store: `list_members`, `join`, `claim_role`, `set_status`, `normalize_availability`, `normalize_role`, `next_availability`, `member_chip`, `resolve_mentions`.
+
+`join` reuses a member only on a non-empty `session_id` match. Empty session always creates a new member; taken names get a suffix (`engine`, `engine-2`). Join/leave do **not** post system lines to `#general`.
 
 ### Auto-refresh while open
 
@@ -141,6 +143,8 @@ Manual: **Ctrl+R** (⌘R) while open → `refresh()`. Mailbox: `refresh_workspac
 | `tab(shift)` | Cycle `@mention` picker when open; else `cycle_channel` |
 
 Posts append one product JSONL line under `channels/<slug>/messages.jsonl`.
+`from_id` is the joiner's member id (`join_self` / `post_as`) — never a freshly minted id per message.
+`@name` mentions are resolved to member ids and stored on the line as `mentions`. `@name` tokens are resolved to member ids and stored as `mentions`. The picker lists unique members (name + suffix); `engine` and `engine-2` are distinct `@targets`.
 
 ### File attach
 

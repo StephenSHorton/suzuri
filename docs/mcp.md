@@ -35,8 +35,9 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | `suzuri_notes_delete` | Delete by `id` (omit = active; last note is cleared, not removed). **No UI confirm** — agents skip the interactive prompt. |
 | `workspace_guide` | **Start here** — how the shared room works + paste-ready agent/user phrases |
 | `workspace_status` | Shared workspace path + channel/member counts (offline OK) |
-| `workspace_join` | Register as agent/human in the shared workspace |
-| `workspace_leave` | Leave workspace |
+| `workspace_join` | Register as agent/human (session id injected; returns `member_id` + `session_id`) |
+| `workspace_leave` | Leave workspace (no #general system line) |
+| `workspace_claim_role` | Exclusive role `pm` / `engine` / `content` for a member |
 | `workspace_set_status` | Publish availability: `idle` / `working` / `waiting` / `blocked` / `away` (+ optional note) |
 | `workspace_members` | List members (includes `status` + `status_note`) |
 | `workspace_channels` | List channels |

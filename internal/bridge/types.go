@@ -29,12 +29,12 @@ type TabSnap struct {
 	Title     string   `json:"title"`
 	Alive     bool     `json:"alive"`
 	Shell     string   `json:"shell,omitempty"`
-	Input     string   `json:"input"` // Warp bar draft
+	Input     string   `json:"input"`      // Warp bar draft
 	AltScreen bool     `json:"alt_screen"` // full-screen TUI owns keyboard; bar hidden
 	Echo      EchoStat `json:"echo"`
 	LiveLines []string `json:"live_lines"` // effective (non-trailing-blank) live text
-	Viewport  []string `json:"viewport"`  // what the user sees (history+live, text)
-	Blocks    []Block  `json:"blocks"`    // recent command blocks
+	Viewport  []string `json:"viewport"`   // what the user sees (history+live, text)
+	Blocks    []Block  `json:"blocks"`     // recent command blocks
 	History   []HLine  `json:"history_tail"`
 	PtyTail   string   `json:"pty_tail"` // recent raw PTY bytes, Go-quoted
 }
@@ -80,7 +80,6 @@ type Status struct {
 	Bridge  string `json:"bridge"`
 	Message string `json:"message,omitempty"`
 }
-
 
 // LogsResult is a tail of %LOCALAPPDATA%\suzuri\suzuri.log.
 type LogsResult struct {
@@ -146,6 +145,7 @@ const (
 	WorkspaceOpUpload        WorkspaceOp = "upload"
 	WorkspaceOpDownload      WorkspaceOp = "download"
 	WorkspaceOpSetStatus     WorkspaceOp = "set_status"
+	WorkspaceOpClaimRole     WorkspaceOp = "claim_role"
 )
 
 // WorkspaceRequest mutates or reads the shared workspace (channels / messages).
@@ -166,6 +166,8 @@ type WorkspaceRequest struct {
 	Status string `json:"status,omitempty"`
 	// StatusNote optional free text; nil leaves unchanged when set_status runs.
 	StatusNote *string `json:"status_note,omitempty"`
+	// Role is for claim_role (pm|engine|content).
+	Role string `json:"role,omitempty"`
 }
 
 // WorkspaceMember is one human or agent in the workspace.
@@ -174,6 +176,7 @@ type WorkspaceMember struct {
 	Name       string    `json:"name"`
 	Kind       string    `json:"kind"`
 	SessionID  string    `json:"session_id,omitempty"`
+	Role       string    `json:"role,omitempty"`
 	Status     string    `json:"status,omitempty"`
 	StatusNote string    `json:"status_note,omitempty"`
 	JoinedAt   time.Time `json:"joined_at"`
@@ -209,6 +212,7 @@ type WorkspaceMessage struct {
 	Body     string         `json:"body"`
 	ReplyTo  string         `json:"reply_to,omitempty"`
 	File     *WorkspaceFile `json:"file,omitempty"`
+	Mentions []string       `json:"mentions,omitempty"`
 }
 
 // WorkspaceResult is the response from workspace ops.
@@ -226,4 +230,6 @@ type WorkspaceResult struct {
 	File      *WorkspaceFile     `json:"file,omitempty"`
 	LocalPath string             `json:"local_path,omitempty"`
 	Count     int                `json:"count,omitempty"`
+	SessionID string             `json:"session_id,omitempty"`
+	MemberID  string             `json:"member_id,omitempty"`
 }

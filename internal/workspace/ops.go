@@ -22,6 +22,7 @@ const (
 	OpUpload        Op = "upload"
 	OpDownload      Op = "download"
 	OpSetStatus     Op = "set_status" // member availability (idle|working|waiting|blocked|away)
+	OpClaimRole     Op = "claim_role" // exclusive role: pm|engine|content
 )
 
 // Request is the unified workspace RPC body.
@@ -45,6 +46,8 @@ type Request struct {
 	// StatusNote is optional free text for OpSetStatus.
 	// Nil = leave note unchanged; non-nil (incl. empty) = set/clear.
 	StatusNote *string `json:"status_note,omitempty"`
+	// Role is for OpClaimRole (pm|engine|content|"").
+	Role string `json:"role,omitempty"`
 }
 
 // Result is a JSON-friendly workspace response.
@@ -62,7 +65,10 @@ type Result struct {
 	File     *FileRef       `json:"file,omitempty"`
 	// LocalPath is the absolute path for download/upload destination.
 	LocalPath string `json:"local_path,omitempty"`
-	Count     int   `json:"count,omitempty"`
+	Count     int    `json:"count,omitempty"`
+	// SessionID / MemberID are set on join so agents do not have to dig into member.
+	SessionID string `json:"session_id,omitempty"`
+	MemberID  string `json:"member_id,omitempty"`
 }
 
 // Apply runs req against Default (or s if non-nil).
@@ -92,7 +98,7 @@ func Apply(s *Store, req Request) Result {
 		if err != nil {
 			return Result{OK: false, Path: path, Error: err.Error()}
 		}
-		return Result{OK: true, Path: path, Member: &m}
+		return Result{OK: true, Path: path, Member: &m, SessionID: m.SessionID, MemberID: m.ID}
 
 	case OpLeave:
 		if err := s.Leave(req.MemberID, req.Name); err != nil {
@@ -102,6 +108,13 @@ func Apply(s *Store, req Request) Result {
 
 	case OpSetStatus:
 		m, err := s.SetStatus(req.MemberID, req.Name, Availability(req.Status), req.StatusNote)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Member: &m}
+
+	case OpClaimRole:
+		m, err := s.ClaimRole(req.MemberID, req.Role)
 		if err != nil {
 			return Result{OK: false, Path: path, Error: err.Error()}
 		}

@@ -97,8 +97,9 @@ Agents with suzuri MCP should call **`workspace_guide`** first if unsure.
 |------|---------|
 | `workspace_guide` | How the room works + paste-ready instructions (no side effects) |
 | `workspace_status` | Path, title, counts |
-| `workspace_join` | Register agent name (+ optional session_id) |
-| `workspace_leave` | Unregister |
+| `workspace_join` | Register agent name. Session id is injected server-side (optional override). Returns `member_id` + `session_id`. Does **not** post to #general. |
+| `workspace_leave` | Unregister (no #general system line) |
+| `workspace_claim_role` | Exclusive role `pm`\|`engine`\|`content` for a `member_id`. Role ≠ display name. |
 | `workspace_set_status` | Set availability (`idle`/`working`/`waiting`/`blocked`/`away`) + optional note |
 | `workspace_members` | List members (includes `status` + `status_note`) |
 | `workspace_channels` | List channels |
@@ -117,9 +118,10 @@ show up immediately; a ~1s poll is the fallback if watch setup fails.
 ## Agent flow
 
 ```
-workspace_join name="implementer" session_id="…"
+workspace_join name="implementer"
+workspace_claim_role role="engine" member_id="…"
 workspace_set_status member_id="…" status="working" note="auth fix"
-workspace_post channel="general" body="starting auth fix" member_id="…"
+workspace_post channel="pr-142" body="@alice starting auth fix" member_id="…"
 workspace_channel_create name="pr-142"
 workspace_upload path="~/code/patch.diff" channel="pr-142" member_id="…"
 workspace_history channel="pr-142" limit=30
@@ -128,6 +130,16 @@ workspace_download file_id="f_…" channel="pr-142"
 ```
 
 Prefer `member_id` from join. If omitted, `name` auto-joins as an agent.
+
+### Identity
+
+- **Session, not name.** `Join` reuses a member only when `session_id` is non-empty and matches. Two joins as `engine` with an empty session_id become two members: `engine` and `engine-2`.
+- MCP `workspace_join` injects a session id (Grok/MCP client meta, env, or a minted id). The model does not have to pass one.
+- **Role ≠ name.** `workspace_claim_role` is exclusive among live (not left) members. A member named `engine` may or may not hold the `engine` role.
+- **Mentions** (`@engine-2 hello`) resolve at post time to that member's id and are stored on the message as `mentions: [member_id, …]`. The picker still shows display names.
+- Join/leave do **not** post system lines to `#general`. Work happens in topic channels.
+- An empty `session_id` never merges, even when a same name+kind member already has a session. Only a matching non-empty `session_id` updates.
+- Chrome posts use the joiner's `member_id` as `from_id` (not a new id per message).
 
 ## Later
 

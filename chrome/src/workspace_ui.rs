@@ -151,6 +151,8 @@ pub struct WorkspaceUi {
     mention_sel: usize,
     store: WorkspaceStore,
     human: String,
+    /// Member id from join_self (used as from_id on every chrome post).
+    human_id: String,
     /// Scroll: how many messages from the end are hidden (0 = pin bottom).
     pub scroll: usize,
     /// Accumulator for auto-refresh while open (seconds).
@@ -200,6 +202,7 @@ impl WorkspaceUi {
             mention_sel: 0,
             store,
             human,
+            human_id: String::new(),
             scroll: 0,
             refresh_accum: 0.0,
             fs_watch,
@@ -310,9 +313,14 @@ impl WorkspaceUi {
     }
 
     /// Register `$USER` as a human member (no-op update if already joined).
+    /// Uses a stable local session id so reopen does not mint a new human.
     pub fn join_self(&mut self) {
-        match self.store.join(&self.human, "human", "") {
-            Ok(_) => {}
+        let sess = crate::workspace_store::local_human_session(&self.human);
+        match self.store.join(&self.human, "human", &sess) {
+            Ok(m) => {
+                self.human_id = m.id;
+                self.human = m.name;
+            }
             Err(e) => self.status = format!("join: {e}"),
         }
     }
@@ -359,7 +367,7 @@ impl WorkspaceUi {
             }
             // Native FS watch: reload as soon as disk changes (debounced).
             let mut reloaded = false;
-            if self.watch_dirty.load(Ordering::Acquire) {
+            if self.fs_watch.is_some() && self.watch_dirty.load(Ordering::Acquire) {
                 self.watch_debounce += wall;
                 if self.watch_debounce >= WATCH_DEBOUNCE_SECS {
                     self.watch_dirty.store(false, Ordering::Release);
@@ -572,7 +580,10 @@ impl WorkspaceUi {
         if body.is_empty() {
             return;
         }
-        match self.store.post(&self.channel, &body, &self.human, "human") {
+        match self
+            .store
+            .post_as(&self.channel, &body, &self.human_id, &self.human, "human")
+        {
             Ok(msg) => {
                 self.messages.push(msg);
                 if self.messages.len() > HISTORY_LIMIT {
@@ -652,9 +663,13 @@ impl WorkspaceUi {
         match self.store.create_channel(&name, "") {
             Ok(slug) => {
                 // Optional system-ish first line (product posts "channel created").
-                let _ = self
-                    .store
-                    .post(&slug, "channel created", &self.human, "human");
+                let _ = self.store.post_as(
+                    &slug,
+                    "channel created",
+                    &self.human_id,
+                    &self.human,
+                    "human",
+                );
                 self.channel = slug.clone();
                 self.draft.clear();
                 self.mode = ComposeMode::Message;
@@ -800,11 +815,14 @@ impl WorkspaceUi {
         let current = self
             .members
             .iter()
-            .find(|m| m.name == self.human && m.kind == "human")
+            .find(|m| {
+                (!self.human_id.is_empty() && m.id == self.human_id)
+                    || (m.name == self.human && m.kind == "human")
+            })
             .map(|m| m.presence().to_string())
             .unwrap_or_else(|| STATUS_IDLE.into());
         let next = next_availability(&current);
-        match self.store.set_status("", &self.human, next, None) {
+        match self.store.set_status(&self.human_id, &self.human, next, None) {
             Ok(m) => {
                 self.reload_members();
                 self.status = format!("status: {}", m.presence());
@@ -817,7 +835,10 @@ impl WorkspaceUi {
     pub fn self_status(&self) -> &str {
         self.members
             .iter()
-            .find(|m| m.name == self.human && m.kind == "human")
+            .find(|m| {
+                (!self.human_id.is_empty() && m.id == self.human_id)
+                    || (m.name == self.human && m.kind == "human")
+            })
             .map(|m| m.presence())
             .unwrap_or(STATUS_IDLE)
     }
@@ -1297,22 +1318,26 @@ mod tests {
         ui.messages.push(WsMessage {
             id: "1".into(),
             channel: "general".into(),
+            from_id: "m_me".into(),
             from: "me".into(),
             from_kind: "human".into(),
             kind: "text".into(),
             body: "hello self".into(),
             ts: 1,
             file: None,
+            mentions: vec![],
         });
         ui.messages.push(WsMessage {
             id: "2".into(),
             channel: "general".into(),
+            from_id: "m_other".into(),
             from: "other".into(),
             from_kind: "human".into(),
             kind: "text".into(),
             body: "hello other".into(),
             ts: 2,
             file: None,
+            mentions: vec![],
         });
         let accent = [0.0, 0.9, 0.46];
         let bubbles = ui.layout_bubbles(900.0, 700.0, accent);
@@ -1564,6 +1589,40 @@ mod tests {
     }
 
     #[test]
+    fn mention_picker_distinguishes_suffixed_names() {
+        let dir = temp_root("mention-suffix");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        let store = WorkspaceStore::open_at(&dir);
+        let e1 = store.join("engine", "agent", "").unwrap();
+        let e2 = store.join("engine", "agent", "").unwrap();
+        assert_eq!(e1.name, "engine");
+        assert_eq!(e2.name, "engine-2");
+        ui.reload_members();
+
+        ui.draft = "@engine".into();
+        let names: Vec<_> = ui
+            .mention_candidates()
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert!(names.contains(&"engine"));
+        assert!(names.contains(&"engine-2"));
+
+        ui.draft = "@engine-2".into();
+        let names: Vec<_> = ui
+            .mention_candidates()
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["engine-2"]);
+        assert!(ui.complete_mention());
+        assert_eq!(ui.draft, "@engine-2 ");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn active_mention_ignores_mid_word_at() {
         assert!(active_mention_query("email@x").is_none());
         assert_eq!(active_mention_query("@al").unwrap().1, "al");
@@ -1596,4 +1655,20 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+
+    #[test]
+    fn chrome_ui_post_uses_joiner_member_id() {
+        let dir = temp_root("ui-fromid");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.human = "alice".into();
+        ui.open();
+        assert!(!ui.human_id.is_empty(), "join_self should store member id");
+        ui.draft = "hello from chrome".into();
+        ui.send();
+        let last = ui.messages.last().expect("posted");
+        assert_eq!(last.body, "hello from chrome");
+        assert_eq!(last.from_id, ui.human_id);
+        assert_eq!(last.from, "alice");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
