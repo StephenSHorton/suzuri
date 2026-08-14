@@ -189,6 +189,9 @@ pub fn classify_drop(
         if pl.pane_id == moving {
             return None;
         }
+        if session.panes.get(&pl.pane_id).is_some_and(|p| p.exiting) {
+            return None;
+        }
         return Some(DropKind::Edge {
             pane_id: pl.pane_id,
             edge: edge_of(pl.glass, x, y),

@@ -686,6 +686,11 @@ impl ChromeSession {
         if !self.panes.contains_key(&moving) || !self.panes.contains_key(&target) {
             return false;
         }
+        if self.panes.get(&moving).is_some_and(|p| p.exiting)
+            || self.panes.get(&target).is_some_and(|p| p.exiting)
+        {
+            return false;
+        }
         let Some(src_tab) = self.tab_id_for_pane(moving) else {
             return false;
         };
@@ -701,15 +706,21 @@ impl ChromeSession {
             if tab.root.leaf_ids().len() <= 1 {
                 return false;
             }
-            match tab.root.remove_leaf(moving) {
+            if tab.root.is_closing(target) {
+                return false;
+            }
+            let fallback = match tab.root.remove_leaf(moving) {
                 RemoveResult::Removed { focus_hint } => {
                     if tab.focus_pane == moving {
                         tab.focus_pane = focus_hint;
                     }
+                    focus_hint
                 }
                 RemoveResult::RemovedEmpty | RemoveResult::NotFound => return false,
-            }
+            };
             if !tab.root.split_leaf_edge(target, moving, edge) {
+                // Don't leave a live PTY with no leaf (workflow risk).
+                let _ = tab.root.split_leaf(fallback, moving, SplitAxis::Vertical);
                 return false;
             }
             tab.focus_pane = moving;
@@ -748,6 +759,9 @@ impl ChromeSession {
         let Some(dst) = self.tabs.iter_mut().find(|t| t.id == dst_tab) else {
             return false;
         };
+        if dst.root.is_closing(target) {
+            return false;
+        }
         if !dst.root.split_leaf_edge(target, moving, edge) {
             return false;
         }
@@ -1408,6 +1422,15 @@ mod tests {
         assert!(s.reparent_pane(pid, 1, DockEdge::Right));
         assert_eq!(s.tabs.len(), 1);
         assert!(s.panes.contains_key(&pid));
+        assert_eq!(s.active_tab().unwrap().root.leaf_ids().len(), 2);
+    }
+
+    #[test]
+    fn reparent_refuses_exiting_target() {
+        let mut s = ChromeSession::new(80, 24);
+        let right = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        s.panes.get_mut(&1).unwrap().exiting = true;
+        assert!(!s.reparent_pane(right, 1, DockEdge::Left));
         assert_eq!(s.active_tab().unwrap().root.leaf_ids().len(), 2);
     }
 
