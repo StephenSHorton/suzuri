@@ -147,6 +147,10 @@ pub struct PaneLayout {
     pub divider: Rect,
     pub path: Rect,
     pub warp: Rect,
+    /// Top chrome strip (title pill + close).
+    pub header: Rect,
+    pub title_pill: Rect,
+    pub close: Rect,
     pub focused: bool,
 }
 
@@ -235,6 +239,13 @@ impl FrameLayout {
         self.tab_new = Rect::new(x, new_y, new_size, new_size);
     }
 }
+
+/// Height of the pane header strip (title pill + close).
+pub const PANE_HEADER_H: f32 = 22.0;
+/// Title pill height inside the header.
+pub const PANE_PILL_H: f32 = 16.0;
+/// Ghost close button size (matches the + chip feel).
+pub const PANE_CLOSE_SZ: f32 = 16.0;
 
 /// Tab chip width (room for title + gap + close ×).
 pub const TAB_CHIP_W: f32 = 112.0;
@@ -456,6 +467,25 @@ impl FrameLayout {
         // (surface tension / stretchy glass, not separate cubes).
         for pl in &self.panes {
             out.push(PanelInstance::glass(pl.glass, m.radius, PanelKind::Terminal));
+            if pl.title_pill.w > 2.0 && pl.title_pill.h > 2.0 {
+                let id = ChipId::PaneTitle(pl.pane_id);
+                let r = scale_rect(pl.title_pill, chip_ui.scale_for(id));
+                out.push(
+                    PanelInstance::glass(r, (m.chip_radius * 0.7).max(4.0), PanelKind::ChipIdle)
+                        .with_press(chip_ui.press_light(id)),
+                );
+            }
+            {
+                let id = ChipId::PaneClose(pl.pane_id);
+                if pl.close.w > 2.0 && chip_ui.ghost_shell_visible(id) {
+                    let r = scale_rect(pl.close, chip_ui.scale_for(id));
+                    let rr = (m.chip_radius * 0.75).max(4.0);
+                    out.push(
+                        PanelInstance::glass(r, rr, PanelKind::NewTab)
+                            .with_press(chip_ui.press_light(id)),
+                    );
+                }
+            }
             // Footer hairline only when the command strip is present (not alt-screen).
             if pl.divider.h >= 1.0 {
                 let mid_y = pl.divider.y + pl.divider.h * 0.5 - 0.75;
@@ -538,6 +568,26 @@ impl FrameLayout {
 ///
 /// When `fullscreen` is true (VT alt screen), path/warp/divider collapse and the
 /// cell grid fills the glass — full-screen TUIs (vim, grok, etc.).
+fn pane_header_rects(glass: Rect, inset: f32) -> (Rect, Rect, Rect) {
+    let inner_x = glass.x + inset;
+    let inner_w = (glass.w - inset * 2.0).max(24.0);
+    let header = Rect::new(inner_x, glass.y + 3.0, inner_w, PANE_HEADER_H);
+    let close = Rect::new(
+        header.x + header.w - PANE_CLOSE_SZ,
+        header.y + (header.h - PANE_CLOSE_SZ) * 0.5,
+        PANE_CLOSE_SZ,
+        PANE_CLOSE_SZ,
+    );
+    let pill_w = (header.w - PANE_CLOSE_SZ - 8.0).clamp(20.0, 92.0);
+    let title_pill = Rect::new(
+        header.x + 2.0,
+        header.y + (header.h - PANE_PILL_H) * 0.5,
+        pill_w,
+        PANE_PILL_H,
+    );
+    (header, title_pill, close)
+}
+
 fn pane_layout_in_glass(
     pane_id: u64,
     glass: Rect,
@@ -546,9 +596,10 @@ fn pane_layout_in_glass(
     fullscreen: bool,
 ) -> PaneLayout {
     let inset = m.inset();
+    let (header, title_pill, close) = pane_header_rects(glass, inset);
     let inner_x = glass.x + inset;
     let inner_w = (glass.w - inset * 2.0).max(40.0);
-    let inner_top = glass.y + inset;
+    let inner_top = (header.y + header.h + 2.0).max(glass.y + inset);
     let inner_bottom = glass.y + glass.h - inset;
     let avail = (inner_bottom - inner_top).max(0.0);
 
@@ -564,6 +615,9 @@ fn pane_layout_in_glass(
             divider: empty,
             path: empty,
             warp: empty,
+            header,
+            title_pill,
+            close,
             focused,
         };
     }
@@ -597,6 +651,9 @@ fn pane_layout_in_glass(
         divider,
         path,
         warp,
+        header,
+        title_pill,
+        close,
         focused,
     }
 }
@@ -772,6 +829,17 @@ mod tests {
         assert!(!a.intersects(c));
         assert!(a.contains(0.0, 0.0));
         assert!(!a.contains(10.0, 10.0));
+    }
+
+    #[test]
+    fn pane_header_has_title_pill_and_close() {
+        let m = Metrics::default();
+        let l = FrameLayout::compute(800.0, 600.0, m, 1);
+        let pl = &l.panes[0];
+        assert!(pl.header.h > 10.0);
+        assert!(pl.title_pill.x < pl.close.x);
+        assert!(pl.close.x + pl.close.w <= pl.header.x + pl.header.w + 0.5);
+        assert!(pl.cells.y >= pl.header.y + pl.header.h);
     }
 
     #[test]

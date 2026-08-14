@@ -1590,7 +1590,12 @@ fn chrome_labels(
             .nth(i)
             .map(|t| t.title.as_str())
             .unwrap_or("?");
-        let color = chip_ui.dim_color(id, if i == active_idx { bright } else { dim });
+        let mut color = chip_ui.dim_color(id, if i == active_idx { bright } else { dim });
+        if let Some((xi, exit)) = session.tab_exit_on_surface(surface) {
+            if xi == i {
+                color[3] *= exit.t.clamp(0.0, 1.0);
+            }
+        }
         // Labels sit on layout chips — no hover scale.
         let r = scale_rect(*chip, chip_ui.scale_for(id));
         // Title sits in the left band; close × has its own rect on the right.
@@ -1604,7 +1609,12 @@ fn chrome_labels(
         if let Some(close) = layout.tab_closes.get(i) {
             let cr = scale_rect(*close, chip_ui.scale_for(id));
             // × only dims on hover — no red flash.
-            let xc = chip_ui.dim_color(id, dim);
+            let mut xc = chip_ui.dim_color(id, dim);
+            if let Some((xi, exit)) = session.tab_exit_on_surface(surface) {
+                if xi == i {
+                    xc[3] *= exit.t.clamp(0.0, 1.0);
+                }
+            }
             labels.push(TextLabel::centered(
                 "×",
                 [cr.x, cr.y, cr.w, cr.h],
@@ -1680,12 +1690,34 @@ fn chrome_labels(
     );
     let dim_term = !cover_cards.is_empty();
 
-    // Every leaf pane: cells + footer
+    // Every leaf pane: header + cells + footer
     let focus = session.focus_pane_id();
     for pl in &layout.panes {
         let Some(pane) = session.panes.get(&pl.pane_id) else {
             continue;
         };
+        if pl.title_pill.w > 2.0 {
+            let title = pane.title.as_str();
+            if !title.is_empty() {
+                let max_c = ((pl.title_pill.w / cell.w.max(1.0)).floor() as usize).max(1);
+                let draw = truncate_chars(title, max_c);
+                let ts = 11.0;
+                let ty = pl.title_pill.y + (pl.title_pill.h - ts).max(0.0) * 0.5;
+                labels.push(TextLabel::new(
+                    draw,
+                    pl.title_pill.x + 5.0,
+                    ty,
+                    ts,
+                    if pl.focused { bright } else { dim },
+                ));
+            }
+        }
+        if pl.close.w > 2.0 {
+            let cid = ChipId::PaneClose(pl.pane_id);
+            let cr = scale_rect(pl.close, chip_ui.scale_for(cid));
+            let xc = chip_ui.dim_color(cid, dim);
+            labels.push(TextLabel::centered("×", [cr.x, cr.y, cr.w, cr.h], 12.0, xc));
+        }
         if pane.kind.is_workspace() {
             if workspace_ui.is_docked() {
                 push_workspace_labels(

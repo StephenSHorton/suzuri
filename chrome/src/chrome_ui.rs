@@ -10,6 +10,8 @@ pub enum ChipId {
     NewTab,
     Logo,
     Caffeine,
+    PaneClose(u64),
+    PaneTitle(u64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -177,7 +179,11 @@ impl ChipUi {
     }
 
     /// Ghost + shell only while pressing (no hover-only shell).
+    /// Pane close also lights on hover so the × is findable.
     pub fn ghost_shell_visible(&self, id: ChipId) -> bool {
+        if matches!(id, ChipId::PaneClose(_)) && self.hover == Some(id) {
+            return true;
+        }
         self.press_light(id) > 0.04
     }
 }

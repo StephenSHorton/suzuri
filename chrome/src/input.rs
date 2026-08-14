@@ -20,8 +20,10 @@ pub enum HitTarget {
     Caffeine,
     /// Local input strip for pane id.
     WarpBar(u64),
-    /// Path / divider chrome of a pane — grab handle for re-dock drag.
+    /// Path / divider / header chrome of a pane — grab handle for re-dock drag.
     PaneChrome(u64),
+    /// Close × on a pane header.
+    PaneClose(u64),
     /// Split sash (a_leaf identifies the branch).
     Sash(u64),
     /// History cells for pane id.
@@ -126,11 +128,12 @@ pub fn hit_test(
         }
     }
 
-    // Multi-pane: path/divider = drag chrome; warp = command line; cells = PTY.
-    // Top 8px of glass is a grab band so widget / alt-screen panes (no path) can move.
-    const GRAB_BAND: f32 = 8.0;
+    // Multi-pane: header / path / divider = drag chrome; warp = command line; cells = PTY.
     for pl in &layout.panes {
-        if pl.glass.contains(x, y) && y < pl.glass.y + GRAB_BAND {
+        if pl.close.w > 1.0 && pl.close.contains(x, y) {
+            return HitTarget::PaneClose(pl.pane_id);
+        }
+        if pl.header.h > 1.0 && pl.header.contains(x, y) {
             return HitTarget::PaneChrome(pl.pane_id);
         }
         if pl.path.contains(x, y) || pl.divider.contains(x, y) {
@@ -446,6 +449,23 @@ mod tests {
         assert!(
             matches!(chrome, HitTarget::PaneChrome(_)),
             "path strip is the pane grab handle, got {chrome:?}"
+        );
+        let header = hit_test(
+            &layout,
+            &m,
+            layout.panes[0].header.x + 4.0,
+            layout.panes[0].header.y + 4.0,
+            false,
+        );
+        assert!(
+            matches!(header, HitTarget::PaneChrome(_)),
+            "header is pane chrome, got {header:?}"
+        );
+        let px = layout.panes[0].close;
+        let xhit = hit_test(&layout, &m, px.x + px.w * 0.5, px.y + px.h * 0.5, false);
+        assert!(
+            matches!(xhit, HitTarget::PaneClose(_)),
+            "pane × should close, got {xhit:?}"
         );
     }
 

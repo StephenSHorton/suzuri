@@ -911,6 +911,9 @@ impl ChromeApp {
                     pl.warp.x += dx;
                     pl.path.x += dx;
                     pl.divider.x += dx;
+                    pl.header.x += dx;
+                    pl.title_pill.x += dx;
+                    pl.close.x += dx;
                 }
                 for s in &mut layout.sashes {
                     s.rect.x += dx;
@@ -968,7 +971,7 @@ impl ChromeApp {
         }
         let pane_ids = self.session.close_tab(tab_id);
         for id in pane_ids {
-            self.runtimes.remove(&id);
+            self.drop_runtime(id);
         }
         self.prune_empty_surfaces(event_loop);
     }
@@ -1658,7 +1661,7 @@ impl ChromeApp {
         let tabs = self.session.tabs_on_surface(key);
         for tid in tabs {
             for pid in self.session.close_tab(tid) {
-                self.runtimes.remove(&pid);
+                self.drop_runtime(pid);
             }
         }
         if self.ghost_host == Some(id) {
@@ -1696,7 +1699,7 @@ impl ChromeApp {
             CloseOutcome::QuitApp => event_loop.exit(),
             CloseOutcome::ClosedPanes(ids) => {
                 for id in ids {
-                    self.runtimes.remove(&id);
+                    self.drop_runtime(id);
                 }
             }
             CloseOutcome::Animating | CloseOutcome::None => {}
@@ -1746,6 +1749,14 @@ impl ChromeApp {
         }
     }
 
+    fn drop_runtime(&mut self, pane_id: u64) {
+        if let Some(mut rt) = self.runtimes.remove(&pane_id) {
+            if let Some(pty) = &mut rt.pty {
+                pty.kill();
+            }
+        }
+    }
+
     fn finish_closed_panes(&mut self, event_loop: &ActiveEventLoop, finished: &[u64]) {
         if self
             .workspace_ui
@@ -1755,7 +1766,7 @@ impl ChromeApp {
             self.workspace_ui.close();
         }
         for id in finished {
-            self.runtimes.remove(id);
+            self.drop_runtime(*id);
         }
         if self.session.is_empty() {
             event_loop.exit();
@@ -1783,10 +1794,22 @@ impl ChromeApp {
             } else if layout.tab_new.contains(x, y) {
                 hit = Some(ChipId::NewTab);
             } else {
-                for (i, chip) in layout.tab_chips.iter().enumerate() {
-                    if chip.contains(x, y) {
-                        hit = Some(ChipId::Tab(i));
+                for pl in &layout.panes {
+                    if pl.close.contains(x, y) {
+                        hit = Some(ChipId::PaneClose(pl.pane_id));
                         break;
+                    }
+                    if pl.title_pill.contains(x, y) {
+                        hit = Some(ChipId::PaneTitle(pl.pane_id));
+                        break;
+                    }
+                }
+                if hit.is_none() {
+                    for (i, chip) in layout.tab_chips.iter().enumerate() {
+                        if chip.contains(x, y) {
+                            hit = Some(ChipId::Tab(i));
+                            break;
+                        }
                     }
                 }
             }
@@ -2247,6 +2270,15 @@ impl ChromeApp {
                 self.settings.toggle();
             }
             HitTarget::Sash(_) => {}
+            HitTarget::PaneClose(pane_id) => {
+                self.session.set_focus_pane(pane_id);
+                let _ = self.session.begin_close_pane(pane_id);
+                if let Some(tab) = self.session.active_tab() {
+                    let id = tab.id;
+                    let surface = tab.surface;
+                    self.set_surface_focus(surface, id);
+                }
+            }
             HitTarget::PaneChrome(pane_id) => {
                 self.session.set_focus_pane(pane_id);
                 if self.session.pane_kind(pane_id).is_workspace() {
@@ -3613,7 +3645,9 @@ impl ApplicationHandler for ChromeApp {
                         return;
                     }
                 }
-                if let HitTarget::PaneChrome(pane_id) = hit {
+                if let HitTarget::PaneClose(_) = hit {
+                    // activation on release — don't start a drag
+                } else if let HitTarget::PaneChrome(pane_id) = hit {
                     if !self.overlay_open() {
                         let source = self
                             .current_layout()
