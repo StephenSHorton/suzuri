@@ -356,6 +356,35 @@ impl ChromeSession {
         result
     }
 
+    /// Last tab on `surface` — close should shrink+fade the window.
+    pub fn is_last_tab_on_surface(&self, tab_id: u64) -> bool {
+        let Some(surface) = self.surface_of_tab(tab_id) else {
+            return false;
+        };
+        self.tabs_on_surface(surface).len() <= 1
+    }
+
+    /// Close a tab that is the last one on its window (shrink + fade).
+    pub fn begin_close_last_window_tab(&mut self, tab_id: u64) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return false;
+        };
+        if tab.solo_exit.is_some() {
+            return true;
+        }
+        let pane_id = tab.focus_pane;
+        let ids = tab.root.leaf_ids();
+        for pid in ids {
+            if let Some(p) = self.panes.get_mut(&pid) {
+                p.exiting = true;
+            }
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.solo_exit = Some(SoloExitAnim::start_window(pane_id));
+        }
+        true
+    }
+
     /// Begin graceful exit of a pane (shell died or user closed).
     /// Returns true if an animation was started (or already in progress).
     pub fn begin_close_pane(&mut self, pane_id: u64) -> bool {
@@ -367,19 +396,28 @@ impl ChromeSession {
         }
         pane.exiting = true;
 
-        let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|t| t.root.contains_pane(pane_id) || t.solo_exit.as_ref().map(|s| s.pane_id) == Some(pane_id))
-        else {
+        let tab_meta = self.tabs.iter().find(|t| {
+            t.root.contains_pane(pane_id)
+                || t.solo_exit.as_ref().map(|s| s.pane_id) == Some(pane_id)
+        });
+        let Some(tab_id) = tab_meta.map(|t| t.id) else {
+            return false;
+        };
+        let last_on_window = self.is_last_tab_on_surface(tab_id);
+
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
             return false;
         };
 
         let leaf_count = tab.root.leaf_ids().len();
         if leaf_count <= 1 {
-            // Sole pane — jelly-scale the whole well, then drop tab/pane.
+            // Sole pane — jelly-scale the well; last tab of a window also fades.
             if tab.solo_exit.is_none() {
-                tab.solo_exit = Some(SoloExitAnim::start(pane_id));
+                tab.solo_exit = Some(if last_on_window {
+                    SoloExitAnim::start_window(pane_id)
+                } else {
+                    SoloExitAnim::start(pane_id)
+                });
             }
             return true;
         }
@@ -1623,6 +1661,35 @@ mod tests {
         assert_eq!(s.active_tab().unwrap().root.leaf_ids(), vec![right]);
         assert!(s.panes.contains_key(&right));
         assert!(s.panes.contains_key(&1));
+    }
+
+    #[test]
+    fn last_tab_on_surface_fades_window() {
+        let mut s = ChromeSession::new(80, 24);
+        let _ = s.new_tab(80, 24); // second tab on surface 0
+        let (t2, pid2) = s.new_tab_on_surface(80, 24, 1);
+        assert!(s.is_last_tab_on_surface(t2));
+        assert!(!s.is_last_tab_on_surface(1));
+        assert!(s.begin_close_pane(pid2));
+        let anim = s
+            .tabs
+            .iter()
+            .find(|t| t.id == t2)
+            .and_then(|t| t.solo_exit.as_ref())
+            .expect("solo exit");
+        assert!(anim.fade_window);
+        assert!(anim.opacity() > 0.9);
+    }
+
+    #[test]
+    fn sole_pane_on_shared_window_does_not_fade() {
+        let mut s = ChromeSession::new(80, 24);
+        let _ = s.new_tab(80, 24);
+        s.select_tab(1);
+        assert!(s.begin_close_pane(1));
+        let anim = s.tabs[0].solo_exit.as_ref().expect("solo exit");
+        assert!(!anim.fade_window);
+        assert_eq!(anim.opacity(), 1.0);
     }
 
     #[test]

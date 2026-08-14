@@ -530,6 +530,8 @@ pub struct SoloExitAnim {
     pub pane_id: u64,
     pub jelly: f32,
     pub jelly_vel: f32,
+    /// Last tab on this window — shrink *and* fade the frame out.
+    pub fade_window: bool,
 }
 
 impl SoloExitAnim {
@@ -538,6 +540,24 @@ impl SoloExitAnim {
             pane_id,
             jelly: 1.0,
             jelly_vel: 0.0,
+            fade_window: false,
+        }
+    }
+
+    pub fn start_window(pane_id: u64) -> Self {
+        Self {
+            pane_id,
+            jelly: 1.0,
+            jelly_vel: 0.0,
+            fade_window: true,
+        }
+    }
+
+    pub fn opacity(&self) -> f32 {
+        if self.fade_window {
+            self.jelly.clamp(0.0, 1.0)
+        } else {
+            1.0
         }
     }
 

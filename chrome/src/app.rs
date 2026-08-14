@@ -834,23 +834,39 @@ impl ChromeApp {
         tab.root.layout_into(layout.workspace, gap, &mut leafs);
         if let Some(anim) = &tab.solo_exit {
             let s = anim.jelly.clamp(0.0, 1.15);
-            leafs = leafs
-                .into_iter()
-                .map(|(id, r)| {
-                    if id == anim.pane_id {
-                        let cx = r.x + r.w * 0.5;
-                        let cy = r.y + r.h * 0.5;
+            if anim.fade_window {
+                let wr = layout.workspace;
+                let cx = wr.x + wr.w * 0.5;
+                let cy = wr.y + wr.h * 0.5;
+                leafs = leafs
+                    .into_iter()
+                    .map(|(id, r)| {
                         let nw = (r.w * s).max(1.0);
                         let nh = (r.h * s).max(1.0);
-                        (
-                            id,
-                            crate::layout::Rect::new(cx - nw * 0.5, cy - nh * 0.5, nw, nh),
-                        )
-                    } else {
-                        (id, r)
-                    }
-                })
-                .collect();
+                        let nx = cx + (r.x + r.w * 0.5 - cx) * s - nw * 0.5;
+                        let ny = cy + (r.y + r.h * 0.5 - cy) * s - nh * 0.5;
+                        (id, crate::layout::Rect::new(nx, ny, nw, nh))
+                    })
+                    .collect();
+            } else {
+                leafs = leafs
+                    .into_iter()
+                    .map(|(id, r)| {
+                        if id == anim.pane_id {
+                            let cx = r.x + r.w * 0.5;
+                            let cy = r.y + r.h * 0.5;
+                            let nw = (r.w * s).max(1.0);
+                            let nh = (r.h * s).max(1.0);
+                            (
+                                id,
+                                crate::layout::Rect::new(cx - nw * 0.5, cy - nh * 0.5, nw, nh),
+                            )
+                        } else {
+                            (id, r)
+                        }
+                    })
+                    .collect();
+            }
         }
         let alt_ids: std::collections::HashSet<u64> = self
             .runtimes
@@ -893,8 +909,15 @@ impl ChromeApp {
 
     fn close_tab_by_id(&mut self, event_loop: &ActiveEventLoop, tab_id: u64) {
         if self.session.tabs.len() <= 1 {
-            // Last tab → quit (product strip × on sole tab).
-            self.request_quit(event_loop);
+            if self.needs_quit_confirm() {
+                self.request_quit(event_loop);
+                return;
+            }
+            let _ = self.session.begin_close_last_window_tab(tab_id);
+            return;
+        }
+        if self.session.is_last_tab_on_surface(tab_id) {
+            let _ = self.session.begin_close_last_window_tab(tab_id);
             return;
         }
         let pane_ids = self.session.close_tab(tab_id);
@@ -3236,10 +3259,25 @@ impl ChromeApp {
             || self.workspace_captures_input()
             || self.pane_drag.as_ref().is_some_and(|d| d.active)
             || self.sash_drag.is_some()
+            || self.session.tabs.iter().any(|t| t.solo_exit.is_some())
         {
             return true;
         }
         false
+    }
+
+    fn sync_window_fade(&self) {
+        for s in self.surfaces.values() {
+            let fade = self
+                .surface_focus_tab(s.key)
+                .and_then(|tid| self.session.tabs.iter().find(|t| t.id == tid))
+                .and_then(|t| t.solo_exit.as_ref())
+                .map(|a| a.opacity())
+                .unwrap_or(1.0);
+            #[cfg(target_os = "macos")]
+            crate::macos_window::set_window_alpha(&s.window, fade as f64);
+            let _ = fade;
+        }
     }
 
 }
@@ -3924,6 +3962,7 @@ impl ApplicationHandler for ChromeApp {
                         self.finish_closed_panes(event_loop, &tick.finished_closes);
                     }
                     self.chip_ui.tick(dt);
+                    self.sync_window_fade();
                 }
                 if self.session.is_empty() {
                     chrome_status::clear_status();
