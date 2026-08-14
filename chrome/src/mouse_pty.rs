@@ -48,6 +48,70 @@ pub fn encode_mouse_wheel(
     seq.repeat(n)
 }
 
+/// Left=0, middle=1, right=2. Press = SGR `M`, release = `m`.
+pub fn encode_mouse_button(
+    col: u16,
+    row: u16,
+    btn: u16,
+    press: bool,
+    tracking: bool,
+    sgr: bool,
+) -> Vec<u8> {
+    if !tracking {
+        return Vec::new();
+    }
+    let col = col.max(1);
+    let row = row.max(1);
+    if sgr {
+        let end = if press { 'M' } else { 'm' };
+        return format!("\x1b[<{btn};{col};{row}{end}").into_bytes();
+    }
+    if !press {
+        return Vec::new();
+    }
+    let cb = 32u16.saturating_add(btn).min(255) as u8;
+    let cx = 32u16.saturating_add(col).min(255) as u8;
+    let cy = 32u16.saturating_add(row).min(255) as u8;
+    vec![0x1b, b'[', b'M', cb, cx, cy]
+}
+
+/// Hover (1003, button 35) or drag (1002, button 32) SGR motion.
+///
+/// Press-only tracking (1000) returns empty. 1002 only reports while `left_down`.
+pub fn encode_mouse_motion(
+    col: u16,
+    row: u16,
+    left_down: bool,
+    tracking: bool,
+    any: bool,
+    drag: bool,
+    sgr: bool,
+) -> Vec<u8> {
+    if !tracking || (!any && !drag) {
+        return Vec::new();
+    }
+    if !any && !left_down {
+        return Vec::new();
+    }
+    let col = col.max(1);
+    let row = row.max(1);
+    // Motion bit 32 + button: left=0 → 32, none=3 → 35.
+    let btn = if left_down { 32 } else { 35 };
+    if sgr {
+        return format!("\x1b[<{btn};{col};{row}M").into_bytes();
+    }
+    let col = col.min(223);
+    let row = row.min(223);
+    vec![
+        0x1b,
+        b'[',
+        b'M',
+        btn as u8,
+        (32 + col) as u8,
+        (32 + row) as u8,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +145,38 @@ mod tests {
     fn cap_fling() {
         let out = encode_mouse_wheel(1, 1, 100, false, false, false);
         assert_eq!(out.len(), 32 * b"\x1b[A".len());
+    }
+
+    #[test]
+    fn button_nil_without_tracking() {
+        assert!(encode_mouse_button(5, 10, 0, true, false, true).is_empty());
+    }
+
+    #[test]
+    fn button_sgr_press_release() {
+        let press = encode_mouse_button(5, 10, 0, true, true, true);
+        assert_eq!(press, b"\x1b[<0;5;10M");
+        let rel = encode_mouse_button(5, 10, 0, false, true, true);
+        assert_eq!(rel, b"\x1b[<0;5;10m");
+    }
+
+    #[test]
+    fn motion_1000_silent() {
+        assert!(encode_mouse_motion(3, 4, false, true, false, false, true).is_empty());
+    }
+
+    #[test]
+    fn motion_1003_hover() {
+        let got = encode_mouse_motion(3, 4, false, true, true, false, true);
+        assert_eq!(got, b"\x1b[<35;3;4M");
+        let drag = encode_mouse_motion(3, 4, true, true, true, false, true);
+        assert_eq!(drag, b"\x1b[<32;3;4M");
+    }
+
+    #[test]
+    fn motion_1002_drag_only() {
+        assert!(encode_mouse_motion(1, 1, false, true, false, true, true).is_empty());
+        let got = encode_mouse_motion(1, 1, true, true, false, true, true);
+        assert_eq!(got, b"\x1b[<32;1;1M");
     }
 }

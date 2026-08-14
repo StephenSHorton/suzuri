@@ -35,7 +35,7 @@ use crate::layout::{
     clamp_ui_zoom, scene_from_screen, FrameLayout, Metrics, UI_ZOOM_STEP,
 };
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
-use crate::mouse_pty::encode_mouse_wheel;
+use crate::mouse_pty::{encode_mouse_button, encode_mouse_motion, encode_mouse_wheel};
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
@@ -137,6 +137,10 @@ pub struct ChromeApp {
     paint_dirty: bool,
     /// Dragging the terminal scrollbar thumb/track (pane id).
     scroll_dragging: Option<u64>,
+    /// Last 1-based SGR motion cell sent to an alt-screen TUI (dedupe).
+    alt_mouse_cell: Option<(u16, u16)>,
+    /// Left button is down after an alt-screen SGR press (awaiting release).
+    alt_mouse_down: bool,
     /// URL under the pointer in the focused terminal (for hand cursor / Cmd-click).
     hovered_link: Option<String>,
     /// Exact cell range of [`Self::hovered_link`] for primary hover paint.
@@ -256,6 +260,8 @@ impl Default for ChromeApp {
             pending_term_select: None,
             paint_dirty: false,
             scroll_dragging: None,
+            alt_mouse_cell: None,
+            alt_mouse_down: false,
             hovered_link: None,
             hovered_link_span: None,
             link_cursor_on: false,
@@ -1887,6 +1893,8 @@ impl ChromeApp {
             // Left alt screen — back to command line.
             self.terminal_focused = false;
             self.warp_focused = true;
+            self.alt_mouse_cell = None;
+            self.alt_mouse_down = false;
         }
         // Alt enter/leave changes cells height — keep grid/PTY in sync.
         self.sync_grids_to_panes();
@@ -1918,6 +1926,95 @@ impl ChromeApp {
         let col = col.clamp(0, grid.cols().saturating_sub(1) as i32) as u16;
         let row = row.clamp(0, grid.rows().saturating_sub(1) as i32) as u16;
         (col + 1, row + 1)
+    }
+
+    /// 1-based cell only when the pointer is inside the focused cell well.
+    fn term_cell_in_well_1based(&self) -> Option<(u16, u16)> {
+        if !matches!(self.hit_at_cursor(), HitTarget::Terminal(_)) {
+            return None;
+        }
+        let layout = self.current_layout();
+        let focus = self.session.focus_pane_id();
+        let pl = layout.panes.iter().find(|p| p.pane_id == focus)?;
+        let pane = self.session.panes.get(&focus)?;
+        let cells = pl.cells;
+        let (px, py) = self.pointer();
+        if !cells.contains(px, py) {
+            return None;
+        }
+        let cell = self.cell_metrics();
+        let col = ((px - cells.x) / cell.w.max(1.0)).floor() as i32;
+        let row = ((py - cells.y) / cell.h.max(1.0)).floor() as i32;
+        if col < 0 || row < 0 {
+            return None;
+        }
+        let col = col.min(pane.grid.cols().saturating_sub(1) as i32) as u16;
+        let row = row.min(pane.grid.rows().saturating_sub(1) as i32) as u16;
+        Some((col + 1, row + 1))
+    }
+
+    /// SGR press/release for an alt-screen TUI with mouse tracking (Grok buttons).
+    fn try_alt_mouse(&mut self, press: bool) -> bool {
+        if self.overlay_open() || !self.alt_owns_keyboard() {
+            return false;
+        }
+        let id = self.session.focus_pane_id();
+        let Some(rt) = self.runtimes.get(&id) else {
+            return false;
+        };
+        if !rt.ansi.mouse_tracking {
+            return false;
+        }
+        let tracking = rt.ansi.mouse_tracking;
+        let sgr = rt.ansi.mouse_sgr;
+        let Some((col, row)) = self.term_cell_in_well_1based() else {
+            return false;
+        };
+        let bytes = encode_mouse_button(col, row, 0, press, tracking, sgr);
+        if bytes.is_empty() {
+            return false;
+        }
+        self.alt_mouse_cell = Some((col, row));
+        self.alt_mouse_down = press;
+        self.write_focused_pty(&bytes);
+        self.drain_all_ptys();
+        true
+    }
+
+    /// Hover (1003) / drag (1002) motion — Grok button highlight needs this.
+    fn maybe_send_alt_mouse_motion(&mut self) {
+        if self.overlay_open() || !self.alt_owns_keyboard() {
+            self.alt_mouse_cell = None;
+            return;
+        }
+        let id = self.session.focus_pane_id();
+        let Some(rt) = self.runtimes.get(&id) else {
+            return;
+        };
+        let tracking = rt.ansi.mouse_tracking;
+        let any = rt.ansi.mouse_any;
+        let drag = rt.ansi.mouse_drag;
+        let sgr = rt.ansi.mouse_sgr;
+        if !any && !(drag && self.alt_mouse_down) {
+            return;
+        }
+        let Some((col, row)) = self.term_cell_in_well_1based() else {
+            return;
+        };
+        if self.alt_mouse_cell == Some((col, row)) {
+            return;
+        }
+        let bytes =
+            encode_mouse_motion(col, row, self.alt_mouse_down, tracking, any, drag, sgr);
+        if bytes.is_empty() {
+            return;
+        }
+        self.alt_mouse_cell = Some((col, row));
+        self.write_focused_pty(&bytes);
+        self.drain_all_ptys();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     /// Forward a wheel step to an alt-screen TUI (SGR 64/65 or arrow keys).
@@ -3746,6 +3843,7 @@ impl ApplicationHandler for ChromeApp {
                     self.request_redraw();
                 }
                 self.update_link_hover();
+                self.maybe_send_alt_mouse_motion();
             }
 
             WindowEvent::CursorLeft { .. } => {
@@ -3870,8 +3968,14 @@ impl ApplicationHandler for ChromeApp {
                 else if matches!(hit, HitTarget::Terminal(_)) && !self.overlay_open() {
                     if let Some(pos) = self.term_cell_at_cursor() {
                         let clicks = self.term_click_count(pos);
+                        // Alt-screen (Grok): single-click + hover go to the TUI.
+                        // Double/triple-click still host-selects word/line.
                         if clicks >= 2 {
                             self.apply_term_click_selection(pos, clicks);
+                            self.request_redraw();
+                        } else if self.try_alt_mouse(true) {
+                            self.term_selection.clear();
+                            self.selecting_term = false;
                             self.request_redraw();
                         } else {
                             if !self.term_selection.is_empty() {
@@ -3942,6 +4046,9 @@ impl ApplicationHandler for ChromeApp {
                 let was_scroll = self.scroll_dragging.take().is_some();
                 let was_sash = self.sash_drag.take().is_some();
                 let pane_drag_done = self.finish_pane_drag(event_loop);
+                if self.alt_mouse_down {
+                    self.try_alt_mouse(false);
+                }
                 if self.selecting_term {
                     self.term_selection.end();
                     self.selecting_term = false;
