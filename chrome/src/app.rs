@@ -12,7 +12,7 @@ use winit::{
     },
     event_loop::{ActiveEventLoop, ControlFlow},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId},
+    window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId, WindowLevel},
 };
 
 use crate::ansi::AnsiDecoder;
@@ -38,7 +38,7 @@ use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
 use crate::rename::{RenameState, RenameTarget};
-use crate::renderer::{self, Renderer};
+use crate::renderer::{self, GhostLayer, Renderer};
 use crate::text::MonoCellMetrics;
 use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
@@ -152,6 +152,10 @@ pub struct ChromeApp {
     /// Pane / tab drag (grab path, glass band, or a tab chip).
     pane_drag: Option<LayoutDrag>,
     sash_drag: Option<SashDrag>,
+    /// Click-through chip that follows the pointer (not a session surface).
+    drag_float: Option<GhostLayer>,
+    /// Window whose GPU device owns [`Self::drag_float`].
+    ghost_host: Option<WindowId>,
 }
 
 enum DragSubject {
@@ -165,6 +169,8 @@ struct LayoutDrag {
     active: bool,
     drop: Option<DropKind>,
     dest_surface: u64,
+    /// Cursor offset from the ghost window's top-left (logical px).
+    grab: (f32, f32),
 }
 
 enum SurfaceAdopt {
@@ -253,6 +259,8 @@ impl Default for ChromeApp {
             wheel_accum: 0.0,
             pane_drag: None,
             sash_drag: None,
+            drag_float: None,
+            ghost_host: None,
             surfaces: HashMap::new(),
             event_win: None,
             focus_win: None,
@@ -497,6 +505,144 @@ impl ChromeApp {
             origin.x + (self.cursor.x as f64 * scale).round() as i32,
             origin.y + (self.cursor.y as f64 * scale).round() as i32,
         ))
+    }
+
+    fn is_ghost_win(&self, id: WindowId) -> bool {
+        self.drag_float
+            .as_ref()
+            .is_some_and(|g| g.window.id() == id)
+    }
+
+    fn drag_float_logical_size(&self) -> (f32, f32) {
+        match self.pane_drag.as_ref().map(|d| &d.subject) {
+            Some(DragSubject::Tab { .. }) => (crate::layout::TAB_CHIP_W, 32.0),
+            Some(DragSubject::Pane { source, .. }) => (
+                (source.w * 0.55).clamp(120.0, 320.0),
+                (source.h * 0.40).clamp(64.0, 180.0),
+            ),
+            None => (crate::layout::TAB_CHIP_W, 32.0),
+        }
+    }
+
+    fn ensure_drag_float(&mut self, event_loop: &ActiveEventLoop) {
+        if self
+            .ghost_host
+            .is_some_and(|id| !self.surfaces.contains_key(&id))
+        {
+            self.drag_float = None;
+            self.ghost_host = None;
+        }
+        let (lw, lh) = self.drag_float_logical_size();
+        if let Some(g) = &self.drag_float {
+            let scale = g.window.scale_factor() as f32;
+            let want_w = (lw * scale).round() as u32;
+            let want_h = (lh * scale).round() as u32;
+            let have = g.window.inner_size();
+            if have.width.abs_diff(want_w) > 2 || have.height.abs_diff(want_h) > 2 {
+                let _ = g.window.request_inner_size(LogicalSize::new(lw, lh));
+            }
+            g.window.set_visible(true);
+            self.place_drag_float();
+            return;
+        }
+        let attrs = WindowAttributes::default()
+            .with_title("suzuri · drag")
+            .with_inner_size(LogicalSize::new(lw, lh))
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_resizable(false)
+            .with_visible(true)
+            .with_active(false)
+            .with_window_level(WindowLevel::AlwaysOnTop);
+        let Ok(raw) = event_loop.create_window(attrs) else {
+            return;
+        };
+        let window = Arc::new(raw);
+        let _ = window.set_cursor_hittest(false);
+        #[cfg(target_os = "macos")]
+        crate::macos_window::configure_rounded_window(&window, 8.0);
+        let Some(host_id) = self
+            .event_win
+            .filter(|id| self.surfaces.contains_key(id))
+            .or_else(|| self.surfaces.keys().next().copied())
+        else {
+            return;
+        };
+        let Some(layer) = self
+            .surfaces
+            .get(&host_id)
+            .map(|s| s.renderer.spawn_ghost(window.clone()))
+        else {
+            return;
+        };
+        self.ghost_host = Some(host_id);
+        self.drag_float = Some(layer);
+        self.place_drag_float();
+    }
+
+    fn place_drag_float(&self) {
+        let Some(g) = &self.drag_float else {
+            return;
+        };
+        let Some(screen) = self.pointer_screen_physical() else {
+            return;
+        };
+        let grab = self
+            .pane_drag
+            .as_ref()
+            .map(|d| d.grab)
+            .unwrap_or((48.0, 16.0));
+        let scale = g.window.scale_factor();
+        let x = screen.0 - (grab.0 as f64 * scale).round() as i32;
+        let y = screen.1 - (grab.1 as f64 * scale).round() as i32;
+        g.window
+            .set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        g.window.request_redraw();
+    }
+
+    fn hide_drag_float(&self) {
+        if let Some(g) = &self.drag_float {
+            g.window.set_visible(false);
+        }
+    }
+
+    fn paint_drag_float(&mut self) {
+        let Some(title) = self.pane_drag.as_ref().and_then(|d| match &d.subject {
+            DragSubject::Tab { tab_id, .. } => self
+                .session
+                .tabs
+                .iter()
+                .find(|t| t.id == *tab_id)
+                .map(|t| t.title.clone()),
+            DragSubject::Pane { pane_id, .. } => self
+                .session
+                .panes
+                .get(pane_id)
+                .map(|p| p.title.clone()),
+        }) else {
+            return;
+        };
+        let is_tab = self
+            .pane_drag
+            .as_ref()
+            .is_some_and(|d| matches!(d.subject, DragSubject::Tab { .. }));
+        let Some(host_id) = self.ghost_host else {
+            return;
+        };
+        if !self.surfaces.contains_key(&host_id) {
+            self.drag_float = None;
+            self.ghost_host = None;
+            return;
+        }
+        let Some(mut ghost) = self.drag_float.take() else {
+            return;
+        };
+        if let Some(host) = self.surfaces.get(&host_id) {
+            let _ = host
+                .renderer
+                .render_ghost(&mut ghost, &title, &self.settings, is_tab);
+        }
+        self.drag_float = Some(ghost);
     }
 
     fn request_redraw(&self) {
@@ -1342,6 +1488,7 @@ impl ChromeApp {
             }
             _ => {}
         }
+        self.hide_drag_float();
         self.prune_empty_surfaces(event_loop);
         true
     }
@@ -1397,6 +1544,10 @@ impl ChromeApp {
             .map(|(id, _)| *id)
             .collect();
         for id in empty {
+            if self.ghost_host == Some(id) {
+                self.drag_float = None;
+                self.ghost_host = None;
+            }
             self.surfaces.remove(&id);
             if self.event_win == Some(id) {
                 self.event_win = self.surfaces.keys().next().copied();
@@ -1440,6 +1591,10 @@ impl ChromeApp {
             for pid in self.session.close_tab(tid) {
                 self.runtimes.remove(&pid);
             }
+        }
+        if self.ghost_host == Some(id) {
+            self.drag_float = None;
+            self.ghost_host = None;
         }
         self.surfaces.remove(&id);
         if self.event_win == Some(id) {
@@ -2100,6 +2255,7 @@ impl ChromeApp {
             }
             if self.pane_drag.is_some() {
                 self.pane_drag = None;
+                self.hide_drag_float();
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -3172,6 +3328,22 @@ impl ApplicationHandler for ChromeApp {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            if self.pane_drag.as_ref().is_some_and(|d| d.active) {
+                if !self.pointer_inside {
+                    if let Some(g) = &self.drag_float {
+                        if let Ok(pos) = g.window.outer_position() {
+                            g.window.set_outer_position(
+                                winit::dpi::PhysicalPosition::new(
+                                    pos.x + dx as i32,
+                                    pos.y + dy as i32,
+                                ),
+                            );
+                            g.window.request_redraw();
+                        }
+                    }
+                }
+                return;
+            }
             if !self.pointer_inside {
                 if let Some(w) = &self.window {
                     let s = w.inner_size();
@@ -3209,6 +3381,12 @@ impl ApplicationHandler for ChromeApp {
         id: WindowId,
         event: WindowEvent,
     ) {
+        if self.is_ghost_win(id) {
+            if matches!(event, WindowEvent::RedrawRequested) {
+                self.paint_drag_float();
+            }
+            return;
+        }
         self.bind_win(id);
         match event {
             WindowEvent::CloseRequested => self.close_surface(event_loop, id),
@@ -3287,6 +3465,7 @@ impl ApplicationHandler for ChromeApp {
                             d.drop = drop;
                             d.dest_surface = dest_surface;
                         }
+                        self.ensure_drag_float(event_loop);
                     }
                     self.request_redraw_all();
                 } else if self.selecting_term {
@@ -3356,6 +3535,10 @@ impl ApplicationHandler for ChromeApp {
                             active: false,
                             drop: None,
                             dest_surface: self.event_surface_key(),
+                            grab: (
+                                (source.w * 0.55).clamp(120.0, 320.0) * 0.3,
+                                12.0,
+                            ),
                         });
                     }
                 }
@@ -3363,6 +3546,12 @@ impl ApplicationHandler for ChromeApp {
                     if !self.overlay_open() {
                         let surface = self.event_surface_key();
                         if let Some(tab_id) = self.session.tabs_on_surface(surface).get(i).copied() {
+                            let chip = self
+                                .current_layout()
+                                .tab_chips
+                                .get(i)
+                                .copied()
+                                .unwrap_or_default();
                             self.pane_drag = Some(LayoutDrag {
                                 subject: DragSubject::Tab {
                                     tab_id,
@@ -3372,6 +3561,10 @@ impl ApplicationHandler for ChromeApp {
                                 active: false,
                                 drop: None,
                                 dest_surface: surface,
+                                grab: (
+                                    (self.cursor.x - chip.x).clamp(8.0, chip.w.max(16.0) - 8.0),
+                                    (self.cursor.y - chip.y).clamp(4.0, chip.h.max(8.0) - 4.0),
+                                ),
                             });
                         }
                     }
@@ -3809,7 +4002,7 @@ impl ApplicationHandler for ChromeApp {
                             .and_then(|d| d.drop),
                         self.pane_drag
                             .as_ref()
-                            .filter(|d| d.active && show_drag)
+                            .filter(|d| d.active && show_drag && self.drag_float.is_none())
                             .and_then(|d| {
                             match &d.subject {
                                 DragSubject::Pane { source, .. } => {
