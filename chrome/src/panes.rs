@@ -36,7 +36,7 @@ pub enum SplitNode {
 
 /// Which child of a branch is mid close-jelly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-enum CloseSide {
+pub(crate) enum CloseSide {
     #[default]
     None,
     A,

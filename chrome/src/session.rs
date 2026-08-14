@@ -78,6 +78,10 @@ fn new_terminal_pane(id: u64, cols: u16, rows: u16, cwd: String) -> Pane {
     }
 }
 
+fn default_tab_title(id: u64) -> String {
+    format!("tab {id}")
+}
+
 fn new_widget_pane(id: u64, kind: WidgetKind, cwd: String) -> Pane {
     Pane {
         id,
@@ -174,7 +178,7 @@ impl ChromeSession {
         );
         let tab = Tab {
             id: 1,
-            title: "shell 1".into(),
+            title: default_tab_title(1),
             root: SplitNode::leaf(pane_id),
             focus_pane: pane_id,
             solo_exit: None,
@@ -286,40 +290,24 @@ impl ChromeSession {
 
     /// Manual "Rename tab" — sets the chrome strip title.
     ///
-    /// Empty name clears the custom strip label: falls back to the focused
-    /// pane title (solo follow / multi sticky base).
+    /// Empty name restores `tab {n}`. Pane titles are never used as a fallback.
     pub fn rename_active_tab(&mut self, name: &str) {
         let name = name.trim();
-        let focus = self.focus_pane_id();
-        let fallback = self
-            .panes
-            .get(&focus)
-            .map(|p| {
-                if p.title.trim().is_empty() {
-                    format!("shell {focus}")
-                } else {
-                    p.title.clone()
-                }
-            })
-            .unwrap_or_else(|| "shell".into());
         if let Some(tab) = self.active_tab_mut() {
             tab.title = if name.is_empty() {
-                fallback
+                default_tab_title(tab.id)
             } else {
                 name.to_string()
             };
         }
     }
 
-    /// Manual "Rename pane" — sets the focused leaf title.
+    /// Manual "Rename pane" — sets the focused leaf title only.
     ///
-    /// Empty clears to `shell {id}`. Solo pages keep the strip in sync with the
-    /// only pane (product `applyRename`); multi-pane strip is left alone so
-    /// OSC/Grok continue to rename panes only.
+    /// Empty clears to `shell {id}`. The tab strip is never changed.
     pub fn rename_focused_pane(&mut self, name: &str) {
         let name = name.trim();
         let focus = self.focus_pane_id();
-        let leaf_count = self.active_leaf_count();
         let resolved = if name.is_empty() {
             match self.panes.get(&focus).map(|p| p.kind) {
                 Some(PaneKind::Widget(k)) => k.title().to_string(),
@@ -329,12 +317,7 @@ impl ChromeSession {
             name.to_string()
         };
         if let Some(p) = self.panes.get_mut(&focus) {
-            p.title = resolved.clone();
-        }
-        if leaf_count <= 1 {
-            if let Some(tab) = self.active_tab_mut() {
-                tab.title = resolved;
-            }
+            p.title = resolved;
         }
     }
 
@@ -621,7 +604,7 @@ impl ChromeSession {
             .unwrap_or(0);
         self.tabs.push(Tab {
             id: tab_id,
-            title: format!("shell {pane_id}"),
+            title: default_tab_title(tab_id),
             root: SplitNode::leaf(pane_id),
             focus_pane: pane_id,
             solo_exit: None,
@@ -1084,16 +1067,11 @@ impl ChromeSession {
             }
             RemoveResult::RemovedEmpty | RemoveResult::NotFound => return None,
         }
-        let title = self
-            .panes
-            .get(&pane_id)
-            .map(|p| p.title.clone())
-            .unwrap_or_else(|| format!("shell {pane_id}"));
         let tab_id = self.next_tab_id;
         self.next_tab_id = self.next_tab_id.saturating_add(1);
         self.tabs.push(Tab {
             id: tab_id,
-            title,
+            title: default_tab_title(tab_id),
             root: SplitNode::leaf(pane_id),
             focus_pane: pane_id,
             solo_exit: None,
@@ -1687,25 +1665,23 @@ mod tests {
     #[test]
     fn rename_tab_sets_strip_title() {
         let mut s = ChromeSession::new(80, 24);
-        assert_eq!(s.rename_seed(true), "shell 1");
+        assert_eq!(s.rename_seed(true), "tab 1");
         s.rename_active_tab("work");
         assert_eq!(s.active_tab().unwrap().title, "work");
-        // Empty clears → falls back to pane title
+        // Empty restores tab N — never the pane title.
         s.rename_active_tab("  ");
-        assert_eq!(s.active_tab().unwrap().title, "shell 1");
+        assert_eq!(s.active_tab().unwrap().title, "tab 1");
     }
 
     #[test]
-    fn rename_pane_solo_syncs_strip() {
+    fn rename_pane_does_not_change_strip() {
         let mut s = ChromeSession::new(80, 24);
         s.rename_focused_pane("nvim");
         assert_eq!(s.active_pane().unwrap().title, "nvim");
-        assert_eq!(s.active_tab().unwrap().title, "nvim");
-        // OSC still only touches pane (strip already nvim from manual rename)
+        assert_eq!(s.active_tab().unwrap().title, "tab 1");
         s.set_pane_title(1, "from-osc".into());
         assert_eq!(s.panes.get(&1).unwrap().title, "from-osc");
-        // Strip is not updated by OSC (product rule)
-        assert_eq!(s.active_tab().unwrap().title, "nvim");
+        assert_eq!(s.active_tab().unwrap().title, "tab 1");
     }
 
     #[test]
@@ -1732,7 +1708,7 @@ mod tests {
         s.rename_focused_pane("tmp");
         s.rename_focused_pane("");
         assert_eq!(s.active_pane().unwrap().title, "shell 1");
-        assert_eq!(s.active_tab().unwrap().title, "shell 1");
+        assert_eq!(s.active_tab().unwrap().title, "tab 1");
     }
 
     #[test]
