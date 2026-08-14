@@ -1,6 +1,7 @@
 # Workspace
 
-Shared working area for **humans and AI sessions**: channels, messages, members.
+Shared working area for **humans and AI sessions**: channels, messages, members,
+claimable tasks, and exclusive path leases.
 Mini Slack/Discord shaped — local-first under the suzuri config directory.
 
 ## Paths
@@ -17,6 +18,8 @@ Layout:
 workspace/
   workspace.json
   members.json
+  tasks.json
+  leases.json
   channels/
     general/
       meta.json
@@ -113,6 +116,13 @@ Agents with suzuri MCP should call **`workspace_guide`** first if unsure.
 | `workspace_inbox` | Mentions + assignments for `member_id` since `since_id` (default poll target) |
 | `workspace_upload` | Attach a local file (`path`, optional `caption`) |
 | `workspace_download` | Resolve `file_id` → absolute `local_path` |
+| `workspace_task_create` | Create a claimable task (`title`, optional `id` / `files`) — posts a system line |
+| `workspace_task_list` | List tasks from `tasks.json` |
+| `workspace_task_claim` | Exclusive claim (`task` + `member_id`); second claim fails |
+| `workspace_assign` | `task=E7 member=<member_id>` — owner + claimed + `@member_id` mention |
+| `workspace_task_set_status` | `todo` / `claimed` / `done` / `blocked` (done/blocked post a system line) |
+| `workspace_lease` | Exclusive path lease (`path`, `member_id`, `ttl=10m`); `steal=true` posts a system line |
+| `workspace_lease_list` | List active path leases from `leases.json` |
 
 Works **offline** (disk store) if the GUI is down. When the GUI is up, the
 bridge refreshes an open Workspace panel after mutations. Chrome also watches
@@ -133,6 +143,11 @@ workspace_wait channel="general" since="msg_…" timeout=60
 workspace_inbox member_id="…" since_id="msg_…"
 workspace_set_status member_id="…" status="waiting" note="need human review"
 workspace_download file_id="f_…" channel="pr-142"
+workspace_task_create title="Write main.js" files='["js/main.js"]'
+workspace_task_claim task="E1" member_id="…"
+workspace_lease path="js/main.js" member_id="…" ttl="10m"
+workspace_assign task="E1" member="…"
+workspace_task_set_status task="E1" status="done"
 ```
 
 Prefer `member_id` from join. If omitted, `name` auto-joins as an agent.
@@ -151,6 +166,22 @@ you do read history. Members with `status=working` and `last_seen` older than
 - Join/leave do **not** post system lines to `#general`. Work happens in topic channels.
 - An empty `session_id` never merges, even when a same name+kind member already has a session. Only a matching non-empty `session_id` updates.
 - Chrome posts use the joiner's `member_id` as `from_id` (not a new id per message).
+
+## Tasks and path leases
+
+Two engine sessions used to race on the same file (and a `TASKS.md` in chat went stale).
+The store now keeps **first-class tasks** and **exclusive path leases** on disk:
+
+| File | Role |
+|------|------|
+| `tasks.json` | Claimable work: `id` (E1, E2… or explicit E7/C1), `title`, `owner` (**member_id**, never `"engine"`), `status` (`todo`/`claimed`/`done`/`blocked`), `files[]` |
+| `leases.json` | Exclusive hold on a relative path + `member_id` + expiry |
+
+- **Claim is exclusive** — a second `workspace_task_claim` of the same task fails.
+- **Assign** sets `owner` to that `member_id`, marks `claimed`, and posts a system line that `@mention`s the member_id.
+- **Lease is exclusive** — a second `workspace_lease` on the same path fails unless `steal=true` (steal posts a system line).
+- Create / claim / assign / done / blocked each post a **system line** in the channel (default `#general`). **Do not upload TASKS.md.**
+- Chrome task board strip is not in this slice; agents use the MCP tools + `ListTasks` / `ListLeases` on the store.
 
 ## Later
 

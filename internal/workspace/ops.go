@@ -26,6 +26,13 @@ const (
 	OpDownload      Op = "download"
 	OpSetStatus     Op = "set_status" // member availability (idle|working|waiting|blocked|away)
 	OpClaimRole     Op = "claim_role" // exclusive role: pm|engine|content
+	OpTaskCreate    Op = "task_create"
+	OpTaskList      Op = "task_list"
+	OpTaskClaim     Op = "task_claim"
+	OpTaskAssign    Op = "assign"
+	OpTaskSetStatus Op = "task_set_status"
+	OpLease         Op = "lease"
+	OpLeaseList     Op = "lease_list"
 )
 
 // Request is the unified workspace RPC body.
@@ -59,6 +66,20 @@ type Request struct {
 	StatusNote *string `json:"status_note,omitempty"`
 	// Role is for OpClaimRole (pm|engine|content|"").
 	Role string `json:"role,omitempty"`
+	// TaskID is E7 / C1 / etc. for task ops (alias of MCP "task").
+	TaskID string `json:"task_id,omitempty"`
+	// Title for task_create.
+	Title string `json:"title,omitempty"`
+	// Files are paths a task may touch.
+	Files []string `json:"files,omitempty"`
+	// TaskStatus for task_set_status (todo|claimed|done|blocked).
+	TaskStatus string `json:"task_status,omitempty"`
+	// Path is a workspace-relative file path for lease.
+	Path string `json:"path,omitempty"`
+	// TTL is a duration string (e.g. 10m) for lease.
+	TTL string `json:"ttl,omitempty"`
+	// Steal allows taking an existing path lease.
+	Steal bool `json:"steal,omitempty"`
 }
 
 // Result is a JSON-friendly workspace response.
@@ -75,11 +96,15 @@ type Result struct {
 	Messages []Message      `json:"messages,omitempty"`
 	File     *FileRef       `json:"file,omitempty"`
 	// LocalPath is the absolute path for download/upload destination.
-	LocalPath string `json:"local_path,omitempty"`
-	Count     int    `json:"count,omitempty"`
+	LocalPath string  `json:"local_path,omitempty"`
+	Count     int     `json:"count,omitempty"`
 	// SessionID / MemberID are set on join so agents do not have to dig into member.
-	SessionID string `json:"session_id,omitempty"`
-	MemberID  string `json:"member_id,omitempty"`
+	SessionID string  `json:"session_id,omitempty"`
+	MemberID  string  `json:"member_id,omitempty"`
+	Task      *Task   `json:"task,omitempty"`
+	Tasks     []Task  `json:"tasks,omitempty"`
+	Lease     *Lease  `json:"lease,omitempty"`
+	Leases    []Lease `json:"leases,omitempty"`
 }
 
 // Apply runs req against Default (or s if non-nil).
@@ -262,6 +287,59 @@ func Apply(s *Store, req Request) Result {
 			return Result{OK: false, Path: path, Error: err.Error()}
 		}
 		return Result{OK: true, Path: path, File: &ref, LocalPath: abs}
+
+	case OpTaskCreate:
+		t, err := s.CreateTask(req.Title, req.TaskID, req.Files, req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Task: &t}
+
+	case OpTaskList:
+		list, err := s.ListTasks()
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Tasks: list, Count: len(list)}
+
+	case OpTaskClaim:
+		t, err := s.ClaimTask(req.TaskID, req.MemberID, req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Task: &t}
+
+	case OpTaskAssign:
+		t, err := s.AssignTask(req.TaskID, req.MemberID, req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Task: &t}
+
+	case OpTaskSetStatus:
+		t, err := s.SetTaskStatus(req.TaskID, TaskStatus(req.TaskStatus), req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Task: &t}
+
+	case OpLease:
+		leasePath := req.Path
+		if leasePath == "" {
+			leasePath = req.FilePath
+		}
+		l, err := s.AcquireLease(leasePath, req.MemberID, req.TTL, req.Steal, req.Channel)
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Lease: &l}
+
+	case OpLeaseList:
+		list, err := s.ListLeases()
+		if err != nil {
+			return Result{OK: false, Path: path, Error: err.Error()}
+		}
+		return Result{OK: true, Path: path, Leases: list, Count: len(list)}
 
 	default:
 		return Result{

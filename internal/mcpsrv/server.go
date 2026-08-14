@@ -233,9 +233,11 @@ func RunStdio() error {
 				"2. Optional: workspace_claim_role role=engine member_id=… (exclusive: pm|engine|content). Role is not your display name.",
 				"3. workspace_set_status status=working note=\"…\" so humans/peers see what you are doing",
 				"4. workspace_history once to catch up (pass since_id / after_ts for incremental reads)",
-				"5. workspace_post to reply (prefer member_id from join). @name mentions resolve to that member's id.",
-				"6. Update status when blocked/waiting (waiting|blocked) or when idle/away",
-				"7. After joining, call workspace_wait (channel + since) or workspace_inbox (member_id + since_id) — do not replay the whole channel each turn",
+				"5. workspace_task_list / workspace_lease_list before touching shared files",
+				"6. workspace_task_claim or workspace_assign, then workspace_lease path=… ttl=10m",
+				"7. workspace_post to reply (prefer member_id from join). @name mentions resolve to that member's id.",
+				"8. Update status when blocked/waiting (waiting|blocked) or when idle/away",
+				"9. After joining, call workspace_wait (channel + since) or workspace_inbox (member_id + since_id) — do not replay the whole channel each turn",
 			},
 			"availability": map[string]any{
 				"tool":  "workspace_set_status",
@@ -254,12 +256,30 @@ func RunStdio() error {
 				"workspace_channels", "workspace_channel_create", "workspace_channel_delete",
 				"workspace_post", "workspace_history", "workspace_wait", "workspace_inbox",
 				"workspace_upload", "workspace_download",
+				"workspace_task_create", "workspace_task_list", "workspace_task_claim",
+				"workspace_assign", "workspace_task_set_status",
+				"workspace_lease", "workspace_lease_list",
 			},
 			"identity": map[string]any{
 				"session":    "workspace_join injects a session id (Grok/MCP meta, env, or a minted id). Two joins as the same display name without a shared session_id become two members (engine, engine-2).",
 				"role":       "workspace_claim_role role=pm|engine|content member_id=… is exclusive among live members. Role ≠ display name.",
 				"mentions":   "@name in a post is resolved to member_id and stored on the message. engine and engine-2 are distinct @targets.",
 				"join_leave": "Join/leave do not post system lines to #general. Work happens in other channels.",
+			},
+			"tasks": map[string]any{
+				"what": "First-class claimable tasks in tasks.json (not TASKS.md). " +
+					"id is E1, E2… auto or an explicit id (E7, C1). owner is a member_id, never the string engine.",
+				"create": "workspace_task_create title=\"Write main.js\" files=[\"js/main.js\"]",
+				"claim":  "workspace_task_claim task=E1 member_id=…  — exclusive; second claim fails",
+				"assign": "workspace_assign task=E7 member=<member_id>  — sets owner+claimed and @mentions that member_id",
+				"status": "workspace_task_set_status task=E1 status=done|blocked|todo|claimed",
+				"list":   "workspace_task_list",
+			},
+			"leases": map[string]any{
+				"what":  "Exclusive path leases in leases.json so two agents do not write the same file.",
+				"lease": "workspace_lease path=js/main.js member_id=… ttl=10m",
+				"steal": "Second lease on the same path fails unless steal=true (posts a system line).",
+				"list":  "workspace_lease_list",
 			},
 			"channels": map[string]any{
 				"what": "#general always exists. Create more for topics (e.g. #pr-142). " +
@@ -288,6 +308,8 @@ func RunStdio() error {
 				"GUI should be running for live UI refresh; disk tools still work offline",
 				"Do not post join/leave chatter to #general — work in topic channels",
 				"Prefer member_id from join; two agents named engine are engine and engine-2",
+				"Use tasks.json + workspace_task_* / workspace_assign — do not upload TASKS.md",
+				"Lease a path before writing it; steal only when you must (posts a system line)",
 			},
 		}), nil, nil
 	})
@@ -557,6 +579,131 @@ func RunStdio() error {
 		}), nil, nil
 	})
 
+	type wsTaskCreateArgs struct {
+		Title   string   `json:"title" jsonschema:"task title"`
+		ID      string   `json:"id,omitempty" jsonschema:"optional explicit id (E7, C1). Auto-generates E1, E2… if omitted"`
+		Files   []string `json:"files,omitempty" jsonschema:"paths this task may touch"`
+		Channel string   `json:"channel,omitempty" jsonschema:"channel for the system line (default general)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "workspace_task_create",
+		Description: "Create a claimable workspace task (persisted in tasks.json, not TASKS.md). " +
+			"Auto-assigns E1, E2… unless id is given. Posts a system line in the channel.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsTaskCreateArgs) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:      bridge.WorkspaceOpTaskCreate,
+			Title:   args.Title,
+			TaskID:  args.ID,
+			Files:   args.Files,
+			Channel: args.Channel,
+		}), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_task_list",
+		Description: "List claimable workspace tasks from tasks.json (id, title, owner member_id, status, files).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{Op: bridge.WorkspaceOpTaskList}), nil, nil
+	})
+
+	type wsTaskClaimArgs struct {
+		Task     string `json:"task,omitempty" jsonschema:"task id (e.g. E7)"`
+		TaskID   string `json:"task_id,omitempty" jsonschema:"alias for task"`
+		MemberID string `json:"member_id" jsonschema:"claimant member_id from workspace_join"`
+		Channel  string `json:"channel,omitempty" jsonschema:"channel for the system line (default general)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "workspace_task_claim",
+		Description: "Exclusively claim a workspace task. Owner becomes your member_id (not \"engine\"). " +
+			"A second claim of the same task by another member fails. Posts a system line.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsTaskClaimArgs) (*mcp.CallToolResult, any, error) {
+		id := args.Task
+		if id == "" {
+			id = args.TaskID
+		}
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:       bridge.WorkspaceOpTaskClaim,
+			TaskID:   id,
+			MemberID: args.MemberID,
+			Channel:  args.Channel,
+		}), nil, nil
+	})
+
+	type wsAssignArgs struct {
+		Task     string `json:"task" jsonschema:"task id (e.g. E7)"`
+		Member   string `json:"member" jsonschema:"member_id to assign as owner"`
+		MemberID string `json:"member_id,omitempty" jsonschema:"alias for member"`
+		Channel  string `json:"channel,omitempty" jsonschema:"channel for the system line (default general)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "workspace_assign",
+		Description: "Assign a task to a member_id: sets owner + claimed and records an @mention of that member_id. " +
+			"Posts a system line. Owner is never the string engine.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsAssignArgs) (*mcp.CallToolResult, any, error) {
+		member := args.Member
+		if member == "" {
+			member = args.MemberID
+		}
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:       bridge.WorkspaceOpTaskAssign,
+			TaskID:   args.Task,
+			MemberID: member,
+			Channel:  args.Channel,
+		}), nil, nil
+	})
+
+	type wsTaskSetStatusArgs struct {
+		Task    string `json:"task,omitempty" jsonschema:"task id (e.g. E7)"`
+		TaskID  string `json:"task_id,omitempty" jsonschema:"alias for task"`
+		Status  string `json:"status" jsonschema:"todo|claimed|done|blocked"`
+		Channel string `json:"channel,omitempty" jsonschema:"channel for the system line (default general)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "workspace_task_set_status",
+		Description: "Set a workspace task status (todo|claimed|done|blocked). " +
+			"done and blocked each post a system line in the channel.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsTaskSetStatusArgs) (*mcp.CallToolResult, any, error) {
+		id := args.Task
+		if id == "" {
+			id = args.TaskID
+		}
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:         bridge.WorkspaceOpTaskSetStatus,
+			TaskID:     id,
+			TaskStatus: args.Status,
+			Channel:    args.Channel,
+		}), nil, nil
+	})
+
+	type wsLeaseArgs struct {
+		Path     string `json:"path" jsonschema:"workspace-relative path (e.g. js/main.js)"`
+		MemberID string `json:"member_id" jsonschema:"holder member_id from workspace_join"`
+		TTL      string `json:"ttl,omitempty" jsonschema:"duration such as 10m (default 10m)"`
+		Steal    bool   `json:"steal,omitempty" jsonschema:"if true, take an existing lease and post a system line"`
+		Channel  string `json:"channel,omitempty" jsonschema:"channel for steal system line (default general)"`
+	}
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "workspace_lease",
+		Description: "Take an exclusive lease on a path (leases.json) so another session cannot write it. " +
+			"Second lease on the same path fails unless steal=true (steal posts a system line).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsLeaseArgs) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{
+			Op:       bridge.WorkspaceOpLease,
+			Path:     args.Path,
+			MemberID: args.MemberID,
+			TTL:      args.TTL,
+			Steal:    args.Steal,
+			Channel:  args.Channel,
+		}), nil, nil
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "workspace_lease_list",
+		Description: "List active exclusive path leases (path, member_id, until).",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		return workspaceTool(bridge.WorkspaceRequest{Op: bridge.WorkspaceOpLeaseList}), nil, nil
+	})
+
 	logf("stdio MCP ready (attach to GUI via %s)", bridge.EndpointPath())
 	return server.Run(context.Background(), &mcp.StdioTransport{})
 }
@@ -611,6 +758,13 @@ func workspaceApply(req bridge.WorkspaceRequest) workspace.Result {
 		Status:     req.Status,
 		StatusNote: req.StatusNote,
 		Role:       req.Role,
+		TaskID:     req.TaskID,
+		Title:      req.Title,
+		Files:      req.Files,
+		TaskStatus: req.TaskStatus,
+		Path:       req.Path,
+		TTL:        req.TTL,
+		Steal:      req.Steal,
 	})
 }
 
