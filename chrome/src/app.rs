@@ -1954,7 +1954,12 @@ impl ChromeApp {
     }
 
     /// SGR press/release for an alt-screen TUI with mouse tracking (Grok buttons).
+    /// `btn`: 0=left, 1=middle, 2=right.
     fn try_alt_mouse(&mut self, press: bool) -> bool {
+        self.try_alt_mouse_btn(0, press)
+    }
+
+    fn try_alt_mouse_btn(&mut self, btn: u16, press: bool) -> bool {
         if self.overlay_open() || !self.alt_owns_keyboard() {
             return false;
         }
@@ -1970,12 +1975,14 @@ impl ChromeApp {
         let Some((col, row)) = self.term_cell_in_well_1based() else {
             return false;
         };
-        let bytes = encode_mouse_button(col, row, 0, press, tracking, sgr);
+        let bytes = encode_mouse_button(col, row, btn, press, tracking, sgr);
         if bytes.is_empty() {
             return false;
         }
         self.alt_mouse_cell = Some((col, row));
-        self.alt_mouse_down = press;
+        if btn == 0 {
+            self.alt_mouse_down = press;
+        }
         self.write_focused_pty(&bytes);
         self.drain_all_ptys();
         true
@@ -3017,7 +3024,7 @@ impl ChromeApp {
                         }
                         return;
                     }
-                    "v" | "V" if !shift => {
+                    "v" | "V" if !shift && !self.alt_owns_keyboard() => {
                         self.paste_clipboard();
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -3134,6 +3141,7 @@ impl ChromeApp {
             && !shift
             && !alt
             && !self.overlay_open()
+            && !self.alt_owns_keyboard()
             && matches!(event.logical_key, Key::Named(NamedKey::F2))
         {
             self.open_rename(RenameTarget::Pane);
@@ -3285,73 +3293,55 @@ impl ChromeApp {
             let id = self.session.focus_pane_id();
             if let Some(rt) = self.runtimes.get_mut(&id) {
                 if let Some(pty) = &mut rt.pty {
-                    match &event.logical_key {
-                        Key::Named(NamedKey::Enter) => {
-                            // Shift/Cmd+Enter → CSI-u so Grok inserts a newline
-                            // instead of submitting. Bare Enter stays CR.
-                            let bytes = crate::kitty::encode_enter(
-                                self.modifiers.shift_key(),
-                                self.modifiers.alt_key(),
-                                self.modifiers.control_key(),
-                                self.modifiers.super_key(),
-                                rt.ansi.kitty_active(),
-                            );
+                    let mods = crate::kitty::KeyMods {
+                        shift: self.modifiers.shift_key(),
+                        alt: self.modifiers.alt_key(),
+                        ctrl: self.modifiers.control_key(),
+                        super_key: self.modifiers.super_key(),
+                    };
+                    let kitty_on = rt.ansi.kitty_active();
+                    let app_cur = rt.ansi.app_cursor;
+                    let named = match &event.logical_key {
+                        Key::Named(NamedKey::Enter) => Some(crate::kitty::NamedKey::Enter),
+                        Key::Named(NamedKey::Escape) => Some(crate::kitty::NamedKey::Esc),
+                        Key::Named(NamedKey::Tab) => Some(crate::kitty::NamedKey::Tab),
+                        Key::Named(NamedKey::Backspace) => Some(crate::kitty::NamedKey::Backspace),
+                        Key::Named(NamedKey::Delete) => Some(crate::kitty::NamedKey::Delete),
+                        Key::Named(NamedKey::Insert) => Some(crate::kitty::NamedKey::Insert),
+                        Key::Named(NamedKey::Home) => Some(crate::kitty::NamedKey::Home),
+                        Key::Named(NamedKey::End) => Some(crate::kitty::NamedKey::End),
+                        Key::Named(NamedKey::PageUp) => Some(crate::kitty::NamedKey::PageUp),
+                        Key::Named(NamedKey::PageDown) => Some(crate::kitty::NamedKey::PageDown),
+                        Key::Named(NamedKey::ArrowUp) => Some(crate::kitty::NamedKey::ArrowUp),
+                        Key::Named(NamedKey::ArrowDown) => Some(crate::kitty::NamedKey::ArrowDown),
+                        Key::Named(NamedKey::ArrowRight) => Some(crate::kitty::NamedKey::ArrowRight),
+                        Key::Named(NamedKey::ArrowLeft) => Some(crate::kitty::NamedKey::ArrowLeft),
+                        Key::Named(NamedKey::F1) => Some(crate::kitty::NamedKey::F(1)),
+                        Key::Named(NamedKey::F2) => Some(crate::kitty::NamedKey::F(2)),
+                        Key::Named(NamedKey::F3) => Some(crate::kitty::NamedKey::F(3)),
+                        Key::Named(NamedKey::F4) => Some(crate::kitty::NamedKey::F(4)),
+                        Key::Named(NamedKey::F5) => Some(crate::kitty::NamedKey::F(5)),
+                        Key::Named(NamedKey::F6) => Some(crate::kitty::NamedKey::F(6)),
+                        Key::Named(NamedKey::F7) => Some(crate::kitty::NamedKey::F(7)),
+                        Key::Named(NamedKey::F8) => Some(crate::kitty::NamedKey::F(8)),
+                        Key::Named(NamedKey::F9) => Some(crate::kitty::NamedKey::F(9)),
+                        Key::Named(NamedKey::F10) => Some(crate::kitty::NamedKey::F(10)),
+                        Key::Named(NamedKey::F11) => Some(crate::kitty::NamedKey::F(11)),
+                        Key::Named(NamedKey::F12) => Some(crate::kitty::NamedKey::F(12)),
+                        _ => None,
+                    };
+                    if let Some(nk) = named {
+                        let bytes = crate::kitty::encode_named(nk, app_cur, kitty_on, mods);
+                        if !bytes.is_empty() {
                             let _ = pty.write_all(&bytes);
                         }
-                        Key::Named(NamedKey::Backspace) => {
-                            let _ = pty.write_all(&[0x7f]);
+                    } else if let Key::Character(s) = &event.logical_key {
+                        if let Some(bytes) = crate::kitty::encode_character(s, mods) {
+                            let _ = pty.write_all(&bytes);
                         }
-                        Key::Named(NamedKey::Tab) => {
-                            let _ = pty.write_all(b"\t");
-                        }
-                        Key::Named(NamedKey::ArrowUp) => {
-                            let _ = pty.write_all(b"\x1b[A");
-                        }
-                        Key::Named(NamedKey::ArrowDown) => {
-                            let _ = pty.write_all(b"\x1b[B");
-                        }
-                        Key::Named(NamedKey::ArrowRight) => {
-                            let _ = pty.write_all(b"\x1b[C");
-                        }
-                        Key::Named(NamedKey::ArrowLeft) => {
-                            let _ = pty.write_all(b"\x1b[D");
-                        }
-                        Key::Character(s) => {
-                            let ctrl = self.modifiers.control_key();
-                            let super_key = self.modifiers.super_key();
-                            let shift = self.modifiers.shift_key();
-                            let alt = self.modifiers.alt_key();
-                            if ctrl && !super_key && !alt {
-                                if !shift {
-                                    if let Some(b) = crate::kitty::encode_ctrl_char(s) {
-                                        let _ = pty.write_all(&[b]);
-                                    } else if let Some(buf) = crate::kitty::encode_ctrl_punct(s) {
-                                        let _ = pty.write_all(&buf);
-                                    }
-                                } else if let Some(ch) = s.chars().next().map(|c| c.to_ascii_lowercase()) {
-                                    if ch.is_ascii_lowercase() {
-                                        let mods = crate::kitty::kitty_mods(true, false, true, false);
-                                        let _ = pty.write_all(&crate::kitty::kitty_csi_u(
-                                            ch as u16,
-                                            mods,
-                                        ));
-                                    }
-                                }
-                            } else if super_key && !ctrl && !alt && !shift {
-                                // Grok undo accepts Cmd+Z as well as Ctrl+Z.
-                                if matches!(s.as_str(), "z" | "Z") {
-                                    let _ = pty.write_all(&[0x1a]);
-                                }
-                            } else if !ctrl && !super_key {
-                                let _ = pty.write_all(s.as_bytes());
-                            }
-                        }
-                        _ => {
-                            if let Some(text) = &event.text {
-                                if !self.modifiers.control_key() && !self.modifiers.super_key() {
-                                    let _ = pty.write_all(text.as_bytes());
-                                }
-                            }
+                    } else if let Some(text) = &event.text {
+                        if !mods.ctrl && !mods.super_key {
+                            let _ = pty.write_all(text.as_bytes());
                         }
                     }
                     self.drain_all_ptys();
@@ -4081,10 +4071,43 @@ impl ApplicationHandler for ChromeApp {
 
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                let hit = self.hit_at_cursor();
+                if matches!(hit, HitTarget::Terminal(_)) && self.try_alt_mouse_btn(2, true) {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                } else if !self.overlay_open() {
+                    // Product: right-click paste when the TUI does not take the click.
+                    self.paste_clipboard();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if matches!(self.hit_at_cursor(), HitTarget::Terminal(_)) {
+                    let _ = self.try_alt_mouse_btn(2, false);
+                }
+            }
+
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
                 button: MouseButton::Middle,
                 ..
             } => {
-                self.middle_press_hit = Some(self.hit_at_cursor());
+                let hit = self.hit_at_cursor();
+                self.middle_press_hit = Some(hit);
+                if matches!(hit, HitTarget::Terminal(_)) {
+                    let _ = self.try_alt_mouse_btn(1, true);
+                }
             }
 
             WindowEvent::MouseInput {
@@ -4094,6 +4117,9 @@ impl ApplicationHandler for ChromeApp {
             } => {
                 if let Some(start) = self.middle_press_hit.take() {
                     let end = self.hit_at_cursor();
+                    if matches!(start, HitTarget::Terminal(_)) {
+                        let _ = self.try_alt_mouse_btn(1, false);
+                    }
                     if start == end {
                         let idx = match start {
                             HitTarget::Tab(i) | HitTarget::TabClose(i) => Some(i),

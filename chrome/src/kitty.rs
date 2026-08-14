@@ -144,6 +144,189 @@ pub fn encode_ctrl_char(s: &str) -> Option<u8> {
     }
 }
 
+/// Modifier bits for a PTY key (Kitty / xterm).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyMods {
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+    pub super_key: bool,
+}
+
+impl KeyMods {
+    pub fn any(self) -> bool {
+        self.shift || self.alt || self.ctrl || self.super_key
+    }
+
+    pub fn param(self) -> u16 {
+        kitty_mods(self.shift, self.alt, self.ctrl, self.super_key)
+    }
+}
+
+/// Arrow CSI final: A=up B=down C=right D=left.
+///
+/// Bare arrows use SS3 (`ESC O X`) when the app requested cursor keys.
+/// Modified arrows stay `CSI 1;mods X` even with Kitty flags — not CSI-u
+/// (crossterm only maps the legacy form to Left/Right/Up/Down).
+pub fn encode_arrow(dir: u8, app_cursor: bool, m: KeyMods) -> Vec<u8> {
+    if dir != b'A' && dir != b'B' && dir != b'C' && dir != b'D' {
+        return Vec::new();
+    }
+    if !m.any() {
+        if app_cursor {
+            return vec![0x1b, b'O', dir];
+        }
+        return vec![0x1b, b'[', dir];
+    }
+    format!("\x1b[1;{}{}", m.param(), dir as char).into_bytes()
+}
+
+/// Functional / named keys for alt-screen TUIs (Grok, vim, …).
+#[derive(Clone, Copy, Debug)]
+pub enum NamedKey {
+    Enter,
+    Esc,
+    Tab,
+    Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    ArrowUp,
+    ArrowDown,
+    ArrowRight,
+    ArrowLeft,
+    F(u8),
+}
+
+/// Encode a named key. Cmd+Left/Right map to Home/End (macOS text-field).
+pub fn encode_named(key: NamedKey, app_cursor: bool, kitty_active: bool, m: KeyMods) -> Vec<u8> {
+    match key {
+        NamedKey::Enter => encode_enter(m.shift, m.alt, m.ctrl, m.super_key, kitty_active),
+        NamedKey::Esc => vec![0x1b],
+        NamedKey::Tab => {
+            if m.shift && !m.alt && !m.ctrl && !m.super_key {
+                return b"\x1b[Z".to_vec();
+            }
+            if m.any() {
+                return kitty_csi_u(9, m.param());
+            }
+            vec![b'\t']
+        }
+        NamedKey::Backspace => {
+            if m.alt && !m.ctrl && !m.super_key && !m.shift {
+                return vec![0x1b, 0x7f];
+            }
+            if m.any() {
+                return kitty_csi_u(127, m.param());
+            }
+            vec![0x7f]
+        }
+        NamedKey::Delete => {
+            if m.any() {
+                format!("\x1b[3;{}~", m.param()).into_bytes()
+            } else {
+                b"\x1b[3~".to_vec()
+            }
+        }
+        NamedKey::Insert => b"\x1b[2~".to_vec(),
+        NamedKey::Home => encode_home_end(true, app_cursor, m),
+        NamedKey::End => encode_home_end(false, app_cursor, m),
+        NamedKey::PageUp => encode_tilde(5, m),
+        NamedKey::PageDown => encode_tilde(6, m),
+        NamedKey::ArrowUp => encode_arrow(b'A', app_cursor, m),
+        NamedKey::ArrowDown => encode_arrow(b'B', app_cursor, m),
+        NamedKey::ArrowRight => {
+            if m.super_key && !m.alt && !m.ctrl && !m.shift {
+                return encode_home_end(false, app_cursor, KeyMods::default());
+            }
+            encode_arrow(b'C', app_cursor, m)
+        }
+        NamedKey::ArrowLeft => {
+            if m.super_key && !m.alt && !m.ctrl && !m.shift {
+                return encode_home_end(true, app_cursor, KeyMods::default());
+            }
+            encode_arrow(b'D', app_cursor, m)
+        }
+        NamedKey::F(n) => encode_fn(n),
+    }
+}
+
+fn encode_home_end(home: bool, app_cursor: bool, m: KeyMods) -> Vec<u8> {
+    let letter = if home { b'H' } else { b'F' };
+    if !m.any() {
+        if app_cursor {
+            return vec![0x1b, b'O', letter];
+        }
+        return vec![0x1b, b'[', letter];
+    }
+    format!("\x1b[1;{}{}", m.param(), letter as char).into_bytes()
+}
+
+fn encode_tilde(n: u8, m: KeyMods) -> Vec<u8> {
+    if m.any() {
+        format!("\x1b[{n};{}~", m.param()).into_bytes()
+    } else {
+        format!("\x1b[{n}~").into_bytes()
+    }
+}
+
+fn encode_fn(n: u8) -> Vec<u8> {
+    match n {
+        1 => b"\x1bOP".to_vec(),
+        2 => b"\x1bOQ".to_vec(),
+        3 => b"\x1bOR".to_vec(),
+        4 => b"\x1bOS".to_vec(),
+        5 => b"\x1b[15~".to_vec(),
+        6 => b"\x1b[17~".to_vec(),
+        7 => b"\x1b[18~".to_vec(),
+        8 => b"\x1b[19~".to_vec(),
+        9 => b"\x1b[20~".to_vec(),
+        10 => b"\x1b[21~".to_vec(),
+        11 => b"\x1b[23~".to_vec(),
+        12 => b"\x1b[24~".to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// Character with modifiers for the PTY. Bare Alt+letter is left for the host.
+pub fn encode_character(s: &str, m: KeyMods) -> Option<Vec<u8>> {
+    if m.ctrl && !m.super_key && !m.alt {
+        if !m.shift {
+            if let Some(b) = encode_ctrl_char(s) {
+                return Some(vec![b]);
+            }
+            return encode_ctrl_punct(s);
+        }
+        let ch = s.chars().next()?.to_ascii_lowercase();
+        if ch.is_ascii_lowercase() {
+            return Some(kitty_csi_u(ch as u16, m.param()));
+        }
+        return None;
+    }
+    if m.super_key && !m.ctrl && !m.alt {
+        // Cmd+Z undo (C0) even without Kitty; other Cmd+letter as CSI-u
+        // so Grok sees SUPER (paste ⌘V, settings ⌘,).
+        if !m.shift && matches!(s, "z" | "Z") {
+            return Some(vec![0x1a]);
+        }
+        let ch = s.chars().next()?.to_ascii_lowercase();
+        if ch.is_ascii_alphabetic() || matches!(ch, ',' | '.' | ';' | '\'' | '/') {
+            return Some(kitty_csi_u(ch as u16, m.param()));
+        }
+        return None;
+    }
+    if m.alt && !m.ctrl && !m.super_key {
+        return None;
+    }
+    if !m.ctrl && !m.super_key {
+        return Some(s.as_bytes().to_vec());
+    }
+    None
+}
+
 /// Ctrl+punctuation that has no C0 (Grok queue / settings / search).
 pub fn encode_ctrl_punct(s: &str) -> Option<Vec<u8>> {
     let mut cs = s.chars();
@@ -233,5 +416,89 @@ mod tests {
     #[test]
     fn ctrl_semicolon_is_csi_u() {
         assert_eq!(encode_ctrl_punct(";").as_deref(), Some(&b"\x1b[59;5u"[..]));
+    }
+
+    fn mods(shift: bool, alt: bool, ctrl: bool, super_key: bool) -> KeyMods {
+        KeyMods {
+            shift,
+            alt,
+            ctrl,
+            super_key,
+        }
+    }
+
+    #[test]
+    fn opt_left_is_csi_1_3_d() {
+        assert_eq!(
+            encode_arrow(b'D', false, mods(false, true, false, false)),
+            b"\x1b[1;3D"
+        );
+        assert_eq!(
+            encode_arrow(b'D', true, mods(false, false, false, false)),
+            b"\x1bOD"
+        );
+        assert_eq!(
+            encode_arrow(b'D', false, mods(false, false, true, false)),
+            b"\x1b[1;5D"
+        );
+        assert_eq!(
+            encode_arrow(b'C', false, mods(true, false, false, false)),
+            b"\x1b[1;2C"
+        );
+    }
+
+    #[test]
+    fn shift_tab_is_csi_z() {
+        let b = encode_named(
+            NamedKey::Tab,
+            false,
+            false,
+            mods(true, false, false, false),
+        );
+        assert_eq!(b, b"\x1b[Z");
+    }
+
+    #[test]
+    fn opt_backspace_is_meta_del() {
+        let b = encode_named(
+            NamedKey::Backspace,
+            false,
+            false,
+            mods(false, true, false, false),
+        );
+        assert_eq!(b, b"\x1b\x7f");
+    }
+
+    #[test]
+    fn cmd_left_is_home() {
+        let b = encode_named(
+            NamedKey::ArrowLeft,
+            false,
+            false,
+            mods(false, false, false, true),
+        );
+        assert_eq!(b, b"\x1b[H");
+    }
+
+    #[test]
+    fn page_up_plain() {
+        assert_eq!(
+            encode_named(NamedKey::PageUp, false, false, KeyMods::default()),
+            b"\x1b[5~"
+        );
+    }
+
+    #[test]
+    fn f2_is_ss3_q() {
+        assert_eq!(
+            encode_named(NamedKey::F(2), false, false, KeyMods::default()),
+            b"\x1bOQ"
+        );
+    }
+
+    #[test]
+    fn cmd_v_is_super_csi_u() {
+        let b = encode_character("v", mods(false, false, false, true)).unwrap();
+        assert_eq!(b, b"\x1b[118;9u");
     }
 }
