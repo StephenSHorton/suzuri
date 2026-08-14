@@ -44,7 +44,12 @@ pub fn configure_rounded_window(window: &Window, radius_pts: f64) {
 
         if let Some(ns_window) = view.window() {
             ns_window.setOpaque(false);
-            ns_window.setBackgroundColor(Some(&NSColor::clearColor()));
+            // Fully clear windows force WindowServer to sample GPU alpha
+            // before delivering mouseDown — clicks wait on the next present.
+            // A near-zero fill keeps the silhouette hittable immediately.
+            let bg = NSColor::colorWithWhite_alpha(0.0, 0.001);
+            ns_window.setBackgroundColor(Some(&bg));
+            ns_window.setAcceptsMouseMovedEvents(true);
             ns_window.setHasShadow(true);
             ns_window.invalidateShadow();
             // Keep a local retain so the temporary doesn't drop mid-call.

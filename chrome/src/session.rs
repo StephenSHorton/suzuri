@@ -1109,18 +1109,22 @@ impl ChromeSession {
         None
     }
 
-    pub fn set_focus_pane(&mut self, pane_id: u64) {
+    /// Returns true when the focused leaf (or its tab) actually changed.
+    pub fn set_focus_pane(&mut self, pane_id: u64) -> bool {
         if !self.panes.contains_key(&pane_id) {
-            return;
+            return false;
         }
         if let Some(tab) = self
             .tabs
             .iter_mut()
             .find(|t| t.root.contains_pane(pane_id))
         {
+            let changed = tab.focus_pane != pane_id || self.active_id != tab.id;
             self.active_id = tab.id;
             tab.focus_pane = pane_id;
+            return changed;
         }
+        false
     }
 
     pub fn focus_neighbor(&mut self, dir: FocusDir, area: crate::layout::Rect, gap: f32) {
@@ -1616,6 +1620,19 @@ mod tests {
         assert_ne!(new, 1);
         assert_eq!(s.focus_pane_id(), new);
         assert_eq!(s.active_tab().unwrap().root.leaf_ids().len(), 2);
+    }
+
+    #[test]
+    fn set_focus_pane_moves_immediately() {
+        let mut s = ChromeSession::new(80, 24);
+        let first = s.focus_pane_id();
+        let second = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        assert_eq!(s.focus_pane_id(), second);
+        assert!(s.set_focus_pane(first));
+        assert_eq!(s.focus_pane_id(), first);
+        assert!(!s.set_focus_pane(first));
+        assert!(s.set_focus_pane(second));
+        assert_eq!(s.focus_pane_id(), second);
     }
 
     #[test]

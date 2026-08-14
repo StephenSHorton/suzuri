@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalPosition, LogicalSize, PhysicalPosition},
+    dpi::{LogicalPosition, LogicalSize},
     event::{
         DeviceEvent, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
     },
@@ -28,8 +28,8 @@ use crate::commands::{
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
 use crate::input::{
-    classify_drop, classify_tab_drop, hit_test, is_mac, window_origin_for_tab_drop, DropKind,
-    HitTarget,
+    classify_drop, classify_tab_drop, hit_test, is_mac, term_select_drag_started,
+    window_origin_for_tab_drop, DropKind, HitTarget,
 };
 use crate::layout::{FrameLayout, Metrics};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
@@ -128,6 +128,11 @@ pub struct ChromeApp {
     /// Terminal cell selection (absolute document rows).
     term_selection: Selection,
     selecting_term: bool,
+    /// Single-click origin; selection starts after a small drag so pane
+    /// focus can paint without waiting on a 1-cell highlight.
+    pending_term_select: Option<(f32, f32, CellPos)>,
+    /// Force a frame from `about_to_wait` after a focus change.
+    paint_dirty: bool,
     /// Dragging the terminal scrollbar thumb/track (pane id).
     scroll_dragging: Option<u64>,
     /// URL under the pointer in the focused terminal (for hand cursor / Cmd-click).
@@ -246,6 +251,8 @@ impl Default for ChromeApp {
             last_term_click: None,
             term_selection: Selection::new(),
             selecting_term: false,
+            pending_term_select: None,
+            paint_dirty: false,
             scroll_dragging: None,
             hovered_link: None,
             hovered_link_span: None,
@@ -777,6 +784,11 @@ impl ChromeApp {
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(true);
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs = attrs.with_accepts_first_mouse(true);
+        }
         if let (SurfacePlace::UnderPointer, Some(size)) = (&place, src_size) {
             attrs = attrs.with_inner_size(size);
         }
@@ -2143,18 +2155,19 @@ impl ChromeApp {
         false
     }
 
-    /// Activate a control (runs on **mouse-up** when press & release share a target).
-    /// Apply pane focus on press so the rim doesn't wait for mouse-up.
-    fn focus_hit_pane(&mut self, hit: HitTarget) {
+    /// Apply pane focus the same way keyboard neighbors do: flip the leaf,
+    /// keep the warp caret, schedule a frame. Returns true if focus moved.
+    fn focus_hit_pane(&mut self, hit: HitTarget) -> bool {
         let pane_id = match hit {
             HitTarget::Terminal(id)
             | HitTarget::WarpBar(id)
             | HitTarget::ScrollBar(id)
             | HitTarget::PaneChrome(id)
             | HitTarget::PaneClose(id) => id,
-            _ => return,
+            _ => return false,
         };
-        self.session.set_focus_pane(pane_id);
+        let changed = self.session.set_focus_pane(pane_id);
+        self.remember_event_surface_tab();
         if self.session.pane_kind(pane_id).is_workspace() {
             self.sync_workspace_host();
             self.warp_focused = false;
@@ -2168,14 +2181,20 @@ impl ChromeApp {
             if alt {
                 self.terminal_focused = true;
                 self.warp_focused = false;
-            } else if matches!(hit, HitTarget::Terminal(_) | HitTarget::ScrollBar(_)) {
-                self.terminal_focused = true;
-                self.warp_focused = false;
             } else {
+                // Match keyboard / mouse-up: command line stays focused so the
+                // caret never disappears waiting on the next paint.
                 self.warp_focused = true;
                 self.terminal_focused = false;
             }
         }
+        if changed {
+            self.term_selection.clear();
+            self.selecting_term = false;
+            self.paint_dirty = true;
+            self.request_redraw_all();
+        }
+        changed
     }
 
     fn handle_activation(&mut self, event_loop: &ActiveEventLoop, target: HitTarget) {
@@ -3409,13 +3428,18 @@ impl ApplicationHandler for ChromeApp {
             return;
         }
 
-        let attrs = WindowAttributes::default()
+        let mut attrs = WindowAttributes::default()
             .with_title("suzuri · chrome")
             .with_inner_size(LogicalSize::new(1120.0, 740.0))
             .with_min_inner_size(LogicalSize::new(720.0, 440.0))
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(true);
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs = attrs.with_accepts_first_mouse(true);
+        }
 
         let window = Arc::new(
             event_loop
@@ -3469,13 +3493,14 @@ impl ApplicationHandler for ChromeApp {
         // Schedule the next frame only when something is animating (composite
         // rain sample, springs, scroll ease, caret blink). Rain encode runs on
         // its own thread — this wake is just to blit the latest RT.
-        let wake = if self.needs_anim_frame() {
+        let wake = if self.needs_anim_frame() || self.paint_dirty {
             Duration::from_millis(16) // ~60 Hz while animating
         } else {
             Duration::from_millis(33) // PTY poll cadence when idle
         };
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + wake));
-        if self.needs_anim_frame() {
+        if self.needs_anim_frame() || self.paint_dirty {
+            self.paint_dirty = false;
             self.request_redraw_all();
         }
     }
@@ -3487,50 +3512,24 @@ impl ApplicationHandler for ChromeApp {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            if self.pane_drag.as_ref().is_some_and(|d| d.active) {
-                if !self.pointer_inside {
-                    if let Some(g) = &self.drag_float {
-                        if let Ok(pos) = g.window.outer_position() {
-                            g.window.set_outer_position(
-                                winit::dpi::PhysicalPosition::new(
-                                    pos.x + dx as i32,
-                                    pos.y + dy as i32,
-                                ),
-                            );
-                            g.window.request_redraw();
-                        }
-                    }
-                }
+            // Inside the window, CursorMoved owns the pointer. Device deltas
+            // double-count that motion and make press hit-test the wrong pane.
+            if self.pointer_inside {
                 return;
             }
-            if !self.pointer_inside {
-                if let Some(w) = &self.window {
-                    let s = w.inner_size();
-                    let scale = w.scale_factor();
-                    self.cursor = LogicalPosition::new(
-                        (s.width as f64 / scale) as f32 * 0.5,
-                        (s.height as f64 / scale) as f32 * 0.5,
-                    );
+            if self.pane_drag.as_ref().is_some_and(|d| d.active) {
+                if let Some(g) = &self.drag_float {
+                    if let Ok(pos) = g.window.outer_position() {
+                        g.window.set_outer_position(
+                            winit::dpi::PhysicalPosition::new(
+                                pos.x + dx as i32,
+                                pos.y + dy as i32,
+                            ),
+                        );
+                        g.window.request_redraw();
+                    }
                 }
             }
-            self.pointer_inside = true;
-            let scale = self
-                .window
-                .as_ref()
-                .map(|w| w.scale_factor())
-                .unwrap_or(1.0) as f32;
-            self.cursor.x = (self.cursor.x + dx as f32 / scale).max(0.0);
-            self.cursor.y = (self.cursor.y + dy as f32 / scale).max(0.0);
-            if let Some(w) = &self.window {
-                let (lw, lh) = {
-                    let s = w.inner_size();
-                    let sc = w.scale_factor();
-                    (s.width as f32 / sc as f32, s.height as f32 / sc as f32)
-                };
-                self.cursor.x = self.cursor.x.clamp(0.0, lw);
-                self.cursor.y = self.cursor.y.clamp(0.0, lh);
-            }
-            let _ = PhysicalPosition::new(0.0, 0.0);
         }
     }
 
@@ -3627,6 +3626,23 @@ impl ApplicationHandler for ChromeApp {
                         self.ensure_drag_float(event_loop);
                     }
                     self.request_redraw_all();
+                } else if let Some((sx, sy, origin)) = self.pending_term_select {
+                    let dx = self.cursor.x - sx;
+                    let dy = self.cursor.y - sy;
+                    if term_select_drag_started(dx, dy) {
+                        self.term_selection.begin(origin);
+                        if let Some(pos) = self.term_cell_at_cursor() {
+                            let id = self.session.focus_pane_id();
+                            if let Some(pane) = self.session.panes.get(&id) {
+                                self.term_selection.update_drag(&pane.grid, pos);
+                            } else {
+                                self.term_selection.update(pos);
+                            }
+                        }
+                        self.selecting_term = true;
+                        self.pending_term_select = None;
+                        self.request_redraw();
+                    }
                 } else if self.selecting_term {
                     if let Some(pos) = self.term_cell_at_cursor() {
                         let id = self.session.focus_pane_id();
@@ -3638,6 +3654,22 @@ impl ApplicationHandler for ChromeApp {
                     }
                     if let Some(w) = &self.window {
                         w.request_redraw();
+                    }
+                } else if self.press_hit.is_some()
+                    && !self.overlay_open()
+                    && self.sash_drag.is_none()
+                    && !self.pane_drag.as_ref().is_some_and(|d| d.active)
+                {
+                    // MouseDown can arrive before the last CursorMoved; correct
+                    // focus as soon as the pointer position is known.
+                    let hit = self.hit_at_cursor();
+                    if self.focus_hit_pane(hit) {
+                        if let Some(pos) = self.term_cell_at_cursor() {
+                            if self.pending_term_select.is_some() {
+                                self.pending_term_select =
+                                    Some((self.cursor.x, self.cursor.y, pos));
+                            }
+                        }
                     }
                 }
                 self.update_link_hover();
@@ -3664,11 +3696,9 @@ impl ApplicationHandler for ChromeApp {
                 self.chip_ui.pressed = true;
                 let hit = self.hit_at_cursor();
                 self.press_hit = Some(hit);
+                self.pending_term_select = None;
                 if !self.overlay_open() {
-                    self.focus_hit_pane(hit);
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
+                    let _ = self.focus_hit_pane(hit);
                 }
                 // Cmd/Ctrl+click on a terminal URL → open browser (no selection).
                 if matches!(hit, HitTarget::Terminal(_))
@@ -3759,16 +3789,21 @@ impl ApplicationHandler for ChromeApp {
                         self.last_term_click = None;
                     }
                 }
-                // Terminal selection: single = cell drag, double = word, triple = line
-                // (then drag keeps that mode via update_drag).
+                // Terminal selection: double = word, triple = line. Single click
+                // only focuses; cell drag starts after a few pixels of movement.
                 else if matches!(hit, HitTarget::Terminal(_)) && !self.overlay_open() {
                     if let Some(pos) = self.term_cell_at_cursor() {
                         let clicks = self.term_click_count(pos);
-                        self.apply_term_click_selection(pos, clicks);
-                        // Start selection paint on this press — don't wait for
-                        // the next continuous-redraw frame (felt ~½s late).
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
+                        if clicks >= 2 {
+                            self.apply_term_click_selection(pos, clicks);
+                            self.request_redraw();
+                        } else {
+                            if !self.term_selection.is_empty() {
+                                self.term_selection.clear();
+                                self.selecting_term = false;
+                                self.request_redraw();
+                            }
+                            self.pending_term_select = Some((self.cursor.x, self.cursor.y, pos));
                         }
                     }
                 } else if !matches!(hit, HitTarget::Terminal(_) | HitTarget::ScrollBar(_)) {
@@ -3827,6 +3862,7 @@ impl ApplicationHandler for ChromeApp {
                 ..
             } => {
                 self.chip_ui.pressed = false;
+                self.pending_term_select = None;
                 let was_scroll = self.scroll_dragging.take().is_some();
                 let was_sash = self.sash_drag.take().is_some();
                 let pane_drag_done = self.finish_pane_drag(event_loop);

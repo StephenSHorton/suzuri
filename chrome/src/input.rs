@@ -38,6 +38,16 @@ pub enum HitTarget {
 /// Width of the scroll hit gutter inside the cell well (logical px).
 pub const SCROLL_GUTTER_W: f32 = 10.0;
 
+/// Pointer slop before a terminal press becomes a cell selection.
+/// A click under this distance only changes pane focus (same as the keyboard).
+pub const TERM_SELECT_DRAG_PX: f32 = 4.0;
+
+/// True once the pointer has moved far enough to start a terminal selection.
+#[inline]
+pub fn term_select_drag_started(dx: f32, dy: f32) -> bool {
+    dx.hypot(dy) >= TERM_SELECT_DRAG_PX
+}
+
 /// Platform detection for chrome affordances (traffic lights, etc.).
 #[inline]
 pub fn is_mac() -> bool {
@@ -467,6 +477,14 @@ mod tests {
             matches!(xhit, HitTarget::PaneClose(_)),
             "pane × should close, got {xhit:?}"
         );
+    }
+
+    #[test]
+    fn term_select_waits_for_a_small_drag() {
+        assert!(!term_select_drag_started(0.0, 0.0));
+        assert!(!term_select_drag_started(2.0, 2.0));
+        assert!(term_select_drag_started(TERM_SELECT_DRAG_PX, 0.0));
+        assert!(term_select_drag_started(3.0, 3.0));
     }
 
     #[test]
