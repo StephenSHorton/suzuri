@@ -1624,11 +1624,11 @@ fn chrome_labels(
         }
     }
 
-    // Ghost + : dim idle; hover/press show the same glass shell as pane ×.
+    // Ghost + : dim idle; hover/press keep the glyph bright on the shell.
     {
         let id = ChipId::NewTab;
         let r = scale_rect(layout.tab_new, chip_ui.scale_for(id));
-        let color = chip_ui.dim_color(id, dim);
+        let color = if chip_ui.is_lit(id) { bright } else { dim };
         labels.push(TextLabel::centered("+", [r.x, r.y, r.w, r.h], 14.0, color));
     }
 

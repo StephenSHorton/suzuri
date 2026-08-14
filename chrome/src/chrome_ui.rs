@@ -184,10 +184,12 @@ impl ChipUi {
 
     /// Ghost + / pane × shell on hover or press (no idle glass).
     pub fn ghost_shell_visible(&self, id: ChipId) -> bool {
-        if matches!(id, ChipId::NewTab | ChipId::PaneClose(_)) && self.hover == Some(id) {
-            return true;
-        }
-        self.press_light(id) > 0.04
+        self.is_lit(id)
+    }
+
+    /// Hover or press — glyph should stay at least as bright as idle.
+    pub fn is_lit(&self, id: ChipId) -> bool {
+        self.hover == Some(id) || self.press_light(id) > 0.04
     }
 }
 
@@ -360,7 +362,11 @@ mod tests {
         assert!(!ui.ghost_shell_visible(ChipId::NewTab));
         ui.set_hover(Some(ChipId::NewTab), (80.0, 12.0));
         assert!(ui.ghost_shell_visible(ChipId::NewTab));
+        assert!(ui.is_lit(ChipId::NewTab));
         assert!((ui.hover_dim(ChipId::NewTab) - 1.0).abs() < 0.001);
+        let idle = [0.4, 0.4, 0.4, 0.88];
+        let hovered = ui.dim_color(ChipId::NewTab, idle);
+        assert!((hovered[0] - idle[0]).abs() < 0.001, "hover must not dim +");
         ui.set_hover(None, (80.0, 12.0));
         assert!(!ui.ghost_shell_visible(ChipId::NewTab));
     }
