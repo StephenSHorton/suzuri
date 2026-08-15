@@ -1,0 +1,69 @@
+{
+  "title": "suzuri-guest protocol v1",
+  "description": "JSON messages on one localhost channel per guest pane. Chrome never links the guest engine.",
+  "version": 1,
+  "chromeToGuest": {
+    "spawn": {
+      "dir": "chrome→guest",
+      "fields": {
+        "pane_id": "string",
+        "rect": "x y w h",
+        "scale": "number",
+        "cwd": "string"
+      },
+      "notes": "Create the guest process/view for this pane."
+    },
+    "resize": {
+      "dir": "chrome→guest",
+      "fields": { "rect": "x y w h", "scale": "number" },
+      "notes": "Pane well changed."
+    },
+    "focus": {
+      "dir": "chrome→guest",
+      "fields": { "in": "boolean" },
+      "notes": "Mosaic focus entered or left this leaf."
+    },
+    "navigate": {
+      "dir": "chrome→guest",
+      "fields": { "url": "string" },
+      "notes": "Open or replace the guest document."
+    },
+    "kill": {
+      "dir": "chrome→guest",
+      "fields": {},
+      "notes": "Pane closed. Guest must exit."
+    }
+  },
+  "guestToChrome": {
+    "hello": {
+      "dir": "guest→chrome",
+      "fields": { "protocol": "1", "title": "string" },
+      "notes": "First message after spawn."
+    },
+    "title": {
+      "dir": "guest→chrome",
+      "fields": { "string": "string" },
+      "notes": "Tab chip."
+    },
+    "url": {
+      "dir": "guest→chrome",
+      "fields": { "string": "string" },
+      "notes": "Current location, if any."
+    },
+    "busy": {
+      "dir": "guest→chrome",
+      "fields": { "bool": "boolean" },
+      "notes": "Loading / working indicator."
+    },
+    "surface": {
+      "dir": "guest→chrome",
+      "fields": { "kind": "native-child | iosurface", "handle": "opaque" },
+      "notes": "Optional. Guests that do not attach a native surface can present in their own window."
+    },
+    "crash": {
+      "dir": "guest→chrome",
+      "fields": { "message": "string" },
+      "notes": "Guest died; chrome removes the leaf."
+    }
+  }
+}
