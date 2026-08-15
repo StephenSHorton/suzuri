@@ -1,0 +1,91 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  --color-background: #050806;
+  --color-foreground: #e8fff0;
+  --color-mute: #7a9a84;
+  --color-primary: #0a5c32;
+  --color-accent: #00e676;
+  --color-panel: #0e1410;
+  --color-border: #1a2e22;
+  --font-sans: "IBM Plex Mono", ui-monospace, monospace;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-serif: "Shippori Mincho", "Hiragino Mincho ProN", serif;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+  body {
+    @apply bg-background font-sans text-foreground text-[15px] leading-relaxed antialiased;
+    margin: 0;
+  }
+  .page {
+    background:
+      radial-gradient(ellipse 90% 70% at 50% 40%, transparent 15%, #050806d0 78%),
+      linear-gradient(180deg, #050806d8 0%, transparent 16%, transparent 72%, #050806f0 100%);
+  }
+  .legal p,
+  .legal li {
+    color: #c8cfc9;
+  }
+  .cui-mount[data-mode="fallback"] .cui-source,
+  .cui-mount.cui-failed .cui-source,
+  .cui-mount[data-mode="fallback"] .cui-output,
+  .cui-mount.cui-failed .cui-output {
+    display: none !important;
+  }
+  .glyph-rain-backdrop.glyph-rain-failed {
+    display: none;
+  }
+  .hero-shot {
+    --shot-w: min(1100px, 96vw);
+    width: var(--shot-w);
+    max-width: none;
+    margin: 2.25rem 0 0;
+    margin-left: calc(50% - (var(--shot-w) / 2));
+    padding: 0;
+    border: 0;
+  }
+  .hero-shot-video {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1600 / 1018;
+    border-radius: 14px;
+    border: 1px solid rgba(0, 230, 118, 0.16);
+    background: #050806;
+    box-shadow:
+      0 0 0 1px rgba(5, 8, 6, 0.7),
+      0 28px 80px rgba(0, 0, 0, 0.55),
+      0 0 80px rgba(0, 230, 118, 0.08);
+    pointer-events: none;
+    user-select: none;
+  }
+  .hero-shot-video::-webkit-media-controls,
+  .hero-shot-video::-webkit-media-controls-enclosure,
+  .hero-shot-video::-webkit-media-controls-start-playback-button,
+  .hero-shot-video::-webkit-media-controls-overlay-play-button,
+  .hero-shot-video::-webkit-media-controls-panel {
+    display: none !important;
+    -webkit-appearance: none;
+    opacity: 0;
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .glyph-rain-output {
+      opacity: 0.35;
+    }
+    .cui-glitch .cui-output,
+    .cui-decrypt .cui-output {
+      display: none !important;
+    }
+  }
+}

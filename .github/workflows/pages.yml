@@ -35,6 +35,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - name: Resolve site version
         id: ver
         shell: bash
@@ -56,41 +60,33 @@ jobs:
           echo "built_at=$built_at" >> "$GITHUB_OUTPUT"
           echo "Site version: $version ($source) at $built_at"
 
-      - name: Stamp version into site
-        shell: bash
+      - name: Build marketing site
+        working-directory: site
+        env:
+          SITE_BASE: /suzuri/
+          VITE_SITE_VERSION: ${{ steps.ver.outputs.version }}
+          VITE_SITE_BUILT: ${{ steps.ver.outputs.built_at }}
         run: |
           set -euo pipefail
-          v='${{ steps.ver.outputs.version }}'
-          built='${{ steps.ver.outputs.built_at }}'
-          src='${{ steps.ver.outputs.source }}'
-          # JSON for optional fetch; also embed so the footer works offline/cached HTML.
-          cat > docs/site/version.json <<EOF
+          bun install --frozen-lockfile
+          mkdir -p public
+          cat > public/version.json <<EOF
           {
-            "version": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$v"),
-            "built_at": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$built"),
-            "source": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$src"),
+            "version": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${{ steps.ver.outputs.version }}"),
+            "built_at": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${{ steps.ver.outputs.built_at }}"),
+            "source": $(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${{ steps.ver.outputs.source }}"),
             "commit": "${GITHUB_SHA}"
           }
           EOF
-          # Replace placeholders in the checked-in HTML.
-          python3 <<'PY'
-          from pathlib import Path
-          import os
-          path = Path("docs/site/index.html")
-          text = path.read_text()
-          text = text.replace("__SITE_VERSION__", os.environ["SITE_V"])
-          text = text.replace("__SITE_BUILT__", os.environ["SITE_BUILT"])
-          path.write_text(text)
-          PY
-        env:
-          SITE_V: ${{ steps.ver.outputs.version }}
-          SITE_BUILT: ${{ steps.ver.outputs.built_at }}
+          bun run build
+          # Client-side routes (/docs, /privacy) need a 404.html twin of index.html.
+          cp dist/index.html dist/404.html
 
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/site
+          path: site/dist
 
       - id: deployment
         uses: actions/deploy-pages@v4
