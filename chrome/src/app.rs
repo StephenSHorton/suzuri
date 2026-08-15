@@ -1444,6 +1444,30 @@ impl ChromeApp {
             .pointer(pane_id, kind, x, y, button, buttons, self.guest_mod_bits());
     }
 
+    /// 1:1 with AppKit: PixelDelta is physical, Ladybird wants CSS points
+    /// (`-scrollingDelta`). LineDelta is a mouse wheel (Ladybird ×40).
+    fn send_guest_wheel(&mut self, pane_id: u64, delta: MouseScrollDelta) {
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor())
+            .unwrap_or(1.0)
+            .max(0.5);
+        let (dx, dy) = match delta {
+            MouseScrollDelta::PixelDelta(p) => {
+                let dx = if p.x.is_finite() { -p.x / scale } else { 0.0 };
+                let dy = if p.y.is_finite() { -p.y / scale } else { 0.0 };
+                (dx, dy)
+            }
+            MouseScrollDelta::LineDelta(x, y) => (-f64::from(x) * 40.0, -f64::from(y) * 40.0),
+        };
+        let (hole, _) = self.guest_pane_geom(pane_id);
+        let (px, py) = self.pointer();
+        self.guest_host
+            .scroll(pane_id, dx, dy, px - hole.x, py - hole.y);
+        self.paint_dirty = true;
+    }
+
     fn send_guest_key(&self, event: &winit::event::KeyEvent) {
         let kind = if event.state.is_pressed() { "down" } else { "up" };
         let (key, text) = match &event.logical_key {
@@ -4178,8 +4202,7 @@ impl ChromeApp {
     /// Scroll the pane under the pointer (or the focused pane as fallback).
     fn scroll_pane_at(&mut self, pane_id: u64, step: i32) {
         if self.session.pane_kind(pane_id).is_guest() {
-            self.guest_host.scroll(pane_id, -step * 48);
-            self.paint_dirty = true;
+            self.send_guest_wheel(pane_id, MouseScrollDelta::LineDelta(0.0, step as f32));
             return;
         }
         if self.session.pane_kind(pane_id).is_workspace() {
@@ -4879,6 +4902,17 @@ impl ApplicationHandler for ChromeApp {
                         }
                     }
                 } else {
+                    let hit_id = pane_id_from_hit(self.hit_at_cursor())
+                        .unwrap_or_else(|| self.session.focus_pane_id());
+                    if self.session.pane_kind(hit_id).is_guest()
+                        && !(self.workspace_ui.is_modal() && self.pointer_over_workspace())
+                    {
+                        self.send_guest_wheel(hit_id, delta);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     // LineDelta = discrete mouse wheel. PixelDelta = trackpad;
                     // macOS sends many sub-line events — accumulate or they vanish.
                     const PX_PER_LINE: f32 = 12.0;

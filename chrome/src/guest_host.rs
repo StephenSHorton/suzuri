@@ -355,12 +355,13 @@ impl GuestHost {
         self.send(pane_id, &encode_navigate(url));
     }
 
-    /// Scroll the guest document. `dy` is pixels; negative = toward the top.
-    pub fn scroll(&self, pane_id: u64, dy: i32) {
-        if dy == 0 {
+    /// Scroll the guest document. `dx`/`dy` are CSS pixels, same sign as
+    /// Ladybird (`-scrollingDelta`). `x`/`y` are the pointer in the well.
+    pub fn scroll(&self, pane_id: u64, dx: f64, dy: f64, x: f32, y: f32) {
+        if (!dx.is_finite() || dx.abs() < 1e-4) && (!dy.is_finite() || dy.abs() < 1e-4) {
             return;
         }
-        self.send(pane_id, &encode_scroll(dy));
+        self.send(pane_id, &encode_scroll(dx, dy, x, y));
     }
 
     /// Pointer in the well, CSS/logical px relative to the hole origin.
@@ -566,8 +567,10 @@ fn encode_navigate(url: &str) -> String {
     format!(r#"{{"type":"navigate","url":"{}"}}"#, json_escape(url))
 }
 
-fn encode_scroll(dy: i32) -> String {
-    format!(r#"{{"type":"scroll","dy":{dy}}}"#)
+fn encode_scroll(dx: f64, dy: f64, x: f32, y: f32) -> String {
+    format!(
+        r#"{{"type":"scroll","dx":{dx:.3},"dy":{dy:.3},"x":{x:.2},"y":{y:.2}}}"#
+    )
 }
 
 fn encode_pointer(kind: &str, x: f32, y: f32, button: i32, buttons: i32, modifiers: i32) -> String {
@@ -691,7 +694,10 @@ mod tests {
         let line = encode_navigate("https://a.test/q?x=1");
         assert!(line.contains(r#""type":"navigate""#));
         assert!(line.contains("https://a.test/q?x=1"));
-        assert!(encode_scroll(-96).contains(r#""dy":-96"#));
+        let sc = encode_scroll(1.25, -4.5, 10.0, 20.0);
+        assert!(sc.contains(r#""type":"scroll""#));
+        assert!(sc.contains(r#""dy":-4.500"#));
+        assert!(sc.contains(r#""x":10.00"#));
         let p = encode_pointer("down", 10.0, 20.5, 0, 1, 0);
         assert!(p.contains(r#""type":"pointer""#));
         assert!(p.contains(r#""kind":"down""#));
