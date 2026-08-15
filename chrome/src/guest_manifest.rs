@@ -227,7 +227,11 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("fake-guest");
+        let bin = dir.join(if cfg!(windows) {
+            "fake-guest.exe"
+        } else {
+            "fake-guest"
+        });
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {
@@ -236,14 +240,15 @@ mod tests {
             p.set_mode(0o755);
             fs::set_permissions(&bin, p).unwrap();
         }
-        write_json(
-            &dir,
-            "example.json",
-            &format!(
-                r#"{{"id":"example","name":"Example","command":"{}","protocol":1,"capabilities":["pane","navigate"]}}"#,
-                bin.display()
-            ),
-        );
+        let body = serde_json::json!({
+            "id": "example",
+            "name": "Example",
+            "command": bin,
+            "protocol": 1,
+            "capabilities": ["pane", "navigate"]
+        })
+        .to_string();
+        write_json(&dir, "example.json", &body);
         let got = load_guests_from(&dir);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, "example");

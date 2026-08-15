@@ -792,8 +792,12 @@ mod tests {
             .status()
             .expect("cargo build example");
         assert!(status.success(), "example crate failed to build");
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../guests/example/target/debug/suzuri-guest-example")
+        let mut bin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../guests/example/target/debug/suzuri-guest-example");
+        if !std::env::consts::EXE_SUFFIX.is_empty() {
+            bin.set_extension(std::env::consts::EXE_EXTENSION);
+        }
+        bin
     }
 
     fn wait_event(
