@@ -226,6 +226,43 @@ nav a:hover { color: var(--accent); }
   border-radius: 3px;
 }
 
+/* Product clip — wider than the text column, no player chrome. */
+.hero-shot {
+  --shot-w: min(1100px, 96vw);
+  width: var(--shot-w);
+  max-width: none;
+  margin: 2.25rem 0 0;
+  margin-left: calc(50% - (var(--shot-w) / 2));
+  padding: 0;
+  border: 0;
+}
+.hero-shot-video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1600 / 1018;
+  border-radius: 14px;
+  border: 1px solid rgba(0, 230, 118, 0.16);
+  background: #050806;
+  box-shadow:
+    0 0 0 1px rgba(5, 8, 6, 0.7),
+    0 28px 80px rgba(0, 0, 0, 0.55),
+    0 0 80px rgba(0, 230, 118, 0.08);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.hero-shot-video::-webkit-media-controls,
+.hero-shot-video::-webkit-media-controls-enclosure,
+.hero-shot-video::-webkit-media-controls-start-playback-button,
+.hero-shot-video::-webkit-media-controls-overlay-play-button,
+.hero-shot-video::-webkit-media-controls-panel {
+  display: none !important;
+  -webkit-appearance: none;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .notice {
   margin: 1.35rem 0 0;
   max-width: 40rem;
@@ -514,6 +551,14 @@ footer code { font-size: 0.8em; }
 @media (max-width: 560px) {
   nav a { margin-left: 0.75rem; }
   .hero { padding-top: 2rem; }
+  .hero-shot {
+    --shot-w: 92vw;
+    margin-top: 1.5rem;
+    margin-left: calc(50% - 46vw);
+  }
+  .hero-shot-video {
+    border-radius: 10px;
+  }
   .dossier-dl {
     grid-template-columns: 1fr;
   }
