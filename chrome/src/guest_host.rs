@@ -33,19 +33,17 @@ pub fn guest_hole_rect(cells: Rect) -> Rect {
     cells
 }
 
-/// Well below the pane header, inset from the glass rim.
+/// Web view fills the pane glass under the header. Corners are clipped
+/// to the glass in the blit shader.
 pub fn guest_mount_rect(glass: Rect, header: Rect) -> Rect {
-    let inset = 8.0;
     let top = if header.h > 1.0 {
-        header.y + header.h + 2.0
+        header.y + header.h
     } else {
-        glass.y + 28.0
+        glass.y
     };
-    let x = glass.x + inset;
-    let y = top;
-    let w = (glass.x + glass.w - inset - x).max(0.0);
-    let h = (glass.y + glass.h - inset - y).max(0.0);
-    guest_hole_rect(Rect::new(x, y, w, h))
+    let y = top.clamp(glass.y, glass.y + glass.h);
+    let h = (glass.y + glass.h - y).max(0.0);
+    guest_hole_rect(Rect::new(glass.x, y, glass.w.max(0.0), h))
 }
 
 /// Events from a guest, tagged with the pane that owns the process.
@@ -741,8 +739,9 @@ mod tests {
         let glass = Rect::new(0.0, 0.0, 400.0, 300.0);
         let header = Rect::new(8.0, 4.0, 384.0, 22.0);
         let m = guest_mount_rect(glass, header);
-        assert!(m.y >= header.y + header.h);
-        assert!(m.w > 300.0);
+        assert!((m.y - (header.y + header.h)).abs() < 0.01);
+        assert!((m.x - glass.x).abs() < 0.01);
+        assert!((m.w - glass.w).abs() < 0.01);
         assert!(m.h > 200.0);
     }
 

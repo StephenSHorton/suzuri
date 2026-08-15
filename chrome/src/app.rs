@@ -5109,7 +5109,12 @@ impl ApplicationHandler for ChromeApp {
                     }
                     let hole = guest_mount_rect(pl.glass, pl.header);
                     if hole.w >= 2.0 && hole.h >= 2.0 {
-                        guest_wells.push((pl.pane_id, hole));
+                        guest_wells.push(crate::renderer::GuestWell {
+                            pane_id: pl.pane_id,
+                            hole,
+                            glass: pl.glass,
+                            radius: self.metrics.radius,
+                        });
                     }
                     if let Some((w, h, px)) = self.guest_host.take_fb(pl.pane_id) {
                         guest_uploads.push((pl.pane_id, w, h, px));

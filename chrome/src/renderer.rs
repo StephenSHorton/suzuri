@@ -178,7 +178,14 @@ pub struct Renderer {
     guest_blit_bgl: wgpu::BindGroupLayout,
     guest_nearest: wgpu::Sampler,
     guest_tex: HashMap<u64, GuestGpu>,
-    guest_wells: Vec<(u64, crate::layout::Rect)>,
+    guest_wells: Vec<GuestWell>,
+}
+
+pub struct GuestWell {
+    pub pane_id: u64,
+    pub hole: crate::layout::Rect,
+    pub glass: crate::layout::Rect,
+    pub radius: f32,
 }
 
 struct GuestGpu {
@@ -719,7 +726,7 @@ impl Renderer {
         self.metrics
     }
 
-    pub fn set_guest_wells(&mut self, wells: Vec<(u64, crate::layout::Rect)>) {
+    pub fn set_guest_wells(&mut self, wells: Vec<GuestWell>) {
         self.guest_wells = wells;
     }
 
@@ -751,7 +758,7 @@ impl Renderer {
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
             let uni = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("guest blit uni"),
-                size: 32,
+                size: 64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -803,22 +810,37 @@ impl Renderer {
 
     pub fn drop_guest_fb(&mut self, pane_id: u64) {
         self.guest_tex.remove(&pane_id);
-        self.guest_wells.retain(|(id, _)| *id != pane_id);
+        self.guest_wells.retain(|w| w.pane_id != pane_id);
     }
 
     fn blit_guest_fbs(&self, encoder: &mut wgpu::CommandEncoder, logical_w: f32, logical_h: f32) {
         if self.guest_wells.is_empty() {
             return;
         }
-        for (id, well) in &self.guest_wells {
-            let Some(gpu) = self.guest_tex.get(id) else {
+        for well in &self.guest_wells {
+            let Some(gpu) = self.guest_tex.get(&well.pane_id) else {
                 continue;
             };
-            if well.w < 2.0 || well.h < 2.0 {
+            if well.hole.w < 2.0 || well.hole.h < 2.0 {
                 continue;
             }
             let uni = [
-                logical_w, logical_h, 0.0, 0.0, well.x, well.y, well.w, well.h,
+                logical_w,
+                logical_h,
+                0.0,
+                0.0,
+                well.hole.x,
+                well.hole.y,
+                well.hole.w,
+                well.hole.h,
+                well.glass.x,
+                well.glass.y,
+                well.glass.w,
+                well.glass.h,
+                well.radius,
+                0.0,
+                0.0,
+                0.0,
             ];
             self.queue
                 .write_buffer(&gpu.uni, 0, bytemuck::cast_slice(&uni));
@@ -1944,15 +1966,6 @@ fn chrome_labels(
             continue;
         }
         if pane.kind.is_guest() {
-            push_guest_well_text(
-                &mut labels,
-                pl,
-                pane,
-                pl.pane_id == focus,
-                bright,
-                muted,
-                dim,
-            );
             continue;
         }
         if pane.kind.widget().is_some() {
@@ -2382,44 +2395,6 @@ fn push_workspace_glass(
     panels.push(
         PanelInstance::glass(input, m.chip_radius + 2.0, PanelKind::ModalFrost).with_opacity(ease),
     );
-}
-
-fn push_guest_well_text(
-    labels: &mut Vec<TextLabel>,
-    pl: &PaneLayout,
-    pane: &crate::session::Pane,
-    focused: bool,
-    bright: [f32; 4],
-    muted: [f32; 4],
-    dim: [f32; 4],
-) {
-    let g = pl.cells;
-    if g.w < 8.0 || g.h < 8.0 {
-        return;
-    }
-    let text = if !pane.draft.is_empty() {
-        pane.draft.as_str()
-    } else if !pane.guest_url.is_empty() {
-        pane.guest_url.as_str()
-    } else {
-        "type a URL · Enter"
-    };
-    if text.is_empty() {
-        return;
-    }
-    let color = if !pane.draft.is_empty() || focused {
-        bright
-    } else {
-        muted
-    };
-    let _ = dim;
-    labels.push(TextLabel::new(
-        text.to_string(),
-        g.x + 16.0,
-        g.y + 16.0,
-        16.0,
-        color,
-    ));
 }
 
 fn push_workspace_labels(
@@ -3797,13 +3772,13 @@ fn create_guest_blit(
         multiview: None,
         cache: None,
     });
-    let nearest = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("guest nearest"),
-        mag_filter: wgpu::FilterMode::Nearest,
-        min_filter: wgpu::FilterMode::Nearest,
+    let samp = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("guest linear"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
-    (pipeline, bgl, nearest)
+    (pipeline, bgl, samp)
 }
 
 #[cfg(test)]
