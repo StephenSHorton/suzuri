@@ -363,6 +363,28 @@ impl GuestHost {
         self.send(pane_id, &encode_scroll(dy));
     }
 
+    /// Pointer in the well, CSS/logical px relative to the hole origin.
+    pub fn pointer(
+        &self,
+        pane_id: u64,
+        kind: &str,
+        x: f32,
+        y: f32,
+        button: i32,
+        buttons: i32,
+        modifiers: i32,
+    ) {
+        self.send(
+            pane_id,
+            &encode_pointer(kind, x, y, button, buttons, modifiers),
+        );
+    }
+
+    /// Key to the guest document. `kind` is `down` or `up`.
+    pub fn key(&self, pane_id: u64, kind: &str, key: &str, text: &str, modifiers: i32) {
+        self.send(pane_id, &encode_key(kind, key, text, modifiers));
+    }
+
     pub fn draft(&self, pane_id: u64, text: &str) {
         self.send(pane_id, &encode_draft(text));
     }
@@ -548,6 +570,20 @@ fn encode_scroll(dy: i32) -> String {
     format!(r#"{{"type":"scroll","dy":{dy}}}"#)
 }
 
+fn encode_pointer(kind: &str, x: f32, y: f32, button: i32, buttons: i32, modifiers: i32) -> String {
+    format!(
+        r#"{{"type":"pointer","kind":"{kind}","x":{x:.2},"y":{y:.2},"button":{button},"buttons":{buttons},"modifiers":{modifiers}}}"#
+    )
+}
+
+fn encode_key(kind: &str, key: &str, text: &str, modifiers: i32) -> String {
+    format!(
+        r#"{{"type":"key","kind":"{kind}","key":"{}","text":"{}","modifiers":{modifiers}}}"#,
+        json_escape(key),
+        json_escape(text),
+    )
+}
+
 fn encode_draft(text: &str) -> String {
     format!(r#"{{"type":"draft","string":"{}"}}"#, json_escape(text))
 }
@@ -656,6 +692,13 @@ mod tests {
         assert!(line.contains(r#""type":"navigate""#));
         assert!(line.contains("https://a.test/q?x=1"));
         assert!(encode_scroll(-96).contains(r#""dy":-96"#));
+        let p = encode_pointer("down", 10.0, 20.5, 0, 1, 0);
+        assert!(p.contains(r#""type":"pointer""#));
+        assert!(p.contains(r#""kind":"down""#));
+        assert!(p.contains(r#""y":20.50"#));
+        let k = encode_key("down", "Enter", "", 0);
+        assert!(k.contains(r#""type":"key""#));
+        assert!(k.contains(r#""key":"Enter""#));
         let s = encode_spawn(9, Rect::new(1.0, 2.0, 3.0, 4.0), 2.0, "/tmp", None, None);
         assert!(s.contains(r#""type":"spawn""#));
         assert!(s.contains(r#""pane_id":"9""#));

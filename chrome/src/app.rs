@@ -160,6 +160,8 @@ pub struct ChromeApp {
     control_mailbox: ControlMailbox,
     /// Optional guest processes (one localhost channel per guest pane).
     guest_host: GuestHost,
+    /// Primary button is down in a guest well (drag / click).
+    guest_pointer_down: Option<u64>,
     /// Last focused guest pane, for focus in/out messages.
     guest_focus: Option<u64>,
     /// False while the OS window is in the background (hide floating guest).
@@ -285,6 +287,7 @@ impl Default for ChromeApp {
             link_cursor_on: false,
             control_mailbox: ControlMailbox::new(),
             guest_host: GuestHost::new(),
+            guest_pointer_down: None,
             guest_focus: None,
             os_active: true,
             update_mailbox: UpdateMailbox::new(),
@@ -1393,6 +1396,81 @@ impl ChromeApp {
             && !self.notes.open
             && !self.transfer.open
             && !self.rename.open
+    }
+
+    fn guest_compose_focused(&self) -> bool {
+        self.guest_captures_input() && self.warp_focused
+    }
+
+    fn guest_document_focused(&self) -> bool {
+        self.guest_captures_input() && self.terminal_focused
+    }
+
+    fn guest_well_at_pointer(&self) -> Option<u64> {
+        match self.hit_at_cursor() {
+            HitTarget::Terminal(id) if self.session.pane_kind(id).is_guest() => Some(id),
+            _ => None,
+        }
+    }
+
+    fn guest_mod_bits(&self) -> i32 {
+        let mut m = 0;
+        if self.modifiers.alt_key() {
+            m |= 1;
+        }
+        if self.modifiers.control_key() {
+            m |= 2;
+        }
+        if self.modifiers.shift_key() {
+            m |= 4;
+        }
+        if self.modifiers.super_key() {
+            m |= 8;
+        }
+        m
+    }
+
+    fn send_guest_pointer(&self, pane_id: u64, kind: &str, button: i32) {
+        let (hole, _) = self.guest_pane_geom(pane_id);
+        let (px, py) = self.pointer();
+        let x = px - hole.x;
+        let y = py - hole.y;
+        let buttons = if self.guest_pointer_down.is_some() || kind == "down" {
+            1
+        } else {
+            0
+        };
+        self.guest_host
+            .pointer(pane_id, kind, x, y, button, buttons, self.guest_mod_bits());
+    }
+
+    fn send_guest_key(&self, event: &winit::event::KeyEvent) {
+        let kind = if event.state.is_pressed() { "down" } else { "up" };
+        let (key, text) = match &event.logical_key {
+            Key::Named(NamedKey::Enter) => ("Enter".into(), String::new()),
+            Key::Named(NamedKey::Backspace) => ("Backspace".into(), String::new()),
+            Key::Named(NamedKey::Tab) => ("Tab".into(), String::new()),
+            Key::Named(NamedKey::Escape) => ("Escape".into(), String::new()),
+            Key::Named(NamedKey::ArrowLeft) => ("ArrowLeft".into(), String::new()),
+            Key::Named(NamedKey::ArrowRight) => ("ArrowRight".into(), String::new()),
+            Key::Named(NamedKey::ArrowUp) => ("ArrowUp".into(), String::new()),
+            Key::Named(NamedKey::ArrowDown) => ("ArrowDown".into(), String::new()),
+            Key::Named(NamedKey::Home) => ("Home".into(), String::new()),
+            Key::Named(NamedKey::End) => ("End".into(), String::new()),
+            Key::Named(NamedKey::PageUp) => ("PageUp".into(), String::new()),
+            Key::Named(NamedKey::PageDown) => ("PageDown".into(), String::new()),
+            Key::Named(NamedKey::Delete) => ("Delete".into(), String::new()),
+            Key::Named(NamedKey::Space) => ("Space".into(), " ".into()),
+            Key::Character(s) => (s.to_string(), s.to_string()),
+            _ => return,
+        };
+        self.guest_host.key(
+            self.session.focus_pane_id(),
+            kind,
+            &key,
+            &text,
+            self.guest_mod_bits(),
+        );
     }
 
     fn apply_guest_events(&mut self) {
@@ -2702,6 +2780,15 @@ impl ChromeApp {
             self.sync_workspace_host();
             self.warp_focused = false;
             self.terminal_focused = false;
+        } else if self.session.pane_kind(pane_id).is_guest() {
+            // Click the well → page owns keys. Warp bar still takes compose.
+            if matches!(hit, HitTarget::Terminal(_) | HitTarget::ScrollBar(_)) {
+                self.terminal_focused = true;
+                self.warp_focused = false;
+            } else if matches!(hit, HitTarget::WarpBar(_)) {
+                self.warp_focused = true;
+                self.terminal_focused = false;
+            }
         } else {
             let alt = self
                 .runtimes
@@ -2901,6 +2988,9 @@ impl ChromeApp {
                     self.drain_workspace_clipboard();
                     self.warp_focused = false;
                     self.terminal_focused = false;
+                } else if self.session.pane_kind(pane_id).is_guest() {
+                    self.terminal_focused = true;
+                    self.warp_focused = false;
                 } else {
                     // Alt-screen TUIs own the keyboard; otherwise click focuses warp.
                     let alt = self
@@ -2932,6 +3022,9 @@ impl ChromeApp {
 
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
         if !event.state.is_pressed() {
+            if self.guest_document_focused() {
+                self.send_guest_key(event);
+            }
             return;
         }
 
@@ -2982,6 +3075,16 @@ impl ChromeApp {
                 self.term_selection.clear();
                 self.selecting_term = false;
                 self.last_term_click = None;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+            // Guest well: Esc returns the caret to the URL strip.
+            if self.guest_document_focused() {
+                self.warp_focused = true;
+                self.terminal_focused = false;
+                self.paint_dirty = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -3100,7 +3203,21 @@ impl ChromeApp {
                     _ => {}
                 }
             }
-            if self.guest_captures_input() {
+            if self.guest_document_focused() {
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    self.warp_focused = true;
+                    self.terminal_focused = false;
+                    self.paint_dirty = true;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+                self.send_guest_key(event);
+                self.paint_dirty = true;
+                return;
+            }
+            if self.guest_compose_focused() {
                 match &event.logical_key {
                     Key::Named(NamedKey::Backspace) => {
                         self.session.draft_mut().pop();
@@ -4286,6 +4403,11 @@ impl ApplicationHandler for ChromeApp {
                 let logical: LogicalPosition<f64> = position.to_logical(scale);
                 self.cursor = LogicalPosition::new(logical.x as f32, logical.y as f32);
                 self.pointer_inside = true;
+                if let Some(pane_id) = self.guest_pointer_down {
+                    self.send_guest_pointer(pane_id, "move", 0);
+                } else if let Some(pane_id) = self.guest_well_at_pointer() {
+                    self.send_guest_pointer(pane_id, "move", 0);
+                }
                 if let Some(pane_id) = self.scroll_dragging {
                     self.apply_scrollbar_drag(pane_id);
                     if let Some(w) = &self.window {
@@ -4431,6 +4553,19 @@ impl ApplicationHandler for ChromeApp {
                 self.pending_term_select = None;
                 if !self.overlay_open() {
                     let _ = self.focus_hit_pane(hit);
+                }
+                if let HitTarget::Terminal(pane_id) = hit {
+                    if !self.overlay_open() && self.session.pane_kind(pane_id).is_guest() {
+                        self.guest_pointer_down = Some(pane_id);
+                        self.terminal_focused = true;
+                        self.warp_focused = false;
+                        self.send_guest_pointer(pane_id, "down", 0);
+                        self.press_hit = Some(hit);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                 }
                 // Cmd/Ctrl+click on a terminal URL → open browser (no selection).
                 if matches!(hit, HitTarget::Terminal(_))
@@ -4599,6 +4734,9 @@ impl ApplicationHandler for ChromeApp {
                 button: MouseButton::Left,
                 ..
             } => {
+                if let Some(pane_id) = self.guest_pointer_down.take() {
+                    self.send_guest_pointer(pane_id, "up", 0);
+                }
                 self.chip_ui.pressed = false;
                 self.pending_term_select = None;
                 let was_scroll = self.scroll_dragging.take().is_some();
