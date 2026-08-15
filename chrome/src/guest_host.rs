@@ -355,6 +355,14 @@ impl GuestHost {
         self.send(pane_id, &encode_navigate(url));
     }
 
+    /// Scroll the guest document. `dy` is pixels; negative = toward the top.
+    pub fn scroll(&self, pane_id: u64, dy: i32) {
+        if dy == 0 {
+            return;
+        }
+        self.send(pane_id, &encode_scroll(dy));
+    }
+
     pub fn draft(&self, pane_id: u64, text: &str) {
         self.send(pane_id, &encode_draft(text));
     }
@@ -536,6 +544,10 @@ fn encode_navigate(url: &str) -> String {
     format!(r#"{{"type":"navigate","url":"{}"}}"#, json_escape(url))
 }
 
+fn encode_scroll(dy: i32) -> String {
+    format!(r#"{{"type":"scroll","dy":{dy}}}"#)
+}
+
 fn encode_draft(text: &str) -> String {
     format!(r#"{{"type":"draft","string":"{}"}}"#, json_escape(text))
 }
@@ -643,6 +655,7 @@ mod tests {
         let line = encode_navigate("https://a.test/q?x=1");
         assert!(line.contains(r#""type":"navigate""#));
         assert!(line.contains("https://a.test/q?x=1"));
+        assert!(encode_scroll(-96).contains(r#""dy":-96"#));
         let s = encode_spawn(9, Rect::new(1.0, 2.0, 3.0, 4.0), 2.0, "/tmp", None, None);
         assert!(s.contains(r#""type":"spawn""#));
         assert!(s.contains(r#""pane_id":"9""#));

@@ -4060,6 +4060,11 @@ impl ChromeApp {
 
     /// Scroll the pane under the pointer (or the focused pane as fallback).
     fn scroll_pane_at(&mut self, pane_id: u64, step: i32) {
+        if self.session.pane_kind(pane_id).is_guest() {
+            self.guest_host.scroll(pane_id, -step * 48);
+            self.paint_dirty = true;
+            return;
+        }
         if self.session.pane_kind(pane_id).is_workspace() {
             if step > 0 {
                 self.workspace_ui.scroll_up(step as usize);
