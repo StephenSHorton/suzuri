@@ -70,7 +70,7 @@
         <!-- Plain CTAs — always visible (no canvas wrap; liquid was collapsing this). -->
         <div class="cta-panel">
           <div class="cta">
-            <a class="btn primary" id="download-win" href="https://github.com/StephenSHorton/suzuri/releases/latest">
+            <a class="btn primary" id="download-win" href="https://apps.microsoft.com/detail/9PJ735V6JKN3">
               Download for Windows
             </a>
             <a class="btn primary" id="download-mac" href="https://github.com/StephenSHorton/suzuri/releases/latest">
@@ -80,7 +80,7 @@
               Source on GitHub
             </a>
           </div>
-          <p class="meta" id="release-meta">Windows amd64 · macOS arm64 · MIT License</p>
+          <p class="meta" id="release-meta">Windows · Microsoft Store · macOS arm64 · MIT License</p>
           <p class="meta fine-inline">Linux not yet supported as a host build.</p>
         </div>
 
@@ -102,15 +102,6 @@
             <source src="media/suzuri.mp4" type="video/mp4" />
           </video>
         </figure>
-
-        <aside class="notice" aria-label="Windows note">
-          <h2>Windows</h2>
-          <p>
-            Windows builds are not code-signed yet. SmartScreen may say
-            “Windows protected your PC” — choose <em>More info</em> → <em>Run anyway</em>
-            (or install the setup from GitHub Releases).
-          </p>
-        </aside>
       </section>
 
       <section class="grid">
@@ -268,16 +259,8 @@
       .then((rel) => {
         if (!rel || !rel.tag_name) return;
         const meta = document.getElementById("release-meta");
-        meta.innerHTML = `Latest <strong>${rel.tag_name}</strong> · Windows amd64 · macOS arm64 · MIT`;
+        meta.innerHTML = `Latest <strong>${rel.tag_name}</strong> · Microsoft Store · macOS arm64 · MIT`;
         const assets = rel.assets || [];
-        const win =
-          assets.find((x) => /windows-amd64-setup\.exe$/i.test(x.name)) ||
-          assets.find(
-            (x) =>
-              /windows-amd64(\.exe|\.zip)?$/i.test(x.name) &&
-              x.name.endsWith(".exe"),
-          ) ||
-          assets.find((x) => /windows-amd64/i.test(x.name));
         const mac =
           assets.find((x) => /darwin-arm64\.dmg$/i.test(x.name)) ||
           assets.find((x) => /darwin-arm64\.app\.zip$/i.test(x.name)) ||
@@ -291,10 +274,8 @@
             (x) => /darwin-arm64\.zip$/i.test(x.name) && !/\.app/i.test(x.name),
           ) ||
           assets.find((x) => /darwin-arm64/i.test(x.name));
-        const winA = document.getElementById("download-win");
+        // Windows CTA stays on the Microsoft Store listing (signed).
         const macA = document.getElementById("download-mac");
-        if (win) winA.href = win.browser_download_url;
-        else winA.href = rel.html_url;
         if (mac) macA.href = mac.browser_download_url;
         else macA.href = rel.html_url;
       })
