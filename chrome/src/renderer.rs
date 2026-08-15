@@ -1,5 +1,6 @@
 //! wgpu renderer: rain pass → glass composite → surface.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -170,6 +171,20 @@ pub struct Renderer {
     pub window_exit_blur: f32,
     /// Lens blit view zoom. Always 1 for ⌘± (reflow zoom); pinch magnifier stacks on top.
     view_zoom: f32,
+
+    guest_blit_pipeline: wgpu::RenderPipeline,
+    guest_blit_bgl: wgpu::BindGroupLayout,
+    guest_nearest: wgpu::Sampler,
+    guest_tex: HashMap<u64, GuestGpu>,
+    guest_wells: Vec<(u64, crate::layout::Rect)>,
+}
+
+struct GuestGpu {
+    _tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    w: u32,
+    h: u32,
+    uni: wgpu::Buffer,
 }
 
 impl Renderer {
@@ -595,6 +610,8 @@ impl Renderer {
             cache: None,
         });
 
+        let guest_blit = create_guest_blit(&device, format);
+
         let cx = (size.width as f32 / scale_factor) * 0.5;
         let cy = (size.height as f32 / scale_factor) * 0.5;
 
@@ -636,6 +653,11 @@ impl Renderer {
             surface_format: format,
             window_exit_blur: 0.0,
             view_zoom: 1.0,
+            guest_blit_pipeline: guest_blit.0,
+            guest_blit_bgl: guest_blit.1,
+            guest_nearest: guest_blit.2,
+            guest_tex: HashMap::new(),
+            guest_wells: Vec::new(),
         }
     }
 
@@ -696,6 +718,159 @@ impl Renderer {
 
     pub fn metrics(&self) -> Metrics {
         self.metrics
+    }
+
+    pub fn set_guest_wells(&mut self, wells: Vec<(u64, crate::layout::Rect)>) {
+        self.guest_wells = wells;
+    }
+
+    pub fn upload_guest_fb(&mut self, pane_id: u64, w: u32, h: u32, bgra: &[u8]) {
+        let need = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        if w == 0 || h == 0 || bgra.len() < need {
+            return;
+        }
+        let recreate = self
+            .guest_tex
+            .get(&pane_id)
+            .map(|t| t.w != w || t.h != h)
+            .unwrap_or(true);
+        if recreate {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("guest fb"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let uni = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("guest blit uni"),
+                size: 32,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.guest_tex.insert(
+                pane_id,
+                GuestGpu {
+                    _tex: tex,
+                    view,
+                    w,
+                    h,
+                    uni,
+                },
+            );
+        }
+        let Some(gpu) = self.guest_tex.get(&pane_id) else {
+            return;
+        };
+        let bpr = w * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = bpr.div_ceil(align) * align;
+        let layout = wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(padded),
+            rows_per_image: Some(h),
+        };
+        let size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let dest = wgpu::TexelCopyTextureInfo {
+            texture: &gpu._tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        };
+        if padded == bpr {
+            self.queue.write_texture(dest, &bgra[..need], layout, size);
+        } else {
+            let mut buf = vec![0u8; padded as usize * h as usize];
+            for y in 0..h as usize {
+                let src = y * bpr as usize;
+                let dst = y * padded as usize;
+                buf[dst..dst + bpr as usize].copy_from_slice(&bgra[src..src + bpr as usize]);
+            }
+            self.queue.write_texture(dest, &buf, layout, size);
+        }
+    }
+
+    pub fn drop_guest_fb(&mut self, pane_id: u64) {
+        self.guest_tex.remove(&pane_id);
+        self.guest_wells.retain(|(id, _)| *id != pane_id);
+    }
+
+    fn blit_guest_fbs(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        logical_w: f32,
+        logical_h: f32,
+    ) {
+        if self.guest_wells.is_empty() {
+            return;
+        }
+        for (id, well) in &self.guest_wells {
+            let Some(gpu) = self.guest_tex.get(id) else {
+                continue;
+            };
+            if well.w < 2.0 || well.h < 2.0 {
+                continue;
+            }
+            let uni = [
+                logical_w,
+                logical_h,
+                0.0,
+                0.0,
+                well.x,
+                well.y,
+                well.w,
+                well.h,
+            ];
+            self.queue
+                .write_buffer(&gpu.uni, 0, bytemuck::cast_slice(&uni));
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("guest blit bg"),
+                layout: &self.guest_blit_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: gpu.uni.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&gpu.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.guest_nearest),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("guest blit"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.guest_blit_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -1382,6 +1557,8 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
+        self.blit_guest_fbs(&mut encoder, logical_w, logical_h);
+
         // Pass 2: text overlay onto scene RT
         let labels = chrome_labels(
             layout,
@@ -1766,6 +1943,18 @@ fn chrome_labels(
                     &cover_cards,
                 );
             }
+            continue;
+        }
+        if pane.kind.is_guest() {
+            push_guest_well_text(
+                &mut labels,
+                pl,
+                pane,
+                pl.pane_id == focus,
+                bright,
+                muted,
+                dim,
+            );
             continue;
         }
         if pane.kind.widget().is_some() {
@@ -2213,6 +2402,44 @@ fn push_workspace_glass(
     panels.push(
         PanelInstance::glass(input, m.chip_radius + 2.0, PanelKind::ModalFrost).with_opacity(ease),
     );
+}
+
+fn push_guest_well_text(
+    labels: &mut Vec<TextLabel>,
+    pl: &PaneLayout,
+    pane: &crate::session::Pane,
+    focused: bool,
+    bright: [f32; 4],
+    muted: [f32; 4],
+    dim: [f32; 4],
+) {
+    let g = pl.cells;
+    if g.w < 8.0 || g.h < 8.0 {
+        return;
+    }
+    let text = if !pane.draft.is_empty() {
+        pane.draft.as_str()
+    } else if !pane.guest_url.is_empty() {
+        pane.guest_url.as_str()
+    } else {
+        "type a URL · Enter"
+    };
+    if text.is_empty() {
+        return;
+    }
+    let color = if !pane.draft.is_empty() || focused {
+        bright
+    } else {
+        muted
+    };
+    let _ = dim;
+    labels.push(TextLabel::new(
+        text.to_string(),
+        g.x + 16.0,
+        g.y + 16.0,
+        16.0,
+        color,
+    ));
 }
 
 fn push_workspace_labels(
@@ -3517,6 +3744,85 @@ fn create_scene_target(
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     (tex, view)
+}
+
+fn create_guest_blit(
+    device: &wgpu::Device,
+    target: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Sampler) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("guest blit"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/guest_blit.wgsl").into()),
+    });
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("guest blit bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("guest blit pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("guest blit pl"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            }),
+        ),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: target,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    let nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("guest nearest"),
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    (pipeline, bgl, nearest)
 }
 
 #[cfg(test)]

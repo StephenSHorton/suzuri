@@ -524,6 +524,17 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             continue;
         }
 
+        // Guest hole (18) — opaque well so rain never reads as a terminal
+        // behind the plugin overlay.
+        if (p.kind > 17.5 && p.kind < 18.5) {
+            let d = sd_round_box(px - center, half, max(p.radius, 0.5));
+            let inside = 1.0 - smoothstep(-1.0, 1.0, d);
+            if (inside > 0.001) {
+                col = mix(col, vec3f(0.04, 0.09, 0.05), inside);
+            }
+            continue;
+        }
+
         // Idle chips / logo / + / modal / modal buttons — discrete glass
         let g = eval_glass_panel(px, center, half, p.radius, p.kind);
         if (g.a <= 0.001) { continue; }

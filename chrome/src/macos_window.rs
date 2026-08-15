@@ -10,6 +10,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::platform::macos::WindowExtMacOS;
 use winit::window::Window;
 
+use crate::layout::Rect;
+
 /// Apply macOS-native rounded corners (points) and transparent backdrop.
 ///
 /// `radius_pts` is in logical points (CSS-px style), matching AppKit.
@@ -79,5 +81,49 @@ pub fn set_window_alpha(window: &Window, alpha: f64) {
             ns_window.setAlphaValue(alpha.clamp(0.0, 1.0));
             let _keep: Retained<objc2_app_kit::NSWindow> = ns_window;
         }
+    }
+}
+
+/// AppKit `windowNumber` for the winit window, or `None` if the handle is gone.
+pub fn window_number(window: &Window) -> Option<i64> {
+    ns_window(window).map(|w| unsafe { w.windowNumber() as i64 })
+}
+
+/// Map a top-left logical content rect (suzuri layout) to AppKit screen
+/// coordinates (bottom-left origin, points).
+///
+/// Uses the window's content rect — not the wgpu NSView — so a flipped Metal
+/// layer cannot shrink or offset the hole.
+pub fn content_rect_to_screen(window: &Window, rect: Rect) -> Option<Rect> {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return None;
+    }
+    let ns_window = ns_window(window)?;
+    let content = ns_window.contentRectForFrameRect(ns_window.frame());
+    let x = content.origin.x + rect.x as f64;
+    let y = content.origin.y + (content.size.height - rect.y as f64 - rect.h as f64);
+    Some(Rect::new(
+        x as f32,
+        y as f32,
+        rect.w,
+        rect.h,
+    ))
+}
+
+fn ns_window(window: &Window) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+    let Ok(handle) = window.window_handle() else {
+        return None;
+    };
+    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+        return None;
+    };
+    unsafe {
+        use objc2_app_kit::NSView;
+        let ns_view = appkit.ns_view.as_ptr() as *const NSView;
+        if ns_view.is_null() {
+            return None;
+        }
+        let view: &NSView = &*ns_view;
+        view.window()
     }
 }

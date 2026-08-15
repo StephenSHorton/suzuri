@@ -1,0 +1,7 @@
+[package]
+name = "suzuri-guest-example"
+version = "0.1.0"
+edition = "2021"
+description = "Sample suzuri guest plugin (separate process; chrome never links it)"
+license = "MIT"
+publish = false

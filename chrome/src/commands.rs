@@ -10,6 +10,8 @@ pub enum CommandAction {
     OpenPalette,
     OpenNotes,
     OpenWorkspace,
+    /// Split a guest pane for a resolved manifest (soft no-op if none).
+    OpenGuest,
     OpenTransferSend,
     OpenTransferReceive,
     NewTab,
@@ -130,6 +132,13 @@ pub fn default_commands() -> Vec<Command> {
             desc: "Shared channels · splits as a pane".into(),
             category: "Workspace",
             action: CommandAction::OpenWorkspace,
+        },
+        Command {
+            id: "guest",
+            title: "New guest pane",
+            desc: "Optional process · opens a tab".into(),
+            category: "Panes",
+            action: CommandAction::OpenGuest,
         },
         Command {
             id: "workspace_cycle_status",
@@ -1092,6 +1101,17 @@ mod tests {
         assert_eq!(cmd.action, CommandAction::CheckUpdates);
         let idx = filter_commands(&all, "updates");
         assert!(idx.iter().any(|&i| all[i].id == "check_updates"));
+    }
+
+    #[test]
+    fn registry_contains_guest() {
+        let all = default_commands();
+        let cmd = all.iter().find(|c| c.id == "guest").expect("guest command");
+        assert_eq!(cmd.title, "New guest pane");
+        assert_eq!(cmd.category, "Panes");
+        assert_eq!(cmd.action, CommandAction::OpenGuest);
+        let idx = filter_commands(&all, "guest");
+        assert!(idx.iter().any(|&i| all[i].id == "guest"));
     }
 
     #[test]

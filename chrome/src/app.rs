@@ -43,6 +43,8 @@ use crate::rename::{RenameState, RenameTarget};
 use crate::renderer::{self, GhostLayer, Renderer};
 use crate::text::MonoCellMetrics;
 use crate::selection::{clamp_pos, CellPos, Selection};
+use crate::guest_host::{guest_mount_rect, GuestEvent, GuestHost, NativeAttach};
+use crate::guest_manifest::{load_guests, pick_guest};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
 use crate::settings::SettingsState;
 use crate::toast::ToastState;
@@ -149,6 +151,12 @@ pub struct ChromeApp {
     link_cursor_on: bool,
     /// Host light IPC: poll `chrome_cmd` under config dir (~250ms).
     control_mailbox: ControlMailbox,
+    /// Optional guest processes (one localhost channel per guest pane).
+    guest_host: GuestHost,
+    /// Last focused guest pane, for focus in/out messages.
+    guest_focus: Option<u64>,
+    /// False while the OS window is in the background (hide floating guest).
+    os_active: bool,
     /// Host updater IPC: `update_req` / `update_evt`.
     update_mailbox: UpdateMailbox,
     /// Publish `chrome_status.json` for Go MCP bridge proxy.
@@ -266,6 +274,9 @@ impl Default for ChromeApp {
             hovered_link_span: None,
             link_cursor_on: false,
             control_mailbox: ControlMailbox::new(),
+            guest_host: GuestHost::new(),
+            guest_focus: None,
+            os_active: true,
             update_mailbox: UpdateMailbox::new(),
             ui_zoom: 1.0,
             status_publisher: StatusPublisher::new(),
@@ -294,6 +305,20 @@ impl Default for ChromeApp {
 
 /// Multi-click window for terminal word/line select (product: 500 ms; same cell ±1).
 const TERM_MULTI_CLICK_MS: u64 = 500;
+
+/// Palette query → guest id hint (`guest example` / `example`).
+fn guest_prefer_from_query(q: &str) -> Option<String> {
+    let t = q.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let last = t.split_whitespace().last().unwrap_or(t);
+    let low = last.to_ascii_lowercase();
+    if low == "guest" || low == "pane" || low == "new" {
+        return None;
+    }
+    Some(last.to_string())
+}
 
 fn spawn_pane_runtime(
     cols: u16,
@@ -923,6 +948,9 @@ impl ChromeApp {
         layout.apply_pane_rects(self.metrics, &leafs, tab.focus_pane, &|id| {
             alt_ids.contains(&id) || self.session.is_widget(id)
         });
+        for pl in &mut layout.panes {
+            pl.hole = self.session.pane_kind(pl.pane_id).is_guest();
+        }
         tab.root
             .collect_sashes(layout.workspace, gap, &mut layout.sashes);
         if let Some((_, exit)) = self.session.tab_exit_on_surface(surface) {
@@ -945,6 +973,93 @@ impl ChromeApp {
             }
         }
         layout
+    }
+
+    /// Push hole geometry to every live guest. Hidden when the pane is off-tab
+    /// or a glass overlay covers the mosaic.
+    fn sync_guest_holes(&mut self) {
+        let overlay = self.overlay_open() || !self.os_active;
+        let scale = self.renderer().map(|r| r.scale_factor()).unwrap_or(1.0);
+        let mut visible = std::collections::HashSet::new();
+        let keys: Vec<u64> = if self.surfaces.is_empty() {
+            vec![self.event_surface_key()]
+        } else {
+            self.surfaces.values().map(|s| s.key).collect()
+        };
+        for key in keys {
+            let layout = self.layout_for_surface(key);
+            for pl in &layout.panes {
+                if !self.session.pane_kind(pl.pane_id).is_guest() {
+                    continue;
+                }
+                if !self.guest_host.is_live(pl.pane_id) {
+                    continue;
+                }
+                visible.insert(pl.pane_id);
+                let hole = guest_mount_rect(pl.glass, pl.header);
+                let native = self.guest_native_attach(pl.pane_id, hole, !overlay);
+                self.guest_host.resize(pl.pane_id, hole, scale, native);
+                self.guest_host.restack(pl.pane_id);
+            }
+        }
+        for id in self.guest_host.live_pane_ids() {
+            if visible.contains(&id) {
+                continue;
+            }
+            let hidden = NativeAttach {
+                window_number: 0,
+                screen: crate::layout::Rect::new(0.0, 0.0, 0.0, 0.0),
+                visible: false,
+            };
+            self.guest_host.resize(
+                id,
+                crate::layout::Rect::new(0.0, 0.0, 0.0, 0.0),
+                scale,
+                Some(hidden),
+            );
+        }
+    }
+
+    fn guest_native_attach(
+        &self,
+        pane_id: u64,
+        hole: crate::layout::Rect,
+        visible: bool,
+    ) -> Option<NativeAttach> {
+        if !visible || hole.w < 8.0 || hole.h < 8.0 {
+            return Some(NativeAttach {
+                window_number: 0,
+                screen: hole,
+                visible: false,
+            });
+        }
+        let window = self.window_for_guest_pane(pane_id)?;
+        #[cfg(target_os = "macos")]
+        {
+            let number = crate::macos_window::window_number(window.as_ref())?;
+            let screen = crate::macos_window::content_rect_to_screen(window.as_ref(), hole)
+                .unwrap_or(hole);
+            Some(NativeAttach {
+                window_number: number,
+                screen,
+                visible: true,
+            })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (pane_id, window);
+            None
+        }
+    }
+
+    fn window_for_guest_pane(&self, pane_id: u64) -> Option<Arc<Window>> {
+        for s in self.surfaces.values() {
+            let layout = self.layout_for_surface(s.key);
+            if layout.panes.iter().any(|p| p.pane_id == pane_id) {
+                return Some(s.window.clone());
+            }
+        }
+        self.window.clone()
     }
 
     /// Mono cell pitch (logical px). Follows ⌘± so grid + glyphs stay in step.
@@ -1044,6 +1159,9 @@ impl ChromeApp {
         for key in keys {
             let layout = self.layout_for_surface(key);
             for pl in &layout.panes {
+                if self.session.pane_kind(pl.pane_id).is_guest() {
+                    continue;
+                }
                 if self.session.is_widget(pl.pane_id) {
                     continue;
                 }
@@ -1065,6 +1183,7 @@ impl ChromeApp {
                 }
             }
         }
+        self.sync_guest_holes();
     }
 
     fn drain_all_ptys(&mut self) {
@@ -1202,6 +1321,178 @@ impl ChromeApp {
             self.warp_focused = false;
             self.terminal_focused = false;
         }
+    }
+
+    /// Split a guest leaf and spawn the process. Missing manifests toast and return.
+    fn open_guest_pane(&mut self, prefer: Option<&str>) {
+        let guests = load_guests();
+        let Some(manifest) = pick_guest(&guests, prefer).cloned() else {
+            self.toast
+                .show("No guests installed — drop a manifest in guests/");
+            return;
+        };
+        let id = self
+            .session
+            .new_guest_tab(&manifest.id, &manifest.name);
+        self.warp_focused = false;
+        self.terminal_focused = false;
+        if let Some(tab) = self.session.active_tab() {
+            let surface = tab.surface;
+            let tid = tab.id;
+            self.set_surface_focus(surface, tid);
+        }
+        let (hole, scale) = self.guest_pane_geom(id);
+        let native = self.guest_native_attach(id, hole, true);
+        let cwd = self
+            .session
+            .panes
+            .get(&id)
+            .map(|p| p.cwd.clone())
+            .unwrap_or_default();
+        if let Err(e) = self.guest_host.start(id, &manifest, &cwd, hole, scale, native) {
+            self.toast.show(e);
+            let _ = self.session.begin_close_pane(id);
+            return;
+        }
+        self.sync_guest_focus();
+        self.paint_dirty = true;
+    }
+
+    fn guest_pane_geom(&self, pane_id: u64) -> (crate::layout::Rect, f32) {
+        let scale = self.renderer().map(|r| r.scale_factor()).unwrap_or(1.0);
+        let layout = self.current_layout();
+        let rect = layout
+            .panes
+            .iter()
+            .find(|p| p.pane_id == pane_id)
+            .map(|p| guest_mount_rect(p.glass, p.header))
+            .unwrap_or_else(|| crate::layout::Rect::new(0.0, 0.0, 0.0, 0.0));
+        (rect, scale)
+    }
+
+    fn guest_captures_input(&self) -> bool {
+        self.session.focused_is_guest()
+            && !self.palette.open
+            && !self.settings.open
+            && !self.help.open
+            && !self.confirm.open
+            && !self.splash.open
+            && !self.notes.open
+            && !self.transfer.open
+            && !self.rename.open
+    }
+
+    fn apply_guest_events(&mut self) {
+        let events = self.guest_host.poll();
+        if events.is_empty() {
+            return;
+        }
+        for ev in events {
+            match ev {
+                GuestEvent::Hello {
+                    pane_id, title, ..
+                } => {
+                    if let Some(p) = self.session.panes.get_mut(&pane_id) {
+                        if !title.is_empty() {
+                            p.title = title;
+                        }
+                    }
+                }
+                GuestEvent::Title { pane_id, text } => {
+                    if let Some(p) = self.session.panes.get_mut(&pane_id) {
+                        if !text.is_empty() {
+                            p.title = text;
+                        }
+                        p.busy = false;
+                    }
+                }
+                GuestEvent::Url { pane_id, text } => {
+                    if let Some(p) = self.session.panes.get_mut(&pane_id) {
+                        p.guest_url = text;
+                        p.busy = false;
+                    }
+                }
+                GuestEvent::Busy { pane_id, busy } => {
+                    if let Some(p) = self.session.panes.get_mut(&pane_id) {
+                        p.busy = busy;
+                    }
+                }
+                GuestEvent::Crash { pane_id, message } => {
+                    if !message.is_empty() {
+                        self.toast.show(message);
+                    }
+                    let _ = self.session.begin_close_pane(pane_id);
+                }
+                GuestEvent::Surface { .. } => {
+                    // Pixels land via take_fb on the next paint.
+                }
+            }
+        }
+        self.paint_dirty = true;
+    }
+
+    fn sync_guest_focus(&mut self) {
+        let now = if self.session.focused_is_guest() {
+            Some(self.session.focus_pane_id())
+        } else {
+            None
+        };
+        if self.guest_focus == now {
+            return;
+        }
+        if let Some(old) = self.guest_focus {
+            self.guest_host.focus(old, false);
+        }
+        if let Some(new_id) = now {
+            self.guest_host.focus(new_id, true);
+        }
+        self.guest_focus = now;
+    }
+
+    fn submit_guest_navigate(&mut self) {
+        let id = self.session.focus_pane_id();
+        if !self.session.pane_kind(id).is_guest() {
+            return;
+        }
+        let url = self.session.draft().trim().to_string();
+        self.session.draft_mut().clear();
+        if url.is_empty() {
+            return;
+        }
+        if let Some(p) = self.session.panes.get_mut(&id) {
+            p.busy = true;
+        }
+        self.guest_host.draft(id, "");
+        self.guest_host.navigate(id, &url);
+        self.paint_dirty = true;
+    }
+
+    /// Host / live-try: `{config}/guest_nav` is one URL, then deleted.
+    fn take_guest_nav_file(&mut self) {
+        let path = crate::config_store::product_config_dir().join("guest_nav");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let _ = std::fs::remove_file(&path);
+        let url = raw.trim();
+        if url.is_empty() {
+            return;
+        }
+        let id = if self.session.focused_is_guest() {
+            self.session.focus_pane_id()
+        } else {
+            match self.guest_host.live_pane_ids().into_iter().next() {
+                Some(id) => id,
+                None => return,
+            }
+        };
+        if let Some(p) = self.session.panes.get_mut(&id) {
+            p.busy = true;
+            p.guest_url = url.to_string();
+        }
+        self.guest_host.navigate(id, url);
+        self.paint_dirty = true;
     }
 
     fn close_all_overlays(&mut self) {
@@ -1392,6 +1683,16 @@ impl ChromeApp {
                 self.transfer.close();
                 self.rename.close();
                 self.open_workspace_pane();
+            }
+            CommandAction::OpenGuest => {
+                let prefer = guest_prefer_from_query(&self.palette.query);
+                self.palette.close();
+                self.settings.close();
+                self.help.close();
+                self.notes.close();
+                self.transfer.close();
+                self.rename.close();
+                self.open_guest_pane(prefer.as_deref());
             }
             CommandAction::RefreshWorkspace => {
                 // Soft no-op when closed (product RefreshWorkspaceMsg).
@@ -1835,6 +2136,13 @@ impl ChromeApp {
             self.workspace_ui.close();
         }
         for id in finished {
+            self.guest_host.kill(*id);
+            if self.guest_focus == Some(*id) {
+                self.guest_focus = None;
+            }
+            for s in self.surfaces.values_mut() {
+                s.renderer.drop_guest_fb(*id);
+            }
             self.drop_runtime(*id);
         }
         if self.session.is_empty() {
@@ -2752,6 +3060,42 @@ impl ChromeApp {
                                 self.notes.insert_char(ch);
                             }
                         }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if self.guest_captures_input() {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => {
+                        self.session.draft_mut().pop();
+                        let draft = self.session.draft().to_string();
+                        self.guest_host.draft(self.session.focus_pane_id(), &draft);
+                        self.paint_dirty = true;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.submit_guest_navigate();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Character(s) => {
+                        for ch in s.chars() {
+                            if !ch.is_control() {
+                                self.session.draft_mut().push(ch);
+                            }
+                        }
+                        let draft = self.session.draft().to_string();
+                        self.guest_host.draft(self.session.focus_pane_id(), &draft);
+                        self.paint_dirty = true;
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -3699,12 +4043,23 @@ impl ApplicationHandler for ChromeApp {
         // Lightweight wake path: drain PTY / mailboxes without a full GPU frame
         // so key-repeat and shell output stay responsive between paints.
         self.drain_all_ptys();
+        self.apply_guest_events();
+        self.sync_guest_focus();
+        if self
+            .guest_host
+            .live_pane_ids()
+            .iter()
+            .any(|&id| self.guest_host.fb_newer(id))
+        {
+            self.paint_dirty = true;
+        }
         for cmd in self.control_mailbox.poll() {
             self.run_action(event_loop, cmd.to_action());
             if matches!(cmd, crate::control_mailbox::ControlCommand::Quit) {
                 return;
             }
         }
+        self.sync_guest_holes();
         self.apply_update_events();
         if let Some(line) = chrome_status::take_submit() {
             self.submit_line_text(&line);
@@ -3712,6 +4067,7 @@ impl ApplicationHandler for ChromeApp {
                 w.request_redraw();
             }
         }
+        self.take_guest_nav_file();
 
         // Schedule the next frame only when something is animating (composite
         // rain sample, springs, scroll ease, caret blink). Rain encode runs on
@@ -3771,7 +4127,16 @@ impl ApplicationHandler for ChromeApp {
         self.bind_win(id);
         match event {
             WindowEvent::CloseRequested => self.close_surface(event_loop, id),
-            WindowEvent::Focused(true) => self.focus_surface_window(id),
+            WindowEvent::Focused(true) => {
+                self.os_active = true;
+                self.focus_surface_window(id);
+                self.sync_guest_holes();
+            }
+            WindowEvent::Focused(false) => {
+                self.os_active = false;
+                self.sync_guest_holes();
+            }
+            WindowEvent::Moved(_) => self.sync_guest_holes(),
 
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
@@ -4363,6 +4728,8 @@ impl ApplicationHandler for ChromeApp {
             WindowEvent::RedrawRequested => {
                 self.drain_all_ptys();
                 self.reap_dead_shells();
+                self.apply_guest_events();
+                self.sync_guest_focus();
                 // Auto raw-PTY focus while a fullscreen TUI owns the alt screen.
                 self.sync_focus_for_alt_screen();
                 // Phase 2 light IPC: host writes chrome_cmd; fail soft if absent.
@@ -4372,11 +4739,13 @@ impl ApplicationHandler for ChromeApp {
                         return;
                     }
                 }
+                self.sync_guest_holes();
                 self.apply_update_events();
                 // MCP / host warp submit (chrome_submit mailbox).
                 if let Some(line) = chrome_status::take_submit() {
                     self.submit_line_text(&line);
                 }
+                self.take_guest_nav_file();
                 // Publish rich status for Go bridge proxy (`chrome_status.json`).
                 self.publish_bridge_status();
                 let now = Instant::now();
@@ -4460,9 +4829,27 @@ impl ApplicationHandler for ChromeApp {
                     .and_then(|t| t.solo_exit.as_ref())
                     .map(|a| a.blur_px())
                     .unwrap_or(0.0);
+                let mut guest_wells = Vec::new();
+                let mut guest_uploads = Vec::new();
+                for pl in &layout.panes {
+                    if !self.session.pane_kind(pl.pane_id).is_guest() {
+                        continue;
+                    }
+                    let hole = guest_mount_rect(pl.glass, pl.header);
+                    if hole.w >= 2.0 && hole.h >= 2.0 {
+                        guest_wells.push((pl.pane_id, hole));
+                    }
+                    if let Some((w, h, px)) = self.guest_host.take_fb(pl.pane_id) {
+                        guest_uploads.push((pl.pane_id, w, h, px));
+                    }
+                }
                 if let Some(r) = self.surfaces.get_mut(&id).map(|s| &mut s.renderer) {
                     r.window_exit_blur = exit_blur;
                     r.set_ui_scale(self.ui_zoom);
+                    r.set_guest_wells(guest_wells);
+                    for (pane_id, w, h, px) in &guest_uploads {
+                        r.upload_guest_fb(*pane_id, *w, *h, px);
+                    }
                     match r.render(
                         &self.session,
                         &self.settings,

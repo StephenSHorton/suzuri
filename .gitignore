@@ -24,6 +24,9 @@ docs/site/version.json
 
 # Native chrome (wgpu) + web surface experiment
 chrome/target/
+
+# Sample guest plugin (standalone process)
+guests/**/target/
 surface/node_modules/
 surface/dist/
 surface/src-tauri/target/
