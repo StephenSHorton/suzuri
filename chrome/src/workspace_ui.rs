@@ -266,6 +266,10 @@ impl WorkspaceUi {
         self.open || self.present > 0.01
     }
 
+    pub fn present(&self) -> f32 {
+        self.present.clamp(0.0, 1.0)
+    }
+
     /// Docked in a split pane (default product surface).
     pub fn is_docked(&self) -> bool {
         self.docked_pane.is_some() && self.open

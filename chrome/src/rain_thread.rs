@@ -98,6 +98,13 @@ impl RainThread {
         }
     }
 
+    /// Flip encode on/off without a full uniform publish (focus / eco).
+    pub fn set_enabled(&self, enabled: bool) {
+        if let Ok(mut j) = self.job.lock() {
+            j.enabled = enabled;
+        }
+    }
+
     /// Last completed rain RT (clone is cheap — wgpu view is refcounted).
     pub fn front_view(&self) -> wgpu::TextureView {
         self.front

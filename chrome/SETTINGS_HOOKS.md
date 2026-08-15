@@ -26,13 +26,19 @@ root. `product_config_dir()` **prefers this env** over OS defaults.
   "rain": true,
   "lens": true,
   "glass_darken": 0.82,
-  "theme": "inkstone"
+  "theme": "inkstone",
+  "animate_unfocused": false
 }
 ```
 
 Missing file or keys → defaults (`rain`/`lens` true, `glass_darken` `0.82`,
-`theme` `"inkstone"`). Unknown theme ids normalize to `inkstone`. Aliases:
+`theme` `"inkstone"`, `animate_unfocused` false). Unknown theme ids normalize to `inkstone`. Aliases:
 `tokyo_night` → `tokyo-night`, `charmtone` → `charm`.
+
+`animate_unfocused` keeps glyph rain and overlay springs running when the
+window is in the background (demo / recording). Default **off**: unfocused
+windows still drain PTYs and paint cell updates at ~12 Hz, but the rain
+thread and 60 Hz present stop. Palette: “Toggle animate when unfocused”.
 
 ## Themes
 

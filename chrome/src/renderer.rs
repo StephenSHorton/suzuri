@@ -128,6 +128,8 @@ pub struct Renderer {
     rain_atlas: RainAtlas,
     /// Encodes rain off the UI thread; we only sample the last completed RT.
     rain_thread: RainThread,
+    /// Eco: false while unfocused / occluded unless animate_unfocused.
+    rain_live: bool,
 
     composite_pipeline: wgpu::RenderPipeline,
     composite_overlay_pipeline: wgpu::RenderPipeline,
@@ -625,6 +627,7 @@ impl Renderer {
             scale_factor,
             rain_atlas,
             rain_thread,
+            rain_live: true,
             composite_pipeline,
             composite_overlay_pipeline,
             composite_bgl,
@@ -659,6 +662,12 @@ impl Renderer {
             guest_tex: HashMap::new(),
             guest_wells: Vec::new(),
         }
+    }
+
+    /// Pause or resume the off-thread rain encode. Does not present.
+    pub fn set_rain_enabled(&mut self, on: bool) {
+        self.rain_live = on;
+        self.rain_thread.set_enabled(on);
     }
 
     /// ⌘± UI zoom: scale chrome metrics + remesure mono cells. Scene blit stays 1×
@@ -1197,7 +1206,7 @@ impl Renderer {
 
         let j = settings.prefs.theme_colors().jade;
         self.rain_thread.publish(
-            settings.prefs.rain,
+            self.rain_live && settings.prefs.rain,
             self.config.width,
             self.config.height,
             RainUniforms {

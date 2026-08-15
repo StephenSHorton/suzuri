@@ -20,6 +20,7 @@ mod confirm;
 mod config_store;
 mod control_mailbox;
 mod echo_filter;
+mod eco;
 mod guest_fb;
 mod guest_host;
 mod guest_manifest;

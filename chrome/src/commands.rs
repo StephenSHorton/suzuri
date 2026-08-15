@@ -27,6 +27,8 @@ pub enum CommandAction {
     FocusDown,
     ToggleRain,
     ToggleLens,
+    /// Keep rain / springs running when the window is unfocused (demo mode).
+    ToggleAnimateUnfocused,
     ToggleCaffeine,
     Caffeine15m,
     Caffeine1h,
@@ -321,6 +323,13 @@ pub fn default_commands() -> Vec<Command> {
             desc: "Pinch or ⌃/⌘+scroll · Settings 2".into(),
             category: "Appearance",
             action: CommandAction::ToggleLens,
+        },
+        Command {
+            id: "toggle_animate_unfocused",
+            title: "Toggle animate when unfocused",
+            desc: "Rain + springs while in the background · Appearance".into(),
+            category: "Appearance",
+            action: CommandAction::ToggleAnimateUnfocused,
         },
         Command {
             id: "new_window",
@@ -825,6 +834,10 @@ impl HelpState {
         self.open || self.present > 0.01 || self.overlay > 0.01
     }
 
+    pub fn present(&self) -> f32 {
+        self.present.clamp(0.0, 1.0)
+    }
+
     pub fn content_ease(&self) -> f32 {
         let t = self.present.clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
@@ -894,6 +907,10 @@ impl SplashState {
 
     pub fn visible(&self) -> bool {
         self.open || self.present > 0.01 || self.overlay > 0.01
+    }
+
+    pub fn present(&self) -> f32 {
+        self.present.clamp(0.0, 1.0)
     }
 
     pub fn content_ease(&self) -> f32 {
@@ -1037,6 +1054,18 @@ mod tests {
         assert!(idx.iter().any(|&i| all[i].id == "rename_pane"));
         assert!(all.iter().any(|c| c.action == CommandAction::RenameTab));
         assert!(all.iter().any(|c| c.action == CommandAction::RenamePane));
+    }
+
+    #[test]
+    fn registry_contains_animate_unfocused() {
+        let all = default_commands();
+        let cmd = all
+            .iter()
+            .find(|c| c.id == "toggle_animate_unfocused")
+            .expect("toggle_animate_unfocused command");
+        assert_eq!(cmd.action, CommandAction::ToggleAnimateUnfocused);
+        let idx = filter_commands(&all, "unfocused");
+        assert!(idx.iter().any(|&i| all[i].id == "toggle_animate_unfocused"));
     }
 
     #[test]

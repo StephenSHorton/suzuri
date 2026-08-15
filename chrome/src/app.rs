@@ -28,7 +28,8 @@ use crate::commands::{
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
 use crate::input::{
-    classify_drop, classify_tab_drop, hit_test, is_mac, term_select_drag_started,
+    classify_drop, classify_tab_drop, hit_test, is_mac, pane_id_from_hit,
+    term_select_drag_started,
     window_origin_for_tab_drop, DropKind, HitTarget,
 };
 use crate::layout::{
@@ -137,6 +138,12 @@ pub struct ChromeApp {
     pending_term_select: Option<(f32, f32, CellPos)>,
     /// Force a frame from `about_to_wait` after a focus change.
     paint_dirty: bool,
+    /// Any chrome window currently has OS key focus.
+    app_focused: bool,
+    /// Focused (or last) window is fully covered by another.
+    occluded: bool,
+    /// Last GPU present — used to throttle background cell updates.
+    last_gpu_paint: Instant,
     /// Dragging the terminal scrollbar thumb/track (pane id).
     scroll_dragging: Option<u64>,
     /// Last 1-based SGR motion cell sent to an alt-screen TUI (dedupe).
@@ -267,6 +274,9 @@ impl Default for ChromeApp {
             selecting_term: false,
             pending_term_select: None,
             paint_dirty: false,
+            app_focused: true,
+            occluded: false,
+            last_gpu_paint: Instant::now(),
             scroll_dragging: None,
             alt_mouse_cell: None,
             alt_mouse_down: false,
@@ -1233,8 +1243,11 @@ impl ChromeApp {
                 p.busy = false;
             }
         }
-        if let Some(w) = &self.window {
-            w.request_redraw();
+        self.paint_dirty = true;
+        // Focused: present immediately so vim/Grok output isn't a frame late.
+        // Background: about_to_wait rate-limits the GPU present.
+        if self.paint_input().effects_live() {
+            self.request_redraw_all();
         }
     }
 
@@ -1798,9 +1811,22 @@ impl ChromeApp {
             CommandAction::FocusDown => self.focus_dir(FocusDir::Down),
             CommandAction::ToggleRain => {
                 self.settings.prefs.rain = !self.settings.prefs.rain;
+                self.sync_rain_live();
             }
             CommandAction::ToggleLens => {
                 self.settings.prefs.lens = !self.settings.prefs.lens;
+            }
+            CommandAction::ToggleAnimateUnfocused => {
+                self.settings.prefs.animate_unfocused = !self.settings.prefs.animate_unfocused;
+                self.settings.mark_dirty();
+                self.sync_rain_live();
+                let msg = if self.settings.prefs.animate_unfocused {
+                    "Animate unfocused on"
+                } else {
+                    "Animate unfocused off"
+                };
+                self.toast.show(msg);
+                self.paint_dirty = true;
             }
             CommandAction::ToggleCaffeine => {
                 let _ = self.caffeine.toggle();
@@ -2258,15 +2284,14 @@ impl ChromeApp {
         hit_test(&layout, &self.metrics, x, y, is_mac())
     }
 
-    /// 1-based viewport cell under the pointer (xterm mouse protocol).
-    /// Falls back to (1, 1) when the cursor is outside the well.
-    fn term_screen_cell_1based(&self) -> (u16, u16) {
+    /// 1-based viewport cell under the pointer in `pane_id`'s well.
+    /// Falls back to (1, 1) when the cursor is outside that well.
+    fn term_screen_cell_1based(&self, pane_id: u64) -> (u16, u16) {
         let layout = self.current_layout();
-        let focus = self.session.focus_pane_id();
-        let Some(pl) = layout.panes.iter().find(|p| p.pane_id == focus) else {
+        let Some(pl) = layout.panes.iter().find(|p| p.pane_id == pane_id) else {
             return (1, 1);
         };
-        let Some(pane) = self.session.panes.get(&focus) else {
+        let Some(pane) = self.session.panes.get(&pane_id) else {
             return (1, 1);
         };
         let cells = pl.cells;
@@ -2378,7 +2403,7 @@ impl ChromeApp {
 
     /// Forward a wheel step to an alt-screen TUI (SGR 64/65 or arrow keys).
     fn forward_alt_wheel(&mut self, pane_id: u64, steps: i32) {
-        let (col, row) = self.term_screen_cell_1based();
+        let (col, row) = self.term_screen_cell_1based(pane_id);
         let Some(rt) = self.runtimes.get_mut(&pane_id) else {
             return;
         };
@@ -3929,47 +3954,123 @@ impl ChromeApp {
         }
     }
 
-    /// True when continuous frames are needed (rain, modal springs, scroll, etc.).
-    fn needs_anim_frame(&self) -> bool {
-        if self.settings.prefs.rain {
-            return true;
-        }
+    /// Overlay springs / drags / scroll ease still moving (not "just visible").
+    fn ui_animating(&self) -> bool {
         if self.selecting_term || self.scroll_dragging.is_some() {
             return true;
         }
-        if self.settings.visible()
-            || self.palette.visible()
-            || self.help.visible()
-            || self.confirm.visible()
-            || self.splash.visible()
-            || self.notes.visible()
-            || self.workspace_ui.visible()
-            || self.transfer.visible()
-            || self.rename.visible()
-            || self.toast.visible()
+        if self.pane_drag.as_ref().is_some_and(|d| d.active) || self.sash_drag.is_some() {
+            return true;
+        }
+        if self.toast.visible() {
+            return true;
+        }
+        if self.session.panes.values().any(|p| p.grid.scroll_animating()) {
+            return true;
+        }
+        if self
+            .session
+            .tabs
+            .iter()
+            .any(|t| t.solo_exit.is_some() || t.exit.is_some())
         {
             return true;
         }
-        for pane in self.session.panes.values() {
-            if pane.grid.scroll_animating() {
-                return true;
-            }
+        use crate::eco::spring_motion;
+        if spring_motion(self.settings.open, self.settings.present()) {
+            return true;
         }
-        // Caret blink while an input path is focused.
-        if self.warp_focused
-            || self.terminal_focused
-            || self.workspace_captures_input()
-            || self.pane_drag.as_ref().is_some_and(|d| d.active)
-            || self.sash_drag.is_some()
-            || self
-                .session
-                .tabs
-                .iter()
-                .any(|t| t.solo_exit.is_some() || t.exit.is_some())
+        let rain_t = if self.settings.prefs.rain { 1.0 } else { 0.0 };
+        let lens_t = if self.settings.prefs.lens { 1.0 } else { 0.0 };
+        if (self.settings.rain_toggle_t() - rain_t).abs() > 0.02
+            || (self.settings.lens_toggle_t() - lens_t).abs() > 0.02
+        {
+            return true;
+        }
+        if spring_motion(self.palette.open, self.palette.present())
+            || spring_motion(self.help.open, self.help.present())
+            || spring_motion(self.confirm.open, self.confirm.present())
+            || spring_motion(self.splash.open, self.splash.present())
+            || spring_motion(self.notes.open, self.notes.present())
+            || spring_motion(self.workspace_ui.open, self.workspace_ui.present())
+            || spring_motion(self.transfer.open, self.transfer.present())
+            || spring_motion(self.rename.open, self.rename.present())
         {
             return true;
         }
         false
+    }
+
+    fn paint_input(&self) -> crate::eco::PaintInput {
+        crate::eco::PaintInput {
+            app_focused: self.app_focused,
+            occluded: self.occluded,
+            animate_unfocused: self.settings.prefs.animate_unfocused,
+            rain: self.settings.prefs.rain,
+            ui_animating: self.ui_animating(),
+            paint_dirty: self.paint_dirty,
+            caret_live: self.warp_focused
+                || self.terminal_focused
+                || self.workspace_captures_input(),
+        }
+    }
+
+    fn sync_rain_live(&mut self) {
+        let on = crate::eco::rain_should_run(self.paint_input());
+        for s in self.surfaces.values_mut() {
+            s.renderer.set_rain_enabled(on);
+        }
+    }
+
+    fn tick_world(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if now.duration_since(self.last_world_tick) < Duration::from_millis(8) {
+            return;
+        }
+        self.last_world_tick = now;
+        let dt = 1.0 / 60.0;
+        for pane in self.session.panes.values_mut() {
+            let _ = pane.grid.tick_scroll(dt);
+        }
+        self.settings.tick(dt);
+        self.palette.tick(dt);
+        self.help.tick(dt);
+        self.confirm.tick(dt);
+        self.splash.tick(dt);
+        self.notes.tick(dt);
+        self.workspace_ui.tick(dt);
+        self.transfer.tick(dt);
+        self.rename.tick(dt);
+        self.toast.tick(dt);
+        let _ = self.caffeine.tick();
+        let tick = self.session.tick_splits(dt);
+        if !tick.finished_closes.is_empty() {
+            self.finish_closed_panes(event_loop, &tick.finished_closes);
+        }
+        self.chip_ui.tick(dt);
+        self.sync_window_fade();
+    }
+
+    /// Scroll the pane under the pointer (or the focused pane as fallback).
+    fn scroll_pane_at(&mut self, pane_id: u64, step: i32) {
+        if self.session.pane_kind(pane_id).is_workspace() {
+            if step > 0 {
+                self.workspace_ui.scroll_up(step as usize);
+            } else {
+                self.workspace_ui.scroll_down((-step) as usize);
+            }
+            return;
+        }
+        let alt = self
+            .runtimes
+            .get(&pane_id)
+            .map(|rt| rt.ansi.on_alt_screen())
+            .unwrap_or(false);
+        if alt {
+            self.forward_alt_wheel(pane_id, step);
+        } else if let Some(grid) = self.session.grid_mut(pane_id) {
+            grid.scroll_view(step);
+        }
     }
 
     fn sync_window_fade(&self) {
@@ -4040,8 +4141,8 @@ impl ApplicationHandler for ChromeApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Lightweight wake path: drain PTY / mailboxes without a full GPU frame
-        // so key-repeat and shell output stay responsive between paints.
+        // Always drain PTYs / mailboxes / world tick — shells keep running even
+        // when we skip the GPU present (unfocused / occluded / idle).
         self.drain_all_ptys();
         self.apply_guest_events();
         self.sync_guest_focus();
@@ -4053,6 +4154,8 @@ impl ApplicationHandler for ChromeApp {
         {
             self.paint_dirty = true;
         }
+        self.reap_dead_shells();
+        self.sync_focus_for_alt_screen();
         for cmd in self.control_mailbox.poll() {
             self.run_action(event_loop, cmd.to_action());
             if matches!(cmd, crate::control_mailbox::ControlCommand::Quit) {
@@ -4063,22 +4166,25 @@ impl ApplicationHandler for ChromeApp {
         self.apply_update_events();
         if let Some(line) = chrome_status::take_submit() {
             self.submit_line_text(&line);
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
+            self.paint_dirty = true;
         }
         self.take_guest_nav_file();
+        self.tick_world(event_loop);
+        self.publish_bridge_status();
+        self.sync_rain_live();
 
-        // Schedule the next frame only when something is animating (composite
-        // rain sample, springs, scroll ease, caret blink). Rain encode runs on
-        // its own thread — this wake is just to blit the latest RT.
-        let wake = if self.needs_anim_frame() || self.paint_dirty {
-            Duration::from_millis(16) // ~60 Hz while animating
-        } else {
-            Duration::from_millis(33) // PTY poll cadence when idle
+        let input = self.paint_input();
+        let now = Instant::now();
+        event_loop.set_control_flow(ControlFlow::WaitUntil(now + crate::eco::wake_delay(input)));
+        let demand = crate::eco::gpu_demand(input);
+        let should_present = match demand {
+            crate::eco::GpuDemand::Continuous | crate::eco::GpuDemand::Caret => true,
+            crate::eco::GpuDemand::Dirty => {
+                now.duration_since(self.last_gpu_paint) >= crate::eco::dirty_min_interval(input)
+            }
+            crate::eco::GpuDemand::Idle => false,
         };
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + wake));
-        if self.needs_anim_frame() || self.paint_dirty {
+        if should_present {
             self.paint_dirty = false;
             self.request_redraw_all();
         }
@@ -4127,14 +4233,31 @@ impl ApplicationHandler for ChromeApp {
         self.bind_win(id);
         match event {
             WindowEvent::CloseRequested => self.close_surface(event_loop, id),
-            WindowEvent::Focused(true) => {
-                self.os_active = true;
-                self.focus_surface_window(id);
-                self.sync_guest_holes();
+            WindowEvent::Focused(focused) => {
+                self.os_active = focused;
+                if focused {
+                    self.app_focused = true;
+                    self.occluded = false;
+                    self.focus_surface_window(id);
+                    self.paint_dirty = true;
+                    self.sync_guest_holes();
+                    self.sync_rain_live();
+                    self.request_redraw_all();
+                } else if self.focus_win == Some(id) || self.surfaces.len() <= 1 {
+                    self.app_focused = false;
+                    self.sync_guest_holes();
+                    self.sync_rain_live();
+                }
             }
-            WindowEvent::Focused(false) => {
-                self.os_active = false;
-                self.sync_guest_holes();
+            WindowEvent::Occluded(hidden) => {
+                if self.focus_win == Some(id) || self.event_win == Some(id) {
+                    self.occluded = hidden;
+                    self.sync_rain_live();
+                    if !hidden {
+                        self.paint_dirty = true;
+                        self.request_redraw();
+                    }
+                }
             }
             WindowEvent::Moved(_) => self.sync_guest_holes(),
 
@@ -4635,26 +4758,18 @@ impl ApplicationHandler for ChromeApp {
                     if lines != 0 {
                         let step = lines.clamp(-24, 24);
                         // Workspace chat owns the wheel over its pane (or modal).
-                        if self.pointer_over_workspace() {
+                        // Hovered pane owns the wheel. Modal workspace still
+                        // wins when the pointer is on the floating card.
+                        if self.workspace_ui.is_modal() && self.pointer_over_workspace() {
                             if step > 0 {
                                 self.workspace_ui.scroll_up(step as usize);
                             } else {
                                 self.workspace_ui.scroll_down((-step) as usize);
                             }
                         } else {
-                            let id = self.session.focus_pane_id();
-                            let alt = self
-                                .runtimes
-                                .get(&id)
-                                .map(|rt| rt.ansi.on_alt_screen())
-                                .unwrap_or(false);
-                            if alt {
-                                // Grok / vim / less: host history is suppressed.
-                                // Forward wheel as SGR (if the app asked) or arrows.
-                                self.forward_alt_wheel(id, step);
-                            } else {
-                                self.session.active_grid_mut().scroll_view(step);
-                            }
+                            let id = pane_id_from_hit(self.hit_at_cursor())
+                                .unwrap_or_else(|| self.session.focus_pane_id());
+                            self.scroll_pane_at(id, step);
                         }
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -4732,7 +4847,6 @@ impl ApplicationHandler for ChromeApp {
                 self.sync_guest_focus();
                 // Auto raw-PTY focus while a fullscreen TUI owns the alt screen.
                 self.sync_focus_for_alt_screen();
-                // Phase 2 light IPC: host writes chrome_cmd; fail soft if absent.
                 for cmd in self.control_mailbox.poll() {
                     self.run_action(event_loop, cmd.to_action());
                     if matches!(cmd, crate::control_mailbox::ControlCommand::Quit) {
@@ -4741,40 +4855,12 @@ impl ApplicationHandler for ChromeApp {
                 }
                 self.sync_guest_holes();
                 self.apply_update_events();
-                // MCP / host warp submit (chrome_submit mailbox).
                 if let Some(line) = chrome_status::take_submit() {
                     self.submit_line_text(&line);
                 }
                 self.take_guest_nav_file();
-                // Publish rich status for Go bridge proxy (`chrome_status.json`).
                 self.publish_bridge_status();
-                let now = Instant::now();
-                let should_tick =
-                    now.duration_since(self.last_world_tick) >= Duration::from_millis(8);
-                let dt = 1.0 / 60.0;
-                if should_tick {
-                    self.last_world_tick = now;
-                    for pane in self.session.panes.values_mut() {
-                        let _ = pane.grid.tick_scroll(dt);
-                    }
-                    self.settings.tick(dt);
-                    self.palette.tick(dt);
-                    self.help.tick(dt);
-                    self.confirm.tick(dt);
-                    self.splash.tick(dt);
-                    self.notes.tick(dt);
-                    self.workspace_ui.tick(dt);
-                    self.transfer.tick(dt);
-                    self.rename.tick(dt);
-                    self.toast.tick(dt);
-                    let _ = self.caffeine.tick();
-                    let tick = self.session.tick_splits(dt);
-                    if !tick.finished_closes.is_empty() {
-                        self.finish_closed_panes(event_loop, &tick.finished_closes);
-                    }
-                    self.chip_ui.tick(dt);
-                    self.sync_window_fade();
-                }
+                self.tick_world(event_loop);
                 if self.session.is_empty() {
                     chrome_status::clear_status();
                     event_loop.exit();
@@ -4902,7 +4988,9 @@ impl ApplicationHandler for ChromeApp {
                             }
                         }),
                     ) {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            self.last_gpu_paint = Instant::now();
+                        }
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                             if let Some(w) = &self.window {
                                 r.resize(w.inner_size(), w.scale_factor() as f32);
@@ -4918,7 +5006,7 @@ impl ApplicationHandler for ChromeApp {
                 self.session.active_id = prev_active;
                 // Do NOT always chain request_redraw — that + heavy frames
                 // starved keyboard repeat. Continuous frames are scheduled
-                // from about_to_wait via needs_anim_frame().
+                // from about_to_wait via eco::gpu_demand().
             }
 
             _ => {}

@@ -18,6 +18,7 @@
 //! | [`input`] | Hit-test for chrome affordances |
 //! | [`settings`] | Settings overlay state + prefs |
 //! | [`config_store`] | `chrome_prefs.json` + `SUZURI_CONFIG_DIR` |
+//! | [`eco`] | Unfocused paint cadence (PTY stays live; GPU idles) |
 //! | [`control_mailbox`] | Phase 2 light IPC (`chrome_cmd` file) |
 //! | [`commands`] | Palette / shortcuts registry |
 //! | [`confirm`] | Crush-style yes/no confirm (quit) |
@@ -47,6 +48,7 @@ pub mod confirm;
 pub mod config_store;
 pub mod control_mailbox;
 pub mod echo_filter;
+pub mod eco;
 pub mod guest_fb;
 pub mod guest_host;
 pub mod guest_manifest;
@@ -104,7 +106,7 @@ pub use control_mailbox::{
     POLL_INTERVAL,
 };
 pub use input::{
-    classify_drop, classify_tab_drop, drop_edge_rect, edge_of, hit_test, is_mac,
+    classify_drop, classify_tab_drop, drop_edge_rect, edge_of, hit_test, is_mac, pane_id_from_hit,
     term_select_drag_started, traffic_light_rects, window_origin_for_tab_drop, DropKind,
     HitTarget, TERM_SELECT_DRAG_PX,
 };

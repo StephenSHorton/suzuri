@@ -962,6 +962,7 @@ mod tests {
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
             ui_zoom: 1.0,
+            animate_unfocused: false,
         };
         {
             let mut s = SettingsState::with_path(&path);
