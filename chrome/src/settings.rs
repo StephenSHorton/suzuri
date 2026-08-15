@@ -27,12 +27,13 @@ pub use crate::config_store::{ChromePrefs, GLASS_DARKEN_DEFAULT};
 /// Row indices in the settings list (must match [`SettingsLayout::ROW_COUNT`]).
 pub mod settings_row {
     pub const RAIN: usize = 0;
-    pub const LENS: usize = 1;
-    pub const PRIMARY: usize = 2;
-    pub const ACCENT: usize = 3;
-    pub const FONT: usize = 4;
-    pub const DARKEN: usize = 5;
-    pub const RESET: usize = 6;
+    pub const RAIN_QUALITY: usize = 1;
+    pub const LENS: usize = 2;
+    pub const PRIMARY: usize = 3;
+    pub const ACCENT: usize = 4;
+    pub const FONT: usize = 5;
+    pub const DARKEN: usize = 6;
+    pub const RESET: usize = 7;
 }
 
 /// Whether the settings modal is open, plus presentation springs + prefs.
@@ -175,6 +176,7 @@ impl SettingsState {
         self.selected = row;
         match row {
             settings_row::RAIN => self.prefs.rain = !self.prefs.rain,
+            settings_row::RAIN_QUALITY => self.prefs.cycle_rain_quality(-1),
             settings_row::LENS => self.prefs.lens = !self.prefs.lens,
             // Primary: Enter focuses; use ←→ / swatches to change.
             settings_row::PRIMARY => {}
@@ -211,6 +213,10 @@ impl SettingsState {
         match self.selected {
             settings_row::RAIN | settings_row::LENS => {
                 return self.activate_row(self.selected);
+            }
+            settings_row::RAIN_QUALITY => {
+                self.prefs
+                    .nudge_rain_quality(if dir < 0 { -0.25 } else { 0.25 });
             }
             settings_row::PRIMARY => {
                 self.prefs
@@ -268,8 +274,7 @@ impl SettingsState {
             self.selected = i;
             if i == settings_row::DARKEN {
                 let mid = row.x + row.w * 0.55;
-                self.prefs
-                    .nudge_darken(if x < mid { -0.05 } else { 0.05 });
+                self.prefs.nudge_darken(if x < mid { -0.05 } else { 0.05 });
                 self.dirty = true;
                 let _ = self.save_prefs();
                 return true;
@@ -292,8 +297,15 @@ impl SettingsState {
             }
             if i == settings_row::FONT {
                 let mid = row.x + row.w * 0.55;
+                self.prefs.cycle_font(if x < mid { -1 } else { 1 });
+                self.dirty = true;
+                let _ = self.save_prefs();
+                return true;
+            }
+            if i == settings_row::RAIN_QUALITY {
+                let mid = row.x + row.w * 0.55;
                 self.prefs
-                    .cycle_font(if x < mid { -1 } else { 1 });
+                    .nudge_rain_quality(if x < mid { -0.25 } else { 0.25 });
                 self.dirty = true;
                 let _ = self.save_prefs();
                 return true;
@@ -484,17 +496,12 @@ impl SettingsState {
     }
 
     /// Base modal rect — wide horizontal glass card (not a square).
-    /// Height fits title + 7 rows + color swatches + footer.
+    /// Height fits title + 8 rows + color swatches + footer.
     pub fn base_modal_rect(window_w: f32, window_h: f32) -> Rect {
         let w = (window_w - 48.0).min(560.0).max(320.0);
-        // 48 title + 7×40 + 6×8 gaps + 36 swatches + 28 footer ≈ 470
-        let h = (window_h - 80.0).min(510.0).max(470.0);
-        Rect::new(
-            (window_w - w) * 0.5,
-            (window_h - h) * 0.48,
-            w,
-            h,
-        )
+        // 48 title + 8×40 + 7×8 gaps + 36 swatches + 28 footer ≈ 518
+        let h = (window_h - 80.0).min(558.0).max(518.0);
+        Rect::new((window_w - w) * 0.5, (window_h - h) * 0.48, w, h)
     }
 
     /// Animated modal rect — agility content from **top**:
@@ -535,6 +542,7 @@ impl SettingsState {
             "PTY: mock fallback (no live shell)"
         };
         let rain = if self.prefs.rain { "on" } else { "off" };
+        let rain_quality = format!("{}%", self.prefs.rain_quality_pct());
         let lens = if self.prefs.lens { "on" } else { "off" };
         let darken_pct = (self.prefs.glass_darken * 100.0).round() as i32;
         let primary = theme::to_hex(self.prefs.primary);
@@ -551,6 +559,7 @@ impl SettingsState {
             String::new(),
             "toggles".into(),
             format!("  [1] glyph rain     {rain}"),
+            format!("      rain quality   {rain_quality}  · ←→ / Enter"),
             format!("  [2] magnifier      {lens}  · pinch or ⌃/⌘+scroll"),
             format!("  [3] primary        {primary}  · ←→ hue · swatches"),
             format!("  [4] accent         {accent}  · Enter=auto · ←→ override"),
@@ -593,7 +602,7 @@ pub struct SettingsLayout {
 }
 
 impl SettingsLayout {
-    pub const ROW_COUNT: usize = 7;
+    pub const ROW_COUNT: usize = 8;
     pub const ROW_H: f32 = 40.0;
     pub const GAP: f32 = 8.0;
     pub const SWATCH: f32 = 28.0;
@@ -954,6 +963,7 @@ mod tests {
         let _ = fs::remove_file(&path);
         let want = ChromePrefs {
             rain: false,
+            rain_quality: 0.5,
             lens: false,
             glass_darken: 0.45,
             theme: "tokyo-night".into(),
@@ -975,6 +985,31 @@ mod tests {
         }
         let s2 = SettingsState::with_path(&path);
         assert_eq!(s2.prefs, want);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rain_quality_cycles_and_persists() {
+        let path = temp_prefs_path("rain-quality");
+        let _ = fs::remove_file(&path);
+        {
+            let mut s = SettingsState::with_path(&path);
+            assert!((s.prefs.rain_quality - 1.0).abs() < 1e-4);
+            s.selected = settings_row::RAIN_QUALITY;
+            assert!(s.activate_selected());
+            assert!((s.prefs.rain_quality - 0.75).abs() < 1e-4);
+            assert!(s.nudge_selected(-1));
+            assert!((s.prefs.rain_quality - 0.5).abs() < 1e-4);
+            assert!(s.nudge_selected(1));
+            assert!((s.prefs.rain_quality - 0.75).abs() < 1e-4);
+            let lines = s.display_lines(false, 80, 24, 1).join("\n");
+            assert!(lines.contains("rain quality"));
+            assert!(lines.contains("75%"));
+        }
+        let mut s2 = SettingsState::with_path(&path);
+        assert!((s2.prefs.rain_quality - 0.75).abs() < 1e-4);
+        assert!(s2.handle_hotkey("0"));
+        assert!((s2.prefs.rain_quality - 1.0).abs() < 1e-4);
         cleanup(&path);
     }
 }

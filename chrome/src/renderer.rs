@@ -1183,10 +1183,13 @@ impl Renderer {
         }
 
         let j = settings.prefs.theme_colors().jade;
+        // Swapchain size — worker encodes at rain_rt_extent(scale). res_time /
+        // cell stay full-framebuffer so the column grid does not change.
         self.rain_thread.publish(
             self.rain_live && settings.prefs.rain,
             self.config.width,
             self.config.height,
+            settings.prefs.rain_quality,
             RainUniforms {
                 res_time: [fw, fh, 0.0, 0.0],
                 params: [
@@ -2780,9 +2783,10 @@ fn push_modal_labels(
         };
         let darken_val = format!("‹  {:.0}%  ›", settings.prefs.glass_darken * 100.0);
         use crate::settings::settings_row;
-        // Booleans = glass switches; primary/accent/font/darken show values.
+        // Booleans = glass switches; quality/primary/accent/font/darken show values.
         let titles = [
             "Glyph rain",
+            "Rain quality",
             "Magnifier",
             "Primary color",
             "Accent color",
@@ -2791,6 +2795,7 @@ fn push_modal_labels(
             "Reset defaults",
         ];
         let font_disp = format!("‹  {}  ›", crate::theme::font_label(&settings.prefs.font));
+        let quality_disp = format!("‹  {}%  ›", settings.prefs.rain_quality_pct());
         let text_size = 13.0;
         for (i, row) in lay.rows.iter().enumerate() {
             let mut tc = bright;
@@ -2807,6 +2812,7 @@ fn push_modal_labels(
                 || i == settings_row::ACCENT
                 || i == settings_row::FONT
                 || i == settings_row::DARKEN
+                || i == settings_row::RAIN_QUALITY
             {
                 let vc = if i == settings_row::PRIMARY {
                     [primary[0], primary[1], primary[2], 0.95 * ease]
@@ -2823,6 +2829,8 @@ fn push_modal_labels(
                     accent_disp.as_str()
                 } else if i == settings_row::FONT {
                     font_disp.as_str()
+                } else if i == settings_row::RAIN_QUALITY {
+                    quality_disp.as_str()
                 } else {
                     darken_val.as_str()
                 };

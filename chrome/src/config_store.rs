@@ -25,11 +25,44 @@ pub const ENV_CONFIG_DIR: &str = "SUZURI_CONFIG_DIR";
 /// Default glass face darken (matches product look).
 pub const GLASS_DARKEN_DEFAULT: f32 = 0.82;
 
+/// Rain encode scale vs the swapchain. `1.0` = native; lower is fewer GPU pixels.
+pub const RAIN_QUALITY_DEFAULT: f32 = 1.0;
+pub const RAIN_QUALITY_MIN: f32 = 0.25;
+pub const RAIN_QUALITY_MAX: f32 = 1.0;
+pub const RAIN_QUALITY_STEP: f32 = 0.25;
+
+/// Snap to 25% steps in [`RAIN_QUALITY_MIN`]..=[`RAIN_QUALITY_MAX`].
+pub fn snap_rain_quality(v: f32) -> f32 {
+    let v = v.clamp(RAIN_QUALITY_MIN, RAIN_QUALITY_MAX);
+    let steps = (v / RAIN_QUALITY_STEP).round();
+    (steps * RAIN_QUALITY_STEP).clamp(RAIN_QUALITY_MIN, RAIN_QUALITY_MAX)
+}
+
+/// Parse a rain-quality value: `0.25`–`1` scale, `25`–`100` percent, or
+/// leftover labels (`full` / `half` / `quarter`).
+pub fn parse_rain_quality(raw: &str) -> Option<f32> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    match s.to_ascii_lowercase().as_str() {
+        "full" | "native" | "high" => return Some(RAIN_QUALITY_DEFAULT),
+        "half" | "medium" => return Some(0.5),
+        "quarter" | "low" => return Some(RAIN_QUALITY_MIN),
+        _ => {}
+    }
+    let n: f32 = s.parse().ok()?;
+    let scale = if n > 1.0 + 1e-3 { n / 100.0 } else { n };
+    Some(snap_rain_quality(scale))
+}
+
 /// User-tunable chrome UI prefs (rain / lens / glass darken / colors / splash).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromePrefs {
     /// Canvas UI glyph rain under glass.
     pub rain: bool,
+    /// Rain encode scale 0.25..=1.0 (25% steps). Default 1.0 — lower is opt-in.
+    pub rain_quality: f32,
     /// Mouse glass lens / magnifier.
     pub lens: bool,
     /// Shared glass face darken 0..1 (panes / chips / modal).
@@ -56,6 +89,7 @@ impl Default for ChromePrefs {
     fn default() -> Self {
         Self {
             rain: true,
+            rain_quality: 1.0,
             lens: true,
             glass_darken: GLASS_DARKEN_DEFAULT,
             theme: theme::DEFAULT_THEME_ID.to_string(),
@@ -132,6 +166,27 @@ impl ChromePrefs {
         self.font = theme::cycle_font(&self.font, dir).to_string();
     }
 
+    /// Nudge encode scale by `delta` and snap to 25% steps (clamped).
+    pub fn nudge_rain_quality(&mut self, delta: f32) {
+        self.rain_quality = snap_rain_quality(self.rain_quality + delta);
+    }
+
+    /// Wrap through 25 / 50 / 75 / 100%. Negative `dir` goes cheaper.
+    pub fn cycle_rain_quality(&mut self, dir: i32) {
+        if dir == 0 {
+            return;
+        }
+        let n = (((RAIN_QUALITY_MAX - RAIN_QUALITY_MIN) / RAIN_QUALITY_STEP).round() as i32) + 1;
+        let i0 = ((snap_rain_quality(self.rain_quality) - RAIN_QUALITY_MIN) / RAIN_QUALITY_STEP)
+            .round() as i32;
+        let i1 = (i0 + dir.signum()).rem_euclid(n);
+        self.rain_quality = snap_rain_quality(RAIN_QUALITY_MIN + i1 as f32 * RAIN_QUALITY_STEP);
+    }
+
+    pub fn rain_quality_pct(&self) -> i32 {
+        (snap_rain_quality(self.rain_quality) * 100.0).round() as i32
+    }
+
     /// Reset toggles / colors / darken / font to factory defaults
     /// (keeps `splash_seen` and `ui_zoom`).
     pub fn reset_to_defaults(&mut self) {
@@ -148,6 +203,7 @@ impl ChromePrefs {
         self.theme = theme::normalize_id(&self.theme).to_string();
         self.font = theme::normalize_font_id(&self.font).to_string();
         self.ui_zoom = crate::layout::clamp_ui_zoom(self.ui_zoom);
+        self.rain_quality = snap_rain_quality(self.rain_quality);
         for c in &mut self.primary {
             *c = c.clamp(0.0, 1.0);
         }
@@ -199,7 +255,9 @@ pub fn load_chrome_prefs(path: &Path) -> ChromePrefs {
     let Ok(raw) = fs::read_to_string(path) else {
         return ChromePrefs::default();
     };
-    parse_chrome_prefs_json(&raw).unwrap_or_default().normalize()
+    parse_chrome_prefs_json(&raw)
+        .unwrap_or_default()
+        .normalize()
 }
 
 /// Write prefs atomically (temp + rename). Creates parent dirs as needed.
@@ -239,8 +297,9 @@ pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
     };
     let font = theme::normalize_font_id(&prefs.font);
     format!(
-        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"font\": \"{}\",\n  \"splash_seen\": {},\n  \"ui_zoom\": {},\n  \"animate_unfocused\": {}\n}}\n",
+        "{{\n  \"rain\": {},\n  \"rain_quality\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"font\": \"{}\",\n  \"splash_seen\": {},\n  \"ui_zoom\": {},\n  \"animate_unfocused\": {}\n}}\n",
         prefs.rain,
+        format_f32(snap_rain_quality(prefs.rain_quality)),
         prefs.lens,
         format_f32(prefs.glass_darken),
         theme,
@@ -262,6 +321,13 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
     }
     let d = ChromePrefs::default();
     let rain = extract_bool(trimmed, "rain").unwrap_or(d.rain);
+    let rain_quality = extract_string(trimmed, "rain_quality")
+        .and_then(|s| parse_rain_quality(&s))
+        .or_else(|| extract_f32(trimmed, "rain_quality").and_then(|n| {
+            let scale = if n > 1.0 + 1e-3 { n / 100.0 } else { n };
+            Some(snap_rain_quality(scale))
+        }))
+        .unwrap_or(d.rain_quality);
     let lens = extract_bool(trimmed, "lens").unwrap_or(d.lens);
     let glass_darken = extract_f32(trimmed, "glass_darken").unwrap_or(d.glass_darken);
     let theme = extract_string(trimmed, "theme")
@@ -311,6 +377,7 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
 
     Some(ChromePrefs {
         rain,
+        rain_quality,
         lens,
         glass_darken,
         theme,
@@ -416,6 +483,7 @@ mod tests {
         let path = temp_prefs_path("roundtrip");
         let prefs = ChromePrefs {
             rain: false,
+            rain_quality: 1.0,
             lens: true,
             glass_darken: 0.55,
             theme: "nord".into(),
@@ -462,11 +530,38 @@ mod tests {
     fn parse_partial_json_fills_defaults() {
         let p = parse_chrome_prefs_json(r#"{ "rain": false }"#).expect("parse");
         assert!(!p.rain);
+        assert!((p.rain_quality - RAIN_QUALITY_DEFAULT).abs() < 1e-4);
         assert!(p.lens);
         assert!((p.glass_darken - GLASS_DARKEN_DEFAULT).abs() < 1e-4);
         assert_eq!(p.theme, theme::DEFAULT_THEME_ID);
         assert!(!p.splash_seen);
         assert!(!p.animate_unfocused);
+    }
+
+    #[test]
+    fn rain_quality_roundtrip() {
+        let p = parse_chrome_prefs_json(r#"{ "rain_quality": "half" }"#).unwrap();
+        assert!((p.rain_quality - 0.5).abs() < 1e-4);
+        let raw = chrome_prefs_to_json(&p);
+        assert!(raw.contains("\"rain_quality\": 0.5"));
+        let back = parse_chrome_prefs_json(&raw).unwrap();
+        assert!((back.rain_quality - 0.5).abs() < 1e-4);
+        let missing = parse_chrome_prefs_json(r#"{ "rain": true }"#).unwrap();
+        assert!((missing.rain_quality - 1.0).abs() < 1e-4);
+        let quarter = parse_chrome_prefs_json(r#"{ "rain_quality": "quarter" }"#).unwrap();
+        assert!((quarter.rain_quality - 0.25).abs() < 1e-4);
+        let pct = parse_chrome_prefs_json(r#"{ "rain_quality": 25 }"#).unwrap();
+        assert!((pct.rain_quality - 0.25).abs() < 1e-4);
+        let junk = parse_chrome_prefs_json(r#"{ "rain_quality": "nope" }"#).unwrap();
+        assert!((junk.rain_quality - 1.0).abs() < 1e-4);
+        let mut c = ChromePrefs::default();
+        c.cycle_rain_quality(1);
+        assert!((c.rain_quality - 0.25).abs() < 1e-4);
+        c.cycle_rain_quality(-1);
+        assert!((c.rain_quality - 1.0).abs() < 1e-4);
+        c.nudge_rain_quality(-0.25);
+        assert!((c.rain_quality - 0.75).abs() < 1e-4);
+        assert_eq!(c.rain_quality_pct(), 75);
     }
 
     #[test]
@@ -484,6 +579,7 @@ mod tests {
         let path = temp_prefs_path("splash");
         let prefs = ChromePrefs {
             rain: true,
+            rain_quality: 1.0,
             lens: true,
             glass_darken: GLASS_DARKEN_DEFAULT,
             theme: theme::DEFAULT_THEME_ID.into(),
@@ -521,6 +617,7 @@ mod tests {
         fs::write(&config, b"{\"theme\":\"keep-me\"}\n").unwrap();
         let prefs = ChromePrefs {
             rain: false,
+            rain_quality: 1.0,
             lens: false,
             glass_darken: 0.4,
             theme: "dracula".into(),
@@ -544,6 +641,7 @@ mod tests {
     fn json_roundtrip_text() {
         let prefs = ChromePrefs {
             rain: true,
+            rain_quality: 1.0,
             lens: false,
             glass_darken: 0.82,
             theme: "charm".into(),
@@ -572,7 +670,10 @@ mod tests {
             p.file_name().and_then(|s| s.to_str()),
             Some(CHROME_PREFS_FILE)
         );
-        assert_eq!(p.parent().map(|x| x.to_path_buf()), Some(product_config_dir()));
+        assert_eq!(
+            p.parent().map(|x| x.to_path_buf()),
+            Some(product_config_dir())
+        );
     }
 
     #[test]
@@ -640,10 +741,8 @@ mod tests {
 
     #[test]
     fn new_format_primary_and_custom_accent() {
-        let p = parse_chrome_prefs_json(
-            r##"{ "primary": "#00e676", "accent": "#ff79c6" }"##,
-        )
-        .unwrap();
+        let p =
+            parse_chrome_prefs_json(r##"{ "primary": "#00e676", "accent": "#ff79c6" }"##).unwrap();
         assert!((p.primary[1] - theme::DEFAULT_PRIMARY[1]).abs() < 0.02);
         assert!(p.accent_is_custom());
         let a = p.effective_accent();
@@ -654,6 +753,7 @@ mod tests {
     fn reset_keeps_splash_seen() {
         let mut p = ChromePrefs {
             rain: false,
+            rain_quality: 0.5,
             lens: false,
             glass_darken: 0.1,
             theme: "nord".into(),
@@ -666,6 +766,7 @@ mod tests {
         };
         p.reset_to_defaults();
         assert!(p.rain && p.lens);
+        assert!((p.rain_quality - 1.0).abs() < 1e-4);
         assert!(p.splash_seen);
         assert_eq!(p.primary, theme::DEFAULT_PRIMARY);
         assert!(!p.accent_is_custom());
@@ -675,6 +776,7 @@ mod tests {
     fn normalize_unknown_theme() {
         let p = ChromePrefs {
             rain: true,
+            rain_quality: 1.0,
             lens: true,
             glass_darken: 1.5,
             theme: "nope".into(),

@@ -1816,6 +1816,13 @@ impl ChromeApp {
             CommandAction::ToggleLens => {
                 self.settings.prefs.lens = !self.settings.prefs.lens;
             }
+            CommandAction::CycleRainQuality => {
+                self.settings.prefs.cycle_rain_quality(-1);
+                self.settings.mark_dirty();
+                let msg = format!("Rain quality: {}%", self.settings.prefs.rain_quality_pct());
+                self.toast.show(msg);
+                self.paint_dirty = true;
+            }
             CommandAction::ToggleAnimateUnfocused => {
                 self.settings.prefs.animate_unfocused = !self.settings.prefs.animate_unfocused;
                 self.settings.mark_dirty();

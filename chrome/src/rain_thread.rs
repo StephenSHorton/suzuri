@@ -1,8 +1,9 @@
 //! Off-thread rain encode so glyph rain never blocks typing.
 //!
 //! The UI thread only samples the last completed rain RT. This worker
-//! owns a pair of rain targets, encodes the full-screen rain pass, waits
-//! on the GPU, then publishes the finished view.
+//! owns a pair of rain targets, encodes a **sub-framebuffer** rain pass
+//! (linearly upsampled through glass), waits on the GPU, then publishes
+//! the finished view.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,18 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::rain_sim::RainUniforms;
+
+/// Half-res rain encode scale (~4× fewer pixels). Glass refraction already
+/// softens the sample so the drop is hard to see. Full is `1.0`.
+pub const RAIN_RT_SCALE_HALF: f32 = 0.5;
+
+/// Encode size for a framebuffer of `fb_w` × `fb_h` at `scale` (1.0 = native).
+pub fn rain_rt_extent(fb_w: u32, fb_h: u32, scale: f32) -> (u32, u32) {
+    let s = scale.clamp(0.25, 1.0);
+    let w = ((fb_w as f32) * s).round().max(1.0) as u32;
+    let h = ((fb_h as f32) * s).round().max(1.0) as u32;
+    (w.max(1), h.max(1))
+}
 
 /// Latest job from the UI thread (size + uniforms + enabled).
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +57,7 @@ impl RainThread {
         height: u32,
         seed: RainUniforms,
     ) -> Self {
+        let (width, height) = rain_rt_extent(width, height, 1.0);
         let (tex0, view0) = create_rain_target(&device, width, height);
         let (tex1, view1) = create_rain_target(&device, width, height);
         // Start with a cleared front so the first composite isn't garbage.
@@ -55,7 +69,9 @@ impl RainThread {
             height,
             uniforms: seed,
         }));
-        let front = Arc::new(Mutex::new(RainFront { view: view0.clone() }));
+        let front = Arc::new(Mutex::new(RainFront {
+            view: view0.clone(),
+        }));
         let stop = Arc::new(AtomicBool::new(false));
 
         let job_w = Arc::clone(&job);
@@ -89,7 +105,19 @@ impl RainThread {
         }
     }
 
-    pub fn publish(&self, enabled: bool, width: u32, height: u32, uniforms: RainUniforms) {
+    /// `width`/`height` are the **swapchain** size. `scale` is the encode
+    /// fraction (Full=`1.0`, Half=`0.5`). The worker encodes at
+    /// [`rain_rt_extent`]. Uniforms keep full-framebuffer `res_time` / cell
+    /// so the rain grid matches the old full-res look.
+    pub fn publish(
+        &self,
+        enabled: bool,
+        width: u32,
+        height: u32,
+        scale: f32,
+        uniforms: RainUniforms,
+    ) {
+        let (width, height) = rain_rt_extent(width, height, scale);
         if let Ok(mut j) = self.job.lock() {
             j.enabled = enabled;
             j.width = width.max(1);
@@ -251,7 +279,11 @@ fn worker(
     }
 }
 
-fn create_rain_target(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+fn create_rain_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("rain target (worker)"),
         size: wgpu::Extent3d {
@@ -292,4 +324,22 @@ fn clear_target(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::Texture
     }
     let idx = queue.submit([encoder.finish()]);
     let _ = device.poll(wgpu::Maintain::WaitForSubmissionIndex(idx));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rain_rt_full_matches_framebuffer() {
+        assert_eq!(rain_rt_extent(3456, 2234, 1.0), (3456, 2234));
+        assert_eq!(rain_rt_extent(100, 50, 1.0), (100, 50));
+    }
+
+    #[test]
+    fn rain_rt_half_is_half_framebuffer() {
+        assert_eq!(rain_rt_extent(3456, 2234, RAIN_RT_SCALE_HALF), (1728, 1117));
+        assert_eq!(rain_rt_extent(1, 1, RAIN_RT_SCALE_HALF), (1, 1));
+        assert_eq!(rain_rt_extent(100, 50, RAIN_RT_SCALE_HALF), (50, 25));
+    }
 }
