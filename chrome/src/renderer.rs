@@ -168,7 +168,7 @@ pub struct Renderer {
     surface_format: wgpu::TextureFormat,
     /// Last-tab dissolve blur (logical px). Set per frame before [`render`].
     pub window_exit_blur: f32,
-    /// ⌘± view zoom (1 = identity). Applied in the lens blit; PTY grid unchanged.
+    /// Lens blit view zoom. Always 1 for ⌘± (reflow zoom); pinch magnifier stacks on top.
     view_zoom: f32,
 }
 
@@ -639,9 +639,18 @@ impl Renderer {
         }
     }
 
-    /// ⌘± view zoom. Does not change cell pitch or PTY cols/rows.
+    /// ⌘± UI zoom: scale chrome metrics + remesure mono cells. Scene blit stays 1×
+    /// so the window stays filled (pinch magnifier still uses the lens path).
+    pub fn set_ui_scale(&mut self, z: f32) {
+        let z = crate::layout::clamp_ui_zoom(z);
+        self.metrics = Metrics::default().scaled(z);
+        self.text.set_ui_scale(z);
+        self.view_zoom = 1.0;
+    }
+
+    /// Legacy name — view zoom is no longer a framebuffer blit.
     pub fn set_view_zoom(&mut self, z: f32) {
-        self.view_zoom = crate::layout::clamp_ui_zoom(z);
+        self.set_ui_scale(z);
     }
 
     /// Track pointer for magnifier center (logical px, top-left origin).
@@ -674,7 +683,7 @@ impl Renderer {
         self.mag_level > 0.02 || self.mag_level_smooth > 0.02
     }
 
-    /// Measured mono cell (logical px) — PTY cols/rows and paint pitch (not view zoom).
+    /// Measured mono cell (logical px) — PTY cols/rows and paint pitch (follows UI zoom).
     pub fn cell_metrics(&self) -> MonoCellMetrics {
         self.text.mono_cell()
     }
@@ -1595,8 +1604,8 @@ fn chrome_labels(
     let _ = tab_jelly; // labels no longer follow jelly
 
     // No window title — chrome bar is tabs + logo only.
-    // Gohu is bitmap-rooted @14 — prefer design size so chrome matches the host.
-    let tab_size = 14.0;
+    // Gohu is bitmap-rooted @14 — scale with ⌘± so chips and glyphs stay in step.
+    let tab_size = m.px(14.0);
     for (i, chip) in layout.tab_chips.iter().enumerate() {
         let id = ChipId::Tab(i);
         let surface = session.active_tab().map(|t| t.surface).unwrap_or(0);
@@ -1616,7 +1625,7 @@ fn chrome_labels(
         // Labels sit on layout chips — no hover scale.
         let r = scale_rect(*chip, chip_ui.scale_for(id));
         // Title sits in the left band; close × has its own rect on the right.
-        let title_r = crate::layout::FrameLayout::tab_title_rect(r);
+        let title_r = crate::layout::FrameLayout::tab_title_rect(r, m.ui_scale);
         labels.push(TextLabel::centered(
             title,
             [title_r.x, title_r.y, title_r.w, title_r.h],
@@ -1635,7 +1644,7 @@ fn chrome_labels(
             labels.push(TextLabel::icon_centered(
                 "×",
                 [cr.x, cr.y, cr.w, cr.h],
-                13.0,
+                m.px(13.0),
                 xc,
             ));
         }
@@ -1646,7 +1655,7 @@ fn chrome_labels(
         let id = ChipId::NewTab;
         let r = scale_rect(layout.tab_new, chip_ui.scale_for(id));
         let color = if chip_ui.is_lit(id) { bright } else { dim };
-        labels.push(TextLabel::centered("+", [r.x, r.y, r.w, r.h], 14.0, color));
+        labels.push(TextLabel::centered("+", [r.x, r.y, r.w, r.h], m.px(14.0), color));
     }
 
     // Caffeine ☕ — fully centered in the chip (hint only as short overlay text if timed).
@@ -1661,14 +1670,14 @@ fn chrome_labels(
             labels.push(TextLabel::symbol_centered(
                 format!("☕{h}"),
                 [r.x, r.y, r.w, r.h],
-                16.0,
+                m.px(16.0),
                 color,
             ));
         } else {
             labels.push(TextLabel::symbol_centered(
                 "☕",
                 [r.x, r.y, r.w, r.h],
-                20.0,
+                m.px(20.0),
                 color,
             ));
         }
@@ -1683,7 +1692,7 @@ fn chrome_labels(
         labels.push(TextLabel::centered(
             "硯",
             [r.x, r.y, r.w, r.h],
-            14.0,
+            m.px(14.0),
             chip_ui.dim_color(id, bright),
         ));
     }
@@ -1718,11 +1727,11 @@ fn chrome_labels(
             if !title.is_empty() {
                 let max_c = ((pl.title_pill.w / cell.w.max(1.0)).floor() as usize).max(1);
                 let draw = truncate_chars(title, max_c);
-                let ts = 11.0;
+                let ts = m.px(11.0);
                 let ty = pl.title_pill.y + (pl.title_pill.h - ts).max(0.0) * 0.5;
                 labels.push(TextLabel::new(
                     draw,
-                    pl.title_pill.x + 2.0,
+                    pl.title_pill.x + m.px(2.0),
                     ty,
                     ts,
                     if pl.focused { bright } else { dim },
@@ -1736,7 +1745,7 @@ fn chrome_labels(
             labels.push(TextLabel::icon_centered(
                 "×",
                 [cr.x, cr.y, cr.w, cr.h],
-                14.0,
+                m.px(14.0),
                 xc,
             ));
         }
@@ -1794,8 +1803,8 @@ fn chrome_labels(
         // Footer (path + warp) only when the command strip is present.
         // Alt-screen panes collapse the strip to zero height — skip paint.
         if pl.warp.h >= 1.0 && pl.path.h >= 1.0 {
-            let path_size = 12.0;
-            let input_size = 13.0;
+            let path_size = m.px(12.0);
+            let input_size = m.px(13.0);
             let char_w = cell.w.max(1.0);
 
             let path_str = crate::session::display_path(&pane.cwd);
@@ -3508,4 +3517,29 @@ fn create_scene_target(
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     (tex, view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::Rect;
+
+    #[test]
+    fn bigger_cells_fit_fewer_cols_in_the_same_rect() {
+        let cells = Rect::new(0.0, 0.0, 140.0, 280.0);
+        let (c1, r1) = terminal_grid_size_with(&cells, 7.0, 14.0);
+        let (c2, r2) = terminal_grid_size_with(&cells, 14.0, 28.0);
+        assert_eq!(c1, 20);
+        assert_eq!(r1, 20);
+        assert_eq!(c2, 10);
+        assert_eq!(r2, 10);
+    }
+
+    #[test]
+    fn smaller_cells_fill_the_same_rect() {
+        let cells = Rect::new(0.0, 0.0, 140.0, 280.0);
+        let (c, r) = terminal_grid_size_with(&cells, 3.5, 7.0);
+        assert_eq!(c, 40);
+        assert_eq!(r, 40);
+    }
 }

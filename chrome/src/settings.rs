@@ -961,6 +961,7 @@ mod tests {
             accent: Some(theme::TOKYO_NIGHT.secondary),
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
+            ui_zoom: 1.0,
         };
         {
             let mut s = SettingsState::with_path(&path);

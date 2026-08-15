@@ -45,6 +45,8 @@ pub struct ChromePrefs {
     pub font: String,
     /// First-run welcome splash has been dismissed (product `first_run_done` analog).
     pub splash_seen: bool,
+    /// ⌘± UI zoom (1 = design size). Missing key loads as 1.
+    pub ui_zoom: f32,
 }
 
 impl Default for ChromePrefs {
@@ -58,6 +60,7 @@ impl Default for ChromePrefs {
             accent: None,
             font: theme::DEFAULT_FONT_ID.to_string(),
             splash_seen: false,
+            ui_zoom: 1.0,
         }
     }
 }
@@ -125,11 +128,14 @@ impl ChromePrefs {
         self.font = theme::cycle_font(&self.font, dir).to_string();
     }
 
-    /// Reset toggles / colors / darken / font to factory defaults (keeps `splash_seen`).
+    /// Reset toggles / colors / darken / font to factory defaults
+    /// (keeps `splash_seen` and `ui_zoom`).
     pub fn reset_to_defaults(&mut self) {
         let splash = self.splash_seen;
+        let zoom = self.ui_zoom;
         *self = Self::default();
         self.splash_seen = splash;
+        self.ui_zoom = zoom;
     }
 
     /// Normalize after load (clamp darken/colors; migrate legacy theme).
@@ -137,6 +143,7 @@ impl ChromePrefs {
         self.glass_darken = self.glass_darken.clamp(0.0, 0.95);
         self.theme = theme::normalize_id(&self.theme).to_string();
         self.font = theme::normalize_font_id(&self.font).to_string();
+        self.ui_zoom = crate::layout::clamp_ui_zoom(self.ui_zoom);
         for c in &mut self.primary {
             *c = c.clamp(0.0, 1.0);
         }
@@ -228,7 +235,7 @@ pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
     };
     let font = theme::normalize_font_id(&prefs.font);
     format!(
-        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"font\": \"{}\",\n  \"splash_seen\": {}\n}}\n",
+        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"font\": \"{}\",\n  \"splash_seen\": {},\n  \"ui_zoom\": {}\n}}\n",
         prefs.rain,
         prefs.lens,
         format_f32(prefs.glass_darken),
@@ -237,6 +244,7 @@ pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
         accent,
         font,
         prefs.splash_seen,
+        format_f32(prefs.ui_zoom),
     )
 }
 
@@ -258,6 +266,7 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
     let font = extract_string(trimmed, "font")
         .map(|s| theme::normalize_font_id(&s).to_string())
         .unwrap_or(d.font.clone());
+    let ui_zoom = extract_f32(trimmed, "ui_zoom").unwrap_or(d.ui_zoom);
 
     // Primary: explicit `primary` hex, else legacy `accent` hex (was primary),
     // else named theme jade, else default.
@@ -302,6 +311,7 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
         accent,
         font,
         splash_seen,
+        ui_zoom,
     })
 }
 
@@ -405,6 +415,7 @@ mod tests {
             accent: Some(theme::NORD.secondary),
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
+            ui_zoom: 1.0,
         };
         save_chrome_prefs(&path, &prefs).expect("save");
         assert!(path.is_file(), "expected file at {}", path.display());
@@ -460,6 +471,7 @@ mod tests {
             accent: None,
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
+            ui_zoom: 1.0,
         };
         save_chrome_prefs(&path, &prefs).expect("save");
         let loaded = load_chrome_prefs(&path);
@@ -495,6 +507,7 @@ mod tests {
             accent: None,
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: false,
+            ui_zoom: 1.0,
         };
         save_chrome_prefs(&path, &prefs).unwrap();
         let config_body = fs::read_to_string(&config).unwrap();
@@ -516,6 +529,7 @@ mod tests {
             accent: None,
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
+            ui_zoom: 1.0,
         };
         let raw = chrome_prefs_to_json(&prefs);
         assert!(raw.contains("\"rain\": true"));
@@ -624,6 +638,7 @@ mod tests {
             accent: Some([0.0, 1.0, 0.0]),
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
+            ui_zoom: 1.0,
         };
         p.reset_to_defaults();
         assert!(p.rain && p.lens);
@@ -643,9 +658,25 @@ mod tests {
             accent: None,
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: false,
+            ui_zoom: 3.0,
         }
         .normalize();
         assert!((p.glass_darken - 0.95).abs() < 1e-5);
         assert_eq!(p.theme, "inkstone");
+        assert!((p.ui_zoom - crate::layout::UI_ZOOM_MAX).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ui_zoom_roundtrip_and_default() {
+        let prefs = ChromePrefs {
+            ui_zoom: 1.4,
+            ..ChromePrefs::default()
+        };
+        let raw = chrome_prefs_to_json(&prefs);
+        assert!(raw.contains("\"ui_zoom\": 1.4"));
+        let back = parse_chrome_prefs_json(&raw).unwrap();
+        assert!((back.ui_zoom - 1.4).abs() < 1e-4);
+        let missing = parse_chrome_prefs_json(r#"{ "rain": true }"#).unwrap();
+        assert!((missing.ui_zoom - 1.0).abs() < 1e-4);
     }
 }
