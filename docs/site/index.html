@@ -13,10 +13,10 @@
   <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png" />
   <meta property="og:title" content="suzuri（硯）— terminal host for Windows &amp; macOS" />
   <meta property="og:description" content="A real terminal host: native window, PTY, VT grid, Charm chrome, Warp-style input bar." />
-  <meta property="og:image" content="https://stephenshorton.github.io/suzuri/icons/icon-512.png" />
+  <meta property="og:image" content="https://stephenshorton.github.io/suzuri/media/suzuri-poster.jpg" />
   <meta property="og:type" content="website" />
-  <meta name="twitter:card" content="summary" />
-  <meta name="twitter:image" content="https://stephenshorton.github.io/suzuri/icons/icon-512.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:image" content="https://stephenshorton.github.io/suzuri/media/suzuri-poster.jpg" />
   <link rel="stylesheet" href="styles.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -83,6 +83,25 @@
           <p class="meta" id="release-meta">Windows amd64 · macOS arm64 · MIT License</p>
           <p class="meta fine-inline">Linux not yet supported as a host build.</p>
         </div>
+
+        <figure class="hero-shot">
+          <video
+            class="hero-shot-video"
+            autoplay
+            muted
+            loop
+            playsinline
+            disablepictureinpicture
+            controlslist="nodownload nofullscreen noremoteplayback"
+            preload="auto"
+            poster="media/suzuri-poster.jpg"
+            width="1600"
+            height="1018"
+            aria-label="suzuri running a live terminal session"
+          >
+            <source src="media/suzuri.mp4" type="video/mp4" />
+          </video>
+        </figure>
 
         <aside class="notice" aria-label="Windows note">
           <h2>Windows</h2>
@@ -387,6 +406,29 @@
       window.addEventListener("load", syncHeight, { once: true });
 
       return instance;
+    }
+
+    // Hero product clip: loop without chrome. Pause when the visitor prefers
+    // reduced motion so the poster stands in as a still.
+    {
+      const video = document.querySelector(".hero-shot-video");
+      if (video) {
+        const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+        const apply = () => {
+          if (reduce.matches) {
+            video.pause();
+            video.removeAttribute("autoplay");
+            return;
+          }
+          video.play().catch(() => {
+            /* autoplay policy — poster remains */
+          });
+        };
+        apply();
+        if (typeof reduce.addEventListener === "function") {
+          reduce.addEventListener("change", apply);
+        }
+      }
     }
 
     document.documentElement.dataset.canvasUi = useHic ? "html-in-canvas" : "fallback";
