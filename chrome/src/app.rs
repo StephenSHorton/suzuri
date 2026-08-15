@@ -991,7 +991,9 @@ impl ChromeApp {
     /// Push hole geometry to every live guest. Hidden when the pane is off-tab
     /// or a glass overlay covers the mosaic.
     fn sync_guest_holes(&mut self) {
-        let overlay = self.overlay_open() || !self.os_active;
+        // Palette/modals cover the mosaic. Alt-tab must not hide the SZFB well
+        // — that used to recreate the file while Ladybird still had it mapped.
+        let overlay = self.overlay_open();
         let scale = self.renderer().map(|r| r.scale_factor()).unwrap_or(1.0);
         let mut visible = std::collections::HashSet::new();
         let keys: Vec<u64> = if self.surfaces.is_empty() {

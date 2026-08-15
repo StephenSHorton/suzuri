@@ -407,8 +407,9 @@ impl GuestHost {
             live.last_geom = Some(key);
             let path = live.fb_path.clone();
             let (fb_w, fb_h) = guest_fb::pixel_size(rect.w, rect.h, scale);
+            // Same pixel size: do not recreate the file (truncating SIGBUS's
+            // a guest that still has the well mmap'd).
             let _ = guest_fb::create(&path, fb_w, fb_h);
-            live.fb_seq = 0;
             encode_resize(rect, scale, native.as_ref(), Some((&path, fb_w, fb_h)))
         };
         self.send(pane_id, &line);
