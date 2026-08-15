@@ -412,6 +412,10 @@ impl NotesState {
         self.open || self.present > 0.01
     }
 
+    pub fn present(&self) -> f32 {
+        self.present.clamp(0.0, 1.0)
+    }
+
     pub fn open(&mut self) {
         self.open = true;
         // Blank active note: name first (product openNotes).

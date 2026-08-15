@@ -47,6 +47,9 @@ pub struct ChromePrefs {
     pub splash_seen: bool,
     /// ⌘± UI zoom (1 = design size). Missing key loads as 1.
     pub ui_zoom: f32,
+    /// Keep rain / overlay springs running when the window is unfocused or occluded.
+    /// Default off — demo-friendly when on, battery-hostile.
+    pub animate_unfocused: bool,
 }
 
 impl Default for ChromePrefs {
@@ -61,6 +64,7 @@ impl Default for ChromePrefs {
             font: theme::DEFAULT_FONT_ID.to_string(),
             splash_seen: false,
             ui_zoom: 1.0,
+            animate_unfocused: false,
         }
     }
 }
@@ -235,7 +239,7 @@ pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
     };
     let font = theme::normalize_font_id(&prefs.font);
     format!(
-        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"font\": \"{}\",\n  \"splash_seen\": {},\n  \"ui_zoom\": {}\n}}\n",
+        "{{\n  \"rain\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"font\": \"{}\",\n  \"splash_seen\": {},\n  \"ui_zoom\": {},\n  \"animate_unfocused\": {}\n}}\n",
         prefs.rain,
         prefs.lens,
         format_f32(prefs.glass_darken),
@@ -245,6 +249,7 @@ pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
         font,
         prefs.splash_seen,
         format_f32(prefs.ui_zoom),
+        prefs.animate_unfocused,
     )
 }
 
@@ -267,6 +272,8 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
         .map(|s| theme::normalize_font_id(&s).to_string())
         .unwrap_or(d.font.clone());
     let ui_zoom = extract_f32(trimmed, "ui_zoom").unwrap_or(d.ui_zoom);
+    let animate_unfocused =
+        extract_bool(trimmed, "animate_unfocused").unwrap_or(d.animate_unfocused);
 
     // Primary: explicit `primary` hex, else legacy `accent` hex (was primary),
     // else named theme jade, else default.
@@ -312,6 +319,7 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
         font,
         splash_seen,
         ui_zoom,
+        animate_unfocused,
     })
 }
 
@@ -416,6 +424,7 @@ mod tests {
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
             ui_zoom: 1.0,
+            animate_unfocused: false,
         };
         save_chrome_prefs(&path, &prefs).expect("save");
         assert!(path.is_file(), "expected file at {}", path.display());
@@ -457,6 +466,17 @@ mod tests {
         assert!((p.glass_darken - GLASS_DARKEN_DEFAULT).abs() < 1e-4);
         assert_eq!(p.theme, theme::DEFAULT_THEME_ID);
         assert!(!p.splash_seen);
+        assert!(!p.animate_unfocused);
+    }
+
+    #[test]
+    fn animate_unfocused_roundtrip() {
+        let p = parse_chrome_prefs_json(r#"{ "animate_unfocused": true }"#).unwrap();
+        assert!(p.animate_unfocused);
+        let raw = chrome_prefs_to_json(&p);
+        assert!(raw.contains("\"animate_unfocused\": true"));
+        let back = parse_chrome_prefs_json(&raw).unwrap();
+        assert!(back.animate_unfocused);
     }
 
     #[test]
@@ -472,6 +492,7 @@ mod tests {
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
             ui_zoom: 1.0,
+            animate_unfocused: false,
         };
         save_chrome_prefs(&path, &prefs).expect("save");
         let loaded = load_chrome_prefs(&path);
@@ -508,6 +529,7 @@ mod tests {
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: false,
             ui_zoom: 1.0,
+            animate_unfocused: false,
         };
         save_chrome_prefs(&path, &prefs).unwrap();
         let config_body = fs::read_to_string(&config).unwrap();
@@ -530,6 +552,7 @@ mod tests {
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
             ui_zoom: 1.0,
+            animate_unfocused: false,
         };
         let raw = chrome_prefs_to_json(&prefs);
         assert!(raw.contains("\"rain\": true"));
@@ -639,6 +662,7 @@ mod tests {
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: true,
             ui_zoom: 1.0,
+            animate_unfocused: false,
         };
         p.reset_to_defaults();
         assert!(p.rain && p.lens);
@@ -659,6 +683,7 @@ mod tests {
             font: theme::DEFAULT_FONT_ID.into(),
             splash_seen: false,
             ui_zoom: 3.0,
+            animate_unfocused: false,
         }
         .normalize();
         assert!((p.glass_darken - 0.95).abs() < 1e-5);

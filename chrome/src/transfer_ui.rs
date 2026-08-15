@@ -85,6 +85,10 @@ impl TransferUi {
         self.open || self.present > 0.01
     }
 
+    pub fn present(&self) -> f32 {
+        self.present.clamp(0.0, 1.0)
+    }
+
     /// Host should only route OS drops as transfer-send input when this is true
     /// (matches product `AcceptsFileDrop`).
     pub fn accepts_file_drop(&self) -> bool {

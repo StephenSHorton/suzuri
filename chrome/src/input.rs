@@ -35,6 +35,19 @@ pub enum HitTarget {
     None,
 }
 
+/// Pane id under a chrome hit, if the pointer is on that pane's surface.
+#[inline]
+pub fn pane_id_from_hit(hit: HitTarget) -> Option<u64> {
+    match hit {
+        HitTarget::Terminal(id)
+        | HitTarget::WarpBar(id)
+        | HitTarget::ScrollBar(id)
+        | HitTarget::PaneChrome(id)
+        | HitTarget::PaneClose(id) => Some(id),
+        _ => None,
+    }
+}
+
 /// Width of the scroll hit gutter inside the cell well (logical px).
 pub const SCROLL_GUTTER_W: f32 = 10.0;
 
@@ -477,6 +490,18 @@ mod tests {
             matches!(xhit, HitTarget::PaneClose(_)),
             "pane × should close, got {xhit:?}"
         );
+    }
+
+    #[test]
+    fn pane_id_from_hit_reads_pane_surfaces() {
+        assert_eq!(pane_id_from_hit(HitTarget::Terminal(7)), Some(7));
+        assert_eq!(pane_id_from_hit(HitTarget::WarpBar(3)), Some(3));
+        assert_eq!(pane_id_from_hit(HitTarget::ScrollBar(2)), Some(2));
+        assert_eq!(pane_id_from_hit(HitTarget::PaneChrome(9)), Some(9));
+        assert_eq!(pane_id_from_hit(HitTarget::PaneClose(4)), Some(4));
+        assert_eq!(pane_id_from_hit(HitTarget::TitleDrag), None);
+        assert_eq!(pane_id_from_hit(HitTarget::Tab(0)), None);
+        assert_eq!(pane_id_from_hit(HitTarget::None), None);
     }
 
     #[test]
