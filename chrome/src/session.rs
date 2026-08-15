@@ -11,16 +11,18 @@ use crate::panes::{
 use crate::shell::{self, ShellOutput};
 
 /// What a leaf pane hosts. Terminals own a PTY; widgets reuse the split tree
-/// without a shell (workspace chat now, notes/transfer later).
+/// without a shell (workspace chat, guest processes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WidgetKind {
     Workspace,
+    Guest,
 }
 
 impl WidgetKind {
     pub fn title(self) -> &'static str {
         match self {
             Self::Workspace => "workspace",
+            Self::Guest => "guest",
         }
     }
 }
@@ -38,6 +40,10 @@ impl PaneKind {
 
     pub fn is_workspace(self) -> bool {
         matches!(self, Self::Widget(WidgetKind::Workspace))
+    }
+
+    pub fn is_guest(self) -> bool {
+        matches!(self, Self::Widget(WidgetKind::Guest))
     }
 
     pub fn widget(self) -> Option<WidgetKind> {
@@ -60,6 +66,10 @@ pub struct Pane {
     pub cwd: String,
     /// Local command draft for this pane's input strip.
     pub draft: String,
+    /// Manifest id when [`PaneKind`] is a guest. None for terminals / workspace.
+    pub guest_id: Option<String>,
+    /// Last location the guest reported (`url` message).
+    pub guest_url: String,
     /// Shell exited / user closed — animating out; don't re-trigger.
     pub exiting: bool,
 }
@@ -74,6 +84,8 @@ fn new_terminal_pane(id: u64, cols: u16, rows: u16, cwd: String) -> Pane {
         pty_mode: false,
         cwd,
         draft: String::new(),
+        guest_id: None,
+        guest_url: String::new(),
         exiting: false,
     }
 }
@@ -94,6 +106,8 @@ fn new_widget_pane(id: u64, kind: WidgetKind, cwd: String) -> Pane {
         pty_mode: false,
         cwd,
         draft: String::new(),
+        guest_id: None,
+        guest_url: String::new(),
         exiting: false,
     }
 }
@@ -835,14 +849,18 @@ impl ChromeSession {
     }
 
     /// Split the focused pane and insert a widget leaf (no PTY). Returns new id.
+    ///
+    /// Workspace is a singleton. Guests are not — each call inserts a new leaf.
     pub fn split_focused_widget(
         &mut self,
         axis: SplitAxis,
         kind: WidgetKind,
     ) -> Option<u64> {
-        if let Some(existing) = self.find_widget(kind) {
-            self.set_focus_pane(existing);
-            return Some(existing);
+        if kind != WidgetKind::Guest {
+            if let Some(existing) = self.find_widget(kind) {
+                self.set_focus_pane(existing);
+                return Some(existing);
+            }
         }
         let tab_id = self.active_id;
         let focus = self.focus_pane_id();
@@ -863,6 +881,58 @@ impl ChromeSession {
 
         self.panes.insert(new_id, new_widget_pane(new_id, kind, cwd));
         Some(new_id)
+    }
+
+    /// Split in a guest leaf bound to `guest_id`. Always a new pane.
+    pub fn split_focused_guest(
+        &mut self,
+        axis: SplitAxis,
+        guest_id: &str,
+        title: &str,
+    ) -> Option<u64> {
+        let id = self.split_focused_widget(axis, WidgetKind::Guest)?;
+        if let Some(p) = self.panes.get_mut(&id) {
+            p.guest_id = Some(guest_id.to_string());
+            if !title.is_empty() {
+                p.title = title.to_string();
+            }
+        }
+        Some(id)
+    }
+
+    /// New tab whose only leaf is a guest. No PTY / no leftover shell.
+    pub fn new_guest_tab(&mut self, guest_id: &str, title: &str) -> u64 {
+        let pane_id = self.next_pane_id;
+        self.next_pane_id = self.next_pane_id.saturating_add(1);
+        let tab_id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
+        let cwd = self
+            .active_pane()
+            .map(|p| p.cwd.clone())
+            .unwrap_or_else(initial_cwd);
+        let mut pane = new_widget_pane(pane_id, WidgetKind::Guest, cwd);
+        pane.guest_id = Some(guest_id.to_string());
+        if !title.is_empty() {
+            pane.title = title.to_string();
+        }
+        self.panes.insert(pane_id, pane);
+        let surface = self.active_tab().map(|t| t.surface).unwrap_or(0);
+        let tab_title = if title.is_empty() {
+            default_tab_title(tab_id)
+        } else {
+            title.to_string()
+        };
+        self.tabs.push(Tab {
+            id: tab_id,
+            title: tab_title,
+            root: SplitNode::leaf(pane_id),
+            focus_pane: pane_id,
+            solo_exit: None,
+            surface,
+            exit: None,
+        });
+        self.active_id = tab_id;
+        pane_id
     }
 
     /// First non-exiting pane hosting `kind`, if any (any tab).
@@ -889,6 +959,10 @@ impl ChromeSession {
 
     pub fn focused_is_workspace(&self) -> bool {
         self.pane_kind(self.focus_pane_id()).is_workspace()
+    }
+
+    pub fn focused_is_guest(&self) -> bool {
+        self.pane_kind(self.focus_pane_id()).is_guest()
     }
 
     /// Tab that currently owns `pane_id` in its split tree.
@@ -2046,5 +2120,37 @@ mod tests {
         assert_eq!(s.find_widget(WidgetKind::Workspace), Some(id));
         s.panes.get_mut(&id).unwrap().exiting = true;
         assert_eq!(s.find_widget(WidgetKind::Workspace), None);
+    }
+
+    #[test]
+    fn split_guest_is_not_singleton() {
+        let mut s = ChromeSession::new(80, 24);
+        let a = s
+            .split_focused_guest(SplitAxis::Vertical, "example", "Example")
+            .unwrap();
+        let b = s
+            .split_focused_guest(SplitAxis::Horizontal, "example", "Example")
+            .unwrap();
+        assert_ne!(a, b);
+        assert!(s.pane_kind(a).is_guest());
+        assert!(s.pane_kind(b).is_guest());
+        assert_eq!(s.panes.get(&a).unwrap().guest_id.as_deref(), Some("example"));
+        assert_eq!(
+            s.panes
+                .values()
+                .filter(|p| p.kind.is_guest())
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn guest_tab_has_no_terminal() {
+        let mut s = ChromeSession::new(80, 24);
+        let id = s.new_guest_tab("example", "Example");
+        assert!(s.pane_kind(id).is_guest());
+        assert!(s.focused_is_guest());
+        let tab = s.active_tab().unwrap();
+        assert_eq!(tab.root.leaf_ids(), vec![id]);
     }
 }

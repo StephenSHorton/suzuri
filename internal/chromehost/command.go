@@ -19,6 +19,7 @@ const (
 	CmdQuit                = "quit"
 	CmdOpenNotes           = "open_notes"
 	CmdOpenWorkspace       = "open_workspace"
+	CmdOpenGuest           = "open_guest"
 	CmdOpenPalette         = "open_palette"
 	CmdOpenSettings        = "open_settings"
 	CmdOpenTransferSend    = "open_transfer_send"
@@ -53,7 +54,7 @@ func SendCommand(cmd string) error {
 		return fmt.Errorf("chromehost: empty command")
 	}
 	if !ValidCommand(cmd) {
-		return fmt.Errorf("chromehost: unknown command %q (want quit|open_notes|open_workspace|open_palette|open_settings|open_transfer_send|open_transfer_receive|open_help|new_tab|new_window|toggle_caffeine|refresh_workspace)", cmd)
+		return fmt.Errorf("chromehost: unknown command %q (want quit|open_notes|open_workspace|open_guest|open_palette|open_settings|open_transfer_send|open_transfer_receive|open_help|new_tab|new_window|toggle_caffeine|refresh_workspace)", cmd)
 	}
 
 	path := CmdPath()
@@ -84,6 +85,7 @@ func ValidCommand(cmd string) bool {
 	case CmdQuit,
 		CmdOpenNotes,
 		CmdOpenWorkspace,
+		CmdOpenGuest,
 		CmdOpenPalette,
 		CmdOpenSettings,
 		CmdOpenTransferSend,

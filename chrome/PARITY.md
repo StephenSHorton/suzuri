@@ -79,6 +79,20 @@ go build -o suzuri ./cmd/suzuri && ./suzuri
 - Scrollbar scrub snaps; wheel/Page keys ease
 - Quieter dual bin/lib dead_code surface
 
+## Wave 13 · guest panes
+- `WidgetKind::Guest` (not a singleton) + palette **New guest pane**
+- Manifests at `{config}/guests/*.json` (soft no-op if missing)
+- Localhost JSON channel per pane (`spawn` / `navigate` / `kill` + `hello` / `title` / `url`)
+- Sample binary: `guests/example` (`suzuri-guest-example`)
+- Mailbox `open_guest`
+
+## Wave 14 · native pane hole
+- Spawn/resize carry `fb` `{ path, width, height }` (`SZFB` BGRA file)
+- Example guest paints the buffer; chrome blits it into the well in wgpu
+- Chrome still draws the URL on top; no NSWindow overlay over Metal
+
 ## Later
+- IOSurface / shared texture (skip the file copy)
+- Windows hole when pointed at
 - Full in-process GPU present loop (cgo + host window)
 - Package install always ships `suzuri-chrome` sibling binary

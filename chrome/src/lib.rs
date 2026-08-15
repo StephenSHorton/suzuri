@@ -47,6 +47,9 @@ pub mod confirm;
 pub mod config_store;
 pub mod control_mailbox;
 pub mod echo_filter;
+pub mod guest_fb;
+pub mod guest_host;
+pub mod guest_manifest;
 pub mod input;
 pub mod kitty;
 pub mod layout;
@@ -94,6 +97,8 @@ pub use updater::{
     UPDATE_REQ_FILE,
 };
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
+pub use guest_host::{guest_hole_rect, guest_mount_rect, GuestEvent, GuestHost, NativeAttach};
+pub use guest_manifest::{guests_dir, load_guests, GuestManifest, GUEST_PROTOCOL};
 pub use control_mailbox::{
     chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
     POLL_INTERVAL,

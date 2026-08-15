@@ -181,6 +181,8 @@ pub struct PaneLayout {
     pub title_pill: Rect,
     pub close: Rect,
     pub focused: bool,
+    /// Opaque well (no rain). Guest plugins paint here.
+    pub hole: bool,
 }
 
 /// One chrome frame’s computed geometry.
@@ -499,7 +501,12 @@ impl FrameLayout {
         // Workspace panes — smooth-unioned in the shader with the active tab
         // (surface tension / stretchy glass, not separate cubes).
         for pl in &self.panes {
-            out.push(PanelInstance::glass(pl.glass, m.radius, PanelKind::Terminal));
+            let kind = if pl.hole {
+                PanelKind::GuestHole
+            } else {
+                PanelKind::Terminal
+            };
+            out.push(PanelInstance::glass(pl.glass, m.radius, kind));
             {
                 let id = ChipId::PaneClose(pl.pane_id);
                 if pl.close.w > 2.0 && chip_ui.ghost_shell_visible(id) {
@@ -673,6 +680,7 @@ fn pane_layout_in_glass(
             title_pill,
             close,
             focused,
+            hole: false,
         };
     }
 
@@ -709,6 +717,7 @@ fn pane_layout_in_glass(
         title_pill,
         close,
         focused,
+        hole: false,
     }
 }
 
@@ -751,6 +760,8 @@ pub enum PanelKind {
     Hairline = 16,
     /// Dim primary glow / smoke on the focused pane.
     PaneFocus = 17,
+    /// Guest plugin well — opaque, no rain (the guest paints the pixels).
+    GuestHole = 18,
 }
 
 /// GPU-ready panel instance.
