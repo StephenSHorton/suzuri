@@ -64,6 +64,8 @@ pub struct Metrics {
     /// Corner radius for nav chips (tabs / + / settings).
     pub chip_radius: f32,
     pub spacing: Spacing,
+    /// ⌘± UI scale (1 = design size). Layout + font share this so zoom reflows.
+    pub ui_scale: f32,
 }
 
 impl Default for Metrics {
@@ -78,11 +80,38 @@ impl Default for Metrics {
             radius: s.unit * 2.0,        // 16
             chip_radius: s.unit,         // 8
             spacing: s,
+            ui_scale: 1.0,
         }
     }
 }
 
 impl Metrics {
+    /// Scale chrome metrics for ⌘± zoom. Window size stays put; layout reflows.
+    pub fn scaled(self, z: f32) -> Self {
+        let z = clamp_ui_zoom(z);
+        Self {
+            title_h: self.title_h * z,
+            tab_h: self.tab_h * z,
+            input_strip_h: self.input_strip_h * z,
+            radius: self.radius * z,
+            chip_radius: self.chip_radius * z,
+            spacing: Spacing {
+                unit: self.spacing.unit * z,
+                edge: self.spacing.edge * z,
+                stack: self.spacing.stack * z,
+                inset: self.spacing.inset * z,
+                cluster: self.spacing.cluster * z,
+            },
+            ui_scale: z,
+        }
+    }
+
+    /// Design-px → current zoom (tabs, lights, pads).
+    #[inline]
+    pub fn px(self, n: f32) -> f32 {
+        n * self.ui_scale.max(0.05)
+    }
+
     /// Window edge inset (left / right / bottom).
     #[inline]
     pub fn edge(self) -> f32 {
@@ -282,18 +311,21 @@ impl FrameLayout {
         // Nav chips first — still centered in the chrome bar (traffic lights too).
         // Pane rises to the chip bottoms so nav↔pane air is closed without
         // sliding chips down.
-        let chip_h = m.spacing.unit * 4.0; // 32
+        let chip_h = m.spacing.unit * 4.0; // 32 at 1×
         let cluster = m.cluster();
-        let chip_w = TAB_CHIP_W; // title + air + close ×
+        let chip_w = m.px(TAB_CHIP_W); // title + air + close ×
         let logo_w = chip_h; // square glass
         let chip_y = ((chrome_h - chip_h) * 0.5).max(0.0);
         let chip_bottom = chip_y + chip_h;
+        let close_sz = m.px(TAB_CLOSE_SZ);
+        let close_trail = m.px(TAB_CLOSE_TRAIL);
+        let min_well = m.px(80.0);
 
         let term_x = edge;
         // Flush under chip bottoms (was flush under full chrome_h → ~4px air).
         let term_y = chip_bottom;
-        let term_w = (width - edge * 2.0).max(80.0);
-        let term_h = (height - term_y - edge).max(80.0);
+        let term_w = (width - edge * 2.0).max(min_well);
+        let term_h = (height - term_y - edge).max(min_well);
         let workspace = Rect::new(term_x, term_y, term_w, term_h);
 
         // Default: one pane fills the workspace.
@@ -334,7 +366,7 @@ impl FrameLayout {
         let tabs_left = if cfg!(target_os = "macos") {
             // lights: 16 + 3*12 + 2*8 ≈ 60; keep extra air before first tab
             // (was 72 — felt tight against the traffic lights).
-            80.0 // a bit more than 72, less than 88
+            m.px(80.0)
         } else {
             edge
         };
@@ -355,9 +387,9 @@ impl FrameLayout {
             let chip = Rect::new(x, chip_y, chip_w, chip_h);
             tab_chips.push(chip);
             // Close ×: right side of chip with trail padding (not jammed in the corner).
-            let cx = chip.x + chip.w - TAB_CLOSE_TRAIL - TAB_CLOSE_SZ;
-            let cy = chip.y + (chip.h - TAB_CLOSE_SZ) * 0.5;
-            tab_closes.push(Rect::new(cx, cy, TAB_CLOSE_SZ, TAB_CLOSE_SZ));
+            let cx = chip.x + chip.w - close_trail - close_sz;
+            let cy = chip.y + (chip.h - close_sz) * 0.5;
+            tab_closes.push(Rect::new(cx, cy, close_sz, close_sz));
             x += chip_w + cluster;
         }
         // Ghost + control: smaller hit/glass shell; icon stays full size in paint.
@@ -395,12 +427,13 @@ impl FrameLayout {
     }
 
     /// Title label area inside a tab chip (excludes close × + gaps).
-    pub fn tab_title_rect(chip: Rect) -> Rect {
-        let right = TAB_CLOSE_TRAIL + TAB_CLOSE_SZ + TAB_CLOSE_GAP;
+    pub fn tab_title_rect(chip: Rect, ui_scale: f32) -> Rect {
+        let s = ui_scale.max(0.05);
+        let right = (TAB_CLOSE_TRAIL + TAB_CLOSE_SZ + TAB_CLOSE_GAP) * s;
         Rect::new(
-            chip.x + 10.0,
+            chip.x + 10.0 * s,
             chip.y,
-            (chip.w - 10.0 - right).max(8.0),
+            (chip.w - 10.0 * s - right).max(8.0 * s),
             chip.h,
         )
     }
@@ -584,22 +617,26 @@ impl FrameLayout {
 ///
 /// When `fullscreen` is true (VT alt screen), path/warp/divider collapse and the
 /// cell grid fills the glass — full-screen TUIs (vim, grok, etc.).
-fn pane_header_rects(glass: Rect, inset: f32) -> (Rect, Rect, Rect) {
+fn pane_header_rects(glass: Rect, m: Metrics) -> (Rect, Rect, Rect) {
+    let inset = m.inset();
     let inner_x = glass.x + inset;
-    let inner_w = (glass.w - inset * 2.0).max(24.0);
-    let header = Rect::new(inner_x, glass.y + 3.0, inner_w, PANE_HEADER_H);
+    let inner_w = (glass.w - inset * 2.0).max(m.px(24.0));
+    let header_h = m.px(PANE_HEADER_H);
+    let close_sz = m.px(PANE_CLOSE_SZ);
+    let pill_h = m.px(PANE_PILL_H);
+    let header = Rect::new(inner_x, glass.y + m.px(3.0), inner_w, header_h);
     let close = Rect::new(
-        header.x + header.w - PANE_CLOSE_SZ,
-        header.y + (header.h - PANE_CLOSE_SZ) * 0.5,
-        PANE_CLOSE_SZ,
-        PANE_CLOSE_SZ,
+        header.x + header.w - close_sz,
+        header.y + (header.h - close_sz) * 0.5,
+        close_sz,
+        close_sz,
     );
-    let title_w = (header.w - PANE_CLOSE_SZ - 8.0).max(20.0);
+    let title_w = (header.w - close_sz - m.px(8.0)).max(m.px(20.0));
     let title_pill = Rect::new(
-        header.x + 2.0,
-        header.y + (header.h - PANE_PILL_H) * 0.5,
+        header.x + m.px(2.0),
+        header.y + (header.h - pill_h) * 0.5,
         title_w,
-        PANE_PILL_H,
+        pill_h,
     );
     (header, title_pill, close)
 }
@@ -612,15 +649,16 @@ fn pane_layout_in_glass(
     fullscreen: bool,
 ) -> PaneLayout {
     let inset = m.inset();
-    let (header, title_pill, close) = pane_header_rects(glass, inset);
+    let (header, title_pill, close) = pane_header_rects(glass, m);
     let inner_x = glass.x + inset;
-    let inner_w = (glass.w - inset * 2.0).max(40.0);
-    let inner_top = (header.y + header.h + 2.0).max(glass.y + inset);
+    let inner_w = (glass.w - inset * 2.0).max(m.px(40.0));
+    let inner_top = (header.y + header.h + m.px(2.0)).max(glass.y + inset);
     let inner_bottom = glass.y + glass.h - inset;
     let avail = (inner_bottom - inner_top).max(0.0);
+    let cells_min = m.px(CELL_H_MIN);
 
     if fullscreen {
-        let cells_h = avail.max(CELL_H_MIN);
+        let cells_h = avail.max(cells_min);
         let cells = Rect::new(inner_x, inner_top, inner_w, cells_h);
         // Zero-size strip so paint/hit-test skip path & warp.
         let empty = Rect::new(inner_x, cells.y + cells.h, inner_w, 0.0);
@@ -638,9 +676,9 @@ fn pane_layout_in_glass(
         };
     }
 
-    // Three fixed mono rows (divider / path / input) — each = one cell height so
-    // 14px Gohu never overflows its band or the glass bottom.
-    let row: f32 = 14.0;
+    // Three mono rows (divider / path / input) — each = one zoomed cell height
+    // so glyphs never overflow the footer band or the glass bottom.
+    let row: f32 = (m.input_strip_h / 3.0).max(1.0);
     let strip_want: f32 = row * 3.0;
     let strip: f32 = strip_want.min(avail);
     let row_h: f32 = if strip >= strip_want {
@@ -650,7 +688,7 @@ fn pane_layout_in_glass(
     };
     let strip: f32 = row_h * 3.0;
 
-    let cells_h = (avail - strip).max(CELL_H_MIN);
+    let cells_h = (avail - strip).max(cells_min);
     let cells = Rect::new(inner_x, inner_top, inner_w, cells_h);
 
     let divider = Rect::new(inner_x, cells.y + cells.h, inner_w, row_h);
@@ -766,23 +804,13 @@ impl PanelInstance {
 unsafe impl bytemuck::Pod for PanelInstance {}
 unsafe impl bytemuck::Zeroable for PanelInstance {}
 
-/// ⌘± view zoom (not font size, not PTY cols/rows).
+/// ⌘± UI zoom: font + chrome metrics + PTY reflow (not a scene blit).
 pub const UI_ZOOM_MIN: f32 = 0.5;
 pub const UI_ZOOM_MAX: f32 = 2.5;
 pub const UI_ZOOM_STEP: f32 = 0.1;
 
 pub fn clamp_ui_zoom(z: f32) -> f32 {
     z.clamp(UI_ZOOM_MIN, UI_ZOOM_MAX)
-}
-
-/// Map a screen-space pointer to scene space under a view zoom around `origin`.
-/// Matches `view_unmap` in `shaders/lens.wgsl`.
-pub fn scene_from_screen(sx: f32, sy: f32, origin: (f32, f32), zoom: f32) -> (f32, f32) {
-    let z = clamp_ui_zoom(zoom).max(0.05);
-    (
-        origin.0 + (sx - origin.0) / z,
-        origin.1 + (sy - origin.1) / z,
-    )
 }
 
 #[cfg(test)]
@@ -938,35 +966,61 @@ mod tests {
         assert!(l.tab_chips[2].x < x1 + TAB_CHIP_W);
     }
 
-    #[test]
-    fn scene_from_screen_identity_at_1x() {
-        let (x, y) = scene_from_screen(120.0, 80.0, (400.0, 300.0), 1.0);
-        assert!((x - 120.0).abs() < 1e-5);
-        assert!((y - 80.0).abs() < 1e-5);
+    fn assert_layout_fills(width: f32, height: f32, m: Metrics, tab_count: usize) {
+        let l = FrameLayout::compute(width, height, m, tab_count);
+        let edge = m.edge();
+        assert!(
+            (l.workspace.x - edge).abs() < 0.01,
+            "left gutter {}",
+            l.workspace.x
+        );
+        assert!(
+            (width - l.workspace.x - l.workspace.w - edge).abs() < 0.01,
+            "right gutter"
+        );
+        assert!(
+            (height - (l.workspace.y + l.workspace.h) - edge).abs() < 0.01,
+            "bottom gutter {}",
+            height - (l.workspace.y + l.workspace.h)
+        );
+        assert!(l.workspace.y + l.workspace.h <= height + 0.01);
     }
 
     #[test]
-    fn scene_from_screen_origin_stays_put() {
-        let o = (400.0, 300.0);
-        let (x, y) = scene_from_screen(o.0, o.1, o, 2.0);
-        assert!((x - o.0).abs() < 1e-5);
-        assert!((y - o.1).abs() < 1e-5);
+    fn clamp_ui_zoom_bounds() {
+        assert!((clamp_ui_zoom(0.1) - UI_ZOOM_MIN).abs() < 1e-5);
+        assert!((clamp_ui_zoom(3.0) - UI_ZOOM_MAX).abs() < 1e-5);
+        assert!((clamp_ui_zoom(1.0) - 1.0).abs() < 1e-5);
     }
 
     #[test]
-    fn scene_from_screen_zoom_in_maps_toward_origin() {
-        // Screen point 100px right of center at 2× shows scene 50px right of center.
-        let o = (400.0, 300.0);
-        let (x, y) = scene_from_screen(500.0, 300.0, o, 2.0);
-        assert!((x - 450.0).abs() < 1e-5);
-        assert!((y - 300.0).abs() < 1e-5);
+    fn zoomed_layout_fills_window() {
+        assert_layout_fills(800.0, 600.0, Metrics::default().scaled(1.6), 2);
+        assert_layout_fills(800.0, 600.0, Metrics::default().scaled(0.5), 4);
+        assert_layout_fills(1120.0, 740.0, Metrics::default().scaled(2.5), 1);
     }
 
     #[test]
-    fn scene_from_screen_zoom_out_maps_away_from_origin() {
-        let o = (400.0, 300.0);
-        let (x, y) = scene_from_screen(500.0, 300.0, o, 0.5);
-        assert!((x - 600.0).abs() < 1e-5);
-        assert!((y - 300.0).abs() < 1e-5);
+    fn zoom_in_fits_fewer_tab_chips() {
+        let wide = 800.0;
+        let a = FrameLayout::compute(wide, 600.0, Metrics::default(), 12);
+        let b = FrameLayout::compute(wide, 600.0, Metrics::default().scaled(2.0), 12);
+        assert!(
+            b.tab_chips.len() < a.tab_chips.len(),
+            "1× chips {} vs 2× {}",
+            a.tab_chips.len(),
+            b.tab_chips.len()
+        );
+        assert!(b.tab_chips[0].h > a.tab_chips[0].h);
+        assert!(b.tab_chips[0].w > a.tab_chips[0].w);
+    }
+
+    #[test]
+    fn footer_row_follows_zoom() {
+        let l1 = FrameLayout::compute(800.0, 600.0, Metrics::default(), 1);
+        let l2 = FrameLayout::compute(800.0, 600.0, Metrics::default().scaled(2.0), 1);
+        assert!((l1.path.h - 14.0).abs() < 0.01, "1× footer {}", l1.path.h);
+        assert!((l2.path.h - 28.0).abs() < 0.01, "2× footer {}", l2.path.h);
+        assert!(l2.cells.h < l1.cells.h, "bigger footer + header shrinks cells");
     }
 }

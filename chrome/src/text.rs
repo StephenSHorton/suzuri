@@ -34,6 +34,9 @@ const SYMBOLS_FAMILY: &str = "Segoe UI Symbol";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const SYMBOLS_FAMILY: &str = "Noto Sans Symbols2";
 
+/// Gohu uni14 design size (logical px) at 1× zoom.
+pub const MONO_DESIGN_PX: f32 = 14.0;
+
 /// Mono cell size in **logical** px (grid + paint). Measured from Gohu when possible.
 #[derive(Clone, Copy, Debug)]
 pub struct MonoCellMetrics {
@@ -44,7 +47,17 @@ pub struct MonoCellMetrics {
 impl Default for MonoCellMetrics {
     fn default() -> Self {
         // Gohu uni14 design size — fallback if measurement fails.
-        Self { w: 7.0, h: 14.0 }
+        Self { w: 7.0, h: MONO_DESIGN_PX }
+    }
+}
+
+impl MonoCellMetrics {
+    fn fallback_at(design: f32) -> Self {
+        let z = (design / MONO_DESIGN_PX).max(0.05);
+        Self {
+            w: (7.0 * z).round().max(1.0),
+            h: design.max(1.0),
+        }
     }
 }
 
@@ -238,6 +251,10 @@ pub struct TextLayer {
     mono_weight: Weight,
     /// Measured mono cell (logical px) for terminal grid + paint.
     mono_cell: MonoCellMetrics,
+    /// ⌘± UI scale. Label `size` is design-px; prepare multiplies by this.
+    ui_scale: f32,
+    /// Mono probe / cell height (14 × ui_scale).
+    design_size: f32,
 }
 
 impl TextLayer {
@@ -354,12 +371,31 @@ impl TextLayer {
             mono_family: gohu_family,
             mono_weight: gohu_weight,
             mono_cell,
+            ui_scale: 1.0,
+            design_size: MONO_DESIGN_PX,
         }
     }
 
     /// Measured mono cell size (logical px) for PTY grid + terminal paint.
     pub fn mono_cell(&self) -> MonoCellMetrics {
         self.mono_cell
+    }
+
+    /// ⌘± UI scale applied to label sizes and mono cell pitch.
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale
+    }
+
+    /// Change ⌘± scale. Remeasures mono cell. Returns true if scale changed.
+    pub fn set_ui_scale(&mut self, z: f32) -> bool {
+        let z = crate::layout::clamp_ui_zoom(z);
+        if (self.ui_scale - z).abs() < 1e-4 {
+            return false;
+        }
+        self.ui_scale = z;
+        self.design_size = MONO_DESIGN_PX * z;
+        self.remeasure_mono_cell();
+        true
     }
 
     /// Active mono font id (settings).
@@ -411,7 +447,7 @@ impl TextLayer {
     }
 
     fn remeasure_mono_cell(&mut self) {
-        let design = 14.0_f32;
+        let design = self.design_size.max(1.0);
         let mut probe = Buffer::new(&mut self.font_system, FontMetrics::new(design, design));
         probe.set_size(&mut self.font_system, Some(200.0), Some(design));
         let attrs = if self.mono_font_id == "system" {
@@ -427,13 +463,15 @@ impl TextLayer {
         for run in probe.layout_runs() {
             advance = advance.max(run.line_w);
         }
-        self.mono_cell = if advance >= 5.0 && advance <= 16.0 {
+        let lo = design * 0.30;
+        let hi = design * 1.20;
+        self.mono_cell = if advance >= lo && advance <= hi {
             MonoCellMetrics {
                 w: advance.round().max(1.0),
                 h: design,
             }
         } else {
-            MonoCellMetrics::default()
+            MonoCellMetrics::fallback_at(design)
         };
     }
 
@@ -473,6 +511,7 @@ impl TextLayer {
 
         for (i, label) in labels.iter().enumerate() {
             // Prefer integer physical px (bitmap-friendly).
+            // Callers pass on-screen logical size (terminal = cell.h, already zoomed).
             let size_px = (label.size * scale).max(1.0).round().max(1.0);
             let line_height = if label.tight {
                 size_px
@@ -664,5 +703,35 @@ mod tests {
         assert_eq!(label.center_in, Some(hit));
         assert_eq!(label.size, 14.0);
         assert!(!TextLabel::centered("×", hit, 11.0, [1.0; 4]).tight);
+    }
+
+    #[test]
+    fn gohu_advance_grows_with_design_size() {
+        let mut font_system = FontSystem::new();
+        font_system.db_mut().load_font_data(GOHU_TTF.to_vec());
+        let probe = |fs: &mut FontSystem, design: f32| -> f32 {
+            let mut buf = Buffer::new(fs, FontMetrics::new(design, design));
+            buf.set_size(fs, Some(200.0), Some(design));
+            let attrs = Attrs::new()
+                .family(Family::Name(GOHU_FAMILY))
+                .weight(Weight(500));
+            buf.set_text(fs, "M", attrs, Shaping::Advanced);
+            buf.shape_until_scroll(fs, false);
+            buf.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
+        };
+        let w14 = probe(&mut font_system, MONO_DESIGN_PX);
+        let w28 = probe(&mut font_system, MONO_DESIGN_PX * 2.0);
+        assert!(
+            w14 >= 5.0 && w14 <= 12.0,
+            "Gohu 14px advance should be a cell, got {w14}"
+        );
+        // Either the face scales (~2×) or we fall back to a scaled pitch.
+        let scaled = MonoCellMetrics::fallback_at(MONO_DESIGN_PX * 2.0);
+        assert!(
+            w28 > w14 * 1.3 || (scaled.w - w14 * 2.0).abs() < 1.5,
+            "2× design should grow advance ({w14} → {w28}) or fallback pitch {}",
+            scaled.w
+        );
+        assert!((scaled.h - 28.0).abs() < 1e-4);
     }
 }

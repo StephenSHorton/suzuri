@@ -63,26 +63,26 @@ pub fn is_mac() -> bool {
 /// - 8px gap between dots
 /// - vertically centered in the title strip
 pub fn traffic_light_rects(metrics: &Metrics) -> [Rect; 3] {
-    const LEFT: f32 = 16.0;
-    const DOT: f32 = 12.0;
-    const GAP: f32 = 8.0;
+    let left = metrics.px(16.0);
+    let dot = metrics.px(12.0);
+    let gap = metrics.px(8.0);
 
-    let y = (metrics.title_h - DOT) * 0.5;
+    let y = (metrics.title_h - dot) * 0.5;
     [
-        Rect::new(LEFT, y, DOT, DOT),                     // close
-        Rect::new(LEFT + DOT + GAP, y, DOT, DOT),         // minimize
-        Rect::new(LEFT + 2.0 * (DOT + GAP), y, DOT, DOT), // zoom
+        Rect::new(left, y, dot, dot),                     // close
+        Rect::new(left + dot + gap, y, dot, dot),         // minimize
+        Rect::new(left + 2.0 * (dot + gap), y, dot, dot), // zoom
     ]
 }
 
 /// Right edge of the traffic-light cluster (with a little trailing pad), used to
 /// carve title-drag away from the buttons on macOS.
-fn traffic_lights_right() -> f32 {
-    const LEFT: f32 = 16.0;
-    const DOT: f32 = 12.0;
-    const GAP: f32 = 8.0;
-    const TRAIL: f32 = 8.0;
-    LEFT + 3.0 * DOT + 2.0 * GAP + TRAIL
+fn traffic_lights_right(metrics: &Metrics) -> f32 {
+    let left = metrics.px(16.0);
+    let dot = metrics.px(12.0);
+    let gap = metrics.px(8.0);
+    let trail = metrics.px(8.0);
+    left + 3.0 * dot + 2.0 * gap + trail
 }
 
 /// Hit-test chrome at `(x, y)` in logical pixels (top-left origin).
@@ -168,7 +168,7 @@ pub fn hit_test(
     }
 
     if layout.title.contains(x, y) {
-        if is_mac && x < traffic_lights_right() {
+        if is_mac && x < traffic_lights_right(metrics) {
             return HitTarget::None;
         }
         // Don't drag when over tab chips (already handled); empty bar drag.

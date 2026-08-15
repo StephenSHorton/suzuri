@@ -32,7 +32,7 @@ use crate::input::{
     window_origin_for_tab_drop, DropKind, HitTarget,
 };
 use crate::layout::{
-    clamp_ui_zoom, scene_from_screen, FrameLayout, Metrics, UI_ZOOM_STEP,
+    clamp_ui_zoom, FrameLayout, Metrics, UI_ZOOM_STEP,
 };
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
 use crate::mouse_pty::{encode_mouse_button, encode_mouse_motion, encode_mouse_wheel};
@@ -153,7 +153,7 @@ pub struct ChromeApp {
     update_mailbox: UpdateMailbox,
     /// Publish `chrome_status.json` for Go MCP bridge proxy.
     status_publisher: StatusPublisher,
-    /// View zoom multiplier (⌘± / ⌘0). 1.0 = identity. GPU blit only — no PTY resize.
+    /// UI zoom (⌘± / ⌘0). Scales font + chrome metrics and reflows the PTY.
     ui_zoom: f32,
 
     /// Last applied mono font id (avoid re-resolve every paint).
@@ -286,6 +286,8 @@ impl Default for ChromeApp {
         if !app.settings.prefs.splash_seen {
             app.splash.open_splash();
         }
+        app.ui_zoom = clamp_ui_zoom(app.settings.prefs.ui_zoom);
+        app.metrics = Metrics::default().scaled(app.ui_zoom);
         app
     }
 }
@@ -803,7 +805,8 @@ impl ChromeApp {
         let window = Arc::new(event_loop.create_window(attrs).ok()?);
         #[cfg(target_os = "macos")]
         crate::macos_window::configure_rounded_window(&window, 16.0);
-        let renderer = pollster::block_on(Renderer::new(window.clone()));
+        let mut renderer = pollster::block_on(Renderer::new(window.clone()));
+        renderer.set_ui_scale(self.ui_zoom);
         let key = self.next_surface_key;
         self.next_surface_key = self.next_surface_key.saturating_add(1);
         let wid = window.id();
@@ -944,33 +947,50 @@ impl ChromeApp {
         layout
     }
 
-    /// Native mono cell pitch (logical px). View zoom does not change this —
-    /// PTY cols/rows stay put so fullscreen TUIs do not reflow.
+    /// Mono cell pitch (logical px). Follows ⌘± so grid + glyphs stay in step.
     fn cell_metrics(&self) -> MonoCellMetrics {
         self.renderer()
             .map(|r| r.cell_metrics())
             .unwrap_or_default()
     }
 
-    /// Scene-space pointer under ⌘± view zoom (matches `lens.wgsl` `view_unmap`).
+    /// Pointer in layout space. Zoom is a layout scale, so this is the raw cursor.
     fn pointer(&self) -> (f32, f32) {
-        let origin = self
-            .renderer()
-            .map(|r| {
-                let (w, h) = r.logical_size();
-                (w * 0.5, h * 0.5)
-            })
-            .unwrap_or((0.0, 0.0));
-        scene_from_screen(self.cursor.x, self.cursor.y, origin, self.ui_zoom)
+        (self.cursor.x, self.cursor.y)
+    }
+
+    fn apply_ui_zoom(&mut self) {
+        let z = self.ui_zoom;
+        self.metrics = Metrics::default().scaled(z);
+        for s in self.surfaces.values_mut() {
+            s.renderer.set_ui_scale(z);
+        }
+        if (self.settings.prefs.ui_zoom - z).abs() > 1e-4 {
+            self.settings.prefs.ui_zoom = z;
+            self.settings.mark_dirty();
+            let _ = self.settings.save_if_dirty();
+        }
+        self.sync_grids_to_panes();
     }
 
     fn nudge_zoom(&mut self, delta: f32) {
-        self.ui_zoom = clamp_ui_zoom(self.ui_zoom + delta);
+        let next = clamp_ui_zoom(self.ui_zoom + delta);
+        if (next - self.ui_zoom).abs() < 1e-4 {
+            self.toast.show(format!("Zoom {:.0}% (limit)", self.ui_zoom * 100.0));
+            return;
+        }
+        self.ui_zoom = next;
+        self.apply_ui_zoom();
         self.toast.show(format!("Zoom {:.0}%", self.ui_zoom * 100.0));
     }
 
     fn reset_zoom(&mut self) {
+        if (self.ui_zoom - 1.0).abs() < 1e-4 {
+            self.toast.show("Zoom 100%");
+            return;
+        }
         self.ui_zoom = 1.0;
+        self.apply_ui_zoom();
         self.toast.show("Zoom 100%");
     }
 
@@ -3652,7 +3672,8 @@ impl ApplicationHandler for ChromeApp {
         #[cfg(target_os = "macos")]
         crate::macos_window::configure_rounded_window(&window, 16.0);
 
-        let renderer = pollster::block_on(Renderer::new(window.clone()));
+        let mut renderer = pollster::block_on(Renderer::new(window.clone()));
+        renderer.set_ui_scale(self.ui_zoom);
         self.metrics = renderer.metrics();
         let wid = window.id();
         self.surfaces.insert(
@@ -4441,7 +4462,7 @@ impl ApplicationHandler for ChromeApp {
                     .unwrap_or(0.0);
                 if let Some(r) = self.surfaces.get_mut(&id).map(|s| &mut s.renderer) {
                     r.window_exit_blur = exit_blur;
-                    r.set_view_zoom(self.ui_zoom);
+                    r.set_ui_scale(self.ui_zoom);
                     match r.render(
                         &self.session,
                         &self.settings,
