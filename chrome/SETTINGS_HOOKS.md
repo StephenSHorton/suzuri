@@ -24,6 +24,7 @@ root. `product_config_dir()` **prefers this env** over OS defaults.
 ```json
 {
   "rain": true,
+  "rain_quality": 1,
   "lens": true,
   "glass_darken": 0.82,
   "theme": "inkstone",
@@ -31,9 +32,16 @@ root. `product_config_dir()` **prefers this env** over OS defaults.
 }
 ```
 
-Missing file or keys → defaults (`rain`/`lens` true, `glass_darken` `0.82`,
+Missing file or keys → defaults (`rain`/`lens` true, `rain_quality` `1`,
+`glass_darken` `0.82`,
 `theme` `"inkstone"`, `animate_unfocused` false). Unknown theme ids normalize to `inkstone`. Aliases:
 `tokyo_night` → `tokyo-night`, `charmtone` → `charm`.
+
+`rain_quality` is the rain encode scale (`0.25` / `0.5` / `0.75` / `1`, or
+percent `25`–`100`). Default **1** (native). Lower values write fewer GPU
+pixels and upsample through glass. Settings row “Rain quality” (25% steps);
+palette “Cycle rain quality”. Legacy labels `full` / `half` / `quarter` still
+parse. Unknown values normalize to `1`.
 
 `animate_unfocused` keeps glyph rain and overlay springs running when the
 window is in the background (demo / recording). Default **off**: unfocused

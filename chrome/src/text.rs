@@ -47,7 +47,10 @@ pub struct MonoCellMetrics {
 impl Default for MonoCellMetrics {
     fn default() -> Self {
         // Gohu uni14 design size — fallback if measurement fails.
-        Self { w: 7.0, h: MONO_DESIGN_PX }
+        Self {
+            w: 7.0,
+            h: MONO_DESIGN_PX,
+        }
     }
 }
 
@@ -81,6 +84,8 @@ pub struct TextLabel {
     /// Line box = font size (no 1.2 leading). Needed so a single glyph
     /// centers on `center_in` instead of sitting low in the extra leading.
     pub tight: bool,
+    /// Blink / sine caret — prepared separately so it does not bust the grid cache.
+    pub caret: bool,
 }
 
 impl TextLabel {
@@ -98,6 +103,7 @@ impl TextLabel {
             center_in: None,
             clip: None,
             tight: false,
+            caret: false,
         }
     }
 
@@ -115,15 +121,11 @@ impl TextLabel {
             center_in: None,
             clip: None,
             tight: false,
+            caret: false,
         }
     }
 
-    pub fn centered(
-        text: impl Into<String>,
-        rect: [f32; 4],
-        size: f32,
-        color: [f32; 4],
-    ) -> Self {
+    pub fn centered(text: impl Into<String>, rect: [f32; 4], size: f32, color: [f32; 4]) -> Self {
         Self {
             text: text.into(),
             x: rect[0],
@@ -137,6 +139,7 @@ impl TextLabel {
             center_in: Some(rect),
             clip: None,
             tight: false,
+            caret: false,
         }
     }
 
@@ -155,6 +158,12 @@ impl TextLabel {
     /// Clip this label to a logical rect (e.g. terminal cells hole).
     pub fn with_clip(mut self, clip: [f32; 4]) -> Self {
         self.clip = Some(clip);
+        self
+    }
+
+    /// Mark as a blink/sine caret (prepared on a side path).
+    pub fn as_caret(mut self) -> Self {
+        self.caret = true;
         self
     }
 
@@ -194,6 +203,7 @@ impl TextLabel {
             center_in: None,
             clip: None,
             tight: false,
+            caret: false,
         }
     }
 
@@ -216,6 +226,7 @@ impl TextLabel {
             center_in: Some(rect),
             clip: None,
             tight: false,
+            caret: false,
         }
     }
 }
@@ -237,6 +248,11 @@ pub struct TextLayer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     buffers: Vec<Buffer>,
+    /// Fingerprint of the last fully reshaped non-caret body.
+    last_body_fp: u64,
+    body_prepared: bool,
+    /// How many leading buffers belong to the cached body.
+    body_len: usize,
     width: u32,
     height: u32,
     scale_factor: f32,
@@ -292,21 +308,15 @@ impl TextLayer {
                 gohu_weight.0
             );
         } else {
-            eprintln!(
-                "suzuri-chrome: Gohu face not found after load (expected `{GOHU_FAMILY}`)"
-            );
+            eprintln!("suzuri-chrome: Gohu face not found after load (expected `{GOHU_FAMILY}`)");
         }
 
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
-        let text_renderer = TextRenderer::new(
-            &mut atlas,
-            device,
-            wgpu::MultisampleState::default(),
-            None,
-        );
+        let text_renderer =
+            TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
 
         let seed = Buffer::new(&mut font_system, FontMetrics::new(14.0, 18.0));
 
@@ -346,10 +356,7 @@ impl TextLayer {
             } else {
                 MonoCellMetrics::default()
             };
-            eprintln!(
-                "suzuri-chrome: mono cell {}×{} logical px",
-                cell.w, cell.h
-            );
+            eprintln!("suzuri-chrome: mono cell {}×{} logical px", cell.w, cell.h);
             (ok, cell)
         };
 
@@ -361,6 +368,9 @@ impl TextLayer {
             atlas,
             text_renderer,
             buffers: vec![seed],
+            last_body_fp: 0,
+            body_prepared: false,
+            body_len: 0,
             width: 1,
             height: 1,
             scale_factor: 1.0,
@@ -395,6 +405,7 @@ impl TextLayer {
         self.ui_scale = z;
         self.design_size = MONO_DESIGN_PX * z;
         self.remeasure_mono_cell();
+        self.invalidate_body_cache();
         true
     }
 
@@ -418,6 +429,7 @@ impl TextLayer {
             .db_mut()
             .set_monospace_family(self.mono_family.as_str());
         self.remeasure_mono_cell();
+        self.invalidate_body_cache();
         true
     }
 
@@ -425,7 +437,11 @@ impl TextLayer {
         let candidates: &[&str] = match id {
             "sf-mono" => &["SF Mono", "SFMono-Regular", "Menlo"],
             "menlo" => &["Menlo", "Menlo-Regular"],
-            "jetbrains" => &["JetBrains Mono", "JetBrainsMono-Regular", "JetBrains Mono NL"],
+            "jetbrains" => &[
+                "JetBrains Mono",
+                "JetBrainsMono-Regular",
+                "JetBrains Mono NL",
+            ],
             "cascadia" => &["Cascadia Mono", "Cascadia Code", "CascadiaMono"],
             "system" => &[], // Family::Monospace
             _ => return (self.gohu_family.clone(), self.gohu_weight),
@@ -476,17 +492,37 @@ impl TextLayer {
     }
 
     pub fn resize(&mut self, physical: PhysicalSize<u32>, scale_factor: f32) {
-        self.width = physical.width.max(1);
-        self.height = physical.height.max(1);
-        self.scale_factor = scale_factor.max(0.01);
+        let w = physical.width.max(1);
+        let h = physical.height.max(1);
+        let s = scale_factor.max(0.01);
+        if w != self.width || h != self.height || (s - self.scale_factor).abs() > 1e-4 {
+            self.invalidate_body_cache();
+        }
+        self.width = w;
+        self.height = h;
+        self.scale_factor = s;
     }
 
-    pub fn prepare(
+    fn invalidate_body_cache(&mut self) {
+        self.body_prepared = false;
+        self.last_body_fp = 0;
+        self.body_len = 0;
+    }
+
+    pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, labels: &[TextLabel]) {
+        let _ = self.prepare_body_and_caret(device, queue, labels, &[]);
+    }
+
+    /// Reshape the static body only when it changes. Carets (blink / sine) are
+    /// always reshaped — they are a handful of labels and must not bust the grid.
+    /// Returns whether the body was reshaped (caller may trim the atlas).
+    pub fn prepare_body_and_caret(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        labels: &[TextLabel],
-    ) {
+        body: &[TextLabel],
+        carets: &[TextLabel],
+    ) -> bool {
         self.viewport.update(
             queue,
             Resolution {
@@ -495,134 +531,34 @@ impl TextLayer {
             },
         );
 
+        let fp = labels_fingerprint(body);
+        let body_changed = !self.body_prepared || fp != self.last_body_fp;
+        if body_changed {
+            self.ensure_buffers(body.len());
+            self.reshape_range(0, body);
+            self.last_body_fp = fp;
+            self.body_prepared = true;
+            self.body_len = body.len();
+        }
+
+        let caret_start = self.body_len;
+        self.ensure_buffers(caret_start + carets.len());
+        self.reshape_range(caret_start, carets);
+
         let scale = self.scale_factor;
-
-        while self.buffers.len() < labels.len() {
-            self.buffers.push(Buffer::new(
-                &mut self.font_system,
-                FontMetrics::new(14.0, 18.0),
-            ));
-        }
-
-        let mono_name = self.mono_family.clone();
-        let mono_weight = self.mono_weight;
-        let mono_system = self.mono_font_id == "system";
-        let gohu_ok = self.gohu_ok;
-
-        for (i, label) in labels.iter().enumerate() {
-            // Prefer integer physical px (bitmap-friendly).
-            // Callers pass on-screen logical size (terminal = cell.h, already zoomed).
-            let size_px = (label.size * scale).max(1.0).round().max(1.0);
-            let line_height = if label.tight {
-                size_px
-            } else {
-                (size_px * 1.2).round().max(size_px)
-            };
-            let metrics = FontMetrics::new(size_px, line_height);
-            let max_w = (self.width as f32).max(1.0);
-            let text = label.text.as_str();
-            let is_rain = label.rain;
-            let is_symbols = label.symbols;
-            let is_key_chord = label.key_chord;
-
-            let buf = &mut self.buffers[i];
-            buf.set_metrics(&mut self.font_system, metrics);
-            // Key chords: give the buffer a wide single-line box so multi-glyph
-            // modifiers (⇧⌘T) never wrap into a second line.
-            let buf_h = if is_key_chord {
-                line_height * 1.5
-            } else {
-                line_height
-            };
-            buf.set_size(&mut self.font_system, Some(max_w), Some(buf_h));
-
-            if is_rain {
-                #[cfg(target_os = "macos")]
-                {
-                    let attrs = Attrs::new().family(Family::Name("Hiragino Sans"));
-                    buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let attrs = Attrs::new().family(Family::SansSerif);
-                    buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-                }
-            } else if is_symbols {
-                let attrs = Attrs::new().family(Family::Name(SYMBOLS_FAMILY));
-                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-            } else if is_key_chord {
-                // One system UI face for the whole chord → shared baseline / advances.
-                let attrs = Attrs::new().family(Family::Name(KEY_CHORD_FAMILY));
-                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-            } else if mono_system || !gohu_ok {
-                let attrs = Attrs::new()
-                    .family(Family::Monospace)
-                    .weight(mono_weight);
-                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-            } else {
-                // Named mono face (Gohu weight 500, system faces usually 400).
-                let attrs = Attrs::new()
-                    .family(Family::Name(mono_name.as_str()))
-                    .weight(mono_weight);
-                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-            }
-            buf.shape_until_scroll(&mut self.font_system, false);
-        }
-
-        let full_bounds = TextBounds {
-            left: 0,
-            top: 0,
-            right: self.width as i32,
-            bottom: self.height as i32,
-        };
-
-        let areas: Vec<TextArea> = labels
-            .iter()
-            .enumerate()
-            .map(|(i, label)| {
-                let size_px = (label.size * scale).max(1.0).round().max(1.0);
-                let (left, top) = if let Some([rx, ry, rw, rh]) = label.center_in {
-                    let line_w = self.buffers[i]
-                        .layout_runs()
-                        .map(|run| run.line_w)
-                        .fold(0.0f32, f32::max);
-                    let cx = rx * scale;
-                    let cy = ry * scale;
-                    let cw = rw * scale;
-                    let ch = rh * scale;
-                    (
-                        cx + (cw - line_w).max(0.0) * 0.5,
-                        cy + (ch - size_px).max(0.0) * 0.5,
-                    )
-                } else {
-                    (label.x * scale, label.y * scale)
-                };
-                // Optional clip to a logical rect (terminal cells hole).
-                let bounds = if let Some([cx, cy, cw, ch]) = label.clip {
-                    let l = (cx * scale).floor() as i32;
-                    let t = (cy * scale).floor() as i32;
-                    let r = ((cx + cw) * scale).ceil() as i32;
-                    let b = ((cy + ch) * scale).ceil() as i32;
-                    TextBounds {
-                        left: l.max(0),
-                        top: t.max(0),
-                        right: r.min(self.width as i32),
-                        bottom: b.min(self.height as i32),
-                    }
-                } else {
-                    full_bounds
-                };
-                TextArea {
-                    buffer: &self.buffers[i],
-                    left,
-                    top,
-                    scale: 1.0,
-                    bounds,
-                    default_color: rgba_u8(label.color),
-                    custom_glyphs: &[],
-                }
-            })
-            .collect();
+        let width = self.width;
+        let height = self.height;
+        let mut areas = Vec::with_capacity(body.len() + carets.len());
+        collect_areas(&self.buffers, 0, body, width, height, scale, &mut areas);
+        collect_areas(
+            &self.buffers,
+            caret_start,
+            carets,
+            width,
+            height,
+            scale,
+            &mut areas,
+        );
 
         if self
             .text_renderer
@@ -647,6 +583,76 @@ impl TextLayer {
                 areas,
                 &mut self.swash_cache,
             );
+        }
+        body_changed
+    }
+
+    fn ensure_buffers(&mut self, n: usize) {
+        while self.buffers.len() < n {
+            self.buffers.push(Buffer::new(
+                &mut self.font_system,
+                FontMetrics::new(14.0, 18.0),
+            ));
+        }
+    }
+
+    fn reshape_range(&mut self, start: usize, labels: &[TextLabel]) {
+        let scale = self.scale_factor;
+        let mono_name = self.mono_family.clone();
+        let mono_weight = self.mono_weight;
+        let mono_system = self.mono_font_id == "system";
+        let gohu_ok = self.gohu_ok;
+
+        for (i, label) in labels.iter().enumerate() {
+            let size_px = (label.size * scale).max(1.0).round().max(1.0);
+            let line_height = if label.tight {
+                size_px
+            } else {
+                (size_px * 1.2).round().max(size_px)
+            };
+            let metrics = FontMetrics::new(size_px, line_height);
+            let max_w = (self.width as f32).max(1.0);
+            let text = label.text.as_str();
+            let is_rain = label.rain;
+            let is_symbols = label.symbols;
+            let is_key_chord = label.key_chord;
+
+            let buf = &mut self.buffers[start + i];
+            buf.set_metrics(&mut self.font_system, metrics);
+            let buf_h = if is_key_chord {
+                line_height * 1.5
+            } else {
+                line_height
+            };
+            buf.set_size(&mut self.font_system, Some(max_w), Some(buf_h));
+
+            if is_rain {
+                #[cfg(target_os = "macos")]
+                {
+                    let attrs = Attrs::new().family(Family::Name("Hiragino Sans"));
+                    buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let attrs = Attrs::new().family(Family::SansSerif);
+                    buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+                }
+            } else if is_symbols {
+                let attrs = Attrs::new().family(Family::Name(SYMBOLS_FAMILY));
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+            } else if is_key_chord {
+                let attrs = Attrs::new().family(Family::Name(KEY_CHORD_FAMILY));
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+            } else if mono_system || !gohu_ok {
+                let attrs = Attrs::new().family(Family::Monospace).weight(mono_weight);
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+            } else {
+                let attrs = Attrs::new()
+                    .family(Family::Name(mono_name.as_str()))
+                    .weight(mono_weight);
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
+            }
+            buf.shape_until_scroll(&mut self.font_system, false);
         }
     }
 
@@ -680,6 +686,115 @@ impl TextLayer {
     pub fn trim_atlas(&mut self) {
         self.atlas.trim();
     }
+}
+
+fn collect_areas<'a>(
+    buffers: &'a [Buffer],
+    start: usize,
+    labels: &'a [TextLabel],
+    width: u32,
+    height: u32,
+    scale: f32,
+    areas: &mut Vec<TextArea<'a>>,
+) {
+    let full_bounds = TextBounds {
+        left: 0,
+        top: 0,
+        right: width as i32,
+        bottom: height as i32,
+    };
+    for (i, label) in labels.iter().enumerate() {
+        let size_px = (label.size * scale).max(1.0).round().max(1.0);
+        let (left, top) = if let Some([rx, ry, rw, rh]) = label.center_in {
+            let line_w = buffers[start + i]
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0f32, f32::max);
+            let cx = rx * scale;
+            let cy = ry * scale;
+            let cw = rw * scale;
+            let ch = rh * scale;
+            (
+                cx + (cw - line_w).max(0.0) * 0.5,
+                cy + (ch - size_px).max(0.0) * 0.5,
+            )
+        } else {
+            (label.x * scale, label.y * scale)
+        };
+        let bounds = if let Some([cx, cy, cw, ch]) = label.clip {
+            let l = (cx * scale).floor() as i32;
+            let t = (cy * scale).floor() as i32;
+            let r = ((cx + cw) * scale).ceil() as i32;
+            let b = ((cy + ch) * scale).ceil() as i32;
+            TextBounds {
+                left: l.max(0),
+                top: t.max(0),
+                right: r.min(width as i32),
+                bottom: b.min(height as i32),
+            }
+        } else {
+            full_bounds
+        };
+        areas.push(TextArea {
+            buffer: &buffers[start + i],
+            left,
+            top,
+            scale: 1.0,
+            bounds,
+            default_color: rgba_u8(label.color),
+            custom_glyphs: &[],
+        });
+    }
+}
+
+/// Stable hash of non-caret labels. Quantizes floats so sub-pixel noise
+/// does not force a reshape.
+pub fn labels_fingerprint(labels: &[TextLabel]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    labels.len().hash(&mut h);
+    for l in labels {
+        l.text.hash(&mut h);
+        hash_q(l.x, &mut h);
+        hash_q(l.y, &mut h);
+        hash_q(l.size, &mut h);
+        quant_rgba(l.color).hash(&mut h);
+        l.mono.hash(&mut h);
+        l.rain.hash(&mut h);
+        l.symbols.hash(&mut h);
+        l.key_chord.hash(&mut h);
+        l.tight.hash(&mut h);
+        hash_opt_rect(l.center_in, &mut h);
+        hash_opt_rect(l.clip, &mut h);
+    }
+    h.finish()
+}
+
+fn hash_q(v: f32, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    // 1/64 logical px — tighter than a cell, loose enough for float noise.
+    ((v * 64.0).round() as i32).hash(h);
+}
+
+fn hash_opt_rect(r: Option<[f32; 4]>, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    match r {
+        None => 0u8.hash(h),
+        Some(v) => {
+            1u8.hash(h);
+            for n in v {
+                hash_q(n, h);
+            }
+        }
+    }
+}
+
+fn quant_rgba(c: [f32; 4]) -> u32 {
+    let r = (c[0].clamp(0.0, 1.0) * 255.0).round() as u32;
+    let g = (c[1].clamp(0.0, 1.0) * 255.0).round() as u32;
+    let b = (c[2].clamp(0.0, 1.0) * 255.0).round() as u32;
+    let a = (c[3].clamp(0.0, 1.0) * 255.0).round() as u32;
+    (r << 24) | (g << 16) | (b << 8) | a
 }
 
 fn rgba_u8(c: [f32; 4]) -> Color {
@@ -733,5 +848,36 @@ mod tests {
             scaled.w
         );
         assert!((scaled.h - 28.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn fingerprint_stable_for_same_labels() {
+        let a = TextLabel::mono("x", 8.0, 14.0, 14.0, [1.0, 1.0, 1.0, 0.95]);
+        let b = TextLabel::mono("x", 8.0, 14.0, 14.0, [1.0, 1.0, 1.0, 0.95]);
+        assert_eq!(labels_fingerprint(&[a.clone()]), labels_fingerprint(&[b]));
+    }
+
+    #[test]
+    fn fingerprint_changes_with_glyph_or_color() {
+        let a = TextLabel::mono("x", 8.0, 14.0, 14.0, [1.0, 1.0, 1.0, 0.95]);
+        let b = TextLabel::mono("y", 8.0, 14.0, 14.0, [1.0, 1.0, 1.0, 0.95]);
+        let c = TextLabel::mono("x", 8.0, 14.0, 14.0, [1.0, 0.0, 0.0, 0.95]);
+        let fa = labels_fingerprint(&[a]);
+        assert_ne!(fa, labels_fingerprint(&[b]));
+        assert_ne!(fa, labels_fingerprint(&[c]));
+    }
+
+    #[test]
+    fn caret_flag_does_not_change_body_fingerprint() {
+        // Partition happens before fingerprint; this documents that caret
+        // membership is not hashed (callers must strip carets first).
+        let cell = TextLabel::mono("a", 0.0, 0.0, 14.0, [1.0; 4]);
+        let caret = TextLabel::mono("█", 0.0, 0.0, 14.0, [0.0, 0.9, 0.5, 0.55]).as_caret();
+        assert!(caret.caret);
+        assert!(!cell.caret);
+        assert_eq!(
+            labels_fingerprint(std::slice::from_ref(&cell)),
+            labels_fingerprint(&[cell])
+        );
     }
 }

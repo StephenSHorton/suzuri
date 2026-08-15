@@ -27,6 +27,8 @@ pub enum CommandAction {
     FocusDown,
     ToggleRain,
     ToggleLens,
+    /// Cycle glyph-rain encode resolution (Full ↔ Half).
+    CycleRainQuality,
     /// Keep rain / springs running when the window is unfocused (demo mode).
     ToggleAnimateUnfocused,
     ToggleCaffeine,
@@ -323,6 +325,13 @@ pub fn default_commands() -> Vec<Command> {
             desc: "Pinch or ⌃/⌘+scroll · Settings 2".into(),
             category: "Appearance",
             action: CommandAction::ToggleLens,
+        },
+        Command {
+            id: "cycle_rain_quality",
+            title: "Cycle rain quality",
+            desc: "25–100% rain encode · Settings · Appearance".into(),
+            category: "Appearance",
+            action: CommandAction::CycleRainQuality,
         },
         Command {
             id: "toggle_animate_unfocused",
@@ -1054,6 +1063,18 @@ mod tests {
         assert!(idx.iter().any(|&i| all[i].id == "rename_pane"));
         assert!(all.iter().any(|c| c.action == CommandAction::RenameTab));
         assert!(all.iter().any(|c| c.action == CommandAction::RenamePane));
+    }
+
+    #[test]
+    fn registry_contains_cycle_rain_quality() {
+        let all = default_commands();
+        let cmd = all
+            .iter()
+            .find(|c| c.id == "cycle_rain_quality")
+            .expect("cycle_rain_quality command");
+        assert_eq!(cmd.action, CommandAction::CycleRainQuality);
+        let idx = filter_commands(&all, "rain quality");
+        assert!(idx.iter().any(|&i| all[i].id == "cycle_rain_quality"));
     }
 
     #[test]

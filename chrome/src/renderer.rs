@@ -7,6 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::caffeine::Caffeine;
 use crate::chrome_ui::{ChipUi, TabJelly};
 use crate::commands::{
     filter_commands, splash_hint_rows, Command, HelpLayout, HelpState, PaletteState, SplashState,
@@ -14,20 +15,19 @@ use crate::commands::{
 use crate::confirm::ConfirmState;
 use crate::input::{is_mac, traffic_light_rects};
 use crate::layout::{FrameLayout, Metrics, PaneLayout, PanelInstance};
+use crate::links::LinkHoverSpan;
+use crate::notes::NotesState;
 use crate::rain_atlas::RainAtlas;
 use crate::rain_sim::{self, RainUniforms};
 use crate::rain_thread::RainThread;
 use crate::rename::RenameState;
-use crate::links::LinkHoverSpan;
 use crate::selection::Selection;
 use crate::session::ChromeSession;
-use crate::caffeine::Caffeine;
-use crate::notes::NotesState;
 use crate::settings::SettingsState;
+use crate::text::{MonoCellMetrics, TextLabel, TextLayer, CARET_BLOCK};
 use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
 use crate::workspace_ui::WorkspaceUi;
-use crate::text::{MonoCellMetrics, TextLabel, TextLayer, CARET_BLOCK};
 
 /// Jade selection wash alpha for full-block underlay (`█` mono labels).
 const SELECTION_ALPHA: f32 = 0.32;
@@ -388,12 +388,7 @@ impl Renderer {
                 size: [1.0, 1.0, 1.0, 1.0],
                 misc: [0.0, 1.0, 0.0, crate::settings::GLASS_DARKEN_DEFAULT],
                 glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
-                glass2: [
-                    GLASS_ABERRATION,
-                    GLASS_BLUR,
-                    GLASS_REFLECTION,
-                    GLASS_SHINE,
-                ],
+                glass2: [GLASS_ABERRATION, GLASS_BLUR, GLASS_REFLECTION, GLASS_SHINE],
                 hover: [0.0, 0.0, 28.0, 0.0],
                 primary: [
                     crate::theme::DEFAULT_PRIMARY[0],
@@ -538,12 +533,7 @@ impl Renderer {
                 size: [1.0, 1.0, 1.0, 1.0],
                 lens: [0.0, 0.0, 0.0, 0.0],
                 glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
-                glass2: [
-                    GLASS_ABERRATION,
-                    GLASS_BLUR,
-                    GLASS_REFLECTION,
-                    GLASS_SHINE,
-                ],
+                glass2: [GLASS_ABERRATION, GLASS_BLUR, GLASS_REFLECTION, GLASS_SHINE],
                 exit: [0.0, 0.0, 0.0, 0.0],
                 view: [1.0, 0.5, 0.5, 0.0],
             }),
@@ -816,12 +806,7 @@ impl Renderer {
         self.guest_wells.retain(|(id, _)| *id != pane_id);
     }
 
-    fn blit_guest_fbs(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        logical_w: f32,
-        logical_h: f32,
-    ) {
+    fn blit_guest_fbs(&self, encoder: &mut wgpu::CommandEncoder, logical_w: f32, logical_h: f32) {
         if self.guest_wells.is_empty() {
             return;
         }
@@ -833,14 +818,7 @@ impl Renderer {
                 continue;
             }
             let uni = [
-                logical_w,
-                logical_h,
-                0.0,
-                0.0,
-                well.x,
-                well.y,
-                well.w,
-                well.h,
+                logical_w, logical_h, 0.0, 0.0, well.x, well.y, well.w, well.h,
             ];
             self.queue
                 .write_buffer(&gpu.uni, 0, bytemuck::cast_slice(&uni));
@@ -941,26 +919,26 @@ impl Renderer {
         surface.configure(&self.device, &config);
         let mut text = crate::text::TextLayer::new(&self.device, &self.queue, self.surface_format);
         text.resize(size, scale.max(0.01));
-        let frame_uniform_buf =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("ghost uniforms"),
-                    contents: bytemuck::bytes_of(&FrameUniforms {
-                        size: [1.0, 1.0, 1.0, 1.0],
-                        misc: [0.0, 1.0, 1.0, crate::settings::GLASS_DARKEN_DEFAULT],
-                        glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
-                        glass2: [
-                            GLASS_ABERRATION,
-                            GLASS_BLUR,
-                            GLASS_REFLECTION,
-                            GLASS_SHINE.max(0.1),
-                        ],
-                        hover: [0.0, 0.0, 28.0, 0.0],
-                        primary: [0.0, 0.0, 0.0, 1.0],
-                        flags: [1.0, 0.0, 0.0, 0.0],
-                    }),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                });
+        let frame_uniform_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("ghost uniforms"),
+                contents: bytemuck::bytes_of(&FrameUniforms {
+                    size: [1.0, 1.0, 1.0, 1.0],
+                    misc: [0.0, 1.0, 1.0, crate::settings::GLASS_DARKEN_DEFAULT],
+                    glass: [GLASS_IOR, GLASS_EDGE, GLASS_BEVEL, GLASS_DEPTH],
+                    glass2: [
+                        GLASS_ABERRATION,
+                        GLASS_BLUR,
+                        GLASS_REFLECTION,
+                        GLASS_SHINE.max(0.1),
+                    ],
+                    hover: [0.0, 0.0, 28.0, 0.0],
+                    primary: [0.0, 0.0, 0.0, 1.0],
+                    flags: [1.0, 0.0, 0.0, 0.0],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
         let panel_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ghost panels"),
             size: 4 * std::mem::size_of::<crate::layout::PanelInstance>() as u64,
@@ -1205,10 +1183,13 @@ impl Renderer {
         }
 
         let j = settings.prefs.theme_colors().jade;
+        // Swapchain size — worker encodes at rain_rt_extent(scale). res_time /
+        // cell stay full-framebuffer so the column grid does not change.
         self.rain_thread.publish(
             self.rain_live && settings.prefs.rain,
             self.config.width,
             self.config.height,
+            settings.prefs.rain_quality,
             RainUniforms {
                 res_time: [fw, fh, 0.0, 0.0],
                 params: [
@@ -1257,13 +1238,8 @@ impl Renderer {
         let active_chip = layout.tab_chips.get(active_idx).copied();
         self.tab_jelly.tick(dt, active_chip);
 
-        let mut panels = layout.glass_panels(
-            self.metrics,
-            active_idx,
-            lights,
-            chip_ui,
-            &self.tab_jelly,
-        );
+        let mut panels =
+            layout.glass_panels(self.metrics, active_idx, lights, chip_ui, &self.tab_jelly);
         if let Some(drop) = pane_drop {
             use crate::input::{drop_edge_rect, DropKind};
             use crate::layout::{PanelInstance, PanelKind};
@@ -1303,12 +1279,7 @@ impl Renderer {
                 }
                 DropKind::TabInsert { index } => {
                     if let Some(chip) = layout.tab_chips.get(index) {
-                        let gap = crate::layout::Rect::new(
-                            chip.x - 3.0,
-                            chip.y,
-                            6.0,
-                            chip.h,
-                        );
+                        let gap = crate::layout::Rect::new(chip.x - 3.0, chip.y, 6.0, chip.h);
                         panels.push(
                             PanelInstance::glass(gap, 2.0, PanelKind::ModalButtonActive)
                                 .with_opacity(0.95),
@@ -1595,7 +1566,11 @@ impl Renderer {
             hovered_link,
             self.cell_metrics(),
         );
-        self.text.prepare(&self.device, &self.queue, &labels);
+        let (carets, body): (Vec<crate::text::TextLabel>, Vec<crate::text::TextLabel>) =
+            labels.into_iter().partition(|l| l.caret);
+        let body_changed =
+            self.text
+                .prepare_body_and_caret(&self.device, &self.queue, &body, &carets);
         self.text
             .render(&self.device, &mut encoder, &self.scene_view);
 
@@ -1646,7 +1621,9 @@ impl Renderer {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
-        self.text.trim_atlas();
+        if body_changed {
+            self.text.trim_atlas();
+        }
         Ok(())
     }
 }
@@ -1687,9 +1664,16 @@ fn overlay_modal_rect(window_w: f32, window_h: f32, max_w: f32, max_h: f32) -> c
     crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.42, w, h)
 }
 
-fn workspace_host_rect(workspace_ui: &WorkspaceUi, layout: &FrameLayout) -> Option<crate::layout::Rect> {
+fn workspace_host_rect(
+    workspace_ui: &WorkspaceUi,
+    layout: &FrameLayout,
+) -> Option<crate::layout::Rect> {
     let id = workspace_ui.docked_pane?;
-    layout.panes.iter().find(|p| p.pane_id == id).map(|p| p.glass)
+    layout
+        .panes
+        .iter()
+        .find(|p| p.pane_id == id)
+        .map(|p| p.glass)
 }
 
 /// True overlay cards (not docked workspace). Terminal glyphs under these are clipped.
@@ -1841,7 +1825,12 @@ fn chrome_labels(
         let id = ChipId::NewTab;
         let r = scale_rect(layout.tab_new, chip_ui.scale_for(id));
         let color = if chip_ui.is_lit(id) { bright } else { dim };
-        labels.push(TextLabel::centered("+", [r.x, r.y, r.w, r.h], m.px(14.0), color));
+        labels.push(TextLabel::centered(
+            "+",
+            [r.x, r.y, r.w, r.h],
+            m.px(14.0),
+            color,
+        ));
     }
 
     // Caffeine ☕ — fully centered in the chip (hint only as short overlay text if timed).
@@ -2012,13 +2001,7 @@ fn chrome_labels(
                 let path_draw = truncate_chars(&path_str, max_c);
                 // Left-align path like product chrome (not centered — `~` was easy to miss).
                 let py = pl.path.y + (pl.path.h - path_size).max(0.0) * 0.5;
-                labels.push(TextLabel::new(
-                    path_draw,
-                    pl.path.x,
-                    py,
-                    path_size,
-                    dim,
-                ));
+                labels.push(TextLabel::new(path_draw, pl.path.x, py, path_size, dim));
             }
 
             let draft = pane.draft.as_str();
@@ -2040,13 +2023,16 @@ fn chrome_labels(
                 if a > 0.02 {
                     let caret_cols = (2 + draft.chars().count()).min(max_c.saturating_sub(1));
                     let caret_x = pl.warp.x + caret_cols as f32 * char_w;
-                    labels.push(TextLabel::new(
-                        CARET_BLOCK,
-                        caret_x,
-                        iy,
-                        input_size,
-                        [caret_rgb[0], caret_rgb[1], caret_rgb[2], a],
-                    ));
+                    labels.push(
+                        TextLabel::new(
+                            CARET_BLOCK,
+                            caret_x,
+                            iy,
+                            input_size,
+                            [caret_rgb[0], caret_rgb[1], caret_rgb[2], a],
+                        )
+                        .as_caret(),
+                    );
                 }
             }
         }
@@ -2116,9 +2102,7 @@ fn push_modal_glass(
     if splash.visible() {
         let ease = splash.content_ease().clamp(0.0, 1.0);
         let lay = SplashState::layout(win_w, win_h);
-        panels.push(
-            PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
-        );
+        panels.push(PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease));
         // Hint rows as frost chips (same rects as text path).
         for r in &lay.rows {
             panels.push(
@@ -2135,9 +2119,7 @@ fn push_modal_glass(
     if settings.visible() {
         let ease = settings.content_ease().clamp(0.0, 1.0);
         let lay = settings.layout(win_w, win_h);
-        panels.push(
-            PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
-        );
+        panels.push(PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease));
         use crate::settings::settings_row;
         for (i, r) in lay.rows.iter().enumerate() {
             // Focused row is lit like a selected list item.
@@ -2187,9 +2169,7 @@ fn push_modal_glass(
             } else {
                 PanelKind::ModalFrost
             };
-            panels.push(
-                PanelInstance::glass(*sw, sw.h * 0.35, kind).with_opacity(ease),
-            );
+            panels.push(PanelInstance::glass(*sw, sw.h * 0.35, kind).with_opacity(ease));
         }
     }
 
@@ -2197,9 +2177,7 @@ fn push_modal_glass(
         let ease = help.content_ease().clamp(0.0, 1.0);
         // Animated rect (scale + drop) matches palette/settings — not a static card.
         let lay = HelpLayout::with_ease(win_w, win_h, ease);
-        panels.push(
-            PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
-        );
+        panels.push(PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease));
         // One frost chip per shortcut row (same rects as text path).
         for (r, _, _) in &lay.rows {
             panels.push(
@@ -2226,9 +2204,7 @@ fn push_modal_glass(
     if notes.visible() {
         let ease = notes.content_ease().clamp(0.0, 1.0);
         let lay = notes.layout(win_w, win_h);
-        panels.push(
-            PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease),
-        );
+        panels.push(PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease));
         panels.push(
             PanelInstance::glass(lay.list, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
         );
@@ -2304,12 +2280,7 @@ fn push_modal_glass(
         panels.push(PanelInstance::glass(modal, m.radius, PanelKind::Modal).with_opacity(ease));
         let pad = 14.0;
         let input_h = 44.0;
-        let input = Rect::new(
-            modal.x + pad,
-            modal.y + 44.0,
-            modal.w - pad * 2.0,
-            input_h,
-        );
+        let input = Rect::new(modal.x + pad, modal.y + 44.0, modal.w - pad * 2.0, input_h);
         panels.push(
             PanelInstance::glass(input, m.chip_radius + 2.0, PanelKind::ModalFrost)
                 .with_opacity(ease),
@@ -2469,9 +2440,8 @@ fn push_workspace_labels(
     let modal = workspace_ui.card_rect(win_w, win_h);
     let pad = MODAL_PAD;
     let list_w = workspace_ui.channel_list_w(win_w, win_h);
-    let skip = |x: f32, y: f32| {
-        hidden_by_cards(crate::layout::Rect::new(x, y, 12.0, 14.0), cover_cards)
-    };
+    let skip =
+        |x: f32, y: f32| hidden_by_cards(crate::layout::Rect::new(x, y, 12.0, 14.0), cover_cards);
     let mut title_c = bright;
     title_c[3] *= ease;
     if !skip(modal.x + pad, modal.y + 8.0) {
@@ -2558,13 +2528,7 @@ fn push_workspace_labels(
         let mut tc = dim;
         tc[3] *= ease;
         if !skip(modal.x + pad + 10.0, y) {
-            labels.push(TextLabel::new(
-                "+ New",
-                modal.x + pad + 10.0,
-                y,
-                12.0,
-                tc,
-            ));
+            labels.push(TextLabel::new("+ New", modal.x + pad + 10.0, y, 12.0, tc));
         }
     }
     let accent = settings.prefs.theme_colors().jade;
@@ -2678,13 +2642,16 @@ fn push_workspace_labels(
         }
         if !workspace_ui.draft.is_empty() || caret_a > 0.02 {
             let cx = draft_x + workspace_ui.draft.chars().count() as f32 * 7.5;
-            labels.push(TextLabel::new(
-                CARET_BLOCK,
-                cx,
-                draft_y,
-                13.0,
-                [caret_rgb[0], caret_rgb[1], caret_rgb[2], caret_a * ease],
-            ));
+            labels.push(
+                TextLabel::new(
+                    CARET_BLOCK,
+                    cx,
+                    draft_y,
+                    13.0,
+                    [caret_rgb[0], caret_rgb[1], caret_rgb[2], caret_a * ease],
+                )
+                .as_caret(),
+            );
         }
     }
     if !workspace_ui.status.is_empty() {
@@ -2727,9 +2694,7 @@ fn push_modal_labels(
     caret_rgb: [f32; 3],
 ) {
     let caret_a = caret_alpha.clamp(0.0, 1.0);
-    let caret_rgba = |a: f32| -> [f32; 4] {
-        [caret_rgb[0], caret_rgb[1], caret_rgb[2], a]
-    };
+    let caret_rgba = |a: f32| -> [f32; 4] { [caret_rgb[0], caret_rgb[1], caret_rgb[2], a] };
 
     if splash.visible() {
         let ease = splash.content_ease().clamp(0.0, 1.0);
@@ -2770,12 +2735,7 @@ fn push_modal_labels(
             // Keys: LEFT-aligned (not centered) — centering made short chords
             // (⌘,) sit further right than long ones (⇧⌘T).
             labels.push(TextLabel::key_left_vcenter(
-                key,
-                key_x,
-                row.y,
-                row.h,
-                text_size,
-                kc,
+                key, key_x, row.y, row.h, text_size, kc,
             ));
             labels.push(TextLabel::left_vcenter(
                 label.to_string(),
@@ -2823,9 +2783,10 @@ fn push_modal_labels(
         };
         let darken_val = format!("‹  {:.0}%  ›", settings.prefs.glass_darken * 100.0);
         use crate::settings::settings_row;
-        // Booleans = glass switches; primary/accent/font/darken show values.
+        // Booleans = glass switches; quality/primary/accent/font/darken show values.
         let titles = [
             "Glyph rain",
+            "Rain quality",
             "Magnifier",
             "Primary color",
             "Accent color",
@@ -2833,10 +2794,8 @@ fn push_modal_labels(
             "Glass darken",
             "Reset defaults",
         ];
-        let font_disp = format!(
-            "‹  {}  ›",
-            crate::theme::font_label(&settings.prefs.font)
-        );
+        let font_disp = format!("‹  {}  ›", crate::theme::font_label(&settings.prefs.font));
+        let quality_disp = format!("‹  {}%  ›", settings.prefs.rain_quality_pct());
         let text_size = 13.0;
         for (i, row) in lay.rows.iter().enumerate() {
             let mut tc = bright;
@@ -2853,6 +2812,7 @@ fn push_modal_labels(
                 || i == settings_row::ACCENT
                 || i == settings_row::FONT
                 || i == settings_row::DARKEN
+                || i == settings_row::RAIN_QUALITY
             {
                 let vc = if i == settings_row::PRIMARY {
                     [primary[0], primary[1], primary[2], 0.95 * ease]
@@ -2869,6 +2829,8 @@ fn push_modal_labels(
                     accent_disp.as_str()
                 } else if i == settings_row::FONT {
                     font_disp.as_str()
+                } else if i == settings_row::RAIN_QUALITY {
+                    quality_disp.as_str()
                 } else {
                     darken_val.as_str()
                 };
@@ -2876,13 +2838,12 @@ fn push_modal_labels(
                 labels.push(TextLabel::centered(
                     val.to_string(),
                     [vr.x, vr.y, vr.w, vr.h],
-                    text_size - if i == settings_row::ACCENT
-                        && !settings.prefs.accent_is_custom()
-                    {
-                        1.0
-                    } else {
-                        0.0
-                    },
+                    text_size
+                        - if i == settings_row::ACCENT && !settings.prefs.accent_is_custom() {
+                            1.0
+                        } else {
+                            0.0
+                        },
                     vc,
                 ));
             }
@@ -3098,14 +3059,14 @@ fn push_modal_labels(
         } else {
             notes.title.clone()
         };
-        let title_color = if notes.title.is_empty() && notes.focus != crate::notes::NotesFocus::Title
-        {
-            let mut c = dim;
-            c[3] *= ease;
-            c
-        } else {
-            tc
-        };
+        let title_color =
+            if notes.title.is_empty() && notes.focus != crate::notes::NotesFocus::Title {
+                let mut c = dim;
+                c[3] *= ease;
+                c
+            } else {
+                tc
+            };
         labels.push(TextLabel::new(
             title_text,
             title_r.x + 12.0,
@@ -3115,13 +3076,16 @@ fn push_modal_labels(
         ));
         if notes.focus == crate::notes::NotesFocus::Title {
             let caret_x = title_r.x + 12.0 + notes.cursor as f32 * 8.0;
-            labels.push(TextLabel::new(
-                CARET_BLOCK,
-                caret_x.min(title_r.x + title_r.w - 16.0),
-                title_r.y + 10.0,
-                14.0,
-                caret_rgba(caret_a * ease),
-            ));
+            labels.push(
+                TextLabel::new(
+                    CARET_BLOCK,
+                    caret_x.min(title_r.x + title_r.w - 16.0),
+                    title_r.y + 10.0,
+                    14.0,
+                    caret_rgba(caret_a * ease),
+                )
+                .as_caret(),
+            );
         }
         let body = lay.body;
         let mut bc = muted;
@@ -3136,13 +3100,16 @@ fn push_modal_labels(
                 bc,
             ));
             if notes.focus == crate::notes::NotesFocus::Body {
-                labels.push(TextLabel::new(
-                    CARET_BLOCK,
-                    body.x + 14.0,
-                    by,
-                    13.0,
-                    caret_rgba(caret_a * ease),
-                ));
+                labels.push(
+                    TextLabel::new(
+                        CARET_BLOCK,
+                        body.x + 14.0,
+                        by,
+                        13.0,
+                        caret_rgba(caret_a * ease),
+                    )
+                    .as_caret(),
+                );
             }
         } else {
             for line in notes.body.lines() {
@@ -3161,13 +3128,16 @@ fn push_modal_labels(
             if notes.focus == crate::notes::NotesFocus::Body {
                 let last = notes.body.lines().last().unwrap_or("");
                 let caret_x = body.x + 14.0 + last.chars().count() as f32 * 7.5;
-                labels.push(TextLabel::new(
-                    CARET_BLOCK,
-                    caret_x.min(body.x + body.w - 16.0),
-                    (by - 18.0).max(body.y + 12.0),
-                    13.0,
-                    caret_rgba(caret_a * ease),
-                ));
+                labels.push(
+                    TextLabel::new(
+                        CARET_BLOCK,
+                        caret_x.min(body.x + body.w - 16.0),
+                        (by - 18.0).max(body.y + 12.0),
+                        13.0,
+                        caret_rgba(caret_a * ease),
+                    )
+                    .as_caret(),
+                );
             }
         }
         let mut foot = dim;
@@ -3274,13 +3244,16 @@ fn push_modal_labels(
         ));
         if !transfer.is_running() {
             let cx = modal.x + pad + 14.0 + transfer.buf.chars().count() as f32 * 8.0;
-            labels.push(TextLabel::new(
-                CARET_BLOCK,
-                cx.min(modal.x + modal.w - pad - 20.0),
-                input_y + 16.0,
-                14.0,
-                caret_rgba(caret_a * ease),
-            ));
+            labels.push(
+                TextLabel::new(
+                    CARET_BLOCK,
+                    cx.min(modal.x + modal.w - pad - 20.0),
+                    input_y + 16.0,
+                    14.0,
+                    caret_rgba(caret_a * ease),
+                )
+                .as_caret(),
+            );
         }
         if !transfer.ticket.is_empty() {
             let mut tc = bright;
@@ -3353,13 +3326,16 @@ fn push_modal_labels(
             // "> " + buffer
             let cols = 2 + rename.buffer.chars().count();
             let caret_x = modal.x + pad + 12.0 + cols as f32 * approx;
-            labels.push(TextLabel::new(
-                CARET_BLOCK,
-                caret_x.min(modal.x + modal.w - pad - 20.0),
-                ty,
-                15.0,
-                caret_rgba(caret_a * ease),
-            ));
+            labels.push(
+                TextLabel::new(
+                    CARET_BLOCK,
+                    caret_x.min(modal.x + modal.w - pad - 20.0),
+                    ty,
+                    15.0,
+                    caret_rgba(caret_a * ease),
+                )
+                .as_caret(),
+            );
         }
         let mut foot = dim;
         foot[3] *= ease * 0.9;
@@ -3386,7 +3362,11 @@ fn push_modal_labels(
             input_h,
         );
         let ty = input.y + (input.h - 15.0) * 0.5;
-        let mut qc = if palette.query.is_empty() { dim } else { bright };
+        let mut qc = if palette.query.is_empty() {
+            dim
+        } else {
+            bright
+        };
         qc[3] *= ease;
         let display = if palette.query.is_empty() {
             "Type a command…"
@@ -3403,13 +3383,16 @@ fn push_modal_labels(
         if !palette.query.is_empty() || caret_a > 0.02 {
             let approx = 8.2_f32;
             let caret_x = input.x + 14.0 + palette.query.chars().count() as f32 * approx;
-            labels.push(TextLabel::new(
-                CARET_BLOCK,
-                caret_x.min(input.x + input.w - 20.0),
-                ty,
-                15.0,
-                caret_rgba(caret_a * ease),
-            ));
+            labels.push(
+                TextLabel::new(
+                    CARET_BLOCK,
+                    caret_x.min(input.x + input.w - 20.0),
+                    ty,
+                    15.0,
+                    caret_rgba(caret_a * ease),
+                )
+                .as_caret(),
+            );
         }
 
         let filtered = filter_commands(commands, &palette.query);
@@ -3543,10 +3526,8 @@ fn push_pane_cells(
         } else {
             cursor_visible && grid.abs_to_viewport(cursor_abs) == Some(row)
         };
-        let has_selection =
-            sel.is_some_and(|s| (0..grid.cols()).any(|c| s.contains(c, abs_row)));
-        let has_link_hover =
-            link_hover.is_some_and(|h| h.abs_row == abs_row && h.col0 < h.col1);
+        let has_selection = sel.is_some_and(|s| (0..grid.cols()).any(|c| s.contains(c, abs_row)));
+        let has_link_hover = link_hover.is_some_and(|h| h.abs_row == abs_row && h.col0 < h.col1);
         if !has_content && !has_cursor && !has_selection && !has_link_hover {
             continue;
         }
@@ -3622,21 +3603,11 @@ fn push_pane_cells(
                 continue;
             }
             let hover_cell = link_hover.is_some_and(|h| h.contains(col as u16, abs_row));
-            let fg = if hover_cell {
-                link_hover_rgb
-            } else {
-                c.fg
-            };
+            let fg = if hover_cell { link_hover_rgb } else { c.fg };
             if let Some(bg) = c.bg {
                 labels.push(
-                    TextLabel::mono(
-                        "█",
-                        x,
-                        y,
-                        mono_size,
-                        [bg[0], bg[1], bg[2], 0.85 * dim_a],
-                    )
-                    .with_clip(clip),
+                    TextLabel::mono("█", x, y, mono_size, [bg[0], bg[1], bg[2], 0.85 * dim_a])
+                        .with_clip(clip),
                 );
             }
             if c.ch != ' ' {
@@ -3666,7 +3637,8 @@ fn push_pane_cells(
                         mono_size,
                         [caret_rgb[0], caret_rgb[1], caret_rgb[2], 0.55 * dim_a],
                     )
-                    .with_clip(clip),
+                    .with_clip(clip)
+                    .as_caret(),
                 );
             }
         }
