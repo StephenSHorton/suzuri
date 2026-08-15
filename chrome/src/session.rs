@@ -912,9 +912,13 @@ impl ChromeSession {
             .unwrap_or_else(initial_cwd);
         let mut pane = new_widget_pane(pane_id, WidgetKind::Guest, cwd);
         pane.guest_id = Some(guest_id.to_string());
-        if !title.is_empty() {
-            pane.title = title.to_string();
-        }
+        // Empty → blank header until the page title arrives (like OSC).
+        // Do not seed the engine name here — that reads as a second app.
+        pane.title = if title.is_empty() {
+            String::new()
+        } else {
+            title.to_string()
+        };
         self.panes.insert(pane_id, pane);
         let surface = self.active_tab().map(|t| t.surface).unwrap_or(0);
         let tab_title = if title.is_empty() {
@@ -1548,6 +1552,65 @@ pub fn normalize_process_cwd() {
     let _ = std::env::set_current_dir(&want);
 }
 
+/// Compact guest location for the footer path row (cwd analog).
+///
+/// `https://www.ladybird.org/foo/` → `ladybird.org/foo`. Internal
+/// `about:` / `ladybird:` pages are empty so they never paint as a path.
+pub fn display_guest_path(url: &str) -> String {
+    let raw = url.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let lower = raw.to_ascii_lowercase();
+    if lower.starts_with("about:") || lower.starts_with("ladybird:") {
+        return String::new();
+    }
+    let mut s = raw.to_string();
+    for prefix in ["https://", "http://"] {
+        if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            s = s[prefix.len()..].to_string();
+            break;
+        }
+    }
+    if s.len() >= 4 && s[..4].eq_ignore_ascii_case("www.") {
+        s = s[4..].to_string();
+    }
+    while s.ends_with('/') {
+        s.pop();
+    }
+    s
+}
+
+/// Hello title is the engine name, not a page. Chrome should ignore it.
+pub fn guest_engine_hello_title(title: &str) -> bool {
+    matches!(
+        title.trim().to_ascii_lowercase().as_str(),
+        "ladybird" | "ladybird browser" | "guest"
+    )
+}
+
+/// Page title usable as a pane header (not about:, not the raw URL).
+pub fn guest_page_title_ok(title: &str, url: &str) -> bool {
+    let title = title.trim();
+    if title.is_empty() {
+        return false;
+    }
+    let lower = title.to_ascii_lowercase();
+    if lower.starts_with("about:") || lower.starts_with("ladybird:") || lower == "new tab" {
+        return false;
+    }
+    let url = url.trim();
+    if !url.is_empty() && (title == url || title == display_guest_path(url)) {
+        return false;
+    }
+    true
+}
+
+/// Location the footer should keep (`about:` / empty dropped).
+pub fn guest_url_ok(url: &str) -> bool {
+    !display_guest_path(url).is_empty()
+}
+
 /// Shorten `$HOME` / `%USERPROFILE%` → `~` for chrome path display.
 ///
 /// Compares **cleaned** paths so trailing slashes / `.` / `..` still map to `~`.
@@ -1719,6 +1782,21 @@ mod tests {
             "initial_cwd={cwd}"
         );
         assert!(!cwd.is_empty());
+    }
+
+    #[test]
+    fn display_guest_path_strips_scheme() {
+        assert_eq!(display_guest_path("https://www.ladybird.org/foo/"), "ladybird.org/foo");
+        assert_eq!(display_guest_path("http://localhost:5173/docs"), "localhost:5173/docs");
+        assert_eq!(display_guest_path("about:newtab"), "");
+        assert_eq!(display_guest_path("about:blank"), "");
+        assert!(guest_url_ok("https://ladybird.org"));
+        assert!(!guest_url_ok("about:newtab"));
+        assert!(guest_engine_hello_title("Ladybird"));
+        assert!(!guest_engine_hello_title("Actually independent"));
+        assert!(!guest_page_title_ok("https://ladybird.org", "https://ladybird.org"));
+        assert!(guest_page_title_ok("Actually independent", "https://ladybird.org"));
+        assert!(!guest_page_title_ok("New Tab", ""));
     }
 
     #[test]
@@ -2152,5 +2230,13 @@ mod tests {
         assert!(s.focused_is_guest());
         let tab = s.active_tab().unwrap();
         assert_eq!(tab.root.leaf_ids(), vec![id]);
+    }
+
+    #[test]
+    fn guest_tab_without_name_is_a_normal_tab() {
+        let mut s = ChromeSession::new(80, 24);
+        let id = s.new_guest_tab("example", "");
+        assert_eq!(s.panes.get(&id).unwrap().title, "");
+        assert_eq!(s.active_tab().unwrap().title, "tab 2");
     }
 }

@@ -2004,7 +2004,11 @@ fn chrome_labels(
             let input_size = m.px(13.0);
             let char_w = cell.w.max(1.0);
 
-            let path_str = crate::session::display_path(&pane.cwd);
+            let path_str = if pane.kind.is_guest() {
+                crate::session::display_guest_path(&pane.guest_url)
+            } else {
+                crate::session::display_path(&pane.cwd)
+            };
             if !path_str.is_empty() {
                 // Never drop a lone `~` — always reserve room for at least that glyph.
                 let max_c = ((pl.path.w / char_w).floor() as usize).max(1);
@@ -2016,23 +2020,8 @@ fn chrome_labels(
 
             let draft = pane.draft.as_str();
             let max_c = ((pl.warp.w / char_w).floor() as usize).max(4);
-            let shown = if !draft.is_empty() {
-                draft
-            } else if pane.kind.is_guest() && !pane.guest_url.is_empty() {
-                pane.guest_url.as_str()
-            } else if pane.kind.is_guest() {
-                "type a URL"
-            } else {
-                draft
-            };
-            let warp_text = truncate_chars(&format!("❯ {shown}"), max_c);
-            let input_bright = if pane.kind.is_guest() && draft.is_empty() {
-                muted
-            } else if pl.focused {
-                bright
-            } else {
-                dim
-            };
+            let warp_text = truncate_chars(&format!("❯ {draft}"), max_c);
+            let input_bright = if pl.focused { bright } else { dim };
             // Left-align inside warp band (not full-center — reads as an input line).
             let iy = pl.warp.y + (pl.warp.h - input_size).max(0.0) * 0.5;
             labels.push(TextLabel::new(

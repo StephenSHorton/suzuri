@@ -1358,7 +1358,7 @@ impl ChromeApp {
         };
         let id = self
             .session
-            .new_guest_tab(&manifest.id, &manifest.name);
+            .new_guest_tab(&manifest.id, "");
         self.warp_focused = true;
         self.terminal_focused = false;
         if let Some(tab) = self.session.active_tab() {
@@ -1517,14 +1517,16 @@ impl ChromeApp {
                     pane_id, title, ..
                 } => {
                     if let Some(p) = self.session.panes.get_mut(&pane_id) {
-                        if !title.is_empty() {
+                        if crate::session::guest_page_title_ok(&title, &p.guest_url)
+                            && !crate::session::guest_engine_hello_title(&title)
+                        {
                             p.title = title;
                         }
                     }
                 }
                 GuestEvent::Title { pane_id, text } => {
                     if let Some(p) = self.session.panes.get_mut(&pane_id) {
-                        if !text.is_empty() {
+                        if crate::session::guest_page_title_ok(&text, &p.guest_url) {
                             p.title = text;
                         }
                         p.busy = false;
@@ -1532,7 +1534,9 @@ impl ChromeApp {
                 }
                 GuestEvent::Url { pane_id, text } => {
                     if let Some(p) = self.session.panes.get_mut(&pane_id) {
-                        p.guest_url = text;
+                        if crate::session::guest_url_ok(&text) {
+                            p.guest_url = text;
+                        }
                         p.busy = false;
                     }
                 }

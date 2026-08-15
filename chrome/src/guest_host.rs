@@ -33,7 +33,7 @@ pub fn guest_hole_rect(cells: Rect) -> Rect {
     cells
 }
 
-/// Web view fills the pane under the header and stops at the URL strip
+/// Web view fills the pane under the header and stops at the footer
 /// (`footer_top`). Corners clip to the glass in the blit shader.
 pub fn guest_mount_rect(glass: Rect, header: Rect, footer_top: f32) -> Rect {
     let top = if header.h > 1.0 {
