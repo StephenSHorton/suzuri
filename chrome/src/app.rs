@@ -44,7 +44,9 @@ use crate::rename::{RenameState, RenameTarget};
 use crate::renderer::{self, GhostLayer, Renderer};
 use crate::text::MonoCellMetrics;
 use crate::selection::{clamp_pos, CellPos, Selection};
-use crate::guest_host::{guest_mount_rect, GuestEvent, GuestHost, NativeAttach};
+use crate::guest_host::{
+    guest_footer_top, guest_mount_rect, GuestEvent, GuestHost, NativeAttach,
+};
 use crate::guest_manifest::{load_guests, pick_guest};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
 use crate::settings::SettingsState;
@@ -959,7 +961,8 @@ impl ChromeApp {
             .map(|(id, _)| *id)
             .collect();
         layout.apply_pane_rects(self.metrics, &leafs, tab.focus_pane, &|id| {
-            alt_ids.contains(&id) || self.session.is_widget(id)
+            alt_ids.contains(&id)
+                || (self.session.is_widget(id) && !self.session.pane_kind(id).is_guest())
         });
         for pl in &mut layout.panes {
             pl.hole = self.session.pane_kind(pl.pane_id).is_guest();
@@ -1011,7 +1014,11 @@ impl ChromeApp {
                     continue;
                 }
                 visible.insert(pl.pane_id);
-                let hole = guest_mount_rect(pl.glass, pl.header);
+                let hole = guest_mount_rect(
+                    pl.glass,
+                    pl.header,
+                    guest_footer_top(pl.divider, pl.glass),
+                );
                 let native = self.guest_native_attach(pl.pane_id, hole, !overlay);
                 self.guest_host.resize(pl.pane_id, hole, scale, native);
                 self.guest_host.restack(pl.pane_id);
@@ -1352,7 +1359,7 @@ impl ChromeApp {
         let id = self
             .session
             .new_guest_tab(&manifest.id, &manifest.name);
-        self.warp_focused = false;
+        self.warp_focused = true;
         self.terminal_focused = false;
         if let Some(tab) = self.session.active_tab() {
             let surface = tab.surface;
@@ -1383,7 +1390,7 @@ impl ChromeApp {
             .panes
             .iter()
             .find(|p| p.pane_id == pane_id)
-            .map(|p| guest_mount_rect(p.glass, p.header))
+            .map(|p| guest_mount_rect(p.glass, p.header, guest_footer_top(p.divider, p.glass)))
             .unwrap_or_else(|| crate::layout::Rect::new(0.0, 0.0, 0.0, 0.0));
         (rect, scale)
     }
@@ -5107,7 +5114,11 @@ impl ApplicationHandler for ChromeApp {
                     if !self.session.pane_kind(pl.pane_id).is_guest() {
                         continue;
                     }
-                    let hole = guest_mount_rect(pl.glass, pl.header);
+                    let hole = guest_mount_rect(
+                        pl.glass,
+                        pl.header,
+                        guest_footer_top(pl.divider, pl.glass),
+                    );
                     if hole.w >= 2.0 && hole.h >= 2.0 {
                         guest_wells.push(crate::renderer::GuestWell {
                             pane_id: pl.pane_id,

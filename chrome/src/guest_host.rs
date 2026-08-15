@@ -33,17 +33,34 @@ pub fn guest_hole_rect(cells: Rect) -> Rect {
     cells
 }
 
-/// Web view fills the pane glass under the header. Corners are clipped
-/// to the glass in the blit shader.
-pub fn guest_mount_rect(glass: Rect, header: Rect) -> Rect {
+/// Web view fills the pane under the header and stops at the URL strip
+/// (`footer_top`). Corners clip to the glass in the blit shader.
+pub fn guest_mount_rect(glass: Rect, header: Rect, footer_top: f32) -> Rect {
     let top = if header.h > 1.0 {
         header.y + header.h
     } else {
         glass.y
     };
     let y = top.clamp(glass.y, glass.y + glass.h);
-    let h = (glass.y + glass.h - y).max(0.0);
-    guest_hole_rect(Rect::new(glass.x, y, glass.w.max(0.0), h))
+    let bottom = if footer_top > y + 8.0 {
+        footer_top
+    } else {
+        glass.y + glass.h
+    };
+    guest_hole_rect(Rect::new(
+        glass.x,
+        y,
+        glass.w.max(0.0),
+        (bottom - y).max(0.0),
+    ))
+}
+
+pub fn guest_footer_top(divider: Rect, glass: Rect) -> f32 {
+    if divider.h > 0.5 {
+        divider.y
+    } else {
+        glass.y + glass.h
+    }
 }
 
 /// Events from a guest, tagged with the pane that owns the process.
@@ -738,11 +755,11 @@ mod tests {
         assert_eq!(guest_hole_rect(Rect::new(0.0, 0.0, 10.0, 10.0)).w, 0.0);
         let glass = Rect::new(0.0, 0.0, 400.0, 300.0);
         let header = Rect::new(8.0, 4.0, 384.0, 22.0);
-        let m = guest_mount_rect(glass, header);
+        let m = guest_mount_rect(glass, header, 260.0);
         assert!((m.y - (header.y + header.h)).abs() < 0.01);
         assert!((m.x - glass.x).abs() < 0.01);
         assert!((m.w - glass.w).abs() < 0.01);
-        assert!(m.h > 200.0);
+        assert!((m.y + m.h - 260.0).abs() < 0.01);
     }
 
     #[test]

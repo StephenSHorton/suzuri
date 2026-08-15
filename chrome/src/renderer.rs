@@ -1965,13 +1965,10 @@ fn chrome_labels(
             }
             continue;
         }
-        if pane.kind.is_guest() {
+        if pane.kind.widget().is_some() && !pane.kind.is_guest() {
             continue;
         }
-        if pane.kind.widget().is_some() {
-            continue;
-        }
-        {
+        if !pane.kind.is_guest() {
             let show_cursor = terminal_cursor_visible && pl.pane_id == focus;
             // Selection + link hover are one global model for the focused leaf.
             let pane_sel = if pl.pane_id == focus {
@@ -2019,8 +2016,23 @@ fn chrome_labels(
 
             let draft = pane.draft.as_str();
             let max_c = ((pl.warp.w / char_w).floor() as usize).max(4);
-            let warp_text = truncate_chars(&format!("❯ {draft}"), max_c);
-            let input_bright = if pl.focused { bright } else { dim };
+            let shown = if !draft.is_empty() {
+                draft
+            } else if pane.kind.is_guest() && !pane.guest_url.is_empty() {
+                pane.guest_url.as_str()
+            } else if pane.kind.is_guest() {
+                "type a URL"
+            } else {
+                draft
+            };
+            let warp_text = truncate_chars(&format!("❯ {shown}"), max_c);
+            let input_bright = if pane.kind.is_guest() && draft.is_empty() {
+                muted
+            } else if pl.focused {
+                bright
+            } else {
+                dim
+            };
             // Left-align inside warp band (not full-center — reads as an input line).
             let iy = pl.warp.y + (pl.warp.h - input_size).max(0.0) * 0.5;
             labels.push(TextLabel::new(
