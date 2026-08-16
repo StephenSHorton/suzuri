@@ -501,12 +501,16 @@ impl FrameLayout {
         // Workspace panes — smooth-unioned in the shader with the active tab
         // (surface tension / stretchy glass, not separate cubes).
         for pl in &self.panes {
-            let kind = if pl.hole {
-                PanelKind::GuestHole
-            } else {
-                PanelKind::Terminal
-            };
-            out.push(PanelInstance::glass(pl.glass, m.radius, kind));
+            // Same glass as a terminal leaf. The guest well is a separate
+            // opaque punch so rain does not show under the blit.
+            out.push(PanelInstance::glass(pl.glass, m.radius, PanelKind::Terminal));
+            if pl.hole && pl.cells.w > 4.0 && pl.cells.h > 4.0 {
+                out.push(PanelInstance::glass(
+                    pl.cells,
+                    (m.radius - 2.0).max(1.0),
+                    PanelKind::GuestHole,
+                ));
+            }
             {
                 let id = ChipId::PaneClose(pl.pane_id);
                 if pl.close.w > 2.0 && chip_ui.ghost_shell_visible(id) {
@@ -905,6 +909,26 @@ mod tests {
         assert!(!a.intersects(c));
         assert!(a.contains(0.0, 0.0));
         assert!(!a.contains(10.0, 10.0));
+    }
+
+    #[test]
+    fn guest_hole_does_not_recolor_the_pane_glass() {
+        let m = Metrics::default();
+        let mut l = FrameLayout::compute(800.0, 600.0, m, 1);
+        l.panes[0].hole = true;
+        let chip = crate::chrome_ui::ChipUi::default();
+        let jelly = crate::chrome_ui::TabJelly::default();
+        let panels = l.glass_panels(m, 0, None, &chip, &jelly);
+        let glass = panels
+            .iter()
+            .filter(|p| (p.kind - PanelKind::Terminal as u32 as f32).abs() < 0.1)
+            .count();
+        let holes = panels
+            .iter()
+            .filter(|p| (p.kind - PanelKind::GuestHole as u32 as f32).abs() < 0.1)
+            .count();
+        assert_eq!(glass, 1, "guest still uses terminal glass");
+        assert_eq!(holes, 1, "opaque punch is the cell well only");
     }
 
     #[test]

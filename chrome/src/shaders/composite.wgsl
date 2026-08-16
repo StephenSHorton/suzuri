@@ -524,13 +524,13 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             continue;
         }
 
-        // Guest hole (18) — opaque well so rain never reads as a terminal
-        // behind the plugin overlay.
+        // Guest hole (18) — opaque well so rain never reads under the blit.
+        // Neutral, not primary — header/footer stay normal pane glass.
         if (p.kind > 17.5 && p.kind < 18.5) {
             let d = sd_round_box(px - center, half, max(p.radius, 0.5));
             let inside = 1.0 - smoothstep(-1.0, 1.0, d);
             if (inside > 0.001) {
-                col = mix(col, vec3f(0.04, 0.09, 0.05), inside);
+                col = mix(col, vec3f(0.03, 0.03, 0.03), inside);
             }
             continue;
         }
