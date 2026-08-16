@@ -33,11 +33,19 @@ pub fn create(path: &Path, w: u32, h: u32) -> Result<(), String> {
         let _ = fs::create_dir_all(dir);
     }
     let bytes = HEADER + (w as usize) * (h as usize) * 4;
-    // Never truncate an existing well — Ladybird may have it mmap'd.
+    // Never shrink an existing well — Ladybird may still have the old
+    // size mmap'd (split / sash). Truncate → SIGBUS → chrome closes the pane.
     if let Ok(meta) = fs::metadata(path) {
-        if meta.len() == bytes as u64 {
+        if meta.len() >= bytes as u64 {
             return Ok(());
         }
+        let f = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .open(path)
+            .map_err(|e| e.to_string())?;
+        f.set_len(bytes as u64).map_err(|e| e.to_string())?;
+        return Ok(());
     }
     let mut f = OpenOptions::new()
         .create(true)
@@ -147,6 +155,14 @@ mod tests {
         assert!(read_if_newer(&p, 1).unwrap().is_none());
         create(&p, 4, 2).unwrap();
         assert_eq!(peek_seq(&p), Some(1), "same-size create must not wipe mmap");
+        let big = fs::metadata(&p).unwrap().len();
+        create(&p, 2, 1).unwrap();
+        assert_eq!(
+            fs::metadata(&p).unwrap().len(),
+            big,
+            "shrink must not truncate a mapped well"
+        );
+        assert_eq!(peek_seq(&p), Some(1));
         let _ = fs::remove_file(&p);
     }
 }

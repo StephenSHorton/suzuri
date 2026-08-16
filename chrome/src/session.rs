@@ -2239,4 +2239,14 @@ mod tests {
         assert_eq!(s.panes.get(&id).unwrap().title, "");
         assert_eq!(s.active_tab().unwrap().title, "tab 2");
     }
+
+    #[test]
+    fn split_next_to_a_guest_keeps_the_guest() {
+        let mut s = ChromeSession::new(80, 24);
+        let guest = s.new_guest_tab("example", "");
+        let term = s.split_focused(SplitAxis::Vertical, 40, 24).unwrap();
+        assert!(s.pane_kind(guest).is_guest());
+        assert!(s.pane_kind(term).is_terminal());
+        assert_eq!(s.active_tab().unwrap().root.leaf_ids().len(), 2);
+    }
 }
