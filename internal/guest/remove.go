@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 func remove(id string) error {
@@ -57,6 +56,6 @@ func killByPath(bin string) {
 		if err != nil || pid <= 1 {
 			continue
 		}
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		_ = exec.Command("kill", strconv.Itoa(pid)).Run()
 	}
 }
