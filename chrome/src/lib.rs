@@ -99,7 +99,9 @@ pub use updater::{
     UPDATE_REQ_FILE,
 };
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
-pub use guest_host::{guest_hole_rect, guest_mount_rect, GuestEvent, GuestHost, NativeAttach};
+pub use guest_host::{
+    guest_footer_top, guest_hole_rect, guest_mount_rect, GuestEvent, GuestHost, NativeAttach,
+};
 pub use guest_manifest::{guests_dir, load_guests, GuestManifest, GUEST_PROTOCOL};
 pub use control_mailbox::{
     chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,

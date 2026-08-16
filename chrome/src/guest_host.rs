@@ -33,19 +33,34 @@ pub fn guest_hole_rect(cells: Rect) -> Rect {
     cells
 }
 
-/// Well below the pane header, inset from the glass rim.
-pub fn guest_mount_rect(glass: Rect, header: Rect) -> Rect {
-    let inset = 8.0;
+/// Web view fills the pane under the header and stops at the footer
+/// (`footer_top`). Corners clip to the glass in the blit shader.
+pub fn guest_mount_rect(glass: Rect, header: Rect, footer_top: f32) -> Rect {
     let top = if header.h > 1.0 {
-        header.y + header.h + 2.0
+        header.y + header.h
     } else {
-        glass.y + 28.0
+        glass.y
     };
-    let x = glass.x + inset;
-    let y = top;
-    let w = (glass.x + glass.w - inset - x).max(0.0);
-    let h = (glass.y + glass.h - inset - y).max(0.0);
-    guest_hole_rect(Rect::new(x, y, w, h))
+    let y = top.clamp(glass.y, glass.y + glass.h);
+    let bottom = if footer_top > y + 8.0 {
+        footer_top
+    } else {
+        glass.y + glass.h
+    };
+    guest_hole_rect(Rect::new(
+        glass.x,
+        y,
+        glass.w.max(0.0),
+        (bottom - y).max(0.0),
+    ))
+}
+
+pub fn guest_footer_top(divider: Rect, glass: Rect) -> f32 {
+    if divider.h > 0.5 {
+        divider.y
+    } else {
+        glass.y + glass.h
+    }
 }
 
 /// Events from a guest, tagged with the pane that owns the process.
@@ -355,6 +370,37 @@ impl GuestHost {
         self.send(pane_id, &encode_navigate(url));
     }
 
+    /// Scroll the guest document. `dx`/`dy` are CSS pixels, same sign as
+    /// Ladybird (`-scrollingDelta`). `x`/`y` are the pointer in the well.
+    pub fn scroll(&self, pane_id: u64, dx: f64, dy: f64, x: f32, y: f32) {
+        if (!dx.is_finite() || dx.abs() < 1e-4) && (!dy.is_finite() || dy.abs() < 1e-4) {
+            return;
+        }
+        self.send(pane_id, &encode_scroll(dx, dy, x, y));
+    }
+
+    /// Pointer in the well, CSS/logical px relative to the hole origin.
+    pub fn pointer(
+        &self,
+        pane_id: u64,
+        kind: &str,
+        x: f32,
+        y: f32,
+        button: i32,
+        buttons: i32,
+        modifiers: i32,
+    ) {
+        self.send(
+            pane_id,
+            &encode_pointer(kind, x, y, button, buttons, modifiers),
+        );
+    }
+
+    /// Key to the guest document. `kind` is `down` or `up`.
+    pub fn key(&self, pane_id: u64, kind: &str, key: &str, text: &str, modifiers: i32) {
+        self.send(pane_id, &encode_key(kind, key, text, modifiers));
+    }
+
     pub fn draft(&self, pane_id: u64, text: &str) {
         self.send(pane_id, &encode_draft(text));
     }
@@ -376,8 +422,9 @@ impl GuestHost {
             live.last_geom = Some(key);
             let path = live.fb_path.clone();
             let (fb_w, fb_h) = guest_fb::pixel_size(rect.w, rect.h, scale);
+            // Same pixel size: do not recreate the file (truncating SIGBUS's
+            // a guest that still has the well mmap'd).
             let _ = guest_fb::create(&path, fb_w, fb_h);
-            live.fb_seq = 0;
             encode_resize(rect, scale, native.as_ref(), Some((&path, fb_w, fb_h)))
         };
         self.send(pane_id, &line);
@@ -536,6 +583,26 @@ fn encode_navigate(url: &str) -> String {
     format!(r#"{{"type":"navigate","url":"{}"}}"#, json_escape(url))
 }
 
+fn encode_scroll(dx: f64, dy: f64, x: f32, y: f32) -> String {
+    format!(
+        r#"{{"type":"scroll","dx":{dx:.3},"dy":{dy:.3},"x":{x:.2},"y":{y:.2}}}"#
+    )
+}
+
+fn encode_pointer(kind: &str, x: f32, y: f32, button: i32, buttons: i32, modifiers: i32) -> String {
+    format!(
+        r#"{{"type":"pointer","kind":"{kind}","x":{x:.2},"y":{y:.2},"button":{button},"buttons":{buttons},"modifiers":{modifiers}}}"#
+    )
+}
+
+fn encode_key(kind: &str, key: &str, text: &str, modifiers: i32) -> String {
+    format!(
+        r#"{{"type":"key","kind":"{kind}","key":"{}","text":"{}","modifiers":{modifiers}}}"#,
+        json_escape(key),
+        json_escape(text),
+    )
+}
+
 fn encode_draft(text: &str) -> String {
     format!(r#"{{"type":"draft","string":"{}"}}"#, json_escape(text))
 }
@@ -643,6 +710,17 @@ mod tests {
         let line = encode_navigate("https://a.test/q?x=1");
         assert!(line.contains(r#""type":"navigate""#));
         assert!(line.contains("https://a.test/q?x=1"));
+        let sc = encode_scroll(1.25, -4.5, 10.0, 20.0);
+        assert!(sc.contains(r#""type":"scroll""#));
+        assert!(sc.contains(r#""dy":-4.500"#));
+        assert!(sc.contains(r#""x":10.00"#));
+        let p = encode_pointer("down", 10.0, 20.5, 0, 1, 0);
+        assert!(p.contains(r#""type":"pointer""#));
+        assert!(p.contains(r#""kind":"down""#));
+        assert!(p.contains(r#""y":20.50"#));
+        let k = encode_key("down", "Enter", "", 0);
+        assert!(k.contains(r#""type":"key""#));
+        assert!(k.contains(r#""key":"Enter""#));
         let s = encode_spawn(9, Rect::new(1.0, 2.0, 3.0, 4.0), 2.0, "/tmp", None, None);
         assert!(s.contains(r#""type":"spawn""#));
         assert!(s.contains(r#""pane_id":"9""#));
@@ -677,10 +755,11 @@ mod tests {
         assert_eq!(guest_hole_rect(Rect::new(0.0, 0.0, 10.0, 10.0)).w, 0.0);
         let glass = Rect::new(0.0, 0.0, 400.0, 300.0);
         let header = Rect::new(8.0, 4.0, 384.0, 22.0);
-        let m = guest_mount_rect(glass, header);
-        assert!(m.y >= header.y + header.h);
-        assert!(m.w > 300.0);
-        assert!(m.h > 200.0);
+        let m = guest_mount_rect(glass, header, 260.0);
+        assert!((m.y - (header.y + header.h)).abs() < 0.01);
+        assert!((m.x - glass.x).abs() < 0.01);
+        assert!((m.w - glass.w).abs() < 0.01);
+        assert!((m.y + m.h - 260.0).abs() < 0.01);
     }
 
     #[test]
