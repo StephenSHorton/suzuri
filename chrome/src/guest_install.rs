@@ -218,8 +218,16 @@ fn place_helper(src: &Path, dst: &Path) -> Result<PathBuf, String> {
 fn find_ladybird_binary(root: &Path) -> Result<PathBuf, String> {
     let mut found = None;
     visit(root, &mut |p| {
-        if p.file_name().and_then(|n| n.to_str()) == Some("Ladybird")
-            && p.to_string_lossy().contains("Contents/MacOS/")
+        if p.file_name().and_then(|n| n.to_str()) != Some("Ladybird") {
+            return;
+        }
+        let macos = p.parent();
+        let contents = macos.and_then(|d| d.parent());
+        if macos.and_then(|d| d.file_name()).and_then(|n| n.to_str()) == Some("MacOS")
+            && contents
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str())
+                == Some("Contents")
         {
             found = Some(p.to_path_buf());
         }
@@ -325,13 +333,21 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         // product_config_dir is not overridable here — just write_ladybird_manifest
         // against guests_dir would hit the real config. Test place_helper instead.
-        let src = dir.join("src/Ladybird.app/Contents/MacOS/Ladybird");
+        let src = dir
+            .join("src")
+            .join("Ladybird.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("Ladybird");
         fs::create_dir_all(src.parent().unwrap()).unwrap();
         fs::write(&src, b"dummy").unwrap();
         let dst = dir.join("dst");
         fs::create_dir_all(&dst).unwrap();
-        let bin = place_helper(&dir.join("src/Ladybird.app"), &dst).unwrap();
-        assert!(bin.ends_with("Contents/MacOS/Ladybird"));
+        let bin = place_helper(&dir.join("src").join("Ladybird.app"), &dst).unwrap();
+        assert_eq!(
+            bin.file_name().and_then(|n| n.to_str()),
+            Some("Ladybird")
+        );
         assert!(bin.is_file());
         let _ = fs::remove_dir_all(&dir);
     }
