@@ -12,6 +12,8 @@ func TestValidCommand(t *testing.T) {
 		CmdQuit,
 		CmdOpenNotes,
 		CmdOpenWorkspace,
+		CmdOpenGuest,
+		CmdOpenGuests,
 		CmdOpenPalette,
 		CmdOpenSettings,
 		CmdOpenTransferSend,

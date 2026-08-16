@@ -40,7 +40,10 @@ func usage() string {
   suzuri guest list
 
 Installs live under the product config dir (guests/). Chrome reads the
-manifest; missing guests are a no-op. Ladybird is not shipped inside suzuri.`
+manifest; missing guests are a no-op. Ladybird is not shipped inside suzuri.
+
+Same catalog is in the chrome command palette: Guests.
+`
 }
 
 func cliInstall(args []string) int {
@@ -67,7 +70,7 @@ func cliInstall(args []string) int {
 		return 1
 	}
 	fmt.Printf("installed %s\n  command  %s\n  manifest %s\n", m.ID, m.Command, ManifestPath(m.ID))
-	fmt.Println("open a pane from the palette: New guest pane")
+	fmt.Println("palette: Guests · New guest pane")
 	return 0
 }
 

@@ -1127,6 +1127,7 @@ impl Renderer {
         settings: &SettingsState,
         palette: &PaletteState,
         help: &HelpState,
+        guests: &crate::guest_ui::GuestUi,
         confirm: &ConfirmState,
         splash: &SplashState,
         notes: &NotesState,
@@ -1374,6 +1375,7 @@ impl Renderer {
             let any_overlay = settings.visible()
                 || palette.visible()
                 || help.visible()
+                || guests.visible()
                 || confirm.visible()
                 || splash.visible()
                 || notes.visible()
@@ -1385,6 +1387,7 @@ impl Renderer {
                     .scrim_alpha()
                     .max(palette.scrim_alpha())
                     .max(help.scrim_alpha())
+                    .max(guests.scrim_alpha())
                     .max(confirm.scrim_alpha())
                     .max(splash.scrim_alpha())
                     .max(notes.scrim_alpha())
@@ -1408,6 +1411,7 @@ impl Renderer {
                 settings,
                 palette,
                 help,
+                guests,
                 confirm,
                 splash,
                 notes,
@@ -1570,6 +1574,7 @@ impl Renderer {
             settings,
             palette,
             help,
+            guests,
             confirm,
             splash,
             notes,
@@ -1705,6 +1710,7 @@ fn overlay_cards(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    guests: &crate::guest_ui::GuestUi,
     confirm: &ConfirmState,
     splash: &SplashState,
     notes: &NotesState,
@@ -1721,6 +1727,9 @@ fn overlay_cards(
     }
     if help.visible() {
         cards.push(HelpLayout::modal_rect(win_w, win_h));
+    }
+    if guests.visible() {
+        cards.push(guests.layout(win_w, win_h).modal);
     }
     if confirm.visible() {
         cards.push(confirm.animated_modal_rect(win_w, win_h));
@@ -1756,6 +1765,7 @@ fn chrome_labels(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    guests: &crate::guest_ui::GuestUi,
     confirm: &ConfirmState,
     splash: &SplashState,
     notes: &NotesState,
@@ -1904,6 +1914,7 @@ fn chrome_labels(
         settings,
         palette,
         help,
+        guests,
         confirm,
         splash,
         notes,
@@ -2062,6 +2073,7 @@ fn chrome_labels(
         settings,
         palette,
         help,
+        guests,
         confirm,
         splash,
         notes,
@@ -2103,6 +2115,7 @@ fn push_modal_glass(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    guests: &crate::guest_ui::GuestUi,
     confirm: &ConfirmState,
     splash: &SplashState,
     notes: &NotesState,
@@ -2197,6 +2210,30 @@ fn push_modal_glass(
             panels.push(
                 PanelInstance::glass(*r, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
             );
+        }
+    }
+
+    if guests.visible() {
+        let ease = guests.content_ease().clamp(0.0, 1.0);
+        let lay = guests.layout(win_w, win_h);
+        panels.push(PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease));
+        for (i, row) in lay.rows.iter().enumerate() {
+            let kind = if i == guests.selected {
+                PanelKind::ModalButtonActive
+            } else {
+                PanelKind::ModalButton
+            };
+            panels.push(PanelInstance::glass(row.rect, m.chip_radius, kind).with_opacity(ease));
+            panels.push(
+                PanelInstance::glass(row.action, m.chip_radius, PanelKind::ModalFrost)
+                    .with_opacity(ease),
+            );
+            if row.remove.w > 1.0 {
+                panels.push(
+                    PanelInstance::glass(row.remove, m.chip_radius, PanelKind::ModalFrost)
+                        .with_opacity(ease),
+                );
+            }
         }
     }
 
@@ -2655,6 +2692,7 @@ fn push_modal_labels(
     settings: &SettingsState,
     palette: &PaletteState,
     help: &HelpState,
+    guests: &crate::guest_ui::GuestUi,
     confirm: &ConfirmState,
     splash: &SplashState,
     notes: &NotesState,
@@ -2918,6 +2956,85 @@ fn push_modal_labels(
         foot[3] *= ease * 0.85;
         labels.push(TextLabel::new(
             "esc  close",
+            modal.x + lay.pad,
+            lay.footer_y,
+            11.0,
+            foot,
+        ));
+    }
+
+    if guests.visible() {
+        let ease = guests.content_ease().clamp(0.0, 1.0);
+        let data = guests.rows();
+        let lay = guests.layout(win_w, win_h);
+        let modal = lay.modal;
+        let mut title_c = bright;
+        title_c[3] *= ease;
+        labels.push(TextLabel::new(
+            "Guests",
+            modal.x + lay.pad,
+            modal.y + 14.0,
+            15.0,
+            title_c,
+        ));
+        for (i, geom) in lay.rows.iter().enumerate() {
+            let Some(row) = data.iter().find(|r| r.id == geom.id) else {
+                continue;
+            };
+            let mut nc = if i == guests.selected { bright } else { muted };
+            nc[3] *= ease;
+            labels.push(TextLabel::new(
+                row.name.clone(),
+                geom.rect.x + 14.0,
+                geom.rect.y + 10.0,
+                14.0,
+                nc,
+            ));
+            let mut dc = dim;
+            dc[3] *= ease;
+            let text_right = if geom.remove.w > 1.0 {
+                geom.remove.x
+            } else {
+                geom.action.x
+            };
+            let avail = (text_right - geom.rect.x - 22.0).max(24.0);
+            let max_desc = (avail / 6.5).floor().max(4.0) as usize;
+            labels.push(TextLabel::new(
+                truncate_chars(&row.desc, max_desc),
+                geom.rect.x + 14.0,
+                geom.rect.y + 32.0,
+                11.0,
+                dc,
+            ));
+            let action = if row.installed { "open" } else { "install" };
+            let mut ac = bright;
+            ac[3] *= ease;
+            labels.push(TextLabel::centered(
+                action.to_string(),
+                [geom.action.x, geom.action.y, geom.action.w, geom.action.h],
+                11.0,
+                ac,
+            ));
+            if geom.remove.w > 1.0 {
+                let mut rc = muted;
+                rc[3] *= ease;
+                labels.push(TextLabel::centered(
+                    "remove",
+                    [geom.remove.x, geom.remove.y, geom.remove.w, geom.remove.h],
+                    11.0,
+                    rc,
+                ));
+            }
+        }
+        let mut foot = dim;
+        foot[3] *= ease * 0.95;
+        let foot_txt = if guests.status.is_empty() {
+            "esc  close   ·   enter  install / open".to_string()
+        } else {
+            guests.status.clone()
+        };
+        labels.push(TextLabel::new(
+            foot_txt,
             modal.x + lay.pad,
             lay.footer_y,
             11.0,

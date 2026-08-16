@@ -12,6 +12,8 @@ function DocsIntro() {
         Suzuri is a native terminal host. A <strong>guest</strong> is an optional process it can
         place in the mosaic next to a terminal or workspace. Suzuri does not ship engines. You
         install a guest yourself and drop a manifest under the product config directory.
+        Command palette → <strong>Guests</strong> installs or removes the catalog (Ladybird
+        first).
       </p>
       <h2>What a pane is</h2>
       <p>

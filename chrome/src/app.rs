@@ -111,6 +111,7 @@ pub struct ChromeApp {
     settings: SettingsState,
     palette: PaletteState,
     help: HelpState,
+    guests: crate::guest_ui::GuestUi,
     confirm: ConfirmState,
     splash: SplashState,
     notes: NotesState,
@@ -258,6 +259,7 @@ impl Default for ChromeApp {
             settings: SettingsState::new(),
             palette: PaletteState::new(),
             help: HelpState::new(),
+            guests: crate::guest_ui::GuestUi::new(),
             confirm: ConfirmState::new(),
             splash: SplashState::new(),
             notes: NotesState::new(),
@@ -1266,6 +1268,7 @@ impl ChromeApp {
         self.settings.open
             || self.palette.open
             || self.help.open
+            || self.guests.open
             || self.confirm.open
             || self.splash.open
             || self.notes.open
@@ -1288,6 +1291,7 @@ impl ChromeApp {
             && !self.palette.open
             && !self.settings.open
             && !self.help.open
+            && !self.guests.open
             && !self.confirm.open
             && !self.splash.open
             && !self.notes.open
@@ -1382,6 +1386,37 @@ impl ChromeApp {
         self.paint_dirty = true;
     }
 
+    fn apply_guest_click(&mut self, click: crate::guest_ui::GuestClick) {
+        match click {
+            crate::guest_ui::GuestClick::Open(id) => {
+                self.guests.close();
+                self.open_guest_pane(Some(&id));
+            }
+            crate::guest_ui::GuestClick::Install(id) => {
+                self.guests.start_install(id);
+                self.paint_dirty = true;
+            }
+            crate::guest_ui::GuestClick::Remove(id) => {
+                self.close_guest_panes(&id);
+                self.guests.start_remove(id);
+                self.paint_dirty = true;
+            }
+        }
+    }
+
+    fn close_guest_panes(&mut self, guest_id: &str) {
+        let ids: Vec<u64> = self
+            .session
+            .panes
+            .iter()
+            .filter(|(_, p)| p.guest_id.as_deref() == Some(guest_id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            let _ = self.session.begin_close_pane(id);
+        }
+    }
+
     fn guest_pane_geom(&self, pane_id: u64) -> (crate::layout::Rect, f32) {
         let scale = self.renderer().map(|r| r.scale_factor()).unwrap_or(1.0);
         let layout = self.current_layout();
@@ -1399,6 +1434,7 @@ impl ChromeApp {
             && !self.palette.open
             && !self.settings.open
             && !self.help.open
+            && !self.guests.open
             && !self.confirm.open
             && !self.splash.open
             && !self.notes.open
@@ -1631,6 +1667,7 @@ impl ChromeApp {
         self.settings.close();
         self.palette.close();
         self.help.close();
+        self.guests.close();
         self.confirm.close();
         self.notes.close();
         if self.workspace_ui.is_modal() {
@@ -1644,6 +1681,7 @@ impl ChromeApp {
         self.settings.close();
         self.palette.close();
         self.help.close();
+        self.guests.close();
         self.notes.close();
         if self.workspace_ui.is_modal() {
             self.workspace_ui.close();
@@ -1760,7 +1798,7 @@ impl ChromeApp {
         for (_i, &idx) in filtered.iter().enumerate().take(6) {
             if cy >= y && cy <= y + btn_h && x >= modal.x + pad && x <= modal.x + modal.w - pad {
                 let action = self.commands[idx].action;
-                self.palette.close();
+                self.palette.snap_shut();
                 self.run_action(event_loop, action);
                 return;
             }
@@ -1773,6 +1811,7 @@ impl ChromeApp {
             CommandAction::OpenSettings => {
                 self.palette.close();
                 self.help.close();
+                self.guests.close();
                 self.notes.close();
                 self.rename.close();
                 self.settings.open();
@@ -1780,6 +1819,7 @@ impl ChromeApp {
             CommandAction::OpenHelp => {
                 self.palette.close();
                 self.settings.close();
+                self.guests.close();
                 self.notes.close();
                 self.rename.close();
                 self.help.open_help();
@@ -1787,6 +1827,7 @@ impl ChromeApp {
             CommandAction::OpenPalette => {
                 self.settings.close();
                 self.help.close();
+                self.guests.close();
                 self.notes.close();
                 self.rename.close();
                 self.palette.open_palette();
@@ -1795,6 +1836,7 @@ impl ChromeApp {
                 self.palette.close();
                 self.settings.close();
                 self.help.close();
+                self.guests.close();
                 if self.workspace_ui.is_modal() {
                     self.workspace_ui.close();
                 }
@@ -1806,6 +1848,7 @@ impl ChromeApp {
                 self.palette.close();
                 self.settings.close();
                 self.help.close();
+                self.guests.close();
                 self.notes.close();
                 self.transfer.close();
                 self.rename.close();
@@ -1816,10 +1859,26 @@ impl ChromeApp {
                 self.palette.close();
                 self.settings.close();
                 self.help.close();
+                self.guests.close();
                 self.notes.close();
                 self.transfer.close();
                 self.rename.close();
-                self.open_guest_pane(prefer.as_deref());
+                if crate::guest_manifest::load_guests().is_empty() {
+                    self.dismiss_splash();
+                    self.guests.open_catalog();
+                } else {
+                    self.open_guest_pane(prefer.as_deref());
+                }
+            }
+            CommandAction::OpenGuests => {
+                self.dismiss_splash();
+                self.palette.snap_shut();
+                self.settings.close();
+                self.help.close();
+                self.notes.close();
+                self.transfer.close();
+                self.rename.close();
+                self.guests.open_catalog();
             }
             CommandAction::RefreshWorkspace => {
                 // Soft no-op when closed (product RefreshWorkspaceMsg).
@@ -1879,6 +1938,7 @@ impl ChromeApp {
                 self.palette.close();
                 self.settings.close();
                 self.help.close();
+                self.guests.close();
                 self.notes.close();
                 if self.workspace_ui.is_modal() {
                     self.workspace_ui.close();
@@ -1890,6 +1950,7 @@ impl ChromeApp {
                 self.palette.close();
                 self.settings.close();
                 self.help.close();
+                self.guests.close();
                 self.notes.close();
                 if self.workspace_ui.is_modal() {
                     self.workspace_ui.close();
@@ -2767,6 +2828,12 @@ impl ChromeApp {
                 return true;
             }
         }
+        if self.guests.visible() {
+            let r = self.guests.layout(win_w, win_h).modal;
+            if r.contains(x, y) {
+                return true;
+            }
+        }
         if self.confirm.visible()
             && self
                 .confirm
@@ -2863,6 +2930,7 @@ impl ChromeApp {
             || self.transfer.visible()
             || self.palette.visible()
             || self.help.visible()
+            || self.guests.visible()
             || self.confirm.visible()
             || self.splash.visible()
             || self.settings.visible()
@@ -2891,6 +2959,14 @@ impl ChromeApp {
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
                     let (px, py) = self.pointer();
                     let _ = self.settings.try_click(px, py, win_w, win_h);
+                } else if self.guests.open {
+                    let layout = self.current_layout();
+                    let win_w = layout.title.w;
+                    let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+                    let (px, py) = self.pointer();
+                    if let Some(click) = self.guests.try_click(px, py, win_w, win_h) {
+                        self.apply_guest_click(click);
+                    }
                 } else if self.palette.open {
                     self.try_palette_click(event_loop);
                 } else if self.notes.open {
@@ -3093,6 +3169,7 @@ impl ChromeApp {
                 || self.settings.visible()
                 || self.palette.visible()
                 || self.help.visible()
+                || self.guests.visible()
                 || self.confirm.visible()
                 || self.splash.visible()
                 || self.notes.visible()
@@ -3760,7 +3837,7 @@ impl ChromeApp {
                 Key::Named(NamedKey::Enter) => {
                     if let Some(&idx) = filtered.get(self.palette.selected) {
                         let action = self.commands[idx].action;
-                        self.palette.close();
+                        self.palette.snap_shut();
                         self.run_action(event_loop, action);
                     }
                 }
@@ -3787,6 +3864,50 @@ impl ChromeApp {
             }
             if let Some(w) = &self.window {
                 w.request_redraw();
+            }
+            return;
+        }
+
+        if self.guests.open {
+            let mut handled = false;
+            match &event.logical_key {
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.guests.move_selection(-1);
+                    handled = true;
+                }
+                Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
+                    self.guests.move_selection(1);
+                    handled = true;
+                }
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                    let rows = self.guests.rows();
+                    if let Some(row) = rows.get(self.guests.selected) {
+                        let click = if row.installed {
+                            crate::guest_ui::GuestClick::Open(row.id.clone())
+                        } else {
+                            crate::guest_ui::GuestClick::Install(row.id.clone())
+                        };
+                        self.apply_guest_click(click);
+                    }
+                    handled = true;
+                }
+                Key::Named(NamedKey::Backspace) | Key::Named(NamedKey::Delete) => {
+                    let rows = self.guests.rows();
+                    if let Some(row) = rows.get(self.guests.selected) {
+                        if row.installed {
+                            self.apply_guest_click(crate::guest_ui::GuestClick::Remove(
+                                row.id.clone(),
+                            ));
+                        }
+                    }
+                    handled = true;
+                }
+                _ => {}
+            }
+            if handled {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
             return;
         }
@@ -4140,6 +4261,9 @@ impl ChromeApp {
         if spring_motion(self.settings.open, self.settings.present()) {
             return true;
         }
+        if self.guests.working() {
+            return true;
+        }
         let rain_t = if self.settings.prefs.rain { 1.0 } else { 0.0 };
         let lens_t = if self.settings.prefs.lens { 1.0 } else { 0.0 };
         if (self.settings.rain_toggle_t() - rain_t).abs() > 0.02
@@ -4149,6 +4273,7 @@ impl ChromeApp {
         }
         if spring_motion(self.palette.open, self.palette.present())
             || spring_motion(self.help.open, self.help.present())
+            || spring_motion(self.guests.open, self.guests.present())
             || spring_motion(self.confirm.open, self.confirm.present())
             || spring_motion(self.splash.open, self.splash.present())
             || spring_motion(self.notes.open, self.notes.present())
@@ -4195,6 +4320,11 @@ impl ChromeApp {
         self.settings.tick(dt);
         self.palette.tick(dt);
         self.help.tick(dt);
+        let guests_busy = self.guests.working();
+        self.guests.tick(dt);
+        if guests_busy != self.guests.working() {
+            self.paint_dirty = true;
+        }
         self.confirm.tick(dt);
         self.splash.tick(dt);
         self.notes.tick(dt);
@@ -5146,6 +5276,7 @@ impl ApplicationHandler for ChromeApp {
                         &self.settings,
                         &self.palette,
                         &self.help,
+                        &self.guests,
                         &self.confirm,
                         &self.splash,
                         &self.notes,

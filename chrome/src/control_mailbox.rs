@@ -10,6 +10,7 @@
 //! - `open_notes`
 //! - `open_workspace`
 //! - `open_guest`
+//! - `open_guests`
 //! - `open_palette`
 //! - `open_settings`
 //! - `open_transfer_send`
@@ -40,6 +41,7 @@ pub enum ControlCommand {
     OpenNotes,
     OpenWorkspace,
     OpenGuest,
+    OpenGuests,
     OpenPalette,
     OpenSettings,
     OpenTransferSend,
@@ -60,6 +62,7 @@ impl ControlCommand {
             "open_notes" => Some(Self::OpenNotes),
             "open_workspace" => Some(Self::OpenWorkspace),
             "open_guest" => Some(Self::OpenGuest),
+            "open_guests" => Some(Self::OpenGuests),
             "open_palette" => Some(Self::OpenPalette),
             "open_settings" => Some(Self::OpenSettings),
             "open_transfer_send" => Some(Self::OpenTransferSend),
@@ -80,6 +83,7 @@ impl ControlCommand {
             Self::OpenNotes => CommandAction::OpenNotes,
             Self::OpenWorkspace => CommandAction::OpenWorkspace,
             Self::OpenGuest => CommandAction::OpenGuest,
+            Self::OpenGuests => CommandAction::OpenGuests,
             Self::OpenPalette => CommandAction::OpenPalette,
             Self::OpenSettings => CommandAction::OpenSettings,
             Self::OpenTransferSend => CommandAction::OpenTransferSend,
@@ -99,6 +103,7 @@ impl ControlCommand {
             Self::OpenNotes => "open_notes",
             Self::OpenWorkspace => "open_workspace",
             Self::OpenGuest => "open_guest",
+            Self::OpenGuests => "open_guests",
             Self::OpenPalette => "open_palette",
             Self::OpenSettings => "open_settings",
             Self::OpenTransferSend => "open_transfer_send",
@@ -250,6 +255,10 @@ mod tests {
             Some(ControlCommand::OpenGuest)
         );
         assert_eq!(
+            ControlCommand::parse("open_guests"),
+            Some(ControlCommand::OpenGuests)
+        );
+        assert_eq!(
             ControlCommand::parse("open_palette"),
             Some(ControlCommand::OpenPalette)
         );
@@ -308,6 +317,10 @@ mod tests {
             CommandAction::OpenGuest
         );
         assert_eq!(
+            ControlCommand::OpenGuests.to_action(),
+            CommandAction::OpenGuests
+        );
+        assert_eq!(
             ControlCommand::OpenPalette.to_action(),
             CommandAction::OpenPalette
         );
@@ -349,6 +362,7 @@ mod tests {
             ControlCommand::OpenNotes,
             ControlCommand::OpenWorkspace,
             ControlCommand::OpenGuest,
+            ControlCommand::OpenGuests,
             ControlCommand::OpenPalette,
             ControlCommand::OpenSettings,
             ControlCommand::OpenTransferSend,

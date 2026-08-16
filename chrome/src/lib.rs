@@ -51,7 +51,9 @@ pub mod echo_filter;
 pub mod eco;
 pub mod guest_fb;
 pub mod guest_host;
+pub mod guest_install;
 pub mod guest_manifest;
+pub mod guest_ui;
 pub mod input;
 pub mod kitty;
 pub mod layout;
@@ -103,6 +105,7 @@ pub use guest_host::{
     guest_footer_top, guest_hole_rect, guest_mount_rect, GuestEvent, GuestHost, NativeAttach,
 };
 pub use guest_manifest::{guests_dir, load_guests, GuestManifest, GUEST_PROTOCOL};
+pub use guest_ui::{GuestClick, GuestUi};
 pub use control_mailbox::{
     chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
     POLL_INTERVAL,
