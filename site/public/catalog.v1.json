@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "guests": [
+    {
+      "id": "ladybird",
+      "name": "Ladybird",
+      "description": "Independent web engine in a Suzuri pane.",
+      "protocol": 1,
+      "capabilities": ["pane", "navigate"],
+      "args": ["--temporary-profile"],
+      "repo": "StephenSHorton/suzuri-ladybird",
+      "assets": {
+        "darwin/arm64": { "name": "suzuri-ladybird-macos-arm64.zip" },
+        "darwin/amd64": { "name": "suzuri-ladybird-macos-amd64.zip" }
+      }
+    }
+  ]
+}

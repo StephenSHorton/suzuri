@@ -6,6 +6,7 @@ import (
 	"runtime"
 
 	"github.com/StephenSHorton/suzuri/internal/chromehost"
+	"github.com/StephenSHorton/suzuri/internal/guest"
 	"github.com/StephenSHorton/suzuri/internal/mcpsrv"
 	"github.com/StephenSHorton/suzuri/internal/transfer"
 	"github.com/StephenSHorton/suzuri/internal/update"
@@ -48,6 +49,10 @@ func main() {
 		winconsole.AttachParent()
 		os.Exit(workspacesync.RunCLI(os.Args[1:]))
 	}
+	if len(os.Args) > 1 && guest.IsArg(os.Args[1]) {
+		winconsole.AttachParent()
+		os.Exit(guest.RunCLI(os.Args[2:]))
+	}
 
 	// Product GUI is native only (Rust/wgpu). There is no Charm/ebiten path.
 	// `suzuri chrome …` remains as an explicit alias that forwards extra args.
@@ -67,7 +72,7 @@ func main() {
 		args = os.Args[2:]
 	} else if len(os.Args) > 1 {
 		fmt.Fprintf(os.Stderr, "suzuri: unknown command %q\n", os.Args[1])
-		fmt.Fprintln(os.Stderr, "usage: suzuri | suzuri mcp | suzuri version | suzuri transfer … | suzuri workspace-sync …")
+		fmt.Fprintln(os.Stderr, "usage: suzuri | suzuri mcp | suzuri version | suzuri guest … | suzuri transfer … | suzuri workspace-sync …")
 		os.Exit(2)
 	}
 	os.Exit(chromehost.RunCLI(version, args))
