@@ -3774,9 +3774,9 @@ fn create_guest_blit(
         cache: None,
     });
     let samp = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("guest linear"),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
+        label: Some("guest nearest"),
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
         ..Default::default()
     });
     (pipeline, bgl, samp)

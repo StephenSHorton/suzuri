@@ -1021,7 +1021,6 @@ impl ChromeApp {
                 );
                 let native = self.guest_native_attach(pl.pane_id, hole, !overlay);
                 self.guest_host.resize(pl.pane_id, hole, scale, native);
-                self.guest_host.restack(pl.pane_id);
             }
         }
         for id in self.guest_host.live_pane_ids() {
@@ -4168,7 +4167,7 @@ impl ChromeApp {
             occluded: self.occluded,
             animate_unfocused: self.settings.prefs.animate_unfocused,
             rain: self.settings.prefs.rain,
-            ui_animating: self.ui_animating(),
+            ui_animating: self.ui_animating() || self.session.focused_is_guest(),
             paint_dirty: self.paint_dirty,
             caret_live: self.warp_focused
                 || self.terminal_focused
