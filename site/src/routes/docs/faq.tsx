@@ -30,7 +30,8 @@ function Page() {
       <h2>What is a guest?</h2>
       <p>
         An optional process you install and point at with a manifest. Suzuri can place it in
-        the mosaic. It does not ship inside the app.
+        the mosaic. It does not ship inside the app. Ladybird is the first catalog guest:{" "}
+        <code>suzuri guest install ladybird</code>.
       </p>
       <h2>Can I write my own guest?</h2>
       <p>
