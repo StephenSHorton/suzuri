@@ -21,7 +21,8 @@ function Page() {
         <code>install</code> downloads a helper release when one exists, or you
         can point at a local <code>Ladybird.app</code> with{" "}
         <code>--from</code>. That writes a manifest under the product config
-        directory. Palette → <strong>New guest pane</strong>.
+        directory. Palette → <strong>Guests</strong> for the same install /
+        remove card, or <strong>New guest pane</strong> to open one.
       </p>
       <p>Suzuri looks for manifests here:</p>
       <ul>

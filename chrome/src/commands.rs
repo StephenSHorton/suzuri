@@ -12,6 +12,8 @@ pub enum CommandAction {
     OpenWorkspace,
     /// Split a guest pane for a resolved manifest (soft no-op if none).
     OpenGuest,
+    /// Catalog modal: install / remove / open guests.
+    OpenGuests,
     OpenTransferSend,
     OpenTransferReceive,
     NewTab,
@@ -136,6 +138,13 @@ pub fn default_commands() -> Vec<Command> {
             desc: "Shared channels · splits as a pane".into(),
             category: "Workspace",
             action: CommandAction::OpenWorkspace,
+        },
+        Command {
+            id: "guests",
+            title: "Guests",
+            desc: "Catalog · install · remove · Ladybird".into(),
+            category: "Panes",
+            action: CommandAction::OpenGuests,
         },
         Command {
             id: "guest",
@@ -414,6 +423,14 @@ impl PaletteState {
         self.open = false;
         self.query.clear();
         self.selected = 0;
+    }
+
+    /// Close without the spring-out so a replacement modal isn't under a caret.
+    pub fn snap_shut(&mut self) {
+        self.close();
+        self.present = 0.0;
+        self.present_vel = 0.0;
+        self.overlay = 0.0;
     }
 
     pub fn toggle(&mut self) {
@@ -1162,6 +1179,20 @@ mod tests {
         assert_eq!(cmd.action, CommandAction::OpenGuest);
         let idx = filter_commands(&all, "guest");
         assert!(idx.iter().any(|&i| all[i].id == "guest"));
+        let cat = all.iter().find(|c| c.id == "guests").expect("guests command");
+        assert_eq!(cat.title, "Guests");
+        assert_eq!(cat.action, CommandAction::OpenGuests);
+        let guests_idx = all.iter().position(|c| c.id == "guests").unwrap();
+        assert!(
+            guests_idx < PaletteState::MAX_ROWS,
+            "Guests must be in the unfiltered palette"
+        );
+        assert!(filter_commands(&all, "ladybird")
+            .iter()
+            .any(|&i| all[i].id == "guests"));
+        assert!(filter_commands(&all, "catalog")
+            .iter()
+            .any(|&i| all[i].id == "guests"));
     }
 
     #[test]
