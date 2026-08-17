@@ -26,6 +26,7 @@ type CatalogItem struct {
 	Protocol     int              `json:"protocol"`
 	Capabilities []string         `json:"capabilities"`
 	Args         []string         `json:"args"`
+	Commands     []GuestCommand   `json:"commands,omitempty"`
 	Repo         string           `json:"repo"`
 	Assets       map[string]Asset `json:"assets"`
 }
@@ -57,7 +58,12 @@ func defaultCatalog() Catalog {
 			Protocol:     1,
 			Capabilities: []string{"pane", "navigate"},
 			Args:         []string{"--temporary-profile"},
-			Repo:         "StephenSHorton/suzuri-ladybird",
+			Commands: []GuestCommand{{
+				ID:    "open",
+				Title: "Open Browser Pane",
+				Desc:  "Ladybird · new pane",
+			}},
+			Repo: "StephenSHorton/suzuri-ladybird",
 			Assets: map[string]Asset{
 				"darwin/arm64": {Name: "suzuri-ladybird-macos-arm64.zip"},
 				"darwin/amd64": {Name: "suzuri-ladybird-macos-amd64.zip"},

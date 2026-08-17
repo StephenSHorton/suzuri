@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::guest_fb;
+use crate::guest_install;
 use crate::guest_manifest::GuestManifest;
 use crate::layout::Rect;
 
@@ -232,10 +233,9 @@ impl GuestHost {
         if self.live.contains_key(&pane_id) {
             return Ok(());
         }
+        guest_install::ensure_runnable(&manifest.command);
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-        listener
-            .set_nonblocking(false)
-            .map_err(|e| e.to_string())?;
+        listener.set_nonblocking(false).map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
         let mut cmd = Command::new(&manifest.command);
@@ -250,12 +250,9 @@ impl GuestHost {
         for a in &manifest.args {
             cmd.arg(a);
         }
-        let child = cmd.spawn().map_err(|e| {
-            format!(
-                "spawn {}: {e}",
-                manifest.command.display()
-            )
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("spawn {}: {e}", manifest.command.display()))?;
 
         let (fb_w, fb_h) = guest_fb::pixel_size(rect.w, rect.h, scale);
         let fb_path = guest_fb::fb_path(pane_id);
@@ -338,18 +335,34 @@ impl GuestHost {
             }
         });
 
-        match ready_rx.recv_timeout(Duration::from_secs(6)) {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                let mut child = child;
-                let _ = child.kill();
-                return Err(e);
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let mut child = child;
+        let ready = loop {
+            match ready_rx.try_recv() {
+                Ok(Ok(())) => break Ok(()),
+                Ok(Err(e)) => break Err(e),
+                Err(TryRecvError::Disconnected) => {
+                    break Err("guest handshake closed".into());
+                }
+                Err(TryRecvError::Empty) => {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            break Err(format!("guest exited ({status})"));
+                        }
+                        Ok(None) => {}
+                        Err(e) => break Err(e.to_string()),
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        break Err("guest did not connect".into());
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
             }
-            Err(_) => {
-                let mut child = child;
-                let _ = child.kill();
-                return Err("guest did not connect".into());
-            }
+        };
+        if let Err(e) = ready {
+            let _ = child.kill();
+            return Err(e);
         }
 
         self.live.insert(
@@ -474,13 +487,12 @@ impl GuestHost {
 }
 
 fn matches_crash(events: &[GuestEvent], pane_id: u64) -> bool {
-    events.iter().any(|e| matches!(e, GuestEvent::Crash { pane_id: id, .. } if *id == pane_id))
+    events
+        .iter()
+        .any(|e| matches!(e, GuestEvent::Crash { pane_id: id, .. } if *id == pane_id))
 }
 
-fn accept_timeout(
-    listener: &TcpListener,
-    budget: Duration,
-) -> Result<std::net::TcpStream, String> {
+fn accept_timeout(listener: &TcpListener, budget: Duration) -> Result<std::net::TcpStream, String> {
     let start = std::time::Instant::now();
     loop {
         match listener.accept() {
@@ -576,7 +588,10 @@ fn encode_resize(
 }
 
 fn encode_focus(inn: bool) -> String {
-    format!(r#"{{"type":"focus","in":{}}}"#, if inn { "true" } else { "false" })
+    format!(
+        r#"{{"type":"focus","in":{}}}"#,
+        if inn { "true" } else { "false" }
+    )
 }
 
 fn encode_navigate(url: &str) -> String {
@@ -584,9 +599,7 @@ fn encode_navigate(url: &str) -> String {
 }
 
 fn encode_scroll(dx: f64, dy: f64, x: f32, y: f32) -> String {
-    format!(
-        r#"{{"type":"scroll","dx":{dx:.3},"dy":{dy:.3},"x":{x:.2},"y":{y:.2}}}"#
-    )
+    format!(r#"{{"type":"scroll","dx":{dx:.3},"dy":{dy:.3},"x":{x:.2},"y":{y:.2}}}"#)
 }
 
 fn encode_pointer(kind: &str, x: f32, y: f32, button: i32, buttons: i32, modifiers: i32) -> String {
@@ -677,8 +690,7 @@ mod tests {
 
     #[test]
     fn decode_hello_title_url() {
-        let h = decode_guest_line(3, r#"{"type":"hello","protocol":1,"title":"Example"}"#)
-            .unwrap();
+        let h = decode_guest_line(3, r#"{"type":"hello","protocol":1,"title":"Example"}"#).unwrap();
         assert_eq!(
             h,
             GuestEvent::Hello {
@@ -730,7 +742,14 @@ mod tests {
             screen: Rect::new(10.0, 20.0, 30.0, 40.0),
             visible: true,
         };
-        let with = encode_spawn(9, Rect::new(1.0, 2.0, 3.0, 4.0), 2.0, "/tmp", Some(&n), None);
+        let with = encode_spawn(
+            9,
+            Rect::new(1.0, 2.0, 3.0, 4.0),
+            2.0,
+            "/tmp",
+            Some(&n),
+            None,
+        );
         assert!(with.contains(r#""window_number":42"#));
         assert!(with.contains(r#""kind":"nswindow""#));
         assert!(with.contains(r#""visible":true"#));
@@ -768,7 +787,11 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            writeln!(stream, r#"{{"type":"hello","protocol":1,"title":"Example"}}"#).unwrap();
+            writeln!(
+                stream,
+                r#"{{"type":"hello","protocol":1,"title":"Example"}}"#
+            )
+            .unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
@@ -813,6 +836,7 @@ mod tests {
             protocol: 1,
             capabilities: vec!["pane".into(), "navigate".into()],
             args: vec![],
+            commands: vec![],
             path: std::path::PathBuf::from("example.json"),
         };
         let mut host = GuestHost::new();
@@ -852,13 +876,19 @@ mod tests {
         assert!(saw_hello, "no hello from example guest");
         assert!(saw_surface, "example did not announce a surface");
         host.navigate(7, "https://echo.test/");
-        let echoed = wait_event(&mut host, 2000, |e| {
-            matches!(e, GuestEvent::Url { pane_id: 7, text } if text == "https://echo.test/")
-        });
+        let echoed = wait_event(
+            &mut host,
+            2000,
+            |e| matches!(e, GuestEvent::Url { pane_id: 7, text } if text == "https://echo.test/"),
+        );
         assert!(echoed, "example did not echo navigate");
         let (w, h, px) = host.take_fb(7).expect("example framebuffer");
         assert!(w >= 8 && h >= 8, "fb {w}x{h}");
-        assert_eq!(&px[0..4], &[74, 186, 61, 255], "left rail should be guest jade");
+        assert_eq!(
+            &px[0..4],
+            &[74, 186, 61, 255],
+            "left rail should be guest jade"
+        );
         host.kill(7);
     }
 

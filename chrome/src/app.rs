@@ -23,7 +23,7 @@ use crate::chrome_ui::{ChipId, ChipUi};
 use crate::cmd_blocks::{self, CmdBlockLog};
 use crate::echo_filter::EchoFilter;
 use crate::commands::{
-    default_commands, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
+    commands_with_guests, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
 };
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
@@ -268,7 +268,7 @@ impl Default for ChromeApp {
             rename: RenameState::new(),
             caffeine: Caffeine::new(),
             toast: ToastState::new(),
-            commands: default_commands(),
+            commands: commands_with_guests(&load_guests()),
             started: Instant::now(),
             clipboard: arboard::Clipboard::new().ok(),
             chip_ui: ChipUi::default(),
@@ -1798,15 +1798,25 @@ impl ChromeApp {
         for (_i, &idx) in filtered.iter().enumerate().take(6) {
             if cy >= y && cy <= y + btn_h && x >= modal.x + pad && x <= modal.x + modal.w - pad {
                 let action = self.commands[idx].action;
+                let guest_id = self.commands[idx].guest_id.clone();
                 self.palette.snap_shut();
-                self.run_action(event_loop, action);
+                self.run_action(event_loop, action, guest_id);
                 return;
             }
             y += btn_h + gap;
         }
     }
 
-    fn run_action(&mut self, event_loop: &ActiveEventLoop, action: CommandAction) {
+    fn refresh_guest_commands(&mut self) {
+        self.commands = commands_with_guests(&load_guests());
+    }
+
+    fn run_action(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        action: CommandAction,
+        guest_id: Option<String>,
+    ) {
         match action {
             CommandAction::OpenSettings => {
                 self.palette.close();
@@ -1830,6 +1840,7 @@ impl ChromeApp {
                 self.guests.close();
                 self.notes.close();
                 self.rename.close();
+                self.refresh_guest_commands();
                 self.palette.open_palette();
             }
             CommandAction::OpenNotes => {
@@ -1855,7 +1866,7 @@ impl ChromeApp {
                 self.open_workspace_pane();
             }
             CommandAction::OpenGuest => {
-                let prefer = guest_prefer_from_query(&self.palette.query);
+                let prefer = guest_id.or_else(|| guest_prefer_from_query(&self.palette.query));
                 self.palette.close();
                 self.settings.close();
                 self.help.close();
@@ -3569,6 +3580,7 @@ impl ChromeApp {
                         self.help.close();
                         self.settings.close();
                         self.notes.close();
+                        self.refresh_guest_commands();
                         self.palette.toggle();
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -3636,7 +3648,7 @@ impl ChromeApp {
                     }
                     // Ctrl+Shift+N (and ⌘⇧N on mac) — new OS window process.
                     "n" | "N" if shift => {
-                        self.run_action(event_loop, CommandAction::NewWindow);
+                        self.run_action(event_loop, CommandAction::NewWindow, None);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -3837,8 +3849,9 @@ impl ChromeApp {
                 Key::Named(NamedKey::Enter) => {
                     if let Some(&idx) = filtered.get(self.palette.selected) {
                         let action = self.commands[idx].action;
+                        let guest_id = self.commands[idx].guest_id.clone();
                         self.palette.snap_shut();
-                        self.run_action(event_loop, action);
+                        self.run_action(event_loop, action, guest_id);
                     }
                 }
                 Key::Named(NamedKey::Backspace) => {
@@ -4323,6 +4336,7 @@ impl ChromeApp {
         let guests_busy = self.guests.working();
         self.guests.tick(dt);
         if guests_busy != self.guests.working() {
+            self.refresh_guest_commands();
             self.paint_dirty = true;
         }
         self.confirm.tick(dt);
@@ -4451,7 +4465,7 @@ impl ApplicationHandler for ChromeApp {
         self.reap_dead_shells();
         self.sync_focus_for_alt_screen();
         for cmd in self.control_mailbox.poll() {
-            self.run_action(event_loop, cmd.to_action());
+            self.run_action(event_loop, cmd.to_action(), None);
             if matches!(cmd, crate::control_mailbox::ControlCommand::Quit) {
                 return;
             }
@@ -5174,7 +5188,7 @@ impl ApplicationHandler for ChromeApp {
                 // Auto raw-PTY focus while a fullscreen TUI owns the alt screen.
                 self.sync_focus_for_alt_screen();
                 for cmd in self.control_mailbox.poll() {
-                    self.run_action(event_loop, cmd.to_action());
+                    self.run_action(event_loop, cmd.to_action(), None);
                     if matches!(cmd, crate::control_mailbox::ControlCommand::Quit) {
                         return;
                     }
