@@ -1366,9 +1366,10 @@ impl ChromeApp {
             Some(id) => id,
             None => self.session.new_guest_tab(&manifest.id, ""),
         };
-        // Page owns the well after a default load; warp is still a click away.
-        self.warp_focused = false;
-        self.terminal_focused = true;
+        // Warp owns keys until the well is clicked. Palette Enter would
+        // otherwise hit Ladybird as a synthetic key with no NSEvent.
+        self.warp_focused = true;
+        self.terminal_focused = false;
         if let Some(tab) = self.session.active_tab() {
             let surface = tab.surface;
             let tid = tab.id;
@@ -1438,7 +1439,17 @@ impl ChromeApp {
             .find(|p| p.pane_id == pane_id)
             .map(|p| guest_mount_rect(p.glass, p.header, guest_footer_top(p.divider, p.glass)))
             .unwrap_or_else(|| crate::layout::Rect::new(0.0, 0.0, 0.0, 0.0));
-        (rect, scale)
+        if rect.w >= 32.0 && rect.h >= 32.0 {
+            return (rect, scale);
+        }
+        // Split just landed; the mosaic has not assigned a well yet.
+        let host = layout.workspace;
+        let w = (host.w * 0.5).max(320.0);
+        let h = host.h.max(240.0);
+        (
+            crate::layout::Rect::new(host.x + (host.w - w).max(0.0), host.y, w, h),
+            scale,
+        )
     }
 
     fn guest_captures_input(&self) -> bool {
