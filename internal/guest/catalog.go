@@ -10,7 +10,7 @@ import (
 
 // DefaultCatalogURL is optional. The embedded catalog is enough to install
 // ladybird from a GitHub release or a local --from path.
-const DefaultCatalogURL = "https://raw.githubusercontent.com/StephenSHorton/suzuri/master/site/public/catalog.v1.json"
+const DefaultCatalogURL = "https://raw.githubusercontent.com/StephenSHorton/suzuri/main/site/public/catalog.v1.json"
 
 // Catalog is the installable guest list.
 type Catalog struct {
