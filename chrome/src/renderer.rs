@@ -196,6 +196,7 @@ struct GuestGpu {
     w: u32,
     h: u32,
     uni: wgpu::Buffer,
+    iosurface_id: Option<u32>,
 }
 
 impl Renderer {
@@ -782,6 +783,7 @@ impl Renderer {
                     w,
                     h,
                     uni,
+                    iosurface_id: None,
                 },
             );
         }
@@ -817,6 +819,45 @@ impl Renderer {
                 buf[dst..dst + bpr as usize].copy_from_slice(&bgra[src..src + bpr as usize]);
             }
             self.queue.write_texture(dest, &buf, layout, size);
+        }
+    }
+
+    pub fn import_guest_iosurface(&mut self, pane_id: u64, id: u32, w: u32, h: u32) {
+        #[cfg(target_os = "macos")]
+        {
+            if w == 0 || h == 0 || id == 0 {
+                return;
+            }
+            if self.guest_tex.get(&pane_id).is_some_and(|t| {
+                t.iosurface_id == Some(id) && t.w == w && t.h == h
+            }) {
+                return;
+            }
+            let Some(tex) = crate::guest_iosurface::import(&self.device, id, w, h) else {
+                return;
+            };
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let uni = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("guest blit uni"),
+                size: 64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.guest_tex.insert(
+                pane_id,
+                GuestGpu {
+                    _tex: tex,
+                    view,
+                    w,
+                    h,
+                    uni,
+                    iosurface_id: Some(id),
+                },
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (pane_id, id, w, h);
         }
     }
 

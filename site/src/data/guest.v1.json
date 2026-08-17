@@ -57,8 +57,15 @@
     },
     "surface": {
       "dir": "guest→chrome",
-      "fields": { "kind": "native-child | iosurface", "handle": "opaque" },
-      "notes": "Optional. Guests that do not attach a native surface can present in their own window."
+      "fields": {
+        "kind": "iosurface | file",
+        "id": "IOSurfaceGetID when kind=iosurface",
+        "path": "SZFB path when kind=file",
+        "width": "pixels",
+        "height": "pixels",
+        "seq": "frame counter"
+      },
+      "notes": "Ladybird sends kind=iosurface. Chrome imports the surface as a Metal texture and blits it into the well. kind=file is the example guest fallback."
     },
     "crash": {
       "dir": "guest→chrome",

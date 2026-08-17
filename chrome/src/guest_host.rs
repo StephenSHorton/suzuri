@@ -94,6 +94,21 @@ pub enum GuestEvent {
         width: u32,
         height: u32,
     },
+    IoSurface {
+        pane_id: u64,
+        id: u32,
+        width: u32,
+        height: u32,
+        seq: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IoSurf {
+    id: u32,
+    w: u32,
+    h: u32,
+    seq: u32,
 }
 
 struct LiveGuest {
@@ -104,6 +119,8 @@ struct LiveGuest {
     last_geom: Option<GeomKey>,
     fb_path: std::path::PathBuf,
     fb_seq: u32,
+    iosurface: Option<IoSurf>,
+    iosurface_drawn: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -374,6 +391,8 @@ impl GuestHost {
                 last_geom: Some(geom_key(rect, scale, native.as_ref())),
                 fb_path,
                 fb_seq: 0,
+                iosurface: None,
+                iosurface_drawn: 0,
             },
         );
         Ok(())
@@ -450,6 +469,28 @@ impl GuestHost {
         self.send(pane_id, &line);
     }
 
+    pub fn note_iosurface(&mut self, pane_id: u64, id: u32, width: u32, height: u32, seq: u32) {
+        if let Some(live) = self.live.get_mut(&pane_id) {
+            live.iosurface = Some(IoSurf {
+                id,
+                w: width,
+                h: height,
+                seq,
+            });
+        }
+    }
+
+    /// Next unpublished compositor IOSurface, if the seq advanced.
+    pub fn take_iosurface(&mut self, pane_id: u64) -> Option<(u32, u32, u32)> {
+        let live = self.live.get_mut(&pane_id)?;
+        let s = live.iosurface?;
+        if s.seq == live.iosurface_drawn {
+            return None;
+        }
+        live.iosurface_drawn = s.seq;
+        Some((s.id, s.w, s.h))
+    }
+
     /// Copy guest pixels if the file seq advanced.
     pub fn take_fb(&mut self, pane_id: u64) -> Option<(u32, u32, Vec<u8>)> {
         let live = self.live.get_mut(&pane_id)?;
@@ -465,6 +506,12 @@ impl GuestHost {
         let Some(live) = self.live.get(&pane_id) else {
             return false;
         };
+        if live
+            .iosurface
+            .is_some_and(|s| s.seq != live.iosurface_drawn)
+        {
+            return true;
+        }
         guest_fb::peek_seq(&live.fb_path).is_some_and(|s| s != live.fb_seq)
     }
 
@@ -668,16 +715,31 @@ fn decode_guest_line(pane_id: u64, line: &str) -> Option<GuestEvent> {
                 .unwrap_or("guest crashed")
                 .to_string(),
         }),
-        "surface" => Some(GuestEvent::Surface {
-            pane_id,
-            path: v
-                .get("path")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            width: v.get("width").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-            height: v.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-        }),
+        "surface" => {
+            let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("file");
+            let width = v.get("width").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let height = v.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            if kind == "iosurface" {
+                Some(GuestEvent::IoSurface {
+                    pane_id,
+                    id: v.get("id").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                    width,
+                    height,
+                    seq: v.get("seq").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                })
+            } else {
+                Some(GuestEvent::Surface {
+                    pane_id,
+                    path: v
+                        .get("path")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    width,
+                    height,
+                })
+            }
+        }
         _ => None,
     }
 }
@@ -720,6 +782,25 @@ mod tests {
             GuestEvent::Url {
                 pane_id: 3,
                 text: "https://x.test".into()
+            }
+        );
+    }
+
+    #[test]
+    fn decode_iosurface_surface() {
+        let ev = decode_guest_line(
+            4,
+            r#"{"type":"surface","kind":"iosurface","id":99,"width":800,"height":600,"seq":3}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ev,
+            GuestEvent::IoSurface {
+                pane_id: 4,
+                id: 99,
+                width: 800,
+                height: 600,
+                seq: 3,
             }
         );
     }

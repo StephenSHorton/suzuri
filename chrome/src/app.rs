@@ -1487,13 +1487,10 @@ impl ChromeApp {
     }
 
     fn send_guest_pointer(&self, pane_id: u64, kind: &str, button: i32) {
-        let (hole, scale) = self.guest_pane_geom(pane_id);
+        let (hole, _) = self.guest_pane_geom(pane_id);
         let (px, py) = self.pointer();
-        // Ladybird overlay multiplies by dpr, then enqueue_input_event does it
-        // again. Send CSS / scale so the click lands on the page.
-        let dpr = scale.max(0.5);
-        let x = (px - hole.x) / dpr;
-        let y = (py - hole.y) / dpr;
+        let x = px - hole.x;
+        let y = py - hole.y;
         let buttons = if self.guest_pointer_down.is_some() || kind == "down" {
             1
         } else {
@@ -1520,16 +1517,10 @@ impl ChromeApp {
             }
             MouseScrollDelta::LineDelta(x, y) => (-f64::from(x) * 40.0, -f64::from(y) * 40.0),
         };
-        let (hole, hole_scale) = self.guest_pane_geom(pane_id);
+        let (hole, _) = self.guest_pane_geom(pane_id);
         let (px, py) = self.pointer();
-        let dpr = hole_scale.max(0.5);
-        self.guest_host.scroll(
-            pane_id,
-            dx,
-            dy,
-            (px - hole.x) / dpr,
-            (py - hole.y) / dpr,
-        );
+        self.guest_host
+            .scroll(pane_id, dx, dy, px - hole.x, py - hole.y);
         self.paint_dirty = true;
     }
 
@@ -1608,7 +1599,17 @@ impl ChromeApp {
                     let _ = self.session.begin_close_pane(pane_id);
                 }
                 GuestEvent::Surface { .. } => {
-                    // Pixels land via take_fb on the next paint.
+                    // File pixels land via take_fb on the next paint.
+                }
+                GuestEvent::IoSurface {
+                    pane_id,
+                    id,
+                    width,
+                    height,
+                    seq,
+                } => {
+                    self.guest_host
+                        .note_iosurface(pane_id, id, width, height, seq);
                 }
             }
         }
@@ -5287,6 +5288,7 @@ impl ApplicationHandler for ChromeApp {
                     .unwrap_or(0.0);
                 let mut guest_wells = Vec::new();
                 let mut guest_uploads = Vec::new();
+                let mut guest_ios = Vec::new();
                 for pl in &layout.panes {
                     if !self.session.pane_kind(pl.pane_id).is_guest() {
                         continue;
@@ -5304,7 +5306,9 @@ impl ApplicationHandler for ChromeApp {
                             radius: self.metrics.radius,
                         });
                     }
-                    if let Some((w, h, px)) = self.guest_host.take_fb(pl.pane_id) {
+                    if let Some((id, w, h)) = self.guest_host.take_iosurface(pl.pane_id) {
+                        guest_ios.push((pl.pane_id, id, w, h));
+                    } else if let Some((w, h, px)) = self.guest_host.take_fb(pl.pane_id) {
                         guest_uploads.push((pl.pane_id, w, h, px));
                     }
                 }
@@ -5312,6 +5316,9 @@ impl ApplicationHandler for ChromeApp {
                     r.window_exit_blur = exit_blur;
                     r.set_ui_scale(self.ui_zoom);
                     r.set_guest_wells(guest_wells);
+                    for (pane_id, id, w, h) in guest_ios {
+                        r.import_guest_iosurface(pane_id, id, w, h);
+                    }
                     for (pane_id, w, h, px) in &guest_uploads {
                         r.upload_guest_fb(*pane_id, *w, *h, px);
                     }
