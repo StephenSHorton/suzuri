@@ -121,6 +121,8 @@ struct LiveGuest {
     fb_seq: u32,
     iosurface: Option<IoSurf>,
     iosurface_drawn: u32,
+    #[cfg(target_os = "macos")]
+    inbox: Option<crate::guest_iosurface::MachInbox>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,6 +276,15 @@ impl GuestHost {
         let (fb_w, fb_h) = guest_fb::pixel_size(rect.w, rect.h, scale);
         let fb_path = guest_fb::fb_path(pane_id);
         let _ = guest_fb::create(&fb_path, fb_w, fb_h);
+        #[cfg(target_os = "macos")]
+        let inbox = {
+            let name = format!("com.suzuri.s.{}.{}", std::process::id(), pane_id);
+            crate::guest_iosurface::MachInbox::register(&name)
+        };
+        #[cfg(target_os = "macos")]
+        let mach_name = inbox.as_ref().map(|i| i.name.as_str());
+        #[cfg(not(target_os = "macos"))]
+        let mach_name: Option<&str> = None;
         let ev_tx = self.events_tx.clone();
         let spawn_line = encode_spawn(
             pane_id,
@@ -282,6 +293,7 @@ impl GuestHost {
             cwd,
             native.as_ref(),
             Some((&fb_path, fb_w, fb_h)),
+            mach_name,
         );
         let (out_tx, out_rx) = mpsc::channel::<String>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -393,6 +405,8 @@ impl GuestHost {
                 fb_seq: 0,
                 iosurface: None,
                 iosurface_drawn: 0,
+                #[cfg(target_os = "macos")]
+                inbox,
             },
         );
         Ok(())
@@ -489,6 +503,20 @@ impl GuestHost {
         }
         live.iosurface_drawn = s.seq;
         Some((s.id, s.w, s.h))
+    }
+
+    /// Drain Mach send-rights the guest posted for this pane.
+    #[cfg(target_os = "macos")]
+    pub fn recv_iosurface(
+        &self,
+        pane_id: u64,
+    ) -> Option<crate::guest_iosurface::SurfaceRef> {
+        self.live.get(&pane_id)?.inbox.as_ref()?.recv_latest()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn recv_iosurface(&self, _pane_id: u64) -> Option<()> {
+        None
     }
 
     /// Copy guest pixels if the file seq advanced.
@@ -610,6 +638,13 @@ fn encode_fb_suffix(fb: Option<(&std::path::PathBuf, u32, u32)>) -> String {
     }
 }
 
+fn encode_mach_suffix(name: Option<&str>) -> String {
+    match name {
+        Some(n) if !n.is_empty() => format!(r#","mach":"{}""#, json_escape(n)),
+        _ => String::new(),
+    }
+}
+
 fn encode_spawn(
     pane_id: u64,
     rect: Rect,
@@ -617,13 +652,15 @@ fn encode_spawn(
     cwd: &str,
     native: Option<&NativeAttach>,
     fb: Option<(&std::path::PathBuf, u32, u32)>,
+    mach: Option<&str>,
 ) -> String {
     format!(
-        r#"{{"type":"spawn","pane_id":"{pane_id}","rect":{},"scale":{scale},"cwd":"{}"{}{}}}"#,
+        r#"{{"type":"spawn","pane_id":"{pane_id}","rect":{},"scale":{scale},"cwd":"{}"{}{}{}}}"#,
         encode_rect(rect),
         json_escape(cwd),
         encode_native_suffix(native),
-        encode_fb_suffix(fb)
+        encode_fb_suffix(fb),
+        encode_mach_suffix(mach)
     )
 }
 
@@ -821,7 +858,7 @@ mod tests {
         let k = encode_key("down", "Enter", "", 0);
         assert!(k.contains(r#""type":"key""#));
         assert!(k.contains(r#""key":"Enter""#));
-        let s = encode_spawn(9, Rect::new(1.0, 2.0, 3.0, 4.0), 2.0, "/tmp", None, None);
+        let s = encode_spawn(9, Rect::new(1.0, 2.0, 3.0, 4.0), 2.0, "/tmp", None, None, None);
         assert!(s.contains(r#""type":"spawn""#));
         assert!(s.contains(r#""pane_id":"9""#));
         assert!(!s.contains("native"));
@@ -837,6 +874,7 @@ mod tests {
             "/tmp",
             Some(&n),
             None,
+            None,
         );
         assert!(with.contains(r#""window_number":42"#));
         assert!(with.contains(r#""kind":"nswindow""#));
@@ -849,7 +887,9 @@ mod tests {
             "/",
             None,
             Some((&path, 20, 10)),
+            Some("com.suzuri.s.1.2"),
         );
+        assert!(fb.contains(r#""mach":"com.suzuri.s.1.2""#));
         assert!(fb.contains(r#""fb":{"path":"/tmp/x.szfb""#));
         assert!(fb.contains(r#""width":20"#));
         assert!(fb.contains(r#""height":10"#));
@@ -900,7 +940,7 @@ mod tests {
         writeln!(
             stream,
             "{}",
-            encode_spawn(1, Rect::new(0.0, 0.0, 10.0, 10.0), 1.0, "/", None, None)
+            encode_spawn(1, Rect::new(0.0, 0.0, 10.0, 10.0), 1.0, "/", None, None, None)
         )
         .unwrap();
         writeln!(stream, "{}", encode_navigate("echoed")).unwrap();

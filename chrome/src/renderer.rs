@@ -822,20 +822,32 @@ impl Renderer {
         }
     }
 
-    pub fn import_guest_iosurface(&mut self, pane_id: u64, id: u32, w: u32, h: u32) {
+    pub fn import_guest_iosurface(
+        &mut self,
+        pane_id: u64,
+        id: u32,
+        w: u32,
+        h: u32,
+        #[cfg(target_os = "macos")] held: Option<crate::guest_iosurface::SurfaceRef>,
+        #[cfg(not(target_os = "macos"))] _held: Option<()>,
+    ) -> bool {
         #[cfg(target_os = "macos")]
         {
-            if w == 0 || h == 0 || id == 0 {
-                return;
+            if w == 0 || h == 0 {
+                return false;
             }
-            if self.guest_tex.get(&pane_id).is_some_and(|t| {
-                t.iosurface_id == Some(id) && t.w == w && t.h == h
-            }) {
-                return;
+            if held.is_none()
+                && self.guest_tex.get(&pane_id).is_some_and(|t| {
+                    t.iosurface_id == Some(id) && t.w == w && t.h == h
+                })
+            {
+                return true;
             }
-            let Some(tex) = crate::guest_iosurface::import(&self.device, id, w, h) else {
-                return;
+            let Some(tex) = crate::guest_iosurface::import(&self.device, id, w, h, held) else {
+                return false;
             };
+            let iw = tex.width();
+            let ih = tex.height();
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
             let uni = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("guest blit uni"),
@@ -848,17 +860,23 @@ impl Renderer {
                 GuestGpu {
                     _tex: tex,
                     view,
-                    w,
-                    h,
+                    w: iw,
+                    h: ih,
                     uni,
                     iosurface_id: Some(id),
                 },
             );
+            true
         }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (pane_id, id, w, h);
+            false
         }
+    }
+
+    pub fn has_guest_tex(&self, pane_id: u64) -> bool {
+        self.guest_tex.contains_key(&pane_id)
     }
 
     pub fn drop_guest_fb(&mut self, pane_id: u64) {

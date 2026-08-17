@@ -52,6 +52,8 @@ pub mod eco;
 pub mod guest_fb;
 pub mod guest_host;
 pub mod guest_install;
+#[cfg(target_os = "macos")]
+pub mod guest_iosurface;
 pub mod guest_manifest;
 pub mod guest_ui;
 pub mod input;

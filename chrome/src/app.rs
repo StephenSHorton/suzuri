@@ -5317,9 +5317,17 @@ impl ApplicationHandler for ChromeApp {
                             radius: self.metrics.radius,
                         });
                     }
-                    if let Some((id, w, h)) = self.guest_host.take_iosurface(pl.pane_id) {
-                        guest_ios.push((pl.pane_id, id, w, h));
-                    } else if let Some((w, h, px)) = self.guest_host.take_fb(pl.pane_id) {
+                    let held = self.guest_host.recv_iosurface(pl.pane_id);
+                    let next = self.guest_host.take_iosurface(pl.pane_id);
+                    if let Some(held) = held {
+                        let w = held.width();
+                        let h = held.height();
+                        let id = next.map(|n| n.0).unwrap_or(0);
+                        guest_ios.push((pl.pane_id, id, w, h, Some(held)));
+                    } else if let Some((sid, w, h)) = next {
+                        guest_ios.push((pl.pane_id, sid, w, h, None));
+                    }
+                    if let Some((w, h, px)) = self.guest_host.take_fb(pl.pane_id) {
                         guest_uploads.push((pl.pane_id, w, h, px));
                     }
                 }
@@ -5327,10 +5335,13 @@ impl ApplicationHandler for ChromeApp {
                     r.window_exit_blur = exit_blur;
                     r.set_ui_scale(self.ui_zoom);
                     r.set_guest_wells(guest_wells);
-                    for (pane_id, id, w, h) in guest_ios {
-                        r.import_guest_iosurface(pane_id, id, w, h);
+                    for (pane_id, sid, w, h, held) in guest_ios {
+                        let _ = r.import_guest_iosurface(pane_id, sid, w, h, held);
                     }
                     for (pane_id, w, h, px) in &guest_uploads {
+                        if r.has_guest_tex(*pane_id) {
+                            continue;
+                        }
                         r.upload_guest_fb(*pane_id, *w, *h, px);
                     }
                     match r.render(
