@@ -89,7 +89,7 @@ fn write_ladybird_manifest(bin: &Path) -> Result<(), String> {
     let dir = guests_dir();
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let body = format!(
-        "{{\n  \"id\": \"ladybird\",\n  \"name\": \"Ladybird\",\n  \"command\": {},\n  \"args\": [\"--temporary-profile\"],\n  \"protocol\": 1,\n  \"capabilities\": [\"pane\", \"navigate\"],\n  \"commands\": [\n    {{\n      \"id\": \"open\",\n      \"title\": \"Open Browser Pane\",\n      \"desc\": \"Ladybird · new pane\"\n    }}\n  ]\n}}\n",
+        "{{\n  \"id\": \"ladybird\",\n  \"name\": \"Ladybird\",\n  \"command\": {},\n  \"args\": [\"--temporary-profile\"],\n  \"protocol\": 1,\n  \"capabilities\": [\"pane\", \"navigate\"],\n  \"home\": \"https://www.google.com\",\n  \"commands\": [\n    {{\n      \"id\": \"open\",\n      \"title\": \"Open Browser Pane\",\n      \"desc\": \"Ladybird · new pane\"\n    }}\n  ]\n}}\n",
         serde_json::to_string(&bin.to_string_lossy()).unwrap_or_else(|_| "\"\"".into()),
     );
     let path = manifest_path("ladybird");

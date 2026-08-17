@@ -1359,11 +1359,16 @@ impl ChromeApp {
                 .show("No guests installed — drop a manifest in guests/");
             return;
         };
-        let id = self
+        let id = match self
             .session
-            .new_guest_tab(&manifest.id, "");
-        self.warp_focused = true;
-        self.terminal_focused = false;
+            .split_focused_guest(SplitAxis::Vertical, &manifest.id, "")
+        {
+            Some(id) => id,
+            None => self.session.new_guest_tab(&manifest.id, ""),
+        };
+        // Page owns the well after a default load; warp is still a click away.
+        self.warp_focused = false;
+        self.terminal_focused = true;
         if let Some(tab) = self.session.active_tab() {
             let surface = tab.surface;
             let tid = tab.id;
@@ -1381,6 +1386,13 @@ impl ChromeApp {
             self.toast.show(e);
             let _ = self.session.begin_close_pane(id);
             return;
+        }
+        if let Some(home) = manifest.home_url() {
+            if let Some(p) = self.session.panes.get_mut(&id) {
+                p.guest_url = home.to_string();
+                p.busy = true;
+            }
+            self.guest_host.navigate(id, home);
         }
         self.sync_guest_focus();
         self.paint_dirty = true;
@@ -1475,10 +1487,13 @@ impl ChromeApp {
     }
 
     fn send_guest_pointer(&self, pane_id: u64, kind: &str, button: i32) {
-        let (hole, _) = self.guest_pane_geom(pane_id);
+        let (hole, scale) = self.guest_pane_geom(pane_id);
         let (px, py) = self.pointer();
-        let x = px - hole.x;
-        let y = py - hole.y;
+        // Ladybird overlay multiplies by dpr, then enqueue_input_event does it
+        // again. Send CSS / scale so the click lands on the page.
+        let dpr = scale.max(0.5);
+        let x = (px - hole.x) / dpr;
+        let y = (py - hole.y) / dpr;
         let buttons = if self.guest_pointer_down.is_some() || kind == "down" {
             1
         } else {
@@ -1505,10 +1520,16 @@ impl ChromeApp {
             }
             MouseScrollDelta::LineDelta(x, y) => (-f64::from(x) * 40.0, -f64::from(y) * 40.0),
         };
-        let (hole, _) = self.guest_pane_geom(pane_id);
+        let (hole, hole_scale) = self.guest_pane_geom(pane_id);
         let (px, py) = self.pointer();
-        self.guest_host
-            .scroll(pane_id, dx, dy, px - hole.x, py - hole.y);
+        let dpr = hole_scale.max(0.5);
+        self.guest_host.scroll(
+            pane_id,
+            dx,
+            dy,
+            (px - hole.x) / dpr,
+            (py - hole.y) / dpr,
+        );
         self.paint_dirty = true;
     }
 
@@ -4551,6 +4572,10 @@ impl ApplicationHandler for ChromeApp {
                     self.occluded = false;
                     self.focus_surface_window(id);
                     self.paint_dirty = true;
+                    // Ladybird parks off-screen when the host leaves the
+                    // on-screen window list. Same geom is skipped unless we
+                    // drop last_geom so resize re-covers the helper.
+                    self.guest_host.invalidate_geom();
                     self.sync_guest_holes();
                     self.sync_rain_live();
                     self.request_redraw_all();
@@ -4565,6 +4590,8 @@ impl ApplicationHandler for ChromeApp {
                     self.occluded = hidden;
                     self.sync_rain_live();
                     if !hidden {
+                        self.guest_host.invalidate_geom();
+                        self.sync_guest_holes();
                         self.paint_dirty = true;
                         self.request_redraw();
                     }

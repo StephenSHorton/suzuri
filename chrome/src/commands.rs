@@ -1305,6 +1305,7 @@ mod tests {
             capabilities: vec!["pane".into(), "navigate".into()],
             args: vec![],
             commands: vec![],
+            home: String::new(),
             path: PathBuf::from("ladybird.json"),
         };
         let all = commands_with_guests(&[ladybird]);
@@ -1342,6 +1343,7 @@ mod tests {
                 title: "Open Example pane".into(),
                 desc: "demo".into(),
             }],
+            home: String::new(),
             path: PathBuf::from("example.json"),
         };
         let all = commands_with_guests(&[g]);

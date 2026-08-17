@@ -422,6 +422,13 @@ impl GuestHost {
         self.send(pane_id, r#"{"type":"stack"}"#);
     }
 
+    /// Next resize is sent even if the hole did not change (alt-tab restack).
+    pub fn invalidate_geom(&mut self) {
+        for live in self.live.values_mut() {
+            live.last_geom = None;
+        }
+    }
+
     pub fn resize(&mut self, pane_id: u64, rect: Rect, scale: f32, native: Option<NativeAttach>) {
         let key = geom_key(rect, scale, native.as_ref());
         let line = {
@@ -837,6 +844,7 @@ mod tests {
             capabilities: vec!["pane".into(), "navigate".into()],
             args: vec![],
             commands: vec![],
+            home: String::new(),
             path: std::path::PathBuf::from("example.json"),
         };
         let mut host = GuestHost::new();

@@ -29,12 +29,26 @@ pub struct GuestManifest {
     pub capabilities: Vec<String>,
     pub args: Vec<String>,
     pub commands: Vec<GuestCommand>,
+    /// First location after spawn. Empty → guest default (Ladybird: Google).
+    pub home: String,
     pub path: PathBuf,
 }
 
 impl GuestManifest {
     pub fn accepts_navigate(&self) -> bool {
         self.capabilities.iter().any(|c| c == "navigate")
+    }
+
+    /// URL to load when the pane opens. Ladybird defaults to Google.
+    pub fn home_url(&self) -> Option<&str> {
+        let home = self.home.trim();
+        if !home.is_empty() {
+            return Some(home);
+        }
+        if self.id == "ladybird" {
+            return Some("https://www.google.com");
+        }
+        None
     }
 }
 
@@ -183,6 +197,13 @@ fn parse_manifest(raw: &str, path: &Path) -> Result<Option<GuestManifest>, Strin
                 .collect()
         })
         .unwrap_or_default();
+    let home = obj
+        .get("home")
+        .or_else(|| obj.get("url"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let resolved = resolve_command(command)?;
     if !resolved.is_file() {
         return Ok(None);
@@ -196,6 +217,7 @@ fn parse_manifest(raw: &str, path: &Path) -> Result<Option<GuestManifest>, Strin
         capabilities,
         args: extra_args,
         commands,
+        home,
         path: path.to_path_buf(),
     }))
 }
@@ -348,6 +370,7 @@ mod tests {
             capabilities: vec![],
             args: vec![],
             commands: vec![],
+            home: String::new(),
             path: PathBuf::from("a.json"),
         };
         let e = GuestManifest {
@@ -358,11 +381,31 @@ mod tests {
             capabilities: vec![],
             args: vec![],
             commands: vec![],
+            home: String::new(),
             path: PathBuf::from("e.json"),
         };
         let list = vec![a.clone(), e.clone()];
         assert_eq!(pick_guest(&list, None).unwrap().id, "example");
         assert_eq!(pick_guest(&list, Some("alpha")).unwrap().id, "alpha");
         assert!(pick_guest(&[], None).is_none());
+    }
+
+    #[test]
+    fn ladybird_home_defaults_to_google() {
+        let g = GuestManifest {
+            id: "ladybird".into(),
+            name: "Ladybird".into(),
+            command: PathBuf::from("/bin/true"),
+            protocol: 1,
+            capabilities: vec!["pane".into(), "navigate".into()],
+            args: vec![],
+            commands: vec![],
+            home: String::new(),
+            path: PathBuf::from("ladybird.json"),
+        };
+        assert_eq!(g.home_url(), Some("https://www.google.com"));
+        let mut custom = g.clone();
+        custom.home = "https://ladybird.org".into();
+        assert_eq!(custom.home_url(), Some("https://ladybird.org"));
     }
 }
