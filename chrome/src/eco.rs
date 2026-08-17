@@ -124,6 +124,7 @@ mod tests {
         i.paint_dirty = false;
         assert_eq!(gpu_demand(i), GpuDemand::Idle);
         assert!(!rain_should_run(i));
+        assert!(i.rain, "pref stays on so the last rain frame can freeze");
         assert_eq!(wake_delay(i), PTY_WAKE);
     }
 

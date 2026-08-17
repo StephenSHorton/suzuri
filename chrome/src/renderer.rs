@@ -128,8 +128,10 @@ pub struct Renderer {
     rain_atlas: RainAtlas,
     /// Encodes rain off the UI thread; we only sample the last completed RT.
     rain_thread: RainThread,
-    /// Eco: false while unfocused / occluded unless animate_unfocused.
-    rain_live: bool,
+    /// Rain pref. Off clears the last frame.
+    rain_on: bool,
+    /// Eco: encode paused (last frame stays). Unfocused / occluded.
+    rain_paused: bool,
 
     composite_pipeline: wgpu::RenderPipeline,
     composite_overlay_pipeline: wgpu::RenderPipeline,
@@ -624,7 +626,8 @@ impl Renderer {
             scale_factor,
             rain_atlas,
             rain_thread,
-            rain_live: true,
+            rain_on: true,
+            rain_paused: false,
             composite_pipeline,
             composite_overlay_pipeline,
             composite_bgl,
@@ -661,10 +664,19 @@ impl Renderer {
         }
     }
 
-    /// Pause or resume the off-thread rain encode. Does not present.
+    /// Rain pref on/off. Off clears the last frame. Does not present.
     pub fn set_rain_enabled(&mut self, on: bool) {
-        self.rain_live = on;
+        self.rain_on = on;
+        if !on {
+            self.rain_paused = false;
+        }
         self.rain_thread.set_enabled(on);
+    }
+
+    /// Freeze encode and keep the last rain frame (unfocused eco).
+    pub fn set_rain_paused(&mut self, paused: bool) {
+        self.rain_paused = paused && self.rain_on;
+        self.rain_thread.set_paused(self.rain_paused);
     }
 
     /// ⌘± UI zoom: scale chrome metrics + remesure mono cells. Scene blit stays 1×
@@ -1209,7 +1221,8 @@ impl Renderer {
         // Swapchain size — worker encodes at rain_rt_extent(scale). res_time /
         // cell stay full-framebuffer so the column grid does not change.
         self.rain_thread.publish(
-            self.rain_live && settings.prefs.rain,
+            self.rain_on && settings.prefs.rain,
+            self.rain_paused,
             self.config.width,
             self.config.height,
             settings.prefs.rain_quality,

@@ -28,9 +28,33 @@ pub fn rain_rt_extent(fb_w: u32, fb_h: u32, scale: f32) -> (u32, u32) {
 #[derive(Clone, Copy, Debug)]
 struct RainJob {
     enabled: bool,
+    /// Eco: stop encoding but keep the last RT (do not clear).
+    paused: bool,
     width: u32,
     height: u32,
     uniforms: RainUniforms,
+}
+
+/// What the worker should do with the last rain RT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RainHold {
+    /// Encode a new frame.
+    Encode,
+    /// Keep the last frame (unfocused / occluded).
+    Freeze,
+    /// Clear to black (rain pref off).
+    Clear,
+}
+
+/// `enabled` is the rain pref. `paused` is eco (window not live).
+pub fn rain_hold(enabled: bool, paused: bool) -> RainHold {
+    if !enabled {
+        RainHold::Clear
+    } else if paused {
+        RainHold::Freeze
+    } else {
+        RainHold::Encode
+    }
 }
 
 /// Published rain view the composite pass samples.
@@ -65,6 +89,7 @@ impl RainThread {
 
         let job = Arc::new(Mutex::new(RainJob {
             enabled: true,
+            paused: false,
             width,
             height,
             uniforms: seed,
@@ -112,6 +137,7 @@ impl RainThread {
     pub fn publish(
         &self,
         enabled: bool,
+        paused: bool,
         width: u32,
         height: u32,
         scale: f32,
@@ -120,16 +146,27 @@ impl RainThread {
         let (width, height) = rain_rt_extent(width, height, scale);
         if let Ok(mut j) = self.job.lock() {
             j.enabled = enabled;
+            j.paused = paused;
             j.width = width.max(1);
             j.height = height.max(1);
             j.uniforms = uniforms;
         }
     }
 
-    /// Flip encode on/off without a full uniform publish (focus / eco).
+    /// Rain pref on/off. Off clears the last frame.
     pub fn set_enabled(&self, enabled: bool) {
         if let Ok(mut j) = self.job.lock() {
             j.enabled = enabled;
+            if !enabled {
+                j.paused = false;
+            }
+        }
+    }
+
+    /// Eco: freeze encode, keep the last frame. No-op if rain is off.
+    pub fn set_paused(&self, paused: bool) {
+        if let Ok(mut j) = self.job.lock() {
+            j.paused = paused && j.enabled;
         }
     }
 
@@ -179,6 +216,7 @@ fn worker(
     while !stop.load(Ordering::Acquire) {
         let snap = job.lock().map(|j| *j).unwrap_or(RainJob {
             enabled: false,
+            paused: false,
             width: 1,
             height: 1,
             uniforms: RainUniforms {
@@ -205,17 +243,26 @@ fn worker(
             }
         }
 
-        if !snap.enabled {
-            if last_enabled {
-                clear_target(&device, &queue, &view[0]);
-                clear_target(&device, &queue, &view[1]);
-                if let Ok(mut f) = front.lock() {
-                    f.view = view[0].clone();
+        match rain_hold(snap.enabled, snap.paused) {
+            RainHold::Clear => {
+                if last_enabled {
+                    clear_target(&device, &queue, &view[0]);
+                    clear_target(&device, &queue, &view[1]);
+                    if let Ok(mut f) = front.lock() {
+                        f.view = view[0].clone();
+                    }
+                    last_enabled = false;
                 }
-                last_enabled = false;
+                thread::sleep(Duration::from_millis(40));
+                continue;
             }
-            thread::sleep(Duration::from_millis(40));
-            continue;
+            RainHold::Freeze => {
+                // Keep the last encoded frame on screen; do not spend GPU.
+                last_enabled = true;
+                thread::sleep(Duration::from_millis(40));
+                continue;
+            }
+            RainHold::Encode => {}
         }
         last_enabled = true;
 
@@ -341,5 +388,13 @@ mod tests {
         assert_eq!(rain_rt_extent(3456, 2234, RAIN_RT_SCALE_HALF), (1728, 1117));
         assert_eq!(rain_rt_extent(1, 1, RAIN_RT_SCALE_HALF), (1, 1));
         assert_eq!(rain_rt_extent(100, 50, RAIN_RT_SCALE_HALF), (50, 25));
+    }
+
+    #[test]
+    fn unfocused_pause_freezes_instead_of_clearing() {
+        assert_eq!(rain_hold(true, false), RainHold::Encode);
+        assert_eq!(rain_hold(true, true), RainHold::Freeze);
+        assert_eq!(rain_hold(false, true), RainHold::Clear);
+        assert_eq!(rain_hold(false, false), RainHold::Clear);
     }
 }

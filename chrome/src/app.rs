@@ -4314,9 +4314,12 @@ impl ChromeApp {
     }
 
     fn sync_rain_live(&mut self) {
-        let on = crate::eco::rain_should_run(self.paint_input());
+        let i = self.paint_input();
+        let rain = i.rain;
+        let encode = crate::eco::rain_should_run(i);
         for s in self.surfaces.values_mut() {
-            s.renderer.set_rain_enabled(on);
+            s.renderer.set_rain_enabled(rain);
+            s.renderer.set_rain_paused(rain && !encode);
         }
     }
 

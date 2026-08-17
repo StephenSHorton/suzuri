@@ -46,7 +46,8 @@ parse. Unknown values normalize to `1`.
 `animate_unfocused` keeps glyph rain and overlay springs running when the
 window is in the background (demo / recording). Default **off**: unfocused
 windows still drain PTYs and paint cell updates at ~12 Hz, but the rain
-thread and 60 Hz present stop. Palette: “Toggle animate when unfocused”.
+thread freezes on the last frame (glyphs stay visible) and 60 Hz present
+stops. Palette: “Toggle animate when unfocused”.
 
 ## Themes
 
