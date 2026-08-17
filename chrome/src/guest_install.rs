@@ -57,6 +57,7 @@ pub fn install_ladybird() -> Result<PathBuf, String> {
         fs::create_dir_all(&dst).map_err(|e| e.to_string())?;
         let bin = place_helper(&src, &dst)?;
         add_rpath(&bin);
+        ensure_runnable(&bin);
         write_ladybird_manifest(&bin)?;
         Ok(bin)
     }
@@ -88,7 +89,7 @@ fn write_ladybird_manifest(bin: &Path) -> Result<(), String> {
     let dir = guests_dir();
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let body = format!(
-        "{{\n  \"id\": \"ladybird\",\n  \"name\": \"Ladybird\",\n  \"command\": {},\n  \"args\": [\"--temporary-profile\"],\n  \"protocol\": 1,\n  \"capabilities\": [\"pane\", \"navigate\"]\n}}\n",
+        "{{\n  \"id\": \"ladybird\",\n  \"name\": \"Ladybird\",\n  \"command\": {},\n  \"args\": [\"--temporary-profile\"],\n  \"protocol\": 1,\n  \"capabilities\": [\"pane\", \"navigate\"],\n  \"home\": \"https://www.google.com\",\n  \"commands\": [\n    {{\n      \"id\": \"open\",\n      \"title\": \"Open Browser Pane\",\n      \"desc\": \"Ladybird · new pane\"\n    }}\n  ]\n}}\n",
         serde_json::to_string(&bin.to_string_lossy()).unwrap_or_else(|_| "\"\"".into()),
     );
     let path = manifest_path("ladybird");
@@ -123,10 +124,7 @@ fn discover_ladybird() -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 fn download_ladybird_zip() -> Result<PathBuf, String> {
     let url = latest_asset_url()?;
-    let dir = std::env::temp_dir().join(format!(
-        "suzuri-guest-dl-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("suzuri-guest-dl-{}", std::process::id()));
     let _ = fs::create_dir_all(&dir);
     let zip = dir.join("suzuri-ladybird.zip");
     let status = Command::new("curl")
@@ -155,8 +153,7 @@ fn latest_asset_url() -> Result<String, String> {
     if !out.status.success() {
         return Err("could not list helper releases".into());
     }
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
     let arr = v.as_array().ok_or("no releases")?;
     let arch = if cfg!(target_arch = "aarch64") {
         "macos-arm64"
@@ -197,8 +194,7 @@ fn place_helper(src: &Path, dst: &Path) -> Result<PathBuf, String> {
         }
         return find_ladybird_binary(dst);
     }
-    let app = if src.file_name().and_then(|n| n.to_str()) == Some("Ladybird")
-        && s.contains(".app/")
+    let app = if src.file_name().and_then(|n| n.to_str()) == Some("Ladybird") && s.contains(".app/")
     {
         PathBuf::from(&s[..s.find(".app/").unwrap_or(0) + 4])
     } else {
@@ -284,7 +280,7 @@ fn add_rpath(bin: &Path) {
     };
     for e in rd.flatten() {
         let p = e.path();
-        if p.is_file() {
+        if p.is_file() && !has_rpath(&p, "@executable_path/../lib") {
             let _ = Command::new("install_name_tool")
                 .args(["-add_rpath", "@executable_path/../lib"])
                 .arg(&p)
@@ -293,12 +289,72 @@ fn add_rpath(bin: &Path) {
     }
 }
 
+fn has_rpath(bin: &Path, needle: &str) -> bool {
+    let Ok(out) = Command::new("otool").args(["-l"]).arg(bin).output() else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout).contains(needle)
+}
+
+/// `.app` that contains `bin`, if the helper lives inside a bundle.
+pub fn enclosing_app(bin: &Path) -> Option<PathBuf> {
+    let mut cur = bin;
+    for _ in 0..6 {
+        let Some(parent) = cur.parent() else {
+            break;
+        };
+        if parent
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".app"))
+        {
+            return Some(parent.to_path_buf());
+        }
+        cur = parent;
+    }
+    None
+}
+
+fn codesign_ok(target: &Path) -> bool {
+    Command::new("codesign")
+        .args(["--verify", "--deep"])
+        .arg(target)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn adhoc_sign(target: &Path) {
+    let _ = Command::new("xattr").args(["-cr"]).arg(target).status();
+    let _ = Command::new("codesign")
+        .args(["--force", "--deep", "--sign", "-"])
+        .arg(target)
+        .status();
+}
+
+/// Re-sign a mutated `.app` so macOS will exec it. Bare binaries are left alone.
+///
+/// `install_name_tool` (and a copy out of a zip) often leaves Ladybird with an
+/// invalid page signature. Hardened-runtime Suzuri then gets SIGKILL on spawn,
+/// which looks like a Suzuri crash.
+pub fn ensure_runnable(command: &Path) {
+    let Some(app) = enclosing_app(command) else {
+        return;
+    };
+    if codesign_ok(&app) {
+        return;
+    }
+    adhoc_sign(&app);
+}
+
 fn kill_by_path(bin: &Path) {
     let needle = bin.to_string_lossy();
     if needle.is_empty() {
         return;
     }
-    let Ok(out) = Command::new("ps").args(["-ax", "-o", "pid=,command="]).output() else {
+    let Ok(out) = Command::new("ps")
+        .args(["-ax", "-o", "pid=,command="])
+        .output()
+    else {
         return;
     };
     for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -306,7 +362,11 @@ fn kill_by_path(bin: &Path) {
         if !line.contains(needle.as_ref()) {
             continue;
         }
-        let Some(pid) = line.split_whitespace().next().and_then(|s| s.parse::<i32>().ok()) else {
+        let Some(pid) = line
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<i32>().ok())
+        else {
             continue;
         };
         if pid > 1 {
@@ -326,10 +386,7 @@ mod tests {
 
     #[test]
     fn write_and_remove_manifest() {
-        let dir = std::env::temp_dir().join(format!(
-            "suzuri-guest-install-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("suzuri-guest-install-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         // product_config_dir is not overridable here — just write_ladybird_manifest
         // against guests_dir would hit the real config. Test place_helper instead.
@@ -344,11 +401,12 @@ mod tests {
         let dst = dir.join("dst");
         fs::create_dir_all(&dst).unwrap();
         let bin = place_helper(&dir.join("src").join("Ladybird.app"), &dst).unwrap();
-        assert_eq!(
-            bin.file_name().and_then(|n| n.to_str()),
-            Some("Ladybird")
-        );
+        assert_eq!(bin.file_name().and_then(|n| n.to_str()), Some("Ladybird"));
         assert!(bin.is_file());
+        assert_eq!(
+            enclosing_app(&bin).as_deref(),
+            Some(dst.join("Ladybird.app").as_path())
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

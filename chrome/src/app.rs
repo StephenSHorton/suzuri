@@ -23,7 +23,7 @@ use crate::chrome_ui::{ChipId, ChipUi};
 use crate::cmd_blocks::{self, CmdBlockLog};
 use crate::echo_filter::EchoFilter;
 use crate::commands::{
-    default_commands, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
+    commands_with_guests, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
 };
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
@@ -268,7 +268,7 @@ impl Default for ChromeApp {
             rename: RenameState::new(),
             caffeine: Caffeine::new(),
             toast: ToastState::new(),
-            commands: default_commands(),
+            commands: commands_with_guests(&load_guests()),
             started: Instant::now(),
             clipboard: arboard::Clipboard::new().ok(),
             chip_ui: ChipUi::default(),
@@ -1359,9 +1359,15 @@ impl ChromeApp {
                 .show("No guests installed — drop a manifest in guests/");
             return;
         };
-        let id = self
+        let id = match self
             .session
-            .new_guest_tab(&manifest.id, "");
+            .split_focused_guest(SplitAxis::Vertical, &manifest.id, "")
+        {
+            Some(id) => id,
+            None => self.session.new_guest_tab(&manifest.id, ""),
+        };
+        // Warp owns keys until the well is clicked. Palette Enter would
+        // otherwise hit Ladybird as a synthetic key with no NSEvent.
         self.warp_focused = true;
         self.terminal_focused = false;
         if let Some(tab) = self.session.active_tab() {
@@ -1381,6 +1387,13 @@ impl ChromeApp {
             self.toast.show(e);
             let _ = self.session.begin_close_pane(id);
             return;
+        }
+        if let Some(home) = manifest.home_url() {
+            if let Some(p) = self.session.panes.get_mut(&id) {
+                p.guest_url = home.to_string();
+                p.busy = true;
+            }
+            self.guest_host.navigate(id, home);
         }
         self.sync_guest_focus();
         self.paint_dirty = true;
@@ -1426,7 +1439,17 @@ impl ChromeApp {
             .find(|p| p.pane_id == pane_id)
             .map(|p| guest_mount_rect(p.glass, p.header, guest_footer_top(p.divider, p.glass)))
             .unwrap_or_else(|| crate::layout::Rect::new(0.0, 0.0, 0.0, 0.0));
-        (rect, scale)
+        if rect.w >= 32.0 && rect.h >= 32.0 {
+            return (rect, scale);
+        }
+        // Split just landed; the mosaic has not assigned a well yet.
+        let host = layout.workspace;
+        let w = (host.w * 0.5).max(320.0);
+        let h = host.h.max(240.0);
+        (
+            crate::layout::Rect::new(host.x + (host.w - w).max(0.0), host.y, w, h),
+            scale,
+        )
     }
 
     fn guest_captures_input(&self) -> bool {
@@ -1587,7 +1610,17 @@ impl ChromeApp {
                     let _ = self.session.begin_close_pane(pane_id);
                 }
                 GuestEvent::Surface { .. } => {
-                    // Pixels land via take_fb on the next paint.
+                    // File pixels land via take_fb on the next paint.
+                }
+                GuestEvent::IoSurface {
+                    pane_id,
+                    id,
+                    width,
+                    height,
+                    seq,
+                } => {
+                    self.guest_host
+                        .note_iosurface(pane_id, id, width, height, seq);
                 }
             }
         }
@@ -1798,15 +1831,25 @@ impl ChromeApp {
         for (_i, &idx) in filtered.iter().enumerate().take(6) {
             if cy >= y && cy <= y + btn_h && x >= modal.x + pad && x <= modal.x + modal.w - pad {
                 let action = self.commands[idx].action;
+                let guest_id = self.commands[idx].guest_id.clone();
                 self.palette.snap_shut();
-                self.run_action(event_loop, action);
+                self.run_action(event_loop, action, guest_id);
                 return;
             }
             y += btn_h + gap;
         }
     }
 
-    fn run_action(&mut self, event_loop: &ActiveEventLoop, action: CommandAction) {
+    fn refresh_guest_commands(&mut self) {
+        self.commands = commands_with_guests(&load_guests());
+    }
+
+    fn run_action(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        action: CommandAction,
+        guest_id: Option<String>,
+    ) {
         match action {
             CommandAction::OpenSettings => {
                 self.palette.close();
@@ -1830,6 +1873,7 @@ impl ChromeApp {
                 self.guests.close();
                 self.notes.close();
                 self.rename.close();
+                self.refresh_guest_commands();
                 self.palette.open_palette();
             }
             CommandAction::OpenNotes => {
@@ -1855,7 +1899,7 @@ impl ChromeApp {
                 self.open_workspace_pane();
             }
             CommandAction::OpenGuest => {
-                let prefer = guest_prefer_from_query(&self.palette.query);
+                let prefer = guest_id.or_else(|| guest_prefer_from_query(&self.palette.query));
                 self.palette.close();
                 self.settings.close();
                 self.help.close();
@@ -3569,6 +3613,7 @@ impl ChromeApp {
                         self.help.close();
                         self.settings.close();
                         self.notes.close();
+                        self.refresh_guest_commands();
                         self.palette.toggle();
                         if let Some(w) = &self.window {
                             w.request_redraw();
@@ -3636,7 +3681,7 @@ impl ChromeApp {
                     }
                     // Ctrl+Shift+N (and ⌘⇧N on mac) — new OS window process.
                     "n" | "N" if shift => {
-                        self.run_action(event_loop, CommandAction::NewWindow);
+                        self.run_action(event_loop, CommandAction::NewWindow, None);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -3837,8 +3882,9 @@ impl ChromeApp {
                 Key::Named(NamedKey::Enter) => {
                     if let Some(&idx) = filtered.get(self.palette.selected) {
                         let action = self.commands[idx].action;
+                        let guest_id = self.commands[idx].guest_id.clone();
                         self.palette.snap_shut();
-                        self.run_action(event_loop, action);
+                        self.run_action(event_loop, action, guest_id);
                     }
                 }
                 Key::Named(NamedKey::Backspace) => {
@@ -4301,9 +4347,12 @@ impl ChromeApp {
     }
 
     fn sync_rain_live(&mut self) {
-        let on = crate::eco::rain_should_run(self.paint_input());
+        let i = self.paint_input();
+        let rain = i.rain;
+        let encode = crate::eco::rain_should_run(i);
         for s in self.surfaces.values_mut() {
-            s.renderer.set_rain_enabled(on);
+            s.renderer.set_rain_enabled(rain);
+            s.renderer.set_rain_paused(rain && !encode);
         }
     }
 
@@ -4323,6 +4372,7 @@ impl ChromeApp {
         let guests_busy = self.guests.working();
         self.guests.tick(dt);
         if guests_busy != self.guests.working() {
+            self.refresh_guest_commands();
             self.paint_dirty = true;
         }
         self.confirm.tick(dt);
@@ -4451,7 +4501,7 @@ impl ApplicationHandler for ChromeApp {
         self.reap_dead_shells();
         self.sync_focus_for_alt_screen();
         for cmd in self.control_mailbox.poll() {
-            self.run_action(event_loop, cmd.to_action());
+            self.run_action(event_loop, cmd.to_action(), None);
             if matches!(cmd, crate::control_mailbox::ControlCommand::Quit) {
                 return;
             }
@@ -4534,6 +4584,10 @@ impl ApplicationHandler for ChromeApp {
                     self.occluded = false;
                     self.focus_surface_window(id);
                     self.paint_dirty = true;
+                    // Ladybird parks off-screen when the host leaves the
+                    // on-screen window list. Same geom is skipped unless we
+                    // drop last_geom so resize re-covers the helper.
+                    self.guest_host.invalidate_geom();
                     self.sync_guest_holes();
                     self.sync_rain_live();
                     self.request_redraw_all();
@@ -4548,6 +4602,8 @@ impl ApplicationHandler for ChromeApp {
                     self.occluded = hidden;
                     self.sync_rain_live();
                     if !hidden {
+                        self.guest_host.invalidate_geom();
+                        self.sync_guest_holes();
                         self.paint_dirty = true;
                         self.request_redraw();
                     }
@@ -5174,7 +5230,7 @@ impl ApplicationHandler for ChromeApp {
                 // Auto raw-PTY focus while a fullscreen TUI owns the alt screen.
                 self.sync_focus_for_alt_screen();
                 for cmd in self.control_mailbox.poll() {
-                    self.run_action(event_loop, cmd.to_action());
+                    self.run_action(event_loop, cmd.to_action(), None);
                     if matches!(cmd, crate::control_mailbox::ControlCommand::Quit) {
                         return;
                     }
@@ -5243,6 +5299,7 @@ impl ApplicationHandler for ChromeApp {
                     .unwrap_or(0.0);
                 let mut guest_wells = Vec::new();
                 let mut guest_uploads = Vec::new();
+                let mut guest_ios = Vec::new();
                 for pl in &layout.panes {
                     if !self.session.pane_kind(pl.pane_id).is_guest() {
                         continue;
@@ -5260,6 +5317,11 @@ impl ApplicationHandler for ChromeApp {
                             radius: self.metrics.radius,
                         });
                     }
+                    let held = self.guest_host.recv_iosurface(pl.pane_id);
+                    let next = self.guest_host.take_iosurface(pl.pane_id);
+                    if let Some((sid, w, h)) = next {
+                        guest_ios.push((pl.pane_id, sid, w, h, held, hole));
+                    }
                     if let Some((w, h, px)) = self.guest_host.take_fb(pl.pane_id) {
                         guest_uploads.push((pl.pane_id, w, h, px));
                     }
@@ -5268,7 +5330,14 @@ impl ApplicationHandler for ChromeApp {
                     r.window_exit_blur = exit_blur;
                     r.set_ui_scale(self.ui_zoom);
                     r.set_guest_wells(guest_wells);
+                    for (pane_id, sid, w, h, held, hole) in guest_ios {
+                        let (ew, eh) = crate::guest_fb::pixel_size(hole.w, hole.h, r.scale_factor());
+                        let _ = r.import_guest_iosurface(pane_id, sid, w, h, held, ew, eh);
+                    }
                     for (pane_id, w, h, px) in &guest_uploads {
+                        if r.has_guest_tex(*pane_id) {
+                            continue;
+                        }
                         r.upload_guest_fb(*pane_id, *w, *h, px);
                     }
                     match r.render(

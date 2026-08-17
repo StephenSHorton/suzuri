@@ -1,5 +1,8 @@
 //! Command palette + keyboard shortcuts registry (product suzuri subset).
 
+use std::borrow::Cow;
+
+use crate::guest_manifest::GuestManifest;
 use crate::input::is_mac;
 
 /// Host action for palette / shortcuts.
@@ -60,11 +63,30 @@ pub enum CommandAction {
 
 #[derive(Clone, Debug)]
 pub struct Command {
-    pub id: &'static str,
-    pub title: &'static str,
+    pub id: Cow<'static, str>,
+    pub title: Cow<'static, str>,
     pub desc: String,
-    pub category: &'static str,
+    pub category: Cow<'static, str>,
     pub action: CommandAction,
+    /// When set, [`CommandAction::OpenGuest`] opens this installed guest.
+    pub guest_id: Option<String>,
+}
+
+fn cmd(
+    id: &'static str,
+    title: &'static str,
+    desc: String,
+    category: &'static str,
+    action: CommandAction,
+) -> Command {
+    Command {
+        id: Cow::Borrowed(id),
+        title: Cow::Borrowed(title),
+        desc,
+        category: Cow::Borrowed(category),
+        action,
+        guest_id: None,
+    }
 }
 
 fn mod_key() -> &'static str {
@@ -104,266 +126,344 @@ pub fn default_commands() -> Vec<Command> {
     let ms = mod_shift();
     let ma = mod_alt();
     vec![
-        Command {
-            id: "palette",
-            title: "Command palette",
-            desc: format!("{} · {} · Navigate", chord(m, "K"), chord(m, "P")),
-            category: "Navigate",
-            action: CommandAction::OpenPalette,
-        },
-        Command {
-            id: "settings",
-            title: "Settings",
-            desc: format!("{} · Appearance", chord(m, ",")),
-            category: "Appearance",
-            action: CommandAction::OpenSettings,
-        },
-        Command {
-            id: "help",
-            title: "Keyboard shortcuts",
-            desc: format!("{} · Help", chord(m, "/")),
-            category: "Help",
-            action: CommandAction::OpenHelp,
-        },
-        Command {
-            id: "notes",
-            title: "Notes",
-            desc: format!("{} · Notes", chord(&ms, "M")),
-            category: "Notes",
-            action: CommandAction::OpenNotes,
-        },
-        Command {
-            id: "workspace",
-            title: "Workspace",
-            desc: "Shared channels · splits as a pane".into(),
-            category: "Workspace",
-            action: CommandAction::OpenWorkspace,
-        },
-        Command {
-            id: "guests",
-            title: "Guests",
-            desc: "Catalog · install · remove · Ladybird".into(),
-            category: "Panes",
-            action: CommandAction::OpenGuests,
-        },
-        Command {
-            id: "guest",
-            title: "New guest pane",
-            desc: "Optional process · opens a tab".into(),
-            category: "Panes",
-            action: CommandAction::OpenGuest,
-        },
-        Command {
-            id: "workspace_cycle_status",
-            title: "Cycle workspace status",
-            desc: format!("{} · idle→working→waiting·… · Workspace", chord(&ms, "A")),
-            category: "Workspace",
-            action: CommandAction::CycleWorkspaceStatus,
-        },
-        Command {
-            id: "workspace_attach_file",
-            title: "Attach file…",
-            desc: format!("{} · native picker · Workspace", chord(&ms, "U")),
-            category: "Workspace",
-            action: CommandAction::WorkspaceAttachFile,
-        },
-        Command {
-            id: "workspace_add_agent",
-            title: "Add agent…",
-            desc: "+Agent · copy kickoff · Workspace".into(),
-            category: "Workspace",
-            action: CommandAction::WorkspaceAddAgent,
-        },
-        Command {
-            id: "workspace_set_topic",
-            title: "Set channel topic…",
-            desc: format!("{} · pin above chat · Workspace", chord(&ms, "T")),
-            category: "Workspace",
-            action: CommandAction::WorkspaceSetTopic,
-        },
-        Command {
-            id: "transfer_send",
-            title: "Send file (ticket)…",
-            desc: "P2P · Transfer".into(),
-            category: "Transfer",
-            action: CommandAction::OpenTransferSend,
-        },
-        Command {
-            id: "transfer_receive",
-            title: "Receive ticket…",
-            desc: "P2P · Transfer".into(),
-            category: "Transfer",
-            action: CommandAction::OpenTransferReceive,
-        },
-        Command {
-            id: "caffeine_toggle",
-            title: "Toggle caffeine",
-            desc: "☕ strip · prevent sleep · System".into(),
-            category: "System",
-            action: CommandAction::ToggleCaffeine,
-        },
-        Command {
-            id: "caffeine_15",
-            title: "Caffeine 15 minutes",
-            desc: "Stay awake 15m · System".into(),
-            category: "System",
-            action: CommandAction::Caffeine15m,
-        },
-        Command {
-            id: "caffeine_1h",
-            title: "Caffeine 1 hour",
-            desc: "Stay awake 1h · System".into(),
-            category: "System",
-            action: CommandAction::Caffeine1h,
-        },
-        Command {
-            id: "caffeine_off",
-            title: "Caffeine off",
-            desc: "Allow sleep · System".into(),
-            category: "System",
-            action: CommandAction::CaffeineOff,
-        },
-        Command {
-            id: "check_updates",
-            title: "Check for updates",
-            desc: "GitHub Releases · System".into(),
-            category: "System",
-            action: CommandAction::CheckUpdates,
-        },
-        Command {
-            id: "new_tab",
-            title: "New tab",
-            desc: format!("{} · Tabs", chord(&ms, "T")),
-            category: "Tabs",
-            action: CommandAction::NewTab,
-        },
-        Command {
-            id: "close_tab",
-            title: "Close tab / pane",
-            desc: format!("{} · Tabs · Panes", chord(m, "W")),
-            category: "Tabs",
-            action: CommandAction::CloseTab,
-        },
-        Command {
-            id: "rename_tab",
-            title: "Rename tab",
-            desc: "Palette · custom strip name · Tabs".into(),
-            category: "Tabs",
-            action: CommandAction::RenameTab,
-        },
-        Command {
-            id: "next_tab",
-            title: "Next tab",
-            desc: format!("{} · Tabs", chord(&ms, "]")),
-            category: "Tabs",
-            action: CommandAction::NextTab,
-        },
-        Command {
-            id: "prev_tab",
-            title: "Previous tab",
-            desc: format!("{} · Tabs", chord(&ms, "[")),
-            category: "Tabs",
-            action: CommandAction::PrevTab,
-        },
-        Command {
-            id: "split_right",
-            title: "Split right",
-            desc: format!("{} · Panes · jelly open", chord(&ms, "D")),
-            category: "Panes",
-            action: CommandAction::SplitRight,
-        },
-        Command {
-            id: "split_down",
-            title: "Split down",
-            desc: format!("{} · Panes · jelly open", chord(&ms, "E")),
-            category: "Panes",
-            action: CommandAction::SplitDown,
-        },
-        Command {
-            id: "rename_pane",
-            title: "Rename pane",
-            desc: "F2 · custom pane title · Panes".into(),
-            category: "Panes",
-            action: CommandAction::RenamePane,
-        },
-        Command {
-            id: "close_pane",
-            title: "Close pane",
-            desc: format!("{} · Panes", chord(m, "W")),
-            category: "Panes",
-            action: CommandAction::ClosePane,
-        },
-        Command {
-            id: "focus_left",
-            title: "Focus pane left",
-            desc: format!("{} · Panes", chord(&ma, "←")),
-            category: "Panes",
-            action: CommandAction::FocusLeft,
-        },
-        Command {
-            id: "focus_right",
-            title: "Focus pane right",
-            desc: format!("{} · Panes", chord(&ma, "→")),
-            category: "Panes",
-            action: CommandAction::FocusRight,
-        },
-        Command {
-            id: "focus_up",
-            title: "Focus pane up",
-            desc: format!("{} · Panes", chord(&ma, "↑")),
-            category: "Panes",
-            action: CommandAction::FocusUp,
-        },
-        Command {
-            id: "focus_down",
-            title: "Focus pane down",
-            desc: format!("{} · Panes", chord(&ma, "↓")),
-            category: "Panes",
-            action: CommandAction::FocusDown,
-        },
-        Command {
-            id: "toggle_rain",
-            title: "Toggle glyph rain",
-            desc: "Settings 1 · Appearance".into(),
-            category: "Appearance",
-            action: CommandAction::ToggleRain,
-        },
-        Command {
-            id: "toggle_lens",
-            title: "Toggle magnifier",
-            desc: "Pinch or ⌃/⌘+scroll · Settings 2".into(),
-            category: "Appearance",
-            action: CommandAction::ToggleLens,
-        },
-        Command {
-            id: "cycle_rain_quality",
-            title: "Cycle rain quality",
-            desc: "25–100% rain encode · Settings · Appearance".into(),
-            category: "Appearance",
-            action: CommandAction::CycleRainQuality,
-        },
-        Command {
-            id: "toggle_animate_unfocused",
-            title: "Toggle animate when unfocused",
-            desc: "Rain + springs while in the background · Appearance".into(),
-            category: "Appearance",
-            action: CommandAction::ToggleAnimateUnfocused,
-        },
-        Command {
-            id: "new_window",
-            title: "New window",
-            desc: format!("{} · Window", chord(&ms, "N")),
-            category: "Window",
-            action: CommandAction::NewWindow,
-        },
-        Command {
-            id: "quit",
-            title: "Quit",
-            desc: format!("{} · Window", chord(&ms, "Q")),
-            category: "Window",
-            action: CommandAction::Quit,
-        },
+        cmd(
+            "palette",
+            "Command palette",
+            format!("{} · {} · Navigate", chord(m, "K"), chord(m, "P")),
+            "Navigate",
+            CommandAction::OpenPalette,
+        ),
+        cmd(
+            "settings",
+            "Settings",
+            format!("{} · Appearance", chord(m, ",")),
+            "Appearance",
+            CommandAction::OpenSettings,
+        ),
+        cmd(
+            "help",
+            "Keyboard shortcuts",
+            format!("{} · Help", chord(m, "/")),
+            "Help",
+            CommandAction::OpenHelp,
+        ),
+        cmd(
+            "notes",
+            "Notes",
+            format!("{} · Notes", chord(&ms, "M")),
+            "Notes",
+            CommandAction::OpenNotes,
+        ),
+        cmd(
+            "workspace",
+            "Workspace",
+            "Shared channels · splits as a pane".into(),
+            "Workspace",
+            CommandAction::OpenWorkspace,
+        ),
+        cmd(
+            "guests",
+            "Guests",
+            "Catalog · install · remove · Ladybird".into(),
+            "Panes",
+            CommandAction::OpenGuests,
+        ),
+        cmd(
+            "guest",
+            "New guest pane",
+            "Optional process · opens a tab".into(),
+            "Panes",
+            CommandAction::OpenGuest,
+        ),
+        cmd(
+            "workspace_cycle_status",
+            "Cycle workspace status",
+            format!("{} · idle→working→waiting·… · Workspace", chord(&ms, "A")),
+            "Workspace",
+            CommandAction::CycleWorkspaceStatus,
+        ),
+        cmd(
+            "workspace_attach_file",
+            "Attach file…",
+            format!("{} · native picker · Workspace", chord(&ms, "U")),
+            "Workspace",
+            CommandAction::WorkspaceAttachFile,
+        ),
+        cmd(
+            "workspace_add_agent",
+            "Add agent…",
+            "+Agent · copy kickoff · Workspace".into(),
+            "Workspace",
+            CommandAction::WorkspaceAddAgent,
+        ),
+        cmd(
+            "workspace_set_topic",
+            "Set channel topic…",
+            format!("{} · pin above chat · Workspace", chord(&ms, "T")),
+            "Workspace",
+            CommandAction::WorkspaceSetTopic,
+        ),
+        cmd(
+            "transfer_send",
+            "Send file (ticket)…",
+            "P2P · Transfer".into(),
+            "Transfer",
+            CommandAction::OpenTransferSend,
+        ),
+        cmd(
+            "transfer_receive",
+            "Receive ticket…",
+            "P2P · Transfer".into(),
+            "Transfer",
+            CommandAction::OpenTransferReceive,
+        ),
+        cmd(
+            "caffeine_toggle",
+            "Toggle caffeine",
+            "☕ strip · prevent sleep · System".into(),
+            "System",
+            CommandAction::ToggleCaffeine,
+        ),
+        cmd(
+            "caffeine_15",
+            "Caffeine 15 minutes",
+            "Stay awake 15m · System".into(),
+            "System",
+            CommandAction::Caffeine15m,
+        ),
+        cmd(
+            "caffeine_1h",
+            "Caffeine 1 hour",
+            "Stay awake 1h · System".into(),
+            "System",
+            CommandAction::Caffeine1h,
+        ),
+        cmd(
+            "caffeine_off",
+            "Caffeine off",
+            "Allow sleep · System".into(),
+            "System",
+            CommandAction::CaffeineOff,
+        ),
+        cmd(
+            "check_updates",
+            "Check for updates",
+            "GitHub Releases · System".into(),
+            "System",
+            CommandAction::CheckUpdates,
+        ),
+        cmd(
+            "new_tab",
+            "New tab",
+            format!("{} · Tabs", chord(&ms, "T")),
+            "Tabs",
+            CommandAction::NewTab,
+        ),
+        cmd(
+            "close_tab",
+            "Close tab / pane",
+            format!("{} · Tabs · Panes", chord(m, "W")),
+            "Tabs",
+            CommandAction::CloseTab,
+        ),
+        cmd(
+            "rename_tab",
+            "Rename tab",
+            "Palette · custom strip name · Tabs".into(),
+            "Tabs",
+            CommandAction::RenameTab,
+        ),
+        cmd(
+            "next_tab",
+            "Next tab",
+            format!("{} · Tabs", chord(&ms, "]")),
+            "Tabs",
+            CommandAction::NextTab,
+        ),
+        cmd(
+            "prev_tab",
+            "Previous tab",
+            format!("{} · Tabs", chord(&ms, "[")),
+            "Tabs",
+            CommandAction::PrevTab,
+        ),
+        cmd(
+            "split_right",
+            "Split right",
+            format!("{} · Panes · jelly open", chord(&ms, "D")),
+            "Panes",
+            CommandAction::SplitRight,
+        ),
+        cmd(
+            "split_down",
+            "Split down",
+            format!("{} · Panes · jelly open", chord(&ms, "E")),
+            "Panes",
+            CommandAction::SplitDown,
+        ),
+        cmd(
+            "rename_pane",
+            "Rename pane",
+            "F2 · custom pane title · Panes".into(),
+            "Panes",
+            CommandAction::RenamePane,
+        ),
+        cmd(
+            "close_pane",
+            "Close pane",
+            format!("{} · Panes", chord(m, "W")),
+            "Panes",
+            CommandAction::ClosePane,
+        ),
+        cmd(
+            "focus_left",
+            "Focus pane left",
+            format!("{} · Panes", chord(&ma, "←")),
+            "Panes",
+            CommandAction::FocusLeft,
+        ),
+        cmd(
+            "focus_right",
+            "Focus pane right",
+            format!("{} · Panes", chord(&ma, "→")),
+            "Panes",
+            CommandAction::FocusRight,
+        ),
+        cmd(
+            "focus_up",
+            "Focus pane up",
+            format!("{} · Panes", chord(&ma, "↑")),
+            "Panes",
+            CommandAction::FocusUp,
+        ),
+        cmd(
+            "focus_down",
+            "Focus pane down",
+            format!("{} · Panes", chord(&ma, "↓")),
+            "Panes",
+            CommandAction::FocusDown,
+        ),
+        cmd(
+            "toggle_rain",
+            "Toggle glyph rain",
+            "Settings 1 · Appearance".into(),
+            "Appearance",
+            CommandAction::ToggleRain,
+        ),
+        cmd(
+            "toggle_lens",
+            "Toggle magnifier",
+            "Pinch or ⌃/⌘+scroll · Settings 2".into(),
+            "Appearance",
+            CommandAction::ToggleLens,
+        ),
+        cmd(
+            "cycle_rain_quality",
+            "Cycle rain quality",
+            "25–100% rain encode · Settings · Appearance".into(),
+            "Appearance",
+            CommandAction::CycleRainQuality,
+        ),
+        cmd(
+            "toggle_animate_unfocused",
+            "Toggle animate when unfocused",
+            "Rain + springs while in the background · Appearance".into(),
+            "Appearance",
+            CommandAction::ToggleAnimateUnfocused,
+        ),
+        cmd(
+            "new_window",
+            "New window",
+            format!("{} · Window", chord(&ms, "N")),
+            "Window",
+            CommandAction::NewWindow,
+        ),
+        cmd(
+            "quit",
+            "Quit",
+            format!("{} · Window", chord(&ms, "Q")),
+            "Window",
+            CommandAction::Quit,
+        ),
     ]
+}
+
+/// Built-in palette plus one row per installed guest command.
+///
+/// Installed guests that declare `commands` (or a `pane` capability) show up
+/// here so opening Ladybird does not require the Guests catalog. The generic
+/// "New guest pane" row is dropped once a guest contributes its own open
+/// command.
+pub fn commands_with_guests(guests: &[GuestManifest]) -> Vec<Command> {
+    let mut cmds = default_commands();
+    let extras: Vec<Command> = guests.iter().flat_map(guest_palette_commands).collect();
+    if extras.is_empty() {
+        return cmds;
+    }
+    cmds.retain(|c| c.id != "guest");
+    let insert_at = cmds
+        .iter()
+        .position(|c| c.id == "guests")
+        .map(|i| i + 1)
+        .unwrap_or(cmds.len());
+    for (i, c) in extras.into_iter().enumerate() {
+        cmds.insert(insert_at + i, c);
+    }
+    cmds
+}
+
+fn guest_palette_commands(g: &GuestManifest) -> Vec<Command> {
+    if g.commands.is_empty() {
+        if !g.capabilities.iter().any(|c| c == "pane") {
+            return Vec::new();
+        }
+        return vec![guest_open_command(
+            g,
+            "open",
+            &default_guest_open_title(g),
+            &default_guest_open_desc(g),
+        )];
+    }
+    g.commands
+        .iter()
+        .filter(|c| !c.title.trim().is_empty())
+        .map(|c| {
+            let desc = if c.desc.trim().is_empty() {
+                default_guest_open_desc(g)
+            } else {
+                c.desc.clone()
+            };
+            guest_open_command(g, &c.id, &c.title, &desc)
+        })
+        .collect()
+}
+
+fn default_guest_open_title(g: &GuestManifest) -> String {
+    if g.id == "ladybird" {
+        "Open Browser Pane".into()
+    } else {
+        format!("Open {} pane", g.name)
+    }
+}
+
+fn default_guest_open_desc(g: &GuestManifest) -> String {
+    format!("{} · new pane", g.name)
+}
+
+fn guest_open_command(g: &GuestManifest, cmd_id: &str, title: &str, desc: &str) -> Command {
+    let id = if cmd_id.trim().is_empty() {
+        format!("guest.open.{}", g.id)
+    } else {
+        format!("guest.{}.{}", g.id, cmd_id.trim())
+    };
+    Command {
+        id: Cow::Owned(id),
+        title: Cow::Owned(title.trim().to_string()),
+        desc: desc.to_string(),
+        category: Cow::Borrowed("Panes"),
+        action: CommandAction::OpenGuest,
+        guest_id: Some(g.id.clone()),
+    }
 }
 
 /// Filter commands by query (substring on title / desc / category).
@@ -478,12 +578,7 @@ impl PaletteState {
         let w = base_w * sx;
         let h = base_h * sy;
         let y_nudge = -20.0 * (1.0 - t);
-        crate::layout::Rect::new(
-            (window_w - w) * 0.5,
-            (window_h - h) * 0.38 + y_nudge,
-            w,
-            h,
-        )
+        crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.38 + y_nudge, w, h)
     }
 
     pub fn tick(&mut self, dt: f32) {
@@ -1179,7 +1274,10 @@ mod tests {
         assert_eq!(cmd.action, CommandAction::OpenGuest);
         let idx = filter_commands(&all, "guest");
         assert!(idx.iter().any(|&i| all[i].id == "guest"));
-        let cat = all.iter().find(|c| c.id == "guests").expect("guests command");
+        let cat = all
+            .iter()
+            .find(|c| c.id == "guests")
+            .expect("guests command");
         assert_eq!(cat.title, "Guests");
         assert_eq!(cat.action, CommandAction::OpenGuests);
         let guests_idx = all.iter().position(|c| c.id == "guests").unwrap();
@@ -1193,6 +1291,68 @@ mod tests {
         assert!(filter_commands(&all, "catalog")
             .iter()
             .any(|&i| all[i].id == "guests"));
+    }
+
+    #[test]
+    fn installed_guest_adds_open_browser_pane() {
+        use crate::guest_manifest::GuestManifest;
+        use std::path::PathBuf;
+        let ladybird = GuestManifest {
+            id: "ladybird".into(),
+            name: "Ladybird".into(),
+            command: PathBuf::from("/bin/true"),
+            protocol: 1,
+            capabilities: vec!["pane".into(), "navigate".into()],
+            args: vec![],
+            commands: vec![],
+            home: String::new(),
+            path: PathBuf::from("ladybird.json"),
+        };
+        let all = commands_with_guests(&[ladybird]);
+        let open = all
+            .iter()
+            .find(|c| c.title == "Open Browser Pane")
+            .expect("Open Browser Pane");
+        assert_eq!(open.action, CommandAction::OpenGuest);
+        assert_eq!(open.guest_id.as_deref(), Some("ladybird"));
+        assert!(all.iter().all(|c| c.id != "guest"));
+        assert!(filter_commands(&all, "browser")
+            .iter()
+            .any(|&i| all[i].title == "Open Browser Pane"));
+        let guests_idx = all.iter().position(|c| c.id == "guests").unwrap();
+        let open_idx = all
+            .iter()
+            .position(|c| c.title == "Open Browser Pane")
+            .unwrap();
+        assert_eq!(open_idx, guests_idx + 1);
+    }
+
+    #[test]
+    fn guest_declared_command_title_wins() {
+        use crate::guest_manifest::{GuestCommand, GuestManifest};
+        use std::path::PathBuf;
+        let g = GuestManifest {
+            id: "example".into(),
+            name: "Example".into(),
+            command: PathBuf::from("/bin/true"),
+            protocol: 1,
+            capabilities: vec!["pane".into()],
+            args: vec![],
+            commands: vec![GuestCommand {
+                id: "open".into(),
+                title: "Open Example pane".into(),
+                desc: "demo".into(),
+            }],
+            home: String::new(),
+            path: PathBuf::from("example.json"),
+        };
+        let all = commands_with_guests(&[g]);
+        let open = all
+            .iter()
+            .find(|c| c.guest_id.as_deref() == Some("example"))
+            .unwrap();
+        assert_eq!(open.title, "Open Example pane");
+        assert_eq!(open.desc, "demo");
     }
 
     #[test]
@@ -1277,11 +1437,7 @@ mod tests {
     fn help_layout_one_chip_per_row() {
         let lay = HelpLayout::new(1100.0, 800.0);
         let n: usize = help_sections().iter().map(|s| s.rows.len()).sum();
-        assert_eq!(
-            lay.rows.len(),
-            n,
-            "glass chips must match every help row"
-        );
+        assert_eq!(lay.rows.len(), n, "glass chips must match every help row");
         assert!(!lay.headers.is_empty());
         // Chips stay above the footer.
         for (r, _, _) in &lay.rows {

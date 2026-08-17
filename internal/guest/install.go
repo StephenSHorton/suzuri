@@ -57,6 +57,7 @@ func install(id string, opt InstallOptions) (Manifest, error) {
 	}
 	if runtime.GOOS == "darwin" {
 		_ = addMacRpath(bin)
+		adhocSignMac(bin)
 	}
 
 	m := Manifest{
@@ -66,6 +67,7 @@ func install(id string, opt InstallOptions) (Manifest, error) {
 		Args:         append([]string(nil), item.Args...),
 		Protocol:     item.Protocol,
 		Capabilities: append([]string(nil), item.Capabilities...),
+		Commands:     append([]GuestCommand(nil), item.Commands...),
 	}
 	if m.Protocol == 0 {
 		m.Protocol = 1
@@ -171,6 +173,9 @@ func addMacRpath(bin string) error {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
+		if hasRpath(p, "@executable_path/../lib") {
+			continue
+		}
 		cmd := exec.Command("install_name_tool", "-add_rpath", "@executable_path/../lib", p)
 		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "would duplicate") {
@@ -179,6 +184,43 @@ func addMacRpath(bin string) error {
 		}
 	}
 	return nil
+}
+
+func hasRpath(bin, needle string) bool {
+	out, err := exec.Command("otool", "-l", bin).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), needle)
+}
+
+func enclosingApp(bin string) string {
+	p := bin
+	for i := 0; i < 6; i++ {
+		p = filepath.Dir(p)
+		if p == "." || p == string(filepath.Separator) {
+			break
+		}
+		if strings.HasSuffix(p, ".app") {
+			return p
+		}
+	}
+	return ""
+}
+
+// adhocSignMac re-seals a copied/mutated .app so AMFI will exec it.
+// install_name_tool leaves an invalid page signature; a hardened-runtime
+// Suzuri then SIGKILLs Ladybird on spawn.
+func adhocSignMac(bin string) {
+	target := enclosingApp(bin)
+	if target == "" {
+		target = bin
+	}
+	if exec.Command("codesign", "--verify", "--deep", target).Run() == nil {
+		return
+	}
+	_ = exec.Command("xattr", "-cr", target).Run()
+	_ = exec.Command("codesign", "--force", "--deep", "--sign", "-", target).Run()
 }
 
 func copyTree(src, dst string) error {

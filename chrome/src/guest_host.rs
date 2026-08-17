@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::guest_fb;
+use crate::guest_install;
 use crate::guest_manifest::GuestManifest;
 use crate::layout::Rect;
 
@@ -93,6 +94,21 @@ pub enum GuestEvent {
         width: u32,
         height: u32,
     },
+    IoSurface {
+        pane_id: u64,
+        id: u32,
+        width: u32,
+        height: u32,
+        seq: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IoSurf {
+    id: u32,
+    w: u32,
+    h: u32,
+    seq: u32,
 }
 
 struct LiveGuest {
@@ -103,6 +119,10 @@ struct LiveGuest {
     last_geom: Option<GeomKey>,
     fb_path: std::path::PathBuf,
     fb_seq: u32,
+    iosurface: Option<IoSurf>,
+    iosurface_drawn: u32,
+    #[cfg(target_os = "macos")]
+    inbox: Option<crate::guest_iosurface::MachInbox>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,10 +252,9 @@ impl GuestHost {
         if self.live.contains_key(&pane_id) {
             return Ok(());
         }
+        guest_install::ensure_runnable(&manifest.command);
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-        listener
-            .set_nonblocking(false)
-            .map_err(|e| e.to_string())?;
+        listener.set_nonblocking(false).map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
         let mut cmd = Command::new(&manifest.command);
@@ -250,16 +269,22 @@ impl GuestHost {
         for a in &manifest.args {
             cmd.arg(a);
         }
-        let child = cmd.spawn().map_err(|e| {
-            format!(
-                "spawn {}: {e}",
-                manifest.command.display()
-            )
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("spawn {}: {e}", manifest.command.display()))?;
 
         let (fb_w, fb_h) = guest_fb::pixel_size(rect.w, rect.h, scale);
         let fb_path = guest_fb::fb_path(pane_id);
         let _ = guest_fb::create(&fb_path, fb_w, fb_h);
+        #[cfg(target_os = "macos")]
+        let inbox = {
+            let name = format!("com.suzuri.s.{}.{}", std::process::id(), pane_id);
+            crate::guest_iosurface::MachInbox::register(&name)
+        };
+        #[cfg(target_os = "macos")]
+        let mach_name = inbox.as_ref().map(|i| i.name.as_str());
+        #[cfg(not(target_os = "macos"))]
+        let mach_name: Option<&str> = None;
         let ev_tx = self.events_tx.clone();
         let spawn_line = encode_spawn(
             pane_id,
@@ -268,6 +293,7 @@ impl GuestHost {
             cwd,
             native.as_ref(),
             Some((&fb_path, fb_w, fb_h)),
+            mach_name,
         );
         let (out_tx, out_rx) = mpsc::channel::<String>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -338,18 +364,34 @@ impl GuestHost {
             }
         });
 
-        match ready_rx.recv_timeout(Duration::from_secs(6)) {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                let mut child = child;
-                let _ = child.kill();
-                return Err(e);
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let mut child = child;
+        let ready = loop {
+            match ready_rx.try_recv() {
+                Ok(Ok(())) => break Ok(()),
+                Ok(Err(e)) => break Err(e),
+                Err(TryRecvError::Disconnected) => {
+                    break Err("guest handshake closed".into());
+                }
+                Err(TryRecvError::Empty) => {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            break Err(format!("guest exited ({status})"));
+                        }
+                        Ok(None) => {}
+                        Err(e) => break Err(e.to_string()),
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        break Err("guest did not connect".into());
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
             }
-            Err(_) => {
-                let mut child = child;
-                let _ = child.kill();
-                return Err("guest did not connect".into());
-            }
+        };
+        if let Err(e) = ready {
+            let _ = child.kill();
+            return Err(e);
         }
 
         self.live.insert(
@@ -361,6 +403,10 @@ impl GuestHost {
                 last_geom: Some(geom_key(rect, scale, native.as_ref())),
                 fb_path,
                 fb_seq: 0,
+                iosurface: None,
+                iosurface_drawn: 0,
+                #[cfg(target_os = "macos")]
+                inbox,
             },
         );
         Ok(())
@@ -409,6 +455,13 @@ impl GuestHost {
         self.send(pane_id, r#"{"type":"stack"}"#);
     }
 
+    /// Next resize is sent even if the hole did not change (alt-tab restack).
+    pub fn invalidate_geom(&mut self) {
+        for live in self.live.values_mut() {
+            live.last_geom = None;
+        }
+    }
+
     pub fn resize(&mut self, pane_id: u64, rect: Rect, scale: f32, native: Option<NativeAttach>) {
         let key = geom_key(rect, scale, native.as_ref());
         let line = {
@@ -430,6 +483,42 @@ impl GuestHost {
         self.send(pane_id, &line);
     }
 
+    pub fn note_iosurface(&mut self, pane_id: u64, id: u32, width: u32, height: u32, seq: u32) {
+        if let Some(live) = self.live.get_mut(&pane_id) {
+            live.iosurface = Some(IoSurf {
+                id,
+                w: width,
+                h: height,
+                seq,
+            });
+        }
+    }
+
+    /// Next unpublished compositor IOSurface, if the seq advanced.
+    pub fn take_iosurface(&mut self, pane_id: u64) -> Option<(u32, u32, u32)> {
+        let live = self.live.get_mut(&pane_id)?;
+        let s = live.iosurface?;
+        if s.seq == live.iosurface_drawn {
+            return None;
+        }
+        live.iosurface_drawn = s.seq;
+        Some((s.id, s.w, s.h))
+    }
+
+    /// Drain Mach send-rights the guest posted for this pane.
+    #[cfg(target_os = "macos")]
+    pub fn recv_iosurface(
+        &self,
+        pane_id: u64,
+    ) -> Option<crate::guest_iosurface::SurfaceRef> {
+        self.live.get(&pane_id)?.inbox.as_ref()?.recv_latest()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn recv_iosurface(&self, _pane_id: u64) -> Option<()> {
+        None
+    }
+
     /// Copy guest pixels if the file seq advanced.
     pub fn take_fb(&mut self, pane_id: u64) -> Option<(u32, u32, Vec<u8>)> {
         let live = self.live.get_mut(&pane_id)?;
@@ -445,6 +534,12 @@ impl GuestHost {
         let Some(live) = self.live.get(&pane_id) else {
             return false;
         };
+        if live
+            .iosurface
+            .is_some_and(|s| s.seq != live.iosurface_drawn)
+        {
+            return true;
+        }
         guest_fb::peek_seq(&live.fb_path).is_some_and(|s| s != live.fb_seq)
     }
 
@@ -474,13 +569,12 @@ impl GuestHost {
 }
 
 fn matches_crash(events: &[GuestEvent], pane_id: u64) -> bool {
-    events.iter().any(|e| matches!(e, GuestEvent::Crash { pane_id: id, .. } if *id == pane_id))
+    events
+        .iter()
+        .any(|e| matches!(e, GuestEvent::Crash { pane_id: id, .. } if *id == pane_id))
 }
 
-fn accept_timeout(
-    listener: &TcpListener,
-    budget: Duration,
-) -> Result<std::net::TcpStream, String> {
+fn accept_timeout(listener: &TcpListener, budget: Duration) -> Result<std::net::TcpStream, String> {
     let start = std::time::Instant::now();
     loop {
         match listener.accept() {
@@ -544,6 +638,13 @@ fn encode_fb_suffix(fb: Option<(&std::path::PathBuf, u32, u32)>) -> String {
     }
 }
 
+fn encode_mach_suffix(name: Option<&str>) -> String {
+    match name {
+        Some(n) if !n.is_empty() => format!(r#","mach":"{}""#, json_escape(n)),
+        _ => String::new(),
+    }
+}
+
 fn encode_spawn(
     pane_id: u64,
     rect: Rect,
@@ -551,13 +652,15 @@ fn encode_spawn(
     cwd: &str,
     native: Option<&NativeAttach>,
     fb: Option<(&std::path::PathBuf, u32, u32)>,
+    mach: Option<&str>,
 ) -> String {
     format!(
-        r#"{{"type":"spawn","pane_id":"{pane_id}","rect":{},"scale":{scale},"cwd":"{}"{}{}}}"#,
+        r#"{{"type":"spawn","pane_id":"{pane_id}","rect":{},"scale":{scale},"cwd":"{}"{}{}{}}}"#,
         encode_rect(rect),
         json_escape(cwd),
         encode_native_suffix(native),
-        encode_fb_suffix(fb)
+        encode_fb_suffix(fb),
+        encode_mach_suffix(mach)
     )
 }
 
@@ -576,7 +679,10 @@ fn encode_resize(
 }
 
 fn encode_focus(inn: bool) -> String {
-    format!(r#"{{"type":"focus","in":{}}}"#, if inn { "true" } else { "false" })
+    format!(
+        r#"{{"type":"focus","in":{}}}"#,
+        if inn { "true" } else { "false" }
+    )
 }
 
 fn encode_navigate(url: &str) -> String {
@@ -584,9 +690,7 @@ fn encode_navigate(url: &str) -> String {
 }
 
 fn encode_scroll(dx: f64, dy: f64, x: f32, y: f32) -> String {
-    format!(
-        r#"{{"type":"scroll","dx":{dx:.3},"dy":{dy:.3},"x":{x:.2},"y":{y:.2}}}"#
-    )
+    format!(r#"{{"type":"scroll","dx":{dx:.3},"dy":{dy:.3},"x":{x:.2},"y":{y:.2}}}"#)
 }
 
 fn encode_pointer(kind: &str, x: f32, y: f32, button: i32, buttons: i32, modifiers: i32) -> String {
@@ -648,16 +752,31 @@ fn decode_guest_line(pane_id: u64, line: &str) -> Option<GuestEvent> {
                 .unwrap_or("guest crashed")
                 .to_string(),
         }),
-        "surface" => Some(GuestEvent::Surface {
-            pane_id,
-            path: v
-                .get("path")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
-            width: v.get("width").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-            height: v.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-        }),
+        "surface" => {
+            let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("file");
+            let width = v.get("width").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            let height = v.get("height").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+            if kind == "iosurface" {
+                Some(GuestEvent::IoSurface {
+                    pane_id,
+                    id: v.get("id").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                    width,
+                    height,
+                    seq: v.get("seq").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                })
+            } else {
+                Some(GuestEvent::Surface {
+                    pane_id,
+                    path: v
+                        .get("path")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    width,
+                    height,
+                })
+            }
+        }
         _ => None,
     }
 }
@@ -677,8 +796,7 @@ mod tests {
 
     #[test]
     fn decode_hello_title_url() {
-        let h = decode_guest_line(3, r#"{"type":"hello","protocol":1,"title":"Example"}"#)
-            .unwrap();
+        let h = decode_guest_line(3, r#"{"type":"hello","protocol":1,"title":"Example"}"#).unwrap();
         assert_eq!(
             h,
             GuestEvent::Hello {
@@ -706,6 +824,25 @@ mod tests {
     }
 
     #[test]
+    fn decode_iosurface_surface() {
+        let ev = decode_guest_line(
+            4,
+            r#"{"type":"surface","kind":"iosurface","id":99,"width":800,"height":600,"seq":3}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ev,
+            GuestEvent::IoSurface {
+                pane_id: 4,
+                id: 99,
+                width: 800,
+                height: 600,
+                seq: 3,
+            }
+        );
+    }
+
+    #[test]
     fn encode_roundtrip_shapes() {
         let line = encode_navigate("https://a.test/q?x=1");
         assert!(line.contains(r#""type":"navigate""#));
@@ -721,7 +858,7 @@ mod tests {
         let k = encode_key("down", "Enter", "", 0);
         assert!(k.contains(r#""type":"key""#));
         assert!(k.contains(r#""key":"Enter""#));
-        let s = encode_spawn(9, Rect::new(1.0, 2.0, 3.0, 4.0), 2.0, "/tmp", None, None);
+        let s = encode_spawn(9, Rect::new(1.0, 2.0, 3.0, 4.0), 2.0, "/tmp", None, None, None);
         assert!(s.contains(r#""type":"spawn""#));
         assert!(s.contains(r#""pane_id":"9""#));
         assert!(!s.contains("native"));
@@ -730,7 +867,15 @@ mod tests {
             screen: Rect::new(10.0, 20.0, 30.0, 40.0),
             visible: true,
         };
-        let with = encode_spawn(9, Rect::new(1.0, 2.0, 3.0, 4.0), 2.0, "/tmp", Some(&n), None);
+        let with = encode_spawn(
+            9,
+            Rect::new(1.0, 2.0, 3.0, 4.0),
+            2.0,
+            "/tmp",
+            Some(&n),
+            None,
+            None,
+        );
         assert!(with.contains(r#""window_number":42"#));
         assert!(with.contains(r#""kind":"nswindow""#));
         assert!(with.contains(r#""visible":true"#));
@@ -742,7 +887,9 @@ mod tests {
             "/",
             None,
             Some((&path, 20, 10)),
+            Some("com.suzuri.s.1.2"),
         );
+        assert!(fb.contains(r#""mach":"com.suzuri.s.1.2""#));
         assert!(fb.contains(r#""fb":{"path":"/tmp/x.szfb""#));
         assert!(fb.contains(r#""width":20"#));
         assert!(fb.contains(r#""height":10"#));
@@ -768,7 +915,11 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            writeln!(stream, r#"{{"type":"hello","protocol":1,"title":"Example"}}"#).unwrap();
+            writeln!(
+                stream,
+                r#"{{"type":"hello","protocol":1,"title":"Example"}}"#
+            )
+            .unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
@@ -789,7 +940,7 @@ mod tests {
         writeln!(
             stream,
             "{}",
-            encode_spawn(1, Rect::new(0.0, 0.0, 10.0, 10.0), 1.0, "/", None, None)
+            encode_spawn(1, Rect::new(0.0, 0.0, 10.0, 10.0), 1.0, "/", None, None, None)
         )
         .unwrap();
         writeln!(stream, "{}", encode_navigate("echoed")).unwrap();
@@ -813,6 +964,8 @@ mod tests {
             protocol: 1,
             capabilities: vec!["pane".into(), "navigate".into()],
             args: vec![],
+            commands: vec![],
+            home: String::new(),
             path: std::path::PathBuf::from("example.json"),
         };
         let mut host = GuestHost::new();
@@ -852,13 +1005,19 @@ mod tests {
         assert!(saw_hello, "no hello from example guest");
         assert!(saw_surface, "example did not announce a surface");
         host.navigate(7, "https://echo.test/");
-        let echoed = wait_event(&mut host, 2000, |e| {
-            matches!(e, GuestEvent::Url { pane_id: 7, text } if text == "https://echo.test/")
-        });
+        let echoed = wait_event(
+            &mut host,
+            2000,
+            |e| matches!(e, GuestEvent::Url { pane_id: 7, text } if text == "https://echo.test/"),
+        );
         assert!(echoed, "example did not echo navigate");
         let (w, h, px) = host.take_fb(7).expect("example framebuffer");
         assert!(w >= 8 && h >= 8, "fb {w}x{h}");
-        assert_eq!(&px[0..4], &[74, 186, 61, 255], "left rail should be guest jade");
+        assert_eq!(
+            &px[0..4],
+            &[74, 186, 61, 255],
+            "left rail should be guest jade"
+        );
         host.kill(7);
     }
 

@@ -128,8 +128,10 @@ pub struct Renderer {
     rain_atlas: RainAtlas,
     /// Encodes rain off the UI thread; we only sample the last completed RT.
     rain_thread: RainThread,
-    /// Eco: false while unfocused / occluded unless animate_unfocused.
-    rain_live: bool,
+    /// Rain pref. Off clears the last frame.
+    rain_on: bool,
+    /// Eco: encode paused (last frame stays). Unfocused / occluded.
+    rain_paused: bool,
 
     composite_pipeline: wgpu::RenderPipeline,
     composite_overlay_pipeline: wgpu::RenderPipeline,
@@ -194,6 +196,7 @@ struct GuestGpu {
     w: u32,
     h: u32,
     uni: wgpu::Buffer,
+    iosurface_id: Option<u32>,
 }
 
 impl Renderer {
@@ -624,7 +627,8 @@ impl Renderer {
             scale_factor,
             rain_atlas,
             rain_thread,
-            rain_live: true,
+            rain_on: true,
+            rain_paused: false,
             composite_pipeline,
             composite_overlay_pipeline,
             composite_bgl,
@@ -661,10 +665,19 @@ impl Renderer {
         }
     }
 
-    /// Pause or resume the off-thread rain encode. Does not present.
+    /// Rain pref on/off. Off clears the last frame. Does not present.
     pub fn set_rain_enabled(&mut self, on: bool) {
-        self.rain_live = on;
+        self.rain_on = on;
+        if !on {
+            self.rain_paused = false;
+        }
         self.rain_thread.set_enabled(on);
+    }
+
+    /// Freeze encode and keep the last rain frame (unfocused eco).
+    pub fn set_rain_paused(&mut self, paused: bool) {
+        self.rain_paused = paused && self.rain_on;
+        self.rain_thread.set_paused(self.rain_paused);
     }
 
     /// ⌘± UI zoom: scale chrome metrics + remesure mono cells. Scene blit stays 1×
@@ -770,6 +783,7 @@ impl Renderer {
                     w,
                     h,
                     uni,
+                    iosurface_id: None,
                 },
             );
         }
@@ -806,6 +820,75 @@ impl Renderer {
             }
             self.queue.write_texture(dest, &buf, layout, size);
         }
+    }
+
+    pub fn import_guest_iosurface(
+        &mut self,
+        pane_id: u64,
+        id: u32,
+        w: u32,
+        h: u32,
+        #[cfg(target_os = "macos")] held: Option<crate::guest_iosurface::SurfaceRef>,
+        #[cfg(not(target_os = "macos"))] _held: Option<()>,
+        well_w: u32,
+        well_h: u32,
+    ) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            if w == 0 || h == 0 {
+                return false;
+            }
+            if held.is_none()
+                && self.guest_tex.get(&pane_id).is_some_and(|t| {
+                    t.iosurface_id == Some(id) && t.w == w && t.h == h
+                })
+            {
+                return true;
+            }
+            // Mid-sash frames come in at the old painted size or a padded
+            // backing store. Keep stretching the last good frame.
+            if self.guest_tex.contains_key(&pane_id)
+                && well_w >= 8
+                && well_h >= 8
+                && !sizes_close(w, well_w)
+                && !sizes_close(h, well_h)
+            {
+                return true;
+            }
+            let Some(tex) = crate::guest_iosurface::import(&self.device, id, w, h, held) else {
+                return false;
+            };
+            let iw = tex.width();
+            let ih = tex.height();
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let uni = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("guest blit uni"),
+                size: 64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.guest_tex.insert(
+                pane_id,
+                GuestGpu {
+                    _tex: tex,
+                    view,
+                    w: iw,
+                    h: ih,
+                    uni,
+                    iosurface_id: Some(id),
+                },
+            );
+            true
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (pane_id, id, w, h, well_w, well_h);
+            false
+        }
+    }
+
+    pub fn has_guest_tex(&self, pane_id: u64) -> bool {
+        self.guest_tex.contains_key(&pane_id)
     }
 
     pub fn drop_guest_fb(&mut self, pane_id: u64) {
@@ -1209,7 +1292,8 @@ impl Renderer {
         // Swapchain size — worker encodes at rain_rt_extent(scale). res_time /
         // cell stay full-framebuffer so the column grid does not change.
         self.rain_thread.publish(
-            self.rain_live && settings.prefs.rain,
+            self.rain_on && settings.prefs.rain,
+            self.rain_paused,
             self.config.width,
             self.config.height,
             settings.prefs.rain_quality,
@@ -3818,6 +3902,14 @@ fn create_scene_target(
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     (tex, view)
+}
+
+fn sizes_close(a: u32, b: u32) -> bool {
+    if a == 0 || b == 0 {
+        return false;
+    }
+    let d = a.abs_diff(b);
+    d <= 8 || d * 10 < a.max(b)
 }
 
 fn create_guest_blit(

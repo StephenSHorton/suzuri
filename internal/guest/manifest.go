@@ -8,14 +8,22 @@ import (
 	"strings"
 )
 
+// GuestCommand is a palette row an installed guest may contribute.
+type GuestCommand struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Desc  string `json:"desc,omitempty"`
+}
+
 // Manifest is the JSON chrome reads from guests/*.json.
 type Manifest struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Command      string   `json:"command"`
-	Args         []string `json:"args,omitempty"`
-	Protocol     int      `json:"protocol"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	Command      string         `json:"command"`
+	Args         []string       `json:"args,omitempty"`
+	Protocol     int            `json:"protocol"`
+	Capabilities []string       `json:"capabilities,omitempty"`
+	Commands     []GuestCommand `json:"commands,omitempty"`
 }
 
 func writeManifest(path string, m Manifest) error {
