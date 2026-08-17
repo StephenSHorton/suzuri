@@ -46,6 +46,9 @@ func TestInstallFromAppAndRemove(t *testing.T) {
 	if m.ID != "ladybird" || m.Protocol != 1 {
 		t.Fatalf("manifest: %+v", m)
 	}
+	if len(m.Commands) != 1 || m.Commands[0].Title != "Open Browser Pane" {
+		t.Fatalf("commands: %+v", m.Commands)
+	}
 	if _, err := os.Stat(m.Command); err != nil {
 		t.Fatal(err)
 	}

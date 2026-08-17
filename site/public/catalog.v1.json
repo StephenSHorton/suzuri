@@ -8,6 +8,13 @@
       "protocol": 1,
       "capabilities": ["pane", "navigate"],
       "args": ["--temporary-profile"],
+      "commands": [
+        {
+          "id": "open",
+          "title": "Open Browser Pane",
+          "desc": "Ladybird · new pane"
+        }
+      ],
       "repo": "StephenSHorton/suzuri-ladybird",
       "assets": {
         "darwin/arm64": { "name": "suzuri-ladybird-macos-arm64.zip" },
