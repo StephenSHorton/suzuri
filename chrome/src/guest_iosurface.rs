@@ -298,44 +298,75 @@ unsafe fn import_hal(
         clog(&format!("import null id={id} {w}x{h}"));
         return None;
     }
-    let tw = IOSurfaceGetWidth(surf) as u32;
-    let th = IOSurfaceGetHeight(surf) as u32;
-    let (tw, th) = if tw > 0 && th > 0 { (tw, th) } else { (w, h) };
+    let sw = IOSurfaceGetWidth(surf) as u32;
+    let sh = IOSurfaceGetHeight(surf) as u32;
+    // Guest sends the painted viewport. The IOSurface is often larger
+    // (resize padding). Wrapping the painted size samples the top-left.
+    let tw = if w > 0 && (sw == 0 || w <= sw) {
+        w
+    } else if sw > 0 {
+        sw
+    } else {
+        w
+    };
+    let th = if h > 0 && (sh == 0 || h <= sh) {
+        h
+    } else if sh > 0 {
+        sh
+    } else {
+        h
+    };
 
-    let hal_tex = device.as_hal::<wgpu::hal::api::Metal, _, _>(|hal| {
-        let Some(hal) = hal else {
-            return None;
-        };
-        let mtl = hal.raw_device().lock();
-        let desc = metal::TextureDescriptor::new();
-        desc.set_texture_type(metal::MTLTextureType::D2);
-        desc.set_pixel_format(metal::MTLPixelFormat::BGRA8Unorm);
-        desc.set_width(tw as u64);
-        desc.set_height(th as u64);
-        desc.set_storage_mode(metal::MTLStorageMode::Shared);
-        desc.set_usage(metal::MTLTextureUsage::ShaderRead);
+    let wrap = |srgb: bool| {
+        device.as_hal::<wgpu::hal::api::Metal, _, _>(|hal| {
+            let Some(hal) = hal else {
+                return None;
+            };
+            let mtl = hal.raw_device().lock();
+            let desc = metal::TextureDescriptor::new();
+            desc.set_texture_type(metal::MTLTextureType::D2);
+            desc.set_pixel_format(if srgb {
+                metal::MTLPixelFormat::BGRA8Unorm_sRGB
+            } else {
+                metal::MTLPixelFormat::BGRA8Unorm
+            });
+            desc.set_width(tw as u64);
+            desc.set_height(th as u64);
+            desc.set_storage_mode(metal::MTLStorageMode::Shared);
+            desc.set_usage(metal::MTLTextureUsage::ShaderRead);
 
-        let ns_tex: *mut objc::runtime::Object = msg_send![
-            mtl.as_ptr(),
-            newTextureWithDescriptor: desc.as_ref()
-            iosurface: surf
-            plane: 0u64
-        ];
-        let ns_tex = NonNull::new(ns_tex)?;
-        let raw = metal::Texture::from_ptr(ns_tex.as_ptr() as *mut metal::MTLTexture);
-        Some(wgpu::hal::metal::Device::texture_from_raw(
-            raw,
-            wgpu::TextureFormat::Bgra8Unorm,
-            metal::MTLTextureType::D2,
-            1,
-            1,
-            wgpu::hal::CopyExtent {
-                width: tw,
-                height: th,
-                depth: 1,
-            },
-        ))
-    });
+            let ns_tex: *mut objc::runtime::Object = msg_send![
+                mtl.as_ptr(),
+                newTextureWithDescriptor: desc.as_ref()
+                iosurface: surf
+                plane: 0u64
+            ];
+            let ns_tex = NonNull::new(ns_tex)?;
+            let raw = metal::Texture::from_ptr(ns_tex.as_ptr() as *mut metal::MTLTexture);
+            Some(wgpu::hal::metal::Device::texture_from_raw(
+                raw,
+                if srgb {
+                    wgpu::TextureFormat::Bgra8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Bgra8Unorm
+                },
+                metal::MTLTextureType::D2,
+                1,
+                1,
+                wgpu::hal::CopyExtent {
+                    width: tw,
+                    height: th,
+                    depth: 1,
+                },
+            ))
+        })
+    };
+    // Web pixels are sRGB bytes. Import as sRGB so the scene RT (sRGB)
+    // does not encode them a second time — that wash looks like a white veil.
+    let (hal_tex, fmt) = match wrap(true) {
+        Some(t) => (Some(t), wgpu::TextureFormat::Bgra8UnormSrgb),
+        None => (wrap(false), wgpu::TextureFormat::Bgra8Unorm),
+    };
 
     if owned {
         CFRelease(surf as *const c_void);
@@ -345,7 +376,7 @@ unsafe fn import_hal(
         clog(&format!("import metal fail id={id} {tw}x{th}"));
         return None;
     };
-    clog(&format!("import ok id={id} {tw}x{th}"));
+    clog(&format!("import ok id={id} {tw}x{th} srgb={}", fmt == wgpu::TextureFormat::Bgra8UnormSrgb));
     Some(device.create_texture_from_hal::<wgpu::hal::api::Metal>(
         hal_tex,
         &wgpu::TextureDescriptor {
@@ -358,7 +389,7 @@ unsafe fn import_hal(
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Bgra8Unorm,
+            format: fmt,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         },
