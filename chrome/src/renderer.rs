@@ -830,6 +830,8 @@ impl Renderer {
         h: u32,
         #[cfg(target_os = "macos")] held: Option<crate::guest_iosurface::SurfaceRef>,
         #[cfg(not(target_os = "macos"))] _held: Option<()>,
+        well_w: u32,
+        well_h: u32,
     ) -> bool {
         #[cfg(target_os = "macos")]
         {
@@ -840,6 +842,16 @@ impl Renderer {
                 && self.guest_tex.get(&pane_id).is_some_and(|t| {
                     t.iosurface_id == Some(id) && t.w == w && t.h == h
                 })
+            {
+                return true;
+            }
+            // Mid-sash frames come in at the old painted size or a padded
+            // backing store. Keep stretching the last good frame.
+            if self.guest_tex.contains_key(&pane_id)
+                && well_w >= 8
+                && well_h >= 8
+                && !sizes_close(w, well_w)
+                && !sizes_close(h, well_h)
             {
                 return true;
             }
@@ -870,7 +882,7 @@ impl Renderer {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (pane_id, id, w, h);
+            let _ = (pane_id, id, w, h, well_w, well_h);
             false
         }
     }
@@ -3890,6 +3902,14 @@ fn create_scene_target(
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     (tex, view)
+}
+
+fn sizes_close(a: u32, b: u32) -> bool {
+    if a == 0 || b == 0 {
+        return false;
+    }
+    let d = a.abs_diff(b);
+    d <= 8 || d * 10 < a.max(b)
 }
 
 fn create_guest_blit(
