@@ -7,34 +7,31 @@ use std::time::{Duration, Instant};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize},
-    event::{
-        DeviceEvent, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
-    },
+    event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow},
-    keyboard::{Key, ModifiersState, NamedKey},
+    keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey},
     window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId, WindowLevel},
 };
 
 use crate::ansi::AnsiDecoder;
-use crate::cells::CellGrid;
 use crate::caffeine::Caffeine;
+use crate::cells::CellGrid;
 use crate::chrome_status::{self, PaneSnapExtra, StatusPublisher};
 use crate::chrome_ui::{ChipId, ChipUi};
 use crate::cmd_blocks::{self, CmdBlockLog};
-use crate::echo_filter::EchoFilter;
 use crate::commands::{
     commands_with_guests, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
 };
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
+use crate::echo_filter::EchoFilter;
+use crate::guest_host::{guest_footer_top, guest_mount_rect, GuestEvent, GuestHost, NativeAttach};
+use crate::guest_manifest::{load_guests, pick_guest};
 use crate::input::{
-    classify_drop, classify_tab_drop, hit_test, is_mac, pane_id_from_hit,
-    term_select_drag_started,
+    classify_drop, classify_tab_drop, hit_test, is_mac, pane_id_from_hit, term_select_drag_started,
     window_origin_for_tab_drop, DropKind, HitTarget,
 };
-use crate::layout::{
-    clamp_ui_zoom, FrameLayout, Metrics, UI_ZOOM_STEP,
-};
+use crate::layout::{clamp_ui_zoom, FrameLayout, Metrics, UI_ZOOM_STEP};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
 use crate::mouse_pty::{encode_mouse_button, encode_mouse_motion, encode_mouse_wheel};
 use crate::notes::NotesState;
@@ -42,14 +39,10 @@ use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
 use crate::rename::{RenameState, RenameTarget};
 use crate::renderer::{self, GhostLayer, Renderer};
-use crate::text::MonoCellMetrics;
 use crate::selection::{clamp_pos, CellPos, Selection};
-use crate::guest_host::{
-    guest_footer_top, guest_mount_rect, GuestEvent, GuestHost, NativeAttach,
-};
-use crate::guest_manifest::{load_guests, pick_guest};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
 use crate::settings::SettingsState;
+use crate::text::MonoCellMetrics;
 use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
 use crate::updater::{UpdateEvent, UpdateMailbox};
@@ -190,8 +183,14 @@ pub struct ChromeApp {
 }
 
 enum DragSubject {
-    Pane { pane_id: u64, source: crate::layout::Rect },
-    Tab { tab_id: u64, from_idx: usize },
+    Pane {
+        pane_id: u64,
+        source: crate::layout::Rect,
+    },
+    Tab {
+        tab_id: u64,
+        from_idx: usize,
+    },
 }
 
 struct LayoutDrag {
@@ -450,7 +449,9 @@ impl ChromeApp {
             return;
         }
         if self.palette.open {
-            self.palette.query.push_str(text.split(['\n', '\r']).next().unwrap_or(""));
+            self.palette
+                .query
+                .push_str(text.split(['\n', '\r']).next().unwrap_or(""));
             self.palette.selected = 0;
             return;
         }
@@ -493,17 +494,24 @@ impl ChromeApp {
     }
 
     fn renderer(&self) -> Option<&Renderer> {
-        let id = self.event_win.or_else(|| self.surfaces.keys().next().copied())?;
+        let id = self
+            .event_win
+            .or_else(|| self.surfaces.keys().next().copied())?;
         self.surfaces.get(&id).map(|s| &s.renderer)
     }
 
     fn renderer_mut(&mut self) -> Option<&mut Renderer> {
-        let id = self.event_win.or_else(|| self.surfaces.keys().next().copied())?;
+        let id = self
+            .event_win
+            .or_else(|| self.surfaces.keys().next().copied())?;
         self.surfaces.get_mut(&id).map(|s| &mut s.renderer)
     }
 
     fn renderer_for(&self, key: u64) -> Option<&Renderer> {
-        self.surfaces.values().find(|s| s.key == key).map(|s| &s.renderer)
+        self.surfaces
+            .values()
+            .find(|s| s.key == key)
+            .map(|s| &s.renderer)
     }
 
     fn surface_focus_tab(&self, key: u64) -> Option<u64> {
@@ -518,9 +526,12 @@ impl ChromeApp {
             .find(|s| s.key == key)
             .map(|s| s.focus_tab);
         if let Some(tid) = stored {
-            if self.session.tabs.iter().any(|t| {
-                t.id == tid && t.surface == key && t.exit.is_none()
-            }) {
+            if self
+                .session
+                .tabs
+                .iter()
+                .any(|t| t.id == tid && t.surface == key && t.exit.is_none())
+            {
                 return Some(tid);
             }
         }
@@ -690,11 +701,9 @@ impl ChromeApp {
                 .iter()
                 .find(|t| t.id == *tab_id)
                 .map(|t| t.title.clone()),
-            DragSubject::Pane { pane_id, .. } => self
-                .session
-                .panes
-                .get(pane_id)
-                .map(|p| p.title.clone()),
+            DragSubject::Pane { pane_id, .. } => {
+                self.session.panes.get(pane_id).map(|p| p.title.clone())
+            }
         }) else {
             return;
         };
@@ -734,7 +743,10 @@ impl ChromeApp {
     }
 
     fn pointer_loc(&self) -> PointerLoc {
-        let Some(src_id) = self.event_win.or_else(|| self.surfaces.keys().next().copied()) else {
+        let Some(src_id) = self
+            .event_win
+            .or_else(|| self.surfaces.keys().next().copied())
+        else {
             return PointerLoc::Outside;
         };
         let Some(src) = self.surfaces.get(&src_id) else {
@@ -821,9 +833,16 @@ impl ChromeApp {
                     .map(|s| s.height as f64 / src_scale)
                     .unwrap_or(740.0) as f32;
                 let layout = FrameLayout::compute(logical_w, logical_h, self.metrics, 1);
-                let chip = layout.tab_chips.first().copied().unwrap_or(
-                    crate::layout::Rect::new(80.0, 6.0, crate::layout::TAB_CHIP_W, 20.0),
-                );
+                let chip = layout
+                    .tab_chips
+                    .first()
+                    .copied()
+                    .unwrap_or(crate::layout::Rect::new(
+                        80.0,
+                        6.0,
+                        crate::layout::TAB_CHIP_W,
+                        20.0,
+                    ));
                 let screen = self.pointer_screen_physical().unwrap_or((80, 60));
                 window_origin_for_tab_drop(screen, chip, src_scale)
             }
@@ -878,7 +897,11 @@ impl ChromeApp {
                 let cell = self.cell_metrics();
                 let layout = self.layout_for_surface(key);
                 let (cols, rows) = renderer::terminal_grid_size_with(
-                    layout.panes.first().map(|p| &p.cells).unwrap_or(&layout.cells),
+                    layout
+                        .panes
+                        .first()
+                        .map(|p| &p.cells)
+                        .unwrap_or(&layout.cells),
                     cell.w,
                     cell.h,
                 );
@@ -1016,11 +1039,8 @@ impl ChromeApp {
                     continue;
                 }
                 visible.insert(pl.pane_id);
-                let hole = guest_mount_rect(
-                    pl.glass,
-                    pl.header,
-                    guest_footer_top(pl.divider, pl.glass),
-                );
+                let hole =
+                    guest_mount_rect(pl.glass, pl.header, guest_footer_top(pl.divider, pl.glass));
                 let native = self.guest_native_attach(pl.pane_id, hole, !overlay);
                 self.guest_host.resize(pl.pane_id, hole, scale, native);
             }
@@ -1060,8 +1080,8 @@ impl ChromeApp {
         #[cfg(target_os = "macos")]
         {
             let number = crate::macos_window::window_number(window.as_ref())?;
-            let screen = crate::macos_window::content_rect_to_screen(window.as_ref(), hole)
-                .unwrap_or(hole);
+            let screen =
+                crate::macos_window::content_rect_to_screen(window.as_ref(), hole).unwrap_or(hole);
             Some(NativeAttach {
                 window_number: number,
                 screen,
@@ -1114,12 +1134,14 @@ impl ChromeApp {
     fn nudge_zoom(&mut self, delta: f32) {
         let next = clamp_ui_zoom(self.ui_zoom + delta);
         if (next - self.ui_zoom).abs() < 1e-4 {
-            self.toast.show(format!("Zoom {:.0}% (limit)", self.ui_zoom * 100.0));
+            self.toast
+                .show(format!("Zoom {:.0}% (limit)", self.ui_zoom * 100.0));
             return;
         }
         self.ui_zoom = next;
         self.apply_ui_zoom();
-        self.toast.show(format!("Zoom {:.0}%", self.ui_zoom * 100.0));
+        self.toast
+            .show(format!("Zoom {:.0}%", self.ui_zoom * 100.0));
     }
 
     fn reset_zoom(&mut self) {
@@ -1188,8 +1210,7 @@ impl ChromeApp {
                 if self.session.is_widget(pl.pane_id) {
                     continue;
                 }
-                let (cols, rows) =
-                    renderer::terminal_grid_size_with(&pl.cells, cell.w, cell.h);
+                let (cols, rows) = renderer::terminal_grid_size_with(&pl.cells, cell.w, cell.h);
                 let need = self
                     .session
                     .grid(pl.pane_id)
@@ -1323,11 +1344,7 @@ impl ChromeApp {
                 return pl.glass.contains(px, py);
             }
         }
-        self.workspace_ui.is_modal()
-            && self
-                .workspace_ui
-                .card_rect(win_w, win_h)
-                .contains(px, py)
+        self.workspace_ui.is_modal() && self.workspace_ui.card_rect(win_w, win_h).contains(px, py)
     }
 
     /// Default open: split the last-focused pane and dock workspace there.
@@ -1383,7 +1400,10 @@ impl ChromeApp {
             .get(&id)
             .map(|p| p.cwd.clone())
             .unwrap_or_default();
-        if let Err(e) = self.guest_host.start(id, &manifest, &cwd, hole, scale, native) {
+        if let Err(e) = self
+            .guest_host
+            .start(id, &manifest, &cwd, hole, scale, native)
+        {
             self.toast.show(e);
             let _ = self.session.begin_close_pane(id);
             return;
@@ -1536,7 +1556,11 @@ impl ChromeApp {
     }
 
     fn send_guest_key(&self, event: &winit::event::KeyEvent) {
-        let kind = if event.state.is_pressed() { "down" } else { "up" };
+        let kind = if event.state.is_pressed() {
+            "down"
+        } else {
+            "up"
+        };
         let (key, text) = match &event.logical_key {
             Key::Named(NamedKey::Enter) => ("Enter".into(), String::new()),
             Key::Named(NamedKey::Backspace) => ("Backspace".into(), String::new()),
@@ -1571,9 +1595,7 @@ impl ChromeApp {
         }
         for ev in events {
             match ev {
-                GuestEvent::Hello {
-                    pane_id, title, ..
-                } => {
+                GuestEvent::Hello { pane_id, title, .. } => {
                     if let Some(p) = self.session.panes.get_mut(&pane_id) {
                         if crate::session::guest_page_title_ok(&title, &p.guest_url)
                             && !crate::session::guest_engine_hello_title(&title)
@@ -1726,7 +1748,9 @@ impl ChromeApp {
     /// Open rename dialog for tab or pane (closes other modals first).
     fn open_rename(&mut self, target: RenameTarget) {
         self.close_all_overlays();
-        let seed = self.session.rename_seed(matches!(target, RenameTarget::Tab));
+        let seed = self
+            .session
+            .rename_seed(matches!(target, RenameTarget::Tab));
         self.rename.open_with(target, &seed);
     }
 
@@ -2094,7 +2118,11 @@ impl ChromeApp {
         let layout = self.layout_for_surface(surface);
         let cell = self.cell_metrics();
         let (cols, rows) = renderer::terminal_grid_size_with(
-            layout.panes.first().map(|p| &p.cells).unwrap_or(&layout.cells),
+            layout
+                .panes
+                .first()
+                .map(|p| &p.cells)
+                .unwrap_or(&layout.cells),
             cell.w,
             cell.h,
         );
@@ -2196,7 +2224,11 @@ impl ChromeApp {
             return;
         }
         if self
-            .open_surface(event_loop, SurfaceAdopt::Tab(tab_id), SurfacePlace::UnderPointer)
+            .open_surface(
+                event_loop,
+                SurfaceAdopt::Tab(tab_id),
+                SurfacePlace::UnderPointer,
+            )
             .is_none()
         {
             self.toast.show("Couldn't open window");
@@ -2259,10 +2291,7 @@ impl ChromeApp {
             return;
         }
         if let Some(eid) = self.focus_win.or(self.event_win) {
-            let grabbed = self
-                .surfaces
-                .get(&eid)
-                .map(|s| (s.key, s.window.clone()));
+            let grabbed = self.surfaces.get(&eid).map(|s| (s.key, s.window.clone()));
             if let Some((key, win)) = grabbed {
                 win.focus_window();
                 if let Some(tid) = self.surface_focus_tab(key) {
@@ -2614,8 +2643,7 @@ impl ChromeApp {
         if self.alt_mouse_cell == Some((col, row)) {
             return;
         }
-        let bytes =
-            encode_mouse_motion(col, row, self.alt_mouse_down, tracking, any, drag, sgr);
+        let bytes = encode_mouse_motion(col, row, self.alt_mouse_down, tracking, any, drag, sgr);
         if bytes.is_empty() {
             return;
         }
@@ -2679,9 +2707,7 @@ impl ChromeApp {
             // darwin: meta || (ctrl && !meta) → either Super or Control
             self.modifiers.super_key() || self.modifiers.control_key()
         } else {
-            self.modifiers.control_key()
-                && !self.modifiers.alt_key()
-                && !self.modifiers.shift_key()
+            self.modifiers.control_key() && !self.modifiers.alt_key() && !self.modifiers.shift_key()
         }
     }
 
@@ -2859,7 +2885,11 @@ impl ChromeApp {
         let win_w = layout.title.w;
         let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
         let (x, y) = self.pointer();
-        if self.settings.visible() && self.settings.animated_modal_rect(win_w, win_h).contains(x, y)
+        if self.settings.visible()
+            && self
+                .settings
+                .animated_modal_rect(win_w, win_h)
+                .contains(x, y)
         {
             return true;
         }
@@ -2895,12 +2925,15 @@ impl ChromeApp {
         if self.notes.visible() && self.notes.animated_modal_rect(win_w, win_h).contains(x, y) {
             return true;
         }
-        if self.workspace_ui.is_modal()
-            && self.workspace_ui.card_rect(win_w, win_h).contains(x, y)
+        if self.workspace_ui.is_modal() && self.workspace_ui.card_rect(win_w, win_h).contains(x, y)
         {
             return true;
         }
-        if self.transfer.visible() && self.transfer.animated_modal_rect(win_w, win_h).contains(x, y)
+        if self.transfer.visible()
+            && self
+                .transfer
+                .animated_modal_rect(win_w, win_h)
+                .contains(x, y)
         {
             return true;
         }
@@ -2988,8 +3021,7 @@ impl ChromeApp {
                     let win_w = layout.title.w;
                     let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
                     let (px, py) = self.pointer();
-                    if let Some(choice) = self.confirm.hit_button(px, py, win_w, win_h)
-                    {
+                    if let Some(choice) = self.confirm.hit_button(px, py, win_w, win_h) {
                         self.apply_confirm_choice(event_loop, choice);
                     }
                     return;
@@ -3130,6 +3162,7 @@ impl ChromeApp {
                 } else {
                     self.warp_focused = true;
                     self.terminal_focused = false;
+                    self.place_warp_caret(pane_id);
                 }
             }
             HitTarget::Terminal(pane_id) => {
@@ -3176,6 +3209,32 @@ impl ChromeApp {
         }
     }
 
+    /// Click in the warp strip: put the caret on the nearest draft scalar.
+    fn place_warp_caret(&mut self, pane_id: u64) {
+        let layout = self.current_layout();
+        let Some(pl) = layout.panes.iter().find(|p| p.pane_id == pane_id) else {
+            return;
+        };
+        if pl.warp.h < 1.0 {
+            return;
+        }
+        let char_w = self
+            .cell_metrics()
+            .advance_at(self.metrics.px(13.0))
+            .max(1.0);
+        let max_c = ((pl.warp.w / char_w).floor() as usize).max(4);
+        let (x, _) = self.pointer();
+        let col = ((x - pl.warp.x) / char_w).floor() as isize;
+        let start = self.session.panes.get(&pane_id).map(|pane| {
+            crate::draft::warp_scroll_start(pane.draft.as_str(), pane.draft.cursor(), max_c)
+        });
+        let Some(start) = start else {
+            return;
+        };
+        let idx = start.saturating_add((col - 2).max(0) as usize);
+        self.session.set_pane_draft_cursor(pane_id, idx);
+    }
+
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
         if !event.state.is_pressed() {
             if self.guest_document_focused() {
@@ -3200,8 +3259,7 @@ impl ChromeApp {
             }
             // Workspace: Esc cancels new-channel compose. Docked pane stays open (⌘W).
             if self.workspace_captures_input()
-                && self.workspace_ui.mode
-                    != crate::workspace_ui::ComposeMode::Message
+                && self.workspace_ui.mode != crate::workspace_ui::ComposeMode::Message
             {
                 self.workspace_ui.cancel_mode();
                 if let Some(w) = &self.window {
@@ -3376,8 +3434,8 @@ impl ChromeApp {
             }
             if self.guest_compose_focused() {
                 match &event.logical_key {
-                    Key::Named(NamedKey::Backspace) => {
-                        self.session.draft_mut().pop();
+                    Key::Named(NamedKey::Backspace) if !alt && !super_or_ctrl => {
+                        self.session.backspace();
                         let draft = self.session.draft().to_string();
                         self.guest_host.draft(self.session.focus_pane_id(), &draft);
                         self.paint_dirty = true;
@@ -3393,10 +3451,10 @@ impl ChromeApp {
                         }
                         return;
                     }
-                    Key::Character(s) => {
+                    Key::Character(s) if warp_edit_key(event).is_none() => {
                         for ch in s.chars() {
                             if !ch.is_control() {
-                                self.session.draft_mut().push(ch);
+                                self.session.type_char(ch);
                             }
                         }
                         let draft = self.session.draft().to_string();
@@ -3981,8 +4039,11 @@ impl ChromeApp {
                 Key::Character(s) => {
                     // Shift+Tab → previous row (when we only get "\t" as char, rare).
                     if s.as_str() == "\t" {
-                        self.settings
-                            .move_selection(if self.modifiers.shift_key() { -1 } else { 1 });
+                        self.settings.move_selection(if self.modifiers.shift_key() {
+                            -1
+                        } else {
+                            1
+                        });
                         handled = true;
                     } else {
                         handled = self.settings.handle_hotkey(s.as_str());
@@ -4012,11 +4073,7 @@ impl ChromeApp {
                 .map(|rt| rt.ansi.on_alt_screen())
                 .unwrap_or(false);
             if !alt {
-                let rows = self
-                    .session
-                    .active_grid()
-                    .rows()
-                    .max(1) as i32;
+                let rows = self.session.active_grid().rows().max(1) as i32;
                 let half = (rows / 2).max(1);
                 let scrolled = match &event.logical_key {
                     Key::Named(NamedKey::PageUp) => {
@@ -4077,7 +4134,9 @@ impl ChromeApp {
                         Key::Named(NamedKey::PageDown) => Some(crate::kitty::NamedKey::PageDown),
                         Key::Named(NamedKey::ArrowUp) => Some(crate::kitty::NamedKey::ArrowUp),
                         Key::Named(NamedKey::ArrowDown) => Some(crate::kitty::NamedKey::ArrowDown),
-                        Key::Named(NamedKey::ArrowRight) => Some(crate::kitty::NamedKey::ArrowRight),
+                        Key::Named(NamedKey::ArrowRight) => {
+                            Some(crate::kitty::NamedKey::ArrowRight)
+                        }
                         Key::Named(NamedKey::ArrowLeft) => Some(crate::kitty::NamedKey::ArrowLeft),
                         Key::Named(NamedKey::F1) => Some(crate::kitty::NamedKey::F(1)),
                         Key::Named(NamedKey::F2) => Some(crate::kitty::NamedKey::F(2)),
@@ -4118,27 +4177,80 @@ impl ChromeApp {
 
         // Warp / local input
         if self.warp_focused || !self.terminal_focused {
-            match &event.logical_key {
-                Key::Named(NamedKey::Backspace) => self.session.backspace(),
-                Key::Named(NamedKey::Enter) => self.submit_line(),
-                Key::Named(NamedKey::ArrowUp) => self.session.history_up(),
-                Key::Named(NamedKey::ArrowDown) => self.session.history_down(),
-                Key::Character(s) => {
-                    if super_or_ctrl {
-                        return;
+            if let Some(nk) = warp_edit_key(event) {
+                // Word: ⌥ (mac) or Ctrl. Line: ⌘ / Super (Home/End everywhere).
+                let word_mod = if self.modifiers.super_key() {
+                    false
+                } else if cfg!(target_os = "macos") {
+                    alt || self.modifiers.control_key()
+                } else {
+                    self.modifiers.control_key()
+                };
+                let line_mod = self.modifiers.super_key() && !alt;
+                match nk {
+                    NamedKey::Backspace => {
+                        if word_mod {
+                            self.session.delete_word_back();
+                        } else if !super_or_ctrl {
+                            self.session.backspace();
+                        }
                     }
-                    for c in s.chars() {
-                        self.session.type_char(c);
+                    NamedKey::Delete => {
+                        if word_mod {
+                            self.session.delete_word_forward();
+                        } else if !super_or_ctrl {
+                            self.session.delete_forward();
+                        }
                     }
+                    NamedKey::Enter => self.submit_line(),
+                    NamedKey::Home => self.session.draft_mut().home(),
+                    NamedKey::End => self.session.draft_mut().end(),
+                    NamedKey::ArrowLeft => {
+                        if line_mod {
+                            self.session.draft_mut().home();
+                        } else if word_mod {
+                            self.session.draft_mut().word_left();
+                        } else if !super_or_ctrl {
+                            self.session.draft_mut().move_by(-1);
+                        }
+                    }
+                    NamedKey::ArrowRight => {
+                        if line_mod {
+                            self.session.draft_mut().end();
+                        } else if word_mod {
+                            self.session.draft_mut().word_right();
+                        } else if !super_or_ctrl {
+                            self.session.draft_mut().move_by(1);
+                        }
+                    }
+                    NamedKey::ArrowUp => {
+                        if line_mod {
+                            self.session.draft_mut().home();
+                        } else if !word_mod && !super_or_ctrl {
+                            self.session.history_up();
+                        }
+                    }
+                    NamedKey::ArrowDown => {
+                        if line_mod {
+                            self.session.draft_mut().end();
+                        } else if !word_mod && !super_or_ctrl {
+                            self.session.history_down();
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {
-                    if let Some(text) = &event.text {
-                        if !super_or_ctrl {
-                            for c in text.chars() {
-                                if !c.is_control() {
-                                    self.session.type_char(c);
-                                }
-                            }
+            } else if let Key::Character(s) = &event.logical_key {
+                if super_or_ctrl {
+                    return;
+                }
+                for c in s.chars() {
+                    self.session.type_char(c);
+                }
+            } else if let Some(text) = &event.text {
+                if !super_or_ctrl {
+                    for c in text.chars() {
+                        if !c.is_control() {
+                            self.session.type_char(c);
                         }
                     }
                 }
@@ -4276,7 +4388,7 @@ impl ChromeApp {
                 p.busy = true;
             }
         } else {
-            *self.session.draft_mut() = line;
+            self.session.draft_mut().replace(line);
             self.session.submit_draft_mock();
         }
     }
@@ -4292,7 +4404,12 @@ impl ChromeApp {
         if self.toast.visible() {
             return true;
         }
-        if self.session.panes.values().any(|p| p.grid.scroll_animating()) {
+        if self
+            .session
+            .panes
+            .values()
+            .any(|p| p.grid.scroll_animating())
+        {
             return true;
         }
         if self
@@ -4430,7 +4547,6 @@ impl ChromeApp {
             let _ = fade;
         }
     }
-
 }
 
 impl ApplicationHandler for ChromeApp {
@@ -4452,11 +4568,7 @@ impl ApplicationHandler for ChromeApp {
             attrs = attrs.with_accepts_first_mouse(true);
         }
 
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("create window"),
-        );
+        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         #[cfg(target_os = "macos")]
         crate::macos_window::configure_rounded_window(&window, 16.0);
@@ -4549,12 +4661,11 @@ impl ApplicationHandler for ChromeApp {
             if self.pane_drag.as_ref().is_some_and(|d| d.active) {
                 if let Some(g) = &self.drag_float {
                     if let Ok(pos) = g.window.outer_position() {
-                        g.window.set_outer_position(
-                            winit::dpi::PhysicalPosition::new(
+                        g.window
+                            .set_outer_position(winit::dpi::PhysicalPosition::new(
                                 pos.x + dx as i32,
                                 pos.y + dy as i32,
-                            ),
-                        );
+                            ));
                         g.window.request_redraw();
                     }
                 }
@@ -4562,12 +4673,7 @@ impl ApplicationHandler for ChromeApp {
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.is_ghost_win(id) {
             if matches!(event, WindowEvent::RedrawRequested) {
                 self.paint_drag_float();
@@ -4655,22 +4761,19 @@ impl ApplicationHandler for ChromeApp {
                     };
                     let dx = self.cursor.x - sx;
                     let dy = self.cursor.y - sy;
-                    let active = dx.hypot(dy) >= 8.0
-                        || self.pane_drag.as_ref().is_some_and(|d| d.active);
+                    let active =
+                        dx.hypot(dy) >= 8.0 || self.pane_drag.as_ref().is_some_and(|d| d.active);
                     if active {
                         let (drop, dest_surface) = match self.pointer_loc() {
-                            PointerLoc::Outside => (Some(DropKind::TearOff), self.event_surface_key()),
+                            PointerLoc::Outside => {
+                                (Some(DropKind::TearOff), self.event_surface_key())
+                            }
                             PointerLoc::Surface { key, x, y } => {
                                 let layout = self.layout_for_surface(key);
                                 let drop = match self.pane_drag.as_ref().map(|d| &d.subject) {
-                                    Some(DragSubject::Pane { pane_id, .. }) => classify_drop(
-                                        &layout,
-                                        &self.session,
-                                        key,
-                                        x,
-                                        y,
-                                        *pane_id,
-                                    ),
+                                    Some(DragSubject::Pane { pane_id, .. }) => {
+                                        classify_drop(&layout, &self.session, key, x, y, *pane_id)
+                                    }
                                     Some(DragSubject::Tab { tab_id, from_idx }) => {
                                         let from = self
                                             .session
@@ -4820,17 +4923,15 @@ impl ApplicationHandler for ChromeApp {
                             active: false,
                             drop: None,
                             dest_surface: self.event_surface_key(),
-                            grab: (
-                                (source.w * 0.55).clamp(120.0, 320.0) * 0.3,
-                                12.0,
-                            ),
+                            grab: ((source.w * 0.55).clamp(120.0, 320.0) * 0.3, 12.0),
                         });
                     }
                 }
                 if let HitTarget::Tab(i) = hit {
                     if !self.overlay_open() {
                         let surface = self.event_surface_key();
-                        if let Some(tab_id) = self.session.tabs_on_surface(surface).get(i).copied() {
+                        if let Some(tab_id) = self.session.tabs_on_surface(surface).get(i).copied()
+                        {
                             let chip = self
                                 .current_layout()
                                 .tab_chips
@@ -5084,8 +5185,7 @@ impl ApplicationHandler for ChromeApp {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 // Ctrl/Cmd + scroll → same magnifier (mice / no trackpad).
-                let magnify_mod =
-                    self.modifiers.control_key() || self.modifiers.super_key();
+                let magnify_mod = self.modifiers.control_key() || self.modifiers.super_key();
                 if magnify_mod && self.settings.prefs.lens {
                     let step = match delta {
                         MouseScrollDelta::LineDelta(_, y) => y * 0.18,
@@ -5331,7 +5431,8 @@ impl ApplicationHandler for ChromeApp {
                     r.set_ui_scale(self.ui_zoom);
                     r.set_guest_wells(guest_wells);
                     for (pane_id, sid, w, h, held, hole) in guest_ios {
-                        let (ew, eh) = crate::guest_fb::pixel_size(hole.w, hole.h, r.scale_factor());
+                        let (ew, eh) =
+                            crate::guest_fb::pixel_size(hole.w, hole.h, r.scale_factor());
                         let _ = r.import_guest_iosurface(pane_id, sid, w, h, held, ew, eh);
                     }
                     for (pane_id, w, h, px) in &guest_uploads {
@@ -5370,8 +5471,7 @@ impl ApplicationHandler for ChromeApp {
                         self.pane_drag
                             .as_ref()
                             .filter(|d| d.active && show_drag && self.drag_float.is_none())
-                            .and_then(|d| {
-                            match &d.subject {
+                            .and_then(|d| match &d.subject {
                                 DragSubject::Pane { source, .. } => {
                                     let w = (source.w * 0.72).max(48.0);
                                     let h = (source.h * 0.72).max(36.0);
@@ -5382,16 +5482,13 @@ impl ApplicationHandler for ChromeApp {
                                         h,
                                     ))
                                 }
-                                DragSubject::Tab { .. } => {
-                                    Some(crate::layout::Rect::new(
-                                        ghost_x - 48.0,
-                                        ghost_y - 16.0,
-                                        96.0,
-                                        32.0,
-                                    ))
-                                }
-                            }
-                        }),
+                                DragSubject::Tab { .. } => Some(crate::layout::Rect::new(
+                                    ghost_x - 48.0,
+                                    ghost_y - 16.0,
+                                    96.0,
+                                    32.0,
+                                )),
+                            }),
                     ) {
                         Ok(()) => {
                             self.last_gpu_paint = Instant::now();
@@ -5416,5 +5513,24 @@ impl ApplicationHandler for ChromeApp {
 
             _ => {}
         }
+    }
+}
+
+/// Named key for warp editing. Option on macOS can remap `logical_key` to a
+/// character; fall back to the physical arrow so ⌥←→ still word-jumps.
+fn warp_edit_key(event: &winit::event::KeyEvent) -> Option<NamedKey> {
+    match &event.logical_key {
+        Key::Named(n) => Some(*n),
+        _ => match event.physical_key {
+            PhysicalKey::Code(KeyCode::ArrowLeft) => Some(NamedKey::ArrowLeft),
+            PhysicalKey::Code(KeyCode::ArrowRight) => Some(NamedKey::ArrowRight),
+            PhysicalKey::Code(KeyCode::ArrowUp) => Some(NamedKey::ArrowUp),
+            PhysicalKey::Code(KeyCode::ArrowDown) => Some(NamedKey::ArrowDown),
+            PhysicalKey::Code(KeyCode::Home) => Some(NamedKey::Home),
+            PhysicalKey::Code(KeyCode::End) => Some(NamedKey::End),
+            PhysicalKey::Code(KeyCode::Delete) => Some(NamedKey::Delete),
+            PhysicalKey::Code(KeyCode::Backspace) => Some(NamedKey::Backspace),
+            _ => None,
+        },
     }
 }

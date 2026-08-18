@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::cells::{theme, CellGrid};
+use crate::draft::DraftLine;
 use crate::panes::{
     DockEdge, FocusDir, RemoveResult, SoloExitAnim, SplitAxis, SplitNode, TickResult,
 };
@@ -65,7 +66,7 @@ pub struct Pane {
     pub pty_mode: bool,
     pub cwd: String,
     /// Local command draft for this pane's input strip.
-    pub draft: String,
+    pub draft: DraftLine,
     /// Manifest id when [`PaneKind`] is a guest. None for terminals / workspace.
     pub guest_id: Option<String>,
     /// Last location the guest reported (`url` message).
@@ -83,7 +84,7 @@ fn new_terminal_pane(id: u64, cols: u16, rows: u16, cwd: String) -> Pane {
         grid: CellGrid::new(cols, rows),
         pty_mode: false,
         cwd,
-        draft: String::new(),
+        draft: DraftLine::new(),
         guest_id: None,
         guest_url: String::new(),
         exiting: false,
@@ -105,7 +106,7 @@ fn new_widget_pane(id: u64, kind: WidgetKind, cwd: String) -> Pane {
         grid: CellGrid::new(8, 4),
         pty_mode: false,
         cwd,
-        draft: String::new(),
+        draft: DraftLine::new(),
         guest_id: None,
         guest_url: String::new(),
         exiting: false,
@@ -224,9 +225,7 @@ impl ChromeSession {
     }
 
     pub fn focus_pane_id(&self) -> u64 {
-        self.active_tab()
-            .map(|t| t.focus_pane)
-            .unwrap_or(1)
+        self.active_tab().map(|t| t.focus_pane).unwrap_or(1)
     }
 
     pub fn active_pane(&self) -> Option<&Pane> {
@@ -241,19 +240,19 @@ impl ChromeSession {
 
     /// Draft of the focused pane.
     pub fn draft(&self) -> &str {
-        self.active_pane()
-            .map(|p| p.draft.as_str())
-            .unwrap_or("")
+        self.active_pane().map(|p| p.draft.as_str()).unwrap_or("")
     }
 
-    pub fn draft_mut(&mut self) -> &mut String {
+    pub fn draft_mut(&mut self) -> &mut DraftLine {
         // Ensure we always have a pane.
         let id = self.focus_pane_id();
-        &mut self
-            .panes
-            .get_mut(&id)
-            .expect("focus pane")
-            .draft
+        &mut self.panes.get_mut(&id).expect("focus pane").draft
+    }
+
+    pub fn set_pane_draft_cursor(&mut self, pane_id: u64, cursor: usize) {
+        if let Some(p) = self.panes.get_mut(&pane_id) {
+            p.draft.set_cursor(cursor);
+        }
     }
 
     pub fn display_cwd(&self) -> String {
@@ -378,7 +377,9 @@ impl ChromeSession {
         for tab in &mut self.tabs {
             let r = tab.root.tick(dt);
             result.moving |= r.moving;
-            result.finished_closes.extend(r.finished_closes.iter().copied());
+            result
+                .finished_closes
+                .extend(r.finished_closes.iter().copied());
 
             if let Some(anim) = &mut tab.solo_exit {
                 if anim.tick(dt) {
@@ -514,14 +515,22 @@ impl ChromeSession {
             return false;
         }
 
-        let Some(tab_id) = self.tabs.iter().find(|t| {
-            t.root.contains_pane(pane_id)
-                || t.solo_exit.as_ref().map(|s| s.pane_id) == Some(pane_id)
-        }).map(|t| t.id) else {
+        let Some(tab_id) = self
+            .tabs
+            .iter()
+            .find(|t| {
+                t.root.contains_pane(pane_id)
+                    || t.solo_exit.as_ref().map(|s| s.pane_id) == Some(pane_id)
+            })
+            .map(|t| t.id)
+        else {
             return false;
         };
 
-        let already_closing = self.tabs.iter().any(|t| t.id == tab_id && t.root.is_closing(pane_id));
+        let already_closing = self
+            .tabs
+            .iter()
+            .any(|t| t.id == tab_id && t.root.is_closing(pane_id));
         if self.panes.get(&pane_id).is_some_and(|p| p.exiting) && already_closing {
             return true;
         }
@@ -666,14 +675,9 @@ impl ChromeSession {
             .map(|p| p.cwd.clone())
             .unwrap_or_else(initial_cwd);
 
-        self.panes.insert(
-            pane_id,
-            new_terminal_pane(pane_id, cols, rows, cwd),
-        );
-        let surface = self
-            .active_tab()
-            .map(|t| t.surface)
-            .unwrap_or(0);
+        self.panes
+            .insert(pane_id, new_terminal_pane(pane_id, cols, rows, cwd));
+        let surface = self.active_tab().map(|t| t.surface).unwrap_or(0);
         self.tabs.push(Tab {
             id: tab_id,
             title: default_tab_title(tab_id),
@@ -841,21 +845,15 @@ impl ChromeSession {
         }
         tab.focus_pane = new_id;
 
-        self.panes.insert(
-            new_id,
-            new_terminal_pane(new_id, cols, rows, cwd),
-        );
+        self.panes
+            .insert(new_id, new_terminal_pane(new_id, cols, rows, cwd));
         Some(new_id)
     }
 
     /// Split the focused pane and insert a widget leaf (no PTY). Returns new id.
     ///
     /// Workspace is a singleton. Guests are not — each call inserts a new leaf.
-    pub fn split_focused_widget(
-        &mut self,
-        axis: SplitAxis,
-        kind: WidgetKind,
-    ) -> Option<u64> {
+    pub fn split_focused_widget(&mut self, axis: SplitAxis, kind: WidgetKind) -> Option<u64> {
         if kind != WidgetKind::Guest {
             if let Some(existing) = self.find_widget(kind) {
                 self.set_focus_pane(existing);
@@ -879,7 +877,8 @@ impl ChromeSession {
         }
         tab.focus_pane = new_id;
 
-        self.panes.insert(new_id, new_widget_pane(new_id, kind, cwd));
+        self.panes
+            .insert(new_id, new_widget_pane(new_id, kind, cwd));
         Some(new_id)
     }
 
@@ -1151,12 +1150,7 @@ impl ChromeSession {
             .collect()
     }
 
-    pub fn new_tab_on_surface(
-        &mut self,
-        cols: u16,
-        rows: u16,
-        surface: u64,
-    ) -> (u64, u64) {
+    pub fn new_tab_on_surface(&mut self, cols: u16, rows: u16, surface: u64) -> (u64, u64) {
         let (tid, pid) = self.new_tab(cols, rows);
         if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tid) {
             t.surface = surface;
@@ -1250,11 +1244,7 @@ impl ChromeSession {
         if !self.panes.contains_key(&pane_id) {
             return false;
         }
-        if let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|t| t.root.contains_pane(pane_id))
-        {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.root.contains_pane(pane_id)) {
             let changed = tab.focus_pane != pane_id || self.active_id != tab.id;
             self.active_id = tab.id;
             tab.focus_pane = pane_id;
@@ -1280,24 +1270,32 @@ impl ChromeSession {
             return;
         }
         self.leave_history_browse();
-        self.draft_mut().push(c);
+        self.draft_mut().insert_char(c);
     }
 
     pub fn backspace(&mut self) {
         self.leave_history_browse();
-        self.draft_mut().pop();
+        self.draft_mut().backspace();
+    }
+
+    pub fn delete_forward(&mut self) {
+        self.leave_history_browse();
+        self.draft_mut().delete();
+    }
+
+    pub fn delete_word_back(&mut self) {
+        self.leave_history_browse();
+        self.draft_mut().delete_word_back();
+    }
+
+    pub fn delete_word_forward(&mut self) {
+        self.leave_history_browse();
+        self.draft_mut().delete_word_forward();
     }
 
     pub fn paste_draft(&mut self, text: &str) {
         self.leave_history_browse();
-        let d = self.draft_mut();
-        for c in text.chars() {
-            if !c.is_control() {
-                d.push(c);
-            } else if c == '\n' || c == '\r' {
-                break;
-            }
-        }
+        self.draft_mut().insert_str(text);
     }
 
     pub fn push_history(&mut self, line: &str) {
@@ -1324,12 +1322,14 @@ impl ChromeSession {
                 self.history_stash = self.draft().to_string();
                 let i = self.history.len() - 1;
                 self.history_idx = Some(i);
-                *self.draft_mut() = self.history[i].clone();
+                let line = self.history[i].clone();
+                self.draft_mut().replace(line);
             }
             Some(i) if i > 0 => {
                 let i = i - 1;
                 self.history_idx = Some(i);
-                *self.draft_mut() = self.history[i].clone();
+                let line = self.history[i].clone();
+                self.draft_mut().replace(line);
             }
             Some(_) => {}
         }
@@ -1342,10 +1342,12 @@ impl ChromeSession {
         if i + 1 < self.history.len() {
             let i = i + 1;
             self.history_idx = Some(i);
-            *self.draft_mut() = self.history[i].clone();
+            let line = self.history[i].clone();
+            self.draft_mut().replace(line);
         } else {
             self.history_idx = None;
-            *self.draft_mut() = std::mem::take(&mut self.history_stash);
+            let stash = std::mem::take(&mut self.history_stash);
+            self.draft_mut().replace(stash);
         }
     }
 
@@ -1707,10 +1709,7 @@ fn paths_equal(a: &str, b: &str) -> bool {
         return true;
     }
     // Resolve symlinks when possible (macOS /var vs /private/var, etc.).
-    if let (Ok(ca), Ok(cb)) = (
-        std::fs::canonicalize(a),
-        std::fs::canonicalize(b),
-    ) {
+    if let (Ok(ca), Ok(cb)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         return ca == cb;
     }
     false
@@ -1770,7 +1769,10 @@ mod tests {
             "/",
             Some("/Applications/suzuri.app/Contents/MacOS")
         ));
-        assert!(is_unhelpful_cwd_ex("C:\\", Some("C:\\Program Files\\suzuri")));
+        assert!(is_unhelpful_cwd_ex(
+            "C:\\",
+            Some("C:\\Program Files\\suzuri")
+        ));
         assert!(is_unhelpful_cwd_ex("C:/", None));
     }
 
@@ -1786,16 +1788,28 @@ mod tests {
 
     #[test]
     fn display_guest_path_strips_scheme() {
-        assert_eq!(display_guest_path("https://www.ladybird.org/foo/"), "ladybird.org/foo");
-        assert_eq!(display_guest_path("http://localhost:5173/docs"), "localhost:5173/docs");
+        assert_eq!(
+            display_guest_path("https://www.ladybird.org/foo/"),
+            "ladybird.org/foo"
+        );
+        assert_eq!(
+            display_guest_path("http://localhost:5173/docs"),
+            "localhost:5173/docs"
+        );
         assert_eq!(display_guest_path("about:newtab"), "");
         assert_eq!(display_guest_path("about:blank"), "");
         assert!(guest_url_ok("https://ladybird.org"));
         assert!(!guest_url_ok("about:newtab"));
         assert!(guest_engine_hello_title("Ladybird"));
         assert!(!guest_engine_hello_title("Actually independent"));
-        assert!(!guest_page_title_ok("https://ladybird.org", "https://ladybird.org"));
-        assert!(guest_page_title_ok("Actually independent", "https://ladybird.org"));
+        assert!(!guest_page_title_ok(
+            "https://ladybird.org",
+            "https://ladybird.org"
+        ));
+        assert!(guest_page_title_ok(
+            "Actually independent",
+            "https://ladybird.org"
+        ));
         assert!(!guest_page_title_ok("New Tab", ""));
     }
 
@@ -1887,6 +1901,22 @@ mod tests {
         assert_eq!(s.draft(), "hi");
         s.backspace();
         assert_eq!(s.draft(), "h");
+    }
+
+    #[test]
+    fn draft_edit_in_middle() {
+        let mut s = ChromeSession::default();
+        s.type_char('a');
+        s.type_char('c');
+        s.draft_mut().set_cursor(1);
+        s.type_char('b');
+        assert_eq!(s.draft(), "abc");
+        s.draft_mut().word_left();
+        assert_eq!(s.draft_mut().cursor(), 0);
+        s.draft_mut().end();
+        s.backspace();
+        assert_eq!(s.draft(), "ab");
+        assert_eq!(s.draft_mut().cursor(), 2);
     }
 
     #[test]
@@ -2011,8 +2041,18 @@ mod tests {
         s.select_tab(t2);
         assert!(s.begin_close_tab(t2));
         assert_eq!(s.tabs.len(), 3, "tab stays until the strip anim finishes");
-        assert_eq!(s.active_id, 1, "handoff is the immediate left tab, not the first leftover");
-        let exit = s.tabs.iter().find(|t| t.id == t2).unwrap().exit.as_ref().unwrap();
+        assert_eq!(
+            s.active_id, 1,
+            "handoff is the immediate left tab, not the first leftover"
+        );
+        let exit = s
+            .tabs
+            .iter()
+            .find(|t| t.id == t2)
+            .unwrap()
+            .exit
+            .as_ref()
+            .unwrap();
         assert!(exit.slide_content);
         assert!(exit.dir < 0.0);
         let mut dt = 0.0;
@@ -2181,10 +2221,7 @@ mod tests {
             .unwrap();
         assert_eq!(again, id);
         assert_eq!(
-            s.panes
-                .values()
-                .filter(|p| p.kind.is_workspace())
-                .count(),
+            s.panes.values().filter(|p| p.kind.is_workspace()).count(),
             1
         );
     }
@@ -2212,14 +2249,11 @@ mod tests {
         assert_ne!(a, b);
         assert!(s.pane_kind(a).is_guest());
         assert!(s.pane_kind(b).is_guest());
-        assert_eq!(s.panes.get(&a).unwrap().guest_id.as_deref(), Some("example"));
         assert_eq!(
-            s.panes
-                .values()
-                .filter(|p| p.kind.is_guest())
-                .count(),
-            2
+            s.panes.get(&a).unwrap().guest_id.as_deref(),
+            Some("example")
         );
+        assert_eq!(s.panes.values().filter(|p| p.kind.is_guest()).count(), 2);
     }
 
     #[test]

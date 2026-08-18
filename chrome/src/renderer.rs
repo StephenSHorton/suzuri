@@ -839,9 +839,10 @@ impl Renderer {
                 return false;
             }
             if held.is_none()
-                && self.guest_tex.get(&pane_id).is_some_and(|t| {
-                    t.iosurface_id == Some(id) && t.w == w && t.h == h
-                })
+                && self
+                    .guest_tex
+                    .get(&pane_id)
+                    .is_some_and(|t| t.iosurface_id == Some(id) && t.w == w && t.h == h)
             {
                 return true;
             }
@@ -2118,8 +2119,9 @@ fn chrome_labels(
             }
 
             let draft = pane.draft.as_str();
+            let cursor = pane.draft.cursor();
             let max_c = ((pl.warp.w / char_w.max(1.0)).floor() as usize).max(4);
-            let warp_text = truncate_chars(&format!("❯ {draft}"), max_c);
+            let (warp_text, caret_cols) = crate::draft::warp_view(draft, cursor, max_c);
             let input_bright = if pl.focused { bright } else { dim };
             // Left-align inside warp band (not full-center — reads as an input line).
             let iy = pl.warp.y + (pl.warp.h - input_size).max(0.0) * 0.5;
@@ -2134,7 +2136,7 @@ fn chrome_labels(
             if pl.focused {
                 let a = input_caret_alpha.clamp(0.0, 1.0);
                 if a > 0.02 {
-                    let caret_x = warp_caret_x(pl.warp.x, draft, max_c, char_w);
+                    let caret_x = pl.warp.x + caret_cols as f32 * char_w;
                     labels.push(
                         TextLabel::new(
                             CARET_BLOCK,
@@ -3622,13 +3624,13 @@ fn push_modal_labels(
     let _ = m;
 }
 
-/// Block-caret x for the warp line `❯ {draft}`.
+/// Block-caret x for the warp line `❯ {draft}` at `cursor`.
 ///
 /// `char_w` must be the mono advance at the **same** font size as the warp
 /// label (`cell.advance_at(input_size)`). Stepping the 14px terminal cell
 /// while the label is 13px walks the caret off the text as you type.
-fn warp_caret_x(origin_x: f32, draft: &str, max_c: usize, char_w: f32) -> f32 {
-    let caret_cols = (2 + draft.chars().count()).min(max_c.saturating_sub(1));
+fn warp_caret_x(origin_x: f32, draft: &str, cursor: usize, max_c: usize, char_w: f32) -> f32 {
+    let (_, caret_cols) = crate::draft::warp_view(draft, cursor, max_c);
     origin_x + caret_cols as f32 * char_w
 }
 
@@ -4034,12 +4036,14 @@ mod tests {
         let input_size = 13.0;
         let char_w = cell.advance_at(input_size);
         let origin = 40.0;
-        let empty = warp_caret_x(origin, "", 80, char_w);
-        let one = warp_caret_x(origin, "a", 80, char_w);
-        let many = warp_caret_x(origin, "abcdefghij", 80, char_w);
+        let empty = warp_caret_x(origin, "", 0, 80, char_w);
+        let one = warp_caret_x(origin, "a", 1, 80, char_w);
+        let many = warp_caret_x(origin, "abcdefghij", 10, 80, char_w);
         assert!((empty - (origin + 2.0 * char_w)).abs() < 1e-4);
         assert!((one - empty - char_w).abs() < 1e-4);
         assert!((many - empty - 10.0 * char_w).abs() < 1e-4);
+        let mid = warp_caret_x(origin, "abcdefghij", 3, 80, char_w);
+        assert!((mid - empty - 3.0 * char_w).abs() < 1e-4);
         // Old bug: stepping the 14px cell on a 13px label drifted ~0.5px/char
         // (prefix + draft, so 12 cells × 0.5px = 6px after "abcdefghij").
         let drifted = origin + (2 + 10) as f32 * cell.w;
