@@ -19,6 +19,7 @@ mod commands;
 mod confirm;
 mod config_store;
 mod control_mailbox;
+mod draft;
 mod echo_filter;
 mod eco;
 mod guest_fb;

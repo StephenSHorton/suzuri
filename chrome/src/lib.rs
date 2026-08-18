@@ -47,6 +47,7 @@ pub mod commands;
 pub mod confirm;
 pub mod config_store;
 pub mod control_mailbox;
+pub mod draft;
 pub mod echo_filter;
 pub mod eco;
 pub mod guest_fb;

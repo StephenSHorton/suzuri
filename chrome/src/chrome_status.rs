@@ -170,7 +170,9 @@ pub fn snap_from_session(session: &ChromeSession, extras: &[PaneSnapExtra]) -> C
                 t.to_string()
             }
         };
-        let input = pane.map(|p| p.draft.clone()).unwrap_or_default();
+        let input = pane
+            .map(|p| p.draft.as_str().to_string())
+            .unwrap_or_default();
         let (live_lines, viewport) = match grid {
             Some(g) => (live_lines_of(g), viewport_lines_of(g)),
             None => (Vec::new(), Vec::new()),
