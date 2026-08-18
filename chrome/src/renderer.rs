@@ -2097,7 +2097,11 @@ fn chrome_labels(
         if pl.warp.h >= 1.0 && pl.path.h >= 1.0 {
             let path_size = m.px(12.0);
             let input_size = m.px(13.0);
-            let char_w = cell.w.max(1.0);
+            // Cell.w is the 14px grid. Warp/path paint smaller, so step the
+            // caret and truncation at the same size as the glyphs — otherwise
+            // the block caret walks off the draft by ~1/14 cell per keystroke.
+            let path_char_w = cell.advance_at(path_size);
+            let char_w = cell.advance_at(input_size);
 
             let path_str = if pane.kind.is_guest() {
                 crate::session::display_guest_path(&pane.guest_url)
@@ -2106,7 +2110,7 @@ fn chrome_labels(
             };
             if !path_str.is_empty() {
                 // Never drop a lone `~` — always reserve room for at least that glyph.
-                let max_c = ((pl.path.w / char_w).floor() as usize).max(1);
+                let max_c = ((pl.path.w / path_char_w.max(1.0)).floor() as usize).max(1);
                 let path_draw = truncate_chars(&path_str, max_c);
                 // Left-align path like product chrome (not centered — `~` was easy to miss).
                 let py = pl.path.y + (pl.path.h - path_size).max(0.0) * 0.5;
@@ -2114,7 +2118,7 @@ fn chrome_labels(
             }
 
             let draft = pane.draft.as_str();
-            let max_c = ((pl.warp.w / char_w).floor() as usize).max(4);
+            let max_c = ((pl.warp.w / char_w.max(1.0)).floor() as usize).max(4);
             let warp_text = truncate_chars(&format!("❯ {draft}"), max_c);
             let input_bright = if pl.focused { bright } else { dim };
             // Left-align inside warp band (not full-center — reads as an input line).
@@ -2130,8 +2134,7 @@ fn chrome_labels(
             if pl.focused {
                 let a = input_caret_alpha.clamp(0.0, 1.0);
                 if a > 0.02 {
-                    let caret_cols = (2 + draft.chars().count()).min(max_c.saturating_sub(1));
-                    let caret_x = pl.warp.x + caret_cols as f32 * char_w;
+                    let caret_x = warp_caret_x(pl.warp.x, draft, max_c, char_w);
                     labels.push(
                         TextLabel::new(
                             CARET_BLOCK,
@@ -3619,6 +3622,16 @@ fn push_modal_labels(
     let _ = m;
 }
 
+/// Block-caret x for the warp line `❯ {draft}`.
+///
+/// `char_w` must be the mono advance at the **same** font size as the warp
+/// label (`cell.advance_at(input_size)`). Stepping the 14px terminal cell
+/// while the label is 13px walks the caret off the text as you type.
+fn warp_caret_x(origin_x: f32, draft: &str, max_c: usize, char_w: f32) -> f32 {
+    let caret_cols = (2 + draft.chars().count()).min(max_c.saturating_sub(1));
+    origin_x + caret_cols as f32 * char_w
+}
+
 /// Truncate to at most `max_chars` (append … if cut). Keeps footer single-line.
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
@@ -4013,5 +4026,24 @@ mod tests {
         let (c, r) = terminal_grid_size_with(&cells, 3.5, 7.0);
         assert_eq!(c, 40);
         assert_eq!(r, 40);
+    }
+
+    #[test]
+    fn warp_caret_tracks_scaled_input_pitch() {
+        let cell = crate::text::MonoCellMetrics { w: 7.0, h: 14.0 };
+        let input_size = 13.0;
+        let char_w = cell.advance_at(input_size);
+        let origin = 40.0;
+        let empty = warp_caret_x(origin, "", 80, char_w);
+        let one = warp_caret_x(origin, "a", 80, char_w);
+        let many = warp_caret_x(origin, "abcdefghij", 80, char_w);
+        assert!((empty - (origin + 2.0 * char_w)).abs() < 1e-4);
+        assert!((one - empty - char_w).abs() < 1e-4);
+        assert!((many - empty - 10.0 * char_w).abs() < 1e-4);
+        // Old bug: stepping the 14px cell on a 13px label drifted ~0.5px/char
+        // (prefix + draft, so 12 cells × 0.5px = 6px after "abcdefghij").
+        let drifted = origin + (2 + 10) as f32 * cell.w;
+        assert!((drifted - many).abs() > 5.0);
+        assert!(char_w < cell.w);
     }
 }
