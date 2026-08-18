@@ -62,6 +62,16 @@ impl MonoCellMetrics {
             h: design.max(1.0),
         }
     }
+
+    /// Horizontal advance of one mono cell when painted at `size` (logical px).
+    ///
+    /// `self.w` is measured at `self.h` (14 × zoom). Labels that use another
+    /// size must scale this or a block caret walked by `self.w` drifts by
+    /// `(1 - size/h)` per character.
+    pub fn advance_at(self, size: f32) -> f32 {
+        let h = self.h.max(1.0);
+        self.w.max(1.0) * (size.max(0.0) / h)
+    }
 }
 
 /// One screen-space label (logical pixels).
@@ -865,6 +875,64 @@ mod tests {
         let fa = labels_fingerprint(&[a]);
         assert_ne!(fa, labels_fingerprint(&[b]));
         assert_ne!(fa, labels_fingerprint(&[c]));
+    }
+
+    #[test]
+    fn advance_at_scales_with_paint_size() {
+        let cell = MonoCellMetrics { w: 7.0, h: 14.0 };
+        assert!((cell.advance_at(14.0) - 7.0).abs() < 1e-4);
+        assert!((cell.advance_at(13.0) - 6.5).abs() < 1e-4);
+        assert!((cell.advance_at(7.0) - 3.5).abs() < 1e-4);
+        let zoomed = MonoCellMetrics { w: 14.0, h: 28.0 };
+        assert!((zoomed.advance_at(26.0) - 13.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn gohu_warp_size_matches_scaled_cell() {
+        // Warp used to paint at 13px while the caret stepped the 14px cell.
+        // Glyphon's Gohu advance at 13 must match advance_at(13), or the
+        // block caret walks off the draft as you type.
+        let mut font_system = FontSystem::new();
+        font_system.db_mut().load_font_data(GOHU_TTF.to_vec());
+        let probe = |fs: &mut FontSystem, design: f32, text: &str| -> f32 {
+            let mut buf = Buffer::new(fs, FontMetrics::new(design, design));
+            buf.set_size(fs, Some(400.0), Some(design));
+            let attrs = Attrs::new()
+                .family(Family::Name(GOHU_FAMILY))
+                .weight(Weight(500));
+            buf.set_text(fs, text, attrs, Shaping::Advanced);
+            buf.shape_until_scroll(fs, false);
+            buf.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
+        };
+        let w14 = probe(&mut font_system, MONO_DESIGN_PX, "M");
+        let w13 = probe(&mut font_system, 13.0, "M");
+        let cell = MonoCellMetrics {
+            w: w14.round().max(1.0),
+            h: MONO_DESIGN_PX,
+        };
+        let expected = cell.advance_at(13.0);
+        assert!(
+            (w13 - expected).abs() < 0.6,
+            "13px Gohu advance {w13} should track scaled 14px cell {expected} (14px={w14})"
+        );
+        let prefix14 = probe(&mut font_system, MONO_DESIGN_PX, "❯ ");
+        let prefix13 = probe(&mut font_system, 13.0, "❯ ");
+        // Prefix is two mono cells (`❯` + space) at both sizes.
+        assert!(
+            (prefix14 - 2.0 * w14).abs() < 0.75,
+            "❯  at 14px should be two cells ({prefix14} vs 2×{w14})"
+        );
+        assert!(
+            (prefix13 - 2.0 * w13).abs() < 0.75,
+            "❯  at 13px should be two cells ({prefix13} vs 2×{w13})"
+        );
+        let typed = "abcdefghijklmnopqrstuvwxyz";
+        let line13 = probe(&mut font_system, 13.0, &format!("❯ {typed}"));
+        let caret13 = prefix13 + typed.chars().count() as f32 * w13;
+        assert!(
+            (line13 - caret13).abs() < 1.0,
+            "caret at scaled 13px pitch should sit on the last glyph ({line13} vs {caret13})"
+        );
     }
 
     #[test]
