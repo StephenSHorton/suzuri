@@ -1460,10 +1460,12 @@ pub fn user_home_dir() -> Option<String> {
     }
 }
 
-/// True when `cwd` is a Dock / installer launch directory, not a user project.
+/// True when `cwd` is a Dock / installer / Windows-system launch directory,
+/// not a user project.
 ///
 /// macOS Launch Services starts `.app` binaries in `Contents/Resources`.
-/// Windows installers often set cwd to the folder that contains `suzuri.exe`.
+/// Windows Start Menu / MSIX / Win+R often start in `C:\Windows\System32`.
+/// Installers often set cwd to the folder that contains `suzuri.exe`.
 /// A source checkout (`go.mod` + `chrome/Cargo.toml`) is kept so
 /// `cd repo && ./suzuri` still opens in the repo.
 pub fn is_unhelpful_cwd(cwd: &str) -> bool {
@@ -1493,6 +1495,36 @@ fn is_filesystem_root(cwd_n: &str) -> bool {
         && (b.len() == 2 || b[2] == b'/')
 }
 
+fn is_windows_system_cwd(cwd_n: &str) -> bool {
+    let mut u = slashify_display(cwd_n).to_ascii_lowercase();
+    while u.ends_with('/') {
+        u.pop();
+    }
+    if u.is_empty() {
+        return false;
+    }
+    let path = if u.len() >= 2 && u.as_bytes()[1] == b':' {
+        let rest = &u[2..];
+        if rest.starts_with('/') {
+            rest.to_string()
+        } else {
+            format!("/{rest}")
+        }
+    } else if u.starts_with('/') {
+        u
+    } else {
+        format!("/{u}")
+    };
+    path == "/windows"
+        || path.starts_with("/windows/")
+        || path == "/program files"
+        || path.starts_with("/program files/")
+        || path == "/program files (x86)"
+        || path.starts_with("/program files (x86)/")
+        || path == "/programdata"
+        || path.starts_with("/programdata/")
+}
+
 fn is_unhelpful_cwd_ex(cwd: &str, exe_dir: Option<&str>) -> bool {
     let cwd_n = normalize_abs_path(cwd);
     if cwd_n.is_empty() {
@@ -1504,6 +1536,9 @@ fn is_unhelpful_cwd_ex(cwd: &str, exe_dir: Option<&str>) -> bool {
     }
     let slash = slashify_display(&cwd_n);
     if slash.contains(".app/Contents") {
+        return true;
+    }
+    if is_windows_system_cwd(&cwd_n) {
         return true;
     }
     let Some(exe_dir) = exe_dir else {
@@ -1774,6 +1809,17 @@ mod tests {
             Some("C:\\Program Files\\suzuri")
         ));
         assert!(is_unhelpful_cwd_ex("C:/", None));
+        assert!(is_unhelpful_cwd_ex(
+            r"C:\WINDOWS\system32",
+            Some(r"C:\Program Files\WindowsApps\suzuri")
+        ));
+        assert!(is_unhelpful_cwd_ex(r"C:\Windows\SysWOW64", None));
+        assert!(is_unhelpful_cwd_ex(r"C:\Windows", None));
+        assert!(is_unhelpful_cwd_ex(r"C:\Program Files", None));
+        assert!(!is_unhelpful_cwd_ex(
+            r"C:\Users\stephen\projects\foo",
+            Some(r"C:\Program Files\WindowsApps\suzuri")
+        ));
     }
 
     #[test]
@@ -1782,6 +1828,10 @@ mod tests {
         assert!(
             !slashify_display(&cwd).contains(".app/Contents"),
             "initial_cwd={cwd}"
+        );
+        assert!(
+            !is_windows_system_cwd(&cwd),
+            "initial_cwd={cwd} is a Windows system directory"
         );
         assert!(!cwd.is_empty());
     }

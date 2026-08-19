@@ -44,8 +44,8 @@ pub mod chrome_status;
 pub mod chrome_ui;
 pub mod cmd_blocks;
 pub mod commands;
-pub mod confirm;
 pub mod config_store;
+pub mod confirm;
 pub mod control_mailbox;
 pub mod draft;
 pub mod echo_filter;
@@ -85,11 +85,6 @@ pub mod ffi;
 
 pub use ansi::AnsiDecoder;
 pub use cells::{theme as cell_theme, Cell, CellGrid, Cursor};
-pub use commands::{
-    commands_with_guests, default_commands, filter_commands, help_sections, splash_hint_rows,
-    Command, CommandAction, HelpLayout, HelpRow, HelpSection, HelpState, PaletteState,
-    SplashState,
-};
 pub use chrome_status::{
     clear_status, history_tail_of, live_lines_of, publish_status, snap_from_session, status_path,
     submit_path, take_submit, viewport_lines_of, ChromeSnapOut, PaneSnapExtra, StatusPublisher,
@@ -98,28 +93,31 @@ pub use chrome_status::{
 pub use cmd_blocks::{
     is_clear_command, pty_submit_payload, CmdBlockLog, HIST_META_CAP, RECENT_BLOCKS,
 };
-pub use echo_filter::{EchoFilter, ECHO_FILTER_GIVE_UP};
-pub use confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
-pub use updater::{
-    parse_event, update_evt_path, update_req_path, UpdateEvent, UpdateMailbox, UPDATE_EVT_FILE,
-    UPDATE_REQ_FILE,
+pub use commands::{
+    commands_with_guests, default_commands, filter_commands, help_sections, splash_hint_rows,
+    Command, CommandAction, HelpLayout, HelpRow, HelpSection, HelpState, PaletteState, SplashState,
 };
 pub use config_store::{chrome_prefs_path, product_config_dir, ENV_CONFIG_DIR};
+pub use confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
+pub use control_mailbox::{
+    chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
+    POLL_INTERVAL,
+};
+pub use echo_filter::{EchoFilter, ECHO_FILTER_GIVE_UP};
 pub use guest_host::{
     guest_footer_top, guest_hole_rect, guest_mount_rect, GuestEvent, GuestHost, NativeAttach,
 };
 pub use guest_manifest::{guests_dir, load_guests, GuestManifest, GUEST_PROTOCOL};
 pub use guest_ui::{GuestClick, GuestUi};
-pub use control_mailbox::{
-    chrome_cmd_path, mailbox_config_dir, ControlCommand, ControlMailbox, CHROME_CMD_FILE,
-    POLL_INTERVAL,
-};
 pub use input::{
-    classify_drop, classify_tab_drop, drop_edge_rect, edge_of, hit_test, is_mac, pane_id_from_hit,
-    term_select_drag_started, traffic_light_rects, window_origin_for_tab_drop, DropKind,
-    HitTarget, TERM_SELECT_DRAG_PX,
+    classify_drop, classify_tab_drop, drop_edge_rect, edge_of, hit_test, is_mac, is_windows,
+    pane_id_from_hit, term_select_drag_started, traffic_light_rects, window_origin_for_tab_drop,
+    DropKind, HitTarget, TERM_SELECT_DRAG_PX,
 };
-pub use layout::{FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect, Spacing};
+pub use layout::{
+    caption_button_rects, FrameLayout, Metrics, PaneLayout, PanelInstance, PanelKind, Rect,
+    Spacing, CAPTION_BTN_W,
+};
 pub use links::{
     clean_url, find_links_in_line, link_at, link_span_at_col, link_url_at_col, normalize_url,
     open_url_in_browser, LinkHoverSpan, LinkSpan,
@@ -138,6 +136,10 @@ pub use settings::{ChromePrefs, SettingsState, GLASS_DARKEN_DEFAULT};
 pub use shell::{ShellOutput, PROMPT_GLYPH};
 pub use theme::{colors as theme_colors, ThemeColors, DEFAULT_THEME_ID, THEME_IDS};
 pub use toast::{ToastState, TOAST_DURATION_S};
+pub use updater::{
+    parse_event, update_evt_path, update_req_path, UpdateEvent, UpdateMailbox, UPDATE_EVT_FILE,
+    UPDATE_REQ_FILE,
+};
 
 /// Semver of this crate (`Cargo.toml` package version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

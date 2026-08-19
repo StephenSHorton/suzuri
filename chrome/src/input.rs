@@ -67,6 +67,12 @@ pub fn is_mac() -> bool {
     cfg!(target_os = "macos")
 }
 
+/// Windows caption buttons live on the right; maximize (not fullscreen).
+#[inline]
+pub fn is_windows() -> bool {
+    cfg!(target_os = "windows")
+}
+
 /// macOS traffic-light geometry (close, minimize, zoom), top-left origin.
 ///
 /// Positions match standard frameless title-bar placement relative to
@@ -120,6 +126,17 @@ pub fn hit_test(
         if lights[2].contains(x, y) {
             return HitTarget::Zoom;
         }
+    } else if let Some(btns) = layout.caption_buttons {
+        // Windows: min / max / close, top-right.
+        if btns[0].contains(x, y) {
+            return HitTarget::Minimize;
+        }
+        if btns[1].contains(x, y) {
+            return HitTarget::Zoom;
+        }
+        if btns[2].contains(x, y) {
+            return HitTarget::Close;
+        }
     }
 
     // Right cluster: caffeine then logo/settings
@@ -167,8 +184,7 @@ pub fn hit_test(
         }
         if pl.cells.contains(x, y) {
             // Right gutter: scrollbar (only when the well is wide enough).
-            if pl.cells.w > SCROLL_GUTTER_W * 3.0
-                && x >= pl.cells.x + pl.cells.w - SCROLL_GUTTER_W
+            if pl.cells.w > SCROLL_GUTTER_W * 3.0 && x >= pl.cells.x + pl.cells.w - SCROLL_GUTTER_W
             {
                 return HitTarget::ScrollBar(pl.pane_id);
             }
@@ -184,6 +200,11 @@ pub fn hit_test(
         if is_mac && x < traffic_lights_right(metrics) {
             return HitTarget::None;
         }
+        if let Some(btns) = layout.caption_buttons {
+            if x >= btns[0].x {
+                return HitTarget::None;
+            }
+        }
         // Don't drag when over tab chips (already handled); empty bar drag.
         return HitTarget::TitleDrag;
     }
@@ -194,10 +215,17 @@ pub fn hit_test(
 /// Where a dragged pane would land if dropped at `(x, y)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DropKind {
-    Edge { pane_id: u64, edge: DockEdge },
-    Tab { tab_id: u64 },
+    Edge {
+        pane_id: u64,
+        edge: DockEdge,
+    },
+    Tab {
+        tab_id: u64,
+    },
     /// Insert a dragged tab before this strip index (same window).
-    TabInsert { index: usize },
+    TabInsert {
+        index: usize,
+    },
     /// Pointer left the frame — tear the dragged tab into a new window.
     TearOff,
 }
@@ -322,11 +350,7 @@ pub fn edge_of(r: Rect, x: f32, y: f32) -> DockEdge {
 
 /// Physical outer origin so `chip`'s center sits on `screen` (pointer).
 /// `scale` is the destination window's scale factor.
-pub fn window_origin_for_tab_drop(
-    screen: (i32, i32),
-    chip: Rect,
-    scale: f64,
-) -> (i32, i32) {
+pub fn window_origin_for_tab_drop(screen: (i32, i32), chip: Rect, scale: f64) -> (i32, i32) {
     let ax = ((chip.x + chip.w * 0.5) as f64 * scale).round() as i32;
     let ay = ((chip.y + chip.h * 0.5) as f64 * scale).round() as i32;
     (screen.0 - ax, screen.1 - ay)
@@ -373,6 +397,41 @@ mod tests {
     }
 
     #[test]
+    fn windows_caption_hits_top_right() {
+        let m = Metrics::default();
+        let mut layout = FrameLayout::compute(1120.0, 740.0, m, 2);
+        let btns = crate::layout::caption_button_rects(&m, layout.title.w);
+        layout.caption_buttons = Some(btns);
+        assert_eq!(
+            hit_test(&layout, &m, btns[0].x + 2.0, btns[0].h * 0.5, false),
+            HitTarget::Minimize
+        );
+        assert_eq!(
+            hit_test(&layout, &m, btns[1].x + 2.0, btns[1].h * 0.5, false),
+            HitTarget::Zoom
+        );
+        assert_eq!(
+            hit_test(
+                &layout,
+                &m,
+                btns[2].x + btns[2].w * 0.5,
+                btns[2].h * 0.5,
+                false
+            ),
+            HitTarget::Close
+        );
+        // Empty title between + and the right cluster still drags.
+        let x = layout.tab_new.x + layout.tab_new.w + 16.0;
+        assert!(
+            x < layout.logo.x,
+            "need free space between + and logo for drag"
+        );
+        assert_eq!(
+            hit_test(&layout, &m, x, m.title_h * 0.5, false),
+            HitTarget::TitleDrag
+        );
+    }
+
     fn title_drag_skips_traffic_zone_on_mac() {
         let (layout, m) = demo_layout();
         assert_eq!(
@@ -407,13 +466,7 @@ mod tests {
         );
         let c0 = layout.tab_closes[0];
         assert_eq!(
-            hit_test(
-                &layout,
-                &m,
-                c0.x + c0.w * 0.5,
-                c0.y + c0.h * 0.5,
-                false
-            ),
+            hit_test(&layout, &m, c0.x + c0.w * 0.5, c0.y + c0.h * 0.5, false),
             HitTarget::TabClose(0)
         );
         assert_eq!(
@@ -446,13 +499,7 @@ mod tests {
             ),
             HitTarget::Settings
         );
-        let w = hit_test(
-            &layout,
-            &m,
-            layout.warp.x + 1.0,
-            layout.warp.y + 1.0,
-            false,
-        );
+        let w = hit_test(&layout, &m, layout.warp.x + 1.0, layout.warp.y + 1.0, false);
         assert!(matches!(w, HitTarget::WarpBar(_)));
         let t = hit_test(
             &layout,

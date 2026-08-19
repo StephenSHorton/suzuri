@@ -173,6 +173,8 @@ pub struct Renderer {
     surface_format: wgpu::TextureFormat,
     /// Last-tab dissolve blur (logical px). Set per frame before [`render`].
     pub window_exit_blur: f32,
+    /// Windows caption restore glyph when the OS window is maximized.
+    pub window_maximized: bool,
     /// Lens blit view zoom. Always 1 for ⌘± (reflow zoom); pinch magnifier stacks on top.
     view_zoom: f32,
 
@@ -656,6 +658,7 @@ impl Renderer {
             tab_jelly: TabJelly::default(),
             surface_format: format,
             window_exit_blur: 0.0,
+            window_maximized: false,
             view_zoom: 1.0,
             guest_blit_pipeline: guest_blit.0,
             guest_blit_bgl: guest_blit.1,
@@ -1677,6 +1680,7 @@ impl Renderer {
             term_selection,
             hovered_link,
             self.cell_metrics(),
+            self.window_maximized,
         );
         let (carets, body): (Vec<crate::text::TextLabel>, Vec<crate::text::TextLabel>) =
             labels.into_iter().partition(|l| l.caret);
@@ -1868,6 +1872,7 @@ fn chrome_labels(
     term_selection: &Selection,
     hovered_link: Option<&LinkHoverSpan>,
     cell: MonoCellMetrics,
+    window_maximized: bool,
 ) -> Vec<TextLabel> {
     use crate::chrome_ui::{scale_rect, ChipId};
     // Chrome label colors track prefs theme (see SETTINGS_HOOKS.md / theme.rs).
@@ -1987,6 +1992,38 @@ fn chrome_labels(
             m.px(14.0),
             chip_ui.dim_color(id, bright),
         ));
+    }
+
+    // Windows caption glyphs (min / max-or-restore / close). Not traffic-light
+    // circles — rectangular Win32-style marks, flush top-right.
+    let caption_max_glyph = if window_maximized {
+        "\u{2750}" // ❐ restore
+    } else {
+        "\u{25A1}" // □ maximize
+    };
+    if let Some(btns) = layout.caption_buttons {
+        let ids = [ChipId::CaptionMin, ChipId::CaptionMax, ChipId::CaptionClose];
+        let glyphs = [
+            "\u{2013}", // en dash — minimize
+            caption_max_glyph,
+            "\u{00D7}", // × close
+        ];
+        let sizes = [m.px(13.0), m.px(11.0), m.px(16.0)];
+        for i in 0..3 {
+            let r = btns[i];
+            let id = ids[i];
+            let color = if i == 2 && chip_ui.is_lit(id) {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                dim
+            };
+            labels.push(TextLabel::icon_centered(
+                glyphs[i],
+                [r.x, r.y, r.w, r.h],
+                sizes[i],
+                color,
+            ));
+        }
     }
 
     // Terminal cells paint after glass, so they punch through overlay cards.

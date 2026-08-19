@@ -92,13 +92,16 @@ Section "suzuri" SecMain
   !endif
   File "${ICON}"
 
-  ; Start Menu
+  ; Start Menu — SetOutPath becomes the shortcut working directory.
+  ; Use the user profile so a first shell is ~, not the install folder.
   CreateDirectory "$SMPROGRAMS\suzuri"
+  SetOutPath "$PROFILE"
   CreateShortCut "$SMPROGRAMS\suzuri\suzuri.lnk" "$INSTDIR\suzuri.exe" "" "$INSTDIR\suzuri.ico" 0
   CreateShortCut "$SMPROGRAMS\suzuri\Uninstall suzuri.lnk" "$INSTDIR\Uninstall.exe"
 
   ; Optional desktop shortcut
   CreateShortCut "$DESKTOP\suzuri.lnk" "$INSTDIR\suzuri.exe" "" "$INSTDIR\suzuri.ico" 0
+  SetOutPath "$INSTDIR"
 
   ; Remember install dir
   WriteRegStr HKCU "Software\suzuri" "InstallDir" "$INSTDIR"

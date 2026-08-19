@@ -21,12 +21,13 @@ const EnvVersion = "SUZURI_VERSION"
 // `open`), and returns the running command. The caller owns Wait / Kill.
 //
 // stdio is inherited so chrome logs appear on the parent terminal when launched
-// as `suzuri chrome`. On Windows this uses CreateProcess (Go exec); HideWindow
-// is not set — chrome is a GUI app that must show its window.
+// as `suzuri chrome`. On Windows we set CREATE_NO_WINDOW (not HideWindow): a
+// console-subsystem UI binary must not allocate a spare terminal when the host
+// is -H windowsgui / Start Menu / Store. HideWindow would SW_HIDE the GUI.
 //
 // Env includes SUZURI_CONFIG_DIR=config.Dir() so chrome can share notes/prefs
 // with the host, and SUZURI_VERSION for the in-app updater. The child cwd is
-// [LaunchCwd] so Dock / .app launches do not inherit Contents/Resources.
+// [LaunchCwd] so Dock / .app / System32 launches do not inherit those paths.
 func Start(ctx context.Context, version string, args ...string) (*exec.Cmd, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -50,6 +51,7 @@ func Start(ctx context.Context, version string, args ...string) (*exec.Cmd, erro
 	cmd.Stderr = os.Stderr
 	cmd.Dir = LaunchCwd()
 	cmd.Env = withHostEnv(os.Environ(), config.Dir(), version)
+	configureChromeCmd(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", bin, err)

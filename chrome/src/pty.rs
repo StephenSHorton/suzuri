@@ -3,7 +3,7 @@
 //! Reader runs on a background thread and pushes bytes into an mpsc channel so
 //! the UI event loop can drain with non-blocking `try_read`.
 
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::{self, JoinHandle};
@@ -64,7 +64,13 @@ impl PtySession {
         // Attached to a PTY → shells run interactive without extra flags.
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        if let Some(dir) = cwd.map(str::trim).filter(|s| !s.is_empty()) {
+        let dir = cwd
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|s| !crate::session::is_unhelpful_cwd(s))
+            .map(|s| s.to_string())
+            .or_else(crate::session::user_home_dir);
+        if let Some(dir) = dir {
             cmd.cwd(dir);
         }
 
@@ -156,9 +162,7 @@ impl PtySession {
         self.writer
             .write_all(data)
             .map_err(|e| format!("pty write: {e}"))?;
-        self.writer
-            .flush()
-            .map_err(|e| format!("pty flush: {e}"))
+        self.writer.flush().map_err(|e| format!("pty flush: {e}"))
     }
 
     /// `true` while the child has not yet exited.

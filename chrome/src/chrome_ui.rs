@@ -12,6 +12,9 @@ pub enum ChipId {
     Caffeine,
     PaneClose(u64),
     PaneTitle(u64),
+    CaptionMin,
+    CaptionMax,
+    CaptionClose,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -153,7 +156,14 @@ impl ChipUi {
     /// Label / icon multiplier: 50% when hovered, else full.
     /// Ghost + / pane × keep full glyph strength — the shell is the hover signal.
     pub fn hover_dim(&self, id: ChipId) -> f32 {
-        if matches!(id, ChipId::NewTab | ChipId::PaneClose(_)) {
+        if matches!(
+            id,
+            ChipId::NewTab
+                | ChipId::PaneClose(_)
+                | ChipId::CaptionMin
+                | ChipId::CaptionMax
+                | ChipId::CaptionClose
+        ) {
             return 1.0;
         }
         if self.hover == Some(id) {

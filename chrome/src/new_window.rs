@@ -27,7 +27,8 @@ pub fn canonicalize_exe(path: &Path) -> PathBuf {
 pub fn spawn_new_window() -> Result<(), String> {
     let exe = resolve_self_exe()?;
     let mut cmd = Command::new(&exe);
-    if let Some(dir) = exe.parent() {
+    let dir = crate::session::initial_cwd();
+    if !dir.is_empty() {
         cmd.current_dir(dir);
     }
     // Pass through host config dir when set so the child shares notes/prefs.
@@ -44,7 +45,10 @@ pub fn spawn_new_window() -> Result<(), String> {
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    eprintln!("suzuri-chrome: opened new window pid={pid} path={}", exe.display());
+    eprintln!(
+        "suzuri-chrome: opened new window pid={pid} path={}",
+        exe.display()
+    );
     Ok(())
 }
 

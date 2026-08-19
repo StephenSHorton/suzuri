@@ -535,6 +535,26 @@ fn fs(in: VsOut) -> @location(0) vec4f {
             continue;
         }
 
+        // Windows caption min/max hover (19) — light overlay, no glass.
+        if (p.kind > 18.5 && p.kind < 19.5) {
+            let d = sd_round_box(px - center, half, max(p.radius, 0.0));
+            let inside = 1.0 - smoothstep(-0.6, 0.6, d);
+            if (inside > 0.001) {
+                col = mix(col, vec3f(1.0), inside * 0.12);
+            }
+            continue;
+        }
+
+        // Windows caption close hover (20) — Win11 #C42B1C.
+        if (p.kind > 19.5 && p.kind < 20.5) {
+            let d = sd_round_box(px - center, half, max(p.radius, 0.0));
+            let inside = 1.0 - smoothstep(-0.6, 0.6, d);
+            if (inside > 0.001) {
+                col = mix(col, vec3f(0.768, 0.118, 0.227), inside);
+            }
+            continue;
+        }
+
         // Idle chips / logo / + / modal / modal buttons — discrete glass
         let g = eval_glass_panel(px, center, half, p.radius, p.kind);
         if (g.a <= 0.001) { continue; }
