@@ -853,7 +853,8 @@ impl ChromeApp {
             .with_min_inner_size(LogicalSize::new(720.0, 440.0))
             .with_position(winit::dpi::PhysicalPosition::new(pos.0, pos.1))
             .with_decorations(false)
-            .with_transparent(true)
+            // Rounded per-pixel alpha is a macOS silhouette. Windows stays opaque.
+            .with_transparent(cfg!(target_os = "macos"))
             .with_resizable(true);
         #[cfg(target_os = "macos")]
         {
@@ -4567,18 +4568,19 @@ impl ApplicationHandler for ChromeApp {
             return;
         }
 
-        let mut attrs = WindowAttributes::default()
+        let attrs = WindowAttributes::default()
             .with_title("suzuri · chrome")
             .with_inner_size(LogicalSize::new(1120.0, 740.0))
             .with_min_inner_size(LogicalSize::new(720.0, 440.0))
             .with_decorations(false)
-            .with_transparent(true)
+            // Rounded per-pixel alpha is a macOS silhouette. Windows stays opaque.
+            .with_transparent(cfg!(target_os = "macos"))
             .with_resizable(true);
         #[cfg(target_os = "macos")]
-        {
+        let attrs = {
             use winit::platform::macos::WindowAttributesExtMacOS;
-            attrs = attrs.with_accepts_first_mouse(true);
-        }
+            attrs.with_accepts_first_mouse(true)
+        };
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 

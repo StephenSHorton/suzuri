@@ -13,7 +13,8 @@ struct LensUniforms {
     glass2: vec4f,
     // x = last-tab dissolve blur radius (logical px)
     exit: vec4f,
-    // x = view zoom (⌘±, 1 = identity), yz = origin LOGICAL px, w unused
+    // x = view zoom (⌘±, 1 = identity), yz = origin LOGICAL px,
+    // w = window corner radius in logical pts (0 = square / opaque)
     view: vec4f,
 }
 
@@ -88,18 +89,23 @@ fn sample_scene_blur(fb_px: vec2f, radius_fb: f32) -> vec3f {
     return acc / wsum;
 }
 
-// Rounded window silhouette (logical px). Matches Metrics.radius / macOS CALayer.
+// Rounded window silhouette (logical px). Matches macOS CALayer clip.
 fn sd_round_box(p: vec2f, b: vec2f, r: f32) -> f32 {
     let q = abs(p) - b + vec2f(r);
     return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-/// Premultiplied alpha for the OS window shape (radius 16 logical pts).
+/// Premultiplied alpha for the OS window shape.
+/// `u.view.w` is the corner radius in logical pts (16 on macOS, 0 on Windows —
+/// Windows cannot clip a frameless HWND this way; leave the rectangle opaque).
 fn window_premul(col: vec3f, fb_px: vec2f) -> vec4f {
+    let win_r = u.view.w;
+    if (win_r < 0.5) {
+        return vec4f(col, 1.0);
+    }
     let fb = max(u.size.zw, vec2f(1.0));
     let logical = max(u.size.xy, vec2f(1.0));
     let scale = fb / logical;
-    let win_r = 16.0;
     let win_half = logical * 0.5;
     let win_local = fb_px / scale - win_half;
     let win_sd = sd_round_box(win_local, win_half, win_r);

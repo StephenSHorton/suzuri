@@ -84,9 +84,16 @@ struct LensUniforms {
     glass2: [f32; 4],
     /// x = last-tab dissolve blur radius (logical px).
     exit: [f32; 4],
-    /// x = ⌘± view zoom, yz = origin logical px, w unused.
+    /// x = ⌘± view zoom, yz = origin logical px, w = window corner radius (0 = square).
     view: [f32; 4],
 }
+
+/// macOS CALayer clip (logical pts). Windows stays square — no per-pixel
+/// alpha silhouette (DWM will not round a layered HWND the way AppKit does).
+#[cfg(target_os = "macos")]
+const WINDOW_CORNER_RADIUS: f32 = 16.0;
+#[cfg(not(target_os = "macos"))]
+const WINDOW_CORNER_RADIUS: f32 = 0.0;
 
 /// Canvas UI `GlassVanilla` DEFAULTS — https://github.com/DavidHDev/canvas-ui
 const GLASS_IOR: f32 = 1.5;
@@ -122,6 +129,8 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// Premultiplied (or best available) for the cursor-follow drag chip.
+    overlay_alpha_mode: wgpu::CompositeAlphaMode,
     size: winit::dpi::PhysicalSize<u32>,
     scale_factor: f32,
 
@@ -244,9 +253,10 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
-        // Prefer premultiplied so transparent window corners (macOS rounded)
-        // composite correctly over the desktop.
-        let alpha_mode = caps
+        // macOS: premultiplied so rounded transparent corners composite over
+        // the desktop. Windows: opaque rectangle — do not punch alpha holes
+        // the DWM cannot clip.
+        let premul = caps
             .alpha_modes
             .iter()
             .copied()
@@ -256,8 +266,18 @@ impl Renderer {
                     .iter()
                     .copied()
                     .find(|m| *m == wgpu::CompositeAlphaMode::PostMultiplied)
-            })
-            .unwrap_or(caps.alpha_modes[0]);
+            });
+        let opaque = caps
+            .alpha_modes
+            .iter()
+            .copied()
+            .find(|m| *m == wgpu::CompositeAlphaMode::Opaque);
+        let overlay_alpha_mode = premul.or(opaque).unwrap_or(caps.alpha_modes[0]);
+        let alpha_mode = if cfg!(target_os = "macos") {
+            overlay_alpha_mode
+        } else {
+            opaque.unwrap_or(overlay_alpha_mode)
+        };
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -625,6 +645,7 @@ impl Renderer {
             device,
             queue,
             config,
+            overlay_alpha_mode,
             size,
             scale_factor,
             rain_atlas,
@@ -1021,7 +1042,7 @@ impl Renderer {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: self.config.alpha_mode,
+            alpha_mode: self.overlay_alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -1593,7 +1614,7 @@ impl Renderer {
                     self.view_zoom.max(0.05),
                     logical_w * 0.5,
                     logical_h * 0.5,
-                    0.0,
+                    WINDOW_CORNER_RADIUS,
                 ],
             }),
         );
@@ -1716,12 +1737,12 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // Transparent clear — macOS rounded corners need alpha 0 outside.
+                        // macOS: alpha 0 outside the rounded clip. Windows: opaque fill.
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
                             g: 0.0,
                             b: 0.0,
-                            a: 0.0,
+                            a: if WINDOW_CORNER_RADIUS > 0.0 { 0.0 } else { 1.0 },
                         }),
                         store: wgpu::StoreOp::Store,
                     },
