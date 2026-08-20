@@ -31,6 +31,7 @@ use crate::input::{
     classify_drop, classify_tab_drop, hit_test, is_mac, is_windows, pane_id_from_hit,
     term_select_drag_started, window_origin_for_tab_drop, DropKind, HitTarget,
 };
+use crate::kitty_gfx::placeholder_bounds;
 use crate::layout::{clamp_ui_zoom, FrameLayout, Metrics, UI_ZOOM_STEP};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
 use crate::mouse_pty::{encode_mouse_button, encode_mouse_motion, encode_mouse_wheel};
@@ -38,7 +39,7 @@ use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
 use crate::rename::{RenameState, RenameTarget};
-use crate::renderer::{self, GhostLayer, Renderer};
+use crate::renderer::{self, GhostLayer, KittyBlit, Renderer};
 use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
 use crate::settings::SettingsState;
@@ -336,6 +337,49 @@ fn guest_prefer_from_query(q: &str) -> Option<String> {
     Some(last.to_string())
 }
 
+fn kitty_blits_for_pane(
+    pane_id: u64,
+    pl: &crate::layout::PaneLayout,
+    grid: &CellGrid,
+    gfx: &crate::kitty_gfx::GraphicsStore,
+    cell: MonoCellMetrics,
+    radius: f32,
+) -> Vec<KittyBlit> {
+    if !gfx.has_images() {
+        return Vec::new();
+    }
+    let bounds = placeholder_bounds(grid);
+    let mut out = Vec::new();
+    for p in gfx.placements() {
+        let (col, row, cols, rows) = if p.virtual_place {
+            match bounds.get(&p.image_id).copied() {
+                Some(b) => b,
+                None => continue,
+            }
+        } else {
+            (p.col, p.row, p.cols, p.rows)
+        };
+        if cols == 0 || rows == 0 {
+            continue;
+        }
+        let dest = crate::layout::Rect::new(
+            pl.cells.x + col as f32 * cell.w,
+            pl.cells.y + row as f32 * cell.h,
+            cols as f32 * cell.w,
+            rows as f32 * cell.h,
+        );
+        out.push(KittyBlit {
+            pane_id,
+            image_id: p.image_id,
+            dest,
+            glass: pl.glass,
+            radius,
+            z: p.z,
+        });
+    }
+    out
+}
+
 fn spawn_pane_runtime(
     cols: u16,
     rows: u16,
@@ -363,7 +407,22 @@ fn spawn_pane_runtime_px(
             session.mark_pane_pty(pane_id);
             PaneRuntime {
                 pty: Some(pty),
-                ansi: AnsiDecoder::new(),
+                ansi: {
+                    let mut a = AnsiDecoder::new();
+                    if pixel_w > 0 && pixel_h > 0 {
+                        let cw = (pixel_w as u32 / cols.max(1) as u32).max(1);
+                        let ch = (pixel_h as u32 / rows.max(1) as u32).max(1);
+                        a.set_pixel_metrics(
+                            cw,
+                            ch,
+                            pixel_w as u32,
+                            pixel_h as u32,
+                            cols as u32,
+                            rows as u32,
+                        );
+                    }
+                    a
+                },
                 pty_tail: String::new(),
                 echo: EchoFilter::new(),
                 blocks: CmdBlockLog::new(),
@@ -1203,6 +1262,11 @@ impl ChromeApp {
             self.surfaces.values().map(|s| s.key).collect()
         };
         let cell = self.cell_metrics();
+        let scale = self
+            .renderer()
+            .map(|r| r.scale_factor())
+            .unwrap_or(1.0)
+            .max(0.5);
         for key in keys {
             let layout = self.layout_for_surface(key);
             for pl in &layout.panes {
@@ -1218,14 +1282,26 @@ impl ChromeApp {
                     .grid(pl.pane_id)
                     .map(|g| g.cols() != cols || g.rows() != rows)
                     .unwrap_or(true);
+                let (pw, ph) = self.pty_pixel_size(cols, rows);
                 if need {
                     self.session.resize_pane(pl.pane_id, cols, rows);
-                    let (pw, ph) = self.pty_pixel_size(cols, rows);
                     if let Some(rt) = self.runtimes.get_mut(&pl.pane_id) {
                         if let Some(pty) = &mut rt.pty {
                             let _ = pty.resize_with_pixels(cols, rows, pw, ph);
                         }
                     }
+                }
+                if let Some(rt) = self.runtimes.get_mut(&pl.pane_id) {
+                    let cw = (cell.w * scale).round().max(1.0) as u32;
+                    let ch = (cell.h * scale).round().max(1.0) as u32;
+                    rt.ansi.set_pixel_metrics(
+                        cw,
+                        ch,
+                        pw as u32,
+                        ph as u32,
+                        cols as u32,
+                        rows as u32,
+                    );
                 }
             }
         }
@@ -1251,6 +1327,10 @@ impl ChromeApp {
                 // Suppress local echo of warp-submitted command when armed.
                 let filtered = rt.echo.feed(chunk.as_bytes());
                 if !filtered.is_empty() {
+                    let has_gfx = filtered.windows(3).any(|w| w == b"\x1b_G");
+                    if has_gfx {
+                        rt.suppress_paint = false;
+                    }
                     if rt.suppress_paint {
                         // Parse OSC 7 / DA / title without painting the shell prompt.
                         let mut scratch = CellGrid::new(80, 24);
@@ -1267,6 +1347,9 @@ impl ChromeApp {
                             let _ = pty.write_all(&r);
                         }
                     }
+                }
+                if rt.ansi.graphics().has_images() {
+                    rt.suppress_paint = false;
                 }
                 if let Some(cwd) = rt.ansi.take_cwd() {
                     self.session.set_cwd(id, cwd);
@@ -5462,6 +5545,34 @@ impl ApplicationHandler for ChromeApp {
                         }
                         r.upload_guest_fb(*pane_id, *w, *h, px);
                     }
+                    let cell = r.cell_metrics();
+                    let radius = self.metrics.radius;
+                    let mut kitty_blits = Vec::new();
+                    let mut live_panes = Vec::new();
+                    for pl in &layout.panes {
+                        live_panes.push(pl.pane_id);
+                        if self.session.pane_kind(pl.pane_id).is_guest()
+                            || self.session.is_widget(pl.pane_id)
+                        {
+                            continue;
+                        }
+                        let Some(rt) = self.runtimes.get(&pl.pane_id) else {
+                            continue;
+                        };
+                        r.sync_kitty_images(pl.pane_id, rt.ansi.graphics());
+                        if let Some(grid) = self.session.grid(pl.pane_id) {
+                            kitty_blits.extend(kitty_blits_for_pane(
+                                pl.pane_id,
+                                pl,
+                                grid,
+                                rt.ansi.graphics(),
+                                cell,
+                                radius,
+                            ));
+                        }
+                    }
+                    r.prune_kitty_panes(&live_panes);
+                    r.set_kitty_blits(kitty_blits);
                     match r.render(
                         &self.session,
                         &self.settings,

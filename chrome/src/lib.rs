@@ -59,6 +59,7 @@ pub mod guest_manifest;
 pub mod guest_ui;
 pub mod input;
 pub mod kitty;
+pub mod kitty_gfx;
 pub mod layout;
 pub mod links;
 pub mod mouse_pty;

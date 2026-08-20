@@ -34,6 +34,7 @@ mod guest_manifest;
 mod guest_ui;
 mod input;
 mod kitty;
+mod kitty_gfx;
 mod layout;
 mod links;
 #[cfg(target_os = "macos")]
