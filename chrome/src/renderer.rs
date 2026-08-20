@@ -86,6 +86,8 @@ struct LensUniforms {
     exit: [f32; 4],
     /// x = ⌘± view zoom, yz = origin logical px, w = window corner radius (0 = square).
     view: [f32; 4],
+    /// rgb + hairline width in logical px (0 = none).
+    border: [f32; 4],
 }
 
 /// macOS CALayer clip (logical pts). Windows stays square — no per-pixel
@@ -94,6 +96,12 @@ struct LensUniforms {
 const WINDOW_CORNER_RADIUS: f32 = 16.0;
 #[cfg(not(target_os = "macos"))]
 const WINDOW_CORNER_RADIUS: f32 = 0.0;
+/// 1 logical-px hairline around the square Windows frame. Off on macOS
+/// (the rounded silhouette is the edge).
+#[cfg(target_os = "macos")]
+const WINDOW_BORDER_W: f32 = 0.0;
+#[cfg(not(target_os = "macos"))]
+const WINDOW_BORDER_W: f32 = 1.0;
 
 /// Canvas UI `GlassVanilla` DEFAULTS — https://github.com/DavidHDev/canvas-ui
 const GLASS_IOR: f32 = 1.5;
@@ -568,6 +576,7 @@ impl Renderer {
                 glass2: [GLASS_ABERRATION, GLASS_BLUR, GLASS_REFLECTION, GLASS_SHINE],
                 exit: [0.0, 0.0, 0.0, 0.0],
                 view: [1.0, 0.5, 0.5, 0.0],
+                border: [0.0, 0.0, 0.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1616,6 +1625,20 @@ impl Renderer {
                     logical_h * 0.5,
                     WINDOW_CORNER_RADIUS,
                 ],
+                border: {
+                    let pal = settings.prefs.theme_colors();
+                    let w = if self.window_maximized {
+                        0.0
+                    } else {
+                        WINDOW_BORDER_W
+                    };
+                    [
+                        pal.muted[0] * 0.50 + pal.jade[0] * 0.50,
+                        pal.muted[1] * 0.50 + pal.jade[1] * 0.50,
+                        pal.muted[2] * 0.50 + pal.jade[2] * 0.50,
+                        w,
+                    ]
+                },
             }),
         );
 

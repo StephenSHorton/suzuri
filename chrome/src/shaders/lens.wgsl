@@ -16,6 +16,8 @@ struct LensUniforms {
     // x = view zoom (⌘±, 1 = identity), yz = origin LOGICAL px,
     // w = window corner radius in logical pts (0 = square / opaque)
     view: vec4f,
+    // rgb + hairline width in logical px (0 = none). Windows square frame.
+    border: vec4f,
 }
 
 @group(0) @binding(0) var<uniform> u: LensUniforms;
@@ -98,19 +100,31 @@ fn sd_round_box(p: vec2f, b: vec2f, r: f32) -> f32 {
 /// Premultiplied alpha for the OS window shape.
 /// `u.view.w` is the corner radius in logical pts (16 on macOS, 0 on Windows —
 /// Windows cannot clip a frameless HWND this way; leave the rectangle opaque).
+/// `u.border.w` is a hairline on square windows so the edge reads against the desktop.
 fn window_premul(col: vec3f, fb_px: vec2f) -> vec4f {
-    let win_r = u.view.w;
-    if (win_r < 0.5) {
-        return vec4f(col, 1.0);
-    }
     let fb = max(u.size.zw, vec2f(1.0));
     let logical = max(u.size.xy, vec2f(1.0));
     let scale = fb / logical;
-    let win_half = logical * 0.5;
-    let win_local = fb_px / scale - win_half;
-    let win_sd = sd_round_box(win_local, win_half, win_r);
-    let win_a = 1.0 - smoothstep(-1.0, 0.75, win_sd);
-    return vec4f(col * win_a, win_a);
+    var rgb = col;
+    var a = 1.0;
+
+    let win_r = u.view.w;
+    if (win_r >= 0.5) {
+        let win_half = logical * 0.5;
+        let win_local = fb_px / scale - win_half;
+        let win_sd = sd_round_box(win_local, win_half, win_r);
+        a = 1.0 - smoothstep(-1.0, 0.75, win_sd);
+        rgb = col * a;
+    }
+
+    let bw = u.border.w;
+    if (bw > 0.001 && a > 0.01) {
+        let p = fb_px / scale;
+        let d = min(min(p.x, p.y), min(logical.x - p.x, logical.y - p.y));
+        let line = 1.0 - smoothstep(0.0, max(bw, 0.75), d);
+        rgb = mix(rgb, u.border.xyz, line * 0.88);
+    }
+    return vec4f(rgb, a);
 }
 
 fn ior_for_wavelength(base_ior: f32, aberration: f32, wavelength: f32) -> f32 {
