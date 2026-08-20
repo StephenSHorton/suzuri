@@ -8,9 +8,10 @@ import (
 
 // LaunchCwd is the working directory new shells (and the UI process) should
 // inherit. Dock / Launch Services start a .app in Contents/Resources; Windows
-// installers often start in the folder that contains suzuri.exe. Those are
-// not useful project directories — prefer $HOME. A real project cwd (or a
-// source checkout that contains go.mod + chrome/Cargo.toml) is kept.
+// Start Menu / MSIX / Win+R often start in C:\Windows\System32; installers
+// start in the folder that contains suzuri.exe. Those are not useful project
+// directories — prefer $HOME. A real project cwd (or a source checkout that
+// contains go.mod + chrome/Cargo.toml) is kept.
 func LaunchCwd() string {
 	if wd, err := os.Getwd(); err == nil && !IsUnhelpfulCwd(wd) {
 		return wd
@@ -26,8 +27,8 @@ func LaunchCwd() string {
 	return ""
 }
 
-// IsUnhelpfulCwd reports whether cwd is an app-bundle or install-tree path
-// that should not become the user's first shell directory.
+// IsUnhelpfulCwd reports whether cwd is an app-bundle, Windows system, or
+// install-tree path that should not become the user's first shell directory.
 func IsUnhelpfulCwd(cwd string) bool {
 	exeDir := ""
 	if self, err := os.Executable(); err == nil {
@@ -48,6 +49,9 @@ func isUnhelpfulCwd(cwd, exeDir string) bool {
 	if strings.Contains(slash, ".app/Contents") {
 		return true
 	}
+	if isWindowsDriveRoot(cwd) || isWindowsSystemCwd(cwd) {
+		return true
+	}
 	if exeDir == "" {
 		return false
 	}
@@ -55,6 +59,59 @@ func isUnhelpfulCwd(cwd, exeDir string) bool {
 		return false
 	}
 	return !looksLikeSourceTree(exeDir)
+}
+
+// windowsSlash normalizes Windows and POSIX separators so these checks work
+// in tests on darwin/linux too (filepath.ToSlash is a no-op on Unix).
+func windowsSlash(cwd string) string {
+	s := strings.TrimSpace(cwd)
+	s = strings.ReplaceAll(s, `\`, "/")
+	return s
+}
+
+// isWindowsDriveRoot is true for "C:", "C:\", "C:/".
+func isWindowsDriveRoot(cwd string) bool {
+	s := windowsSlash(cwd)
+	if len(s) < 2 || s[1] != ':' {
+		return false
+	}
+	if !isDriveLetter(s[0]) {
+		return false
+	}
+	rest := strings.Trim(s[2:], "/")
+	return rest == ""
+}
+
+func isDriveLetter(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+}
+
+// isWindowsSystemCwd is true for Windows, System32, Program Files, ProgramData
+// (Start Menu / MSIX / Win+R typical launch directories).
+func isWindowsSystemCwd(cwd string) bool {
+	s := strings.ToLower(windowsSlash(cwd))
+	s = strings.TrimRight(s, "/")
+	if s == "" {
+		return false
+	}
+	if len(s) >= 2 && s[1] == ':' && isDriveLetter(s[0]) {
+		s = s[2:]
+	}
+	if !strings.HasPrefix(s, "/") {
+		s = "/" + s
+	}
+	switch {
+	case s == "/windows", strings.HasPrefix(s, "/windows/"):
+		return true
+	case s == "/program files", strings.HasPrefix(s, "/program files/"):
+		return true
+	case s == "/program files (x86)", strings.HasPrefix(s, "/program files (x86)/"):
+		return true
+	case s == "/programdata", strings.HasPrefix(s, "/programdata/"):
+		return true
+	default:
+		return false
+	}
 }
 
 func looksLikeSourceTree(dir string) bool {

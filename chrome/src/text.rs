@@ -637,16 +637,9 @@ impl TextLayer {
             buf.set_size(&mut self.font_system, Some(max_w), Some(buf_h));
 
             if is_rain {
-                #[cfg(target_os = "macos")]
-                {
-                    let attrs = Attrs::new().family(Family::Name("Hiragino Sans"));
-                    buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    let attrs = Attrs::new().family(Family::SansSerif);
-                    buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-                }
+                let family = crate::rain_atlas::rain_family_name(&self.font_system);
+                let attrs = Attrs::new().family(Family::Name(family.as_str()));
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
             } else if is_symbols {
                 let attrs = Attrs::new().family(Family::Name(SYMBOLS_FAMILY));
                 buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);

@@ -58,4 +58,30 @@ func TestLaunchCwdNeverAppBundle(t *testing.T) {
 	if strings.Contains(filepath.ToSlash(got), ".app/Contents") {
 		t.Fatalf("LaunchCwd=%q still inside .app", got)
 	}
+	if isWindowsSystemCwd(got) {
+		t.Fatalf("LaunchCwd=%q is a Windows system directory", got)
+	}
+}
+
+func TestIsUnhelpfulCwdWindowsSystem(t *testing.T) {
+	exe := `C:\Program Files\WindowsApps\suzuri`
+	cases := []string{
+		`C:\WINDOWS\system32`,
+		`C:\Windows\System32\`,
+		`C:/windows/syswow64`,
+		`C:\Windows`,
+		`C:\Program Files`,
+		`C:\Program Files (x86)\suzuri`,
+		`C:\ProgramData`,
+		`C:\`,
+		`C:`,
+	}
+	for _, cwd := range cases {
+		if !isUnhelpfulCwd(cwd, exe) {
+			t.Fatalf("%q should be unhelpful", cwd)
+		}
+	}
+	if isUnhelpfulCwd(`C:\Users\stephen\projects\foo`, exe) {
+		t.Fatal("user project should be kept")
+	}
 }

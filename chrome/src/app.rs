@@ -28,8 +28,8 @@ use crate::echo_filter::EchoFilter;
 use crate::guest_host::{guest_footer_top, guest_mount_rect, GuestEvent, GuestHost, NativeAttach};
 use crate::guest_manifest::{load_guests, pick_guest};
 use crate::input::{
-    classify_drop, classify_tab_drop, hit_test, is_mac, pane_id_from_hit, term_select_drag_started,
-    window_origin_for_tab_drop, DropKind, HitTarget,
+    classify_drop, classify_tab_drop, hit_test, is_mac, is_windows, pane_id_from_hit,
+    term_select_drag_started, window_origin_for_tab_drop, DropKind, HitTarget,
 };
 use crate::layout::{clamp_ui_zoom, FrameLayout, Metrics, UI_ZOOM_STEP};
 use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
@@ -853,7 +853,8 @@ impl ChromeApp {
             .with_min_inner_size(LogicalSize::new(720.0, 440.0))
             .with_position(winit::dpi::PhysicalPosition::new(pos.0, pos.1))
             .with_decorations(false)
-            .with_transparent(true)
+            // Rounded per-pixel alpha is a macOS silhouette. Windows stays opaque.
+            .with_transparent(cfg!(target_os = "macos"))
             .with_resizable(true);
         #[cfg(target_os = "macos")]
         {
@@ -990,7 +991,8 @@ impl ChromeApp {
                 || (self.session.is_widget(id) && !self.session.pane_kind(id).is_guest())
         });
         for pl in &mut layout.panes {
-            pl.hole = self.session.pane_kind(pl.pane_id).is_guest();
+            pl.hole = self.session.pane_kind(pl.pane_id).is_guest()
+                || alt_ids.contains(&pl.pane_id);
         }
         tab.root
             .collect_sashes(layout.workspace, gap, &mut layout.sashes);
@@ -2444,13 +2446,22 @@ impl ChromeApp {
         let (x, y) = self.pointer();
         let mut hit = None;
         if self.pointer_inside {
-            if layout.logo.contains(x, y) {
+            if let Some(btns) = layout.caption_buttons {
+                if btns[0].contains(x, y) {
+                    hit = Some(ChipId::CaptionMin);
+                } else if btns[1].contains(x, y) {
+                    hit = Some(ChipId::CaptionMax);
+                } else if btns[2].contains(x, y) {
+                    hit = Some(ChipId::CaptionClose);
+                }
+            }
+            if hit.is_none() && layout.logo.contains(x, y) {
                 hit = Some(ChipId::Logo);
-            } else if layout.caffeine.contains(x, y) {
+            } else if hit.is_none() && layout.caffeine.contains(x, y) {
                 hit = Some(ChipId::Caffeine);
-            } else if layout.tab_new.contains(x, y) {
+            } else if hit.is_none() && layout.tab_new.contains(x, y) {
                 hit = Some(ChipId::NewTab);
-            } else {
+            } else if hit.is_none() {
                 for pl in &layout.panes {
                     if pl.close.contains(x, y) {
                         hit = Some(ChipId::PaneClose(pl.pane_id));
@@ -3090,10 +3101,13 @@ impl ChromeApp {
                 }
             }
             HitTarget::Zoom => {
-                // Green traffic light: true fullscreen (not maximize/zoom).
-                // Title-bar double-click still toggles maximized fill.
                 if let Some(w) = &self.window {
-                    if w.fullscreen().is_some() {
+                    if is_windows() {
+                        // Windows caption: maximize / restore (not macOS fullscreen).
+                        w.set_maximized(!w.is_maximized());
+                    } else if w.fullscreen().is_some() {
+                        // Green traffic light: true fullscreen (not maximize/zoom).
+                        // Title-bar double-click still toggles maximized fill.
                         w.set_fullscreen(None);
                     } else {
                         w.set_fullscreen(Some(Fullscreen::Borderless(None)));
@@ -4555,18 +4569,19 @@ impl ApplicationHandler for ChromeApp {
             return;
         }
 
-        let mut attrs = WindowAttributes::default()
+        let attrs = WindowAttributes::default()
             .with_title("suzuri · chrome")
             .with_inner_size(LogicalSize::new(1120.0, 740.0))
             .with_min_inner_size(LogicalSize::new(720.0, 440.0))
             .with_decorations(false)
-            .with_transparent(true)
+            // Rounded per-pixel alpha is a macOS silhouette. Windows stays opaque.
+            .with_transparent(cfg!(target_os = "macos"))
             .with_resizable(true);
         #[cfg(target_os = "macos")]
-        {
+        let attrs = {
             use winit::platform::macos::WindowAttributesExtMacOS;
-            attrs = attrs.with_accepts_first_mouse(true);
-        }
+            attrs.with_accepts_first_mouse(true)
+        };
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
@@ -5426,8 +5441,14 @@ impl ApplicationHandler for ChromeApp {
                         guest_uploads.push((pl.pane_id, w, h, px));
                     }
                 }
+                let maximized = self
+                    .surfaces
+                    .get(&id)
+                    .map(|s| s.window.is_maximized())
+                    .unwrap_or(false);
                 if let Some(r) = self.surfaces.get_mut(&id).map(|s| &mut s.renderer) {
                     r.window_exit_blur = exit_blur;
+                    r.window_maximized = maximized;
                     r.set_ui_scale(self.ui_zoom);
                     r.set_guest_wells(guest_wells);
                     for (pane_id, sid, w, h, held, hole) in guest_ios {

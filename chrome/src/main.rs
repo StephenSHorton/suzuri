@@ -7,6 +7,9 @@
 // Dual bin/lib crate: many helpers are host/API surface used by the library or
 // future hosts; the binary path does not exercise every method.
 #![allow(dead_code)]
+// Release GUI: no spare console when launched from Start Menu / Store / a
+// windowsgui host. Debug keeps a console for `cargo run` logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ansi;
 mod app;
@@ -16,8 +19,8 @@ mod chrome_status;
 mod chrome_ui;
 mod cmd_blocks;
 mod commands;
-mod confirm;
 mod config_store;
+mod confirm;
 mod control_mailbox;
 mod draft;
 mod echo_filter;
@@ -25,17 +28,17 @@ mod eco;
 mod guest_fb;
 mod guest_host;
 mod guest_install;
+#[cfg(target_os = "macos")]
+mod guest_iosurface;
 mod guest_manifest;
 mod guest_ui;
 mod input;
 mod kitty;
 mod layout;
 mod links;
-mod mouse_pty;
-#[cfg(target_os = "macos")]
-mod guest_iosurface;
 #[cfg(target_os = "macos")]
 mod macos_window;
+mod mouse_pty;
 mod new_window;
 mod notes;
 mod notes_ops;

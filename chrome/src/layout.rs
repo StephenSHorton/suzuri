@@ -77,8 +77,8 @@ impl Default for Metrics {
             tab_h: 0.0,            // tabs live in the title bar
             // divider + path + input = 3 mono cell rows (14 each) so text never overflows
             input_strip_h: 14.0 * 3.0, // 42
-            radius: s.unit * 2.0,        // 16
-            chip_radius: s.unit,         // 8
+            radius: s.unit * 2.0,      // 16
+            chip_radius: s.unit,       // 8
             spacing: s,
             ui_scale: 1.0,
         }
@@ -214,6 +214,8 @@ pub struct FrameLayout {
     pub tab_new: Rect,
     /// Same as [`logo`] — settings is the logo button.
     pub settings: Rect,
+    /// Windows caption buttons (min, max, close) top-right. `None` on macOS.
+    pub caption_buttons: Option<[Rect; 3]>,
     /// Split sashes for the active tab (filled by the app after tree layout).
     pub sashes: Vec<crate::panes::SashHit>,
 }
@@ -339,11 +341,7 @@ impl FrameLayout {
         let mut panes = Vec::with_capacity(specs.len());
         if specs.len() == 1 {
             panes.push(pane_layout_in_glass(
-                specs[0].0,
-                workspace,
-                m,
-                specs[0].1,
-                false,
+                specs[0].0, workspace, m, specs[0].1, false,
             ));
         } else {
             // Equal columns fallback if caller didn't apply tree layout.
@@ -373,8 +371,19 @@ impl FrameLayout {
             edge
         };
 
-        // Right cluster: [ ☕ caffeine ] [ 硯 logo/settings ]
-        let logo = Rect::new(width - edge - logo_w, chip_y, logo_w, chip_h);
+        // Right cluster: [ ☕ caffeine ] [ 硯 logo/settings ] ([ min ][ max ][ × ] on Windows)
+        let caption_buttons = if cfg!(target_os = "windows") {
+            Some(caption_button_rects(&m, width))
+        } else {
+            None
+        };
+        let right_limit = caption_buttons.map(|b| b[0].x).unwrap_or(width);
+        let logo_gap = if caption_buttons.is_some() {
+            cluster
+        } else {
+            edge
+        };
+        let logo = Rect::new(right_limit - logo_gap - logo_w, chip_y, logo_w, chip_h);
         let settings = logo; // same hit target
         let caffeine = Rect::new(logo.x - cluster - logo_w, chip_y, logo_w, chip_h);
         let tabs_right = caffeine.x - cluster;
@@ -424,6 +433,7 @@ impl FrameLayout {
             tab_idle,
             tab_new,
             settings,
+            caption_buttons,
             sashes: Vec::new(),
         }
     }
@@ -503,13 +513,20 @@ impl FrameLayout {
         for pl in &self.panes {
             // Same glass as a terminal leaf. The guest well is a separate
             // opaque punch so rain does not show under the blit.
-            out.push(PanelInstance::glass(pl.glass, m.radius, PanelKind::Terminal));
+            out.push(PanelInstance::glass(
+                pl.glass,
+                m.radius,
+                PanelKind::Terminal,
+            ));
             if pl.hole && pl.cells.w > 4.0 && pl.cells.h > 4.0 {
-                out.push(PanelInstance::glass(
-                    pl.cells,
-                    (m.radius - 2.0).max(1.0),
-                    PanelKind::GuestHole,
-                ));
+                // Alt-screen (warp collapsed): square punch so rain cannot leak
+                // at the well corners. Guest blit keeps a slight round.
+                let hole_r = if pl.warp.h < 1.0 {
+                    0.0
+                } else {
+                    (m.radius - 2.0).max(1.0)
+                };
+                out.push(PanelInstance::glass(pl.cells, hole_r, PanelKind::GuestHole));
             }
             {
                 let id = ChipId::PaneClose(pl.pane_id);
@@ -530,17 +547,13 @@ impl FrameLayout {
                     pl.header.w,
                     1.5,
                 );
-                out.push(
-                    PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9),
-                );
+                out.push(PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9));
             }
             // Footer hairline only when the command strip is present (not alt-screen).
             if pl.divider.h >= 1.0 {
                 let mid_y = pl.divider.y + pl.divider.h * 0.5 - 0.75;
                 let line = Rect::new(pl.divider.x, mid_y, pl.divider.w, 1.5);
-                out.push(
-                    PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9),
-                );
+                out.push(PanelInstance::glass(line, 0.5, PanelKind::Hairline).with_opacity(0.9));
             }
             if pl.focused && pl.glass.w > 4.0 && pl.glass.h > 4.0 {
                 let rim = Rect::new(
@@ -620,6 +633,20 @@ impl FrameLayout {
                     .with_press(chip_ui.press_light(id)),
             );
         }
+        if let Some(btns) = self.caption_buttons {
+            let ids = [ChipId::CaptionMin, ChipId::CaptionMax, ChipId::CaptionClose];
+            for (i, r) in btns.iter().enumerate() {
+                if !chip_ui.ghost_shell_visible(ids[i]) {
+                    continue;
+                }
+                let kind = if i == 2 {
+                    PanelKind::CaptionCloseHover
+                } else {
+                    PanelKind::CaptionHover
+                };
+                out.push(PanelInstance::glass(*r, 0.0, kind));
+            }
+        }
         out
     }
 }
@@ -684,7 +711,8 @@ fn pane_layout_in_glass(
             title_pill,
             close,
             focused,
-            hole: false,
+            // Opaque well so glyph rain does not read through vim/Grok.
+            hole: true,
         };
     }
 
@@ -766,6 +794,24 @@ pub enum PanelKind {
     PaneFocus = 17,
     /// Guest plugin well — opaque, no rain (the guest paints the pixels).
     GuestHole = 18,
+    /// Windows caption min/max hover wash (light overlay).
+    CaptionHover = 19,
+    /// Windows caption close hover wash (red).
+    CaptionCloseHover = 20,
+}
+
+/// Windows caption button width (logical CSS-px at 1×). Full title-bar height.
+pub const CAPTION_BTN_W: f32 = 40.0;
+
+/// Windows caption buttons (minimize, maximize, close), top-right, flush to
+/// the window edge. Not circles — rectangular Win32-style hit targets.
+pub fn caption_button_rects(m: &Metrics, win_w: f32) -> [Rect; 3] {
+    let w = m.px(CAPTION_BTN_W);
+    let h = m.title_h;
+    let close = Rect::new(win_w - w, 0.0, w, h);
+    let max = Rect::new(win_w - 2.0 * w, 0.0, w, h);
+    let min = Rect::new(win_w - 3.0 * w, 0.0, w, h);
+    [min, max, close]
 }
 
 /// GPU-ready panel instance.
@@ -860,7 +906,10 @@ mod tests {
         let chip_h = l.tab_chips[0].h;
         let chip_y = l.tab_chips[0].y;
         let expected_y = (m.title_h - chip_h) * 0.5;
-        assert!((chip_y - expected_y).abs() < 0.01, "chips centered {chip_y}");
+        assert!(
+            (chip_y - expected_y).abs() < 0.01,
+            "chips centered {chip_y}"
+        );
 
         // Pane is flush under chip bottoms (zero air between nav and well).
         let chip_bottom = chip_y + chip_h;
@@ -909,6 +958,25 @@ mod tests {
         assert!(!a.intersects(c));
         assert!(a.contains(0.0, 0.0));
         assert!(!a.contains(10.0, 10.0));
+    }
+
+    #[test]
+    fn alt_screen_fullscreen_punches_an_opaque_cell_well() {
+        let m = Metrics::default();
+        let mut l = FrameLayout::compute(800.0, 600.0, m, 1);
+        let glass = l.panes[0].glass;
+        let id = l.panes[0].pane_id;
+        l.apply_pane_rects(m, &[(id, glass)], id, &|_| true);
+        assert!(l.panes[0].hole, "alt-screen well should hide glyph rain");
+        assert!(l.panes[0].warp.h < 1.0, "warp strip collapses");
+        let chip = crate::chrome_ui::ChipUi::default();
+        let jelly = crate::chrome_ui::TabJelly::default();
+        let holes = l
+            .glass_panels(m, 0, None, &chip, &jelly)
+            .iter()
+            .filter(|p| (p.kind - PanelKind::GuestHole as u32 as f32).abs() < 0.1)
+            .count();
+        assert_eq!(holes, 1);
     }
 
     #[test]
@@ -964,6 +1032,29 @@ mod tests {
     }
 
     #[test]
+    fn caption_buttons_flush_top_right() {
+        let m = Metrics::default();
+        let [min, max, close] = caption_button_rects(&m, 800.0);
+        assert_eq!(close.x + close.w, 800.0);
+        assert_eq!(close.y, 0.0);
+        assert_eq!(close.h, m.title_h);
+        assert_eq!(close.w, CAPTION_BTN_W);
+        assert!((max.x + max.w - close.x).abs() < f32::EPSILON);
+        assert!((min.x + min.w - max.x).abs() < f32::EPSILON);
+        assert_eq!(min.x, 800.0 - CAPTION_BTN_W * 3.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_layout_reserves_caption_cluster() {
+        let m = Metrics::default();
+        let l = FrameLayout::compute(1120.0, 740.0, m, 2);
+        let btns = l.caption_buttons.expect("windows caption buttons");
+        assert!(l.logo.x + l.logo.w <= btns[0].x + 0.01);
+        assert!(l.caffeine.x + l.caffeine.w <= l.logo.x + 0.01);
+        assert_eq!(btns[2].x + btns[2].w, 1120.0);
+    }
+
     fn pane_title_is_hairline_not_glass_pill() {
         let m = Metrics::default();
         let l = FrameLayout::compute(800.0, 600.0, m, 1);
@@ -981,10 +1072,7 @@ mod tests {
             .iter()
             .filter(|p| (p.kind - PanelKind::Hairline as u32 as f32).abs() < 0.1)
             .count();
-        assert!(
-            hair >= 2,
-            "header + footer hairlines expected, got {hair}"
-        );
+        assert!(hair >= 2, "header + footer hairlines expected, got {hair}");
     }
 
     #[test]
@@ -1056,6 +1144,9 @@ mod tests {
         let l2 = FrameLayout::compute(800.0, 600.0, Metrics::default().scaled(2.0), 1);
         assert!((l1.path.h - 14.0).abs() < 0.01, "1× footer {}", l1.path.h);
         assert!((l2.path.h - 28.0).abs() < 0.01, "2× footer {}", l2.path.h);
-        assert!(l2.cells.h < l1.cells.h, "bigger footer + header shrinks cells");
+        assert!(
+            l2.cells.h < l1.cells.h,
+            "bigger footer + header shrinks cells"
+        );
     }
 }
