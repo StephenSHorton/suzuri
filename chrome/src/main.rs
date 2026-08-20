@@ -29,6 +29,7 @@ mod guest_manifest;
 mod guest_ui;
 mod input;
 mod kitty;
+mod kitty_gfx;
 mod layout;
 mod links;
 mod mouse_pty;

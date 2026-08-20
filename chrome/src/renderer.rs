@@ -181,6 +181,20 @@ pub struct Renderer {
     guest_nearest: wgpu::Sampler,
     guest_tex: HashMap<u64, GuestGpu>,
     guest_wells: Vec<GuestWell>,
+
+    kitty_blit_pipeline: wgpu::RenderPipeline,
+    kitty_tex: HashMap<(u64, u32), KittyGpu>,
+    kitty_blits: Vec<KittyBlit>,
+}
+
+/// One Kitty graphics placement to blit into a terminal well.
+pub struct KittyBlit {
+    pub pane_id: u64,
+    pub image_id: u32,
+    pub dest: crate::layout::Rect,
+    pub glass: crate::layout::Rect,
+    pub radius: f32,
+    pub z: i32,
 }
 
 pub struct GuestWell {
@@ -197,6 +211,15 @@ struct GuestGpu {
     h: u32,
     uni: wgpu::Buffer,
     iosurface_id: Option<u32>,
+}
+
+struct KittyGpu {
+    _tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    w: u32,
+    h: u32,
+    gen: u64,
+    uni: wgpu::Buffer,
 }
 
 impl Renderer {
@@ -662,6 +685,9 @@ impl Renderer {
             guest_nearest: guest_blit.2,
             guest_tex: HashMap::new(),
             guest_wells: Vec::new(),
+            kitty_blit_pipeline: guest_blit.3,
+            kitty_tex: HashMap::new(),
+            kitty_blits: Vec::new(),
         }
     }
 
@@ -961,6 +987,178 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.guest_blit_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+    }
+
+    pub fn set_kitty_blits(&mut self, mut blits: Vec<KittyBlit>) {
+        blits.sort_by_key(|b| b.z);
+        self.kitty_blits = blits;
+    }
+
+    pub fn prune_kitty_panes(&mut self, live: &[u64]) {
+        self.kitty_tex.retain(|(pane, _), _| live.contains(pane));
+    }
+
+    pub fn sync_kitty_images(&mut self, pane_id: u64, gfx: &crate::kitty_gfx::GraphicsStore) {
+        let live: std::collections::HashSet<u32> = gfx.images().map(|i| i.id).collect();
+        self.kitty_tex
+            .retain(|(p, id), _| *p != pane_id || live.contains(id));
+        for img in gfx.images() {
+            let key = (pane_id, img.id);
+            let stale = self
+                .kitty_tex
+                .get(&key)
+                .map(|t| t.gen != img.gen || t.w != img.width || t.h != img.height)
+                .unwrap_or(true);
+            if stale {
+                self.upload_kitty(pane_id, img);
+            }
+        }
+    }
+
+    fn upload_kitty(&mut self, pane_id: u64, img: &crate::kitty_gfx::KittyImage) {
+        let w = img.width;
+        let h = img.height;
+        let need = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        if w == 0 || h == 0 || img.rgba.len() < need {
+            return;
+        }
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kitty gfx"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bpr = w * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = bpr.div_ceil(align) * align;
+        let layout = wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(padded),
+            rows_per_image: Some(h),
+        };
+        let size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let dest = wgpu::TexelCopyTextureInfo {
+            texture: &tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        };
+        if padded == bpr {
+            self.queue
+                .write_texture(dest, &img.rgba[..need], layout, size);
+        } else {
+            let mut buf = vec![0u8; padded as usize * h as usize];
+            for y in 0..h as usize {
+                let src = y * bpr as usize;
+                let dst = y * padded as usize;
+                buf[dst..dst + bpr as usize].copy_from_slice(&img.rgba[src..src + bpr as usize]);
+            }
+            self.queue.write_texture(dest, &buf, layout, size);
+        }
+        let uni = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kitty img uni"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.kitty_tex.insert(
+            (pane_id, img.id),
+            KittyGpu {
+                _tex: tex,
+                view,
+                w,
+                h,
+                gen: img.gen,
+                uni,
+            },
+        );
+    }
+
+    fn blit_kitty_images(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        logical_w: f32,
+        logical_h: f32,
+    ) {
+        if self.kitty_blits.is_empty() {
+            return;
+        }
+        for blit in &self.kitty_blits {
+            let Some(gpu) = self.kitty_tex.get(&(blit.pane_id, blit.image_id)) else {
+                continue;
+            };
+            if blit.dest.w < 1.0 || blit.dest.h < 1.0 {
+                continue;
+            }
+            let uni = [
+                logical_w,
+                logical_h,
+                0.0,
+                0.0,
+                blit.dest.x,
+                blit.dest.y,
+                blit.dest.w,
+                blit.dest.h,
+                blit.glass.x,
+                blit.glass.y,
+                blit.glass.w,
+                blit.glass.h,
+                blit.radius,
+                0.0,
+                0.0,
+                0.0,
+            ];
+            self.queue
+                .write_buffer(&gpu.uni, 0, bytemuck::cast_slice(&uni));
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("kitty blit bg"),
+                layout: &self.guest_blit_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: gpu.uni.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&gpu.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.guest_nearest),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kitty blit"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.kitty_blit_pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -1685,6 +1883,10 @@ impl Renderer {
                 .prepare_body_and_caret(&self.device, &self.queue, &body, &carets);
         self.text
             .render(&self.device, &mut encoder, &self.scene_view);
+
+        // Kitty graphics sit on top of cell glyphs (z >= 0) so placeholders
+        // don't show as missing-glyph tofu. Guest panes already painted above.
+        self.blit_kitty_images(&mut encoder, logical_w, logical_h);
 
         // Pass 3: cursor glass lens samples full scene → swapchain
         let lens_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3796,6 +3998,9 @@ fn push_pane_cells(
             }
             let hover_cell = link_hover.is_some_and(|h| h.contains(col as u16, abs_row));
             let fg = if hover_cell { link_hover_rgb } else { c.fg };
+            if c.ch == crate::kitty_gfx::PLACEHOLDER {
+                continue;
+            }
             if let Some(bg) = c.bg {
                 labels.push(
                     TextLabel::mono("█", x, y, mono_size, [bg[0], bg[1], bg[2], 0.85 * dim_a])
@@ -3930,7 +4135,12 @@ fn sizes_close(a: u32, b: u32) -> bool {
 fn create_guest_blit(
     device: &wgpu::Device,
     target: wgpu::TextureFormat,
-) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Sampler) {
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::BindGroupLayout,
+    wgpu::Sampler,
+    wgpu::RenderPipeline,
+) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("guest blit"),
         source: wgpu::ShaderSource::Wgsl(include_str!("shaders/guest_blit.wgsl").into()),
@@ -3966,44 +4176,50 @@ fn create_guest_blit(
             },
         ],
     });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("guest blit pipeline"),
-        layout: Some(
-            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("guest blit pl"),
-                bind_group_layouts: &[&bgl],
-                push_constant_ranges: &[],
-            }),
-        ),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: Some("vs"),
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: target,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
+    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("guest blit pl"),
+        bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
     });
+    let pipeline_for = |label: &str, blend: Option<wgpu::BlendState>| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    };
+    let pipeline = pipeline_for("guest blit pipeline", None);
+    let kitty_pipeline = pipeline_for(
+        "kitty blit pipeline",
+        Some(wgpu::BlendState::ALPHA_BLENDING),
+    );
     let samp = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("guest nearest"),
         mag_filter: wgpu::FilterMode::Nearest,
         min_filter: wgpu::FilterMode::Nearest,
         ..Default::default()
     });
-    (pipeline, bgl, samp)
+    (pipeline, bgl, samp, kitty_pipeline)
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@
 
 use crate::cells::{theme, CellGrid};
 use crate::kitty::KittyKeyboard;
+use crate::kitty_gfx::GraphicsStore;
 
 /// Stateful decoder for a byte stream from a PTY.
 #[derive(Debug)]
@@ -49,6 +50,11 @@ pub struct AnsiDecoder {
     pub mouse_sgr: bool,
     /// Kitty keyboard progressive-enhancement flags (`CSI ?/=/</> u`).
     kitty: KittyKeyboard,
+    /// Kitty graphics protocol (APC `ESC _ G … ST`).
+    gfx: GraphicsStore,
+    /// APC payload (between ESC _ and ST). Graphics commands start with `G`.
+    apc_buf: Vec<u8>,
+    apc_overflow: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -92,6 +98,9 @@ impl Default for AnsiDecoder {
             mouse_any: false,
             mouse_sgr: false,
             kitty: KittyKeyboard::new(),
+            gfx: GraphicsStore::new(),
+            apc_buf: Vec::new(),
+            apc_overflow: false,
         }
     }
 }
@@ -124,6 +133,41 @@ impl AnsiDecoder {
     /// Kitty disambiguate / all-keys-as-escapes is on (child pushed flags).
     pub fn kitty_active(&self) -> bool {
         self.kitty.active()
+    }
+
+    /// Kitty graphics store (images + placements) for this PTY.
+    pub fn graphics(&self) -> &GraphicsStore {
+        &self.gfx
+    }
+
+    /// Physical cell / pane metrics used by CSI 14/16/18 t and image placement.
+    pub fn set_pixel_metrics(
+        &mut self,
+        cell_w: u32,
+        cell_h: u32,
+        area_w: u32,
+        area_h: u32,
+        cols: u32,
+        rows: u32,
+    ) {
+        self.gfx
+            .set_pixel_metrics(cell_w, cell_h, area_w, area_h, cols, rows);
+    }
+
+    fn finish_apc(&mut self, grid: &mut CellGrid) {
+        let buf = std::mem::take(&mut self.apc_buf);
+        let overflow = self.apc_overflow;
+        self.apc_overflow = false;
+        if overflow || buf.is_empty() {
+            return;
+        }
+        if buf[0] != b'G' {
+            return;
+        }
+        let replies = self.gfx.execute(&buf[1..], grid);
+        for r in replies {
+            self.reply(&r);
+        }
     }
 
     fn reply(&mut self, bytes: &[u8]) {
@@ -214,7 +258,11 @@ impl AnsiDecoder {
                 // DCS — skip payload until ST so probes never print as text.
                 b'P' => self.esc = EscState::Dcs,
                 // APC — Kitty graphics: ESC _ G a=d,d=i,i=1,q=2 ST
-                b'_' => self.esc = EscState::Apc,
+                b'_' => {
+                    self.apc_buf.clear();
+                    self.apc_overflow = false;
+                    self.esc = EscState::Apc;
+                }
                 // PM — privacy message (rare); same swallow rule.
                 b'^' => self.esc = EscState::Pm,
                 // IND — index (move down / scroll)
@@ -245,8 +293,8 @@ impl AnsiDecoder {
                     self.osc_buf.push(b);
                 }
             }
-            // DCS / APC / PM: swallow body until BEL or ESC (then ST via `\`).
-            EscState::Dcs | EscState::Apc | EscState::Pm => {
+            // DCS / PM: swallow body until BEL or ESC (then ST via `\`).
+            EscState::Dcs | EscState::Pm => {
                 if b == 0x07 {
                     self.esc = EscState::Ground;
                 } else if b == 0x1b {
@@ -254,6 +302,23 @@ impl AnsiDecoder {
                     self.esc = EscState::Esc;
                 }
                 // else: discard payload byte (never put_char)
+            }
+            EscState::Apc => {
+                if b == 0x07 {
+                    self.finish_apc(grid);
+                    self.esc = EscState::Ground;
+                } else if b == 0x1b {
+                    // ST is ESC \; finish now so DA that follows still sees the reply.
+                    self.finish_apc(grid);
+                    self.esc = EscState::Esc;
+                } else if !self.apc_overflow {
+                    if self.apc_buf.len() >= 8 * 1024 * 1024 {
+                        self.apc_overflow = true;
+                        self.apc_buf.clear();
+                    } else {
+                        self.apc_buf.push(b);
+                    }
+                }
             }
             EscState::Csi => match b {
                 // Private / intermediate parameter bytes at sequence start.
@@ -267,16 +332,21 @@ impl AnsiDecoder {
                 0x20..=0x2f => {}
                 b'0'..=b'9' => {
                     self.csi_has_num = true;
-                    self.csi_num = self.csi_num.saturating_mul(10).saturating_add((b - b'0') as u16);
+                    self.csi_num = self
+                        .csi_num
+                        .saturating_mul(10)
+                        .saturating_add((b - b'0') as u16);
                 }
                 b';' => {
-                    self.csi_params.push(if self.csi_has_num { self.csi_num } else { 0 });
+                    self.csi_params
+                        .push(if self.csi_has_num { self.csi_num } else { 0 });
                     self.csi_num = 0;
                     self.csi_has_num = false;
                 }
                 // Final byte 0x40–0x7E (ECMA-48).
                 0x40..=0x7e => {
-                    self.csi_params.push(if self.csi_has_num { self.csi_num } else { 0 });
+                    self.csi_params
+                        .push(if self.csi_has_num { self.csi_num } else { 0 });
                     let params = std::mem::take(&mut self.csi_params);
                     let priv_ = self.csi_priv;
                     let prefix = self.csi_prefix;
@@ -302,13 +372,7 @@ impl AnsiDecoder {
         }
     }
 
-    fn exec_priv_csi(
-        &mut self,
-        grid: &mut CellGrid,
-        final_byte: u8,
-        params: &[u16],
-        prefix: u8,
-    ) {
+    fn exec_priv_csi(&mut self, grid: &mut CellGrid, final_byte: u8, params: &[u16], prefix: u8) {
         match (prefix, final_byte) {
             // CSI ? … h/l — DEC private modes
             (b'?' | 0, b'h') => {
@@ -418,6 +482,7 @@ impl AnsiDecoder {
             *grid = CellGrid::new(cols, rows);
             grid.suppress_scrollback = true;
             self.scroll_region = None;
+            self.gfx.clear_placements();
         }
     }
 
@@ -427,6 +492,7 @@ impl AnsiDecoder {
             // Restored primary keeps its own suppress flag (false).
         }
         self.scroll_region = None;
+        self.gfx.clear_placements();
         // Don't leak SGR mouse reports into the shell if the TUI forgot ?1000l.
         self.mouse_tracking = false;
         self.mouse_drag = false;
@@ -460,6 +526,7 @@ impl AnsiDecoder {
                 }
             }
             b'm' => self.sgr(grid, params),
+            b't' => self.xtwinops(params, grid),
             b'H' | b'f' => {
                 let row = p(0, 1).saturating_sub(1);
                 let col = p(1, 1).saturating_sub(1);
@@ -569,6 +636,34 @@ impl AnsiDecoder {
                 if c.row >= top && c.row <= bottom {
                     grid.scroll_region_up(c.row, bottom, n);
                 }
+            }
+            _ => {}
+        }
+    }
+
+    /// xterm window ops. Reports used by terminal-browser for pane pixels.
+    fn xtwinops(&mut self, params: &[u16], grid: &CellGrid) {
+        let what = params.first().copied().unwrap_or(0);
+        match what {
+            14 => {
+                // CSI 14 t → CSI 4 ; height ; width t  (physical px)
+                let (w, h) = self.gfx.area_px;
+                let s = format!("\x1b[4;{h};{w}t");
+                self.reply(s.as_bytes());
+            }
+            16 => {
+                // CSI 16 t → CSI 6 ; cellheight ; cellwidth t
+                let (w, h) = self.gfx.cell_px;
+                let s = format!("\x1b[6;{h};{w}t");
+                self.reply(s.as_bytes());
+            }
+            18 => {
+                // CSI 18 t → CSI 8 ; rows ; cols t
+                let (cols, rows) = self.gfx.chars;
+                let cols = if cols == 0 { grid.cols() as u32 } else { cols };
+                let rows = if rows == 0 { grid.rows() as u32 } else { rows };
+                let s = format!("\x1b[8;{rows};{cols}t");
+                self.reply(s.as_bytes());
             }
             _ => {}
         }
@@ -800,10 +895,7 @@ fn file_uri_path(uri: &str) -> Option<String> {
     if let Some(slash) = rest.find('/') {
         let host = &rest[..slash];
         let path = &rest[slash..];
-        if !host.is_empty()
-            && !host.eq_ignore_ascii_case("localhost")
-            && host != "127.0.0.1"
-        {
+        if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") && host != "127.0.0.1" {
             // UNC-ish: skip for chrome macOS path display
             return Some(format!("//{host}{path}"));
         }
@@ -857,14 +949,8 @@ mod tests {
     fn osc7_file_uri_sets_cwd() {
         let mut dec = AnsiDecoder::new();
         let mut grid = CellGrid::new(20, 5);
-        dec.feed(
-            &mut grid,
-            b"\x1b]7;file:///Users/stephen/projects\x07",
-        );
-        assert_eq!(
-            dec.take_cwd().as_deref(),
-            Some("/Users/stephen/projects")
-        );
+        dec.feed(&mut grid, b"\x1b]7;file:///Users/stephen/projects\x07");
+        assert_eq!(dec.take_cwd().as_deref(), Some("/Users/stephen/projects"));
     }
 
     #[test]
@@ -894,6 +980,57 @@ mod tests {
         );
         assert!(row0.contains("hello"), "got {row0:?}");
         assert!(row0.contains("world"), "got {row0:?}");
+    }
+
+    #[test]
+    fn kitty_graphics_query_replies_before_da() {
+        // terminal-browser probe: APC query + CSI c. Needle is `Gi=4207;OK`.
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(40, 5);
+        dec.feed(
+            &mut grid,
+            b"\x1b_Gi=4207,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\\x1b[c",
+        );
+        assert!(grid.snapshot_strings().iter().all(|s| s.is_empty()));
+        let replies = dec.take_replies();
+        let gfx = replies
+            .iter()
+            .find(|r| r.windows(8).any(|w| w == b"Gi=4207;"))
+            .expect("graphics query reply");
+        let s = String::from_utf8_lossy(gfx);
+        let at = s.find("Gi=4207;").unwrap();
+        assert!(s[at + 8..].starts_with("OK"), "{s}");
+        assert!(
+            replies.iter().any(|r| r == b"\x1b[?1;2c"),
+            "DA after query: {replies:?}"
+        );
+        let gfx_i = replies
+            .iter()
+            .position(|r| r.windows(8).any(|w| w == b"Gi=4207;"))
+            .unwrap();
+        let da_i = replies.iter().position(|r| r == b"\x1b[?1;2c").unwrap();
+        assert!(gfx_i < da_i, "query reply must beat DA");
+    }
+
+    #[test]
+    fn xtwinops_reports_pixel_and_cell_size() {
+        let mut dec = AnsiDecoder::new();
+        dec.set_pixel_metrics(7, 14, 560, 336, 80, 24);
+        let mut grid = CellGrid::new(80, 24);
+        dec.feed(&mut grid, b"\x1b[14t\x1b[16t\x1b[18t");
+        let replies = dec.take_replies();
+        assert!(
+            replies.iter().any(|r| r == b"\x1b[4;336;560t"),
+            "CSI 14 t: {replies:?}"
+        );
+        assert!(
+            replies.iter().any(|r| r == b"\x1b[6;14;7t"),
+            "CSI 16 t: {replies:?}"
+        );
+        assert!(
+            replies.iter().any(|r| r == b"\x1b[8;24;80t"),
+            "CSI 18 t: {replies:?}"
+        );
     }
 
     #[test]
@@ -1039,7 +1176,10 @@ mod tests {
         assert_eq!(grid.snapshot_strings()[0], "hello");
         dec.feed(&mut grid, b"\x1b[2J");
         let snap = grid.snapshot_strings();
-        assert!(snap.iter().all(|s| s.is_empty()), "expected blank grid, got {snap:?}");
+        assert!(
+            snap.iter().all(|s| s.is_empty()),
+            "expected blank grid, got {snap:?}"
+        );
         assert_eq!(grid.cursor().col, 0);
         assert_eq!(grid.cursor().row, 0);
     }
