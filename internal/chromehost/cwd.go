@@ -61,9 +61,17 @@ func isUnhelpfulCwd(cwd, exeDir string) bool {
 	return !looksLikeSourceTree(exeDir)
 }
 
+// windowsSlash normalizes Windows and POSIX separators so these checks work
+// in tests on darwin/linux too (filepath.ToSlash is a no-op on Unix).
+func windowsSlash(cwd string) string {
+	s := strings.TrimSpace(cwd)
+	s = strings.ReplaceAll(s, `\`, "/")
+	return s
+}
+
 // isWindowsDriveRoot is true for "C:", "C:\", "C:/".
 func isWindowsDriveRoot(cwd string) bool {
-	s := strings.TrimSpace(filepath.ToSlash(cwd))
+	s := windowsSlash(cwd)
 	if len(s) < 2 || s[1] != ':' {
 		return false
 	}
@@ -81,7 +89,7 @@ func isDriveLetter(b byte) bool {
 // isWindowsSystemCwd is true for Windows, System32, Program Files, ProgramData
 // (Start Menu / MSIX / Win+R typical launch directories).
 func isWindowsSystemCwd(cwd string) bool {
-	s := strings.ToLower(filepath.ToSlash(strings.TrimSpace(cwd)))
+	s := strings.ToLower(windowsSlash(cwd))
 	s = strings.TrimRight(s, "/")
 	if s == "" {
 		return false
