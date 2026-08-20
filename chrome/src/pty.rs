@@ -25,7 +25,7 @@ impl PtySession {
     /// Spawn the default user shell in a new PTY of the given size.
     ///
     /// Shell selection: `$SHELL` if set and non-empty, else `/bin/zsh` on macOS,
-    /// `cmd.exe` on Windows, `/bin/bash` elsewhere.
+    /// PowerShell (pwsh → powershell → COMSPEC) on Windows, `/bin/bash` elsewhere.
     pub fn spawn(cols: u16, rows: u16) -> Result<Self, String> {
         Self::spawn_with_pixels(cols, rows, 0, 0)
     }
@@ -60,8 +60,11 @@ impl PtySession {
             .map_err(|e| format!("openpty: {e}"))?;
 
         let shell = default_shell();
-        let mut cmd = CommandBuilder::new(&shell);
-        // Attached to a PTY → shells run interactive without extra flags.
+        let mut cmd = CommandBuilder::new(&shell.program);
+        cmd.args(&shell.args);
+        // Attached to a PTY → shells run interactive without extra flags
+        // (Windows PowerShell gets -NoLogo/-NoProfile + OSC cwd, matching
+        // the Go host DefaultShell).
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         let dir = cwd
@@ -77,7 +80,7 @@ impl PtySession {
         let child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| format!("spawn {shell}: {e}"))?;
+            .map_err(|e| format!("spawn {}: {e}", shell.program))?;
 
         let mut reader = pair
             .master
@@ -189,25 +192,136 @@ impl Drop for PtySession {
     }
 }
 
-fn default_shell() -> String {
+/// Program + argv for the user's default interactive shell.
+struct ShellSpec {
+    program: String,
+    args: Vec<String>,
+}
+
+fn default_shell() -> ShellSpec {
     if let Ok(shell) = std::env::var("SHELL") {
         if !shell.is_empty() {
-            return shell;
+            return ShellSpec {
+                program: shell,
+                args: Vec::new(),
+            };
         }
     }
-    if cfg!(windows) {
-        // ConPTY path; portable-pty maps this on Windows.
-        "cmd.exe".into()
-    } else if cfg!(target_os = "macos") {
-        "/bin/zsh".into()
+    #[cfg(windows)]
+    {
+        return windows_shell();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return ShellSpec {
+            program: "/bin/zsh".into(),
+            args: Vec::new(),
+        };
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        ShellSpec {
+            program: "/bin/bash".into(),
+            args: Vec::new(),
+        }
+    }
+}
+
+/// Same order as Go `host.DefaultShell`: pwsh → powershell → COMSPEC → cmd.
+/// Quiet in-band prompt + OSC 7878 cwd so the warp path bar tracks `cd`.
+#[cfg(windows)]
+fn windows_shell() -> ShellSpec {
+    const PS_QUIET: &str = "function global:prompt { try { $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}; ' ' }; Clear-Host; try { $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}";
+    if let Some(ps) = look_exe(&["pwsh.exe", "pwsh"]).or_else(well_known_pwsh) {
+        return ShellSpec {
+            program: ps,
+            args: vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NoExit".into(),
+                "-Command".into(),
+                PS_QUIET.into(),
+            ],
+        };
+    }
+    if let Some(ps) = look_exe(&["powershell.exe", "powershell"]).or_else(well_known_powershell) {
+        return ShellSpec {
+            program: ps,
+            args: vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-NoExit".into(),
+                "-Command".into(),
+                PS_QUIET.into(),
+            ],
+        };
+    }
+    let comspec =
+        std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+    ShellSpec {
+        program: comspec,
+        args: vec!["/k".into(), r"prompt $E]7878;cwd=$P$E\$S".into()],
+    }
+}
+
+#[cfg(windows)]
+fn look_exe(names: &[&str]) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn well_known_pwsh() -> Option<String> {
+    let mut cands = Vec::new();
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        cands.push(std::path::PathBuf::from(pf).join(r"PowerShell\7\pwsh.exe"));
+    }
+    for p in cands {
+        if p.is_file() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn well_known_powershell() -> Option<String> {
+    let p = std::path::Path::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+    if p.is_file() {
+        Some(p.to_string_lossy().into_owned())
     } else {
-        "/bin/bash".into()
+        None
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_shell_is_not_system32_cmd() {
+        let shell = windows_shell();
+        let low = shell.program.replace('\\', "/").to_ascii_lowercase();
+        assert!(
+            !low.ends_with("/cmd.exe"),
+            "Windows should prefer PowerShell, got {}",
+            shell.program
+        );
+        assert!(
+            shell.args.iter().any(|a| a.contains("7878;cwd=")),
+            "expected OSC cwd hook in {:?}",
+            shell.args
+        );
+    }
 
     #[test]
     fn spawn_default_shell_does_not_panic() {
