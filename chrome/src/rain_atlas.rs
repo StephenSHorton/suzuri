@@ -47,6 +47,9 @@ impl RainAtlas {
         let mut swash = SwashCache::new();
         let font_px = (CELL_PX as f32 * 0.72).round();
         let metrics = Metrics::new(font_px, CELL_PX as f32);
+        let family = rain_family_name(&font_system);
+        let attrs = Attrs::new().family(Family::Name(family.as_str()));
+        eprintln!("suzuri-chrome: rain glyphs · {family}");
 
         for (i, ch) in glyphs.iter().enumerate() {
             let gx = (i as u32) % grid;
@@ -60,12 +63,6 @@ impl RainAtlas {
                 Some(CELL_PX as f32),
                 Some(CELL_PX as f32),
             );
-            // Prefer CJK face for half-width katakana (macOS).
-            #[cfg(target_os = "macos")]
-            let attrs = Attrs::new().family(Family::Name("Hiragino Sans"));
-            #[cfg(not(target_os = "macos"))]
-            let attrs = Attrs::new().family(Family::Monospace);
-
             buffer.set_text(
                 &mut font_system,
                 &ch.to_string(),
@@ -153,4 +150,53 @@ impl RainAtlas {
             grid: grid as f32,
         }
     }
+}
+
+/// Face for half-width katakana rain. macOS uses Hiragino (AA outlines).
+/// Windows `Family::Monospace` often falls through to MS Gothic bitmaps —
+/// those look like ASCII blocks. Prefer Yu Gothic / Meiryo outlines.
+pub fn rain_family_name(font_system: &FontSystem) -> String {
+    let preferred: &[&str] = if cfg!(target_os = "macos") {
+        &["Hiragino Sans", "Hiragino Kaku Gothic ProN", "Hiragino Maru Gothic Pro"]
+    } else if cfg!(target_os = "windows") {
+        &[
+            "Yu Gothic",
+            "Yu Gothic UI",
+            "YuGothic",
+            "Meiryo",
+            "Meiryo UI",
+            "Microsoft YaHei UI",
+            "Microsoft YaHei",
+            "Malgun Gothic",
+            "Segoe UI",
+        ]
+    } else {
+        &["Noto Sans CJK JP", "Noto Sans CJK", "Noto Sans"]
+    };
+    pick_installed_family(font_system, preferred)
+        .unwrap_or_else(|| "sans-serif".into())
+}
+
+fn pick_installed_family(font_system: &FontSystem, names: &[&str]) -> Option<String> {
+    let faces: Vec<String> = font_system
+        .db()
+        .faces()
+        .flat_map(|f| f.families.iter().map(|(n, _)| n.clone()))
+        .collect();
+    for want in names {
+        for name in &faces {
+            if name.eq_ignore_ascii_case(want) {
+                return Some(name.clone());
+            }
+        }
+    }
+    for want in names {
+        let needle = want.to_ascii_lowercase();
+        for name in &faces {
+            if name.to_ascii_lowercase().contains(&needle) {
+                return Some(name.clone());
+            }
+        }
+    }
+    None
 }

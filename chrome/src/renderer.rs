@@ -171,6 +171,12 @@ pub struct Renderer {
 
     /// Chrome + terminal text labels.
     text: TextLayer,
+    /// 2× overlay on sub-retina Windows (Gohu 14px is 1-bit without this).
+    text_aa_tex: Option<wgpu::Texture>,
+    text_aa_view: Option<wgpu::TextureView>,
+    text_aa_boost: f32,
+    text_aa_pipeline: wgpu::RenderPipeline,
+    text_aa_bgl: wgpu::BindGroupLayout,
 
     /// Magnifying-glass bubble (pinch / Ctrl·Cmd+scroll). Not always-on.
     lens_pos: [f32; 2],
@@ -558,7 +564,9 @@ impl Renderer {
             });
 
         let mut text = TextLayer::new(&device, &queue, format);
-        text.resize(size, scale_factor);
+        let text_aa = create_text_aa_blit(&device, format);
+        let (text_aa_tex, text_aa_view, text_aa_boost) =
+            configure_text_aa(&device, format, size, scale_factor, &mut text);
 
         let (scene_tex, scene_view) =
             create_scene_target(&device, format, config.width, config.height);
@@ -677,6 +685,11 @@ impl Renderer {
             start: std::time::Instant::now(),
             last_frame: std::time::Instant::now(),
             text,
+            text_aa_tex,
+            text_aa_view,
+            text_aa_boost,
+            text_aa_pipeline: text_aa.0,
+            text_aa_bgl: text_aa.1,
             lens_pos: [cx, cy],
             lens_target: [cx, cy],
             mag_level: 0.0,
@@ -1034,7 +1047,16 @@ impl Renderer {
         );
         self.scene_tex = st;
         self.scene_view = sv;
-        self.text.resize(new_size, scale_factor);
+        let (tex, view, boost) = configure_text_aa(
+            &self.device,
+            self.surface_format,
+            new_size,
+            scale_factor,
+            &mut self.text,
+        );
+        self.text_aa_tex = tex;
+        self.text_aa_view = view;
+        self.text_aa_boost = boost;
     }
 
     /// Small always-on-top surface that shares this GPU device (no second adapter).
@@ -1731,8 +1753,63 @@ impl Renderer {
         let body_changed =
             self.text
                 .prepare_body_and_caret(&self.device, &self.queue, &body, &carets);
-        self.text
-            .render(&self.device, &mut encoder, &self.scene_view);
+        if self.text_aa_boost > 1.01 {
+            if let Some(aa_view) = &self.text_aa_view {
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("text aa src"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: aa_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    self.text.render_in_pass(&mut pass);
+                }
+                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("text aa blit"),
+                    layout: &self.text_aa_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(aa_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("text aa blit"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &self.scene_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&self.text_aa_pipeline);
+                    pass.set_bind_group(0, &bind, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+            }
+        } else {
+            self.text
+                .render(&self.device, &mut encoder, &self.scene_view);
+        }
 
         // Pass 3: cursor glass lens samples full scene → swapchain
         let lens_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4006,6 +4083,96 @@ fn sizes_close(a: u32, b: u32) -> bool {
     }
     let d = a.abs_diff(b);
     d <= 8 || d * 10 < a.max(b)
+}
+
+/// Sub-retina Windows (100–125%): rasterize Gohu at 2× so outline coverage
+/// anti-aliases like macOS retina, then linear-downsample onto the scene.
+fn text_ssaa_boost(scale_factor: f32) -> f32 {
+    #[cfg(target_os = "windows")]
+    if scale_factor < 1.51 {
+        return 2.0;
+    }
+    let _ = scale_factor;
+    1.0
+}
+
+fn configure_text_aa(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    physical: winit::dpi::PhysicalSize<u32>,
+    scale_factor: f32,
+    text: &mut crate::text::TextLayer,
+) -> (Option<wgpu::Texture>, Option<wgpu::TextureView>, f32) {
+    let boost = text_ssaa_boost(scale_factor);
+    let tw = ((physical.width as f32) * boost).round().max(1.0) as u32;
+    let th = ((physical.height as f32) * boost).round().max(1.0) as u32;
+    text.resize(winit::dpi::PhysicalSize::new(tw, th), scale_factor * boost);
+    if boost <= 1.01 {
+        return (None, None, 1.0);
+    }
+    let (tex, view) = create_scene_target(device, format, tw, th);
+    (Some(tex), Some(view), boost)
+}
+
+fn create_text_aa_blit(
+    device: &wgpu::Device,
+    target: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("text aa blit"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/text_aa.wgsl").into()),
+    });
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("text aa bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("text aa pipeline"),
+        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("text aa pl"),
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        })),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: target,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+    (pipeline, bgl)
 }
 
 fn create_guest_blit(
