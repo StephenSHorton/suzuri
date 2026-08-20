@@ -991,7 +991,8 @@ impl ChromeApp {
                 || (self.session.is_widget(id) && !self.session.pane_kind(id).is_guest())
         });
         for pl in &mut layout.panes {
-            pl.hole = self.session.pane_kind(pl.pane_id).is_guest();
+            pl.hole = self.session.pane_kind(pl.pane_id).is_guest()
+                || alt_ids.contains(&pl.pane_id);
         }
         tab.root
             .collect_sashes(layout.workspace, gap, &mut layout.sashes);

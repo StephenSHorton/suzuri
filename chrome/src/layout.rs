@@ -519,11 +519,14 @@ impl FrameLayout {
                 PanelKind::Terminal,
             ));
             if pl.hole && pl.cells.w > 4.0 && pl.cells.h > 4.0 {
-                out.push(PanelInstance::glass(
-                    pl.cells,
-                    (m.radius - 2.0).max(1.0),
-                    PanelKind::GuestHole,
-                ));
+                // Alt-screen (warp collapsed): square punch so rain cannot leak
+                // at the well corners. Guest blit keeps a slight round.
+                let hole_r = if pl.warp.h < 1.0 {
+                    0.0
+                } else {
+                    (m.radius - 2.0).max(1.0)
+                };
+                out.push(PanelInstance::glass(pl.cells, hole_r, PanelKind::GuestHole));
             }
             {
                 let id = ChipId::PaneClose(pl.pane_id);
@@ -708,7 +711,8 @@ fn pane_layout_in_glass(
             title_pill,
             close,
             focused,
-            hole: false,
+            // Opaque well so glyph rain does not read through vim/Grok.
+            hole: true,
         };
     }
 
@@ -954,6 +958,25 @@ mod tests {
         assert!(!a.intersects(c));
         assert!(a.contains(0.0, 0.0));
         assert!(!a.contains(10.0, 10.0));
+    }
+
+    #[test]
+    fn alt_screen_fullscreen_punches_an_opaque_cell_well() {
+        let m = Metrics::default();
+        let mut l = FrameLayout::compute(800.0, 600.0, m, 1);
+        let glass = l.panes[0].glass;
+        let id = l.panes[0].pane_id;
+        l.apply_pane_rects(m, &[(id, glass)], id, &|_| true);
+        assert!(l.panes[0].hole, "alt-screen well should hide glyph rain");
+        assert!(l.panes[0].warp.h < 1.0, "warp strip collapses");
+        let chip = crate::chrome_ui::ChipUi::default();
+        let jelly = crate::chrome_ui::TabJelly::default();
+        let holes = l
+            .glass_panels(m, 0, None, &chip, &jelly)
+            .iter()
+            .filter(|p| (p.kind - PanelKind::GuestHole as u32 as f32).abs() < 0.1)
+            .count();
+        assert_eq!(holes, 1);
     }
 
     #[test]
