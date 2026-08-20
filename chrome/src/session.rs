@@ -65,6 +65,8 @@ pub struct Pane {
     pub grid: CellGrid,
     pub pty_mode: bool,
     pub cwd: String,
+    /// True once OSC or a manual rename owns the header (stop mirroring cwd).
+    pub title_user: bool,
     /// Local command draft for this pane's input strip.
     pub draft: DraftLine,
     /// Manifest id when [`PaneKind`] is a guest. None for terminals / workspace.
@@ -78,12 +80,13 @@ pub struct Pane {
 fn new_terminal_pane(id: u64, cols: u16, rows: u16, cwd: String) -> Pane {
     Pane {
         id,
-        title: format!("shell {id}"),
+        title: display_path(&cwd),
         kind: PaneKind::Terminal,
         busy: false,
         grid: CellGrid::new(cols, rows),
         pty_mode: false,
         cwd,
+        title_user: false,
         draft: DraftLine::new(),
         guest_id: None,
         guest_url: String::new(),
@@ -106,6 +109,7 @@ fn new_widget_pane(id: u64, kind: WidgetKind, cwd: String) -> Pane {
         grid: CellGrid::new(8, 4),
         pty_mode: false,
         cwd,
+        title_user: true,
         draft: DraftLine::new(),
         guest_id: None,
         guest_url: String::new(),
@@ -263,24 +267,23 @@ impl ChromeSession {
 
     pub fn set_cwd(&mut self, pane_id: u64, path: String) {
         if let Some(p) = self.panes.get_mut(&pane_id) {
-            if !path.is_empty() {
-                p.cwd = path;
-            }
+            assign_cwd(p, path);
         }
     }
 
     /// Apply an OSC 0/2 window title to a pane only (not the chrome tab strip).
     ///
     /// Product rule: OSC renames panes; multi-pane tabs keep a sticky strip title.
-    /// Empty titles are ignored. Manual rename uses [`Self::rename_focused_pane`] /
-    /// [`Self::rename_active_tab`] and is independent of OSC.
+    /// Empty titles and ConPTY's default "path-to-shell.exe" titles are ignored.
+    /// Manual rename uses [`Self::rename_focused_pane`] / [`Self::rename_active_tab`].
     pub fn set_pane_title(&mut self, pane_id: u64, title: String) {
         let title = title.trim();
-        if title.is_empty() {
+        if title.is_empty() || is_unhelpful_osc_title(title) {
             return;
         }
         if let Some(p) = self.panes.get_mut(&pane_id) {
             p.title = title.to_string();
+            p.title_user = true;
         }
     }
 
@@ -320,20 +323,29 @@ impl ChromeSession {
 
     /// Manual "Rename pane" — sets the focused leaf title only.
     ///
-    /// Empty clears to `shell {id}`. The tab strip is never changed.
+    /// Empty restores the cwd header (`~` / project path). The tab strip is
+    /// never changed.
     pub fn rename_focused_pane(&mut self, name: &str) {
         let name = name.trim();
         let focus = self.focus_pane_id();
-        let resolved = if name.is_empty() {
-            match self.panes.get(&focus).map(|p| p.kind) {
-                Some(PaneKind::Widget(k)) => k.title().to_string(),
-                _ => format!("shell {focus}"),
+        if name.is_empty() {
+            if let Some(p) = self.panes.get_mut(&focus) {
+                match p.kind {
+                    PaneKind::Widget(k) => {
+                        p.title = k.title().to_string();
+                        p.title_user = true;
+                    }
+                    PaneKind::Terminal => {
+                        p.title_user = false;
+                        p.title = display_path(&p.cwd);
+                    }
+                }
             }
-        } else {
-            name.to_string()
-        };
+            return;
+        }
         if let Some(p) = self.panes.get_mut(&focus) {
-            p.title = resolved;
+            p.title = name.to_string();
+            p.title_user = true;
         }
     }
 
@@ -343,7 +355,7 @@ impl ChromeSession {
             return;
         };
         if let Some(next) = cwd_after_command(&p.cwd, line) {
-            p.cwd = next;
+            assign_cwd(p, next);
         }
     }
 
@@ -1495,6 +1507,40 @@ fn is_filesystem_root(cwd_n: &str) -> bool {
         && (b.len() == 2 || b[2] == b'/')
 }
 
+fn assign_cwd(p: &mut Pane, path: String) {
+    if path.is_empty() {
+        return;
+    }
+    p.cwd = path;
+    if !p.title_user {
+        p.title = display_path(&p.cwd);
+    }
+}
+
+/// ConPTY / Windows PowerShell default OSC 0/2 title is the shell image path
+/// (`C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`). That is not
+/// a pane name and looks like a bogus PWD in the header.
+fn is_unhelpful_osc_title(title: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return true;
+    }
+    let slash = t.replace('\\', "/");
+    let low = slash.to_ascii_lowercase();
+    if low.ends_with(".exe")
+        || low.ends_with(".com")
+        || low.ends_with(".bat")
+        || low.ends_with(".cmd")
+    {
+        return true;
+    }
+    let base = low.rsplit('/').next().unwrap_or(&low);
+    matches!(
+        base,
+        "powershell.exe" | "pwsh.exe" | "cmd.exe" | "powershell" | "pwsh" | "cmd"
+    )
+}
+
 fn is_windows_system_cwd(cwd_n: &str) -> bool {
     let mut u = slashify_display(cwd_n).to_ascii_lowercase();
     while u.ends_with('/') {
@@ -2014,8 +2060,34 @@ mod tests {
         let mut s = ChromeSession::new(80, 24);
         s.rename_focused_pane("tmp");
         s.rename_focused_pane("");
-        assert_eq!(s.active_pane().unwrap().title, "shell 1");
+        let want = display_path(&s.active_pane().unwrap().cwd);
+        assert_eq!(s.active_pane().unwrap().title, want);
         assert_eq!(s.active_tab().unwrap().title, "tab 1");
+    }
+
+    #[test]
+    fn osc_shell_exe_title_is_ignored() {
+        let mut s = ChromeSession::new(80, 24);
+        let before = s.active_pane().unwrap().title.clone();
+        s.set_pane_title(
+            1,
+            r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".into(),
+        );
+        s.set_pane_title(1, "powershell.exe".into());
+        s.set_pane_title(1, r"C:\Windows\System32\cmd.exe".into());
+        assert_eq!(s.active_pane().unwrap().title, before);
+        s.set_pane_title(1, "nvim".into());
+        assert_eq!(s.active_pane().unwrap().title, "nvim");
+    }
+
+    #[test]
+    fn cwd_updates_auto_pane_title() {
+        let mut s = ChromeSession::new(80, 24);
+        s.set_cwd(1, r"C:\Users\stephen".into());
+        assert_eq!(s.active_pane().unwrap().title, display_path(r"C:\Users\stephen"));
+        s.set_pane_title(1, "nvim".into());
+        s.set_cwd(1, r"C:\Users\stephen\src".into());
+        assert_eq!(s.active_pane().unwrap().title, "nvim");
     }
 
     #[test]
