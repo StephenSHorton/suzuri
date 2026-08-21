@@ -6,6 +6,7 @@
 #     --binary ./suzuri \
 #     --transfer ./suzuri-transfer \
 #     --chrome ./suzuri-chrome \
+#     --workspace-sync ./suzuri-workspace-sync \
 #     --version 0.9.29 \
 #     --out dist
 #
@@ -18,6 +19,7 @@ set -euo pipefail
 BINARY=""
 TRANSFER=""
 CHROME=""
+WORKSPACE_SYNC=""
 VERSION="0.0.0-dev"
 OUT_DIR="dist"
 ARCH="$(uname -m)"
@@ -32,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --binary) BINARY="$2"; shift 2 ;;
     --transfer) TRANSFER="$2"; shift 2 ;;
     --chrome) CHROME="$2"; shift 2 ;;
+    --workspace-sync) WORKSPACE_SYNC="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
     --arch) GOARCH="$2"; shift 2 ;;
@@ -77,6 +80,11 @@ if [[ -n "$CHROME" && -f "$CHROME" ]]; then
   cp "$CHROME" "$MACOS_DIR/suzuri-chrome"
   chmod +x "$MACOS_DIR/suzuri-chrome"
   echo "==> bundled native chrome (suzuri-chrome)"
+fi
+if [[ -n "$WORKSPACE_SYNC" && -f "$WORKSPACE_SYNC" ]]; then
+  cp "$WORKSPACE_SYNC" "$MACOS_DIR/suzuri-workspace-sync"
+  chmod +x "$MACOS_DIR/suzuri-workspace-sync"
+  echo "==> bundled workspace-sync engine"
 fi
 
 # Info.plist with version stamped
@@ -198,6 +206,12 @@ if command -v codesign >/dev/null 2>&1; then
   codesign_one "$MACOS_DIR/suzuri" 0
   if [[ -f "$MACOS_DIR/suzuri-transfer" ]]; then
     codesign_one "$MACOS_DIR/suzuri-transfer" 0
+  fi
+  if [[ -f "$MACOS_DIR/suzuri-workspace-sync" ]]; then
+    codesign_one "$MACOS_DIR/suzuri-workspace-sync" 0
+  fi
+  if [[ -f "$MACOS_DIR/suzuri-chrome" ]]; then
+    codesign_one "$MACOS_DIR/suzuri-chrome" 0
   fi
   codesign_one "$APP_PATH" 1
   echo "==> codesign verify"

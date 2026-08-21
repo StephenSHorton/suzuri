@@ -2841,25 +2841,36 @@ fn push_workspace_glass(
     if include_shell {
         panels.push(PanelInstance::glass(host, m.radius, PanelKind::Modal).with_opacity(ease));
     }
-    let pad = 14.0;
-    let list_w = workspace_ui.channel_list_w(win_w, win_h);
-    let ch = Rect::new(
-        host.x + pad,
-        host.y + pad,
-        list_w,
-        host.h - pad * 2.0 - 52.0,
-    );
-    panels.push(PanelInstance::glass(ch, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease));
-    let msg = Rect::new(
-        ch.x + ch.w + 10.0,
-        host.y + pad,
-        host.x + host.w - pad - (ch.x + ch.w + 10.0),
-        ch.h,
-    );
-    if msg.w > 8.0 {
+    let lay = workspace_ui.layout(win_w, win_h);
+    if lay.rail.w > 8.0 && lay.rail.h > 8.0 {
         panels.push(
-            PanelInstance::glass(msg, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
+            PanelInstance::glass(lay.rail, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
         );
+    }
+    let msg_glass = Rect::new(
+        lay.messages.x,
+        lay.presence.y,
+        lay.messages.w,
+        (lay.compose.y - 6.0 - lay.presence.y).max(0.0),
+    );
+    if msg_glass.w > 8.0 && msg_glass.h > 8.0 {
+        panels.push(
+            PanelInstance::glass(msg_glass, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
+        );
+    }
+    if lay.connect.w > 8.0 && lay.connect.h > 8.0 {
+        panels.push(
+            PanelInstance::glass(lay.connect, m.chip_radius, PanelKind::ModalFrost)
+                .with_opacity(ease * 0.7),
+        );
+    }
+    for (r, _, action) in workspace_ui.connect_buttons(win_w, win_h) {
+        let kind = if action == crate::workspace_ui::ConnectAction::Share {
+            PanelKind::ModalButtonActive
+        } else {
+            PanelKind::ModalFrost
+        };
+        panels.push(PanelInstance::glass(r, m.chip_radius, kind).with_opacity(ease));
     }
     for b in workspace_ui.layout_bubbles(win_w, win_h, accent) {
         let kind = if b.mine {
@@ -2873,15 +2884,12 @@ fn push_workspace_glass(
                 .with_tint(b.tint, b.tint_strength),
         );
     }
-    let input = Rect::new(
-        host.x + pad,
-        host.y + host.h - pad - 44.0,
-        host.w - pad * 2.0,
-        44.0,
-    );
-    panels.push(
-        PanelInstance::glass(input, m.chip_radius + 2.0, PanelKind::ModalFrost).with_opacity(ease),
-    );
+    if lay.compose.w > 8.0 && lay.compose.h > 8.0 {
+        panels.push(
+            PanelInstance::glass(lay.compose, m.chip_radius + 2.0, PanelKind::ModalFrost)
+                .with_opacity(ease),
+        );
+    }
 }
 
 fn push_workspace_labels(
@@ -2898,99 +2906,187 @@ fn push_workspace_labels(
     caret_a: f32,
     cover_cards: &[crate::layout::Rect],
 ) {
-    use crate::workspace_ui::{ComposeMode, CHANNEL_LIST_TOP, CHANNEL_ROW_H, COMPOSE_H, MODAL_PAD};
-    let modal = workspace_ui.card_rect(win_w, win_h);
-    let pad = MODAL_PAD;
-    let list_w = workspace_ui.channel_list_w(win_w, win_h);
+    use crate::workspace_ui::{ComposeMode, CHANNEL_ROW_H};
+    let lay = workspace_ui.layout(win_w, win_h);
     let skip =
         |x: f32, y: f32| hidden_by_cards(crate::layout::Rect::new(x, y, 12.0, 14.0), cover_cards);
+    let clip = |lab: TextLabel, r: crate::layout::Rect| {
+        let mut lab = lab;
+        if r.w > 1.0 && r.h > 1.0 {
+            lab.clip = Some([r.x, r.y, r.w, r.h]);
+        }
+        lab
+    };
     let mut title_c = bright;
     title_c[3] *= ease;
-    if !skip(modal.x + pad, modal.y + 8.0) {
-        labels.push(TextLabel::new(
-            "Workspace",
-            modal.x + pad,
-            modal.y + 8.0,
-            13.0,
-            title_c,
+    if lay.title.w > 8.0 && !skip(lay.title.x, lay.title.y) {
+        let title = if lay.compact {
+            format!("#{}", workspace_ui.channel)
+        } else {
+            "Workspace".into()
+        };
+        let max_ch = ((lay.title.w / 7.0).floor() as usize).max(2);
+        labels.push(clip(
+            TextLabel::new(
+                truncate_chars(&title, max_ch),
+                lay.title.x,
+                lay.title.y + 3.0,
+                13.0,
+                title_c,
+            ),
+            lay.title,
         ));
     }
     {
-        // One label per chip so engine + engine-2 are never collapsed by truncate.
-        let chips = workspace_ui.members_strip_chips();
-        let mut x = modal.x + pad + list_w + 10.0;
-        let add = workspace_ui.add_agent_chip_rect(win_w, win_h);
+        let add = lay.add_agent;
+        let chips = workspace_ui.fitted_presence_chips(lay.presence.w);
+        let mut x = lay.presence.x;
         for chip in chips {
-            if x + 8.0 >= add.x {
-                break;
-            }
-            if !skip(x, modal.y + 8.0) {
+            if !skip(x, lay.presence.y) {
                 let mut sc = dim;
                 sc[3] *= ease;
-                labels.push(TextLabel::new(chip.clone(), x, modal.y + 8.0, 11.0, sc));
+                labels.push(clip(
+                    TextLabel::new(chip.clone(), x, lay.presence.y + 3.0, 11.0, sc),
+                    lay.presence,
+                ));
             }
             x += chip.chars().count() as f32 * 6.4 + 10.0;
+            if x >= lay.presence.x + lay.presence.w {
+                break;
+            }
         }
-        if !skip(add.x, modal.y + 8.0) {
+        if add.w > 8.0 && !skip(add.x, add.y) {
             let mut ac = bright;
             ac[3] *= ease;
-            labels.push(TextLabel::new(
-                "+ Agent".to_string(),
-                add.x,
-                modal.y + 8.0,
-                11.0,
-                ac,
+            labels.push(clip(
+                TextLabel::new(
+                    lay.add_agent_label().to_string(),
+                    add.x,
+                    add.y + 3.0,
+                    11.0,
+                    ac,
+                ),
+                add,
             ));
         }
     }
     {
-        let pin = workspace_ui.topic_pin_rect(win_w, win_h);
+        let pin = lay.topic;
         if workspace_ui.mode == ComposeMode::PickAgentRole {
             for (i, role) in crate::workspace_store::AGENT_ROLES.iter().enumerate() {
                 let r = workspace_ui.agent_role_rect(i, win_w, win_h);
-                if skip(r.x, pin.y) {
+                if pin.w < 8.0 || skip(r.x, pin.y) {
                     continue;
                 }
                 let mut tc = bright;
                 tc[3] *= ease;
                 labels.push(TextLabel::new((*role).to_string(), r.x, pin.y, 11.0, tc));
             }
-        } else if !skip(pin.x, pin.y) {
+        } else if pin.w > 8.0 && !skip(pin.x, pin.y) {
             let mut tc = dim;
             tc[3] *= ease;
-            labels.push(TextLabel::new(
-                truncate_chars(&workspace_ui.topic_pin_text(), 64),
-                pin.x,
-                pin.y,
-                11.0,
-                tc,
+            let max_ch = ((pin.w / 6.4).floor() as usize).max(4);
+            labels.push(clip(
+                TextLabel::new(
+                    truncate_chars(&workspace_ui.topic_pin_text(), max_ch),
+                    pin.x,
+                    pin.y,
+                    11.0,
+                    tc,
+                ),
+                pin,
             ));
         }
-    }
-    let mut y = modal.y + CHANNEL_LIST_TOP;
-    for ch in &workspace_ui.channels {
-        let mut tc = if *ch == workspace_ui.channel {
-            bright
+        let bar = lay.connect;
+        let btns = workspace_ui.connect_buttons(win_w, win_h);
+        let stacked = bar.h > 26.0;
+        let prompt_right = if stacked {
+            bar.x + bar.w
         } else {
-            muted
+            btns.first()
+                .map(|(r, _, _)| r.x - 8.0)
+                .unwrap_or(bar.x + bar.w)
         };
-        tc[3] *= ease;
-        if !skip(modal.x + pad + 10.0, y) {
-            labels.push(TextLabel::new(
-                format!("#{ch}"),
-                modal.x + pad + 10.0,
-                y,
-                12.0,
-                tc,
+        if bar.w > 8.0 && !skip(bar.x, bar.y) && prompt_right > bar.x + 12.0 {
+            let jade = settings.prefs.theme_colors().jade;
+            let c = if workspace_ui.sync_is_live() {
+                [jade[0], jade[1], jade[2], 0.98 * ease]
+            } else {
+                let mut d = dim;
+                d[3] *= ease;
+                d
+            };
+            let max_chars = ((prompt_right - bar.x) / 6.4).floor().max(4.0) as usize;
+            let prompt_clip = crate::layout::Rect::new(
+                bar.x,
+                bar.y,
+                (prompt_right - bar.x).max(0.0),
+                if stacked { 20.0 } else { bar.h },
+            );
+            labels.push(clip(
+                TextLabel::new(
+                    truncate_chars(&workspace_ui.connect_prompt(), max_chars),
+                    bar.x,
+                    bar.y + 4.0,
+                    11.0,
+                    c,
+                ),
+                prompt_clip,
             ));
         }
-        y += CHANNEL_ROW_H;
+        for (r, label, action) in btns {
+            if skip(r.x, r.y) {
+                continue;
+            }
+            let mut tc = if action == crate::workspace_ui::ConnectAction::Share
+                || workspace_ui.sync_is_live() && action == crate::workspace_ui::ConnectAction::Stop
+            {
+                bright
+            } else {
+                dim
+            };
+            tc[3] *= ease;
+            labels.push(clip(
+                TextLabel::new(label.to_string(), r.x + 6.0, r.y + 4.0, 11.0, tc),
+                r,
+            ));
+        }
     }
-    {
-        let mut tc = dim;
-        tc[3] *= ease;
-        if !skip(modal.x + pad + 10.0, y) {
-            labels.push(TextLabel::new("+ New", modal.x + pad + 10.0, y, 12.0, tc));
+    if !lay.compact && lay.rail.w > 8.0 {
+        let list = workspace_ui.channel_list_rect(win_w, win_h);
+        let mut y = list.y;
+        for ch in &workspace_ui.channels {
+            let mut tc = if *ch == workspace_ui.channel {
+                bright
+            } else {
+                muted
+            };
+            tc[3] *= ease;
+            if y + 12.0 > list.y + list.h {
+                break;
+            }
+            if !skip(list.x + 8.0, y) {
+                let max_ch = ((list.w / 7.0).floor() as usize).max(2);
+                labels.push(clip(
+                    TextLabel::new(
+                        truncate_chars(&format!("#{ch}"), max_ch),
+                        list.x + 8.0,
+                        y,
+                        12.0,
+                        tc,
+                    ),
+                    crate::layout::Rect::new(list.x, y, list.w, CHANNEL_ROW_H),
+                ));
+            }
+            y += CHANNEL_ROW_H;
+        }
+        if y + 12.0 <= list.y + list.h && !skip(list.x + 8.0, y) {
+            let mut tc = dim;
+            tc[3] *= ease;
+            labels.push(clip(
+                TextLabel::new("+ New", list.x + 8.0, y, 12.0, tc),
+                crate::layout::Rect::new(list.x, y, list.w, CHANNEL_ROW_H),
+            ));
         }
     }
     let accent = settings.prefs.theme_colors().jade;
@@ -3033,7 +3129,7 @@ fn push_workspace_labels(
             ));
         }
     }
-    let input_y = modal.y + modal.h - pad - COMPOSE_H;
+    let input_y = lay.compose.y;
     if workspace_ui.mention_picker_open() {
         let cands = workspace_ui.mention_candidates();
         let sel = workspace_ui.mention_selected();
@@ -3041,7 +3137,7 @@ fn push_workspace_labels(
         let show_n = cands.len().min(6);
         let box_h = row_h * show_n as f32 + 8.0;
         let box_y = input_y - box_h - 4.0;
-        let box_x = modal.x + pad + list_w + 10.0;
+        let box_x = lay.compose.x + 10.0;
         for (i, m) in cands.iter().take(show_n).enumerate() {
             if skip(box_x, box_y + 4.0 + i as f32 * row_h) {
                 continue;
@@ -3068,15 +3164,16 @@ fn push_workspace_labels(
             ));
         }
     }
-    if !skip(modal.x + pad + 14.0, input_y + 14.0) {
+    if lay.compose.w > 8.0 && !skip(lay.compose.x + 14.0, input_y + 14.0) {
         let placeholder = match workspace_ui.mode {
             ComposeMode::NewChannel => "Channel name · Enter to create",
             ComposeMode::AttachPath => "Path to attach · Enter to upload",
             ComposeMode::PickAgentRole => "Role: pm · engine · content · Enter copies kickoff",
             ComposeMode::SetTopic => "Topic · Enter to pin on this channel",
+            ComposeMode::JoinTicket => "Paste their Share ticket · Enter to join",
             ComposeMode::Message => "Message #… · @mention · Enter to send",
         };
-        let draft_x = modal.x + pad + 14.0;
+        let draft_x = lay.compose.x + 14.0;
         let draft_y = input_y + 14.0;
         if workspace_ui.draft.is_empty() {
             let mut dc = dim;
@@ -3116,15 +3213,18 @@ fn push_workspace_labels(
             );
         }
     }
-    if !workspace_ui.status.is_empty() {
+    let prompt = workspace_ui.connect_prompt();
+    if !workspace_ui.status.is_empty() && workspace_ui.status != prompt && lay.compose.w > 8.0 {
         let mut sc = dim;
         sc[3] *= ease;
-        let x = modal.x + pad + list_w + 10.0;
-        if !skip(x, modal.y + modal.h - 20.0) {
+        let x = lay.compose.x + 8.0;
+        let y = lay.compose.y - 14.0;
+        if y > lay.messages.y && !skip(x, y) {
+            let max_ch = ((lay.compose.w / 6.0).floor() as usize).max(8);
             labels.push(TextLabel::new(
-                truncate_chars(&workspace_ui.status, 48),
+                truncate_chars(&workspace_ui.status, max_ch),
                 x,
-                modal.y + modal.h - 20.0,
+                y,
                 10.0,
                 sc,
             ));
@@ -4472,11 +4572,13 @@ fn create_text_aa_blit(
     });
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("text aa pipeline"),
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("text aa pl"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
-        })),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("text aa pl"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            }),
+        ),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: Some("vs"),

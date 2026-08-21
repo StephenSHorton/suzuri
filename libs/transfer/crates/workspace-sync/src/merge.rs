@@ -1,11 +1,15 @@
 //! Append-only jsonl merge: skip lines whose message `id` is already present.
 
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Product `maxMembers`.
+const MAX_MEMBERS: usize = 128;
 
 pub fn extract_id(line: &str) -> Option<String> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
@@ -151,6 +155,120 @@ pub fn normalize_channel(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// Register the message author in `members.json` so a remote human/agent
+/// shows up in the presence strip. Dedup by member `id`. Existing members
+/// only bump `last_seen`. `session_id` is `p2p:<id>` so chrome does not
+/// fuse two people who share a display name.
+pub fn upsert_author(root: &Path, line: &str) -> Result<bool> {
+    let v: Value = match serde_json::from_str(line.trim()) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let id = v
+        .get("from_id")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim();
+    let name = v
+        .get("from_name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim();
+    if id.is_empty() || name.is_empty() {
+        return Ok(false);
+    }
+    let kind = match v
+        .get("from_kind")
+        .and_then(|x| x.as_str())
+        .unwrap_or("human")
+    {
+        "human" => "human",
+        _ => "agent",
+    };
+    upsert_member(root, id, name, kind)
+}
+
+fn upsert_member(root: &Path, id: &str, name: &str, kind: &str) -> Result<bool> {
+    let path = root.join("members.json");
+    let mut list: Vec<Value> = if path.exists() {
+        let raw = fs::read_to_string(&path).unwrap_or_else(|_| "[]".into());
+        serde_json::from_str(&raw).unwrap_or_else(|_| Vec::new())
+    } else {
+        Vec::new()
+    };
+    let now = iso_now();
+    if let Some(obj) = list
+        .iter_mut()
+        .find(|m| m.get("id").and_then(|x| x.as_str()) == Some(id))
+    {
+        if let Some(map) = obj.as_object_mut() {
+            map.insert("last_seen".into(), Value::String(now));
+        }
+        atomic_write_json(&path, &list)?;
+        return Ok(false);
+    }
+    if list.len() >= MAX_MEMBERS {
+        return Ok(false);
+    }
+    list.push(json!({
+        "id": id,
+        "name": name,
+        "kind": kind,
+        "session_id": format!("p2p:{id}"),
+        "status": "idle",
+        "joined_at": now,
+        "last_seen": now,
+    }));
+    atomic_write_json(&path, &list)?;
+    Ok(true)
+}
+
+fn atomic_write_json(path: &Path, list: &[Value]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_vec_pretty(list)?;
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, body)?;
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(path);
+        fs::rename(&tmp, path).map_err(|_| e)?;
+    }
+    Ok(())
+}
+
+fn iso_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    iso_from_secs(secs)
+}
+
+fn iso_from_secs(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let rem = (secs % 86400) as i64;
+    let h = rem / 3600;
+    let mi = (rem % 3600) / 60;
+    let se = rem % 60;
+    let (y, mo, d) = civil_from_days(days);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z")
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m as i64, d as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,7 +311,8 @@ mod tests {
 
     #[test]
     fn merge_jsonl_two_files_idempotent() {
-        let a = "{\"id\":\"msg_a\",\"body\":\"from-a\"}\n{\"id\":\"msg_shared\",\"body\":\"a-wins\"}\n";
+        let a =
+            "{\"id\":\"msg_a\",\"body\":\"from-a\"}\n{\"id\":\"msg_shared\",\"body\":\"a-wins\"}\n";
         let b = "{\"id\":\"msg_shared\",\"body\":\"b-loses\"}\n{\"id\":\"msg_b\",\"body\":\"from-b\"}\n";
         let once = merge_jsonl(a, b);
         assert_eq!(once, merge_jsonl(&once, b));
@@ -204,5 +323,30 @@ mod tests {
         assert!(!once.contains("b-loses"));
         let ids: Vec<_> = once.lines().filter_map(extract_id).collect();
         assert_eq!(ids, vec!["msg_a", "msg_shared", "msg_b"]);
+    }
+
+    #[test]
+    fn upsert_author_adds_then_bumps_last_seen() {
+        let root = tmp();
+        let line = r#"{"id":"msg_1","from_id":"m_alice","from_name":"alice","from_kind":"human","body":"hi"}"#;
+        assert!(upsert_author(&root, line).unwrap());
+        assert!(!upsert_author(&root, line).unwrap());
+        let raw = fs::read_to_string(root.join("members.json")).unwrap();
+        let list: Vec<Value> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["id"], "m_alice");
+        assert_eq!(list[0]["name"], "alice");
+        assert_eq!(list[0]["kind"], "human");
+        assert_eq!(list[0]["session_id"], "p2p:m_alice");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn upsert_author_skips_system_or_nameless() {
+        let root = tmp();
+        assert!(!upsert_author(&root, r#"{"id":"msg_s","kind":"system","body":"x"}"#).unwrap());
+        assert!(!upsert_author(&root, "not-json").unwrap());
+        assert!(!root.join("members.json").exists());
+        let _ = fs::remove_dir_all(&root);
     }
 }

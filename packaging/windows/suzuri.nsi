@@ -25,6 +25,9 @@ SetCompressor /SOLID lzma
 !ifndef SOURCE_CHROME
   !define SOURCE_CHROME ""
 !endif
+!ifndef SOURCE_WORKSPACE_SYNC
+  !define SOURCE_WORKSPACE_SYNC ""
+!endif
 !ifndef ICON
   !define ICON "assets\icon\suzuri.ico"
 !endif
@@ -81,6 +84,8 @@ Section "suzuri" SecMain
   Pop $0
   nsExec::ExecToLog 'taskkill /IM suzuri-chrome.exe /F'
   Pop $0
+  nsExec::ExecToLog 'taskkill /IM suzuri-workspace-sync.exe /F'
+  Pop $0
   Sleep 300
 
   File "/oname=suzuri.exe" "${SOURCE_EXE}"
@@ -89,6 +94,9 @@ Section "suzuri" SecMain
   !endif
   !if "${SOURCE_CHROME}" != ""
     File "/oname=suzuri-chrome.exe" "${SOURCE_CHROME}"
+  !endif
+  !if "${SOURCE_WORKSPACE_SYNC}" != ""
+    File "/oname=suzuri-workspace-sync.exe" "${SOURCE_WORKSPACE_SYNC}"
   !endif
   File "${ICON}"
 
@@ -143,6 +151,8 @@ Section "Uninstall"
   Pop $0
   nsExec::ExecToLog 'taskkill /IM suzuri-chrome.exe /F'
   Pop $0
+  nsExec::ExecToLog 'taskkill /IM suzuri-workspace-sync.exe /F'
+  Pop $0
   Sleep 300
 
   Delete "$INSTDIR\suzuri.exe"
@@ -151,6 +161,8 @@ Section "Uninstall"
   Delete "$INSTDIR\suzuri-transfer.exe.old"
   Delete "$INSTDIR\suzuri-chrome.exe"
   Delete "$INSTDIR\suzuri-chrome.exe.old"
+  Delete "$INSTDIR\suzuri-workspace-sync.exe"
+  Delete "$INSTDIR\suzuri-workspace-sync.exe.old"
   Delete "$INSTDIR\suzuri.ico"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

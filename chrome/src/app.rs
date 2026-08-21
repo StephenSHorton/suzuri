@@ -2125,6 +2125,43 @@ impl ChromeApp {
                 }
                 self.workspace_ui.begin_set_topic();
             }
+            CommandAction::WorkspaceShare => {
+                if !self.workspace_ui.open {
+                    self.palette.close();
+                    self.settings.close();
+                    self.help.close();
+                    self.notes.close();
+                    self.transfer.close();
+                    self.rename.close();
+                    self.open_workspace_pane();
+                }
+                self.workspace_ui.share_workspace();
+                self.drain_workspace_clipboard();
+            }
+            CommandAction::WorkspaceJoin => {
+                if !self.workspace_ui.open {
+                    self.palette.close();
+                    self.settings.close();
+                    self.help.close();
+                    self.notes.close();
+                    self.transfer.close();
+                    self.rename.close();
+                    self.open_workspace_pane();
+                }
+                let clip = self
+                    .clipboard
+                    .as_mut()
+                    .and_then(|cb| cb.get_text().ok())
+                    .unwrap_or_default();
+                if crate::workspace_ui::looks_like_ticket(&clip) {
+                    self.workspace_ui.join_with_ticket(clip.trim());
+                } else {
+                    self.workspace_ui.begin_join_workspace();
+                }
+            }
+            CommandAction::WorkspaceDisconnect => {
+                self.workspace_ui.disconnect_sync();
+            }
             CommandAction::OpenTransferSend => {
                 self.palette.close();
                 self.settings.close();
@@ -3000,14 +3037,15 @@ impl ChromeApp {
         true
     }
 
-    /// Copy a pending workspace kickoff snippet (from +Agent).
+    /// Copy a pending workspace kickoff snippet or P2P ticket.
     fn drain_workspace_clipboard(&mut self) {
         let Some(text) = self.workspace_ui.take_pending_clipboard() else {
             return;
         };
+        let toast = self.workspace_ui.clipboard_toast();
         if let Some(cb) = &mut self.clipboard {
             if cb.set_text(text).is_ok() {
-                self.toast.show("Kickoff copied");
+                self.toast.show(toast);
             }
         }
     }
@@ -3795,6 +3833,14 @@ impl ChromeApp {
                             }
                             return;
                         }
+                        "l" | "L" if shift => {
+                            self.workspace_ui.share_workspace();
+                            self.drain_workspace_clipboard();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         _ => {}
                     }
                 }
@@ -3954,6 +4000,15 @@ impl ChromeApp {
                                     }
                                     return;
                                 }
+                            }
+                            if self.workspace_captures_input()
+                                && self.workspace_ui.copy_link_ticket().is_some()
+                            {
+                                self.drain_workspace_clipboard();
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
                             }
                             if !self.term_selection.is_empty() {
                                 self.copy_selection_if_any();
@@ -4632,6 +4687,7 @@ impl ChromeApp {
         self.splash.tick(dt);
         self.notes.tick(dt);
         self.workspace_ui.tick(dt);
+        self.drain_workspace_clipboard();
         self.transfer.tick(dt);
         self.rename.tick(dt);
         self.toast.tick(dt);
@@ -5563,11 +5619,17 @@ impl ApplicationHandler for ChromeApp {
                         guest_uploads.push((pl.pane_id, w, h, px));
                     }
                 }
-                let maximized = self
-                    .surfaces
-                    .get(&id)
-                    .map(|s| s.window.is_maximized())
-                    .unwrap_or(false);
+                // macOS: do not call `Window::is_maximized` here (style-mask
+                // rebuild). Windows still needs the real flag for caption glyphs.
+                let os_maximized = if cfg!(target_os = "macos") {
+                    false
+                } else {
+                    self.surfaces
+                        .get(&id)
+                        .map(|s| s.window.is_maximized())
+                        .unwrap_or(false)
+                };
+                let maximized = paint_maximized(cfg!(target_os = "macos"), os_maximized);
                 if let Some(r) = self.surfaces.get_mut(&id).map(|s| &mut s.renderer) {
                     r.window_exit_blur = exit_blur;
                     r.window_maximized = maximized;
@@ -5687,6 +5749,21 @@ impl ApplicationHandler for ChromeApp {
     }
 }
 
+/// Maximized flag consumed by paint (Windows caption restore glyph + hairline).
+///
+/// macOS must stay `false` here. winit 0.30 `Window::is_maximized` on a
+/// borderless window temporarily sets `NSWindowStyleMask::Titled` so AppKit
+/// `isZoomed` works; Tahoe then rebuilds `NSThemeFrame`, `NSVisualEffectView`
+/// glass, and SwiftUI traffic-light widgets. Rain presents ~60 Hz, so that
+/// query on every redraw pegs the main thread and the pane switch "freezes."
+fn paint_maximized(os_macos: bool, os_maximized: bool) -> bool {
+    if os_macos {
+        false
+    } else {
+        os_maximized
+    }
+}
+
 /// Named key for warp editing. Option on macOS can remap `logical_key` to a
 /// character; fall back to the physical arrow so ⌥←→ still word-jumps.
 fn warp_edit_key(event: &winit::event::KeyEvent) -> Option<NamedKey> {
@@ -5703,5 +5780,22 @@ fn warp_edit_key(event: &winit::event::KeyEvent) -> Option<NamedKey> {
             PhysicalKey::Code(KeyCode::Backspace) => Some(NamedKey::Backspace),
             _ => None,
         },
+    }
+}
+
+#[cfg(test)]
+mod paint_maximized_tests {
+    use super::paint_maximized;
+
+    #[test]
+    fn macos_paint_ignores_winit_maximized() {
+        assert!(!paint_maximized(true, true));
+        assert!(!paint_maximized(true, false));
+    }
+
+    #[test]
+    fn other_os_paint_forwards_maximized() {
+        assert!(paint_maximized(false, true));
+        assert!(!paint_maximized(false, false));
     }
 }

@@ -4,7 +4,7 @@ Code that implements suzuri features but is **not** the Go host. One folder per 
 
 | Lib | Language | Role | Shipped binary |
 |-----|----------|------|----------------|
-| [`transfer/`](transfer/) | Rust | P2P file transfer (iroh) | `suzuri-transfer` |
+| [`transfer/`](transfer/) | Rust | P2P file transfer (iroh) + workspace chat sync | `suzuri-transfer`, `suzuri-workspace-sync` |
 
 ## Rules
 

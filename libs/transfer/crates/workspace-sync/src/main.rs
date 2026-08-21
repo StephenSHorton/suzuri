@@ -8,6 +8,8 @@ use suzuri_workspace_sync::sync::{join, listen};
 
 /// Env var that opts into iroh workspace sync.
 const ENABLE_ENV: &str = "SUZURI_WORKSPACE_IROH";
+/// Env var that forces NDJSON machine-mode (`--json`).
+const JSON_ENV: &str = "SUZURI_WORKSPACE_SYNC_OUTPUT";
 
 #[derive(Parser)]
 #[command(
@@ -19,6 +21,10 @@ struct Cli {
     /// Opt in to iroh sync (otherwise set SUZURI_WORKSPACE_IROH=1). Default is local-only.
     #[arg(long, global = true)]
     enable: bool,
+
+    /// NDJSON events on stdout (chrome / host embedding). Same as SUZURI_WORKSPACE_SYNC_OUTPUT=json.
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -59,6 +65,12 @@ fn is_enabled(flag: bool) -> bool {
         .is_some_and(|v| env_value_enabled(&v))
 }
 
+fn want_json(flag: bool) -> bool {
+    flag || std::env::var(JSON_ENV)
+        .ok()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("json"))
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -73,18 +85,19 @@ async fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    if let Err(e) = run(cli.cmd).await {
+    let json = want_json(cli.json);
+    if let Err(e) = run(cli.cmd, json).await {
         eprintln!("error: {e:#}");
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
 }
 
-async fn run(cmd: Cmd) -> anyhow::Result<()> {
+async fn run(cmd: Cmd, json: bool) -> anyhow::Result<()> {
     match cmd {
         Cmd::Listen { root, iroh_dir } => {
             let iroh_dir = iroh_dir.unwrap_or_else(|| root.join(".iroh"));
-            listen(root, iroh_dir).await
+            listen(root, iroh_dir, json).await
         }
         Cmd::Join {
             root,
@@ -92,7 +105,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
             iroh_dir,
         } => {
             let iroh_dir = iroh_dir.unwrap_or_else(|| root.join(".iroh"));
-            join(root, iroh_dir, &ticket).await
+            join(root, iroh_dir, &ticket, json).await
         }
     }
 }

@@ -15,6 +15,10 @@ use crate::layout::Rect;
 /// Apply macOS-native rounded corners (points) and transparent backdrop.
 ///
 /// `radius_pts` is in logical points (CSS-px style), matching AppKit.
+///
+/// Do not toggle `NSWindow.styleMask` from the present path. winit 0.30
+/// `is_maximized` does that on borderless windows; Tahoe then rebuilds
+/// the glass titlebar every frame.
 pub fn configure_rounded_window(window: &Window, radius_pts: f64) {
     // System drop shadow under the rounded silhouette.
     window.set_has_shadow(true);
@@ -78,7 +82,14 @@ pub fn set_window_alpha(window: &Window, alpha: f64) {
         }
         let view: &NSView = &*ns_view;
         if let Some(ns_window) = view.window() {
-            ns_window.setAlphaValue(alpha.clamp(0.0, 1.0));
+            let a = alpha.clamp(0.0, 1.0);
+            // Tick_world used to set 1.0 every 8 ms. Unchanged alpha is a no-op
+            // for the pixels, but AppKit still dirties the theme frame.
+            if (ns_window.alphaValue() - a).abs() < 0.002 {
+                let _keep: Retained<objc2_app_kit::NSWindow> = ns_window;
+                return;
+            }
+            ns_window.setAlphaValue(a);
             let _keep: Retained<objc2_app_kit::NSWindow> = ns_window;
         }
     }

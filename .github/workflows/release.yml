@@ -97,14 +97,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --manifest-path libs/transfer/Cargo.toml -p hato-cli
+          cargo build --release --manifest-path libs/transfer/Cargo.toml -p hato-cli -p suzuri-workspace-sync
           if [ "${{ matrix.goos }}" = "windows" ]; then
             cp libs/transfer/target/release/suzuri-transfer.exe ./suzuri-transfer.exe
+            cp libs/transfer/target/release/suzuri-workspace-sync.exe ./suzuri-workspace-sync.exe
           else
             cp libs/transfer/target/release/suzuri-transfer ./suzuri-transfer
-            chmod +x ./suzuri-transfer
+            cp libs/transfer/target/release/suzuri-workspace-sync ./suzuri-workspace-sync
+            chmod +x ./suzuri-transfer ./suzuri-workspace-sync
           fi
-          ls -la ./suzuri-transfer*
+          ls -la ./suzuri-transfer* ./suzuri-workspace-sync*
 
       - name: Build native chrome
         shell: bash
@@ -145,15 +147,15 @@ jobs:
           base="suzuri-$v-$goos-$goarch"
           if [ "$goos" = "windows" ]; then
             # Portable zip: host + transfer + chrome (sibling layout for ResolveBinary).
-            7z a -tzip "$base.zip" suzuri.exe suzuri-transfer.exe suzuri-chrome.exe \
-              || powershell -Command "Compress-Archive -Path suzuri.exe,suzuri-transfer.exe,suzuri-chrome.exe -DestinationPath $base.zip -Force"
+            7z a -tzip "$base.zip" suzuri.exe suzuri-transfer.exe suzuri-chrome.exe suzuri-workspace-sync.exe \
+              || powershell -Command "Compress-Archive -Path suzuri.exe,suzuri-transfer.exe,suzuri-chrome.exe,suzuri-workspace-sync.exe -DestinationPath $base.zip -Force"
             # Standalone host exe kept for convenience (no sidecars).
             cp suzuri.exe "$base.exe"
           else
             # Bare host binary (legacy); zip is preferred update payload.
             cp suzuri "$base"
-            chmod +x "$base" suzuri-transfer suzuri-chrome
-            zip -9 "$base.zip" suzuri suzuri-transfer suzuri-chrome
+            chmod +x "$base" suzuri-transfer suzuri-chrome suzuri-workspace-sync
+            zip -9 "$base.zip" suzuri suzuri-transfer suzuri-chrome suzuri-workspace-sync
           fi
           ls -la suzuri-*
 
@@ -177,10 +179,12 @@ jobs:
           $exe = Join-Path $root "suzuri.exe"
           $xfer = Join-Path $root "suzuri-transfer.exe"
           $chrome = Join-Path $root "suzuri-chrome.exe"
+          $wssync = Join-Path $root "suzuri-workspace-sync.exe"
           $ico = Join-Path $root "assets\icon\suzuri.ico"
           if (-not (Test-Path $exe)) { throw "missing $exe" }
           if (-not (Test-Path $xfer)) { throw "missing $xfer" }
           if (-not (Test-Path $chrome)) { throw "missing $chrome" }
+          if (-not (Test-Path $wssync)) { throw "missing $wssync" }
           if (-not (Test-Path $ico)) { throw "missing $ico" }
           & $makensis `
             "/DVERSION=$v" `
@@ -188,6 +192,7 @@ jobs:
             "/DSOURCE_EXE=$exe" `
             "/DSOURCE_TRANSFER=$xfer" `
             "/DSOURCE_CHROME=$chrome" `
+            "/DSOURCE_WORKSPACE_SYNC=$wssync" `
             "/DICON=$ico" `
             (Join-Path $root "packaging\windows\suzuri.nsi")
           if ($LASTEXITCODE -ne 0) { throw "makensis failed: $LASTEXITCODE" }
@@ -210,16 +215,18 @@ jobs:
           $exe = Join-Path $root "suzuri.exe"
           $xfer = Join-Path $root "suzuri-transfer.exe"
           $chrome = Join-Path $root "suzuri-chrome.exe"
+          $wssync = Join-Path $root "suzuri-workspace-sync.exe"
           if (-not (Test-Path $xfer)) { throw "missing $xfer" }
           if (-not (Test-Path $chrome)) { throw "missing $chrome" }
           $script = Join-Path $root "packaging\windows\build-msix.ps1"
           $common = @{
-            Version  = $v
-            Exe      = $exe
-            Transfer = $xfer
-            Chrome   = $chrome
-            OutDir   = $msixOut
-            Arch     = "x64"
+            Version        = $v
+            Exe            = $exe
+            Transfer       = $xfer
+            Chrome         = $chrome
+            WorkspaceSync  = $wssync
+            OutDir         = $msixOut
+            Arch           = "x64"
           }
           if ($env:MSIX_IDENTITY_JSON) {
             $prod = Join-Path $idDir "identity.json"
@@ -295,6 +302,7 @@ jobs:
             --binary ./suzuri \
             --transfer ./suzuri-transfer \
             --chrome ./suzuri-chrome \
+            --workspace-sync ./suzuri-workspace-sync \
             --version "$v" \
             --arch "$arch" \
             --out dist-mac

@@ -27,6 +27,7 @@ use crate::workspace_store::{
     agent_kickoff_text, local_human_name, next_availability, normalize_agent_role, presence_chip,
     WorkspaceStore, AGENT_ROLES, DEFAULT_CHANNEL, HISTORY_LIMIT, MAX_BODY_RUNES, STATUS_IDLE,
 };
+use crate::workspace_sync::{spawn_sync, SyncJob, SyncMode};
 
 /// How often an open workspace reloads from disk as a safety net (and the
 /// only path if native FS watch setup fails). MCP / other clients write JSONL.
@@ -54,6 +55,12 @@ pub const PRESENCE_STRIP_H: f32 = 18.0;
 pub const TOPIC_PIN_H: f32 = 16.0;
 /// Width of the +Agent chip at the right of the presence strip.
 pub const ADD_AGENT_CHIP_W: f32 = 64.0;
+/// Connect bar under the topic pin (Share / Join / live status).
+pub const CONNECT_BAR_H: f32 = 22.0;
+/// Hide the channel rail when the pane is narrower than this (logical px).
+pub const COMPACT_INNER_W: f32 = 360.0;
+/// Ticket paste cap (iroh EndpointAddr JSON can exceed message body limits).
+pub const MAX_TICKET_RUNES: usize = 64 * 1024;
 /// Floor for visible bubbles (larger panes raise this via [`WorkspaceUi::visible_bubble_cap`]).
 pub const VISIBLE_BUBBLE_CAP: usize = 14;
 /// Vertical gap between chat bubbles.
@@ -136,6 +143,47 @@ pub enum ComposeMode {
     PickAgentRole,
     /// Draft is the channel topic (Enter writes `meta.json`).
     SetTopic,
+    /// Draft is a workspace P2P ticket (Enter → join).
+    JoinTicket,
+}
+
+/// Hit-tested regions for one workspace pane. Computed from the host rect so
+/// title / presence / rail / connect / compose never share pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkspaceLayout {
+    pub host: Rect,
+    pub compact: bool,
+    pub rail: Rect,
+    pub title: Rect,
+    pub presence: Rect,
+    pub add_agent: Rect,
+    pub topic: Rect,
+    pub connect: Rect,
+    pub messages: Rect,
+    pub compose: Rect,
+}
+
+impl WorkspaceLayout {
+    pub fn add_agent_label(&self) -> &'static str {
+        if self.add_agent.w < 40.0 {
+            "+"
+        } else {
+            "+ Agent"
+        }
+    }
+}
+
+/// One clickable control on the connect bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectAction {
+    /// Listen and copy a ticket for the other computer.
+    Share,
+    /// Paste their ticket into compose.
+    Join,
+    /// Copy the current ticket again.
+    Copy,
+    /// Cancel join compose, or stop the sidecar.
+    Stop,
 }
 
 pub struct WorkspaceUi {
@@ -155,8 +203,10 @@ pub struct WorkspaceUi {
     pub members: Vec<WsMember>,
     /// Pinned topic for the active channel (`meta.json`).
     pub channel_topic: String,
-    /// Kickoff snippet waiting for the host to copy (drained by `app`).
+    /// Kickoff snippet / link ticket waiting for the host to copy (drained by `app`).
     pending_clipboard: Option<String>,
+    /// Toast label for the pending clipboard payload.
+    clipboard_toast: &'static str,
     /// Ephemeral status (create errors, etc.).
     pub status: String,
     pub mode: ComposeMode,
@@ -178,6 +228,14 @@ pub struct WorkspaceUi {
     watch_debounce: f32,
     /// Armed delete: first Ctrl+D sets slug + time; second confirms.
     delete_pending: Option<(String, Instant)>,
+    /// Running `suzuri-workspace-sync` sidecar (listen or join).
+    sync_job: Option<SyncJob>,
+    /// Machine-mode phase: preparing | ready | connecting | connected | error | stopped
+    pub sync_phase: String,
+    /// Ticket to share (listen `ready`, or the ticket we joined with).
+    pub sync_ticket: String,
+    /// Connected peer count from the sidecar.
+    pub sync_peers: u64,
 }
 
 impl Default for WorkspaceUi {
@@ -212,6 +270,7 @@ impl WorkspaceUi {
             members: Vec::new(),
             channel_topic: String::new(),
             pending_clipboard: None,
+            clipboard_toast: "Copied",
             status: String::new(),
             mode: ComposeMode::Message,
             mention_sel: 0,
@@ -224,6 +283,10 @@ impl WorkspaceUi {
             watch_dirty,
             watch_debounce: 0.0,
             delete_pending: None,
+            sync_job: None,
+            sync_phase: String::new(),
+            sync_ticket: String::new(),
+            sync_peers: 0,
         };
         s.reload_channels();
         s.reload_messages();
@@ -290,20 +353,135 @@ impl WorkspaceUi {
             .unwrap_or_else(|| self.animated_modal_rect(win_w, win_h))
     }
 
-    /// Channel rail width — shrinks in a narrow pane.
-    pub fn channel_list_w(&self, win_w: f32, win_h: f32) -> f32 {
+    /// Pack chrome so the rail, title, presence, connect bar, and compose
+    /// do not overlap. Compact panes drop the channel rail.
+    pub fn layout(&self, win_w: f32, win_h: f32) -> WorkspaceLayout {
         let host = self.card_rect(win_w, win_h);
-        CHANNEL_LIST_W
-            .min((host.w * 0.32).max(88.0))
-            .min((host.w - 96.0).max(72.0))
+        let pad = MODAL_PAD;
+        let inner = Rect::new(
+            host.x + pad,
+            host.y + pad,
+            (host.w - pad * 2.0).max(0.0),
+            (host.h - pad * 2.0).max(0.0),
+        );
+        let compose_h = COMPOSE_H.min((inner.h * 0.4).max(32.0));
+        let compose = Rect::new(
+            inner.x,
+            inner.y + inner.h - compose_h,
+            inner.w,
+            compose_h,
+        );
+        let body_bottom = (compose.y - 6.0).max(inner.y);
+
+        let mut compact = inner.w < COMPACT_INNER_W;
+        let mut rail_w = if compact {
+            0.0
+        } else {
+            CHANNEL_LIST_W
+                .min(inner.w * 0.32)
+                .clamp(72.0, (inner.w * 0.42).max(72.0))
+        };
+        if !compact && inner.w - rail_w - 10.0 < 160.0 {
+            rail_w = (inner.w - 10.0 - 160.0).max(0.0);
+        }
+        if rail_w < 64.0 {
+            compact = true;
+            rail_w = 0.0;
+        }
+
+        let rail_h = (body_bottom - inner.y).max(0.0);
+        let rail = Rect::new(inner.x, inner.y, rail_w, rail_h);
+        let col_x = if compact {
+            inner.x
+        } else {
+            inner.x + rail_w + 10.0
+        };
+        let col_w = (inner.x + inner.w - col_x).max(0.0);
+
+        let header_h = 20.0;
+        let add_w = if col_w < 220.0 {
+            22.0
+        } else {
+            ADD_AGENT_CHIP_W
+        };
+        let add_agent = Rect::new(col_x + col_w - add_w, inner.y, add_w.min(col_w), header_h);
+
+        let docked = self.docked_pane.is_some();
+        let (title, presence) = if compact {
+            let title_w = (col_w * 0.38).clamp(52.0, 96.0).min(add_agent.x - col_x);
+            let title = Rect::new(col_x, inner.y, title_w.max(0.0), header_h);
+            let px = title.x + title.w + 6.0;
+            let pw = (add_agent.x - px - 6.0).max(0.0);
+            (title, Rect::new(px, inner.y, pw, header_h))
+        } else if docked {
+            // Pane chrome already says "workspace" — don't paint a second title
+            // over #general in the rail.
+            let pw = (add_agent.x - col_x - 6.0).max(0.0);
+            (
+                Rect::new(rail.x, rail.y, 0.0, 0.0),
+                Rect::new(col_x, inner.y, pw, header_h),
+            )
+        } else {
+            let title = Rect::new(
+                rail.x + 6.0,
+                rail.y + 2.0,
+                (rail.w - 12.0).max(0.0),
+                18.0,
+            );
+            let pw = (add_agent.x - col_x - 6.0).max(0.0);
+            (title, Rect::new(col_x, inner.y, pw, header_h))
+        };
+
+        let mut y = inner.y + header_h + 2.0;
+        let show_topic = body_bottom - y > 80.0;
+        let topic = if show_topic {
+            let r = Rect::new(col_x, y, col_w, TOPIC_PIN_H);
+            y += TOPIC_PIN_H + 2.0;
+            r
+        } else {
+            Rect::new(col_x, y, 0.0, 0.0)
+        };
+
+        let stack_connect = col_w < 240.0;
+        let connect_h = if stack_connect {
+            CONNECT_BAR_H * 2.0 + 2.0
+        } else {
+            CONNECT_BAR_H
+        };
+        let show_connect = body_bottom - y > 48.0;
+        let connect = if show_connect {
+            let r = Rect::new(col_x, y, col_w, connect_h.min(body_bottom - y).max(0.0));
+            y += r.h + 4.0;
+            r
+        } else {
+            Rect::new(col_x, y, 0.0, 0.0)
+        };
+
+        let messages = Rect::new(col_x, y, col_w, (body_bottom - y).max(0.0));
+
+        WorkspaceLayout {
+            host,
+            compact,
+            rail,
+            title,
+            presence,
+            add_agent,
+            topic,
+            connect,
+            messages,
+            compose,
+        }
+    }
+
+    /// Channel rail width — shrinks in a narrow pane; 0 when compact.
+    pub fn channel_list_w(&self, win_w: f32, win_h: f32) -> f32 {
+        self.layout(win_w, win_h).rail.w
     }
 
     /// How many bubbles fit the current card (larger pane → more history).
     pub fn visible_bubble_cap(&self, win_w: f32, win_h: f32) -> usize {
-        let host = self.card_rect(win_w, win_h);
-        let usable =
-            (host.h - MODAL_PAD * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - TOPIC_PIN_H - 8.0).max(80.0);
-        ((usable / (BUBBLE_MIN_H + BUBBLE_GAP)).floor() as usize).clamp(VISIBLE_BUBBLE_CAP, 48)
+        let usable = self.layout(win_w, win_h).messages.h.max(40.0);
+        ((usable / (BUBBLE_MIN_H + BUBBLE_GAP)).floor() as usize).clamp(4, 48)
     }
 
     pub fn open(&mut self) {
@@ -321,6 +499,7 @@ impl WorkspaceUi {
         self.reload_members();
         self.reload_topic();
         self.watch_dirty.store(false, Ordering::Release);
+        self.status = self.connect_prompt();
     }
 
     /// Host in a split-pane leaf. Skips the modal spring — jelly split is the motion.
@@ -376,6 +555,7 @@ impl WorkspaceUi {
     }
 
     pub fn tick(&mut self, dt: f32) {
+        self.poll_sync();
         // Wall time for auto-refresh (do not spring-clamp — long frames still count).
         let wall = dt.max(0.0);
         if self.open {
@@ -465,7 +645,12 @@ impl WorkspaceUi {
         if ch.is_control() {
             return;
         }
-        if self.draft.chars().count() >= MAX_BODY_RUNES {
+        let cap = if self.mode == ComposeMode::JoinTicket {
+            MAX_TICKET_RUNES
+        } else {
+            MAX_BODY_RUNES
+        };
+        if self.draft.chars().count() >= cap {
             return;
         }
         self.draft.push(ch);
@@ -491,6 +676,10 @@ impl WorkspaceUi {
             }
             ComposeMode::PickAgentRole => self.commit_agent_role(),
             ComposeMode::SetTopic => self.commit_topic(),
+            ComposeMode::JoinTicket => {
+                let ticket = self.draft.clone();
+                self.join_with_ticket(ticket.trim());
+            }
             ComposeMode::Message => self.post_draft(),
         }
     }
@@ -736,7 +925,7 @@ impl WorkspaceUi {
             return false;
         };
         let text = agent_kickoff_text(role);
-        self.pending_clipboard = Some(text);
+        self.queue_clipboard(text, "Kickoff copied");
         self.mode = ComposeMode::Message;
         self.draft.clear();
         self.status = format!("+Agent {role} kickoff copied — paste into a new Grok session");
@@ -777,6 +966,195 @@ impl WorkspaceUi {
     /// Host drains this after click/send to copy kickoff text.
     pub fn take_pending_clipboard(&mut self) -> Option<String> {
         self.pending_clipboard.take()
+    }
+
+    /// Toast for the last queued clipboard payload (`Kickoff copied` / `Ticket copied`).
+    pub fn clipboard_toast(&self) -> &'static str {
+        self.clipboard_toast
+    }
+
+    fn queue_clipboard(&mut self, text: String, toast: &'static str) {
+        if text.is_empty() {
+            return;
+        }
+        self.pending_clipboard = Some(text);
+        self.clipboard_toast = toast;
+    }
+
+    // ── P2P link (iroh workspace-sync sidecar) ────────────────────────────────
+
+    /// True while the sidecar is running (listening or joined).
+    pub fn sync_active(&self) -> bool {
+        self.sync_job.is_some()
+    }
+
+    /// At least one live peer.
+    pub fn sync_is_live(&self) -> bool {
+        self.sync_job.is_some() && self.sync_peers > 0
+    }
+
+    /// Plain-English line for the connect bar + status footer.
+    pub fn connect_prompt(&self) -> String {
+        if self.sync_phase == "error" && self.sync_job.is_none() && !self.status.is_empty() {
+            return self.status.clone();
+        }
+        if self.sync_peers > 0 {
+            return "Live on both computers".into();
+        }
+        if self.sync_phase == "connecting" && self.sync_job.is_some() {
+            return "Connecting…".into();
+        }
+        if self.sync_job.is_some() && !self.sync_ticket.is_empty() {
+            return "Waiting for them to Join with that ticket".into();
+        }
+        if self.sync_job.is_some() {
+            return "Starting share…".into();
+        }
+        if self.mode == ComposeMode::JoinTicket {
+            return "Paste their ticket below, then Enter".into();
+        }
+        "Chat with another computer:".into()
+    }
+
+    /// Share this workspace: listen and copy a ticket when ready.
+    /// If already listening with a ticket, copies it again.
+    pub fn share_workspace(&mut self) {
+        if self.sync_job.is_some() && !self.sync_ticket.is_empty() {
+            self.queue_clipboard(
+                self.sync_ticket.clone(),
+                "Ticket copied — they paste it under Join",
+            );
+            self.status = self.connect_prompt();
+            return;
+        }
+        self.start_sync(SyncMode::Listen, "");
+    }
+
+    /// Compose: paste a ticket, Enter to join.
+    pub fn begin_join_workspace(&mut self) {
+        self.mode = ComposeMode::JoinTicket;
+        self.draft.clear();
+        self.status = self.connect_prompt();
+    }
+
+    /// Join with an explicit ticket (palette clipboard path, or compose Enter).
+    pub fn join_with_ticket(&mut self, ticket: &str) {
+        let ticket = ticket.trim();
+        if ticket.is_empty() {
+            self.status = "Paste the ticket they copied with Share, then Enter".into();
+            return;
+        }
+        self.mode = ComposeMode::Message;
+        self.draft.clear();
+        self.start_sync(SyncMode::Join, ticket);
+    }
+
+    /// Stop the sidecar. Local chat stays; remote posts stop arriving.
+    pub fn disconnect_sync(&mut self) {
+        self.cancel_sync();
+        self.sync_phase = "stopped".into();
+        self.sync_peers = 0;
+        self.sync_ticket.clear();
+        self.status = "Disconnected — this chat is local again".into();
+    }
+
+    /// Copy the current ticket if we have one (⌘C / Copy ticket).
+    pub fn copy_link_ticket(&mut self) -> Option<String> {
+        if self.sync_ticket.is_empty() {
+            return None;
+        }
+        self.queue_clipboard(
+            self.sync_ticket.clone(),
+            "Ticket copied — they paste it under Join",
+        );
+        self.status = self.connect_prompt();
+        Some(self.sync_ticket.clone())
+    }
+
+    fn start_sync(&mut self, mode: SyncMode, ticket: &str) {
+        self.cancel_sync();
+        self.sync_peers = 0;
+        self.sync_ticket.clear();
+        match spawn_sync(mode, self.store.root(), ticket) {
+            Ok(job) => {
+                self.sync_job = Some(job);
+                self.sync_phase = "preparing".into();
+                match mode {
+                    SyncMode::Listen => {}
+                    SyncMode::Join => {
+                        self.sync_ticket = ticket.trim().to_string();
+                    }
+                };
+                self.status = self.connect_prompt();
+            }
+            Err(e) => {
+                self.sync_phase = "error".into();
+                self.status = e;
+            }
+        }
+    }
+
+    fn cancel_sync(&mut self) {
+        if let Some(job) = self.sync_job.take() {
+            job.cancel();
+        }
+    }
+
+    fn poll_sync(&mut self) {
+        let Some(job) = self.sync_job.as_ref() else {
+            return;
+        };
+        let mut last_finished = false;
+        let mut batch = Vec::new();
+        while let Some(u) = job.try_recv() {
+            last_finished = u.finished || last_finished;
+            batch.push(u);
+        }
+        let had_events = !batch.is_empty();
+        for u in batch {
+            if !u.phase.is_empty() {
+                self.sync_phase = u.phase;
+            }
+            if let Some(t) = u.ticket {
+                if !t.is_empty() {
+                    let first = self.sync_ticket.is_empty();
+                    self.sync_ticket = t;
+                    if first {
+                        self.queue_clipboard(
+                            self.sync_ticket.clone(),
+                            "Send this ticket to the other computer",
+                        );
+                    }
+                }
+            }
+            if let Some(n) = u.peers {
+                self.sync_peers = n;
+            }
+            if self.sync_phase == "error" {
+                if let Some(msg) = u.message {
+                    if !msg.is_empty() {
+                        self.status = msg;
+                    }
+                }
+            }
+        }
+        let finished = last_finished
+            || self
+                .sync_job
+                .as_ref()
+                .map(|j| j.is_finished())
+                .unwrap_or(false);
+        if finished {
+            if let Some(job) = self.sync_job.take() {
+                drop(job);
+            }
+            if self.sync_phase != "error" {
+                self.sync_peers = 0;
+            }
+        }
+        if (had_events || finished) && self.sync_phase != "error" {
+            self.status = self.connect_prompt();
+        }
     }
 
     // ── channels ─────────────────────────────────────────────────────────────
@@ -1021,34 +1399,152 @@ impl WorkspaceUi {
     /// Hit rect for the presence strip (title row, message pane side). Click cycles status.
     /// Stops short of the +Agent chip on the right.
     pub fn presence_strip_rect(&self, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.card_rect(win_w, win_h);
-        let list_w = self.channel_list_w(win_w, win_h);
-        let full_w = (modal.w - MODAL_PAD * 2.0 - list_w - 10.0).max(40.0);
-        Rect::new(
-            modal.x + MODAL_PAD + list_w + 10.0,
-            modal.y + 4.0,
-            (full_w - ADD_AGENT_CHIP_W - 4.0).max(20.0),
-            PRESENCE_STRIP_H + 4.0,
-        )
+        self.layout(win_w, win_h).presence
     }
 
     /// +Agent chip to the right of the presence strip.
     pub fn add_agent_chip_rect(&self, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.card_rect(win_w, win_h);
-        let x = modal.x + modal.w - MODAL_PAD - ADD_AGENT_CHIP_W;
-        Rect::new(x, modal.y + 4.0, ADD_AGENT_CHIP_W, PRESENCE_STRIP_H + 4.0)
+        self.layout(win_w, win_h).add_agent
+    }
+
+    /// Connect bar under the topic pin (sentence + Share/Join or Copy/Disconnect).
+    pub fn connect_bar_rect(&self, win_w: f32, win_h: f32) -> Rect {
+        self.layout(win_w, win_h).connect
+    }
+
+    /// Presence chips that actually fit `max_w` (drop notes, then names, then +N).
+    pub fn fitted_presence_chips(&self, max_w: f32) -> Vec<String> {
+        let raw = self.members_strip_chips();
+        if max_w < 12.0 {
+            return Vec::new();
+        }
+        let tight = max_w < 240.0;
+        let mut out: Vec<String> = Vec::new();
+        let mut used = 0.0;
+        let mut hidden = 0usize;
+        let remaining = raw.len();
+        for (i, c) in raw.iter().enumerate() {
+            let mut label = if tight {
+                match c.find(" · ") {
+                    Some(p) => c[..p].to_string(),
+                    None => c.clone(),
+                }
+            } else {
+                c.clone()
+            };
+            let w = chip_advance(&label);
+            let left = remaining - i - 1;
+            let plus_w = if left + hidden > 0 {
+                chip_advance(&format!("+{}", left + hidden + 1))
+            } else {
+                0.0
+            };
+            if used + w > max_w {
+                if out.is_empty() {
+                    let chars = ((max_w / 6.4).floor() as usize).max(1);
+                    label = truncate_runes(&label, chars);
+                    let w = chip_advance(&label);
+                    if w <= max_w {
+                        out.push(label);
+                        used += w;
+                    }
+                }
+                hidden += 1 + left;
+                break;
+            }
+            if used + w + plus_w.min(36.0) > max_w && left > 0 && !out.is_empty() {
+                hidden += 1 + left;
+                break;
+            }
+            out.push(label);
+            used += w;
+        }
+        if hidden > 0 {
+            let plus = format!("+{hidden}");
+            let pw = chip_advance(&plus);
+            while !out.is_empty() && used + pw > max_w {
+                if let Some(prev) = out.pop() {
+                    used -= chip_advance(&prev);
+                }
+            }
+            if used + pw <= max_w {
+                out.push(plus);
+            }
+        }
+        out
+    }
+
+    /// Buttons on the connect bar, left-to-right.
+    pub fn connect_buttons(&self, win_w: f32, win_h: f32) -> Vec<(Rect, &'static str, ConnectAction)> {
+        let bar = self.connect_bar_rect(win_w, win_h);
+        if bar.w < 8.0 || bar.h < 8.0 {
+            return Vec::new();
+        }
+        let stacked = bar.h > CONNECT_BAR_H + 4.0;
+        let btn_h = CONNECT_BAR_H.min(bar.h);
+        let btn_y = if stacked {
+            bar.y + bar.h - btn_h
+        } else {
+            bar.y
+        };
+        let mut right = bar.x + bar.w;
+        let mut out: Vec<(Rect, &'static str, ConnectAction)> = Vec::new();
+        let mut push = |w: f32, label: &'static str, action: ConnectAction| {
+            let w = w.min(bar.w);
+            right -= w;
+            if right < bar.x - 0.5 {
+                right += w;
+                return;
+            }
+            out.push((Rect::new(right, btn_y, w, btn_h), label, action));
+            right -= 8.0;
+        };
+        if self.sync_job.is_some() {
+            let stop = if self.sync_is_live() {
+                if bar.w < 220.0 {
+                    "Stop"
+                } else {
+                    "Disconnect"
+                }
+            } else {
+                "Cancel"
+            };
+            push(if stop.len() > 6 { 92.0 } else { 64.0 }, stop, ConnectAction::Stop);
+            if !self.sync_ticket.is_empty() {
+                let copy = if bar.w < 220.0 { "Copy" } else { "Copy ticket" };
+                push(if copy.len() > 5 { 100.0 } else { 56.0 }, copy, ConnectAction::Copy);
+            }
+        } else if self.mode == ComposeMode::JoinTicket {
+            push(72.0, "Cancel", ConnectAction::Stop);
+        } else {
+            push(56.0, "Join", ConnectAction::Join);
+            push(64.0, "Share", ConnectAction::Share);
+        }
+        out.reverse();
+        out
+    }
+
+    fn handle_connect_action(&mut self, action: ConnectAction) {
+        match action {
+            ConnectAction::Share => self.share_workspace(),
+            ConnectAction::Join => self.begin_join_workspace(),
+            ConnectAction::Copy => {
+                let _ = self.copy_link_ticket();
+            }
+            ConnectAction::Stop => {
+                if self.mode == ComposeMode::JoinTicket {
+                    self.cancel_mode();
+                    self.status = self.connect_prompt();
+                } else {
+                    self.disconnect_sync();
+                }
+            }
+        }
     }
 
     /// Pinned topic line under the presence strip (does not scroll).
     pub fn topic_pin_rect(&self, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.card_rect(win_w, win_h);
-        let list_w = self.channel_list_w(win_w, win_h);
-        Rect::new(
-            modal.x + MODAL_PAD + list_w + 10.0,
-            modal.y + MODAL_PAD + PRESENCE_STRIP_H,
-            (modal.w - MODAL_PAD * 2.0 - list_w - 10.0).max(40.0),
-            TOPIC_PIN_H,
-        )
+        self.layout(win_w, win_h).topic
     }
 
     /// Role chip `i` in the +Agent picker (`pm` / `engine` / `content`).
@@ -1070,22 +1566,30 @@ impl WorkspaceUi {
 
     /// Left rail rect holding channel rows (inside the host card).
     pub fn channel_list_rect(&self, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.card_rect(win_w, win_h);
+        let lay = self.layout(win_w, win_h);
+        if lay.compact || lay.rail.w < 8.0 {
+            return Rect::new(lay.rail.x, lay.rail.y, 0.0, 0.0);
+        }
+        let y = if lay.title.h > 8.0 {
+            lay.rail.y + 22.0
+        } else {
+            lay.rail.y + 4.0
+        };
         Rect::new(
-            modal.x + MODAL_PAD,
-            modal.y + CHANNEL_LIST_TOP,
-            self.channel_list_w(win_w, win_h),
-            (modal.h - CHANNEL_LIST_TOP - COMPOSE_H - MODAL_PAD).max(0.0),
+            lay.rail.x,
+            y,
+            lay.rail.w,
+            (lay.rail.y + lay.rail.h - y).max(0.0),
         )
     }
 
     /// Hit rect for channel index `i` (same geometry as renderer labels).
     pub fn channel_row_rect(&self, i: usize, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.card_rect(win_w, win_h);
+        let list = self.channel_list_rect(win_w, win_h);
         Rect::new(
-            modal.x + MODAL_PAD,
-            modal.y + CHANNEL_LIST_TOP + i as f32 * CHANNEL_ROW_H,
-            self.channel_list_w(win_w, win_h),
+            list.x,
+            list.y + i as f32 * CHANNEL_ROW_H,
+            list.w,
             CHANNEL_ROW_H,
         )
     }
@@ -1127,6 +1631,12 @@ impl WorkspaceUi {
         if self.hits_new_channel(x, y, win_w, win_h) {
             self.begin_new_channel();
             return true;
+        }
+        for (r, _, action) in self.connect_buttons(win_w, win_h) {
+            if r.contains(x, y) {
+                self.handle_connect_action(action);
+                return true;
+            }
         }
         if self.add_agent_chip_rect(win_w, win_h).contains(x, y) {
             self.begin_add_agent();
@@ -1170,15 +1680,7 @@ impl WorkspaceUi {
 
     /// Message column rect (right of channel list, above compose).
     pub fn message_pane_rect(&self, win_w: f32, win_h: f32) -> Rect {
-        let modal = self.card_rect(win_w, win_h);
-        let pad = MODAL_PAD;
-        let ch_x = modal.x + pad;
-        let ch_w = self.channel_list_w(win_w, win_h);
-        let msg_x = ch_x + ch_w + 10.0;
-        let msg_w = (modal.x + modal.w - pad - msg_x).max(40.0);
-        let msg_y = modal.y + pad + PRESENCE_STRIP_H + TOPIC_PIN_H;
-        let msg_h = (modal.h - pad * 2.0 - COMPOSE_H - PRESENCE_STRIP_H - TOPIC_PIN_H - 4.0).max(40.0);
-        Rect::new(msg_x, msg_y, msg_w, msg_h)
+        self.layout(win_w, win_h).messages
     }
 
     /// Whether `from` is the local human (mine → right + accent).
@@ -1409,6 +1911,17 @@ fn highlight_mention_segments(draft: &str, members: &[WsMember]) -> Vec<ComposeS
     out
 }
 
+/// True when `s` looks like an iroh workspace listen ticket (JSON EndpointAddr).
+pub fn looks_like_ticket(s: &str) -> bool {
+    let s = s.trim();
+    let s = s.strip_prefix("ticket:").unwrap_or(s).trim();
+    s.starts_with('{') && s.contains("\"id\"") && s.len() >= 24
+}
+
+fn chip_advance(s: &str) -> f32 {
+    s.chars().count() as f32 * 6.4 + 10.0
+}
+
 fn truncate_runes(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max {
@@ -1553,6 +2066,11 @@ mod tests {
         assert!((ui.content_ease() - 1.0).abs() < f32::EPSILON);
         let host = Rect::new(100.0, 80.0, 400.0, 500.0);
         ui.set_host(Some(host));
+        let lay = ui.layout(1200.0, 800.0);
+        assert!(
+            lay.title.w < 1.0,
+            "docked pane chrome already names it; interior title overlaps #general"
+        );
         let card = ui.card_rect(1200.0, 800.0);
         assert!((card.x - host.x).abs() < 0.01);
         assert!((card.w - host.w).abs() < 0.01);
@@ -1896,8 +2414,146 @@ mod tests {
         assert_eq!(ui.mode, ComposeMode::Message);
         let pin = ui.topic_pin_rect(900.0, 700.0);
         let pane = ui.message_pane_rect(900.0, 700.0);
-        assert!(pin.y + pin.h <= pane.y + 0.5, "pin must not scroll with chat");
+        assert!(
+            pin.y + pin.h <= pane.y + 0.5,
+            "pin must not scroll with chat"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn looks_like_ticket_accepts_json_endpoint_addr() {
+        assert!(looks_like_ticket(
+            r#"{"id":"abc123abc123abc123abc123abc123ab"}"#
+        ));
+        assert!(looks_like_ticket(
+            r#"ticket: {"id":"abc123abc123abc123abc123abc123ab"}"#
+        ));
+        assert!(!looks_like_ticket("hello"));
+        assert!(!looks_like_ticket("{short}"));
+    }
+
+    #[test]
+    fn begin_join_sets_ticket_mode() {
+        let dir = temp_root("join-mode");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        ui.begin_join_workspace();
+        assert_eq!(ui.mode, ComposeMode::JoinTicket);
+        assert!(ui.draft.is_empty());
+        assert!(ui.status.contains("ticket"));
+        ui.cancel_mode();
+        assert_eq!(ui.mode, ComposeMode::Message);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn rects_overlap(a: Rect, b: Rect) -> bool {
+        a.w > 0.5
+            && a.h > 0.5
+            && b.w > 0.5
+            && b.h > 0.5
+            && a.x < b.x + b.w - 0.5
+            && b.x < a.x + a.w - 0.5
+            && a.y < b.y + b.h - 0.5
+            && b.y < a.y + a.h - 0.5
+    }
+
+    #[test]
+    fn connect_bar_idle_has_share_and_join() {
+        let dir = temp_root("connect-bar");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        ui.set_host(Some(Rect::new(0.0, 0.0, 800.0, 600.0)));
+        let bar = ui.connect_bar_rect(800.0, 600.0);
+        let pin = ui.topic_pin_rect(800.0, 600.0);
+        let pane = ui.message_pane_rect(800.0, 600.0);
+        assert!(bar.y + 0.5 >= pin.y + pin.h);
+        assert!(pane.y + 0.5 >= bar.y + bar.h);
+        let labels: Vec<_> = ui
+            .connect_buttons(800.0, 600.0)
+            .into_iter()
+            .map(|(_, label, action)| (label, action))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("Share", ConnectAction::Share),
+                ("Join", ConnectAction::Join)
+            ]
+        );
+        assert!(ui.connect_prompt().contains("computer"));
+        assert!(!ui.sync_active());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compact_layout_hides_rail_and_fits_header() {
+        let dir = temp_root("compact-lay");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        ui.set_host(Some(Rect::new(0.0, 0.0, 280.0, 420.0)));
+        let lay = ui.layout(280.0, 420.0);
+        assert!(lay.compact, "280px pane should drop the channel rail");
+        assert!(lay.rail.w < 1.0);
+        assert!(lay.messages.w > 100.0);
+        assert!(lay.add_agent.x + lay.add_agent.w <= lay.host.x + lay.host.w - 10.0);
+        assert!(!rects_overlap(lay.presence, lay.add_agent));
+        assert!(!rects_overlap(lay.title, lay.presence));
+        assert!(!rects_overlap(lay.connect, lay.messages));
+        assert!(!rects_overlap(lay.messages, lay.compose));
+        let btns = ui.connect_buttons(280.0, 420.0);
+        assert!(
+            btns.iter().any(|(_, l, _)| *l == "Share"),
+            "share still reachable when scrunched: {btns:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wide_layout_keeps_rail_and_no_header_overlap() {
+        let dir = temp_root("wide-lay");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        ui.set_host(Some(Rect::new(40.0, 40.0, 720.0, 560.0)));
+        let lay = ui.layout(900.0, 700.0);
+        assert!(!lay.compact);
+        assert!(lay.rail.w >= 72.0);
+        assert!(!rects_overlap(lay.rail, lay.messages));
+        assert!(!rects_overlap(lay.presence, lay.add_agent));
+        assert!(!rects_overlap(lay.topic, lay.connect));
+        assert!(lay.topic.y + lay.topic.h <= lay.connect.y + 0.5);
+        assert!(lay.connect.y + lay.connect.h <= lay.messages.y + 0.5);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn presence_chips_fit_strip_width() {
+        let dir = temp_root("fit-chips");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        let store = WorkspaceStore::open_at(&dir);
+        store.join("stephenhorton", "human", "s-a").unwrap();
+        store.join("other-human", "human", "s-b").unwrap();
+        ui.reload_members();
+        let fitted = ui.fitted_presence_chips(90.0);
+        let used: f32 = fitted.iter().map(|c| chip_advance(c)).sum();
+        assert!(
+            used <= 90.0 + 0.5,
+            "chips {fitted:?} used {used}px > 90"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn join_ticket_compose_allows_long_paste() {
+        let dir = temp_root("long-ticket");
+        let mut ui = WorkspaceUi::open_at(&dir);
+        ui.open();
+        ui.begin_join_workspace();
+        for _ in 0..(MAX_BODY_RUNES + 40) {
+            ui.insert_char('a');
+        }
+        assert!(ui.draft.chars().count() > MAX_BODY_RUNES);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -159,14 +159,16 @@ func (s *Service) DownloadAndApply(info Info) error {
 	var newExe string
 	var newTransfer string
 	var newChrome string
+	var newWorkspaceSync string
 	if strings.HasSuffix(strings.ToLower(dst), ".zip") {
-		host, xfer, chrome, err := extractPackageFromZip(dst, dir)
+		host, xfer, chrome, wsSync, err := extractPackageFromZip(dst, dir)
 		if err != nil {
 			return err
 		}
 		newExe = host
 		newTransfer = xfer
 		newChrome = chrome
+		newWorkspaceSync = wsSync
 	} else {
 		newExe = dst
 	}
@@ -200,6 +202,13 @@ func (s *Service) DownloadAndApply(info Info) error {
 			return fmt.Errorf("install chrome: %w", err)
 		}
 		log.Info("update: native chrome installed", "path", chromeDst)
+	}
+	if newWorkspaceSync != "" {
+		wsDst := filepath.Join(selfDir, workspaceSyncSiblingName())
+		if err := installSibling(newWorkspaceSync, wsDst); err != nil {
+			return fmt.Errorf("install workspace-sync engine: %w", err)
+		}
+		log.Info("update: workspace-sync engine installed", "path", wsDst)
 	}
 
 	// Windows allows renaming a running image. Move current → .old, copy new
@@ -260,6 +269,13 @@ func chromeSiblingName() string {
 		return "suzuri-chrome.exe"
 	}
 	return "suzuri-chrome"
+}
+
+func workspaceSyncSiblingName() string {
+	if runtime.GOOS == "windows" {
+		return "suzuri-workspace-sync.exe"
+	}
+	return "suzuri-workspace-sync"
 }
 
 // installSibling replaces a non-running helper binary (rename → copy).
@@ -438,11 +454,11 @@ func pickReleaseAsset(assets []ghAsset) (ghAsset, string) {
 }
 
 // extractPackageFromZip pulls the host binary and optional sidecars
-// (suzuri-transfer, suzuri-chrome) from a release zip.
-func extractPackageFromZip(zipPath, dir string) (hostPath, transferPath, chromePath string, err error) {
+// (suzuri-transfer, suzuri-chrome, suzuri-workspace-sync) from a release zip.
+func extractPackageFromZip(zipPath, dir string) (hostPath, transferPath, chromePath, workspaceSyncPath string, err error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	defer func() { _ = r.Close() }()
 
@@ -472,56 +488,64 @@ func extractPackageFromZip(zipPath, dir string) (hostPath, transferPath, chromeP
 			continue
 		}
 		switch {
+		case lower == "suzuri-workspace-sync.exe" || lower == "suzuri-workspace-sync" ||
+			(strings.HasPrefix(lower, "suzuri-") && strings.Contains(lower, "workspace-sync")):
+			workspaceSyncPath, err = extract(f, "suzuri-workspace-sync-new"+extForOS())
+			if err != nil {
+				return "", "", "", "", err
+			}
 		case lower == "suzuri-transfer.exe" || lower == "suzuri-transfer":
 			transferPath, err = extract(f, "suzuri-transfer-new"+extForOS())
 			if err != nil {
-				return "", "", "", err
+				return "", "", "", "", err
 			}
 		case lower == "suzuri-chrome.exe" || lower == "suzuri-chrome":
 			chromePath, err = extract(f, "suzuri-chrome-new"+extForOS())
 			if err != nil {
-				return "", "", "", err
+				return "", "", "", "", err
 			}
 		case lower == "suzuri.exe" || lower == "suzuri":
 			hostPath, err = extract(f, "suzuri-new"+extForOS())
 			if err != nil {
-				return "", "", "", err
+				return "", "", "", "", err
 			}
 		case strings.HasPrefix(lower, "suzuri-") && strings.Contains(lower, "transfer"):
 			transferPath, err = extract(f, "suzuri-transfer-new"+extForOS())
 			if err != nil {
-				return "", "", "", err
+				return "", "", "", "", err
 			}
 		case strings.HasPrefix(lower, "suzuri-") && strings.Contains(lower, "chrome"):
 			chromePath, err = extract(f, "suzuri-chrome-new"+extForOS())
 			if err != nil {
-				return "", "", "", err
+				return "", "", "", "", err
 			}
 		case strings.HasPrefix(lower, "suzuri-") && !strings.Contains(lower, "transfer") &&
 			!strings.Contains(lower, "chrome") &&
+			!strings.Contains(lower, "workspace") &&
 			!strings.HasSuffix(lower, ".zip") && !strings.Contains(lower, "setup"):
 			// Versioned bare name e.g. suzuri-0.9.71-darwin-arm64
 			if hostPath == "" {
 				hostPath, err = extract(f, "suzuri-new"+extForOS())
 				if err != nil {
-					return "", "", "", err
+					return "", "", "", "", err
 				}
 			}
 		case strings.HasSuffix(lower, ".exe") && strings.Contains(lower, "suzuri") &&
 			!strings.Contains(lower, "transfer") && !strings.Contains(lower, "chrome") &&
+			!strings.Contains(lower, "workspace") &&
 			!strings.Contains(lower, "setup"):
 			if hostPath == "" {
 				hostPath, err = extract(f, "suzuri-new.exe")
 				if err != nil {
-					return "", "", "", err
+					return "", "", "", "", err
 				}
 			}
 		}
 	}
 	if hostPath == "" {
-		return "", "", "", fmt.Errorf("zip has no suzuri binary")
+		return "", "", "", "", fmt.Errorf("zip has no suzuri binary")
 	}
-	return hostPath, transferPath, chromePath, nil
+	return hostPath, transferPath, chromePath, workspaceSyncPath, nil
 }
 
 func extForOS() string {

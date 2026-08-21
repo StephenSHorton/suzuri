@@ -10,8 +10,10 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
+use notify::Watcher;
 
-use crate::merge::{ingest_line, snapshot};
+use crate::events::Reporter;
+use crate::merge::{ingest_line, snapshot, upsert_author};
 use crate::proto::{read_msg, write_msg, WireMsg, ALPN};
 
 const POLL: Duration = Duration::from_millis(500);
@@ -89,19 +91,20 @@ pub fn parse_ticket(s: &str) -> Result<EndpointAddr> {
     serde_json::from_str(s).context("parse ticket EndpointAddr")
 }
 
-/// Bind, print a one-line ticket, accept joiners until Ctrl+C.
-pub async fn listen(root: PathBuf, iroh_dir: PathBuf) -> Result<()> {
+/// Bind, print a one-line ticket (or `ready` NDJSON), accept joiners until Ctrl+C.
+pub async fn listen(root: PathBuf, iroh_dir: PathBuf, json: bool) -> Result<()> {
+    let reporter = Reporter::new(json);
     let sk = load_or_create_secret_key_in(&iroh_dir)?;
     let endpoint = bind_endpoint(sk).await?;
     let _ = tokio::time::timeout(ONLINE_WAIT, endpoint.online()).await;
     let ticket = encode_ticket(&endpoint.addr())?;
-    println!("{ticket}");
-    let _ = std::io::stdout().flush();
+    reporter.ready(&ticket, "listen");
     eprintln!("listening for workspace message sync (Ctrl+C to stop)");
 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
+                reporter.stopped();
                 endpoint.close().await;
                 break;
             }
@@ -110,17 +113,23 @@ pub async fn listen(root: PathBuf, iroh_dir: PathBuf) -> Result<()> {
                     break;
                 };
                 let root = root.clone();
+                let reporter = reporter.clone();
                 tokio::spawn(async move {
                     match incoming.await {
                         Ok(conn) => {
-                            if let Err(e) = run_connection(conn, root).await {
+                            reporter.peer_up();
+                            let res = run_connection_with(conn, root, reporter.clone()).await;
+                            reporter.peer_down();
+                            if let Err(e) = res {
                                 tracing::warn!("peer session: {e:#}");
                                 eprintln!("peer session: {e:#}");
+                                reporter.error(&format!("{e:#}"));
                             }
                         }
                         Err(e) => {
                             tracing::warn!("accept: {e}");
                             eprintln!("accept: {e}");
+                            reporter.error(&format!("accept: {e}"));
                         }
                     }
                 });
@@ -131,20 +140,32 @@ pub async fn listen(root: PathBuf, iroh_dir: PathBuf) -> Result<()> {
 }
 
 /// Dial a listen ticket and sync until the connection ends or Ctrl+C.
-pub async fn join(root: PathBuf, iroh_dir: PathBuf, ticket: &str) -> Result<()> {
+pub async fn join(root: PathBuf, iroh_dir: PathBuf, ticket: &str, json: bool) -> Result<()> {
+    let reporter = Reporter::new(json);
     let addr = parse_ticket(ticket)?;
     let sk = load_or_create_secret_key_in(&iroh_dir)?;
     let endpoint = bind_endpoint(sk).await?;
     let _ = tokio::time::timeout(ONLINE_WAIT, endpoint.online()).await;
+    reporter.connecting();
     eprintln!("connecting…");
-    let conn = endpoint
-        .connect(addr, ALPN)
-        .await
-        .context("connect to listen ticket")?;
+    let conn = match endpoint.connect(addr, ALPN).await {
+        Ok(c) => c,
+        Err(e) => {
+            reporter.error(&format!("connect: {e:#}"));
+            return Err(e).context("connect to listen ticket");
+        }
+    };
+    reporter.peer_up();
     eprintln!("connected; syncing channel messages (Ctrl+C to stop)");
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        res = run_connection(conn, root) => {
+        _ = tokio::signal::ctrl_c() => {
+            reporter.stopped();
+        }
+        res = run_connection_with(conn, root, reporter.clone()) => {
+            reporter.peer_down();
+            if let Err(e) = &res {
+                reporter.error(&format!("{e:#}"));
+            }
             res?;
         }
     }
@@ -154,12 +175,47 @@ pub async fn join(root: PathBuf, iroh_dir: PathBuf, ticket: &str) -> Result<()> 
 
 /// After a connection is up: each side open_bi for send and accept_bi for recv.
 pub async fn run_connection(conn: Connection, root: PathBuf) -> Result<()> {
+    run_connection_with(conn, root, Reporter::silent()).await
+}
+
+async fn run_connection_with(conn: Connection, root: PathBuf, _reporter: Reporter) -> Result<()> {
     let (mut send, mut recv, _keep) = open_sync_streams(&conn).await?;
     let sent = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let (wake, _watch) = start_jsonl_watch(&root);
     tokio::select! {
-        res = send_loop(&mut send, root.clone(), sent.clone()) => res,
+        res = send_loop(&mut send, root.clone(), sent.clone(), wake) => res,
         res = recv_loop(&mut recv, root, sent) => res,
     }
+}
+
+/// Wake send_loop when channel jsonl changes. Watcher is held so Drop stops it.
+fn start_jsonl_watch(
+    root: &Path,
+) -> (
+    Option<Arc<tokio::sync::Notify>>,
+    Option<notify::RecommendedWatcher>,
+) {
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let flag = wake.clone();
+    let channels = root.join("channels");
+    let _ = fs::create_dir_all(&channels);
+    let watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+        if res.is_ok() {
+            flag.notify_waiters();
+        }
+    });
+    let mut watcher = match watcher {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("workspace jsonl watch: {e}");
+            return (None, None);
+        }
+    };
+    if let Err(e) = watcher.watch(&channels, notify::RecursiveMode::Recursive) {
+        tracing::warn!("workspace jsonl watch: {e}");
+        return (None, None);
+    }
+    (Some(wake), Some(watcher))
 }
 
 /// Keep unused stream halves alive so dropping them does not RESET the used halves.
@@ -197,6 +253,7 @@ async fn send_loop(
     send: &mut SendStream,
     root: PathBuf,
     sent: Arc<Mutex<HashSet<String>>>,
+    wake: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<()> {
     loop {
         let rows = snapshot(&root)?;
@@ -214,11 +271,19 @@ async fn send_loop(
                 line,
             };
             write_msg(send, &msg).await?;
-            sent.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(id);
+            sent.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
         }
-        tokio::time::sleep(POLL).await;
+        if let Some(wake) = &wake {
+            tokio::select! {
+                _ = tokio::time::sleep(POLL) => {}
+                _ = wake.notified() => {
+                    // Debounce bursty atomic jsonl rewrites.
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                }
+            }
+        } else {
+            tokio::time::sleep(POLL).await;
+        }
     }
 }
 
@@ -236,6 +301,9 @@ async fn recv_loop(
         }
         match ingest_line(&root, &msg.channel, &msg.id, &msg.line) {
             Ok(_) => {
+                if let Err(e) = upsert_author(&root, &msg.line) {
+                    tracing::warn!("member upsert skipped: {e:#}");
+                }
                 sent.lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(msg.id);
@@ -275,19 +343,13 @@ pub async fn sync_pair_inprocess(root_a: &Path, root_b: &Path) -> Result<()> {
     let join_root = root_a.to_path_buf();
     let join_task = tokio::spawn(async move { run_connection(conn_a, join_root).await });
 
-    let want: HashSet<String> = snapshot(root_a)?
-        .into_iter()
-        .map(|(_, id, _)| id)
-        .collect();
+    let want: HashSet<String> = snapshot(root_a)?.into_iter().map(|(_, id, _)| id).collect();
     if want.is_empty() {
         bail!("root A has no messages to sync");
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
     loop {
-        let have: HashSet<String> = snapshot(root_b)?
-            .into_iter()
-            .map(|(_, id, _)| id)
-            .collect();
+        let have: HashSet<String> = snapshot(root_b)?.into_iter().map(|(_, id, _)| id).collect();
         if want.iter().all(|id| have.contains(id)) {
             break;
         }
@@ -308,10 +370,7 @@ pub async fn sync_pair_inprocess(root_a: &Path, root_b: &Path) -> Result<()> {
     )?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
     loop {
-        let have: HashSet<String> = snapshot(root_a)?
-            .into_iter()
-            .map(|(_, id, _)| id)
-            .collect();
+        let have: HashSet<String> = snapshot(root_a)?.into_iter().map(|(_, id, _)| id).collect();
         if have.contains("msg_from_b") {
             break;
         }
@@ -369,6 +428,11 @@ mod tests {
         assert_eq!(parsed.id, addr.id);
         let prefixed = format!("ticket: {s}");
         assert_eq!(parse_ticket(&prefixed).unwrap().id, addr.id);
+        assert!(
+            s.contains("\"id\""),
+            "chrome clipboard join looks for an id field, ticket={s}"
+        );
+        assert!(s.len() >= 24);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

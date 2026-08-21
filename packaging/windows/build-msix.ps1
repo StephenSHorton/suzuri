@@ -33,6 +33,7 @@ param(
   # working Store build of current master (native chrome + transfer).
   [string]$Transfer = "",
   [string]$Chrome = "",
+  [string]$WorkspaceSync = "",
 
   [string]$OutDir = "dist\msix",
 
@@ -146,11 +147,15 @@ function Copy-Sidecar([string]$src, [string]$destName) {
 }
 $copiedTransfer = Copy-Sidecar $Transfer "suzuri-transfer.exe"
 $copiedChrome = Copy-Sidecar $Chrome "suzuri-chrome.exe"
+$copiedWsSync = Copy-Sidecar $WorkspaceSync "suzuri-workspace-sync.exe"
 if (-not $copiedChrome) {
   Write-Warning "No -Chrome sidecar — Store/MSIX install will not find suzuri-chrome.exe next to the host"
 }
 if (-not $copiedTransfer) {
   Write-Warning "No -Transfer sidecar — P2P transfer will be missing from the Store package"
+}
+if (-not $copiedWsSync) {
+  Write-Warning "No -WorkspaceSync sidecar — workspace P2P chat will be missing from the Store package"
 }
 
 $imagesSrc = Join-Path $Root "packaging\windows\msix\Images"

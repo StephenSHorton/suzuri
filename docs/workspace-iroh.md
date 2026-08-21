@@ -1,16 +1,18 @@
 # Workspace Iroh sync (opt-in)
 
 Local-first is the default. Channel messages live on one machine under the
-suzuri config directory. This slice adds **opt-in** peer-to-peer sync of
-channel `messages.jsonl` between two workspace roots, using the same iroh 1.0
-stack as `suzuri-transfer`.
+suzuri config directory. **Share workspace** / **Join workspace** in chrome
+opt into peer-to-peer sync of channel `messages.jsonl` between two workspace
+roots, using the same iroh 1.0 stack as `suzuri-transfer`.
 
-It is **not** full product UX (no chrome panel, no auto-start). Run the sidecar
-binary, or `suzuri workspace-sync …` if the host can find it.
+Handshake is the same product sentence as file transfer: one side listens
+(ticket), the other pastes the ticket and joins. After that the two rooms
+are one room. The sidecar also upserts message authors into `members.json`
+so remote humans/agents show in the presence strip.
 
 ## Enable
 
-Sync stays off unless you opt in:
+CLI stays off unless you opt in:
 
 ```
 SUZURI_WORKSPACE_IROH=1
@@ -20,14 +22,22 @@ SUZURI_WORKSPACE_IROH=1
 
 If neither is set the binary prints a short error and exits 2.
 
+Chrome **Share** / **Join** pass `--enable --json` for you (clicking Link is
+the opt-in). Palette: **Share workspace (ticket)…**, **Join workspace…**,
+**Disconnect workspace**. Shortcut: Ctrl+Shift+L / ⇧⌘L to share. The **Link**
+chip (right of the presence strip) listens and copies a ticket; it turns
+**Live** once a peer is connected. Click again to copy the ticket. Sync keeps
+running if you close the pane; chrome exit (or **Disconnect workspace**)
+stops it.
+
 ## What v1 syncs
 
 | Synced | Not synced |
 |--------|------------|
-| `channels/<slug>/messages.jsonl` | `members.json` |
-| Creates missing channel dirs (`meta.json` + jsonl) | `channels/<slug>/files/` |
-| | Presence / availability |
-| | `workspace.json` |
+| `channels/<slug>/messages.jsonl` | `channels/<slug>/files/` |
+| Creates missing channel dirs (`meta.json` + jsonl) | Live availability codes (idle/working/…) |
+| Authors from incoming lines → `members.json` (by `from_id`) | `workspace.json` |
+| | Path leases / tasks |
 
 ## Ticket = pairing
 
@@ -90,10 +100,23 @@ SUZURI_WORKSPACE_IROH=1 suzuri workspace-sync listen --root /tmp/ws-a
 
 You can also run the rust binary directly; the Go command is a thin exec.
 
-## Out of scope (this slice)
+Chrome spawns the same binary with `--enable --json`. Stdout is NDJSON:
 
-- Chrome / workspace-panel UX
+| Event | Meaning |
+|-------|---------|
+| `ready` | `ticket` (JSON EndpointAddr string) + `role=listen` |
+| `connecting` | join dial started |
+| `connected` | `peers` count |
+| `peer_left` | `peers` count after a drop |
+| `error` | `message` |
+| `stopped` | sidecar exiting |
+
+Human traces stay on stderr. `SUZURI_WORKSPACE_SYNC_OUTPUT=json` is the same
+as `--json`.
+
+## Out of scope (later)
+
 - File blobs (`files/`)
-- Presence
+- Live presence / availability sync
 - CRDTs / last-write-wins field merge
-- Sync of members or workspace metadata
+- Sync of `workspace.json` / tasks / leases
