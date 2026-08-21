@@ -1169,6 +1169,20 @@ mod tests {
     }
 
     #[test]
+    fn utf8_split_across_feeds_keeps_braille() {
+        // ConPTY splits 3-byte runes. Must NOT from_utf8_lossy at the seam.
+        let ch = '⣿';
+        let mut enc = [0u8; 4];
+        let n = ch.encode_utf8(&mut enc).len();
+        assert!(n > 1);
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(10, 2);
+        dec.feed(&mut grid, &enc[..1]);
+        dec.feed(&mut grid, &enc[1..n]);
+        assert_eq!(grid.snapshot_strings()[0], ch.to_string());
+    }
+
+    #[test]
     fn csi_2j_clears_screen() {
         let mut dec = AnsiDecoder::new();
         let mut grid = CellGrid::new(10, 3);

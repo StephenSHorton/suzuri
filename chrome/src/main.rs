@@ -54,6 +54,7 @@ mod selection;
 mod session;
 mod settings;
 mod shell;
+mod sync_hold;
 mod text;
 mod theme;
 mod toast;

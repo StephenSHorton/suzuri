@@ -73,6 +73,7 @@ pub mod selection;
 pub mod session;
 pub mod settings;
 pub mod shell;
+pub mod sync_hold;
 pub mod theme;
 pub mod toast;
 pub mod updater;
