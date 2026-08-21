@@ -13,6 +13,16 @@ use glyphon::{
 };
 use winit::dpi::PhysicalSize;
 
+/// Box drawing + block elements (Grok `╭─╮` / `│` prompt chrome).
+fn is_line_art_char(c: char) -> bool {
+    matches!(c as u32, 0x2500..=0x259F)
+}
+
+fn is_line_art_label(text: &str) -> bool {
+    let mut chars = text.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if is_line_art_char(c))
+}
+
 /// Product suzuri mono — GohuFont uni14 Nerd Font Mono (see `assets/fonts/`).
 const GOHU_TTF: &[u8] = include_bytes!("../../assets/fonts/GohuFontuni14NerdFontMono-Regular.ttf");
 
@@ -96,6 +106,9 @@ pub struct TextLabel {
     pub tight: bool,
     /// Blink / sine caret — prepared separately so it does not bust the grid cache.
     pub caret: bool,
+    /// Clip to a pixel-tiled rect (floor both edges) so adjacent cell fills
+    /// neither gap nor double-blend.
+    pub tile_clip: bool,
 }
 
 impl TextLabel {
@@ -114,6 +127,7 @@ impl TextLabel {
             clip: None,
             tight: false,
             caret: false,
+            tile_clip: false,
         }
     }
 
@@ -132,6 +146,7 @@ impl TextLabel {
             clip: None,
             tight: false,
             caret: false,
+            tile_clip: false,
         }
     }
 
@@ -150,6 +165,7 @@ impl TextLabel {
             clip: None,
             tight: false,
             caret: false,
+            tile_clip: false,
         }
     }
 
@@ -168,6 +184,16 @@ impl TextLabel {
     /// Clip this label to a logical rect (e.g. terminal cells hole).
     pub fn with_clip(mut self, clip: [f32; 4]) -> Self {
         self.clip = Some(clip);
+        self
+    }
+
+    pub fn tight(mut self) -> Self {
+        self.tight = true;
+        self
+    }
+
+    pub fn tile_clip(mut self) -> Self {
+        self.tile_clip = true;
         self
     }
 
@@ -214,6 +240,7 @@ impl TextLabel {
             clip: None,
             tight: false,
             caret: false,
+            tile_clip: false,
         }
     }
 
@@ -237,6 +264,7 @@ impl TextLabel {
             clip: None,
             tight: false,
             caret: false,
+            tile_clip: false,
         }
     }
 }
@@ -611,7 +639,8 @@ impl TextLayer {
         let mono_name = self.mono_family.clone();
         let mono_weight = self.mono_weight;
         let mono_system = self.mono_font_id == "system";
-        let gohu_ok = self.gohu_ok;
+        let gohu_name = self.gohu_family.clone();
+        let gohu_wt = self.gohu_weight;
 
         for (i, label) in labels.iter().enumerate() {
             let size_px = (label.size * scale).max(1.0).round().max(1.0);
@@ -646,7 +675,16 @@ impl TextLayer {
             } else if is_key_chord {
                 let attrs = Attrs::new().family(Family::Name(KEY_CHORD_FAMILY));
                 buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
-            } else if mono_system || !gohu_ok {
+            } else if is_line_art_label(text) {
+                // Grok prompt chrome is `╭─╮` (U+2500 box drawing). macOS
+                // FontSystem loads Apple Symbols, which win Common-script
+                // fallback and draw a continuous rule. Gohu’s 14px bitmap
+                // ─ is a short dash in the cell — the ASCII-border look.
+                let attrs = Attrs::new()
+                    .family(Family::Name(gohu_name.as_str()))
+                    .weight(gohu_wt);
+                buf.set_text(&mut self.font_system, text, attrs, Shaping::Basic);
+            } else if mono_system {
                 let attrs = Attrs::new().family(Family::Monospace).weight(mono_weight);
                 buf.set_text(&mut self.font_system, text, attrs, Shaping::Advanced);
             } else {
@@ -727,13 +765,24 @@ fn collect_areas<'a>(
         let bounds = if let Some([cx, cy, cw, ch]) = label.clip {
             let l = (cx * scale).floor() as i32;
             let t = (cy * scale).floor() as i32;
-            let r = ((cx + cw) * scale).ceil() as i32;
-            let b = ((cy + ch) * scale).ceil() as i32;
+            let (r, b) = if label.tile_clip {
+                // Exclusive end = next cell's origin. ceil() on the right
+                // double-covers one pixel and alpha-blends a dark column.
+                (
+                    ((cx + cw) * scale).floor() as i32,
+                    ((cy + ch) * scale).floor() as i32,
+                )
+            } else {
+                (
+                    ((cx + cw) * scale).ceil() as i32,
+                    ((cy + ch) * scale).ceil() as i32,
+                )
+            };
             TextBounds {
                 left: l.max(0),
                 top: t.max(0),
-                right: r.min(width as i32),
-                bottom: b.min(height as i32),
+                right: r.max(l + 1).min(width as i32),
+                bottom: b.max(t + 1).min(height as i32),
             }
         } else {
             full_bounds
@@ -767,6 +816,7 @@ pub fn labels_fingerprint(labels: &[TextLabel]) -> u64 {
         l.symbols.hash(&mut h);
         l.key_chord.hash(&mut h);
         l.tight.hash(&mut h);
+        l.tile_clip.hash(&mut h);
         hash_opt_rect(l.center_in, &mut h);
         hash_opt_rect(l.clip, &mut h);
     }
@@ -821,6 +871,17 @@ mod tests {
         assert_eq!(label.center_in, Some(hit));
         assert_eq!(label.size, 14.0);
         assert!(!TextLabel::centered("×", hit, 11.0, [1.0; 4]).tight);
+    }
+
+    #[test]
+    fn grok_prompt_chrome_is_line_art() {
+        for c in "╭─╮│╰╯┌┐└┘".chars() {
+            assert!(is_line_art_char(c), "{c:?}");
+            assert!(is_line_art_label(c.encode_utf8(&mut [0; 4])));
+        }
+        assert!(!is_line_art_label("A"));
+        assert!(!is_line_art_label("──"));
+        assert!(!is_line_art_char('-'));
     }
 
     #[test]

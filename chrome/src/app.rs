@@ -42,6 +42,7 @@ use crate::rename::{RenameState, RenameTarget};
 use crate::renderer::{self, GhostLayer, KittyBlit, Renderer};
 use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
+use crate::sync_hold::SyncHold;
 use crate::settings::SettingsState;
 use crate::text::MonoCellMetrics;
 use crate::toast::ToastState;
@@ -65,6 +66,8 @@ struct PaneRuntime {
     /// Warp compose owns the prompt: hide PTY paint until the first submit
     /// so a fresh pane is empty (no leaked zsh/cmd prompt).
     suppress_paint: bool,
+    /// Hold Grok/TUI cell diffs until CSI ?2026l (ConPTY splits frames).
+    sync: SyncHold,
 }
 
 impl PaneRuntime {
@@ -82,6 +85,17 @@ impl PaneRuntime {
             }
             self.pty_tail = self.pty_tail[cut..].to_string();
         }
+    }
+
+    /// Echo-filter + DEC 2026 / ConPTY burst hold.
+    /// Empty means the grid must not change yet.
+    fn take_sync_bytes(&mut self, chunk: &[u8], now: Instant, coalesce: bool) -> Vec<u8> {
+        self.sync.set_coalesce(coalesce);
+        let filtered = self.echo.feed(chunk);
+        let mut out = self.sync.flush_if_stale(now).bytes;
+        let rel = self.sync.feed_at(&filtered, now);
+        out.extend(rel.bytes);
+        out
     }
 }
 
@@ -427,6 +441,7 @@ fn spawn_pane_runtime_px(
                 echo: EchoFilter::new(),
                 blocks: CmdBlockLog::new(),
                 suppress_paint: true,
+                sync: SyncHold::new(),
             }
         }
         Err(e) => {
@@ -439,6 +454,7 @@ fn spawn_pane_runtime_px(
                 echo: EchoFilter::new(),
                 blocks: CmdBlockLog::new(),
                 suppress_paint: true,
+                sync: SyncHold::new(),
             }
         }
     }
@@ -1050,8 +1066,10 @@ impl ChromeApp {
                 || (self.session.is_widget(id) && !self.session.pane_kind(id).is_guest())
         });
         for pl in &mut layout.panes {
-            pl.hole = self.session.pane_kind(pl.pane_id).is_guest()
-                || alt_ids.contains(&pl.pane_id);
+            // Only real guest blits get an opaque well. Alt-screen Grok uses
+            // Reset cells so rain shows through; punching GuestHole (0.03 mix)
+            // left a solid slab after slash menus closed.
+            pl.hole = self.session.pane_kind(pl.pane_id).is_guest();
         }
         tab.root
             .collect_sashes(layout.workspace, gap, &mut layout.sashes);
@@ -1309,58 +1327,78 @@ impl ChromeApp {
     }
 
     fn drain_all_ptys(&mut self) {
-        let mut pending: Vec<(u64, String)> = Vec::new();
+        let mut pending: HashMap<u64, Vec<u8>> = HashMap::new();
         for (id, rt) in self.runtimes.iter_mut() {
             if let Some(pty) = &mut rt.pty {
                 let chunk = pty.try_read();
                 if !chunk.is_empty() {
-                    rt.push_pty_tail(&chunk);
-                    pending.push((*id, chunk));
+                    rt.push_pty_tail(&String::from_utf8_lossy(&chunk));
+                    pending.insert(*id, chunk);
                 }
             }
         }
-        if pending.is_empty() {
-            return;
-        }
-        for (id, chunk) in pending {
-            if let Some(rt) = self.runtimes.get_mut(&id) {
-                // Suppress local echo of warp-submitted command when armed.
-                let filtered = rt.echo.feed(chunk.as_bytes());
-                if !filtered.is_empty() {
-                    let has_gfx = filtered.windows(3).any(|w| w == b"\x1b_G");
-                    if has_gfx {
-                        rt.suppress_paint = false;
-                    }
-                    if rt.suppress_paint {
-                        // Parse OSC 7 / DA / title without painting the shell prompt.
-                        let mut scratch = CellGrid::new(80, 24);
-                        rt.ansi.feed(&mut scratch, &filtered);
-                    } else if let Some(grid) = self.session.grid_mut(id) {
-                        rt.ansi.feed(grid, &filtered);
-                    }
+        let now = Instant::now();
+        let ids: Vec<u64> = self.runtimes.keys().copied().collect();
+        let mut grid_wrote = false;
+        for id in ids {
+            let chunk = pending.remove(&id).unwrap_or_default();
+            let Some(rt) = self.runtimes.get_mut(&id) else {
+                continue;
+            };
+            if chunk.is_empty() && !rt.sync.holding() && !rt.sync.has_pending() {
+                continue;
+            }
+            // Alt-screen / in-flight 2026: coalesce ConPTY split reads. ConPTY
+            // strips CSI ?2026, so a quiet-gap is what actually atomic-izes Grok.
+            let entering_alt = chunk.windows(8).any(|w| w == b"\x1b[?1049h")
+                || chunk.windows(7).any(|w| w == b"\x1b[?47h")
+                || chunk.windows(8).any(|w| w == b"\x1b[?1047h");
+            let coalesce = entering_alt
+                || rt.ansi.on_alt_screen()
+                || rt.sync.holding()
+                || rt.sync.has_pending();
+            let to_vt = rt.take_sync_bytes(&chunk, now, coalesce);
+            if to_vt.windows(3).any(|w| w == b"\x1b_G") {
+                rt.suppress_paint = false;
+            }
+            if !to_vt.is_empty() {
+                let was_alt = rt.ansi.on_alt_screen();
+                if rt.suppress_paint {
+                    let mut scratch = CellGrid::new(80, 24);
+                    rt.ansi.feed(&mut scratch, &to_vt);
+                } else if let Some(grid) = self.session.grid_mut(id) {
+                    rt.ansi.feed(grid, &to_vt);
                 }
-                // Device-attribute / probe replies → PTY (never the screen).
-                let replies = rt.ansi.take_replies();
-                if !replies.is_empty() {
-                    if let Some(pty) = &mut rt.pty {
-                        for r in replies {
-                            let _ = pty.write_all(&r);
-                        }
-                    }
+                if was_alt && !rt.ansi.on_alt_screen() {
+                    rt.sync.reset();
                 }
                 if rt.ansi.graphics().has_images() {
                     rt.suppress_paint = false;
                 }
-                if let Some(cwd) = rt.ansi.take_cwd() {
-                    self.session.set_cwd(id, cwd);
-                }
-                if let Some(title) = rt.ansi.take_title() {
-                    self.session.set_pane_title(id, title);
+                grid_wrote = true;
+            }
+            let replies = rt.ansi.take_replies();
+            if !replies.is_empty() {
+                if let Some(pty) = &mut rt.pty {
+                    for r in replies {
+                        let _ = pty.write_all(&r);
+                    }
                 }
             }
-            if let Some(p) = self.session.panes.get_mut(&id) {
-                p.busy = false;
+            if let Some(cwd) = rt.ansi.take_cwd() {
+                self.session.set_cwd(id, cwd);
             }
+            if let Some(title) = rt.ansi.take_title() {
+                self.session.set_pane_title(id, title);
+            }
+            if !chunk.is_empty() {
+                if let Some(p) = self.session.panes.get_mut(&id) {
+                    p.busy = false;
+                }
+            }
+        }
+        if !grid_wrote {
+            return;
         }
         self.paint_dirty = true;
         // Focused: present immediately so vim/Grok output isn't a frame late.
@@ -2467,9 +2505,10 @@ impl ChromeApp {
                 if !pty.is_alive() {
                     // Drain any final output (logout banner, etc.)
                     let chunk = pty.try_read();
-                    if !chunk.is_empty() {
+                    let to_vt = rt.take_sync_bytes(&chunk, Instant::now(), false);
+                    if !to_vt.is_empty() {
                         if let Some(grid) = self.session.grid_mut(*id) {
-                            rt.ansi.feed(grid, chunk.as_bytes());
+                            rt.ansi.feed(grid, &to_vt);
                         }
                     }
                     dead.push(*id);

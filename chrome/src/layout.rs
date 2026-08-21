@@ -711,8 +711,9 @@ fn pane_layout_in_glass(
             title_pill,
             close,
             focused,
-            // Opaque well so glyph rain does not read through vim/Grok.
-            hole: true,
+            // Grok's canvas is Reset/chroma-key: rain must read through empty
+            // cells. Guest plugins still punch an opaque well in app.rs.
+            hole: false,
         };
     }
 
@@ -961,13 +962,16 @@ mod tests {
     }
 
     #[test]
-    fn alt_screen_fullscreen_punches_an_opaque_cell_well() {
+    fn alt_screen_fullscreen_does_not_punch_opaque_well() {
         let m = Metrics::default();
         let mut l = FrameLayout::compute(800.0, 600.0, m, 1);
         let glass = l.panes[0].glass;
         let id = l.panes[0].pane_id;
         l.apply_pane_rects(m, &[(id, glass)], id, &|_| true);
-        assert!(l.panes[0].hole, "alt-screen well should hide glyph rain");
+        assert!(
+            !l.panes[0].hole,
+            "Grok alt-screen must not hide rain under Reset cells"
+        );
         assert!(l.panes[0].warp.h < 1.0, "warp strip collapses");
         let chip = crate::chrome_ui::ChipUi::default();
         let jelly = crate::chrome_ui::TabJelly::default();
@@ -976,7 +980,7 @@ mod tests {
             .iter()
             .filter(|p| (p.kind - PanelKind::GuestHole as u32 as f32).abs() < 0.1)
             .count();
-        assert_eq!(holes, 1);
+        assert_eq!(holes, 0);
     }
 
     #[test]

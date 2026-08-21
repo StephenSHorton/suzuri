@@ -4159,24 +4159,47 @@ fn push_pane_cells(
             if c.ch == crate::kitty_gfx::PLACEHOLDER {
                 continue;
             }
+            // Clip each glyph to its cell. Pane-wide clip lets fallback faces
+            // (Segoe / CJK) overflow into neighbors — mixed text on Windows.
+            let cell_clip = [x, y, cell_w, cell_h];
             if let Some(bg) = c.bg {
-                labels.push(
-                    TextLabel::mono("█", x, y, mono_size, [bg[0], bg[1], bg[2], 0.85 * dim_a])
-                        .with_clip(clip),
-                );
-            }
-            if c.ch != ' ' {
-                labels.push(
-                    TextLabel::mono(
-                        c.ch.to_string(),
+                if bg[0] >= 0.09 || bg[1] >= 0.09 || bg[2] >= 0.09 {
+                    // Gohu █ is inset on the X axis — cell-sized clips leave a
+                    // 1px gutter between columns (slash-menu highlight).
+                    push_inked_cell_fill(
+                        labels,
                         x,
                         y,
-                        mono_size,
-                        [fg[0], fg[1], fg[2], 0.95 * dim_a],
-                    )
-                    .with_clip(clip),
-                );
+                        cell_w,
+                        cell_h,
+                        clip,
+                        [bg[0], bg[1], bg[2], 0.85 * dim_a],
+                    );
+                }
             }
+            if c.ch == ' ' {
+                continue;
+            }
+            let fg_a = [fg[0], fg[1], fg[2], 0.95 * dim_a];
+            // Gohu's bitmap ─ is a short dash; per-cell clip made seams obvious
+            // on highlighted menus. Slice a full block into joining NESW bars.
+            if let Some(bars) = box_drawing_clips(c.ch, x, y, cell_w, cell_h) {
+                // Gohu's █ has side bearings, so a cell-sized block clipped to a
+                // 1px bar is still a dash. Center an oversized block on the bar
+                // so the clip is fully inked and neighbors join.
+                let ink = (cell_h * 2.5).max(18.0);
+                for bar in bars {
+                    if let Some(clipped) = intersect_clip(bar, clip) {
+                        labels.push(
+                            TextLabel::icon_centered("█", clipped, ink, fg_a).with_clip(clipped),
+                        );
+                    }
+                }
+                continue;
+            }
+            labels.push(
+                TextLabel::mono(c.ch.to_string(), x, y, mono_size, fg_a).with_clip(cell_clip),
+            );
         }
 
         if has_cursor {
@@ -4200,6 +4223,106 @@ fn push_pane_cells(
     }
 }
 
+/// Full-cell fill: oversized █ clipped to the exact cell (no overlap).
+/// Adjacent fills tile via `tile_clip` so they neither gap nor double-blend.
+fn push_inked_cell_fill(
+    labels: &mut Vec<TextLabel>,
+    x: f32,
+    y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    pane_clip: [f32; 4],
+    color: [f32; 4],
+) {
+    let fill = [x, y, cell_w, cell_h];
+    let Some(clipped) = intersect_clip(fill, pane_clip) else {
+        return;
+    };
+    let ink = (cell_h * 2.5).max(18.0);
+    labels.push(
+        TextLabel::icon_centered("█", clipped, ink, color)
+            .with_clip(clipped)
+            .tile_clip(),
+    );
+}
+
+fn intersect_clip(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
+    let x0 = a[0].max(b[0]);
+    let y0 = a[1].max(b[1]);
+    let x1 = (a[0] + a[2]).min(b[0] + b[2]);
+    let y1 = (a[1] + a[3]).min(b[1] + b[3]);
+    if x1 <= x0 || y1 <= y0 {
+        None
+    } else {
+        Some([x0, y0, x1 - x0, y1 - y0])
+    }
+}
+
+/// NESW arms for light/rounded/double box drawing. `None` = use the font glyph.
+fn box_drawing_arms(ch: char) -> Option<(bool, bool, bool, bool, bool)> {
+    // (north, east, south, west, heavy)
+    Some(match ch {
+        '─' | '┄' | '┈' | '╌' => (false, true, false, true, false),
+        '━' | '┅' | '┉' | '╍' | '═' => (false, true, false, true, true),
+        '│' | '┆' | '┊' | '╎' => (true, false, true, false, false),
+        '┃' | '┇' | '┋' | '╏' | '║' => (true, false, true, false, true),
+        '┌' | '╭' | '╒' | '╓' => (false, true, true, false, false),
+        '╔' => (false, true, true, false, true),
+        '┐' | '╮' | '╕' | '╖' => (false, false, true, true, false),
+        '╗' => (false, false, true, true, true),
+        '└' | '╰' | '╘' | '╙' => (true, true, false, false, false),
+        '╚' => (true, true, false, false, true),
+        '┘' | '╯' | '╛' | '╜' => (true, false, false, true, false),
+        '╝' => (true, false, false, true, true),
+        '├' | '╟' | '╞' => (true, true, true, false, false),
+        '╠' => (true, true, true, false, true),
+        '┤' | '╢' | '╡' => (true, false, true, true, false),
+        '╣' => (true, false, true, true, true),
+        '┬' | '╤' | '╥' => (false, true, true, true, false),
+        '╦' => (false, true, true, true, true),
+        '┴' | '╧' | '╨' => (true, true, false, true, false),
+        '╩' => (true, true, false, true, true),
+        '┼' | '╪' | '╫' => (true, true, true, true, false),
+        '╬' => (true, true, true, true, true),
+        _ => return None,
+    })
+}
+
+/// █-sliced bar clips that overlap neighboring cells so Grok `╭─╮` joins.
+fn box_drawing_clips(ch: char, x: f32, y: f32, cw: f32, chh: f32) -> Option<Vec<[f32; 4]>> {
+    let (n, e, s, w, heavy) = box_drawing_arms(ch)?;
+    let t = if heavy {
+        (chh / 6.0).max(2.0)
+    } else {
+        (chh / 10.0).max(1.5)
+    };
+    let join = 0.8_f32;
+    let cx = x + cw * 0.5;
+    let cy = y + chh * 0.5;
+    let mut out = Vec::with_capacity(2);
+    if n && s {
+        out.push([cx - t * 0.5, y - join, t, chh + join * 2.0]);
+    } else {
+        if n {
+            out.push([cx - t * 0.5, y - join, t, chh * 0.5 + join]);
+        }
+        if s {
+            out.push([cx - t * 0.5, cy, t, chh * 0.5 + join]);
+        }
+    }
+    if e && w {
+        out.push([x - join, cy - t * 0.5, cw + join * 2.0, t]);
+    } else {
+        if w {
+            out.push([x - join, cy - t * 0.5, cw * 0.5 + join, t]);
+        }
+        if e {
+            out.push([cx, cy - t * 0.5, cw * 0.5 + join, t]);
+        }
+    }
+    Some(out)
+}
+
 /// Contiguous accent full-block runs for one viewport row (selection or link hover).
 fn push_accent_row(
     labels: &mut Vec<TextLabel>,
@@ -4221,15 +4344,14 @@ fn push_accent_row(
             continue;
         }
         let x = origin_x + col as f32 * cell_w;
-        labels.push(
-            TextLabel::mono(
-                "█",
-                x,
-                y,
-                mono_size,
-                [accent[0], accent[1], accent[2], alpha],
-            )
-            .with_clip(clip),
+        push_inked_cell_fill(
+            labels,
+            x,
+            y,
+            cell_w,
+            mono_size,
+            clip,
+            [accent[0], accent[1], accent[2], alpha],
         );
         col += 1;
     }
@@ -4492,6 +4614,16 @@ mod tests {
         let (c, r) = terminal_grid_size_with(&cells, 3.5, 7.0);
         assert_eq!(c, 40);
         assert_eq!(r, 40);
+    }
+
+    #[test]
+    fn grok_prompt_box_drawing_joins_across_cells() {
+        let h = box_drawing_clips('─', 10.0, 20.0, 7.0, 14.0).unwrap();
+        assert_eq!(h.len(), 1);
+        assert!(h[0][2] > 7.0, "horizontal bar must overlap neighbors");
+        let corner = box_drawing_clips('╭', 0.0, 0.0, 7.0, 14.0).unwrap();
+        assert_eq!(corner.len(), 2);
+        assert!(box_drawing_arms('A').is_none());
     }
 
     #[test]

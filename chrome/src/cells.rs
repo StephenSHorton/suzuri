@@ -536,7 +536,12 @@ impl CellGrid {
     }
 
     pub fn set_bg(&mut self, bg: Option<[f32; 3]>) {
-        self.bg = bg;
+        // RGB(0,0,0) is Grok's Windows chroma-key for "show host rain".
+        // ConPTY cannot Reset a dropdown fill, so Grok overwrites with black;
+        // we must not paint a black █ over the underlay.
+        // ANSI 40 / ConPTY-folded RGB black lands ~0.05. Keep theme bg_dark
+        // (≈0.11) as a real band.
+        self.bg = bg.filter(|c| c[0] >= 0.09 || c[1] >= 0.09 || c[2] >= 0.09);
     }
 
     pub fn fg(&self) -> [f32; 3] {

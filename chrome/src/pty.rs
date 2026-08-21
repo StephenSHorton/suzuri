@@ -142,9 +142,12 @@ impl PtySession {
             .map_err(|e| format!("resize: {e}"))
     }
 
-    /// Non-blocking: drain all bytes currently available from the reader thread.
-    /// Returns an empty string when nothing is queued. UTF-8 is lossy.
-    pub fn try_read(&mut self) -> String {
+    /// Non-blocking: drain all bytes currently queued from the reader thread.
+    /// Raw bytes — do **not** UTF-8-lossy here. ConPTY splits multi-byte
+    /// runes across reads; lossy replacement at the seam is what mixed Grok
+    /// text (braille spinners, CJK, box drawing). `AnsiDecoder` already holds
+    /// incomplete UTF-8 across `feed` calls.
+    pub fn try_read(&mut self) -> Vec<u8> {
         let mut bytes = Vec::new();
         loop {
             match self.rx.try_recv() {
@@ -153,11 +156,7 @@ impl PtySession {
                 Err(TryRecvError::Disconnected) => break,
             }
         }
-        if bytes.is_empty() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(&bytes).into_owned()
-        }
+        bytes
     }
 
     /// Write raw bytes to the PTY master (user input, submitted line + `\n`/`\r`).
