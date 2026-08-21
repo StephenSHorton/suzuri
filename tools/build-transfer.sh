@@ -26,11 +26,13 @@ done
 cd "$ROOT"
 echo "==> cargo build ($PROFILE) libs/transfer"
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release --manifest-path libs/transfer/Cargo.toml -p hato-cli
+  cargo build --release --manifest-path libs/transfer/Cargo.toml -p hato-cli -p suzuri-workspace-sync
   OUT="$ROOT/libs/transfer/target/release/suzuri-transfer"
+  WSOUT="$ROOT/libs/transfer/target/release/suzuri-workspace-sync"
 else
-  cargo build --manifest-path libs/transfer/Cargo.toml -p hato-cli
+  cargo build --manifest-path libs/transfer/Cargo.toml -p hato-cli -p suzuri-workspace-sync
   OUT="$ROOT/libs/transfer/target/debug/suzuri-transfer"
+  WSOUT="$ROOT/libs/transfer/target/debug/suzuri-workspace-sync"
 fi
 
 if [[ ! -f "$OUT" ]]; then
@@ -45,6 +47,13 @@ fi
 
 echo "==> built $OUT"
 ls -la "$OUT"
+if [[ -f "$WSOUT" || -f "${WSOUT}.exe" ]]; then
+  if [[ ! -f "$WSOUT" && -f "${WSOUT}.exe" ]]; then
+    WSOUT="${WSOUT}.exe"
+  fi
+  echo "==> built $WSOUT"
+  ls -la "$WSOUT"
+fi
 
 if [[ -n "$COPY_TO" ]]; then
   dest_dir="$(cd "$(dirname "$COPY_TO")" && pwd)"
@@ -52,4 +61,10 @@ if [[ -n "$COPY_TO" ]]; then
   cp "$OUT" "$dest_dir/$base"
   chmod +x "$dest_dir/$base" 2>/dev/null || true
   echo "==> copied to $dest_dir/$base"
+  if [[ -f "$WSOUT" ]]; then
+    wsbase="$(basename "$WSOUT")"
+    cp "$WSOUT" "$dest_dir/$wsbase"
+    chmod +x "$dest_dir/$wsbase" 2>/dev/null || true
+    echo "==> copied to $dest_dir/$wsbase"
+  fi
 fi

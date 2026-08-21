@@ -62,6 +62,8 @@ Presence chips are **one per member** (never unique-by-name), so `engine` and `e
 
 `+ Agent` (right of the strip, or palette **Add agent…**) picks `pm` / `engine` / `content` and copies a kickoff snippet (call `workspace_guide` first, then `workspace_join` → `workspace_claim_role` → `workspace_wait`). Chrome does **not** launch a Grok process.
 
+Connect bar (under the topic pin): **Share** copies an iroh ticket; **Join** pastes theirs. Sentence on the bar explains the current step. Live → **Copy ticket** / **Disconnect**. Palette / ⇧⌘L still work. Sidecar: `workspace_sync.rs`. Product notes: `docs/workspace-iroh.md`.
+
 Channel `meta.json` already has `topic`. Chrome pins it above the chat (does not scroll) and can set it via the pin row, palette **Set channel topic…**, or Ctrl+Shift+T. Writes go through `WorkspaceStore::set_channel_topic` (same atomic `meta.json` rewrite as other workspace files).
 
 ## Public API — `WorkspaceUi`
@@ -94,7 +96,7 @@ Preserve these for `app` / `renderer`:
 - `channel_topic: String` — pinned topic for the active channel
 - `draft: String` — compose buffer
 - `status: String` — ephemeral feedback
-- `mode: ComposeMode` — `Message` \| `NewChannel` \| `AttachPath` \| `PickAgentRole` \| `SetTopic`
+- `mode: ComposeMode` — `Message` \| `NewChannel` \| `AttachPath` \| `PickAgentRole` \| `SetTopic` \| `JoinTicket`
 - `scroll: usize` — messages hidden from the end
 
 `WsMessage { id, channel, from, from_kind, kind, body, ts, file, mentions }` — `from` is display name (`from_name` on disk); `file` is `Option<WsFileRef>` for attaches; `mentions` is member ids resolved from `@name` at post time.
@@ -181,11 +183,12 @@ Layout constants (logical px, shared with paint):
 MODAL_PAD          = 14
 CHANNEL_LIST_W     = 140
 CHANNEL_ROW_H      = 28
-CHANNEL_LIST_TOP   = MODAL_PAD + 18   // first row under title
+CHANNEL_LIST_TOP   = (legacy) first channel row; compact panes hide the rail
 COMPOSE_H          = 44
 PRESENCE_STRIP_H   = 18               // members line above messages
 TOPIC_PIN_H        = 16               // pinned topic (does not scroll)
 ADD_AGENT_CHIP_W   = 64               // +Agent at right of presence strip
+CONNECT_BAR_H      = 22               // Share/Join bar under topic pin
 ```
 
 | Method | Returns |
@@ -210,8 +213,8 @@ ADD_AGENT_CHIP_W   = 64               // +Agent at right of presence strip
 2. Esc: if `mode != Message` → `cancel_mode()`; docked pane stays (⌘W closes). Modal path still `close()`
 3. Enter → `send()` (completes `@mention` when picker open); printable → `insert_char`; Backspace → `backspace`
 4. Tab / Shift+Tab → `tab()` (mention cycle when picker open, else `cycle_channel`); ↑/↓ → scroll
-5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path; Ctrl+Shift+U / palette `WorkspaceAttachFile` → `pick_and_attach()`; Ctrl+Shift+T / palette `WorkspaceSetTopic` → topic; palette `WorkspaceAddAgent` / +Agent chip → role kickoff; Ctrl+D ×2 → `request_delete_channel()` (blocks `#general`)
-6. Pointer inside docked pane / `card_rect` → keep focused; `try_click` for channel rail / presence / +Agent / topic pin
+5. Ctrl+R → `refresh()`; Ctrl+Shift+A → `cycle_status()`; Ctrl+N new channel; Ctrl+U attach path; Ctrl+Shift+U / palette `WorkspaceAttachFile` → `pick_and_attach()`; Ctrl+Shift+T / palette `WorkspaceSetTopic` → topic; palette `WorkspaceAddAgent` / +Agent chip → role kickoff; Ctrl+Shift+L / palette `WorkspaceShare` / Link chip → listen + copy ticket; palette `WorkspaceJoin` → paste ticket; palette `WorkspaceDisconnect` → stop sidecar; Ctrl+D ×2 → `request_delete_channel()` (blocks `#general`)
+6. Pointer inside docked pane / `card_rect` → keep focused; `try_click` for channel rail / presence / connect bar Share·Join / +Agent / topic pin
 7. Outside click on a modal overlay → `close_all_overlays` (does not close a docked workspace pane)
 8. `DroppedFile` while workspace open → `workspace_ui.attach_path(path)` (before transfer)
 9. Mailbox `refresh_workspace` → soft reload if open

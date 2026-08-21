@@ -48,7 +48,7 @@ beside the last-focused terminal (not a covering modal). ⌘W closes the pane.
 Drag the path strip (or the top of the glass) onto another pane’s edge or a
 tab chip to re-dock it.
 
-Layout (top → bottom): **channel tabs** · **presence strip** (members + availability + **+ Agent**) ·
+Layout (top → bottom): **channel tabs** · **presence strip** (members + availability + **Link** + **+ Agent**) ·
 **pinned topic** (does not scroll) · chat bubbles (viewport scroll) · compose · short status · key footer.
 
 | Key | Action |
@@ -58,6 +58,9 @@ Layout (top → bottom): **channel tabs** · **presence strip** (members + avail
 | Tab / Shift+Tab | Cycle channels (or complete/cycle @mentions when picker open) |
 | **+** chip (or Ctrl+N) | New channel — type name, Enter |
 | **+ Agent** (or palette **Add agent…**) | Pick `pm` / `engine` / `content` — copies a kickoff snippet |
+| **Share** (connect bar, or ⇧⌘L) | Copy a ticket. Keep Suzuri open. The other computer clicks **Join** and pastes it. |
+| **Join** (connect bar) | Paste the ticket they copied, Enter. Chat then appears on both sides. |
+| **Disconnect** (connect bar while live) | Stop sync. Local history stays. |
 | Topic pin (or Ctrl+Shift+T) | Set the channel topic (stored in `meta.json`) |
 | Click channel tab | Switch channel |
 | Ctrl+D | Delete current channel (press twice to confirm; not on #general) |
@@ -205,6 +208,9 @@ The store now keeps **first-class tasks** and **exclusive path leases** on disk:
 - Create / claim / assign / done / blocked each post a **system line** in the channel (default `#general`). **Do not upload TASKS.md.**
 - Chrome task board strip is not in this slice; agents use the MCP tools + `ListTasks` / `ListLeases` on the store.
 
-## Later
+## Multi-machine (P2P)
 
-- Multi-machine workspace: opt-in Iroh message sync — see [workspace-iroh.md](workspace-iroh.md)
+Two Suzuri installs merge their workspace chats over iroh (same ticket handshake
+as file transfer). Local-first on each disk; the sidecar copies new jsonl lines
+both ways and upserts remote authors into `members.json`. See
+[workspace-iroh.md](workspace-iroh.md).

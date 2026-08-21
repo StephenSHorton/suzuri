@@ -61,6 +61,7 @@ mod toast;
 mod transfer_ui;
 mod updater;
 mod workspace_store;
+mod workspace_sync;
 mod workspace_ui;
 
 use winit::event_loop::EventLoop;

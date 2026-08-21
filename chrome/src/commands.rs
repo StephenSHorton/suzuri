@@ -56,6 +56,12 @@ pub enum CommandAction {
     WorkspaceAddAgent,
     /// Edit the pinned channel topic (`meta.json`).
     WorkspaceSetTopic,
+    /// Listen and copy a P2P workspace ticket (iroh, same stack as transfer).
+    WorkspaceShare,
+    /// Paste a workspace ticket and join the other machine's room.
+    WorkspaceJoin,
+    /// Stop workspace P2P sync (local chat stays).
+    WorkspaceDisconnect,
     /// Query GitHub Releases (host may open confirm).
     CheckUpdates,
     Quit,
@@ -202,6 +208,30 @@ pub fn default_commands() -> Vec<Command> {
             format!("{} · pin above chat · Workspace", chord(&ms, "T")),
             "Workspace",
             CommandAction::WorkspaceSetTopic,
+        ),
+        cmd(
+            "workspace_share",
+            "Share workspace…",
+            format!(
+                "{} · copy a ticket · they Join on the other computer",
+                chord(&ms, "L")
+            ),
+            "Workspace",
+            CommandAction::WorkspaceShare,
+        ),
+        cmd(
+            "workspace_join",
+            "Join workspace…",
+            "Paste their Share ticket · Workspace".into(),
+            "Workspace",
+            CommandAction::WorkspaceJoin,
+        ),
+        cmd(
+            "workspace_disconnect",
+            "Disconnect other computer",
+            "Stop live sync · Workspace".into(),
+            "Workspace",
+            CommandAction::WorkspaceDisconnect,
         ),
         cmd(
             "transfer_send",
@@ -1249,6 +1279,32 @@ mod tests {
         assert!(filter_commands(&all, "topic")
             .iter()
             .any(|&i| all[i].id == "workspace_set_topic"));
+    }
+
+    #[test]
+    fn registry_contains_workspace_share_join_disconnect() {
+        let all = default_commands();
+        let share = all
+            .iter()
+            .find(|c| c.id == "workspace_share")
+            .expect("workspace_share");
+        assert_eq!(share.action, CommandAction::WorkspaceShare);
+        let join = all
+            .iter()
+            .find(|c| c.id == "workspace_join")
+            .expect("workspace_join");
+        assert_eq!(join.action, CommandAction::WorkspaceJoin);
+        let disc = all
+            .iter()
+            .find(|c| c.id == "workspace_disconnect")
+            .expect("workspace_disconnect");
+        assert_eq!(disc.action, CommandAction::WorkspaceDisconnect);
+        assert!(filter_commands(&all, "share workspace")
+            .iter()
+            .any(|&i| all[i].id == "workspace_share"));
+        assert!(filter_commands(&all, "join workspace")
+            .iter()
+            .any(|&i| all[i].id == "workspace_join"));
     }
 
     #[test]
