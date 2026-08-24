@@ -238,6 +238,16 @@ mod tests {
     }
 
     #[test]
+    fn insert_space_is_whitespace() {
+        let mut d = DraftLine::new();
+        d.insert_char('a');
+        d.insert_char(' ');
+        d.insert_char('b');
+        assert_eq!(d.as_str(), "a b");
+        assert_eq!(d.cursor(), 3);
+    }
+
+    #[test]
     fn arrows_move_and_insert_in_middle() {
         let mut d = DraftLine::new();
         d.replace("ac");
