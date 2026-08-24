@@ -414,6 +414,14 @@ mod tests {
     }
 
     #[test]
+    fn plain_space_is_ascii_space() {
+        assert_eq!(
+            encode_character(" ", mods(false, false, false, false)).as_deref(),
+            Some(&b" "[..])
+        );
+    }
+
+    #[test]
     fn ctrl_semicolon_is_csi_u() {
         assert_eq!(encode_ctrl_punct(";").as_deref(), Some(&b"\x1b[59;5u"[..]));
     }

@@ -3578,6 +3578,13 @@ impl ChromeApp {
                         }
                         return;
                     }
+                    Key::Named(NamedKey::Space) => {
+                        self.notes.insert_char(' ');
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     Key::Character(s) => {
                         for ch in s.chars() {
                             if !ch.is_control() {
@@ -3620,6 +3627,16 @@ impl ChromeApp {
                     }
                     Key::Named(NamedKey::Enter) => {
                         self.submit_guest_navigate();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::Space) if !super_or_ctrl => {
+                        self.session.type_char(' ');
+                        let draft = self.session.draft().to_string();
+                        self.guest_host.draft(self.session.focus_pane_id(), &draft);
+                        self.paint_dirty = true;
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -3682,6 +3699,13 @@ impl ChromeApp {
                         }
                         return;
                     }
+                    Key::Named(NamedKey::Space) => {
+                        self.workspace_ui.insert_char(' ');
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     Key::Character(s) => {
                         for ch in s.chars() {
                             if !ch.is_control() {
@@ -3707,6 +3731,13 @@ impl ChromeApp {
                     }
                     Key::Named(NamedKey::Enter) => {
                         self.transfer.submit();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::Space) => {
+                        self.transfer.insert_char(' ');
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -3739,6 +3770,13 @@ impl ChromeApp {
                         let target = self.rename.target;
                         let name = self.rename.commit();
                         self.apply_rename(target, &name);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::Space) => {
+                        self.rename.insert_char(' ');
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -4140,6 +4178,10 @@ impl ChromeApp {
                     self.palette.query.pop();
                     self.palette.selected = 0;
                 }
+                Key::Named(NamedKey::Space) if !super_or_ctrl => {
+                    self.palette.query.push(' ');
+                    self.palette.selected = 0;
+                }
                 Key::Character(s) if !super_or_ctrl => {
                     self.palette.query.push_str(s);
                     self.palette.selected = 0;
@@ -4348,13 +4390,14 @@ impl ChromeApp {
                         if !bytes.is_empty() {
                             let _ = pty.write_all(&bytes);
                         }
-                    } else if let Key::Character(s) = &event.logical_key {
-                        if let Some(bytes) = crate::kitty::encode_character(s, mods) {
-                            let _ = pty.write_all(&bytes);
-                        }
-                    } else if let Some(text) = &event.text {
-                        if !mods.ctrl && !mods.super_key {
-                            let _ = pty.write_all(text.as_bytes());
+                    } else {
+                        let s = event_typed_text(event);
+                        if !s.is_empty() {
+                            if let Some(bytes) = crate::kitty::encode_character(&s, mods) {
+                                let _ = pty.write_all(&bytes);
+                            } else if !mods.ctrl && !mods.super_key {
+                                let _ = pty.write_all(s.as_bytes());
+                            }
                         }
                     }
                     self.drain_all_ptys();
@@ -4430,19 +4473,10 @@ impl ChromeApp {
                     }
                     _ => {}
                 }
-            } else if let Key::Character(s) = &event.logical_key {
-                if super_or_ctrl {
-                    return;
-                }
-                for c in s.chars() {
-                    self.session.type_char(c);
-                }
-            } else if let Some(text) = &event.text {
-                if !super_or_ctrl {
-                    for c in text.chars() {
-                        if !c.is_control() {
-                            self.session.type_char(c);
-                        }
+            } else if !super_or_ctrl {
+                for c in event_typed_text(event).chars() {
+                    if !c.is_control() {
+                        self.session.type_char(c);
                     }
                 }
             }
@@ -5766,8 +5800,11 @@ fn paint_maximized(os_macos: bool, os_maximized: bool) -> bool {
 
 /// Named key for warp editing. Option on macOS can remap `logical_key` to a
 /// character; fall back to the physical arrow so ⌥←→ still word-jumps.
+///
+/// Only motion / submit / delete — Space is a named key in winit, and treating
+/// it as an edit command swallows whitespace in the warp bar.
 fn warp_edit_key(event: &winit::event::KeyEvent) -> Option<NamedKey> {
-    match &event.logical_key {
+    let named = match &event.logical_key {
         Key::Named(n) => Some(*n),
         _ => match event.physical_key {
             PhysicalKey::Code(KeyCode::ArrowLeft) => Some(NamedKey::ArrowLeft),
@@ -5778,9 +5815,41 @@ fn warp_edit_key(event: &winit::event::KeyEvent) -> Option<NamedKey> {
             PhysicalKey::Code(KeyCode::End) => Some(NamedKey::End),
             PhysicalKey::Code(KeyCode::Delete) => Some(NamedKey::Delete),
             PhysicalKey::Code(KeyCode::Backspace) => Some(NamedKey::Backspace),
+            PhysicalKey::Code(KeyCode::Enter) => Some(NamedKey::Enter),
             _ => None,
         },
+    }?;
+    warp_edit_named(named)
+}
+
+fn warp_edit_named(key: NamedKey) -> Option<NamedKey> {
+    match key {
+        NamedKey::Backspace
+        | NamedKey::Delete
+        | NamedKey::Enter
+        | NamedKey::Home
+        | NamedKey::End
+        | NamedKey::ArrowLeft
+        | NamedKey::ArrowRight
+        | NamedKey::ArrowUp
+        | NamedKey::ArrowDown => Some(key),
+        _ => None,
     }
+}
+
+/// Printable text this key should insert into a field, warp draft, or PTY.
+///
+/// winit reports Space as `Key::Named(NamedKey::Space)`, not `Character(" ")`.
+fn typed_text(logical: &Key, text: Option<&str>) -> String {
+    match logical {
+        Key::Named(NamedKey::Space) => " ".into(),
+        Key::Character(s) => s.to_string(),
+        _ => text.unwrap_or("").to_string(),
+    }
+}
+
+fn event_typed_text(event: &winit::event::KeyEvent) -> String {
+    typed_text(&event.logical_key, event.text.as_deref())
 }
 
 #[cfg(test)]
@@ -5797,5 +5866,36 @@ mod paint_maximized_tests {
     fn other_os_paint_forwards_maximized() {
         assert!(paint_maximized(false, true));
         assert!(!paint_maximized(false, false));
+    }
+}
+
+#[cfg(test)]
+mod warp_key_tests {
+    use super::{typed_text, warp_edit_named};
+    use winit::keyboard::{Key, NamedKey};
+
+    #[test]
+    fn space_is_not_a_warp_edit_key() {
+        assert_eq!(warp_edit_named(NamedKey::Space), None);
+        assert_eq!(warp_edit_named(NamedKey::Tab), None);
+        assert_eq!(warp_edit_named(NamedKey::Escape), None);
+        assert_eq!(warp_edit_named(NamedKey::Enter), Some(NamedKey::Enter));
+        assert_eq!(
+            warp_edit_named(NamedKey::Backspace),
+            Some(NamedKey::Backspace)
+        );
+        assert_eq!(
+            warp_edit_named(NamedKey::ArrowLeft),
+            Some(NamedKey::ArrowLeft)
+        );
+    }
+
+    #[test]
+    fn named_space_inserts_whitespace() {
+        assert_eq!(typed_text(&Key::Named(NamedKey::Space), None), " ");
+        assert_eq!(typed_text(&Key::Named(NamedKey::Space), Some("")), " ");
+        assert_eq!(typed_text(&Key::Character("a".into()), None), "a");
+        assert_eq!(typed_text(&Key::Named(NamedKey::Enter), None), "");
+        assert_eq!(typed_text(&Key::Named(NamedKey::Enter), Some("\r")), "\r");
     }
 }
