@@ -131,6 +131,8 @@ impl TextLabel {
         }
     }
 
+    /// Terminal cell glyph. Tight line box so Gohu descenders (`g`/`y`/`p`)
+    /// fit the 14px cell clip — 1.2 leading would sit them 2px low and shear.
     pub fn mono(text: impl Into<String>, x: f32, y: f32, size: f32, color: [f32; 4]) -> Self {
         Self {
             text: text.into(),
@@ -144,7 +146,7 @@ impl TextLabel {
             key_chord: false,
             center_in: None,
             clip: None,
-            tight: false,
+            tight: true,
             caret: false,
             tile_clip: false,
         }
@@ -644,11 +646,7 @@ impl TextLayer {
 
         for (i, label) in labels.iter().enumerate() {
             let size_px = (label.size * scale).max(1.0).round().max(1.0);
-            let line_height = if label.tight {
-                size_px
-            } else {
-                (size_px * 1.2).round().max(size_px)
-            };
+            let line_height = line_height_px(size_px, label.tight, label.clip, scale);
             let metrics = FontMetrics::new(size_px, line_height);
             let max_w = (self.width as f32).max(1.0);
             let text = label.text.as_str();
@@ -727,6 +725,24 @@ impl TextLayer {
     pub fn trim_atlas(&mut self) {
         self.atlas.trim();
     }
+}
+
+/// Line box in physical px.
+///
+/// Extra 1.2 leading vertically centers the glyph in a taller box. A cell-sized
+/// clip then shears the descenders (`g`/`y`/`p`/`q`/`j`) at the bottom. Use a
+/// tight box (font size) for those labels.
+fn line_height_px(size_px: f32, tight: bool, clip: Option<[f32; 4]>, scale: f32) -> f32 {
+    if tight {
+        return size_px;
+    }
+    if let Some([_, _, _, ch]) = clip {
+        let clip_h = (ch * scale).round().max(1.0);
+        if clip_h <= size_px + scale.max(1.0) {
+            return size_px;
+        }
+    }
+    (size_px * 1.2).round().max(size_px)
 }
 
 fn collect_areas<'a>(
@@ -871,6 +887,72 @@ mod tests {
         assert_eq!(label.center_in, Some(hit));
         assert_eq!(label.size, 14.0);
         assert!(!TextLabel::centered("×", hit, 11.0, [1.0; 4]).tight);
+    }
+
+    #[test]
+    fn mono_cell_glyph_is_tight() {
+        let label = TextLabel::mono("g", 0.0, 0.0, 14.0, [1.0; 4]);
+        assert!(label.tight);
+        assert!(label.mono);
+    }
+
+    #[test]
+    fn cell_sized_clip_drops_leading() {
+        let size = 14.0;
+        let scale = 1.0;
+        let cell = Some([8.0, 20.0, 7.0, 14.0]);
+        assert!((line_height_px(size, false, cell, scale) - 14.0).abs() < 1e-4);
+        assert!((line_height_px(size, false, None, scale) - 17.0).abs() < 1e-4);
+        let pane = Some([8.0, 20.0, 400.0, 280.0]);
+        assert!((line_height_px(size, false, pane, scale) - 17.0).abs() < 1e-4);
+        assert!((line_height_px(size, true, pane, scale) - 14.0).abs() < 1e-4);
+        let scale2 = 2.0;
+        let size2 = 28.0;
+        let cell2 = Some([8.0, 20.0, 7.0, 14.0]);
+        assert!((line_height_px(size2, false, cell2, scale2) - 28.0).abs() < 1e-4);
+    }
+
+    fn gohu_descender_bottom(text: &str, font: f32, line: f32) -> i32 {
+        let mut font_system = FontSystem::new();
+        font_system.db_mut().load_font_data(GOHU_TTF.to_vec());
+        let attrs = Attrs::new()
+            .family(Family::Name(GOHU_FAMILY))
+            .weight(Weight(500));
+        let mut buf = Buffer::new(&mut font_system, FontMetrics::new(font, line));
+        buf.set_size(&mut font_system, Some(200.0), Some(line));
+        buf.set_text(&mut font_system, text, attrs, Shaping::Advanced);
+        buf.shape_until_scroll(&mut font_system, false);
+        let mut swash = SwashCache::new();
+        let mut bottom = 0i32;
+        for run in buf.layout_runs() {
+            for g in run.glyphs.iter() {
+                let phys = g.physical((0.0, 0.0), 1.0);
+                let Some(img) = swash.get_image_uncached(&mut font_system, phys.cache_key) else {
+                    continue;
+                };
+                let draw_y = run.line_y.round() as i32 + phys.y - img.placement.top;
+                bottom = bottom.max(draw_y + img.placement.height as i32);
+            }
+        }
+        bottom
+    }
+
+    #[test]
+    fn gohu_descenders_fit_tight_cell_and_overflow_leading() {
+        // Gohu 14px bitmaps include g/y/p descenders in the em square. Cosmic-text
+        // 1.2 leading (17px) centers that square then a 14px cell clip shears them.
+        for ch in ["g", "y", "p", "q", "j"] {
+            let tight = gohu_descender_bottom(ch, 14.0, 14.0);
+            let lead = gohu_descender_bottom(ch, 14.0, 17.0);
+            assert!(
+                tight <= 14,
+                "{ch} tight descender bottom {tight} must fit a 14px cell"
+            );
+            assert!(
+                lead > 14,
+                "{ch} with 1.2 leading bottom {lead} must overflow a 14px clip"
+            );
+        }
     }
 
     #[test]

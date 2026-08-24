@@ -2855,7 +2855,8 @@ fn push_workspace_glass(
     );
     if msg_glass.w > 8.0 && msg_glass.h > 8.0 {
         panels.push(
-            PanelInstance::glass(msg_glass, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
+            PanelInstance::glass(msg_glass, m.chip_radius, PanelKind::ModalFrost)
+                .with_opacity(ease),
         );
     }
     if lay.connect.w > 8.0 && lay.connect.h > 8.0 {
@@ -4261,6 +4262,8 @@ fn push_pane_cells(
             }
             // Clip each glyph to its cell. Pane-wide clip lets fallback faces
             // (Segoe / CJK) overflow into neighbors — mixed text on Windows.
+            // `TextLabel::mono` is tight so 1.2 leading cannot drop g/y/p
+            // descenders below this 14px box.
             let cell_clip = [x, y, cell_w, cell_h];
             if let Some(bg) = c.bg {
                 if bg[0] >= 0.09 || bg[1] >= 0.09 || bg[2] >= 0.09 {
