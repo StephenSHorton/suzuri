@@ -100,7 +100,7 @@ func TestWithConfigDir(t *testing.T) {
 
 func TestWithHostEnvSetsVersion(t *testing.T) {
 	env := []string{"FOO=1", EnvVersion + "=old", "BAR=2"}
-	out := withHostEnv(env, "/cfg", "0.9.113")
+	out := withHostEnv(env, "/cfg", "0.9.113", "")
 	var sawVer, sawDir string
 	for _, e := range out {
 		if strings.HasPrefix(e, EnvVersion+"=") {

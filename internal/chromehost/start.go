@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/transfer"
 )
 
 // EnvConfigDir is passed to chrome so host and chrome share the product data dir.
@@ -16,6 +17,11 @@ const EnvConfigDir = "SUZURI_CONFIG_DIR"
 // EnvVersion is the host's release version (`-ldflags -X main.version`).
 // Chrome uses it to skip GitHub checks on `dev` builds.
 const EnvVersion = "SUZURI_VERSION"
+
+// EnvTransferBin is the absolute path to suzuri-transfer. Chrome rediscovers
+// the sidecar on its own; the host also injects this so Windows Store launches
+// do not depend on chrome's PATHEXT-less lookup.
+const EnvTransferBin = "SUZURI_TRANSFER_BIN"
 
 // Start resolves suzuri-chrome, spawns it as a child process (never via macOS
 // `open`), and returns the running command. The caller owns Wait / Kill.
@@ -49,7 +55,8 @@ func Start(ctx context.Context, version string, args ...string) (*exec.Cmd, erro
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = LaunchCwd()
-	cmd.Env = withHostEnv(os.Environ(), config.Dir(), version)
+	transferBin, _ := transfer.ResolveBinary()
+	cmd.Env = withHostEnv(os.Environ(), config.Dir(), version, transferBin)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", bin, err)
@@ -61,10 +68,23 @@ func withConfigDir(env []string, dir string) []string {
 	return withReplacedEnv(env, EnvConfigDir, dir)
 }
 
-func withHostEnv(env []string, dir, version string) []string {
+func withHostEnv(env []string, dir, version, transferBin string) []string {
 	env = withReplacedEnv(env, EnvConfigDir, dir)
 	env = withReplacedEnv(env, EnvVersion, version)
+	if transferBin != "" && !envHasKey(env, EnvTransferBin) {
+		env = withReplacedEnv(env, EnvTransferBin, transferBin)
+	}
 	return env
+}
+
+func envHasKey(env []string, key string) bool {
+	prefix := key + "="
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func withReplacedEnv(env []string, key, val string) []string {

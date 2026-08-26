@@ -39,11 +39,13 @@ Do not rename these without updating `app.rs` and `renderer.rs`.
 
 Same order as product host (`internal/transfer/resolve.go`) plus monorepo paths:
 
-1. **`SUZURI_TRANSFER_BIN`** — absolute path to the engine
-2. **Next to the running executable** — `suzuri-transfer`, then legacy `hato`
+1. **`SUZURI_TRANSFER_BIN`** — absolute path to the engine (host injects this on launch)
+2. **Next to the running executable** — `suzuri-transfer.exe` / `suzuri-transfer`, then legacy `hato`
 3. **Walk up from CWD** — `libs/transfer/target/{release,debug}/suzuri-transfer`
 4. **Dev home fallback** — `~/projects/suzuri/libs/transfer/target/release/…`
-5. **`PATH`** — `suzuri-transfer`, then `hato`
+5. **`PATH`** — same names as (2)
+
+On Windows, discovery must include the `.exe` suffix (`Path::is_file` does not apply PATHEXT). The Store package ships `suzuri-transfer.exe` next to `suzuri-chrome.exe`.
 
 Missing binary → status line:
 

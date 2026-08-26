@@ -88,10 +88,10 @@ pub enum EngineMode {
 ///
 /// Order:
 /// 1. `SUZURI_TRANSFER_BIN`
-/// 2. Next to the running executable
+/// 2. Next to the running executable (`suzuri-transfer.exe` on Windows)
 /// 3. Walk up from CWD for `libs/transfer/target/release/suzuri-transfer`
 /// 4. `~/projects/suzuri/libs/transfer/target/release/suzuri-transfer` (dev home)
-/// 5. `PATH` (`suzuri-transfer`, then `hato`)
+/// 5. `PATH` (same names as step 2)
 pub fn find_transfer_bin() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("SUZURI_TRANSFER_BIN") {
         let pb = PathBuf::from(p.trim());
@@ -102,21 +102,11 @@ pub fn find_transfer_bin() -> Option<PathBuf> {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Ok(exe) = exe.canonicalize() {
-            if let Some(dir) = exe.parent() {
-                for name in engine_names() {
-                    let cand = dir.join(name);
-                    if cand.is_file() {
-                        return Some(cand);
-                    }
-                }
+            if let Some(found) = first_engine_in(exe.parent()) {
+                return Some(found);
             }
-        } else if let Some(dir) = exe.parent() {
-            for name in engine_names() {
-                let cand = dir.join(name);
-                if cand.is_file() {
-                    return Some(cand);
-                }
-            }
+        } else if let Some(found) = first_engine_in(exe.parent()) {
+            return Some(found);
         }
     }
 
@@ -147,7 +137,33 @@ pub fn find_transfer_bin() -> Option<PathBuf> {
 }
 
 fn engine_names() -> &'static [&'static str] {
-    &["suzuri-transfer", "hato"]
+    // Windows File::exists / Path::is_file do not apply PATHEXT. The Store
+    // package ships `suzuri-transfer.exe`; looking for the bare name misses it
+    // and the GUI shows "suzuri-transfer not found".
+    #[cfg(windows)]
+    {
+        &[
+            "suzuri-transfer.exe",
+            "suzuri-transfer",
+            "hato.exe",
+            "hato",
+        ]
+    }
+    #[cfg(not(windows))]
+    {
+        &["suzuri-transfer", "hato"]
+    }
+}
+
+fn first_engine_in(dir: Option<&Path>) -> Option<PathBuf> {
+    let dir = dir?;
+    for name in engine_names() {
+        let cand = dir.join(name);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
 }
 
 fn walk_dev_release(start: &Path) -> Option<PathBuf> {
@@ -224,12 +240,14 @@ fn suzuri_config_dir() -> PathBuf {
 
 /// Default receive directory: `~/Downloads` when present, else home.
 pub fn default_receive_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        let dl = PathBuf::from(&home).join("Downloads");
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    if let Some(home) = home {
+        let home = PathBuf::from(home);
+        let dl = home.join("Downloads");
         if dl.is_dir() {
             return dl;
         }
-        return PathBuf::from(home);
+        return home;
     }
     PathBuf::from(".")
 }
@@ -706,5 +724,40 @@ mod tests {
         assert_eq!(u.phase, "error");
         assert!(!u.ok);
         assert_eq!(u.message.as_deref(), Some("missing path"));
+    }
+
+    #[test]
+    fn engine_names_include_windows_exe() {
+        let names = engine_names();
+        assert!(names.contains(&"suzuri-transfer"));
+        assert!(names.contains(&"hato"));
+        #[cfg(windows)]
+        {
+            assert_eq!(names[0], "suzuri-transfer.exe");
+            assert!(names.contains(&"hato.exe"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(!names.iter().any(|n| n.ends_with(".exe")));
+        }
+    }
+
+    #[test]
+    fn first_engine_in_finds_sidecar() {
+        let dir = std::env::temp_dir().join(format!(
+            "suzuri-engine-names-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = engine_names()[0];
+        let bin = dir.join(name);
+        std::fs::write(&bin, b"fake-engine").unwrap();
+        let found = first_engine_in(Some(&dir)).expect("sidecar in temp dir");
+        assert_eq!(found.file_name(), bin.file_name());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
