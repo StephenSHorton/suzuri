@@ -42,8 +42,8 @@ use crate::rename::{RenameState, RenameTarget};
 use crate::renderer::{self, GhostLayer, KittyBlit, Renderer};
 use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
-use crate::sync_hold::SyncHold;
 use crate::settings::SettingsState;
+use crate::sync_hold::SyncHold;
 use crate::text::MonoCellMetrics;
 use crate::toast::ToastState;
 use crate::transfer_ui::TransferUi;
@@ -3441,6 +3441,16 @@ impl ChromeApp {
                 }
                 return;
             }
+            // Notes: Esc from editor → list; Esc from list → close.
+            if self.notes.open {
+                if self.notes.handle_escape() {
+                    self.notes.close();
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
             if self.overlay_open()
                 || self.settings.visible()
                 || self.palette.visible()
@@ -3542,6 +3552,10 @@ impl ChromeApp {
         // Modal text surfaces (notes / workspace / transfer) — not terminal.
         if !super_or_ctrl {
             if self.notes.open {
+                let layout = self.current_layout();
+                let win_w = layout.title.w;
+                let win_h = layout.workspace.y + layout.workspace.h + self.metrics.edge();
+                self.notes.refresh_layout(win_w, win_h);
                 match &event.logical_key {
                     Key::Named(NamedKey::Backspace) => {
                         self.notes.backspace();
@@ -3551,35 +3565,63 @@ impl ChromeApp {
                         return;
                     }
                     Key::Named(NamedKey::ArrowLeft) => {
-                        self.notes.move_cursor(-1);
+                        self.notes.on_left();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
                     Key::Named(NamedKey::ArrowRight) => {
-                        self.notes.move_cursor(1);
+                        self.notes.on_right();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.notes.on_up();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.notes.on_down();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
                     Key::Named(NamedKey::Tab) => {
-                        self.notes.cycle_focus(shift);
+                        self.notes.on_tab(shift);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
                     Key::Named(NamedKey::Enter) => {
-                        self.notes.insert_char('\n');
+                        self.notes.on_enter();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
                         return;
                     }
                     Key::Named(NamedKey::Space) => {
-                        self.notes.insert_char(' ');
+                        self.notes.type_char(' ');
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::Delete) => {
+                        self.notes.on_delete_key();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    Key::Named(NamedKey::F2) => {
+                        self.notes.on_f2();
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -3588,7 +3630,7 @@ impl ChromeApp {
                     Key::Character(s) => {
                         for ch in s.chars() {
                             if !ch.is_control() {
-                                self.notes.insert_char(ch);
+                                self.notes.type_char(ch);
                             }
                         }
                         if let Some(w) = &self.window {
