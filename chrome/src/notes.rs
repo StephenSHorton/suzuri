@@ -1,15 +1,17 @@
-//! Notes bank — multi-note list + title/body editor (product parity subset).
+//! Notes bank — list screen, then full editor (product parity).
 //!
-//! Persists product-compatible `notes.json` (`active_id` + `notes[]`) under the
-//! suzuri config dir. Pure bank ops live in [`crate::notes_ops`].
+//! Two screens, never a list|editor split: the list is a full browser; Enter
+//! opens the editor; Esc returns to the list (Esc again closes). Persists
+//! product-compatible `notes.json` under the suzuri config dir. Pure bank ops
+//! live in [`crate::notes_ops`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::layout::Rect;
 use crate::notes_ops::{
-    self, bank_active_index, bank_create_note, bank_delete_note, normalize_bank, note_display_title,
-    NotesBank, NOTES_MAX_RUNES,
+    self, bank_active_index, bank_create_note, bank_delete_note, normalize_bank,
+    note_display_title, NotesBank, NOTES_MAX_RUNES,
 };
 
 pub use crate::notes_ops::NoteDoc;
@@ -17,35 +19,50 @@ pub use crate::notes_ops::NoteDoc;
 #[allow(unused_imports)]
 pub use crate::notes_ops::NOTES_MAX_BANK;
 
-/// Which field owns keyboard input inside the editor column.
+/// Which screen / field owns keyboard input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum NotesFocus {
+    /// Full-card note browser (Esc from the editor lands here).
+    List,
     Title,
     #[default]
     Body,
 }
 
-/// Hit-test geometry for the split list + editor modal (logical px).
+/// Hit-test geometry for the list **or** editor screen (never both).
 #[derive(Clone, Debug, Default)]
 pub struct NotesLayout {
     pub modal: Rect,
     pub list: Rect,
-    /// One rect per bank entry (same order as `bank`).
+    /// Visible list rows (bank index = `list_start + i`).
     pub list_rows: Vec<Rect>,
+    pub list_start: usize,
     pub new_row: Rect,
     pub title: Rect,
     pub body: Rect,
-    /// Optional “delete” affordance under the list (row after + New).
     pub delete_row: Rect,
+    pub footer: Rect,
+    pub list_mode: bool,
+}
+
+impl NotesLayout {
+    pub fn clip(r: Rect) -> [f32; 4] {
+        [r.x, r.y, r.w.max(0.0), r.h.max(0.0)]
+    }
 }
 
 /// Layout constants — keep in sync with renderer notes glass panels.
 pub const NOTES_PAD: f32 = 14.0;
-pub const NOTES_LIST_W: f32 = 160.0;
 pub const NOTES_ROW_H: f32 = 32.0;
 pub const NOTES_TITLE_H: f32 = 36.0;
-pub const NOTES_GAP: f32 = 10.0;
 pub const NOTES_TITLE_BODY_GAP: f32 = 8.0;
+pub const NOTES_FOOTER_H: f32 = 22.0;
+pub const NOTES_HEADER_H: f32 = 28.0;
+pub const NOTES_BODY_LINE_H: f32 = 18.0;
+pub const NOTES_BODY_INSET: f32 = 14.0;
+pub const NOTES_TITLE_INSET: f32 = 12.0;
+pub const NOTES_BODY_CHAR_W: f32 = 7.5;
+pub const NOTES_TITLE_CHAR_W: f32 = 8.0;
 
 /// Max undo depth for the body editor (product uses 200; chrome keeps it light).
 pub const BODY_HIST_LIMIT: usize = 50;
@@ -126,6 +143,8 @@ pub struct NotesState {
     pub title_rect: Rect,
     /// Body-only undo/redo (cleared when switching notes).
     body_hist: BodyHistory,
+    body_scroll: usize,
+    list_scroll: usize,
 }
 
 impl NotesState {
@@ -161,6 +180,8 @@ impl NotesState {
             body_rect: Rect::default(),
             title_rect: Rect::default(),
             body_hist: BodyHistory::default(),
+            body_scroll: 0,
+            list_scroll: 0,
         }
     }
 
@@ -196,6 +217,43 @@ impl NotesState {
             .unwrap_or_else(|| "Untitled".into())
     }
 
+    /// List row: `Title  ·  first line` (preview omitted when it repeats the title).
+    pub fn list_row_label(&self, index: usize) -> String {
+        let title = self.display_title_for(index);
+        let preview = self
+            .bank
+            .get(index)
+            .map(|n| {
+                let p = n.body.lines().next().unwrap_or("").trim();
+                if p.is_empty() || p == title {
+                    String::new()
+                } else {
+                    p.to_string()
+                }
+            })
+            .unwrap_or_default();
+        if preview.is_empty() {
+            title
+        } else {
+            format!("{title}  ·  {preview}")
+        }
+    }
+
+    pub fn footer_text(&self) -> String {
+        let status = if self.dirty { "unsaved" } else { "saved" };
+        let n = self.bank.len();
+        let chars = self.body.chars().count();
+        match self.focus {
+            NotesFocus::List => {
+                format!("{n} notes  ·  ↑↓ move  ·  enter open  ·  n new  ·  d delete  ·  esc close")
+            }
+            NotesFocus::Title => "enter  body    esc  editor".into(),
+            NotesFocus::Body => {
+                format!("{n} notes · {chars} chars · {status} · esc list")
+            }
+        }
+    }
+
     pub fn active_display_title(&self) -> String {
         let t = self.title.trim();
         if !t.is_empty() {
@@ -213,20 +271,32 @@ impl NotesState {
         if index >= self.bank.len() {
             return;
         }
-        if index == self.active {
-            self.set_focus(NotesFocus::Body);
-            return;
+        if index != self.active {
+            self.flush_active();
+            self.active = index;
+            let n = &self.bank[index];
+            self.title = n.title.clone();
+            self.body = n.body.clone();
+            self.cursor = self.body.chars().count();
+            self.body_hist.clear();
+            self.body_scroll = 0;
+            self.dirty = true;
         }
-        self.flush_active();
-        self.active = index;
-        let n = &self.bank[index];
-        self.title = n.title.clone();
-        self.body = n.body.clone();
-        self.cursor = self.body.chars().count();
-        self.focus = NotesFocus::Body;
-        self.body_hist.clear();
-        // Active-id change should persist.
-        self.dirty = true;
+        self.ensure_list_visible();
+    }
+
+    /// Open the editor screen on the active note (blank → title, else body).
+    pub fn open_editor(&mut self) {
+        if self.active_is_blank() {
+            self.set_focus(NotesFocus::Title);
+        } else {
+            self.set_focus(NotesFocus::Body);
+        }
+        self.ensure_body_visible();
+    }
+
+    pub fn is_list(&self) -> bool {
+        self.focus == NotesFocus::List
     }
 
     pub fn new_note(&mut self) {
@@ -253,6 +323,7 @@ impl NotesState {
         self.cursor = 0;
         self.focus = NotesFocus::Title;
         self.body_hist.clear();
+        self.body_scroll = 0;
         self.dirty = true;
     }
 
@@ -283,9 +354,13 @@ impl NotesState {
             self.body.clear();
         }
         self.cursor = self.body.chars().count();
-        self.focus = NotesFocus::Body;
+        if self.focus != NotesFocus::List {
+            self.focus = NotesFocus::Body;
+        }
         self.body_hist.clear();
+        self.body_scroll = 0;
         self.dirty = true;
+        self.ensure_list_visible();
     }
 
     /// Alias used by some call sites / hooks.
@@ -293,18 +368,28 @@ impl NotesState {
         self.delete_active();
     }
 
-    /// Move keyboard ownership between title and body; caret lands at field end.
+    /// Move keyboard ownership; caret lands at field end (list keeps caret).
     pub fn set_focus(&mut self, focus: NotesFocus) {
         self.focus = focus;
-        self.cursor = match focus {
-            NotesFocus::Title => self.title.chars().count(),
-            NotesFocus::Body => self.body.chars().count(),
-        };
+        match focus {
+            NotesFocus::List => {
+                self.flush_active();
+                self.ensure_list_visible();
+            }
+            NotesFocus::Title => {
+                self.cursor = self.title.chars().count();
+            }
+            NotesFocus::Body => {
+                self.cursor = self.body.chars().count();
+                self.ensure_body_visible();
+            }
+        }
     }
 
-    /// Tab / Shift-Tab: toggle Title ↔ Body (two fields — direction is the same).
+    /// Tab / Shift-Tab: list → editor; editor toggles Title ↔ Body.
     pub fn cycle_focus(&mut self, _reverse: bool) {
         self.set_focus(match self.focus {
+            NotesFocus::List => NotesFocus::Body,
             NotesFocus::Title => NotesFocus::Body,
             NotesFocus::Body => NotesFocus::Title,
         });
@@ -358,10 +443,15 @@ impl NotesState {
         self.body_hist.push(snap);
     }
 
-    /// Compute split-pane layout for hit-testing and rendering.
+    /// Compute list-or-editor layout for hit-testing and rendering.
     pub fn layout(&self, win_w: f32, win_h: f32) -> NotesLayout {
         let modal = self.animated_modal_rect(win_w, win_h);
-        notes_layout_in_modal(modal, self.bank.len())
+        notes_layout_in_modal(
+            modal,
+            self.bank.len(),
+            self.focus == NotesFocus::List,
+            self.list_scroll,
+        )
     }
 
     /// Refresh cached hit rects (`list_hit`, `title_rect`, `body_rect`).
@@ -370,41 +460,164 @@ impl NotesState {
         self.list_hit = lay.list_rows.clone();
         self.title_rect = lay.title;
         self.body_rect = lay.body;
+        self.ensure_body_visible();
+        self.ensure_list_visible();
     }
 
-    /// Click inside notes modal: list select, + New, delete, title/body focus.
+    /// Click inside notes modal: list open, + New, delete, title/body caret.
     pub fn try_click(&mut self, x: f32, y: f32, win_w: f32, win_h: f32) {
         let lay = self.layout(win_w, win_h);
         self.list_hit = lay.list_rows.clone();
         self.title_rect = lay.title;
         self.body_rect = lay.body;
 
-        for (i, r) in lay.list_rows.iter().enumerate() {
-            if r.contains(x, y) {
-                self.select(i);
+        if lay.list_mode {
+            for (i, r) in lay.list_rows.iter().enumerate() {
+                if r.contains(x, y) {
+                    self.select(lay.list_start + i);
+                    self.open_editor();
+                    return;
+                }
+            }
+            if lay.new_row.contains(x, y) {
+                self.new_note();
                 return;
             }
-        }
-        if lay.new_row.contains(x, y) {
-            self.new_note();
+            if lay.delete_row.contains(x, y) {
+                self.delete_active();
+            }
             return;
         }
-        if lay.delete_row.contains(x, y) {
-            self.delete_active();
-            return;
-        }
+
         if lay.title.contains(x, y) {
-            self.set_focus(NotesFocus::Title);
+            self.focus = NotesFocus::Title;
+            let rel = (x - (lay.title.x + NOTES_TITLE_INSET)).max(0.0);
+            let col = (rel / NOTES_TITLE_CHAR_W).floor() as usize;
+            self.cursor = col.min(self.title.chars().count());
             return;
         }
         if lay.body.contains(x, y) {
-            self.set_focus(NotesFocus::Body);
-            // Approximate caret from x within body (mono ~7.5px).
-            let rel = (x - (lay.body.x + 14.0)).max(0.0);
-            let col = (rel / 7.5) as usize;
-            // Place on last line for now (full wrap mapping is a polish item).
-            let n = self.body.chars().count();
-            self.cursor = col.min(n);
+            self.focus = NotesFocus::Body;
+            let cols = notes_wrap_cols(lay.body.w);
+            let lines = notes_wrap_lines(&self.body, cols);
+            let rel_y = (y - (lay.body.y + 12.0)).max(0.0);
+            let row = (rel_y / NOTES_BODY_LINE_H).floor() as usize + self.body_scroll;
+            let rel_x = (x - (lay.body.x + NOTES_BODY_INSET)).max(0.0);
+            let col = (rel_x / NOTES_BODY_CHAR_W).floor() as usize;
+            self.cursor = notes_index_at(&lines, row, col, self.body.chars().count());
+            self.ensure_body_visible();
+        }
+    }
+
+    /// Esc: editor → list, title → editor, list → close (caller closes).
+    /// Returns true when the overlay should close.
+    pub fn handle_escape(&mut self) -> bool {
+        match self.focus {
+            NotesFocus::List => true,
+            NotesFocus::Title => {
+                self.focus = NotesFocus::Body;
+                self.cursor = self.body.chars().count();
+                self.ensure_body_visible();
+                false
+            }
+            NotesFocus::Body => {
+                self.flush_active();
+                self.focus = NotesFocus::List;
+                self.ensure_list_visible();
+                false
+            }
+        }
+    }
+
+    pub fn on_enter(&mut self) {
+        match self.focus {
+            NotesFocus::List => self.open_editor(),
+            NotesFocus::Title => self.set_focus(NotesFocus::Body),
+            NotesFocus::Body => self.insert_char('\n'),
+        }
+    }
+
+    pub fn on_tab(&mut self, reverse: bool) {
+        self.cycle_focus(reverse);
+    }
+
+    pub fn on_f2(&mut self) {
+        self.set_focus(NotesFocus::Title);
+    }
+
+    pub fn on_delete_key(&mut self) {
+        if self.focus == NotesFocus::List {
+            self.delete_active();
+        }
+    }
+
+    pub fn on_up(&mut self) {
+        match self.focus {
+            NotesFocus::List => {
+                if self.active > 0 {
+                    self.select(self.active - 1);
+                }
+            }
+            NotesFocus::Title => {}
+            NotesFocus::Body => {
+                if self.body_cursor_row() == 0 {
+                    self.focus = NotesFocus::Title;
+                    self.cursor = self.title.chars().count();
+                } else {
+                    self.move_vert(-1);
+                }
+            }
+        }
+    }
+
+    pub fn on_down(&mut self) {
+        match self.focus {
+            NotesFocus::List => {
+                if self.active + 1 < self.bank.len() {
+                    self.select(self.active + 1);
+                }
+            }
+            NotesFocus::Title => {
+                self.focus = NotesFocus::Body;
+                self.cursor = self.cursor.min(self.body.chars().count());
+                self.ensure_body_visible();
+            }
+            NotesFocus::Body => self.move_vert(1),
+        }
+    }
+
+    pub fn on_left(&mut self) {
+        if self.focus == NotesFocus::List {
+            return;
+        }
+        self.move_cursor(-1);
+    }
+
+    pub fn on_right(&mut self) {
+        if self.focus == NotesFocus::List {
+            self.open_editor();
+            return;
+        }
+        self.move_cursor(1);
+    }
+
+    /// List: n new, d delete, other printable opens editor then inserts.
+    pub fn type_char(&mut self, ch: char) {
+        if self.focus == NotesFocus::List {
+            match ch {
+                'n' | 'N' => {
+                    self.new_note();
+                    return;
+                }
+                'd' | 'D' => {
+                    self.delete_active();
+                    return;
+                }
+                _ => self.open_editor(),
+            }
+        }
+        if ch == '\n' || !ch.is_control() {
+            self.insert_char(ch);
         }
     }
 
@@ -485,8 +698,80 @@ impl NotesState {
         Rect::new(x, y, w, h)
     }
 
+    fn current_wrap_cols(&self) -> usize {
+        if self.body_rect.w > 8.0 {
+            notes_wrap_cols(self.body_rect.w)
+        } else {
+            64
+        }
+    }
+
+    fn current_body_rows(&self) -> usize {
+        if self.body_rect.h > 8.0 {
+            notes_body_visible_rows(self.body_rect.h)
+        } else {
+            12
+        }
+    }
+
+    fn current_list_rows(&self) -> usize {
+        if self.list_hit.is_empty() {
+            8
+        } else {
+            self.list_hit.len().max(1)
+        }
+    }
+
+    fn body_cursor_row(&self) -> usize {
+        let lines = notes_wrap_lines(&self.body, self.current_wrap_cols());
+        notes_cursor_row_col(&lines, self.cursor).0
+    }
+
+    fn move_vert(&mut self, dir: isize) {
+        let cols = self.current_wrap_cols();
+        let lines = notes_wrap_lines(&self.body, cols);
+        let (row, col) = notes_cursor_row_col(&lines, self.cursor);
+        let n = self.body.chars().count();
+        let new_row = row as isize + dir;
+        if new_row < 0 {
+            self.cursor = 0;
+        } else if new_row >= lines.len() as isize {
+            self.cursor = n;
+        } else {
+            self.cursor = notes_index_at(&lines, new_row as usize, col, n);
+        }
+        self.ensure_body_visible();
+    }
+
+    fn ensure_body_visible(&mut self) {
+        let vis = self.current_body_rows();
+        let lines = notes_wrap_lines(&self.body, self.current_wrap_cols());
+        let row = notes_cursor_row_col(&lines, self.cursor).0;
+        if row < self.body_scroll {
+            self.body_scroll = row;
+        }
+        if row >= self.body_scroll + vis {
+            self.body_scroll = row + 1 - vis;
+        }
+    }
+
+    fn ensure_list_visible(&mut self) {
+        let vis = self.current_list_rows();
+        if self.active < self.list_scroll {
+            self.list_scroll = self.active;
+        }
+        if self.active >= self.list_scroll + vis {
+            self.list_scroll = self.active + 1 - vis;
+        }
+    }
+
+    pub fn body_scroll(&self) -> usize {
+        self.body_scroll
+    }
+
     pub fn insert_char(&mut self, ch: char) {
         match self.focus {
+            NotesFocus::List => {}
             NotesFocus::Title => {
                 if ch == '\n' {
                     self.set_focus(NotesFocus::Body);
@@ -510,6 +795,7 @@ impl NotesState {
                 self.cursor = i + 1;
                 self.body = chars.into_iter().collect();
                 self.dirty = true;
+                self.ensure_body_visible();
             }
         }
     }
@@ -519,6 +805,7 @@ impl NotesState {
             return;
         }
         match self.focus {
+            NotesFocus::List => {}
             NotesFocus::Title => {
                 let mut chars: Vec<char> = self.title.chars().collect();
                 let i = self.cursor.min(chars.len());
@@ -538,6 +825,7 @@ impl NotesState {
                     self.cursor = i - 1;
                     self.body = chars.into_iter().collect();
                     self.dirty = true;
+                    self.ensure_body_visible();
                 }
             }
         }
@@ -545,6 +833,7 @@ impl NotesState {
 
     pub fn move_cursor(&mut self, delta: isize) {
         let n = match self.focus {
+            NotesFocus::List => return,
             NotesFocus::Title => self.title.chars().count() as isize,
             NotesFocus::Body => self.body.chars().count() as isize,
         };
@@ -634,41 +923,167 @@ impl Default for NotesState {
     }
 }
 
-/// Layout geometry inside a modal rect for `bank_len` notes.
-pub fn notes_layout_in_modal(modal: Rect, bank_len: usize) -> NotesLayout {
+/// Layout geometry inside a modal rect — list **or** editor, never both.
+pub fn notes_layout_in_modal(
+    modal: Rect,
+    bank_len: usize,
+    list_mode: bool,
+    list_scroll: usize,
+) -> NotesLayout {
     let pad = NOTES_PAD;
-    let list_w = NOTES_LIST_W;
-    let row_h = NOTES_ROW_H;
-    let list = Rect::new(modal.x + pad, modal.y + pad, list_w, modal.h - pad * 2.0);
-    let mut list_rows = Vec::with_capacity(bank_len);
-    let mut row_y = list.y + 10.0;
-    for _ in 0..bank_len {
-        list_rows.push(Rect::new(list.x, row_y, list.w, row_h));
-        row_y += row_h;
-    }
-    let new_row = Rect::new(list.x, row_y, list.w, row_h);
-    row_y += row_h;
-    let delete_row = Rect::new(list.x, row_y, list.w, row_h);
-
-    let editor_x = list.x + list.w + NOTES_GAP;
-    let editor_w = (modal.x + modal.w - pad - editor_x).max(40.0);
-    let title = Rect::new(editor_x, modal.y + pad, editor_w, NOTES_TITLE_H);
-    let body = Rect::new(
-        editor_x,
-        title.y + title.h + NOTES_TITLE_BODY_GAP,
-        editor_w,
-        (modal.h - pad * 2.0 - NOTES_TITLE_H - NOTES_TITLE_BODY_GAP).max(80.0),
+    let inner_x = modal.x + pad;
+    let inner_y = modal.y + pad;
+    let inner_w = (modal.w - pad * 2.0).max(40.0);
+    let inner_h = (modal.h - pad * 2.0 - NOTES_FOOTER_H).max(80.0);
+    let footer = Rect::new(
+        inner_x,
+        modal.y + modal.h - pad - NOTES_FOOTER_H,
+        inner_w,
+        NOTES_FOOTER_H,
     );
 
+    if list_mode {
+        let list = Rect::new(inner_x, inner_y, inner_w, inner_h);
+        let rows_top = list.y + NOTES_HEADER_H;
+        let actions_h = NOTES_ROW_H * 2.0;
+        let rows_bot = (list.y + list.h - actions_h).max(rows_top + NOTES_ROW_H);
+        let vis = ((rows_bot - rows_top) / NOTES_ROW_H).floor().max(1.0) as usize;
+        let max_start = bank_len.saturating_sub(vis);
+        let start = list_scroll.min(max_start);
+        let mut list_rows = Vec::new();
+        let mut y = rows_top;
+        let count = vis.min(bank_len.saturating_sub(start));
+        for _ in 0..count {
+            list_rows.push(Rect::new(list.x, y, list.w, NOTES_ROW_H));
+            y += NOTES_ROW_H;
+        }
+        let delete_row = Rect::new(list.x, list.y + list.h - NOTES_ROW_H, list.w, NOTES_ROW_H);
+        let new_row = Rect::new(list.x, delete_row.y - NOTES_ROW_H, list.w, NOTES_ROW_H);
+        return NotesLayout {
+            modal,
+            list,
+            list_rows,
+            list_start: start,
+            new_row,
+            title: Rect::default(),
+            body: Rect::default(),
+            delete_row,
+            footer,
+            list_mode: true,
+        };
+    }
+
+    let title = Rect::new(inner_x, inner_y, inner_w, NOTES_TITLE_H);
+    let body_y = title.y + title.h + NOTES_TITLE_BODY_GAP;
+    let body_h = (inner_y + inner_h - body_y).max(80.0);
+    let body = Rect::new(inner_x, body_y, inner_w, body_h);
     NotesLayout {
         modal,
-        list,
-        list_rows,
-        new_row,
+        list: Rect::default(),
+        list_rows: Vec::new(),
+        list_start: 0,
+        new_row: Rect::default(),
+        delete_row: Rect::default(),
         title,
         body,
-        delete_row,
+        footer,
+        list_mode: false,
     }
+}
+
+/// One soft-wrapped body line (`start`/`end` are char indices).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotesWrapLine {
+    pub start: usize,
+    pub end: usize,
+    pub hard: bool,
+}
+
+pub fn notes_wrap_cols(body_w: f32) -> usize {
+    let inner = (body_w - NOTES_BODY_INSET * 2.0).max(8.0);
+    (inner / NOTES_BODY_CHAR_W).floor().max(8.0) as usize
+}
+
+pub fn notes_body_visible_rows(body_h: f32) -> usize {
+    let inner = (body_h - 12.0 - 8.0).max(NOTES_BODY_LINE_H);
+    (inner / NOTES_BODY_LINE_H).floor().max(1.0) as usize
+}
+
+pub fn notes_wrap_lines(text: &str, width: usize) -> Vec<NotesWrapLine> {
+    let width = width.max(4);
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![NotesWrapLine {
+            start: 0,
+            end: 0,
+            hard: false,
+        }];
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut col = 0;
+    for (i, ch) in chars.iter().enumerate() {
+        if *ch == '\n' {
+            out.push(NotesWrapLine {
+                start,
+                end: i,
+                hard: true,
+            });
+            start = i + 1;
+            col = 0;
+            continue;
+        }
+        if col > 0 && col + 1 > width {
+            out.push(NotesWrapLine {
+                start,
+                end: i,
+                hard: false,
+            });
+            start = i;
+            col = 0;
+        }
+        col += 1;
+    }
+    out.push(NotesWrapLine {
+        start,
+        end: chars.len(),
+        hard: false,
+    });
+    out
+}
+
+pub fn notes_cursor_row_col(lines: &[NotesWrapLine], cursor: usize) -> (usize, usize) {
+    if lines.is_empty() {
+        return (0, 0);
+    }
+    for (i, ln) in lines.iter().enumerate() {
+        if cursor >= ln.start && cursor <= ln.end {
+            if cursor == ln.end && !ln.hard && i + 1 < lines.len() && lines[i + 1].start == ln.end {
+                continue;
+            }
+            return (i, cursor.saturating_sub(ln.start));
+        }
+    }
+    let last = lines.len() - 1;
+    (last, lines[last].end.saturating_sub(lines[last].start))
+}
+
+pub fn notes_index_at(lines: &[NotesWrapLine], row: usize, col: usize, text_len: usize) -> usize {
+    if lines.is_empty() {
+        return 0;
+    }
+    if row >= lines.len() {
+        return text_len;
+    }
+    let ln = lines[row];
+    (ln.start + col).min(ln.end).min(text_len)
+}
+
+pub fn notes_line_text(text: &str, ln: NotesWrapLine) -> String {
+    text.chars()
+        .skip(ln.start)
+        .take(ln.end.saturating_sub(ln.start))
+        .collect()
 }
 
 fn json_string(s: &str) -> String {
@@ -1004,32 +1419,93 @@ mod tests {
     }
 
     #[test]
-    fn layout_hit_regions() {
+    fn layout_two_screens_no_sidebar() {
         let path = temp_notes_path("lay");
         let _ = fs::remove_file(&path);
         let mut s = NotesState::with_path(&path);
         s.open = true;
         s.present = 1.0;
-        s.new_note();
-        let lay = s.layout(800.0, 600.0);
-        assert_eq!(lay.list_rows.len(), 2);
-        assert!(lay.list.w > 0.0);
-        assert!(lay.title.w > 0.0);
-        assert!(lay.body.h >= 80.0);
 
-        // Click second list row selects it.
-        let r = lay.list_rows[1];
+        s.set_focus(NotesFocus::List);
+        let list = s.layout(800.0, 600.0);
+        assert!(list.list_mode);
+        assert!(
+            list.list.w > 200.0,
+            "list uses the full card, not a sidebar"
+        );
+        assert!(list.list.w > list.modal.w * 0.7);
+        assert_eq!(list.title.w, 0.0);
+        assert_eq!(list.body.w, 0.0);
+        assert!(!list.list_rows.is_empty());
+        // List frost and editor frost must not coexist.
+        assert!(list.title.w < 1.0 || list.list.w < 1.0);
+
+        let r = list.list_rows[0];
         s.try_click(r.x + 4.0, r.y + 4.0, 800.0, 600.0);
-        assert_eq!(s.active_index(), 1);
+        assert_ne!(s.focus, NotesFocus::List);
 
-        // Title focus.
-        s.try_click(lay.title.x + 8.0, lay.title.y + 8.0, 800.0, 600.0);
+        let ed = s.layout(800.0, 600.0);
+        assert!(!ed.list_mode);
+        assert_eq!(ed.list.w, 0.0);
+        assert!(ed.list_rows.is_empty());
+        assert!(ed.title.w > 200.0);
+        assert!(ed.body.w > 200.0);
+        assert!(ed.body.h >= 80.0);
+        assert!(
+            (ed.title.x - ed.body.x).abs() < 0.5,
+            "title and body share the full width"
+        );
+
+        s.try_click(ed.title.x + 8.0, ed.title.y + 8.0, 800.0, 600.0);
         assert_eq!(s.focus, NotesFocus::Title);
-
-        // Body focus.
-        s.try_click(lay.body.x + 8.0, lay.body.y + 8.0, 800.0, 600.0);
+        s.try_click(ed.body.x + 8.0, ed.body.y + 8.0, 800.0, 600.0);
         assert_eq!(s.focus, NotesFocus::Body);
 
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn wrap_long_line_stays_in_cols() {
+        let text = "Need to try Gemma training and usage out. Can it do basket ball in the net recognition? Can it run?";
+        let lines = notes_wrap_lines(text, 24);
+        assert!(lines.len() > 1);
+        for ln in &lines {
+            assert!(ln.end.saturating_sub(ln.start) <= 24);
+        }
+        let (row, col) = notes_cursor_row_col(&lines, text.chars().count());
+        assert_eq!(row, lines.len() - 1);
+        assert!(col <= 24);
+    }
+
+    #[test]
+    fn escape_editor_to_list_then_close() {
+        let path = temp_notes_path("esc");
+        let _ = fs::remove_file(&path);
+        let mut s = NotesState::with_path(&path);
+        s.open();
+        assert_eq!(s.focus, NotesFocus::Title); // blank scratch
+        assert!(!s.handle_escape());
+        assert_eq!(s.focus, NotesFocus::Body);
+        assert!(!s.handle_escape());
+        assert_eq!(s.focus, NotesFocus::List);
+        assert!(s.handle_escape());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn list_keys_new_and_open() {
+        let path = temp_notes_path("keys");
+        let _ = fs::remove_file(&path);
+        let mut s = NotesState::with_path(&path);
+        s.set_focus(NotesFocus::List);
+        s.type_char('n');
+        assert_eq!(s.focus, NotesFocus::Title);
+        assert_eq!(s.bank().len(), 2);
+        s.handle_escape(); // title → body
+        s.handle_escape(); // body → list
+        assert_eq!(s.focus, NotesFocus::List);
+        s.on_enter();
+        assert_ne!(s.focus, NotesFocus::List);
         let _ = fs::remove_file(&path);
     }
 

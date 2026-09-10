@@ -2705,17 +2705,25 @@ fn push_modal_glass(
         let ease = notes.content_ease().clamp(0.0, 1.0);
         let lay = notes.layout(win_w, win_h);
         panels.push(PanelInstance::glass(lay.modal, m.radius, PanelKind::Modal).with_opacity(ease));
-        panels.push(
-            PanelInstance::glass(lay.list, m.chip_radius, PanelKind::ModalFrost).with_opacity(ease),
-        );
-        panels.push(
-            PanelInstance::glass(lay.title, m.chip_radius, PanelKind::ModalFrost)
-                .with_opacity(ease),
-        );
-        panels.push(
-            PanelInstance::glass(lay.body, m.chip_radius + 2.0, PanelKind::ModalFrost)
-                .with_opacity(ease),
-        );
+        if lay.list_mode && lay.list.w > 1.0 {
+            panels.push(
+                PanelInstance::glass(lay.list, m.chip_radius, PanelKind::ModalFrost)
+                    .with_opacity(ease),
+            );
+        } else if !lay.list_mode {
+            if lay.title.w > 1.0 {
+                panels.push(
+                    PanelInstance::glass(lay.title, m.chip_radius, PanelKind::ModalFrost)
+                        .with_opacity(ease),
+                );
+            }
+            if lay.body.w > 1.0 {
+                panels.push(
+                    PanelInstance::glass(lay.body, m.chip_radius + 2.0, PanelKind::ModalFrost)
+                        .with_opacity(ease),
+                );
+            }
+        }
     }
 
     if workspace_ui.is_modal() {
@@ -3648,156 +3656,217 @@ fn push_modal_labels(
         let ease = notes.content_ease().clamp(0.0, 1.0);
         // Shared geometry with NotesState::layout / try_click (see NOTES_HOOKS.md).
         let lay = notes.layout(win_w, win_h);
-        let list = lay.list;
-        let row_h = crate::notes::NOTES_ROW_H;
-        for (i, r) in lay.list_rows.iter().enumerate() {
-            let mut tc = if i == notes.active_index() {
-                bright
-            } else {
-                muted
-            };
-            tc[3] *= ease;
-            let title = notes.display_title_for(i);
-            labels.push(TextLabel::new(
-                truncate_chars(&title, 18),
-                list.x + 10.0,
-                r.y + 8.0,
-                12.0,
-                tc,
-            ));
-        }
-        let mut nc = dim;
-        nc[3] *= ease;
-        labels.push(TextLabel::new(
-            "+ New note",
-            list.x + 10.0,
-            lay.new_row.y + 8.0,
-            12.0,
-            nc,
-        ));
-        let mut dc = dim;
-        dc[3] *= ease * 0.9;
-        let del_label = if notes.bank().len() <= 1 {
-            "Clear note"
-        } else {
-            "Delete note"
+        use crate::notes::{
+            notes_body_visible_rows, notes_cursor_row_col, notes_line_text, notes_wrap_cols,
+            notes_wrap_lines, NotesFocus, NotesLayout, NOTES_BODY_CHAR_W, NOTES_BODY_INSET,
+            NOTES_BODY_LINE_H, NOTES_TITLE_CHAR_W, NOTES_TITLE_INSET,
         };
-        labels.push(TextLabel::new(
-            del_label.to_string(),
-            list.x + 10.0,
-            lay.delete_row.y + 8.0,
-            11.0,
-            dc,
-        ));
-
-        let title_r = lay.title;
-        let mut tc = bright;
-        tc[3] *= ease;
-        let title_text = if notes.title.is_empty() {
-            if notes.focus == crate::notes::NotesFocus::Title {
-                String::new()
-            } else {
-                "Title".into()
+        if lay.list_mode {
+            let list_clip = NotesLayout::clip(lay.list);
+            let mut header = bright;
+            header[3] *= ease;
+            let header_txt = format!("Notes  ({})", notes.bank().len());
+            labels.push(
+                TextLabel::new(
+                    header_txt,
+                    lay.list.x + 12.0,
+                    lay.list.y + 8.0,
+                    13.0,
+                    header,
+                )
+                .with_clip(list_clip),
+            );
+            let row_max = ((lay.list.w - 24.0) / 7.0).floor().max(8.0) as usize;
+            for (i, r) in lay.list_rows.iter().enumerate() {
+                let bank_i = lay.list_start + i;
+                let active = bank_i == notes.active_index();
+                let mut tc = if active { bright } else { muted };
+                tc[3] *= ease;
+                let mut label = notes.list_row_label(bank_i);
+                if active {
+                    label = format!("▸ {label}");
+                } else {
+                    label = format!("  {label}");
+                }
+                labels.push(
+                    TextLabel::left_vcenter(
+                        truncate_chars(&label, row_max),
+                        r.x + 10.0,
+                        r.y,
+                        r.h,
+                        12.0,
+                        tc,
+                    )
+                    .with_clip(NotesLayout::clip(*r)),
+                );
             }
+            let mut nc = dim;
+            nc[3] *= ease;
+            labels.push(
+                TextLabel::left_vcenter(
+                    "+ New note",
+                    lay.new_row.x + 10.0,
+                    lay.new_row.y,
+                    lay.new_row.h,
+                    12.0,
+                    nc,
+                )
+                .with_clip(NotesLayout::clip(lay.new_row)),
+            );
+            let mut dc = dim;
+            dc[3] *= ease * 0.9;
+            let del_label = if notes.bank().len() <= 1 {
+                "Clear note"
+            } else {
+                "Delete note"
+            };
+            labels.push(
+                TextLabel::left_vcenter(
+                    del_label.to_string(),
+                    lay.delete_row.x + 10.0,
+                    lay.delete_row.y,
+                    lay.delete_row.h,
+                    11.0,
+                    dc,
+                )
+                .with_clip(NotesLayout::clip(lay.delete_row)),
+            );
         } else {
-            notes.title.clone()
-        };
-        let title_color =
-            if notes.title.is_empty() && notes.focus != crate::notes::NotesFocus::Title {
+            let title_r = lay.title;
+            let title_clip = NotesLayout::clip(title_r);
+            let title_max = ((title_r.w - NOTES_TITLE_INSET * 2.0) / NOTES_TITLE_CHAR_W)
+                .floor()
+                .max(4.0) as usize;
+            let mut tc = bright;
+            tc[3] *= ease;
+            let title_empty = notes.title.is_empty();
+            let title_text = if title_empty {
+                if notes.focus == NotesFocus::Title {
+                    String::new()
+                } else {
+                    "Title".into()
+                }
+            } else {
+                truncate_chars(&notes.title, title_max)
+            };
+            let title_color = if title_empty && notes.focus != NotesFocus::Title {
                 let mut c = dim;
                 c[3] *= ease;
                 c
             } else {
                 tc
             };
-        labels.push(TextLabel::new(
-            title_text,
-            title_r.x + 12.0,
-            title_r.y + 10.0,
-            14.0,
-            title_color,
-        ));
-        if notes.focus == crate::notes::NotesFocus::Title {
-            let caret_x = title_r.x + 12.0 + notes.cursor as f32 * 8.0;
             labels.push(
                 TextLabel::new(
-                    CARET_BLOCK,
-                    caret_x.min(title_r.x + title_r.w - 16.0),
+                    title_text,
+                    title_r.x + NOTES_TITLE_INSET,
                     title_r.y + 10.0,
                     14.0,
-                    caret_rgba(caret_a * ease),
+                    title_color,
                 )
-                .as_caret(),
+                .with_clip(title_clip),
             );
-        }
-        let body = lay.body;
-        let mut bc = muted;
-        bc[3] *= ease;
-        let mut by = body.y + 12.0;
-        if notes.body.is_empty() {
-            labels.push(TextLabel::new(
-                "Start writing…",
-                body.x + 14.0,
-                by,
-                13.0,
-                bc,
-            ));
-            if notes.focus == crate::notes::NotesFocus::Body {
+            if notes.focus == NotesFocus::Title {
+                let caret_x =
+                    title_r.x + NOTES_TITLE_INSET + notes.cursor as f32 * NOTES_TITLE_CHAR_W;
                 labels.push(
                     TextLabel::new(
                         CARET_BLOCK,
-                        body.x + 14.0,
-                        by,
-                        13.0,
+                        caret_x.clamp(title_r.x + NOTES_TITLE_INSET, title_r.x + title_r.w - 16.0),
+                        title_r.y + 10.0,
+                        14.0,
                         caret_rgba(caret_a * ease),
                     )
-                    .as_caret(),
+                    .as_caret()
+                    .with_clip(title_clip),
                 );
             }
-        } else {
-            for line in notes.body.lines() {
-                if by > body.y + body.h - 16.0 {
-                    break;
+
+            let body = lay.body;
+            let body_clip = NotesLayout::clip(body);
+            let mut bc = muted;
+            bc[3] *= ease;
+            let wrap_cols = notes_wrap_cols(body.w);
+            let vis_rows = notes_body_visible_rows(body.h);
+            let lines = notes_wrap_lines(&notes.body, wrap_cols);
+            let scroll = notes.body_scroll();
+            let origin_y = body.y + 12.0;
+            if notes.body.is_empty() {
+                labels.push(
+                    TextLabel::new(
+                        "Start writing…",
+                        body.x + NOTES_BODY_INSET,
+                        origin_y,
+                        13.0,
+                        bc,
+                    )
+                    .with_clip(body_clip),
+                );
+                if notes.focus == NotesFocus::Body {
+                    labels.push(
+                        TextLabel::new(
+                            CARET_BLOCK,
+                            body.x + NOTES_BODY_INSET,
+                            origin_y,
+                            13.0,
+                            caret_rgba(caret_a * ease),
+                        )
+                        .as_caret()
+                        .with_clip(body_clip),
+                    );
                 }
-                labels.push(TextLabel::new(
-                    line.to_string(),
-                    body.x + 14.0,
-                    by,
-                    13.0,
-                    bc,
-                ));
-                by += 18.0;
-            }
-            if notes.focus == crate::notes::NotesFocus::Body {
-                let last = notes.body.lines().last().unwrap_or("");
-                let caret_x = body.x + 14.0 + last.chars().count() as f32 * 7.5;
-                labels.push(
-                    TextLabel::new(
-                        CARET_BLOCK,
-                        caret_x.min(body.x + body.w - 16.0),
-                        (by - 18.0).max(body.y + 12.0),
-                        13.0,
-                        caret_rgba(caret_a * ease),
-                    )
-                    .as_caret(),
-                );
+            } else {
+                for i in 0..vis_rows {
+                    let Some(ln) = lines.get(scroll + i) else {
+                        break;
+                    };
+                    let by = origin_y + i as f32 * NOTES_BODY_LINE_H;
+                    let line = notes_line_text(&notes.body, *ln);
+                    labels.push(
+                        TextLabel::new(
+                            truncate_chars(&line, wrap_cols),
+                            body.x + NOTES_BODY_INSET,
+                            by,
+                            13.0,
+                            bc,
+                        )
+                        .with_clip(body_clip),
+                    );
+                }
+                if notes.focus == NotesFocus::Body {
+                    let (row, col) = notes_cursor_row_col(&lines, notes.cursor);
+                    if row >= scroll && row < scroll + vis_rows {
+                        let vis_row = row - scroll;
+                        let caret_x = body.x + NOTES_BODY_INSET + col as f32 * NOTES_BODY_CHAR_W;
+                        let caret_y = origin_y + vis_row as f32 * NOTES_BODY_LINE_H;
+                        labels.push(
+                            TextLabel::new(
+                                CARET_BLOCK,
+                                caret_x.clamp(body.x + NOTES_BODY_INSET, body.x + body.w - 16.0),
+                                caret_y,
+                                13.0,
+                                caret_rgba(caret_a * ease),
+                            )
+                            .as_caret()
+                            .with_clip(body_clip),
+                        );
+                    }
+                }
             }
         }
         let mut foot = dim;
         foot[3] *= ease;
-        let status = if notes.is_dirty() { "unsaved" } else { "saved" };
-        labels.push(TextLabel::new(
-            format!(
-                "{} notes · {} chars · {status} · Esc saves",
-                notes.bank().len(),
-                notes.body.chars().count()
-            ),
-            lay.title.x,
-            lay.modal.y + lay.modal.h - 22.0,
-            11.0,
-            foot,
-        ));
-        let _ = row_h; // layout constant available for future row chrome
+        let foot_max = ((lay.footer.w) / 6.5).floor().max(8.0) as usize;
+        labels.push(
+            TextLabel::new(
+                truncate_chars(&notes.footer_text(), foot_max),
+                lay.footer.x,
+                lay.footer.y + 4.0,
+                11.0,
+                foot,
+            )
+            .with_clip(NotesLayout::clip(lay.modal)),
+        );
     }
 
     if workspace_ui.is_modal() {

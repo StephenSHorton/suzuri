@@ -33,28 +33,31 @@ Product refs: `internal/notes/` (disk bank + MCP offline ops); UI in this crate
 
 ## Layout helpers (paint + hit-test)
 
-Use **one** geometry source so clicks match glass panels:
+Two screens — **never** a list|editor split (pre-glass product: commit `19b5af2`).
 
 ```text
 NotesState::layout(win_w, win_h) -> NotesLayout {
-  modal, list, list_rows[], new_row, delete_row, title, body
+  list mode:  modal, list, list_rows[], new_row, delete_row, footer
+  editor:     modal, title, body, footer
 }
 ```
 
-Constants: `NOTES_PAD`, `NOTES_LIST_W`, `NOTES_ROW_H`, `NOTES_TITLE_H`, `NOTES_GAP`.
+Constants: `NOTES_PAD`, `NOTES_ROW_H`, `NOTES_TITLE_H`, `NOTES_FOOTER_H`, wrap via `notes_wrap_lines`.
 
-- **Renderer panels**: frost rects for `list`, `title`, `body` from `layout()`.
-- **Renderer labels**: row titles via `display_title_for`; caret only on focused field.
-- **App click**: `notes.try_click(cursor.x, cursor.y, win_w, win_h)` while notes modal is open (already wired). Outside-click still dismisses via `pointer_in_open_modal`.
+- **Renderer panels**: list frost **or** title+body frost (not both).
+- **Renderer labels**: wrap/clip body to the frost rect so long lines cannot overflow.
+- **App click**: `notes.try_click(...)` — list row opens the editor; title/body place the caret.
+- **Esc**: editor → list; list → close (saves).
 
 ## Keyboard (app)
 
 Already routed when `notes.open` and no super/ctrl:
 
-- Printable → `insert_char` (title if `focus == Title`, else body)
-- Backspace / ← / → → `backspace` / `move_cursor`
-- Enter in title → commit focus to body; in body → newline
-- Tab / Shift-Tab → `cycle_focus` Title ↔ Body
+- Printable → `type_char` (list: `n` new / `d` delete / else open editor; else title or body)
+- Backspace / ← / → / ↑ / ↓ → field motion; list ↑↓ selects; body ↑ at top → title
+- Enter in list → editor; in title → body; in body → newline
+- Tab / Shift-Tab → `cycle_focus` (list → body; title ↔ body)
+- Esc → `handle_escape` (editor → list; list → close)
 
 With super/ctrl while notes open:
 
