@@ -365,12 +365,7 @@ impl WorkspaceUi {
             (host.h - pad * 2.0).max(0.0),
         );
         let compose_h = COMPOSE_H.min((inner.h * 0.4).max(32.0));
-        let compose = Rect::new(
-            inner.x,
-            inner.y + inner.h - compose_h,
-            inner.w,
-            compose_h,
-        );
+        let compose = Rect::new(inner.x, inner.y + inner.h - compose_h, inner.w, compose_h);
         let body_bottom = (compose.y - 6.0).max(inner.y);
 
         let mut compact = inner.w < COMPACT_INNER_W;
@@ -422,12 +417,7 @@ impl WorkspaceUi {
                 Rect::new(col_x, inner.y, pw, header_h),
             )
         } else {
-            let title = Rect::new(
-                rail.x + 6.0,
-                rail.y + 2.0,
-                (rail.w - 12.0).max(0.0),
-                18.0,
-            );
+            let title = Rect::new(rail.x + 6.0, rail.y + 2.0, (rail.w - 12.0).max(0.0), 18.0);
             let pw = (add_agent.x - col_x - 6.0).max(0.0);
             (title, Rect::new(col_x, inner.y, pw, header_h))
         };
@@ -1475,7 +1465,11 @@ impl WorkspaceUi {
     }
 
     /// Buttons on the connect bar, left-to-right.
-    pub fn connect_buttons(&self, win_w: f32, win_h: f32) -> Vec<(Rect, &'static str, ConnectAction)> {
+    pub fn connect_buttons(
+        &self,
+        win_w: f32,
+        win_h: f32,
+    ) -> Vec<(Rect, &'static str, ConnectAction)> {
         let bar = self.connect_bar_rect(win_w, win_h);
         if bar.w < 8.0 || bar.h < 8.0 {
             return Vec::new();
@@ -1509,10 +1503,18 @@ impl WorkspaceUi {
             } else {
                 "Cancel"
             };
-            push(if stop.len() > 6 { 92.0 } else { 64.0 }, stop, ConnectAction::Stop);
+            push(
+                if stop.len() > 6 { 92.0 } else { 64.0 },
+                stop,
+                ConnectAction::Stop,
+            );
             if !self.sync_ticket.is_empty() {
                 let copy = if bar.w < 220.0 { "Copy" } else { "Copy ticket" };
-                push(if copy.len() > 5 { 100.0 } else { 56.0 }, copy, ConnectAction::Copy);
+                push(
+                    if copy.len() > 5 { 100.0 } else { 56.0 },
+                    copy,
+                    ConnectAction::Copy,
+                );
             }
         } else if self.mode == ComposeMode::JoinTicket {
             push(72.0, "Cancel", ConnectAction::Stop);
@@ -2394,7 +2396,8 @@ mod tests {
         assert!(text.contains("engine"));
         assert!(text.contains("workspace_guide"));
         assert!(text.contains("workspace_claim_role"));
-        assert!(text.contains("workspace_wait"));
+        assert!(text.contains("workspace_post"));
+        assert!(text.contains("source=\"suzuri\""));
         assert_eq!(ui.mode, ComposeMode::Message);
         assert!(ui.status.contains("engine"));
         let _ = fs::remove_dir_all(&dir);
@@ -2537,10 +2540,7 @@ mod tests {
         ui.reload_members();
         let fitted = ui.fitted_presence_chips(90.0);
         let used: f32 = fitted.iter().map(|c| chip_advance(c)).sum();
-        assert!(
-            used <= 90.0 + 0.5,
-            "chips {fitted:?} used {used}px > 90"
-        );
+        assert!(used <= 90.0 + 0.5, "chips {fitted:?} used {used}px > 90");
         let _ = fs::remove_dir_all(&dir);
     }
 

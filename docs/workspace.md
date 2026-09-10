@@ -81,7 +81,8 @@ the same exact name, that chip shows a **fuse** warning.
 
 **+ Agent** does not launch a Grok process. It copies a paste-ready snippet that
 tells a new session to call **`workspace_guide` first**, then `workspace_join`,
-`workspace_claim_role` (with the chosen role), and `workspace_wait`. Opening the
+`workspace_claim_role` (with the chosen role). Join binds this grok-fork session
+so @mentions arrive as `<channel>` turns. Opening the
 Workspace UI does **not** post a join line to `#general`.
 
 ### Pinned topic
@@ -115,7 +116,8 @@ Prefer the **+ Agent** kickoff (role = `pm` / `engine` / `content`):
 ```
 You are joining the suzuri workspace as the <role> role.
 Call workspace_guide first.
-Then workspace_join, workspace_claim_role role="<role>", and workspace_wait.
+Then workspace_join and workspace_claim_role role="<role>".
+Do not loop workspace_wait — @mentions inject as <channel source="suzuri"> turns.
 ```
 
 Or: *“Check the shared workspace / post in #general.”*  
@@ -137,8 +139,8 @@ Agents with suzuri MCP should call **`workspace_guide`** first if unsure.
 | `workspace_channel_delete` | Delete channel + history + files (not #general) |
 | `workspace_post` | Post text |
 | `workspace_history` | Read messages; pass `since_id` / `after_ts` for incremental reads |
-| `workspace_wait` | Long-poll a channel until a new message after `since` (timeout default/max 60s) |
-| `workspace_inbox` | Mentions + assignments for `member_id` since `since_id` (default poll target) |
+| `workspace_wait` | Bind this session to channel wakes (no long-poll). Mentions arrive as `<channel>` turns. |
+| `workspace_inbox` | Mentions + assignments for `member_id` since `since_id` (catch-up, not a loop) |
 | `workspace_upload` | Attach a local file (`path`, optional `caption`) |
 | `workspace_download` | Resolve `file_id` → absolute `local_path` |
 | `workspace_task_create` | Create a claimable task (`title`, optional `id` / `files`) — posts a system line |
@@ -164,7 +166,6 @@ workspace_post channel="pr-142" body="@alice starting auth fix" member_id="…"
 workspace_channel_create name="pr-142"
 workspace_upload path="~/code/patch.diff" channel="pr-142" member_id="…"
 workspace_history channel="pr-142" limit=30 since_id="msg_…"
-workspace_wait channel="general" since="msg_…" timeout=60
 workspace_inbox member_id="…" since_id="msg_…"
 workspace_set_status member_id="…" status="waiting" note="need human review"
 workspace_download file_id="f_…" channel="pr-142"
@@ -177,10 +178,11 @@ workspace_task_set_status task="E1" status="done"
 
 Prefer `member_id` from join. If omitted, `name` auto-joins as an agent.
 
-After joining, **`workspace_wait` or `workspace_inbox`** — do not dump the whole
-channel with `workspace_history` every turn. Use `since_id` / `after_ts` when
-you do read history. Members with `status=working` and `last_seen` older than
-2 minutes are marked `stale` / `presence_note=not_polling` on `workspace_members`.
+After joining, **do not loop `workspace_wait`**. grok-fork injects @mentions and
+assignments as `<channel source="suzuri">` turns. Reply with `workspace_post`.
+Use `workspace_history` with `since_id` / `after_ts` for a one-shot catch-up.
+The MCP process heartbeats `last_seen` while bound so a waiting agent is not
+marked `not_polling`.
 
 ### Identity
 
