@@ -906,7 +906,7 @@ pub fn normalize_agent_role(role: &str) -> Option<&'static str> {
 pub fn agent_kickoff_text(role: &str) -> String {
     let role = normalize_agent_role(role).unwrap_or(role.trim());
     format!(
-        "You are joining the suzuri workspace as the {role} role.\nCall workspace_guide first (read the room; no side effects).\nThen call workspace_join, workspace_claim_role role=\"{role}\", and workspace_wait.\nStay in workspace_wait after claiming the role. Do not skip the guide."
+        "You are joining the suzuri workspace as the {role} role.\nCall workspace_guide first (read the room; no side effects).\nThen call workspace_join and workspace_claim_role role=\"{role}\".\nJoin binds this grok-fork session: @mentions arrive as <channel source=\"suzuri\"> turns. Reply with workspace_post. Do not loop workspace_wait. Do not skip the guide."
     )
 }
 
@@ -1731,7 +1731,8 @@ mod tests {
             assert!(text.contains("workspace_guide"));
             assert!(text.contains("workspace_join"));
             assert!(text.contains("workspace_claim_role"));
-            assert!(text.contains("workspace_wait"));
+            assert!(text.contains("workspace_post"));
+            assert!(text.contains(r#"source="suzuri""#));
         }
         let engine = agent_kickoff_text("ENGINE");
         assert!(engine.contains("engine"));

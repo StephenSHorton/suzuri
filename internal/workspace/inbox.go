@@ -67,7 +67,7 @@ func (s *Store) Inbox(memberID, sinceID string, limit int) ([]Message, error) {
 				cursorFound = true
 				cursorTS = msg.TS
 			}
-			if messageTargetsMember(msg, *member) {
+			if MessageTargetsMember(msg, *member) {
 				matched = append(matched, msg)
 			}
 		}
@@ -98,8 +98,8 @@ func (s *Store) Inbox(memberID, sinceID string, limit int) ([]Message, error) {
 	return clampHistory(matched, limit, incremental), nil
 }
 
-// messageTargetsMember reports whether msg mentions or assigns member.
-func messageTargetsMember(msg Message, member Member) bool {
+// MessageTargetsMember reports whether msg mentions or assigns member.
+func MessageTargetsMember(msg Message, member Member) bool {
 	id := strings.ToLower(strings.TrimSpace(member.ID))
 	name := strings.ToLower(strings.TrimSpace(member.Name))
 	if id == "" && name == "" {

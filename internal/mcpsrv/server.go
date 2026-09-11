@@ -20,6 +20,11 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/workspace"
 )
 
+const workspaceChannelInstructions = `Suzuri workspace is a shared room (not this chat log). ` +
+	`Messages that @mention you arrive as <channel source="suzuri" channel="…" message_id="…" from="…">. ` +
+	`Reply with workspace_post (pass channel from the tag and member_id from join). ` +
+	`Do not loop workspace_wait or workspace_inbox — grok-fork injects new mentions as turns.`
+
 // RunStdio starts the MCP server on stdin/stdout. Logs go to stderr only.
 func RunStdio() error {
 	// Never write protocol noise to stdout.
@@ -27,10 +32,21 @@ func RunStdio() error {
 		fmt.Fprintf(os.Stderr, "[suzuri-mcp] "+format+"\n", args...)
 	}
 
+	nt := newNotifyTransport(&mcp.StdioTransport{})
+	watch := newChannelWatch(workspace.Default, func(method string, params any) error {
+		logf("channel notify %s", method)
+		return nt.Notify(method, params)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watch.Loop(ctx)
+
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "suzuri",
 		Version: "0.1.0",
-	}, nil)
+	}, &mcp.ServerOptions{
+		Instructions: workspaceChannelInstructions,
+	})
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "suzuri_status",
@@ -229,7 +245,7 @@ func RunStdio() error {
 				"windows": "%LOCALAPPDATA%\\suzuri\\workspace\\",
 			},
 			"agent_workflow": []string{
-				"1. workspace_join with a short display name (e.g. implementer, reviewer). Session id is injected server-side — do not invent one. Join returns member_id + session_id.",
+				"1. workspace_join with a short display name (e.g. implementer, reviewer). Session id is injected server-side — do not invent one. Join returns member_id + session_id and binds this grok-fork session.",
 				"2. Optional: workspace_claim_role role=engine member_id=… (exclusive: pm|engine|content). Role is not your display name.",
 				"3. workspace_set_status status=working note=\"…\" so humans/peers see what you are doing",
 				"4. workspace_history once to catch up (pass since_id / after_ts for incremental reads)",
@@ -237,7 +253,7 @@ func RunStdio() error {
 				"6. workspace_task_claim or workspace_assign, then workspace_lease path=… ttl=10m",
 				"7. workspace_post to reply (prefer member_id from join). @name mentions resolve to that member's id.",
 				"8. Update status when blocked/waiting (waiting|blocked) or when idle/away",
-				"9. After joining, call workspace_wait (channel + since) or workspace_inbox (member_id + since_id) — do not replay the whole channel each turn",
+				"9. After join, do not loop workspace_wait. Mentions/assignments arrive as <channel source=\"suzuri\"> turns (grok-fork --channels). Reply with workspace_post.",
 			},
 			"availability": map[string]any{
 				"tool":  "workspace_set_status",
@@ -292,14 +308,15 @@ func RunStdio() error {
 			"user_phrases": []string{
 				"Join the suzuri workspace as <name> and introduce yourself in #general",
 				"Check #general / post in the shared workspace",
-				"Poll the workspace channel and reply to other agents",
+				"Join the workspace; @mention the agent so grok-fork wakes without polling",
 				"Create channel #pr-123 and summarize the thread",
 				"Delete channel #temp-room after we're done",
 			},
 			"paste_for_new_session": "Use suzuri MCP shared Workspace (not this chat log). " +
 				"Call workspace_guide if unsure. Then workspace_join name=\"…\" " +
 				"(session id is injected; keep member_id from the result). " +
-				"Then workspace_wait or workspace_inbox after joining, and workspace_post to talk. " +
+				"Join binds this session: @mentions arrive as <channel source=\"suzuri\"> turns. " +
+				"Reply with workspace_post. Do not loop workspace_wait. " +
 				"Use workspace_history with since_id for a one-shot catch-up, not a full replay every turn.",
 			"rules": []string{
 				"This is a shared log, not private agent memory",
@@ -338,13 +355,22 @@ func RunStdio() error {
 			kind = "agent"
 		}
 		sid := joinSessionID(req, args.SessionID)
-		res := workspaceTool(bridge.WorkspaceRequest{
+		r := workspaceApply(bridge.WorkspaceRequest{
 			Op:        bridge.WorkspaceOpJoin,
 			Name:      args.Name,
 			SessionID: sid,
 			Kind:      kind,
 		})
-		return res, nil, nil
+		if r.OK && r.MemberID != "" {
+			watch.Bind(r.MemberID)
+		}
+		m := joinResultMap(r.ToMap(), r.Member)
+		if r.OK {
+			m["bound"] = true
+			m["channel_mode"] = "mcp"
+			m["hint"] = "Mentions of you arrive as <channel source=\"suzuri\"> turns. Reply with workspace_post. Do not loop workspace_wait."
+		}
+		return textResult(m), nil, nil
 	})
 
 	type wsClaimRoleArgs struct {
@@ -372,6 +398,9 @@ func RunStdio() error {
 		Name:        "workspace_leave",
 		Description: "Leave the shared workspace (by member_id or name).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsLeaveArgs) (*mcp.CallToolResult, any, error) {
+		if args.MemberID != "" && args.MemberID == watch.MemberID() {
+			watch.Unbind()
+		}
 		return workspaceTool(bridge.WorkspaceRequest{
 			Op:       bridge.WorkspaceOpLeave,
 			MemberID: args.MemberID,
@@ -507,15 +536,24 @@ func RunStdio() error {
 	}
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "workspace_wait",
-		Description: "Long-poll a workspace channel until a new message arrives after `since` (message id), or timeout (default/max 60s). " +
-			"Returns the new messages; an empty list on timeout is OK. Prefer this (or workspace_inbox) after joining instead of dumping history every turn.",
+		Description: "Bind this session to workspace channel wakes (grok-fork --channels). " +
+			"Does not long-poll. Mentions/assignments after bind arrive as <channel source=\"suzuri\"> turns. " +
+			"Pass member_id from join. Do not call this in a loop.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args wsWaitArgs) (*mcp.CallToolResult, any, error) {
-		return workspaceTool(bridge.WorkspaceRequest{
-			Op:       bridge.WorkspaceOpWait,
-			Channel:  args.Channel,
-			Since:    args.Since,
-			Timeout:  args.Timeout,
-			MemberID: args.MemberID,
+		memberID := strings.TrimSpace(args.MemberID)
+		if memberID == "" {
+			memberID = watch.MemberID()
+		}
+		if memberID != "" {
+			watch.Bind(memberID)
+		}
+		return textResult(map[string]any{
+			"ok":           true,
+			"bound":        memberID != "",
+			"member_id":    memberID,
+			"channel_mode": "mcp",
+			"messages":     []any{},
+			"hint":         "Bound. Further @mentions arrive as <channel source=\"suzuri\"> turns. Reply with workspace_post. Do not loop this tool.",
 		}), nil, nil
 	})
 
@@ -705,7 +743,7 @@ func RunStdio() error {
 	})
 
 	logf("stdio MCP ready (attach to GUI via %s)", bridge.EndpointPath())
-	return server.Run(context.Background(), &mcp.StdioTransport{})
+	return server.Run(context.Background(), nt)
 }
 
 // notesTool prefers the live bridge (UI-thread, flushes editor); falls back to notes.json.
@@ -722,8 +760,7 @@ func notesTool(req bridge.NotesRequest) *mcp.CallToolResult {
 }
 
 // workspaceTool prefers the live bridge (refreshes open panel); falls back to disk store.
-// workspace_wait always runs on disk: it is a long-poll (up to 60s) and must not
-// block the GUI bridge (8s HTTP timeout).
+// workspace_wait is handled in the tool handler (bind, no long-poll).
 func workspaceTool(req bridge.WorkspaceRequest) *mcp.CallToolResult {
 	if req.Op != bridge.WorkspaceOpWait {
 		if c, err := bridge.Dial(); err == nil {

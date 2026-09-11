@@ -45,8 +45,8 @@ If the GUI is not running, tools return a clear error: launch `suzuri.exe` first
 | `workspace_channel_delete` | Delete a channel + history + files (not #general) |
 | `workspace_post` | Post a message to a channel |
 | `workspace_history` | Read channel messages (`since_id` / `after_ts` for incremental) |
-| `workspace_wait` | Long-poll until a new message after `since` (timeout default/max 60s) |
-| `workspace_inbox` | Mentions + assignments for `member_id` since `since_id` |
+| `workspace_wait` | Bind this grok-fork session to channel wakes (no 60s poll) |
+| `workspace_inbox` | Mentions + assignments for `member_id` since `since_id` (catch-up) |
 | `workspace_upload` | Attach a local file to a channel (max 64MiB) |
 | `workspace_download` | Resolve a file attachment to a local path |
 | `workspace_task_create` | Create a claimable task (`tasks.json`; no TASKS.md) |
