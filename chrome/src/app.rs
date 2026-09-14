@@ -4128,6 +4128,13 @@ impl ChromeApp {
                         }
                         return;
                     }
+                    "," if shift => {
+                        self.run_action(event_loop, CommandAction::ShrinkPane, None);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
                     "," => {
                         self.palette.close();
                         self.help.close();
@@ -4200,13 +4207,6 @@ impl ChromeApp {
                     }
                     "." if shift => {
                         self.run_action(event_loop, CommandAction::GrowPane, None);
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                        return;
-                    }
-                    "," if shift => {
-                        self.run_action(event_loop, CommandAction::ShrinkPane, None);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
