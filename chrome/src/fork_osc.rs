@@ -186,12 +186,23 @@ mod tests {
         assert!(parse_fork_osc_payload(b"7880;fork=1;resume=x").is_none());
     }
 
+    #[cfg(windows)]
+    const SAMPLE_BIN: &str = r"C:\bin\grok-fork.exe";
+    #[cfg(not(windows))]
+    const SAMPLE_BIN: &str = "/usr/bin/grok-fork";
+
     #[test]
     fn allowlist() {
-        assert!(allowed_fork_bin("/usr/bin/grok-fork"));
+        assert!(allowed_fork_bin(SAMPLE_BIN));
+        #[cfg(windows)]
+        assert!(allowed_fork_bin(r"C:\tmp\xai-grok-pager.exe"));
+        #[cfg(not(windows))]
         assert!(allowed_fork_bin("/tmp/xai-grok-pager"));
         assert!(!allowed_fork_bin("grok-fork"));
         assert!(!allowed_fork_bin("/bin/zsh"));
+        #[cfg(windows)]
+        assert!(!allowed_fork_bin(r"C:\usr\bin\..\bin\zsh.exe"));
+        #[cfg(not(windows))]
         assert!(!allowed_fork_bin("/usr/bin/../bin/zsh"));
     }
 
@@ -199,13 +210,13 @@ mod tests {
     fn launch_spec_resume_and_prompt() {
         let (bin, args, env) = fork_launch_spec(&ForkPaneRequest {
             resume: "sess-1".into(),
-            bin: "/usr/bin/grok-fork".into(),
+            bin: SAMPLE_BIN.into(),
             prompt: "do the thing".into(),
             brand: "fork".into(),
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(bin, "/usr/bin/grok-fork");
+        assert_eq!(bin, SAMPLE_BIN);
         assert_eq!(args, ["--resume", "sess-1", "--", "do the thing"]);
         assert!(env.iter().any(|(k, v)| k == "GROK_SKIP_SYNC" && v == "1"));
         assert!(env
