@@ -127,8 +127,7 @@ impl SplitNode {
                     }
                 }
 
-                let settled =
-                    (*jelly - target).abs() < 0.02 && jelly_vel.abs() < 0.04;
+                let settled = (*jelly - target).abs() < 0.02 && jelly_vel.abs() < 0.04;
                 if settled {
                     *jelly = target;
                     *jelly_vel = 0.0;
@@ -199,6 +198,90 @@ impl SplitNode {
         true
     }
 
+    /// Toggle the parent split of `id` between H and V.
+    pub fn rotate_parent_of(&mut self, id: u64) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch { axis, a, b, .. } => {
+                let direct = matches!(
+                    (a.as_ref(), b.as_ref()),
+                    (Self::Leaf(x), _) if *x == id
+                ) || matches!(
+                    (a.as_ref(), b.as_ref()),
+                    (_, Self::Leaf(y)) if *y == id
+                );
+                if direct {
+                    *axis = match *axis {
+                        SplitAxis::Vertical => SplitAxis::Horizontal,
+                        SplitAxis::Horizontal => SplitAxis::Vertical,
+                    };
+                    return true;
+                }
+                a.rotate_parent_of(id) || b.rotate_parent_of(id)
+            }
+        }
+    }
+
+    /// Swap the two children of the parent split that contains leaf `id`.
+    pub fn swap_parent_of(&mut self, id: u64) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch { a, b, .. } => {
+                let direct = matches!(a.as_ref(), Self::Leaf(x) if *x == id)
+                    || matches!(b.as_ref(), Self::Leaf(y) if *y == id);
+                if direct {
+                    std::mem::swap(a, b);
+                    return true;
+                }
+                a.swap_parent_of(id) || b.swap_parent_of(id)
+            }
+        }
+    }
+
+    /// Grow (`delta` > 0) or shrink the leaf `id` within its parent split.
+    pub fn grow_parent_of(&mut self, id: u64, delta: f32) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch { a, b, ratio, .. } => {
+                if matches!(a.as_ref(), Self::Leaf(x) if *x == id) {
+                    let next = (*ratio + delta).clamp(0.15, 0.85);
+                    if (next - *ratio).abs() < f32::EPSILON {
+                        return false;
+                    }
+                    *ratio = next;
+                    return true;
+                }
+                if matches!(b.as_ref(), Self::Leaf(y) if *y == id) {
+                    let next = (*ratio - delta).clamp(0.15, 0.85);
+                    if (next - *ratio).abs() < f32::EPSILON {
+                        return false;
+                    }
+                    *ratio = next;
+                    return true;
+                }
+                a.grow_parent_of(id, delta) || b.grow_parent_of(id, delta)
+            }
+        }
+    }
+
+    pub fn equalize_parent_of(&mut self, id: u64) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Branch { a, b, ratio, .. } => {
+                let direct = matches!(a.as_ref(), Self::Leaf(x) if *x == id)
+                    || matches!(b.as_ref(), Self::Leaf(y) if *y == id);
+                if direct {
+                    if (*ratio - 0.5).abs() < f32::EPSILON {
+                        return false;
+                    }
+                    *ratio = 0.5;
+                    return true;
+                }
+                a.equalize_parent_of(id) || b.equalize_parent_of(id)
+            }
+        }
+    }
+
     fn swap_direct_children(&mut self, a_id: u64, b_id: u64) -> bool {
         match self {
             Self::Leaf(_) => false,
@@ -249,10 +332,10 @@ impl SplitNode {
                     return true;
                 }
                 // Direct children that are the leaf (or contain only that leaf as single)
-                let a_is = matches!(a.as_ref(), Self::Leaf(p) if *p == id)
-                    || (a.leaf_ids() == [id]);
-                let b_is = matches!(b.as_ref(), Self::Leaf(p) if *p == id)
-                    || (b.leaf_ids() == [id]);
+                let a_is =
+                    matches!(a.as_ref(), Self::Leaf(p) if *p == id) || (a.leaf_ids() == [id]);
+                let b_is =
+                    matches!(b.as_ref(), Self::Leaf(p) if *p == id) || (b.leaf_ids() == [id]);
 
                 if b_is {
                     *jelly_target = 0.0;
@@ -389,8 +472,7 @@ impl SplitNode {
                 if b.is_only(id) {
                     return Some(a.first_leaf());
                 }
-                a.focus_after_close(id)
-                    .or_else(|| b.focus_after_close(id))
+                a.focus_after_close(id).or_else(|| b.focus_after_close(id))
             }
         }
     }
@@ -643,7 +725,9 @@ pub enum RemoveResult {
     NotFound,
     /// Leaf was the only node — tree empty (caller drops tab/page).
     RemovedEmpty,
-    Removed { focus_hint: u64 },
+    Removed {
+        focus_hint: u64,
+    },
 }
 
 /// Sole-pane (or whole-tab) exit: scale workspace glass from 1 → 0 with jelly.
@@ -732,10 +816,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rotate_swap_grow() {
+        let mut root = SplitNode::leaf(1);
+        assert!(root.split_leaf(1, 2, SplitAxis::Vertical));
+        assert!(root.rotate_parent_of(2));
+        if let SplitNode::Branch { axis, .. } = &root {
+            assert_eq!(*axis, SplitAxis::Horizontal);
+        } else {
+            panic!("branch");
+        }
+        assert!(root.swap_parent_of(2));
+        assert!(root.grow_parent_of(2, 0.2));
+        assert!(root.equalize_parent_of(2));
+        let mut solo = SplitNode::leaf(9);
+        assert!(!solo.rotate_parent_of(9));
+    }
+
+    #[test]
     fn split_and_layout_two() {
         let mut root = SplitNode::leaf(1);
         assert!(root.split_leaf(1, 2, SplitAxis::Vertical));
-        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+        if let SplitNode::Branch {
+            jelly,
+            jelly_target,
+            ..
+        } = &mut root
+        {
             *jelly = 1.0;
             *jelly_target = 1.0;
         }
@@ -763,7 +869,12 @@ mod tests {
         let mut root = SplitNode::leaf(1);
         root.split_leaf(1, 2, SplitAxis::Vertical);
         // open fully
-        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+        if let SplitNode::Branch {
+            jelly,
+            jelly_target,
+            ..
+        } = &mut root
+        {
             *jelly = 1.0;
             *jelly_target = 1.0;
         }
@@ -784,7 +895,12 @@ mod tests {
         let mut root = SplitNode::leaf(1);
         root.split_leaf(1, 2, SplitAxis::Vertical);
         root.split_leaf(2, 3, SplitAxis::Horizontal);
-        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+        if let SplitNode::Branch {
+            jelly,
+            jelly_target,
+            ..
+        } = &mut root
+        {
             *jelly = 1.0;
             *jelly_target = 1.0;
         }
@@ -795,8 +911,14 @@ mod tests {
         }
         let mut out = Vec::new();
         root.layout_into(Rect::new(0.0, 0.0, 200.0, 100.0), 4.0, &mut out);
-        let left = out.iter().find(|(id, _)| *id == 1).expect("left pane still laid out");
-        let right = out.iter().find(|(id, _)| *id == 2).expect("right stack still laid out");
+        let left = out
+            .iter()
+            .find(|(id, _)| *id == 1)
+            .expect("left pane still laid out");
+        let right = out
+            .iter()
+            .find(|(id, _)| *id == 2)
+            .expect("right stack still laid out");
         assert!(
             left.1.x < right.1.x,
             "closing left pane must stay on the left, got left.x={} right.x={}",
@@ -856,7 +978,12 @@ mod tests {
     fn split_leaf_edge_puts_new_on_left() {
         let mut root = SplitNode::leaf(1);
         assert!(root.split_leaf_edge(1, 2, DockEdge::Left));
-        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+        if let SplitNode::Branch {
+            jelly,
+            jelly_target,
+            ..
+        } = &mut root
+        {
             *jelly = 1.0;
             *jelly_target = 1.0;
         }
@@ -872,7 +999,12 @@ mod tests {
     fn sash_ratio_moves_split() {
         let mut root = SplitNode::leaf(1);
         assert!(root.split_leaf(1, 2, SplitAxis::Vertical));
-        if let SplitNode::Branch { jelly, jelly_target, .. } = &mut root {
+        if let SplitNode::Branch {
+            jelly,
+            jelly_target,
+            ..
+        } = &mut root
+        {
             *jelly = 1.0;
             *jelly_target = 1.0;
         }

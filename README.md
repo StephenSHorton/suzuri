@@ -28,7 +28,7 @@ chrome — not HTML and not Charm.
 | Area | Highlights |
 |------|------------|
 | **Host** | Native window, ConPTY / POSIX PTY, scrollback, selection, copy/paste |
-| **Chrome** | Tabs, splits, command palette (`⌘K` / `⌘P`), settings (`⌘,`), help (`⌘/`) |
+| **Chrome** | Tabs, splits, command palette (`⌘K` / `⌘P`), settings (`⌘,`), help (`⌘/`) · grok-fork `/fork` host split (OSC 7880) |
 | **Look** | Glass panes · glyph rain · primary + derived accent colors · Gohu mono |
 | **Input** | Warp-style compose · echo filter · command blocks |
 | **Agents** | Spawn-on-demand MCP (`suzuri mcp`) for diagnostics / control |

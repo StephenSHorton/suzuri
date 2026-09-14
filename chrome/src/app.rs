@@ -20,27 +20,27 @@ use crate::chrome_status::{self, PaneSnapExtra, StatusPublisher};
 use crate::chrome_ui::{ChipId, ChipUi};
 use crate::cmd_blocks::{self, CmdBlockLog};
 use crate::commands::{
-    commands_with_guests, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
+    CommandAction, HelpState, PaletteState, SplashState, commands_with_guests, filter_commands,
 };
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
 use crate::echo_filter::EchoFilter;
-use crate::guest_host::{guest_footer_top, guest_mount_rect, GuestEvent, GuestHost, NativeAttach};
+use crate::guest_host::{GuestEvent, GuestHost, NativeAttach, guest_footer_top, guest_mount_rect};
 use crate::guest_manifest::{load_guests, pick_guest};
 use crate::input::{
-    classify_drop, classify_tab_drop, hit_test, is_mac, is_windows, pane_id_from_hit,
-    term_select_drag_started, window_origin_for_tab_drop, DropKind, HitTarget,
+    DropKind, HitTarget, classify_drop, classify_tab_drop, hit_test, is_mac, is_windows,
+    pane_id_from_hit, term_select_drag_started, window_origin_for_tab_drop,
 };
 use crate::kitty_gfx::placeholder_bounds;
-use crate::layout::{clamp_ui_zoom, FrameLayout, Metrics, UI_ZOOM_STEP};
-use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
+use crate::layout::{FrameLayout, Metrics, UI_ZOOM_STEP, clamp_ui_zoom};
+use crate::links::{LinkHoverSpan, link_span_at_col, open_url_in_browser};
 use crate::mouse_pty::{encode_mouse_button, encode_mouse_motion, encode_mouse_wheel};
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
 use crate::rename::{RenameState, RenameTarget};
 use crate::renderer::{self, GhostLayer, KittyBlit, Renderer};
-use crate::selection::{clamp_pos, CellPos, Selection};
+use crate::selection::{CellPos, Selection, clamp_pos};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
 use crate::settings::SettingsState;
 use crate::sync_hold::SyncHold;
@@ -416,7 +416,7 @@ fn spawn_pane_runtime_px(
         .get(&pane_id)
         .map(|p| p.cwd.as_str())
         .filter(|s| !s.is_empty());
-    match PtySession::spawn_in(cols, rows, pixel_w, pixel_h, cwd) {
+    match PtySession::spawn_in(cols, rows, pixel_w, pixel_h, cwd, pane_id) {
         Ok(pty) => {
             session.mark_pane_pty(pane_id);
             PaneRuntime {
@@ -458,6 +458,50 @@ fn spawn_pane_runtime_px(
             }
         }
     }
+}
+
+fn spawn_pane_runtime_cmd(
+    cols: u16,
+    rows: u16,
+    pixel_w: u16,
+    pixel_h: u16,
+    session: &mut ChromeSession,
+    pane_id: u64,
+    program: &str,
+    args: &[String],
+    extra_env: &[(String, String)],
+) -> Result<PaneRuntime, String> {
+    let cwd = session
+        .panes
+        .get(&pane_id)
+        .map(|p| p.cwd.as_str())
+        .filter(|s| !s.is_empty());
+    let pty = PtySession::spawn_cmd(
+        cols, rows, pixel_w, pixel_h, program, args, cwd, pane_id, extra_env,
+    )?;
+    session.mark_pane_pty(pane_id);
+    let mut ansi = AnsiDecoder::new();
+    if pixel_w > 0 && pixel_h > 0 {
+        let cw = (pixel_w as u32 / cols.max(1) as u32).max(1);
+        let ch = (pixel_h as u32 / rows.max(1) as u32).max(1);
+        ansi.set_pixel_metrics(
+            cw,
+            ch,
+            pixel_w as u32,
+            pixel_h as u32,
+            cols as u32,
+            rows as u32,
+        );
+    }
+    Ok(PaneRuntime {
+        pty: Some(pty),
+        ansi,
+        pty_tail: String::new(),
+        echo: EchoFilter::new(),
+        blocks: CmdBlockLog::new(),
+        suppress_paint: false,
+        sync: SyncHold::new(),
+    })
 }
 
 impl ChromeApp {
@@ -1328,6 +1372,7 @@ impl ChromeApp {
 
     fn drain_all_ptys(&mut self) {
         let mut pending: HashMap<u64, Vec<u8>> = HashMap::new();
+        let mut forks: Vec<(u64, crate::fork_osc::ForkPaneRequest)> = Vec::new();
         for (id, rt) in self.runtimes.iter_mut() {
             if let Some(pty) = &mut rt.pty {
                 let chunk = pty.try_read();
@@ -1391,11 +1436,17 @@ impl ChromeApp {
             if let Some(title) = rt.ansi.take_title() {
                 self.session.set_pane_title(id, title);
             }
+            if let Some(req) = rt.ansi.take_fork() {
+                forks.push((id, req));
+            }
             if !chunk.is_empty() {
                 if let Some(p) = self.session.panes.get_mut(&id) {
                     p.busy = false;
                 }
             }
+        }
+        for (id, req) in forks {
+            self.fork_split_from_osc(id, req);
         }
         if !grid_wrote {
             return;
@@ -2208,6 +2259,58 @@ impl ChromeApp {
             CommandAction::SplitDown => {
                 self.split_pane(SplitAxis::Horizontal);
             }
+            CommandAction::RotateSplit => {
+                if self.session.rotate_focused_split() {
+                    self.toast.show("rotated split");
+                    self.sync_grids_to_panes();
+                } else {
+                    self.toast.show("no split");
+                }
+            }
+            CommandAction::SwapPanes => {
+                if self.session.swap_focused_split() {
+                    self.toast.show("swapped panes");
+                    self.sync_grids_to_panes();
+                } else {
+                    self.toast.show("no split");
+                }
+            }
+            CommandAction::GrowPane => {
+                if self.session.grow_focused_split(0.08) {
+                    self.sync_grids_to_panes();
+                } else {
+                    self.toast.show("no split");
+                }
+            }
+            CommandAction::ShrinkPane => {
+                if self.session.grow_focused_split(-0.08) {
+                    self.sync_grids_to_panes();
+                } else {
+                    self.toast.show("no split");
+                }
+            }
+            CommandAction::EqualizeSplit => {
+                if self.session.equalize_focused_split() {
+                    self.toast.show("equal split");
+                    self.sync_grids_to_panes();
+                } else {
+                    self.toast.show("no split");
+                }
+            }
+            CommandAction::ExtractPane => {
+                let pane = self.session.focus_pane_id();
+                let surface = self.session.active_tab().map(|t| t.surface).unwrap_or(0);
+                if self
+                    .session
+                    .extract_pane_to_new_tab(pane, surface)
+                    .is_some()
+                {
+                    self.toast.show("moved to tab");
+                    self.sync_grids_to_panes();
+                } else {
+                    self.toast.show("already a tab");
+                }
+            }
             CommandAction::FocusLeft => self.focus_dir(FocusDir::Left),
             CommandAction::FocusRight => self.focus_dir(FocusDir::Right),
             CommandAction::FocusUp => self.focus_dir(FocusDir::Up),
@@ -2323,6 +2426,85 @@ impl ChromeApp {
             self.warp_focused = true;
             self.terminal_focused = false;
             self.sync_grids_to_panes();
+        }
+    }
+
+    fn fork_split_from_osc(&mut self, src: u64, req: crate::fork_osc::ForkPaneRequest) {
+        let (bin, args, extra) = match crate::fork_osc::fork_launch_spec(&req) {
+            Ok(v) => v,
+            Err(_) => {
+                self.toast.show("fork split blocked");
+                return;
+            }
+        };
+        let layout = self.current_layout();
+        let (w, h) = layout
+            .panes
+            .iter()
+            .find(|p| p.pane_id == src)
+            .map(|p| (p.glass.w, p.glass.h))
+            .unwrap_or((800.0, 500.0));
+        let axis = crate::fork_osc::choose_fork_split_dir(w, h);
+        let cell = self.cell_metrics();
+        let (cols, rows) = {
+            let mut half = layout.workspace;
+            match axis {
+                SplitAxis::Vertical => half.w *= 0.5,
+                SplitAxis::Horizontal => half.h *= 0.5,
+            }
+            let inset = self.metrics.inset();
+            let strip = self.metrics.input_strip_h;
+            let cells = crate::layout::Rect::new(
+                half.x + inset,
+                half.y + inset,
+                (half.w - inset * 2.0).max(40.0),
+                (half.h - inset * 2.0 - strip).max(40.0),
+            );
+            renderer::terminal_grid_size_with(&cells, cell.w, cell.h)
+        };
+        let cwd = {
+            let t = req.cwd.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        };
+        let title = crate::fork_osc::fork_title(&req);
+        let Some(new_id) = self
+            .session
+            .split_at(src, axis, cols, rows, cwd, Some(title))
+        else {
+            self.toast.show("split failed");
+            return;
+        };
+        let (pw, ph) = self.pty_pixel_size(cols, rows);
+        match spawn_pane_runtime_cmd(
+            cols,
+            rows,
+            pw,
+            ph,
+            &mut self.session,
+            new_id,
+            &bin,
+            &args,
+            &extra,
+        ) {
+            Ok(rt) => {
+                self.runtimes.insert(new_id, rt);
+                self.warp_focused = false;
+                self.terminal_focused = true;
+                self.sync_grids_to_panes();
+                self.toast.show(match axis {
+                    SplitAxis::Vertical => "fork split right",
+                    SplitAxis::Horizontal => "fork split down",
+                });
+                self.paint_dirty = true;
+                self.request_redraw_all();
+            }
+            Err(_) => {
+                self.toast.show("split failed");
+            }
         }
     }
 
@@ -2963,11 +3145,7 @@ impl ChromeApp {
                     && (pos.abs_row as i64 - abs_row as i64).abs() <= 1 =>
             {
                 let next = n.saturating_add(1);
-                if next > 3 {
-                    1
-                } else {
-                    next
-                }
+                if next > 3 { 1 } else { next }
             }
             _ => 1,
         };
@@ -3994,6 +4172,41 @@ impl ChromeApp {
                     }
                     "e" | "E" if shift => {
                         self.split_pane(SplitAxis::Horizontal);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "o" | "O" if shift => {
+                        self.run_action(event_loop, CommandAction::RotateSplit, None);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "x" | "X" if shift => {
+                        self.run_action(event_loop, CommandAction::SwapPanes, None);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "u" | "U" if shift => {
+                        self.run_action(event_loop, CommandAction::ExtractPane, None);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "." if shift => {
+                        self.run_action(event_loop, CommandAction::GrowPane, None);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        return;
+                    }
+                    "," if shift => {
+                        self.run_action(event_loop, CommandAction::ShrinkPane, None);
                         if let Some(w) = &self.window {
                             w.request_redraw();
                         }
@@ -5833,11 +6046,7 @@ impl ApplicationHandler for ChromeApp {
 /// glass, and SwiftUI traffic-light widgets. Rain presents ~60 Hz, so that
 /// query on every redraw pegs the main thread and the pane switch "freezes."
 fn paint_maximized(os_macos: bool, os_maximized: bool) -> bool {
-    if os_macos {
-        false
-    } else {
-        os_maximized
-    }
+    if os_macos { false } else { os_maximized }
 }
 
 /// Named key for warp editing. Option on macOS can remap `logical_key` to a

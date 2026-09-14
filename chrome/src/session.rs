@@ -840,26 +840,75 @@ impl ChromeSession {
 
     /// Split the focused pane. Returns new pane id.
     pub fn split_focused(&mut self, axis: SplitAxis, cols: u16, rows: u16) -> Option<u64> {
-        let tab_id = self.active_id;
         let focus = self.focus_pane_id();
-        let cwd = self
-            .panes
-            .get(&focus)
-            .map(|p| p.cwd.clone())
-            .unwrap_or_else(initial_cwd);
+        self.split_at(focus, axis, cols, rows, None, None)
+    }
+
+    /// Split leaf `source` (not necessarily focused). Optional cwd/title for grok-fork.
+    pub fn split_at(
+        &mut self,
+        source: u64,
+        axis: SplitAxis,
+        cols: u16,
+        rows: u16,
+        cwd: Option<String>,
+        title: Option<String>,
+    ) -> Option<u64> {
+        let cwd = cwd.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
+            self.panes
+                .get(&source)
+                .map(|p| p.cwd.clone())
+                .unwrap_or_else(initial_cwd)
+        });
 
         let new_id = self.next_pane_id;
         self.next_pane_id = self.next_pane_id.saturating_add(1);
 
-        let tab = self.tabs.iter_mut().find(|t| t.id == tab_id)?;
-        if !tab.root.split_leaf(focus, new_id, axis) {
+        let tab = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.root.contains_pane(source))?;
+        if !tab.root.split_leaf(source, new_id, axis) {
             return None;
         }
         tab.focus_pane = new_id;
+        self.active_id = tab.id;
 
-        self.panes
-            .insert(new_id, new_terminal_pane(new_id, cols, rows, cwd));
+        let mut pane = new_terminal_pane(new_id, cols, rows, cwd);
+        if let Some(t) = title.filter(|s| !s.trim().is_empty()) {
+            pane.title = t;
+            pane.title_user = true;
+        }
+        self.panes.insert(new_id, pane);
         Some(new_id)
+    }
+
+    pub fn rotate_focused_split(&mut self) -> bool {
+        let id = self.focus_pane_id();
+        self.active_tab_mut()
+            .map(|t| t.root.rotate_parent_of(id))
+            .unwrap_or(false)
+    }
+
+    pub fn swap_focused_split(&mut self) -> bool {
+        let id = self.focus_pane_id();
+        self.active_tab_mut()
+            .map(|t| t.root.swap_parent_of(id))
+            .unwrap_or(false)
+    }
+
+    pub fn grow_focused_split(&mut self, delta: f32) -> bool {
+        let id = self.focus_pane_id();
+        self.active_tab_mut()
+            .map(|t| t.root.grow_parent_of(id, delta))
+            .unwrap_or(false)
+    }
+
+    pub fn equalize_focused_split(&mut self) -> bool {
+        let id = self.focus_pane_id();
+        self.active_tab_mut()
+            .map(|t| t.root.equalize_parent_of(id))
+            .unwrap_or(false)
     }
 
     /// Split the focused pane and insert a widget leaf (no PTY). Returns new id.
@@ -2084,7 +2133,10 @@ mod tests {
     fn cwd_updates_auto_pane_title() {
         let mut s = ChromeSession::new(80, 24);
         s.set_cwd(1, r"C:\Users\stephen".into());
-        assert_eq!(s.active_pane().unwrap().title, display_path(r"C:\Users\stephen"));
+        assert_eq!(
+            s.active_pane().unwrap().title,
+            display_path(r"C:\Users\stephen")
+        );
         s.set_pane_title(1, "nvim".into());
         s.set_cwd(1, r"C:\Users\stephen\src".into());
         assert_eq!(s.active_pane().unwrap().title, "nvim");

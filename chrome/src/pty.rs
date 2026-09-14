@@ -37,7 +37,7 @@ impl PtySession {
         pixel_width: u16,
         pixel_height: u16,
     ) -> Result<Self, String> {
-        Self::spawn_in(cols, rows, pixel_width, pixel_height, None)
+        Self::spawn_in(cols, rows, pixel_width, pixel_height, None, 0)
     }
 
     /// Spawn in `cwd` when it is a non-empty directory; otherwise inherit.
@@ -47,6 +47,33 @@ impl PtySession {
         pixel_width: u16,
         pixel_height: u16,
         cwd: Option<&str>,
+        pane_id: u64,
+    ) -> Result<Self, String> {
+        let shell = default_shell();
+        Self::spawn_cmd(
+            cols,
+            rows,
+            pixel_width,
+            pixel_height,
+            &shell.program,
+            &shell.args,
+            cwd,
+            pane_id,
+            &[],
+        )
+    }
+
+    /// Spawn `program` with `args` (used by grok-fork OSC 7880).
+    pub fn spawn_cmd(
+        cols: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+        program: &str,
+        args: &[String],
+        cwd: Option<&str>,
+        pane_id: u64,
+        extra_env: &[(String, String)],
     ) -> Result<Self, String> {
         let pty_system = native_pty_system();
         let size = PtySize {
@@ -59,14 +86,12 @@ impl PtySession {
             .openpty(size)
             .map_err(|e| format!("openpty: {e}"))?;
 
-        let shell = default_shell();
-        let mut cmd = CommandBuilder::new(&shell.program);
-        cmd.args(&shell.args);
-        // Attached to a PTY → shells run interactive without extra flags
-        // (Windows PowerShell gets -NoLogo/-NoProfile + OSC cwd, matching
-        // the Go host DefaultShell).
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(args);
+        apply_host_env(&mut cmd, pane_id);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
         let dir = cwd
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -80,7 +105,7 @@ impl PtySession {
         let child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| format!("spawn {}: {e}", shell.program))?;
+            .map_err(|e| format!("spawn {program}: {e}"))?;
 
         let mut reader = pair
             .master
@@ -189,6 +214,18 @@ impl Drop for PtySession {
         // briefly). Handle is dropped with the struct.
         let _ = self._reader.take();
     }
+}
+
+fn apply_host_env(cmd: &mut CommandBuilder, pane_id: u64) {
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    // Ghostty spoof so Grok emits Kitty graphics; SUZURI* is the real identity.
+    cmd.env("TERM_PROGRAM", "ghostty");
+    cmd.env("TERM_PROGRAM_VERSION", "1.0.0");
+    cmd.env("KITTY_WINDOW_ID", "1");
+    cmd.env("SUZURI", "1");
+    cmd.env("SUZURI_FORK_SPLIT", "1");
+    cmd.env("SUZURI_PANE_ID", pane_id.to_string());
 }
 
 /// Program + argv for the user's default interactive shell.

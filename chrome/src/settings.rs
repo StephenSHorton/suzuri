@@ -582,6 +582,8 @@ impl SettingsState {
             "  ⌘/       keyboard shortcuts".into(),
             "  ⌘T / ⌘W  new tab / close pane".into(),
             "  ⇧⌘D/E    split right / down".into(),
+            "  ⇧⌘O/X    rotate / swap panes".into(),
+            "  ⇧⌘U      move pane to tab".into(),
             "  ⌘V       paste".into(),
             "  wheel    scrollback".into(),
         ]

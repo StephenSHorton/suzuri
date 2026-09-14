@@ -36,6 +36,8 @@ pub struct AnsiDecoder {
     pending_cwd: Option<String>,
     /// Latest window/icon title from OSC 0 / 2 (consumed by the host).
     pending_title: Option<String>,
+    /// Latest grok-fork pane-split request (OSC 7880).
+    pending_fork: Option<crate::fork_osc::ForkPaneRequest>,
     /// Bytes to write back to the PTY (DA / DECRQM answers). Host drains.
     pending_replies: Vec<Vec<u8>>,
     /// DECSET 1 — application cursor keys (`ESC OA` vs `ESC [A`).
@@ -91,6 +93,7 @@ impl Default for AnsiDecoder {
             osc_buf: Vec::new(),
             pending_cwd: None,
             pending_title: None,
+            pending_fork: None,
             pending_replies: Vec::new(),
             app_cursor: false,
             mouse_tracking: false,
@@ -123,6 +126,11 @@ impl AnsiDecoder {
     /// Take the latest OSC 0 / 2 window title, if any.
     pub fn take_title(&mut self) -> Option<String> {
         self.pending_title.take()
+    }
+
+    /// Take the latest OSC 7880 grok-fork pane-split request, if any.
+    pub fn take_fork(&mut self) -> Option<crate::fork_osc::ForkPaneRequest> {
+        self.pending_fork.take()
     }
 
     /// Drain PTY write-back replies (device attributes, mode reports, …).
@@ -180,6 +188,9 @@ impl AnsiDecoder {
         }
         if let Some(title) = parse_title_osc_payload(&self.osc_buf) {
             self.pending_title = Some(title);
+        }
+        if let Some(fork) = crate::fork_osc::parse_fork_osc_payload(&self.osc_buf) {
+            self.pending_fork = Some(fork);
         }
         self.osc_buf.clear();
     }
@@ -1114,6 +1125,19 @@ mod tests {
         let mut grid = CellGrid::new(20, 5);
         dec.feed(&mut grid, b"\x1b]7878;cwd=/tmp/demo\x07");
         assert_eq!(dec.take_cwd().as_deref(), Some("/tmp/demo"));
+    }
+
+    #[test]
+    fn osc_7880_fork_pane() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        dec.feed(
+            &mut grid,
+            b"\x1b]7880;fork=1;resume=abc;bin=/usr/bin/grok-fork\x07",
+        );
+        let req = dec.take_fork().expect("fork osc");
+        assert_eq!(req.resume, "abc");
+        assert_eq!(req.bin, "/usr/bin/grok-fork");
     }
 
     #[test]
