@@ -25,6 +25,7 @@ mod control_mailbox;
 mod draft;
 mod echo_filter;
 mod eco;
+mod fork_osc;
 mod guest_fb;
 mod guest_host;
 mod guest_install;

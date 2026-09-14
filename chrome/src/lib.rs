@@ -50,6 +50,7 @@ pub mod control_mailbox;
 pub mod draft;
 pub mod echo_filter;
 pub mod eco;
+pub mod fork_osc;
 pub mod guest_fb;
 pub mod guest_host;
 pub mod guest_install;
