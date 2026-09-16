@@ -6,6 +6,7 @@
 use crate::cells::{theme, CellGrid};
 use crate::kitty::KittyKeyboard;
 use crate::kitty_gfx::GraphicsStore;
+use std::collections::VecDeque;
 
 /// Stateful decoder for a byte stream from a PTY.
 #[derive(Debug)]
@@ -36,8 +37,9 @@ pub struct AnsiDecoder {
     pending_cwd: Option<String>,
     /// Latest window/icon title from OSC 0 / 2 (consumed by the host).
     pending_title: Option<String>,
-    /// Latest grok-fork pane-split request (OSC 7880).
-    pending_fork: Option<crate::fork_osc::ForkPaneRequest>,
+    /// Queued grok-fork pane-split requests (OSC 7880). A burst of several
+    /// must not collapse to the last one.
+    pending_forks: VecDeque<crate::fork_osc::ForkPaneRequest>,
     /// Bytes to write back to the PTY (DA / DECRQM answers). Host drains.
     pending_replies: Vec<Vec<u8>>,
     /// DECSET 1 — application cursor keys (`ESC OA` vs `ESC [A`).
@@ -93,7 +95,7 @@ impl Default for AnsiDecoder {
             osc_buf: Vec::new(),
             pending_cwd: None,
             pending_title: None,
-            pending_fork: None,
+            pending_forks: VecDeque::new(),
             pending_replies: Vec::new(),
             app_cursor: false,
             mouse_tracking: false,
@@ -128,9 +130,14 @@ impl AnsiDecoder {
         self.pending_title.take()
     }
 
-    /// Take the latest OSC 7880 grok-fork pane-split request, if any.
+    /// Take the oldest OSC 7880 grok-fork pane-split request, if any.
     pub fn take_fork(&mut self) -> Option<crate::fork_osc::ForkPaneRequest> {
-        self.pending_fork.take()
+        self.pending_forks.pop_front()
+    }
+
+    /// Drain every queued OSC 7880 pane-split request (oldest first).
+    pub fn take_forks(&mut self) -> Vec<crate::fork_osc::ForkPaneRequest> {
+        self.pending_forks.drain(..).collect()
     }
 
     /// Drain PTY write-back replies (device attributes, mode reports, …).
@@ -190,7 +197,7 @@ impl AnsiDecoder {
             self.pending_title = Some(title);
         }
         if let Some(fork) = crate::fork_osc::parse_fork_osc_payload(&self.osc_buf) {
-            self.pending_fork = Some(fork);
+            self.pending_forks.push_back(fork);
         }
         self.osc_buf.clear();
     }
@@ -1138,6 +1145,20 @@ mod tests {
         let req = dec.take_fork().expect("fork osc");
         assert_eq!(req.resume, "abc");
         assert_eq!(req.bin, "/usr/bin/grok-fork");
+    }
+
+    #[test]
+    fn osc_7880_queues_multiple() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(20, 5);
+        dec.feed(
+            &mut grid,
+            b"\x1b]7880;new=1;session=a;bin=/usr/bin/grok-fork\x07\x1b]7880;new=1;session=b;bin=/usr/bin/grok-fork\x07",
+        );
+        let reqs = dec.take_forks();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[0].resume, "a");
+        assert_eq!(reqs[1].resume, "b");
     }
 
     #[test]

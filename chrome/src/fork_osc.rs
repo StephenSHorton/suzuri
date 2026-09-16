@@ -1,17 +1,19 @@
-//! OSC 7880 — grok-fork asks this host to split the emitting pane and resume
-//! a forked session in the new leaf.
+//! OSC 7880 — grok-fork asks this host to split the emitting pane and launch
+//! a Grok session in the new leaf.
 //!
 //! ```text
 //! ESC]7880;fork=1;resume=…;cwd=…;bin=…;prompt=…;title=…;brand=…BEL
+//! ESC]7880;new=1;session=…;cwd=…;bin=…;prompt=…;title=…;brand=…BEL
 //! ```
 //!
+//! `fork=1` resumes an existing (usually forked) session via `--resume`.
+//! `new=1` / `open=1` / `pane=1` starts a **new** conversation via `--session-id`.
 //! Values are percent-encoded. The host never execs a raw shell line: argv is
-//! built from an allowlisted binary plus `--resume <id>`.
-
+//! built from an allowlisted binary plus those flags.
 use crate::panes::SplitAxis;
 use std::path::{Component, Path};
 
-/// Parsed OSC 7880 fork-pane payload.
+/// Parsed OSC 7880 pane-split payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ForkPaneRequest {
     pub resume: String,
@@ -20,14 +22,24 @@ pub struct ForkPaneRequest {
     pub prompt: String,
     pub title: String,
     pub brand: String,
+    /// `true` → `--session-id` (new conversation). `false` → `--resume` (fork).
+    pub new_session: bool,
 }
 
-/// Parse an OSC payload (`7880;…`). Incomplete / missing resume+bin → None.
+fn truthy(val: &str) -> bool {
+    matches!(
+        val.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "pane" | "new" | "open"
+    )
+}
+
+/// Parse an OSC payload (`7880;…`). Incomplete / missing session id+bin → None.
 pub fn parse_fork_osc_payload(payload: &[u8]) -> Option<ForkPaneRequest> {
     let s = std::str::from_utf8(payload).ok()?.trim();
     let rest = s.strip_prefix("7880;")?;
     let mut req = ForkPaneRequest::default();
     let mut forked = false;
+    let mut new_session = false;
     for part in rest.split(';') {
         let part = part.trim();
         if part.is_empty() {
@@ -37,8 +49,11 @@ pub fn parse_fork_osc_payload(payload: &[u8]) -> Option<ForkPaneRequest> {
             let key = key.trim().to_ascii_lowercase();
             let val = pct_decode(val.trim());
             match key.as_str() {
-                "fork" if val == "1" || val.eq_ignore_ascii_case("true") || val == "pane" => {
+                "fork" if truthy(&val) => {
                     forked = true;
+                }
+                "new" | "open" | "pane" if truthy(&val) => {
+                    new_session = true;
                 }
                 "resume" | "session" | "id" => req.resume = val,
                 "cwd" => req.cwd = val,
@@ -50,11 +65,15 @@ pub fn parse_fork_osc_payload(payload: &[u8]) -> Option<ForkPaneRequest> {
             }
         } else if part == "fork" || part == "fork-pane" {
             forked = true;
+        } else if part == "new" || part == "open" || part == "pane" {
+            new_session = true;
         }
     }
-    if !forked || req.resume.trim().is_empty() || req.bin.trim().is_empty() {
+    if !(forked || new_session) || req.resume.trim().is_empty() || req.bin.trim().is_empty() {
         return None;
     }
+    // `new=1` starts a fresh conversation (`--session-id`). `/fork` only sends `fork=1`.
+    req.new_session = new_session;
     Some(req)
 }
 
@@ -115,9 +134,13 @@ pub fn fork_launch_spec(
         return Err("bin not allowlisted".into());
     }
     if req.resume.trim().is_empty() {
-        return Err("missing resume id".into());
+        return Err("missing session id".into());
     }
-    let mut args = vec!["--resume".into(), req.resume.clone()];
+    let mut args = if req.new_session {
+        vec!["--session-id".into(), req.resume.clone()]
+    } else {
+        vec!["--resume".into(), req.resume.clone()]
+    };
     let prompt = req.prompt.trim();
     if !prompt.is_empty() {
         args.push("--".into());
@@ -132,6 +155,10 @@ pub fn fork_launch_spec(
         env.push(("GROK_PROCESS_BRAND".into(), "fork".into()));
         env.push(("GROK_FORK".into(), "1".into()));
         env.push(("GROK_MCP_CHANNELS".into(), "1".into()));
+    }
+    let title = req.title.trim();
+    if !title.is_empty() {
+        env.push(("GROK_SESSION_TITLE".into(), title.to_string()));
     }
     Ok((req.bin.clone(), args, env))
 }
@@ -149,10 +176,86 @@ pub fn choose_fork_split_dir(w: f32, h: f32) -> SplitAxis {
     }
 }
 
+/// Smallest child glass (logical px) we will still split into.
+pub const MIN_SPLIT_CHILD: f32 = 160.0;
+
+/// A visible leaf considered as a split host.
+#[derive(Clone, Copy, Debug)]
+pub struct SplitCandidate {
+    pub id: u64,
+    pub w: f32,
+    pub h: f32,
+}
+
+fn other_axis(axis: SplitAxis) -> SplitAxis {
+    match axis {
+        SplitAxis::Vertical => SplitAxis::Horizontal,
+        SplitAxis::Horizontal => SplitAxis::Vertical,
+    }
+}
+
+fn half_size(w: f32, h: f32, axis: SplitAxis) -> (f32, f32) {
+    match axis {
+        SplitAxis::Vertical => (w * 0.5, h),
+        SplitAxis::Horizontal => (w, h * 0.5),
+    }
+}
+
+/// Score of splitting `w`×`h`: axis plus the child's smaller side. `None` if both
+/// halves would be under [`MIN_SPLIT_CHILD`].
+pub fn split_score(w: f32, h: f32, min_child: f32) -> Option<(SplitAxis, f32)> {
+    let preferred = choose_fork_split_dir(w, h);
+    for axis in [preferred, other_axis(preferred)] {
+        let (cw, ch) = half_size(w, h, axis);
+        if cw >= min_child && ch >= min_child {
+            return Some((axis, cw.min(ch)));
+        }
+    }
+    None
+}
+
+/// Prefer the leaf whose split yields the largest usable child. Falls back to `src`
+/// (even if undersized) so a first split in an empty tab still works.
+pub fn pick_split_target(
+    candidates: &[SplitCandidate],
+    src: u64,
+    min_child: f32,
+) -> (u64, SplitAxis) {
+    let mut best: Option<(u64, SplitAxis, f32, f32)> = None;
+    for c in candidates {
+        let Some((axis, score)) = split_score(c.w, c.h, min_child) else {
+            continue;
+        };
+        let area = (c.w * c.h).max(1.0);
+        let better = match best {
+            None => true,
+            Some((_, _, best_score, best_area)) => {
+                score > best_score + 0.5 || ((score - best_score).abs() < 0.5 && area > best_area)
+            }
+        };
+        if better {
+            best = Some((c.id, axis, score, area));
+        }
+    }
+    if let Some((id, axis, _, _)) = best {
+        return (id, axis);
+    }
+    let (w, h) = candidates
+        .iter()
+        .find(|c| c.id == src)
+        .map(|c| (c.w, c.h))
+        .unwrap_or((800.0, 500.0));
+    (src, choose_fork_split_dir(w, h))
+}
+
 pub fn fork_title(req: &ForkPaneRequest) -> String {
     let t = req.title.trim();
     if t.is_empty() {
-        "fork".into()
+        if req.new_session {
+            "session".into()
+        } else {
+            "fork".into()
+        }
     } else {
         t.to_string()
     }
@@ -184,6 +287,18 @@ mod tests {
     fn parse_requires_resume_and_bin() {
         assert!(parse_fork_osc_payload(b"7880;fork=1;bin=/usr/bin/grok").is_none());
         assert!(parse_fork_osc_payload(b"7880;fork=1;resume=x").is_none());
+        assert!(parse_fork_osc_payload(b"7880;new=1;bin=/usr/bin/grok").is_none());
+    }
+
+    #[test]
+    fn parse_new_session() {
+        let req = parse_fork_osc_payload(
+            b"7880;new=1;session=abc-123;bin=/usr/bin/grok-fork;title=review",
+        )
+        .expect("parse");
+        assert!(req.new_session);
+        assert_eq!(req.resume, "abc-123");
+        assert_eq!(req.title, "review");
     }
 
     #[cfg(windows)]
@@ -225,6 +340,37 @@ mod tests {
     }
 
     #[test]
+    fn launch_spec_new_session_id() {
+        let (bin, args, env) = fork_launch_spec(&ForkPaneRequest {
+            resume: "sess-new".into(),
+            bin: SAMPLE_BIN.into(),
+            prompt: "own this review".into(),
+            brand: "fork".into(),
+            new_session: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(bin, SAMPLE_BIN);
+        assert_eq!(args, ["--session-id", "sess-new", "--", "own this review"]);
+        assert!(env.iter().any(|(k, v)| k == "GROK_SKIP_SYNC" && v == "1"));
+    }
+
+    #[test]
+    fn launch_spec_passes_session_title_env() {
+        let (_, _, env) = fork_launch_spec(&ForkPaneRequest {
+            resume: "sess-new".into(),
+            bin: SAMPLE_BIN.into(),
+            title: "auth review".into(),
+            new_session: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GROK_SESSION_TITLE" && v == "auth review"));
+    }
+
+    #[test]
     fn choose_dir_wide_vertical() {
         assert_eq!(choose_fork_split_dir(1200.0, 800.0), SplitAxis::Vertical);
     }
@@ -237,5 +383,69 @@ mod tests {
     #[test]
     fn choose_dir_tie_vertical() {
         assert_eq!(choose_fork_split_dir(800.0, 800.0), SplitAxis::Vertical);
+    }
+
+    #[test]
+    fn pick_prefers_larger_pane_over_osc_source() {
+        let src = 1;
+        let (id, axis) = pick_split_target(
+            &[
+                SplitCandidate {
+                    id: src,
+                    w: 400.0,
+                    h: 300.0,
+                },
+                SplitCandidate {
+                    id: 2,
+                    w: 1200.0,
+                    h: 800.0,
+                },
+            ],
+            src,
+            MIN_SPLIT_CHILD,
+        );
+        assert_eq!(id, 2);
+        assert_eq!(axis, SplitAxis::Vertical);
+    }
+
+    #[test]
+    fn pick_skips_undersized_and_falls_back_to_src() {
+        let src = 1;
+        let (id, _) = pick_split_target(
+            &[SplitCandidate {
+                id: src,
+                w: 100.0,
+                h: 80.0,
+            }],
+            src,
+            MIN_SPLIT_CHILD,
+        );
+        assert_eq!(id, src);
+    }
+
+    #[test]
+    fn pick_second_largest_when_largest_already_tight() {
+        let (id, _) = pick_split_target(
+            &[
+                SplitCandidate {
+                    id: 1,
+                    w: 200.0,
+                    h: 180.0,
+                },
+                SplitCandidate {
+                    id: 2,
+                    w: 900.0,
+                    h: 700.0,
+                },
+                SplitCandidate {
+                    id: 3,
+                    w: 500.0,
+                    h: 400.0,
+                },
+            ],
+            1,
+            MIN_SPLIT_CHILD,
+        );
+        assert_eq!(id, 2);
     }
 }

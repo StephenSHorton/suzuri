@@ -1436,7 +1436,7 @@ impl ChromeApp {
             if let Some(title) = rt.ansi.take_title() {
                 self.session.set_pane_title(id, title);
             }
-            if let Some(req) = rt.ansi.take_fork() {
+            for req in rt.ansi.take_forks() {
                 forks.push((id, req));
             }
             if !chunk.is_empty() {
@@ -2438,16 +2438,36 @@ impl ChromeApp {
             }
         };
         let layout = self.current_layout();
+        let candidates: Vec<crate::fork_osc::SplitCandidate> = layout
+            .panes
+            .iter()
+            .filter(|p| {
+                self.session
+                    .panes
+                    .get(&p.pane_id)
+                    .map(|pane| !pane.exiting)
+                    .unwrap_or(true)
+            })
+            .map(|p| crate::fork_osc::SplitCandidate {
+                id: p.pane_id,
+                w: p.glass.w,
+                h: p.glass.h,
+            })
+            .collect();
+        let (host, axis) = crate::fork_osc::pick_split_target(
+            &candidates,
+            src,
+            crate::fork_osc::MIN_SPLIT_CHILD,
+        );
         let (w, h) = layout
             .panes
             .iter()
-            .find(|p| p.pane_id == src)
+            .find(|p| p.pane_id == host)
             .map(|p| (p.glass.w, p.glass.h))
             .unwrap_or((800.0, 500.0));
-        let axis = crate::fork_osc::choose_fork_split_dir(w, h);
         let cell = self.cell_metrics();
         let (cols, rows) = {
-            let mut half = layout.workspace;
+            let mut half = crate::layout::Rect::new(0.0, 0.0, w, h);
             match axis {
                 SplitAxis::Vertical => half.w *= 0.5,
                 SplitAxis::Horizontal => half.h *= 0.5,
@@ -2473,7 +2493,7 @@ impl ChromeApp {
         let title = crate::fork_osc::fork_title(&req);
         let Some(new_id) = self
             .session
-            .split_at(src, axis, cols, rows, cwd, Some(title))
+            .split_at(host, axis, cols, rows, cwd, Some(title))
         else {
             self.toast.show("split failed");
             return;
@@ -2495,9 +2515,11 @@ impl ChromeApp {
                 self.warp_focused = false;
                 self.terminal_focused = true;
                 self.sync_grids_to_panes();
-                self.toast.show(match axis {
-                    SplitAxis::Vertical => "fork split right",
-                    SplitAxis::Horizontal => "fork split down",
+                self.toast.show(match (req.new_session, axis) {
+                    (true, SplitAxis::Vertical) => "session split right",
+                    (true, SplitAxis::Horizontal) => "session split down",
+                    (false, SplitAxis::Vertical) => "fork split right",
+                    (false, SplitAxis::Horizontal) => "fork split down",
                 });
                 self.paint_dirty = true;
                 self.request_redraw_all();
