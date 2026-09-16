@@ -3,6 +3,9 @@ name: Release
 # Cut an app release: git tag v0.6.0 && git push origin v0.6.0
 # Site deploys use a different line: v0.1.0-site / site-v0.1.0 (pages.yml only).
 # Or Actions → Release → Run workflow with tag input.
+#
+# Each platform job publishes its own assets as soon as they are built.
+# Windows is optional and must not delay the macOS GitHub Release.
 on:
   push:
     tags: ["v*.*.*"]
@@ -41,8 +44,8 @@ jobs:
             ext: ""
             optional: false
     runs-on: ${{ matrix.os }}
-    # continue-on-error only for the optional matrix leg so needs.build can
-    # still be success when Windows never gets a runner.
+    # Windows is best-effort: a flake or build break must not fail the
+    # workflow after macOS has already published.
     continue-on-error: ${{ matrix.optional }}
     steps:
       - uses: actions/checkout@v4
@@ -317,62 +320,12 @@ jobs:
           name: suzuri-${{ matrix.goos }}-${{ matrix.goarch }}
           path: suzuri-*
 
-  release:
-    needs: build
-    # Publish whatever matrix legs produced artifacts. Skipped only when the
-    # whole build job was skipped (site tags) or cancelled. Windows is
-    # continue-on-error, so a runner flake still leaves needs.build=success
-    # when macOS succeeded; if macOS itself fails we still try to ship any
-    # surviving artifacts (and require at least one file below).
-    if: ${{ always() && needs.build.result != 'skipped' && needs.build.result != 'cancelled' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-          # Partial matrix success is expected (e.g. Windows never ran).
-          # Empty is handled by the next step.
-          pattern: suzuri-*
-
-      - name: Checksums
-        working-directory: dist
+      # Publish this platform immediately. The other matrix leg attaches
+      # later; SHA256SUMS is merged. Do not fan-in on Windows.
+      - name: Attach to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          set -euo pipefail
-          ls -laR || true
-          find . -type f -name 'suzuri-*' ! -path './SHA256SUMS' -exec mv -n {} . \; 2>/dev/null || true
-          shopt -s nullglob
-          files=(suzuri-*)
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "::error::No suzuri-* release artifacts from any platform build"
-            exit 1
-          fi
-          rm -f SHA256SUMS
-          for f in "${files[@]}"; do
-            [ -f "$f" ] || continue
-            sha256sum "$f" | tee -a SHA256SUMS
-          done
-          cat SHA256SUMS
-          # Surface a soft warning when Windows is missing (optional leg).
-          if ! compgen -G 'suzuri-*-windows-*' >/dev/null; then
-            echo "::warning::Windows artifacts missing — shipping macOS-only release"
-          fi
-
-      - name: Resolve tag
-        id: ver
-        run: |
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: suzuri ${{ steps.ver.outputs.tag }}
-          generate_release_notes: true
-          # Allow re-running after a partial failure without clobbering.
-          # softprops updates an existing release for the same tag.
-          files: |
-            dist/suzuri-*
-            dist/SHA256SUMS
+          chmod +x tools/attach-release-assets.sh
+          tools/attach-release-assets.sh "${{ steps.ver.outputs.tag }}"
