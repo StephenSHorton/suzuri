@@ -156,6 +156,10 @@ pub fn fork_launch_spec(
         env.push(("GROK_FORK".into(), "1".into()));
         env.push(("GROK_MCP_CHANNELS".into(), "1".into()));
     }
+    let title = req.title.trim();
+    if !title.is_empty() {
+        env.push(("GROK_SESSION_TITLE".into(), title.to_string()));
+    }
     Ok((req.bin.clone(), args, env))
 }
 
@@ -349,6 +353,21 @@ mod tests {
         assert_eq!(bin, SAMPLE_BIN);
         assert_eq!(args, ["--session-id", "sess-new", "--", "own this review"]);
         assert!(env.iter().any(|(k, v)| k == "GROK_SKIP_SYNC" && v == "1"));
+    }
+
+    #[test]
+    fn launch_spec_passes_session_title_env() {
+        let (_, _, env) = fork_launch_spec(&ForkPaneRequest {
+            resume: "sess-new".into(),
+            bin: SAMPLE_BIN.into(),
+            title: "auth review".into(),
+            new_session: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "GROK_SESSION_TITLE" && v == "auth review"));
     }
 
     #[test]

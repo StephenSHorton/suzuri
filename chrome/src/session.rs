@@ -282,6 +282,10 @@ impl ChromeSession {
             return;
         }
         if let Some(p) = self.panes.get_mut(&pane_id) {
+            // A sessions_open / F2 name must survive Grok's live OSC 0/2 titles.
+            if p.title_user {
+                return;
+            }
             p.title = title.to_string();
             p.title_user = true;
         }
@@ -2082,7 +2086,11 @@ mod tests {
         assert_eq!(s.active_pane().unwrap().title, "nvim");
         assert_eq!(s.active_tab().unwrap().title, "tab 1");
         s.set_pane_title(1, "from-osc".into());
-        assert_eq!(s.panes.get(&1).unwrap().title, "from-osc");
+        assert_eq!(
+            s.panes.get(&1).unwrap().title,
+            "nvim",
+            "named pane must keep its name over OSC 0/2"
+        );
         assert_eq!(s.active_tab().unwrap().title, "tab 1");
     }
 
@@ -2100,7 +2108,7 @@ mod tests {
         // OSC pane title still works independently
         let focus = s.focus_pane_id();
         s.set_pane_title(focus, "osc-right".into());
-        assert_eq!(s.panes.get(&focus).unwrap().title, "osc-right");
+        assert_eq!(s.panes.get(&focus).unwrap().title, "right");
         assert_eq!(s.active_tab().unwrap().title, "sticky");
     }
 
@@ -2112,6 +2120,24 @@ mod tests {
         let want = display_path(&s.active_pane().unwrap().cwd);
         assert_eq!(s.active_pane().unwrap().title, want);
         assert_eq!(s.active_tab().unwrap().title, "tab 1");
+    }
+
+    #[test]
+    fn named_split_keeps_title_over_osc() {
+        let mut s = ChromeSession::new(80, 24);
+        let id = s
+            .split_at(
+                1,
+                SplitAxis::Vertical,
+                40,
+                24,
+                None,
+                Some("auth review".into()),
+            )
+            .unwrap();
+        assert_eq!(s.panes.get(&id).unwrap().title, "auth review");
+        s.set_pane_title(id, "Grok · working".into());
+        assert_eq!(s.panes.get(&id).unwrap().title, "auth review");
     }
 
     #[test]
