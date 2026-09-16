@@ -2495,9 +2495,11 @@ impl ChromeApp {
                 self.warp_focused = false;
                 self.terminal_focused = true;
                 self.sync_grids_to_panes();
-                self.toast.show(match axis {
-                    SplitAxis::Vertical => "fork split right",
-                    SplitAxis::Horizontal => "fork split down",
+                self.toast.show(match (req.new_session, axis) {
+                    (true, SplitAxis::Vertical) => "session split right",
+                    (true, SplitAxis::Horizontal) => "session split down",
+                    (false, SplitAxis::Vertical) => "fork split right",
+                    (false, SplitAxis::Horizontal) => "fork split down",
                 });
                 self.paint_dirty = true;
                 self.request_redraw_all();
