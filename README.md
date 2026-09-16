@@ -125,7 +125,7 @@ MSIX** installs skip GitHub self-update (the Store owns updates).
 | Workflow | Purpose |
 |----------|---------|
 | **CI** | `go test` + build |
-| **Release** | Tag `v*.*.*` → macOS / Windows assets + Store MSIX + `SHA256SUMS` (includes UI binary) |
+| **Release** | Tag `v*.*.*` → each platform publishes as it finishes; Windows may land later; `SHA256SUMS` is merged |
 | **Pages** | Site under `docs/site` |
 
 ```bash
