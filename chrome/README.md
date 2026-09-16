@@ -61,6 +61,10 @@ One glass pane only — input is text at the bottom of the well (not a second re
 | ⌘W | Close pane (or tab if last pane) |
 | ⇧⌘D | Split right (jelly open) |
 | ⇧⌘E | Split down (jelly open) |
+| ⇧⌘O | Rotate split |
+| ⇧⌘X | Swap panes |
+| ⇧⌘. / ⇧⌘, | Grow / shrink pane |
+| ⇧⌘U | Move pane to new tab |
 | ⌥⌘←↑↓→ | Focus pane |
 | ⇧⌘[ / ] | Prev / next tab |
 | Middle-click tab | Close tab |
@@ -69,6 +73,13 @@ One glass pane only — input is text at the bottom of the well (not a second re
 | ↑/↓ (input) | Command history |
 | Wheel | Scrollback |
 | Settings **1** / **2** | Toggle rain / lens |
+
+### AI control (loopback HTTP)
+
+Chrome binds `127.0.0.1` at start. Pane PTYs get `SUZURI_CONTROL_URL` and
+`SUZURI_CONTROL_TOKEN`. `GET /help` and `GET /tools` need no auth; layout and
+mutations take `Authorization: Bearer $SUZURI_CONTROL_TOKEN`. This is how
+agents inspect and move panes — not MCP.
 
 ### Library (`suzuri_chrome`)
 

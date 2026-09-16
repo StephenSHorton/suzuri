@@ -828,6 +828,26 @@ pub fn help_sections() -> Vec<HelpSection> {
                     desc: "Focus pane",
                 },
                 HelpRow {
+                    keys: chord(&ms, "O"),
+                    desc: "Rotate split",
+                },
+                HelpRow {
+                    keys: chord(&ms, "X"),
+                    desc: "Swap panes",
+                },
+                HelpRow {
+                    keys: format!("{} / {}", chord(&ms, "."), chord(&ms, ",")),
+                    desc: "Grow / shrink",
+                },
+                HelpRow {
+                    keys: "Palette".into(),
+                    desc: "Equalize split",
+                },
+                HelpRow {
+                    keys: chord(&ms, "U"),
+                    desc: "Move pane to tab",
+                },
+                HelpRow {
                     keys: word_jump,
                     desc: "Word jump",
                 },
@@ -898,9 +918,9 @@ pub struct HelpLayout {
 }
 
 impl HelpLayout {
-    pub const ROW_H: f32 = 26.0;
-    pub const ROW_GAP: f32 = 3.0;
-    pub const SEC_GAP: f32 = 6.0;
+    pub const ROW_H: f32 = 24.0;
+    pub const ROW_GAP: f32 = 2.0;
+    pub const SEC_GAP: f32 = 5.0;
     pub const HEADER_H: f32 = 14.0;
 
     /// Layout at full open (ease = 1). Prefer [`Self::with_ease`] while animating.
@@ -970,9 +990,9 @@ impl HelpLayout {
     }
 
     fn base_modal_rect(window_w: f32, window_h: f32) -> crate::layout::Rect {
-        // Two-col stack needs ~40 title + ~15×29 rows + headers ≈ 520+.
+        // Two-col stack: title + headers + pane/chrome rows must all chip.
         let w = (window_w - 40.0).min(800.0).max(360.0);
-        let h = (window_h - 48.0).min(640.0).max(520.0);
+        let h = (window_h - 48.0).min(680.0).max(520.0);
         crate::layout::Rect::new((window_w - w) * 0.5, (window_h - h) * 0.40, w, h)
     }
 
@@ -1535,6 +1555,18 @@ mod tests {
         }
         let n: usize = secs.iter().map(|s| s.rows.len()).sum();
         assert!(n >= 20, "expected product-scale shortcut list, got {n}");
+        let panes = secs.iter().find(|s| s.title == "Panes").unwrap();
+        let descs: Vec<_> = panes.rows.iter().map(|r| r.desc).collect();
+        for need in [
+            "Split right",
+            "Split down",
+            "Rotate split",
+            "Swap panes",
+            "Grow / shrink",
+            "Move pane to tab",
+        ] {
+            assert!(descs.contains(&need), "Panes help missing {need}");
+        }
     }
 
     #[test]

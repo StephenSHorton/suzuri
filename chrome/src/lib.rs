@@ -20,6 +20,7 @@
 //! | [`config_store`] | `chrome_prefs.json` + `SUZURI_CONFIG_DIR` |
 //! | [`eco`] | Unfocused paint cadence (PTY stays live; GPU idles) |
 //! | [`control_mailbox`] | Phase 2 light IPC (`chrome_cmd` file) |
+//! | [`ai_control`] | Loopback HTTP for agents (layout / split / move) |
 //! | [`commands`] | Palette / shortcuts registry |
 //! | [`confirm`] | Crush-style yes/no confirm (quit) |
 //! | [`new_window`] | Resolve/spawn a second process (New Window is in-process) |
@@ -38,6 +39,7 @@
 // Host-facing re-exports and helpers may not all be used inside this crate.
 #![allow(dead_code)]
 
+pub mod ai_control;
 pub mod ansi;
 pub mod cells;
 pub mod chrome_status;
