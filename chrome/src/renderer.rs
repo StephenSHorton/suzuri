@@ -72,8 +72,12 @@ struct FrameUniforms {
     /// Theme primary RGB + pad (ModalButtonActive, hairlines, chip press).
     primary: [f32; 4],
     /// x=1 → transparent outside panels (cursor-follow drag chip).
+    /// y=1 wallpaper on; z = dim; w=1 Ken Burns.
     flags: [f32; 4],
 }
+
+/// How much to darken a custom photo so glass still reads (0 = full, 1 = black).
+const WALLPAPER_DIM: f32 = 0.40;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -210,6 +214,9 @@ pub struct Renderer {
     kitty_blit_pipeline: wgpu::RenderPipeline,
     kitty_tex: HashMap<(u64, u32), KittyGpu>,
     kitty_blits: Vec<KittyBlit>,
+
+    wallpaper: WallpaperGpu,
+    wallpaper_paused: bool,
 }
 
 /// One Kitty graphics placement to blit into a terminal well.
@@ -245,6 +252,18 @@ struct KittyGpu {
     h: u32,
     gen: u64,
     uni: wgpu::Buffer,
+}
+
+struct WallpaperGpu {
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    w: u32,
+    h: u32,
+    frames: std::sync::Arc<[crate::wallpaper::WallpaperFrame]>,
+    frame_i: usize,
+    accum: f32,
+    animated: bool,
+    enabled: bool,
 }
 
 impl Renderer {
@@ -518,6 +537,16 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -676,6 +705,19 @@ impl Renderer {
 
         let guest_blit = create_guest_blit(&device, format);
 
+        let (wall_tex, wall_view) = create_wallpaper_target(&device, 1, 1);
+        let wallpaper = WallpaperGpu {
+            tex: wall_tex,
+            view: wall_view,
+            w: 1,
+            h: 1,
+            frames: std::sync::Arc::from([]),
+            frame_i: 0,
+            accum: 0.0,
+            animated: false,
+            enabled: false,
+        };
+
         let cx = (size.width as f32 / scale_factor) * 0.5;
         let cy = (size.height as f32 / scale_factor) * 0.5;
 
@@ -734,6 +776,8 @@ impl Renderer {
             kitty_blit_pipeline: guest_blit.3,
             kitty_tex: HashMap::new(),
             kitty_blits: Vec::new(),
+            wallpaper,
+            wallpaper_paused: false,
         }
     }
 
@@ -750,6 +794,132 @@ impl Renderer {
     pub fn set_rain_paused(&mut self, paused: bool) {
         self.rain_paused = paused && self.rain_on;
         self.rain_thread.set_paused(self.rain_paused);
+    }
+
+    /// Custom backdrop under glyph rain. `None` restores rain-on-black.
+    pub fn set_wallpaper(&mut self, asset: Option<crate::wallpaper::WallpaperAsset>) {
+        match asset {
+            None => {
+                self.wallpaper.enabled = false;
+                self.wallpaper.animated = false;
+                self.wallpaper.frames = std::sync::Arc::from([]);
+                self.wallpaper.frame_i = 0;
+                self.wallpaper.accum = 0.0;
+            }
+            Some(a) => {
+                let Some(first) = a.first().cloned() else {
+                    self.set_wallpaper(None);
+                    return;
+                };
+                self.ensure_wallpaper_tex(first.w, first.h);
+                self.upload_wallpaper_rgba(first.w, first.h, &first.rgba);
+                self.wallpaper.frames = a.frames;
+                self.wallpaper.animated = a.animated;
+                self.wallpaper.enabled = true;
+                self.wallpaper.frame_i = 0;
+                self.wallpaper.accum = 0.0;
+            }
+        }
+    }
+
+    pub fn wallpaper_enabled(&self) -> bool {
+        self.wallpaper.enabled
+    }
+
+    pub fn wallpaper_animated(&self) -> bool {
+        self.wallpaper.enabled && self.wallpaper.animated
+    }
+
+    /// Freeze GIF playback (unfocused eco). Ken Burns uses shader time on present.
+    pub fn set_wallpaper_paused(&mut self, paused: bool) {
+        self.wallpaper_paused = paused && self.wallpaper.enabled;
+    }
+
+    fn ensure_wallpaper_tex(&mut self, w: u32, h: u32) {
+        let w = w.max(1);
+        let h = h.max(1);
+        if self.wallpaper.w == w && self.wallpaper.h == h && self.wallpaper.enabled {
+            return;
+        }
+        let (tex, view) = create_wallpaper_target(&self.device, w, h);
+        self.wallpaper.tex = tex;
+        self.wallpaper.view = view;
+        self.wallpaper.w = w;
+        self.wallpaper.h = h;
+    }
+
+    fn upload_wallpaper_rgba(&self, w: u32, h: u32, rgba: &[u8]) {
+        let need = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        if rgba.len() < need || w == 0 || h == 0 {
+            return;
+        }
+        let bpr = w * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = bpr.div_ceil(align) * align;
+        let layout = wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(padded),
+            rows_per_image: Some(h),
+        };
+        let size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let dest = wgpu::TexelCopyTextureInfo {
+            texture: &self.wallpaper.tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        };
+        if padded == bpr {
+            self.queue.write_texture(dest, &rgba[..need], layout, size);
+        } else {
+            let mut buf = vec![0u8; padded as usize * h as usize];
+            for y in 0..h as usize {
+                let src = y * bpr as usize;
+                let dst = y * padded as usize;
+                buf[dst..dst + bpr as usize].copy_from_slice(&rgba[src..src + bpr as usize]);
+            }
+            self.queue.write_texture(dest, &buf, layout, size);
+        }
+    }
+
+    fn tick_wallpaper(&mut self, dt: f32) {
+        if !self.wallpaper.enabled || !self.wallpaper.animated || self.wallpaper_paused {
+            return;
+        }
+        let n = self.wallpaper.frames.len();
+        if n < 2 {
+            return;
+        }
+        let delay = self
+            .wallpaper
+            .frames
+            .get(self.wallpaper.frame_i)
+            .map(|f| f.delay)
+            .unwrap_or(0.08)
+            .max(0.02);
+        self.wallpaper.accum += dt.max(0.0);
+        if self.wallpaper.accum < delay {
+            return;
+        }
+        self.wallpaper.accum -= delay;
+        self.wallpaper.frame_i = (self.wallpaper.frame_i + 1) % n;
+        if let Some(frame) = self.wallpaper.frames.get(self.wallpaper.frame_i).cloned() {
+            if frame.w != self.wallpaper.w || frame.h != self.wallpaper.h {
+                self.ensure_wallpaper_tex(frame.w, frame.h);
+            }
+            self.upload_wallpaper_rgba(frame.w, frame.h, &frame.rgba);
+        }
+    }
+
+    fn wallpaper_flags(&self) -> [f32; 4] {
+        if !self.wallpaper.enabled {
+            return [0.0, 0.0, 0.0, 0.0];
+        }
+        let ken = if self.wallpaper.animated { 0.0 } else { 1.0 };
+        [0.0, 1.0, WALLPAPER_DIM, ken]
     }
 
     /// ⌘± UI zoom: scale chrome metrics + remesure mono cells. Scene blit stays 1×
@@ -1393,7 +1563,11 @@ impl Renderer {
                 ],
                 hover: [0.0, 0.0, 28.0, 0.0],
                 primary: [j[0], j[1], j[2], 1.0],
-                flags: [1.0, 0.0, 0.0, 0.0],
+                flags: {
+                    let mut f = self.wallpaper_flags();
+                    f[0] = 1.0;
+                    f
+                },
             }),
         );
         let rain_view = self.rain_thread.front_view();
@@ -1416,6 +1590,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: ghost.panel_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.wallpaper.view),
                 },
             ],
         });
@@ -1581,6 +1759,7 @@ impl Renderer {
             },
         );
         let rain_view = self.rain_thread.front_view();
+        self.tick_wallpaper(dt);
         let _ = t; // wall-clock still used by composite glass time
 
         let surface = session.active_tab().map(|t| t.surface).unwrap_or(0);
@@ -1816,7 +1995,7 @@ impl Renderer {
                     let j = settings.prefs.theme_colors().jade;
                     [j[0], j[1], j[2], 1.0]
                 },
-                flags: [0.0, 0.0, 0.0, 0.0],
+                flags: self.wallpaper_flags(),
             }),
         );
 
@@ -1881,6 +2060,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.panel_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.wallpaper.view),
                 },
             ],
         });
@@ -3359,6 +3542,7 @@ fn push_modal_labels(
         let titles = [
             "Glyph rain",
             "Rain quality",
+            "Background",
             "Magnifier",
             "Primary color",
             "Accent color",
@@ -3368,6 +3552,14 @@ fn push_modal_labels(
         ];
         let font_disp = format!("‹  {}  ›", crate::theme::font_label(&settings.prefs.font));
         let quality_disp = format!("‹  {}%  ›", settings.prefs.rain_quality_pct());
+        let wallpaper_disp = if settings.prefs.wallpaper_is_set() {
+            format!(
+                "‹  {}  ›",
+                crate::wallpaper::display_label(&settings.prefs.wallpaper)
+            )
+        } else {
+            "none  · Enter".into()
+        };
         let text_size = 13.0;
         for (i, row) in lay.rows.iter().enumerate() {
             let mut tc = bright;
@@ -3385,6 +3577,7 @@ fn push_modal_labels(
                 || i == settings_row::FONT
                 || i == settings_row::DARKEN
                 || i == settings_row::RAIN_QUALITY
+                || i == settings_row::BACKGROUND
             {
                 let vc = if i == settings_row::PRIMARY {
                     [primary[0], primary[1], primary[2], 0.95 * ease]
@@ -3403,6 +3596,8 @@ fn push_modal_labels(
                     font_disp.as_str()
                 } else if i == settings_row::RAIN_QUALITY {
                     quality_disp.as_str()
+                } else if i == settings_row::BACKGROUND {
+                    wallpaper_disp.as_str()
                 } else {
                     darken_val.as_str()
                 };
@@ -4527,6 +4722,29 @@ fn push_accent_row(
         );
         col += 1;
     }
+}
+
+fn create_wallpaper_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("wallpaper"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
 }
 
 fn create_rain_target(

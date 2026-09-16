@@ -19,6 +19,7 @@ struct FrameUniforms {
     // Theme primary RGB (user settings) + pad — active buttons, hairlines, press wash
     primary: vec4f,
     // x=1 → transparent outside panels (cursor-follow drag chip)
+    // y=1 → wallpaper under rain; z = wallpaper dim 0..1; w=1 → Ken Burns on stills
     flags: vec4f,
 }
 
@@ -35,6 +36,7 @@ struct Panel {
 @group(0) @binding(1) var rain_tex: texture_2d<f32>;
 @group(0) @binding(2) var rain_samp: sampler;
 @group(0) @binding(3) var<storage, read> panels: array<Panel>;
+@group(0) @binding(4) var wall_tex: texture_2d<f32>;
 
 const PI: f32 = 3.14159265358979;
 const AIR_IOR: f32 = 1.0003;
@@ -248,11 +250,45 @@ fn eval_glass_sdf(px: vec2f, sd: f32, n: u32) -> vec4f {
 
 // Sample rain RT. logical top-left origin → texture UV (no Y flip:
 // rain is written with WebGPU top-left origin matching the scene).
-fn sample_rain_raw(logical_px: vec2f, lod: f32) -> vec3f {
+fn sample_rain_tex(logical_px: vec2f, lod: f32) -> vec3f {
     let logical = max(u.size.xy, vec2f(1.0));
     var uv = logical_px / logical;
     uv = clamp(uv, vec2f(0.001), vec2f(0.999));
     return textureSampleLevel(rain_tex, rain_samp, uv, lod).rgb;
+}
+
+fn sample_wallpaper(logical_px: vec2f, lod: f32) -> vec3f {
+    let logical = max(u.size.xy, vec2f(1.0));
+    let tex_size = vec2f(textureDimensions(wall_tex));
+    let tw = max(tex_size.x, 1.0);
+    let th = max(tex_size.y, 1.0);
+    // Cover-fit: scale so the image fills the window, crop overflow.
+    let scale = max(logical.x / tw, logical.y / th);
+    var sized = vec2f(tw, th) * scale;
+    var off = (sized - logical) * 0.5;
+    if (u.flags.w > 0.5) {
+        // Slow Ken Burns on stills (ping-pong zoom + drift).
+        let t = u.misc.x;
+        let kb = 0.5 + 0.5 * sin(t * 0.07);
+        let zoom = 1.0 + 0.10 * kb;
+        sized = sized * zoom;
+        off = (sized - logical) * 0.5;
+        off = off + vec2f(sized.x * 0.018 * sin(t * 0.045), sized.y * 0.014 * cos(t * 0.038));
+    }
+    var uv = (logical_px + off) / sized;
+    uv = clamp(uv, vec2f(0.001), vec2f(0.999));
+    return textureSampleLevel(wall_tex, rain_samp, uv, lod).rgb;
+}
+
+// Backdrop the glass refracts: wallpaper (optional) + additive glyph rain.
+fn sample_rain_raw(logical_px: vec2f, lod: f32) -> vec3f {
+    let rain = sample_rain_tex(logical_px, lod);
+    if (u.flags.y < 0.5) {
+        return rain;
+    }
+    let wall = sample_wallpaper(logical_px, lod);
+    let dim = clamp(u.flags.z, 0.0, 1.0);
+    return wall * (1.0 - dim) + rain;
 }
 
 fn ign(v: vec2f) -> f32 {

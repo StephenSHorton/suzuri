@@ -80,6 +80,7 @@ pub mod sync_hold;
 pub mod theme;
 pub mod toast;
 pub mod updater;
+pub mod wallpaper;
 
 /// Optional C ABI for cgo / static link (session handles + metrics).
 /// Enable with `--features ffi`.

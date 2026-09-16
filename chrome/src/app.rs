@@ -40,6 +40,7 @@ use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
 use crate::rename::{RenameState, RenameTarget};
+use crate::settings::WallpaperPrompt;
 use crate::renderer::{self, GhostLayer, KittyBlit, Renderer};
 use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
@@ -129,6 +130,9 @@ pub struct ChromeApp {
     rename: RenameState,
     caffeine: Caffeine,
     toast: ToastState,
+    wallpaper_asset: Option<crate::wallpaper::WallpaperAsset>,
+    wallpaper_gen: u64,
+    wallpaper_rx: Option<std::sync::mpsc::Receiver<WallpaperLoad>>,
     commands: Vec<crate::commands::Command>,
     started: Instant,
     clipboard: Option<arboard::Clipboard>,
@@ -251,6 +255,18 @@ struct Surface {
     focus_tab: u64,
 }
 
+enum WallpaperLoad {
+    Ok {
+        gen: u64,
+        source: String,
+        asset: crate::wallpaper::WallpaperAsset,
+    },
+    Err {
+        gen: u64,
+        message: String,
+    },
+}
+
 impl Default for ChromeApp {
     fn default() -> Self {
         let ai = ai_control::start();
@@ -286,6 +302,9 @@ impl Default for ChromeApp {
             rename: RenameState::new(),
             caffeine: Caffeine::new(),
             toast: ToastState::new(),
+            wallpaper_asset: None,
+            wallpaper_gen: 0,
+            wallpaper_rx: None,
             commands: commands_with_guests(&load_guests()),
             started: Instant::now(),
             clipboard: arboard::Clipboard::new().ok(),
@@ -995,6 +1014,9 @@ impl ChromeApp {
         crate::macos_window::configure_rounded_window(&window, 16.0);
         let mut renderer = pollster::block_on(Renderer::new(window.clone()));
         renderer.set_ui_scale(self.ui_zoom);
+        if let Some(asset) = self.wallpaper_asset.clone() {
+            renderer.set_wallpaper(Some(asset));
+        }
         let key = self.next_surface_key;
         self.next_surface_key = self.next_surface_key.saturating_add(1);
         let wid = window.id();
@@ -1939,6 +1961,13 @@ impl ChromeApp {
         match target {
             RenameTarget::Tab => self.session.rename_active_tab(name),
             RenameTarget::Pane => self.session.rename_focused_pane(name),
+            RenameTarget::WallpaperUrl => {
+                if name.is_empty() {
+                    self.clear_wallpaper();
+                } else {
+                    self.begin_wallpaper_load(name);
+                }
+            }
         }
     }
 
@@ -2339,6 +2368,15 @@ impl ChromeApp {
                 let msg = format!("Rain quality: {}%", self.settings.prefs.rain_quality_pct());
                 self.toast.show(msg);
                 self.paint_dirty = true;
+            }
+            CommandAction::ChooseBackground => {
+                self.pick_wallpaper();
+            }
+            CommandAction::SetBackgroundUrl => {
+                self.prompt_wallpaper_url();
+            }
+            CommandAction::ClearBackground => {
+                self.clear_wallpaper();
             }
             CommandAction::ToggleAnimateUnfocused => {
                 self.settings.prefs.animate_unfocused = !self.settings.prefs.animate_unfocused;
@@ -5148,6 +5186,7 @@ impl ChromeApp {
             occluded: self.occluded,
             animate_unfocused: self.settings.prefs.animate_unfocused,
             rain: self.settings.prefs.rain,
+            wallpaper: self.settings.prefs.wallpaper_is_set(),
             ui_animating: self.ui_animating() || self.session.focused_is_guest(),
             paint_dirty: self.paint_dirty,
             caret_live: self.warp_focused
@@ -5160,10 +5199,137 @@ impl ChromeApp {
         let i = self.paint_input();
         let rain = i.rain;
         let encode = crate::eco::rain_should_run(i);
+        let wall_live = i.wallpaper && i.effects_live();
         for s in self.surfaces.values_mut() {
             s.renderer.set_rain_enabled(rain);
             s.renderer.set_rain_paused(rain && !encode);
+            s.renderer.set_wallpaper_paused(i.wallpaper && !wall_live);
         }
+    }
+
+    fn drain_wallpaper_prompt(&mut self) {
+        match self.settings.take_wallpaper_prompt() {
+            Some(WallpaperPrompt::PickFile) => self.pick_wallpaper(),
+            Some(WallpaperPrompt::AskUrl) => self.prompt_wallpaper_url(),
+            Some(WallpaperPrompt::Clear) => self.clear_wallpaper(),
+            None => {}
+        }
+    }
+
+    fn drain_wallpaper_job(&mut self) {
+        let Some(rx) = self.wallpaper_rx.as_ref() else {
+            return;
+        };
+        let Ok(msg) = rx.try_recv() else {
+            return;
+        };
+        self.wallpaper_rx = None;
+        match msg {
+            WallpaperLoad::Ok {
+                gen,
+                source,
+                asset,
+            } if gen == self.wallpaper_gen => {
+                self.settings.prefs.set_wallpaper(source);
+                self.settings.mark_dirty();
+                let _ = self.settings.save_if_dirty();
+                self.wallpaper_asset = Some(asset.clone());
+                for s in self.surfaces.values_mut() {
+                    s.renderer.set_wallpaper(Some(asset.clone()));
+                }
+                self.sync_rain_live();
+                let kind = if asset.animated { "animated" } else { "still" };
+                self.toast.show(format!(
+                    "Background ({kind}): {}",
+                    crate::wallpaper::display_label(&asset.source)
+                ));
+                self.paint_dirty = true;
+            }
+            WallpaperLoad::Err { gen, message } if gen == self.wallpaper_gen => {
+                self.toast.show(message);
+                self.paint_dirty = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn pick_wallpaper(&mut self) {
+        let Some(path) = crate::wallpaper::pick_image_file() else {
+            return;
+        };
+        self.begin_wallpaper_load(&path.to_string_lossy());
+    }
+
+    fn prompt_wallpaper_url(&mut self) {
+        self.close_all_overlays();
+        self.rename.close();
+        let seed = if crate::wallpaper::is_http_url(&self.settings.prefs.wallpaper) {
+            self.settings.prefs.wallpaper.clone()
+        } else {
+            "https://".into()
+        };
+        self.rename
+            .open_with(RenameTarget::WallpaperUrl, &seed);
+    }
+
+    fn clear_wallpaper(&mut self) {
+        let had = self.settings.prefs.wallpaper_is_set() || self.wallpaper_asset.is_some();
+        self.wallpaper_gen = self.wallpaper_gen.saturating_add(1);
+        self.wallpaper_rx = None;
+        self.wallpaper_asset = None;
+        self.settings.prefs.clear_wallpaper();
+        self.settings.mark_dirty();
+        let _ = self.settings.save_if_dirty();
+        for s in self.surfaces.values_mut() {
+            s.renderer.set_wallpaper(None);
+        }
+        self.sync_rain_live();
+        if had {
+            self.toast.show("Background cleared");
+        }
+        self.paint_dirty = true;
+    }
+
+    fn begin_wallpaper_load(&mut self, source: &str) {
+        let source = source.trim().to_string();
+        if source.is_empty() {
+            self.clear_wallpaper();
+            return;
+        }
+        if let Some(why) = crate::wallpaper::reject_reason(&source) {
+            self.toast.show(why);
+            self.paint_dirty = true;
+            return;
+        }
+        self.wallpaper_gen = self.wallpaper_gen.saturating_add(1);
+        let gen = self.wallpaper_gen;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.wallpaper_rx = Some(rx);
+        self.toast.show("Loading background…");
+        self.paint_dirty = true;
+        std::thread::Builder::new()
+            .name("suzuri-wallpaper".into())
+            .spawn(move || {
+                let result = if crate::wallpaper::is_http_url(&source) {
+                    crate::wallpaper::load_source(&source)
+                } else {
+                    let path = std::path::PathBuf::from(&source);
+                    match crate::wallpaper::cache_local_file(&path) {
+                        Ok(cached) => crate::wallpaper::load_from_path(&cached, &source),
+                        Err(_) => crate::wallpaper::load_from_path(&path, &source),
+                    }
+                };
+                let msg = match result {
+                    Ok(asset) => WallpaperLoad::Ok {
+                        gen,
+                        source,
+                        asset,
+                    },
+                    Err(message) => WallpaperLoad::Err { gen, message },
+                };
+                let _ = tx.send(msg);
+            })
+            .ok();
     }
 
     fn tick_world(&mut self, event_loop: &ActiveEventLoop) {
@@ -5177,6 +5343,8 @@ impl ChromeApp {
             let _ = pane.grid.tick_scroll(dt);
         }
         self.settings.tick(dt);
+        self.drain_wallpaper_prompt();
+        self.drain_wallpaper_job();
         self.palette.tick(dt);
         self.help.tick(dt);
         let guests_busy = self.guests.working();
@@ -5270,6 +5438,9 @@ impl ApplicationHandler for ChromeApp {
 
         let mut renderer = pollster::block_on(Renderer::new(window.clone()));
         renderer.set_ui_scale(self.ui_zoom);
+        if let Some(asset) = self.wallpaper_asset.clone() {
+            renderer.set_wallpaper(Some(asset));
+        }
         self.metrics = renderer.metrics();
         let wid = window.id();
         self.surfaces.insert(
@@ -5285,6 +5456,9 @@ impl ApplicationHandler for ChromeApp {
         self.event_win = Some(wid);
         self.focus_win = Some(wid);
         self.sync_grids_to_panes();
+        if self.settings.prefs.wallpaper_is_set() && self.wallpaper_asset.is_none() {
+            self.begin_wallpaper_load(&self.settings.prefs.wallpaper.clone());
+        }
 
         if let Some(w) = &self.window {
             w.request_redraw();

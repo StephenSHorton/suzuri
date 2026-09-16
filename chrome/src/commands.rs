@@ -40,6 +40,12 @@ pub enum CommandAction {
     ToggleLens,
     /// Cycle glyph-rain encode resolution (Full ↔ Half).
     CycleRainQuality,
+    /// Native OS file picker → chrome wallpaper.
+    ChooseBackground,
+    /// Prompt for an http(s) image URL as wallpaper.
+    SetBackgroundUrl,
+    /// Remove the custom wallpaper (glyph rain on black).
+    ClearBackground,
     /// Keep rain / springs running when the window is unfocused (demo mode).
     ToggleAnimateUnfocused,
     ToggleCaffeine,
@@ -441,6 +447,27 @@ pub fn default_commands() -> Vec<Command> {
             "25–100% rain encode · Settings · Appearance".into(),
             "Appearance",
             CommandAction::CycleRainQuality,
+        ),
+        cmd(
+            "choose_background",
+            "Choose background…",
+            "Finder · image or GIF/WebP · Appearance".into(),
+            "Appearance",
+            CommandAction::ChooseBackground,
+        ),
+        cmd(
+            "set_background_url",
+            "Set background URL…",
+            "Direct image link (not YouTube) · Appearance".into(),
+            "Appearance",
+            CommandAction::SetBackgroundUrl,
+        ),
+        cmd(
+            "clear_background",
+            "Clear background",
+            "Back to glyph rain on black · Appearance".into(),
+            "Appearance",
+            CommandAction::ClearBackground,
         ),
         cmd(
             "toggle_animate_unfocused",
@@ -1273,6 +1300,16 @@ mod tests {
         assert!(idx.iter().any(|&i| all[i].id == "rename_pane"));
         assert!(all.iter().any(|c| c.action == CommandAction::RenameTab));
         assert!(all.iter().any(|c| c.action == CommandAction::RenamePane));
+    }
+
+    #[test]
+    fn registry_contains_background_commands() {
+        let all = default_commands();
+        assert!(all.iter().any(|c| c.action == CommandAction::ChooseBackground));
+        assert!(all.iter().any(|c| c.action == CommandAction::SetBackgroundUrl));
+        assert!(all.iter().any(|c| c.action == CommandAction::ClearBackground));
+        let idx = filter_commands(&all, "background");
+        assert!(idx.iter().any(|&i| all[i].id == "choose_background"));
     }
 
     #[test]

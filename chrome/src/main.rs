@@ -62,6 +62,7 @@ mod theme;
 mod toast;
 mod transfer_ui;
 mod updater;
+mod wallpaper;
 mod workspace_store;
 mod workspace_sync;
 mod workspace_ui;

@@ -83,6 +83,8 @@ pub struct ChromePrefs {
     /// Keep rain / overlay springs running when the window is unfocused or occluded.
     /// Default off — demo-friendly when on, battery-hostile.
     pub animate_unfocused: bool,
+    /// Custom backdrop source: empty = none (glyph rain on black). File path or http(s) URL.
+    pub wallpaper: String,
 }
 
 impl Default for ChromePrefs {
@@ -99,6 +101,7 @@ impl Default for ChromePrefs {
             splash_seen: false,
             ui_zoom: 1.0,
             animate_unfocused: false,
+            wallpaper: String::new(),
         }
     }
 }
@@ -195,6 +198,19 @@ impl ChromePrefs {
         *self = Self::default();
         self.splash_seen = splash;
         self.ui_zoom = zoom;
+        self.wallpaper.clear();
+    }
+
+    pub fn wallpaper_is_set(&self) -> bool {
+        !self.wallpaper.trim().is_empty()
+    }
+
+    pub fn set_wallpaper(&mut self, source: impl Into<String>) {
+        self.wallpaper = source.into().trim().to_string();
+    }
+
+    pub fn clear_wallpaper(&mut self) {
+        self.wallpaper.clear();
     }
 
     /// Normalize after load (clamp darken/colors; migrate legacy theme).
@@ -297,7 +313,7 @@ pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
     };
     let font = theme::normalize_font_id(&prefs.font);
     format!(
-        "{{\n  \"rain\": {},\n  \"rain_quality\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"font\": \"{}\",\n  \"splash_seen\": {},\n  \"ui_zoom\": {},\n  \"animate_unfocused\": {}\n}}\n",
+        "{{\n  \"rain\": {},\n  \"rain_quality\": {},\n  \"lens\": {},\n  \"glass_darken\": {},\n  \"theme\": \"{}\",\n  \"primary\": \"{}\",\n  \"accent\": {},\n  \"font\": \"{}\",\n  \"splash_seen\": {},\n  \"ui_zoom\": {},\n  \"animate_unfocused\": {},\n  \"wallpaper\": {}\n}}\n",
         prefs.rain,
         format_f32(snap_rain_quality(prefs.rain_quality)),
         prefs.lens,
@@ -309,6 +325,7 @@ pub fn chrome_prefs_to_json(prefs: &ChromePrefs) -> String {
         prefs.splash_seen,
         format_f32(prefs.ui_zoom),
         prefs.animate_unfocused,
+        json_string(&prefs.wallpaper),
     )
 }
 
@@ -340,6 +357,7 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
     let ui_zoom = extract_f32(trimmed, "ui_zoom").unwrap_or(d.ui_zoom);
     let animate_unfocused =
         extract_bool(trimmed, "animate_unfocused").unwrap_or(d.animate_unfocused);
+    let wallpaper = extract_string(trimmed, "wallpaper").unwrap_or_else(|| d.wallpaper.clone());
 
     // Primary: explicit `primary` hex, else legacy `accent` hex (was primary),
     // else named theme jade, else default.
@@ -387,7 +405,26 @@ pub fn parse_chrome_prefs_json(raw: &str) -> Option<ChromePrefs> {
         splash_seen,
         ui_zoom,
         animate_unfocused,
+        wallpaper,
     })
+}
+
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn format_f32(v: f32) -> String {
@@ -493,6 +530,7 @@ mod tests {
             splash_seen: true,
             ui_zoom: 1.0,
             animate_unfocused: false,
+            wallpaper: String::new(),
         };
         save_chrome_prefs(&path, &prefs).expect("save");
         assert!(path.is_file(), "expected file at {}", path.display());
@@ -589,6 +627,7 @@ mod tests {
             splash_seen: true,
             ui_zoom: 1.0,
             animate_unfocused: false,
+            wallpaper: String::new(),
         };
         save_chrome_prefs(&path, &prefs).expect("save");
         let loaded = load_chrome_prefs(&path);
@@ -627,6 +666,7 @@ mod tests {
             splash_seen: false,
             ui_zoom: 1.0,
             animate_unfocused: false,
+            wallpaper: String::new(),
         };
         save_chrome_prefs(&path, &prefs).unwrap();
         let config_body = fs::read_to_string(&config).unwrap();
@@ -651,6 +691,7 @@ mod tests {
             splash_seen: true,
             ui_zoom: 1.0,
             animate_unfocused: false,
+            wallpaper: String::new(),
         };
         let raw = chrome_prefs_to_json(&prefs);
         assert!(raw.contains("\"rain\": true"));
@@ -763,9 +804,11 @@ mod tests {
             splash_seen: true,
             ui_zoom: 1.0,
             animate_unfocused: false,
+            wallpaper: "/tmp/forest.png".into(),
         };
         p.reset_to_defaults();
         assert!(p.rain && p.lens);
+        assert!(p.wallpaper.is_empty());
         assert!((p.rain_quality - 1.0).abs() < 1e-4);
         assert!(p.splash_seen);
         assert_eq!(p.primary, theme::DEFAULT_PRIMARY);
@@ -786,6 +829,7 @@ mod tests {
             splash_seen: false,
             ui_zoom: 3.0,
             animate_unfocused: false,
+            wallpaper: String::new(),
         }
         .normalize();
         assert!((p.glass_darken - 0.95).abs() < 1e-5);
@@ -805,5 +849,21 @@ mod tests {
         assert!((back.ui_zoom - 1.4).abs() < 1e-4);
         let missing = parse_chrome_prefs_json(r#"{ "rain": true }"#).unwrap();
         assert!((missing.ui_zoom - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn wallpaper_roundtrip_and_escape() {
+        let prefs = ChromePrefs {
+            wallpaper: r#"C:\Walls\"forest".png"#.into(),
+            ..ChromePrefs::default()
+        };
+        let raw = chrome_prefs_to_json(&prefs);
+        assert!(raw.contains("\"wallpaper\":"));
+        let back = parse_chrome_prefs_json(&raw).unwrap();
+        assert_eq!(back.wallpaper, prefs.wallpaper);
+        let missing = parse_chrome_prefs_json(r#"{ "rain": true }"#).unwrap();
+        assert!(missing.wallpaper.is_empty());
+        let empty = parse_chrome_prefs_json(r#"{ "wallpaper": "" }"#).unwrap();
+        assert!(empty.wallpaper.is_empty());
     }
 }

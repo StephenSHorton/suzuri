@@ -28,7 +28,8 @@ root. `product_config_dir()` **prefers this env** over OS defaults.
   "lens": true,
   "glass_darken": 0.82,
   "theme": "inkstone",
-  "animate_unfocused": false
+  "animate_unfocused": false,
+  "wallpaper": ""
 }
 ```
 
@@ -48,6 +49,14 @@ window is in the background (demo / recording). Default **off**: unfocused
 windows still drain PTYs and paint cell updates at ~12 Hz, but the rain
 thread freezes on the last frame (glyphs stay visible) and 60 Hz present
 stops. Palette: “Toggle animate when unfocused”.
+
+`wallpaper` is a file path or `http(s)` image URL. Empty (default) means
+glyph rain on black — the historical look. A set wallpaper is cover-fit
+under rain (rain can stay on). Animated GIF/WebP loop; stills get a slow
+Ken Burns drift. YouTube / video files are rejected (no webview; local
+video is a later GPU-frame pump). Settings row “Background”: Enter =
+Finder, → = paste URL, ← = clear. Palette: “Choose background…”,
+“Set background URL…”, “Clear background”.
 
 ## Themes
 
