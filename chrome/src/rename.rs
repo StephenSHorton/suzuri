@@ -14,6 +14,8 @@ pub enum RenameTarget {
     Pane,
     /// Chrome strip tab (page).
     Tab,
+    /// Wallpaper http(s) URL prompt.
+    WallpaperUrl,
 }
 
 /// Glass rename input modal (spring presentation like palette/settings).
@@ -80,6 +82,7 @@ impl RenameState {
         match self.target {
             RenameTarget::Pane => "Rename pane",
             RenameTarget::Tab => "Rename tab",
+            RenameTarget::WallpaperUrl => "Background URL",
         }
     }
 
@@ -176,6 +179,14 @@ mod tests {
         let mut r = RenameState::new();
         r.open_with(RenameTarget::Tab, "notes");
         assert_eq!(r.title(), "Rename tab");
+    }
+
+    #[test]
+    fn wallpaper_url_title() {
+        let mut r = RenameState::new();
+        r.open_with(RenameTarget::WallpaperUrl, "https://");
+        assert_eq!(r.title(), "Background URL");
+        assert_eq!(r.buffer, "https://");
     }
 
     #[test]

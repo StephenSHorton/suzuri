@@ -28,12 +28,21 @@ pub use crate::config_store::{ChromePrefs, GLASS_DARKEN_DEFAULT};
 pub mod settings_row {
     pub const RAIN: usize = 0;
     pub const RAIN_QUALITY: usize = 1;
-    pub const LENS: usize = 2;
-    pub const PRIMARY: usize = 3;
-    pub const ACCENT: usize = 4;
-    pub const FONT: usize = 5;
-    pub const DARKEN: usize = 6;
-    pub const RESET: usize = 7;
+    pub const BACKGROUND: usize = 2;
+    pub const LENS: usize = 3;
+    pub const PRIMARY: usize = 4;
+    pub const ACCENT: usize = 5;
+    pub const FONT: usize = 6;
+    pub const DARKEN: usize = 7;
+    pub const RESET: usize = 8;
+}
+
+/// Host-side wallpaper action queued by the settings modal (Finder / URL / clear).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WallpaperPrompt {
+    PickFile,
+    AskUrl,
+    Clear,
 }
 
 /// Whether the settings modal is open, plus presentation springs + prefs.
@@ -63,6 +72,8 @@ pub struct SettingsState {
     dirty: bool,
     /// Last successfully persisted snapshot (detect external `prefs` mutation).
     last_saved: ChromePrefs,
+    /// One-shot: app drains this to open Finder / URL prompt / clear GPU.
+    pending_wallpaper: Option<WallpaperPrompt>,
 }
 
 impl Default for SettingsState {
@@ -98,7 +109,13 @@ impl SettingsState {
             prefs_path,
             dirty: false,
             last_saved: prefs,
+            pending_wallpaper: None,
         }
+    }
+
+    /// Take a pending wallpaper prompt (Finder / URL / clear).
+    pub fn take_wallpaper_prompt(&mut self) -> Option<WallpaperPrompt> {
+        self.pending_wallpaper.take()
     }
 
     /// Rain switch knob position 0..1 (animated).
@@ -177,6 +194,9 @@ impl SettingsState {
         match row {
             settings_row::RAIN => self.prefs.rain = !self.prefs.rain,
             settings_row::RAIN_QUALITY => self.prefs.cycle_rain_quality(-1),
+            settings_row::BACKGROUND => {
+                self.pending_wallpaper = Some(WallpaperPrompt::PickFile);
+            }
             settings_row::LENS => self.prefs.lens = !self.prefs.lens,
             // Primary: Enter focuses; use ←→ / swatches to change.
             settings_row::PRIMARY => {}
@@ -191,6 +211,7 @@ impl SettingsState {
             settings_row::DARKEN => self.prefs.nudge_darken(0.05),
             settings_row::RESET => {
                 self.prefs.reset_to_defaults();
+                self.pending_wallpaper = Some(WallpaperPrompt::Clear);
                 // Snap toggle visuals to defaults immediately.
                 self.rain_visual = if self.prefs.rain { 1.0 } else { 0.0 };
                 self.lens_visual = if self.prefs.lens { 1.0 } else { 0.0 };
@@ -217,6 +238,14 @@ impl SettingsState {
             settings_row::RAIN_QUALITY => {
                 self.prefs
                     .nudge_rain_quality(if dir < 0 { -0.25 } else { 0.25 });
+            }
+            settings_row::BACKGROUND => {
+                if dir < 0 {
+                    self.prefs.clear_wallpaper();
+                    self.pending_wallpaper = Some(WallpaperPrompt::Clear);
+                } else {
+                    self.pending_wallpaper = Some(WallpaperPrompt::AskUrl);
+                }
             }
             settings_row::PRIMARY => {
                 self.prefs
@@ -365,6 +394,7 @@ impl SettingsState {
             "0" => {
                 self.selected = settings_row::RESET;
                 self.prefs.reset_to_defaults();
+                self.pending_wallpaper = Some(WallpaperPrompt::Clear);
                 self.rain_visual = if self.prefs.rain { 1.0 } else { 0.0 };
                 self.lens_visual = if self.prefs.lens { 1.0 } else { 0.0 };
                 true
@@ -499,8 +529,8 @@ impl SettingsState {
     /// Height fits title + 8 rows + color swatches + footer.
     pub fn base_modal_rect(window_w: f32, window_h: f32) -> Rect {
         let w = (window_w - 48.0).min(560.0).max(320.0);
-        // 48 title + 8×40 + 7×8 gaps + 36 swatches + 28 footer ≈ 518
-        let h = (window_h - 80.0).min(558.0).max(518.0);
+        // 48 title + 9×40 + 8×8 gaps + 36 swatches + 28 footer ≈ 536
+        let h = (window_h - 80.0).min(580.0).max(536.0);
         Rect::new((window_w - w) * 0.5, (window_h - h) * 0.48, w, h)
     }
 
@@ -560,6 +590,10 @@ impl SettingsState {
             "toggles".into(),
             format!("  [1] glyph rain     {rain}"),
             format!("      rain quality   {rain_quality}  · ←→ / Enter"),
+            format!(
+                "      background     {}  · Enter=file · → URL · ← clear",
+                crate::wallpaper::display_label(&self.prefs.wallpaper)
+            ),
             format!("  [2] magnifier      {lens}  · pinch or ⌃/⌘+scroll"),
             format!("  [3] primary        {primary}  · ←→ hue · swatches"),
             format!("  [4] accent         {accent}  · Enter=auto · ←→ override"),
@@ -602,7 +636,7 @@ pub struct SettingsLayout {
 }
 
 impl SettingsLayout {
-    pub const ROW_COUNT: usize = 8;
+    pub const ROW_COUNT: usize = 9;
     pub const ROW_H: f32 = 40.0;
     pub const GAP: f32 = 8.0;
     pub const SWATCH: f32 = 28.0;
@@ -973,6 +1007,7 @@ mod tests {
             splash_seen: true,
             ui_zoom: 1.0,
             animate_unfocused: false,
+            wallpaper: "/tmp/bg.png".into(),
         };
         {
             let mut s = SettingsState::with_path(&path);
@@ -1010,6 +1045,25 @@ mod tests {
         assert!((s2.prefs.rain_quality - 0.75).abs() < 1e-4);
         assert!(s2.handle_hotkey("0"));
         assert!((s2.prefs.rain_quality - 1.0).abs() < 1e-4);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn background_row_queues_prompts() {
+        let path = temp_prefs_path("wallpaper-row");
+        let _ = fs::remove_file(&path);
+        let mut s = SettingsState::with_path(&path);
+        s.selected = settings_row::BACKGROUND;
+        assert!(s.activate_selected());
+        assert_eq!(s.take_wallpaper_prompt(), Some(WallpaperPrompt::PickFile));
+        assert!(s.nudge_selected(1));
+        assert_eq!(s.take_wallpaper_prompt(), Some(WallpaperPrompt::AskUrl));
+        s.prefs.set_wallpaper("/tmp/forest.png");
+        assert!(s.nudge_selected(-1));
+        assert!(s.prefs.wallpaper.is_empty());
+        assert_eq!(s.take_wallpaper_prompt(), Some(WallpaperPrompt::Clear));
+        let lines = s.display_lines(false, 80, 24, 1).join("\n");
+        assert!(lines.contains("background"));
         cleanup(&path);
     }
 }

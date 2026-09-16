@@ -36,6 +36,8 @@ pub struct PaintInput {
     pub occluded: bool,
     pub animate_unfocused: bool,
     pub rain: bool,
+    /// Custom wallpaper is set (Ken Burns / GIF) — same 60 Hz as rain.
+    pub wallpaper: bool,
     pub ui_animating: bool,
     pub paint_dirty: bool,
     pub caret_live: bool,
@@ -50,7 +52,7 @@ impl PaintInput {
 
 pub fn gpu_demand(i: PaintInput) -> GpuDemand {
     let live = i.effects_live();
-    if live && (i.rain || i.ui_animating) {
+    if live && (i.rain || i.wallpaper || i.ui_animating) {
         return GpuDemand::Continuous;
     }
     if i.paint_dirty {
@@ -101,6 +103,7 @@ mod tests {
             occluded: false,
             animate_unfocused: false,
             rain: false,
+            wallpaper: false,
             ui_animating: false,
             paint_dirty: false,
             caret_live: false,
@@ -113,6 +116,15 @@ mod tests {
         i.rain = true;
         assert_eq!(gpu_demand(i), GpuDemand::Continuous);
         assert!(rain_should_run(i));
+        assert_eq!(wake_delay(i), ANIM_WAKE);
+    }
+
+    #[test]
+    fn focused_wallpaper_is_continuous() {
+        let mut i = base();
+        i.wallpaper = true;
+        assert_eq!(gpu_demand(i), GpuDemand::Continuous);
+        assert!(!rain_should_run(i));
         assert_eq!(wake_delay(i), ANIM_WAKE);
     }
 
