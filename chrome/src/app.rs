@@ -684,6 +684,8 @@ impl ChromeApp {
             }
         }
         self.session.select_tab(tab_id);
+        self.paint_dirty = true;
+        self.request_redraw_all();
     }
 
     fn focus_surface_window(&mut self, id: WindowId) {
@@ -2254,9 +2256,13 @@ impl ChromeApp {
             }
             CommandAction::NextTab => {
                 self.session.next_tab();
+                self.remember_event_surface_tab();
+                self.wake_click(event_loop);
             }
             CommandAction::PrevTab => {
                 self.session.prev_tab();
+                self.remember_event_surface_tab();
+                self.wake_click(event_loop);
             }
             CommandAction::SplitRight => {
                 self.split_pane(SplitAxis::Vertical);
@@ -3545,6 +3551,13 @@ impl ChromeApp {
         changed
     }
 
+    /// Don't sit in eco `WaitUntil` (caret 120ms / PTY 33ms) after a click.
+    fn wake_click(&mut self, event_loop: &ActiveEventLoop) {
+        self.paint_dirty = true;
+        self.request_redraw_all();
+        event_loop.set_control_flow(ControlFlow::Wait);
+    }
+
     fn handle_activation(&mut self, event_loop: &ActiveEventLoop, target: HitTarget) {
         // Traffic lights always work
         if matches!(
@@ -3757,10 +3770,8 @@ impl ChromeApp {
             HitTarget::None => {}
         }
         self.remember_event_surface_tab();
-
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
+        self.paint_dirty = true;
+        self.request_redraw_all();
     }
 
     /// Click in the warp strip: put the caret on the nearest draft scalar.
@@ -5518,6 +5529,7 @@ impl ApplicationHandler for ChromeApp {
                     // focus as soon as the pointer position is known.
                     let hit = self.hit_at_cursor();
                     if self.focus_hit_pane(hit) {
+                        self.wake_click(event_loop);
                         if let Some(pos) = self.term_cell_at_cursor() {
                             if self.pending_term_select.is_some() {
                                 self.pending_term_select =
@@ -5561,7 +5573,21 @@ impl ApplicationHandler for ChromeApp {
                 self.press_hit = Some(hit);
                 self.pending_term_select = None;
                 if !self.overlay_open() {
-                    let _ = self.focus_hit_pane(hit);
+                    if self.focus_hit_pane(hit) {
+                        self.wake_click(event_loop);
+                    }
+                    // Tabs used to wait for mouse-up so a drag-to-reorder
+                    // could steal the click. That made switching feel like a
+                    // half-beat. Focus on press; drag still starts after 8px.
+                    if let HitTarget::Tab(i) = hit {
+                        let surface = self.event_surface_key();
+                        if let Some(id) = self.session.tabs_on_surface(surface).get(i).copied() {
+                            self.set_surface_focus(surface, id);
+                            self.warp_focused = true;
+                            self.terminal_focused = false;
+                            self.wake_click(event_loop);
+                        }
+                    }
                 }
                 if let HitTarget::Terminal(pane_id) = hit {
                     if !self.overlay_open() && self.session.pane_kind(pane_id).is_guest() {
