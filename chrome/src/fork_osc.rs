@@ -172,6 +172,78 @@ pub fn choose_fork_split_dir(w: f32, h: f32) -> SplitAxis {
     }
 }
 
+/// Smallest child glass (logical px) we will still split into.
+pub const MIN_SPLIT_CHILD: f32 = 160.0;
+
+/// A visible leaf considered as a split host.
+#[derive(Clone, Copy, Debug)]
+pub struct SplitCandidate {
+    pub id: u64,
+    pub w: f32,
+    pub h: f32,
+}
+
+fn other_axis(axis: SplitAxis) -> SplitAxis {
+    match axis {
+        SplitAxis::Vertical => SplitAxis::Horizontal,
+        SplitAxis::Horizontal => SplitAxis::Vertical,
+    }
+}
+
+fn half_size(w: f32, h: f32, axis: SplitAxis) -> (f32, f32) {
+    match axis {
+        SplitAxis::Vertical => (w * 0.5, h),
+        SplitAxis::Horizontal => (w, h * 0.5),
+    }
+}
+
+/// Score of splitting `w`×`h`: axis plus the child's smaller side. `None` if both
+/// halves would be under [`MIN_SPLIT_CHILD`].
+pub fn split_score(w: f32, h: f32, min_child: f32) -> Option<(SplitAxis, f32)> {
+    let preferred = choose_fork_split_dir(w, h);
+    for axis in [preferred, other_axis(preferred)] {
+        let (cw, ch) = half_size(w, h, axis);
+        if cw >= min_child && ch >= min_child {
+            return Some((axis, cw.min(ch)));
+        }
+    }
+    None
+}
+
+/// Prefer the leaf whose split yields the largest usable child. Falls back to `src`
+/// (even if undersized) so a first split in an empty tab still works.
+pub fn pick_split_target(
+    candidates: &[SplitCandidate],
+    src: u64,
+    min_child: f32,
+) -> (u64, SplitAxis) {
+    let mut best: Option<(u64, SplitAxis, f32, f32)> = None;
+    for c in candidates {
+        let Some((axis, score)) = split_score(c.w, c.h, min_child) else {
+            continue;
+        };
+        let area = (c.w * c.h).max(1.0);
+        let better = match best {
+            None => true,
+            Some((_, _, best_score, best_area)) => {
+                score > best_score + 0.5 || ((score - best_score).abs() < 0.5 && area > best_area)
+            }
+        };
+        if better {
+            best = Some((c.id, axis, score, area));
+        }
+    }
+    if let Some((id, axis, _, _)) = best {
+        return (id, axis);
+    }
+    let (w, h) = candidates
+        .iter()
+        .find(|c| c.id == src)
+        .map(|c| (c.w, c.h))
+        .unwrap_or((800.0, 500.0));
+    (src, choose_fork_split_dir(w, h))
+}
+
 pub fn fork_title(req: &ForkPaneRequest) -> String {
     let t = req.title.trim();
     if t.is_empty() {
@@ -292,5 +364,69 @@ mod tests {
     #[test]
     fn choose_dir_tie_vertical() {
         assert_eq!(choose_fork_split_dir(800.0, 800.0), SplitAxis::Vertical);
+    }
+
+    #[test]
+    fn pick_prefers_larger_pane_over_osc_source() {
+        let src = 1;
+        let (id, axis) = pick_split_target(
+            &[
+                SplitCandidate {
+                    id: src,
+                    w: 400.0,
+                    h: 300.0,
+                },
+                SplitCandidate {
+                    id: 2,
+                    w: 1200.0,
+                    h: 800.0,
+                },
+            ],
+            src,
+            MIN_SPLIT_CHILD,
+        );
+        assert_eq!(id, 2);
+        assert_eq!(axis, SplitAxis::Vertical);
+    }
+
+    #[test]
+    fn pick_skips_undersized_and_falls_back_to_src() {
+        let src = 1;
+        let (id, _) = pick_split_target(
+            &[SplitCandidate {
+                id: src,
+                w: 100.0,
+                h: 80.0,
+            }],
+            src,
+            MIN_SPLIT_CHILD,
+        );
+        assert_eq!(id, src);
+    }
+
+    #[test]
+    fn pick_second_largest_when_largest_already_tight() {
+        let (id, _) = pick_split_target(
+            &[
+                SplitCandidate {
+                    id: 1,
+                    w: 200.0,
+                    h: 180.0,
+                },
+                SplitCandidate {
+                    id: 2,
+                    w: 900.0,
+                    h: 700.0,
+                },
+                SplitCandidate {
+                    id: 3,
+                    w: 500.0,
+                    h: 400.0,
+                },
+            ],
+            1,
+            MIN_SPLIT_CHILD,
+        );
+        assert_eq!(id, 2);
     }
 }
