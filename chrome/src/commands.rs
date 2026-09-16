@@ -828,6 +828,26 @@ pub fn help_sections() -> Vec<HelpSection> {
                     desc: "Focus pane",
                 },
                 HelpRow {
+                    keys: chord(&ms, "O"),
+                    desc: "Rotate split",
+                },
+                HelpRow {
+                    keys: chord(&ms, "X"),
+                    desc: "Swap panes",
+                },
+                HelpRow {
+                    keys: format!("{} / {}", chord(&ms, "."), chord(&ms, ",")),
+                    desc: "Grow / shrink",
+                },
+                HelpRow {
+                    keys: "Palette".into(),
+                    desc: "Equalize split",
+                },
+                HelpRow {
+                    keys: chord(&ms, "U"),
+                    desc: "Move pane to tab",
+                },
+                HelpRow {
                     keys: word_jump,
                     desc: "Word jump",
                 },
@@ -1535,6 +1555,18 @@ mod tests {
         }
         let n: usize = secs.iter().map(|s| s.rows.len()).sum();
         assert!(n >= 20, "expected product-scale shortcut list, got {n}");
+        let panes = secs.iter().find(|s| s.title == "Panes").unwrap();
+        let descs: Vec<_> = panes.rows.iter().map(|r| r.desc).collect();
+        for need in [
+            "Split right",
+            "Split down",
+            "Rotate split",
+            "Swap panes",
+            "Grow / shrink",
+            "Move pane to tab",
+        ] {
+            assert!(descs.contains(&need), "Panes help missing {need}");
+        }
     }
 
     #[test]

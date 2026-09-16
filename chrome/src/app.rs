@@ -13,6 +13,7 @@ use winit::{
     window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId, WindowLevel},
 };
 
+use crate::ai_control::{self, AiHandle, AiJob, AiOp};
 use crate::ansi::AnsiDecoder;
 use crate::caffeine::Caffeine;
 use crate::cells::CellGrid;
@@ -20,27 +21,27 @@ use crate::chrome_status::{self, PaneSnapExtra, StatusPublisher};
 use crate::chrome_ui::{ChipId, ChipUi};
 use crate::cmd_blocks::{self, CmdBlockLog};
 use crate::commands::{
-    CommandAction, HelpState, PaletteState, SplashState, commands_with_guests, filter_commands,
+    commands_with_guests, filter_commands, CommandAction, HelpState, PaletteState, SplashState,
 };
 use crate::confirm::{ConfirmChoice, ConfirmKind, ConfirmState};
 use crate::control_mailbox::ControlMailbox;
 use crate::echo_filter::EchoFilter;
-use crate::guest_host::{GuestEvent, GuestHost, NativeAttach, guest_footer_top, guest_mount_rect};
+use crate::guest_host::{guest_footer_top, guest_mount_rect, GuestEvent, GuestHost, NativeAttach};
 use crate::guest_manifest::{load_guests, pick_guest};
 use crate::input::{
-    DropKind, HitTarget, classify_drop, classify_tab_drop, hit_test, is_mac, is_windows,
-    pane_id_from_hit, term_select_drag_started, window_origin_for_tab_drop,
+    classify_drop, classify_tab_drop, hit_test, is_mac, is_windows, pane_id_from_hit,
+    term_select_drag_started, window_origin_for_tab_drop, DropKind, HitTarget,
 };
 use crate::kitty_gfx::placeholder_bounds;
-use crate::layout::{FrameLayout, Metrics, UI_ZOOM_STEP, clamp_ui_zoom};
-use crate::links::{LinkHoverSpan, link_span_at_col, open_url_in_browser};
+use crate::layout::{clamp_ui_zoom, FrameLayout, Metrics, UI_ZOOM_STEP};
+use crate::links::{link_span_at_col, open_url_in_browser, LinkHoverSpan};
 use crate::mouse_pty::{encode_mouse_button, encode_mouse_motion, encode_mouse_wheel};
 use crate::notes::NotesState;
 use crate::panes::{FocusDir, SplitAxis};
 use crate::pty::PtySession;
 use crate::rename::{RenameState, RenameTarget};
 use crate::renderer::{self, GhostLayer, KittyBlit, Renderer};
-use crate::selection::{CellPos, Selection, clamp_pos};
+use crate::selection::{clamp_pos, CellPos, Selection};
 use crate::session::{ChromeSession, CloseOutcome, WidgetKind};
 use crate::settings::SettingsState;
 use crate::sync_hold::SyncHold;
@@ -169,6 +170,8 @@ pub struct ChromeApp {
     link_cursor_on: bool,
     /// Host light IPC: poll `chrome_cmd` under config dir (~250ms).
     control_mailbox: ControlMailbox,
+    /// Loopback HTTP for agents (layout / split / move). None if bind failed.
+    ai: Option<AiHandle>,
     /// Optional guest processes (one localhost channel per guest pane).
     guest_host: GuestHost,
     /// Primary button is down in a guest well (drag / click).
@@ -250,6 +253,7 @@ struct Surface {
 
 impl Default for ChromeApp {
     fn default() -> Self {
+        let ai = ai_control::start();
         let mut session = ChromeSession::new(80, 24);
         let mut runtimes = HashMap::new();
         let pane_id = session.focus_pane_id();
@@ -304,6 +308,7 @@ impl Default for ChromeApp {
             hovered_link_span: None,
             link_cursor_on: false,
             control_mailbox: ControlMailbox::new(),
+            ai,
             guest_host: GuestHost::new(),
             guest_pointer_down: None,
             guest_focus: None,
@@ -2376,6 +2381,180 @@ impl ChromeApp {
         }
     }
 
+    fn drain_ai(&mut self, event_loop: &ActiveEventLoop) {
+        loop {
+            let job = match self.ai.as_ref() {
+                Some(ai) => match ai.try_recv() {
+                    Ok(j) => j,
+                    Err(_) => break,
+                },
+                None => break,
+            };
+            self.handle_ai_job(event_loop, job);
+        }
+    }
+
+    fn handle_ai_job(&mut self, event_loop: &ActiveEventLoop, job: AiJob) {
+        match job.op {
+            AiOp::Layout => {
+                ai_control::reply_ok(job, ai_control::layout_json(&self.session));
+            }
+            AiOp::Pane { id, lines } => match ai_control::pane_json(&self.session, id, lines) {
+                Some(v) => ai_control::reply_ok(job, v),
+                None => ai_control::reply_err(job, 404, "no such pane"),
+            },
+            AiOp::Call { ref tool, ref args } => match self.ai_call(event_loop, tool, args) {
+                Ok(v) => ai_control::reply_ok(job, v),
+                Err((status, msg)) => ai_control::reply_err(job, status, &msg),
+            },
+        }
+    }
+
+    fn ai_maybe_focus(&mut self, args: &serde_json::Value) -> Result<(), (u16, String)> {
+        if let Some(id) = ai_control::arg_u64(args, "pane_id") {
+            if !self.session.panes.contains_key(&id) {
+                return Err((404, format!("no such pane {id}")));
+            }
+            self.session.set_focus_pane(id);
+        }
+        Ok(())
+    }
+
+    fn ai_call(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, (u16, String)> {
+        match tool {
+            "layout" => Ok(ai_control::layout_json(&self.session)),
+            "pane" => {
+                let id =
+                    ai_control::arg_u64(args, "pane_id").ok_or((400, "pane_id required".into()))?;
+                let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(80) as usize;
+                ai_control::pane_json(&self.session, id, lines)
+                    .ok_or((404, format!("no such pane {id}")))
+            }
+            "focus" => {
+                let id =
+                    ai_control::arg_u64(args, "pane_id").ok_or((400, "pane_id required".into()))?;
+                if !self.session.set_focus_pane(id) && !self.session.panes.contains_key(&id) {
+                    return Err((404, format!("no such pane {id}")));
+                }
+                self.paint_dirty = true;
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "split" => {
+                self.ai_maybe_focus(args)?;
+                let axis = args
+                    .get("axis")
+                    .and_then(|v| v.as_str())
+                    .and_then(ai_control::parse_axis)
+                    .unwrap_or(crate::panes::SplitAxis::Vertical);
+                self.split_pane(axis);
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "move" => {
+                let pane =
+                    ai_control::arg_u64(args, "pane_id").ok_or((400, "pane_id required".into()))?;
+                let target = ai_control::arg_u64(args, "target_pane_id")
+                    .ok_or((400, "target_pane_id required".into()))?;
+                let edge = args
+                    .get("edge")
+                    .and_then(|v| v.as_str())
+                    .and_then(ai_control::parse_edge)
+                    .ok_or((400, "edge must be left|right|top|bottom".into()))?;
+                if !self.session.reparent_pane(pane, target, edge) {
+                    return Err((400, "move failed".into()));
+                }
+                self.sync_grids_to_panes();
+                self.paint_dirty = true;
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "move_to_tab" => {
+                let pane =
+                    ai_control::arg_u64(args, "pane_id").ok_or((400, "pane_id required".into()))?;
+                let ok = if let Some(tab) = ai_control::arg_u64(args, "tab_id") {
+                    self.session.move_pane_to_tab(pane, tab)
+                } else {
+                    let surface = self.session.active_tab().map(|t| t.surface).unwrap_or(0);
+                    self.session
+                        .extract_pane_to_new_tab(pane, surface)
+                        .is_some()
+                };
+                if !ok {
+                    return Err((400, "move_to_tab failed".into()));
+                }
+                self.sync_grids_to_panes();
+                self.paint_dirty = true;
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "rotate" => {
+                self.ai_maybe_focus(args)?;
+                if !self.session.rotate_focused_split() {
+                    return Err((400, "no split".into()));
+                }
+                self.sync_grids_to_panes();
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "swap" => {
+                self.ai_maybe_focus(args)?;
+                if !self.session.swap_focused_split() {
+                    return Err((400, "no split".into()));
+                }
+                self.sync_grids_to_panes();
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "grow" => {
+                self.ai_maybe_focus(args)?;
+                if !self.session.grow_focused_split(0.08) {
+                    return Err((400, "no split".into()));
+                }
+                self.sync_grids_to_panes();
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "shrink" => {
+                self.ai_maybe_focus(args)?;
+                if !self.session.grow_focused_split(-0.08) {
+                    return Err((400, "no split".into()));
+                }
+                self.sync_grids_to_panes();
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "equalize" => {
+                self.ai_maybe_focus(args)?;
+                if !self.session.equalize_focused_split() {
+                    return Err((400, "no split".into()));
+                }
+                self.sync_grids_to_panes();
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "close" => {
+                self.ai_maybe_focus(args)?;
+                self.close_pane_or_tab(event_loop);
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "rename" => {
+                let title = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .ok_or((400, "title required".into()))?;
+                self.ai_maybe_focus(args)?;
+                if ai_control::arg_u64(args, "pane_id").is_none() {
+                    return Err((400, "pane_id required".into()));
+                }
+                self.session.rename_focused_pane(title);
+                self.paint_dirty = true;
+                Ok(ai_control::layout_json(&self.session))
+            }
+            "new_tab" => {
+                self.new_tab();
+                Ok(ai_control::layout_json(&self.session))
+            }
+            other => Err((404, format!("unknown tool {other}"))),
+        }
+    }
+
     fn new_tab(&mut self) {
         let surface = self.event_surface_key();
         let layout = self.layout_for_surface(surface);
@@ -2454,11 +2633,8 @@ impl ChromeApp {
                 h: p.glass.h,
             })
             .collect();
-        let (host, axis) = crate::fork_osc::pick_split_target(
-            &candidates,
-            src,
-            crate::fork_osc::MIN_SPLIT_CHILD,
-        );
+        let (host, axis) =
+            crate::fork_osc::pick_split_target(&candidates, src, crate::fork_osc::MIN_SPLIT_CHILD);
         let (w, h) = layout
             .panes
             .iter()
@@ -3167,7 +3343,11 @@ impl ChromeApp {
                     && (pos.abs_row as i64 - abs_row as i64).abs() <= 1 =>
             {
                 let next = n.saturating_add(1);
-                if next > 3 { 1 } else { next }
+                if next > 3 {
+                    1
+                } else {
+                    next
+                }
             }
             _ => 1,
         };
@@ -5122,6 +5302,7 @@ impl ApplicationHandler for ChromeApp {
                 return;
             }
         }
+        self.drain_ai(event_loop);
         self.sync_guest_holes();
         self.apply_update_events();
         if let Some(line) = chrome_status::take_submit() {
@@ -5839,6 +6020,7 @@ impl ApplicationHandler for ChromeApp {
                         return;
                     }
                 }
+                self.drain_ai(event_loop);
                 self.sync_guest_holes();
                 self.apply_update_events();
                 if let Some(line) = chrome_status::take_submit() {
@@ -6068,7 +6250,11 @@ impl ApplicationHandler for ChromeApp {
 /// glass, and SwiftUI traffic-light widgets. Rain presents ~60 Hz, so that
 /// query on every redraw pegs the main thread and the pane switch "freezes."
 fn paint_maximized(os_macos: bool, os_maximized: bool) -> bool {
-    if os_macos { false } else { os_maximized }
+    if os_macos {
+        false
+    } else {
+        os_maximized
+    }
 }
 
 /// Named key for warp editing. Option on macOS can remap `logical_key` to a

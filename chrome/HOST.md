@@ -46,3 +46,11 @@ use suzuri_chrome::{
 
 See `PARITY.md` for feature status. Release packaging ships the UI binary next
 to the host (see repo root `README.md` and `.github/workflows/release.yml`).
+
+## AI control (loopback HTTP)
+
+Chrome binds `127.0.0.1:0` at start and writes `{config_dir}/ai.json` (also
+`{config_dir}/ai/{pid}.json` per window). Pane PTYs get `SUZURI_CONTROL_URL`
+and `SUZURI_CONTROL_TOKEN`. Agents curl that — `GET /help`, `GET /tools`
+(no auth), `GET /v1/layout`, `POST /v1/call` — instead of MCP. Layout and
+mutations: `Authorization: Bearer <token>`.

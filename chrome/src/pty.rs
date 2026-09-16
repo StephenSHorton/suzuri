@@ -226,6 +226,9 @@ fn apply_host_env(cmd: &mut CommandBuilder, pane_id: u64) {
     cmd.env("SUZURI", "1");
     cmd.env("SUZURI_FORK_SPLIT", "1");
     cmd.env("SUZURI_PANE_ID", pane_id.to_string());
+    for (k, v) in crate::ai_control::pty_env() {
+        cmd.env(k, v);
+    }
 }
 
 /// Program + argv for the user's default interactive shell.

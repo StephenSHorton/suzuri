@@ -11,6 +11,7 @@
 // windowsgui host. Debug keeps a console for `cargo run` logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai_control;
 mod ansi;
 mod app;
 mod caffeine;
