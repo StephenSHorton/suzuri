@@ -195,11 +195,8 @@ func forkLaunchSpec(req forkPaneRequest) (bin string, args []string, env []strin
 	if p := strings.TrimSpace(req.prompt); p != "" {
 		args = append(args, "--", p)
 	}
-	env = []string{
-		"GROK_SKIP_SYNC=1",
-		"GROK_SKIP_REBUILD=1",
-		"GROK_DISABLE_AUTOUPDATER=1",
-	}
+	// The grok-fork launcher refuses GROK_SKIP_* / GROK_DISABLE_AUTOUPDATER.
+	env = []string{}
 	if strings.EqualFold(strings.TrimSpace(req.brand), "fork") {
 		env = append(env,
 			"GROK_PROCESS_BRAND=fork",

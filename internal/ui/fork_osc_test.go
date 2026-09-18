@@ -76,7 +76,11 @@ func TestForkLaunchSpec(t *testing.T) {
 	if len(args) < 2 || args[0] != "--session-id" || args[1] != "abc" {
 		t.Fatalf("args=%v", args)
 	}
-	if !strings.Contains(strings.Join(env, "\n"), "GROK_FORK=1") {
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "GROK_FORK=1") {
 		t.Fatalf("env=%v", env)
+	}
+	if strings.Contains(joined, "GROK_SKIP_") || strings.Contains(joined, "GROK_DISABLE_AUTOUPDATER") {
+		t.Fatalf("launcher forbids skip env: %v", env)
 	}
 }
