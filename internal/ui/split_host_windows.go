@@ -293,6 +293,7 @@ func (u *winUI) applyForkOSC(src *tab, req forkPaneRequest) {
 	if u.hwnd != 0 {
 		u.requestPaint()
 	}
+	log.Info("fork pane", "new", t.id, "bin", bin)
 }
 
 // closePaneUI closes a single pane (Ctrl+W).
@@ -450,76 +451,6 @@ func (u *winUI) focusPaneDir(dir int) {
 	} else {
 		u.computeActiveLayout()
 	}
-	if u.hwnd != 0 {
-		u.requestPaint()
-	}
-}
-
-func (u *winUI) applyForkOSC(src *tab, req forkPaneRequest) {
-	defer applog.Recover("applyForkOSC", false)
-	if u == nil || src == nil {
-		return
-	}
-	if u.paneCount() >= maxPanesTotal {
-		u.toast("max panes")
-		return
-	}
-	bin, args, env, errMsg := forkLaunchSpec(req)
-	if errMsg != "" {
-		u.toast(errMsg)
-		return
-	}
-	_, pg := u.pageByPaneID(src.id)
-	if pg == nil {
-		return
-	}
-	cols, rows := u.cols, u.rows
-	dir := splitVert
-	if g := u.focusedGeom(); g != nil && u.activeTab() == src {
-		dir = chooseForkSplitDir(g.cols, g.rows)
-		if dir == splitVert {
-			cols = g.cols / 2
-		} else {
-			rows = g.rows / 2
-		}
-	}
-	if cols < minPaneCols {
-		cols = minPaneCols
-	}
-	if rows < minPaneRows {
-		rows = minPaneRows
-	}
-	cwd := strings.TrimSpace(req.cwd)
-	if cwd == "" {
-		cwd = src.cwd
-	}
-	opts := tabOpts{
-		shell:    joinCommandLine(bin, args),
-		cwd:      cwd,
-		title:    forkTitle(req),
-		extraEnv: env,
-	}
-	t, err := newTab(u.nextTabID, cols, rows, opts)
-	if err != nil {
-		log.Error("fork pane failed", "err", err)
-		u.toast("fork failed")
-		return
-	}
-	u.nextTabID++
-	pg.focusID = src.id
-	if !pg.splitFocused(dir, t) {
-		t.close()
-		u.toast("fork failed")
-		return
-	}
-	u.tabs = append(u.tabs, t)
-	t.startWorkers(u)
-	u.selecting = false
-	src.sel.clear()
-	setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
-	u.syncChrome()
-	u.postLayoutSettle()
-	u.toast("fork " + t.displayTitle())
 	if u.hwnd != 0 {
 		u.requestPaint()
 	}

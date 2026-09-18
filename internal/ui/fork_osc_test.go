@@ -3,9 +3,21 @@
 package ui
 
 import (
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// absForkBin is an OS-absolute grok binary path. filepath.IsAbs("/usr/bin/x")
+// is false on Windows (needs a volume), so Unix fixtures cannot exercise the
+// allowlist there.
+func absForkBin(name string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(`C:\Users\test\bin`, name+".exe")
+	}
+	return "/usr/bin/" + name
+}
 
 func TestParseForkOSCBasic(t *testing.T) {
 	req, ok := parseForkOSCPayload([]byte("7880;fork=1;resume=abc-123;bin=/usr/bin/grok-fork"))
@@ -44,13 +56,13 @@ func TestParseForkOSCNewSession(t *testing.T) {
 }
 
 func TestAllowedForkBin(t *testing.T) {
-	if !allowedForkBin("/usr/bin/grok-fork") {
+	if !allowedForkBin(absForkBin("grok-fork")) {
 		t.Fatal("grok-fork")
 	}
-	if !allowedForkBin("/tmp/xai-grok-pager") {
+	if !allowedForkBin(absForkBin("xai-grok-pager")) {
 		t.Fatal("pager")
 	}
-	if allowedForkBin("grok-fork") || allowedForkBin("/bin/zsh") || allowedForkBin("/usr/bin/../bin/grok") {
+	if allowedForkBin("grok-fork") || allowedForkBin(absForkBin("zsh")) || allowedForkBin("/usr/bin/../bin/grok") {
 		t.Fatal("allowlist too open")
 	}
 }
@@ -67,10 +79,11 @@ func TestStripAndTakeFork(t *testing.T) {
 }
 
 func TestForkLaunchSpec(t *testing.T) {
+	want := absForkBin("grok-fork")
 	bin, args, env, err := forkLaunchSpec(forkPaneRequest{
-		bin: "/usr/bin/grok-fork", resume: "abc", newSession: true, brand: "fork",
+		bin: want, resume: "abc", newSession: true, brand: "fork",
 	})
-	if err != "" || bin != "/usr/bin/grok-fork" {
+	if err != "" || bin != want {
 		t.Fatalf("err=%s bin=%s", err, bin)
 	}
 	if len(args) < 2 || args[0] != "--session-id" || args[1] != "abc" {
