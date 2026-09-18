@@ -11,11 +11,11 @@ const shellMatrixIntensity = 0.16
 // shellMatrixAltScreenIntensity is used under alt-screen TUIs (Grok, vim, …).
 const shellMatrixAltScreenIntensity = 0.32
 
-// matrixLoopSpeedMin / Span: always-on rain (intro spawn stays faster).
+// Original loop rain (before we started slowing it). Intro spawn stays faster.
 const (
-	matrixLoopSpeedMin  = 0.16
-	matrixLoopSpeedSpan = 0.06 // + 0..8 → ~0.16–0.64
-	matrixLoopRateDiv   = 5.2
+	matrixLoopSpeedMin  = 0.22
+	matrixLoopSpeedSpan = 0.08 // + 0..8 → ~0.22–0.86
+	matrixLoopRateDiv   = 4.2
 )
 
 // effectiveShellMatrixIntensity is base rain strength × user opacity (0–1).

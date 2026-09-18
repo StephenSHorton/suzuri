@@ -161,6 +161,9 @@ func sessionEnv(base []string, extra ...string) []string {
 func applyGraphicsBrandEnv(env []string) []string {
 	env = setEnvIfEmpty(env, "TERM", "xterm-256color")
 	env = setEnvIfEmpty(env, "COLORTERM", "truecolor")
+	env = setEnvIfEmpty(env, "GROK_APPEARANCE", "dark")
+	env = setEnvIfEmpty(env, "LC_GROK_APPEARANCE", "dark")
+	env = setEnvIfEmpty(env, "COLORFGBG", "15;0")
 	// Advertise Kitty/Ghostty-class graphics so Grok emits pixel previews
 	// (Kitty APC) instead of metadata-only image chips.
 	env = setEnvIfEmpty(env, "TERM_PROGRAM", "ghostty")

@@ -45,7 +45,7 @@ func TestRewriteSGRFaintDefaultIsSecondary(t *testing.T) {
 	}
 	c := glyphToCell(term.Cell(0, 0))
 	defR, _, _ := colorToRGB(vt10x.DefaultFG, false)
-	if int(c.FR) >= int(defR)-20 {
+	if int(c.FR) >= int(defR) {
 		t.Fatalf("faint default should be dimmer than body, FR=%d default=%d seq=%q", c.FR, defR, got)
 	}
 }

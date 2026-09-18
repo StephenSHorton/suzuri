@@ -31,6 +31,9 @@ func SetShellANSIMap(mode string) {
 func colorToRGB(c vt10x.Color, bold bool) (r, g, b byte) {
 	switch c {
 	case vt10x.DefaultFG:
+		if chrome.TextR != 0 || chrome.TextG != 0 || chrome.TextB != 0 {
+			return chrome.TextR, chrome.TextG, chrome.TextB
+		}
 		return 220, 220, 220
 	case vt10x.DefaultBG, vt10x.DefaultCursor:
 		return 0, 0, 0
@@ -95,31 +98,28 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 	// as normal text with a skipped black default BG (invisible on rain).
 	fr, fg, fb := colorToRGB(g.FG, bold)
 	br, bg, bb := colorToRGB(g.BG, false)
-	// Truecolor SGR ignores the bold brighten path in colorToRGB (only ANSI
-	// 0–7 step up). Modest paint-time FG lift stands in for a bold face
-	// (Darwin often has none). Do NOT invent a selection-style background for
-	// bold alone — lots of TUIs use SGR 1 for emphasis (headers, markdown,
-	// ls dirs). Real list selection is SGR 7 reverse / explicit BG (below).
-	// Stamping a band on every bright bold cell made normal bold look selected.
 	if bold {
 		fr, fg, fb = brightenBoldRGB(fr, fg, fb)
 	}
-	// Reverse video always needs an opaque field. If the stored BG still
-	// resolves near-black (truecolor 0 collides with ANSI black; some TUIs
-	// reverse light-on-dark into dark-on-dark), force a light selection field
-	// so paint does not skip the fill under shell rain / transparent default BG.
-	if g.Mode&attrReverse != 0 && nearBlackRGB(br, bg, bb) {
-		br, bg, bb = 220, 220, 224
-		if nearBlackRGB(fr, fg, fb) {
-			// Both ends dark after convert — use dark ink on light field.
-			fr, fg, fb = 18, 18, 22
+	// Reverse needs an opaque field under rain. Suzuri is a dark host:
+	// inverting DefaultFG/DefaultBG to a white card (vt10x swaps 220 onto
+	// the BG) is what made Grok's bandless/minimal UI look white-washed.
+	// Use the theme panel + text instead. Explicit RGB reverse stays as-is
+	// unless the field would vanish (near-black / low contrast).
+	if g.Mode&attrReverse != 0 {
+		defaultRev := g.FG == vt10x.DefaultBG && g.BG == vt10x.DefaultFG
+		if defaultRev {
+			br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
+			fr, fg, fb = chrome.TextR, chrome.TextG, chrome.TextB
+		} else if nearBlackRGB(br, bg, bb) {
+			br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
+			if nearBlackRGB(fr, fg, fb) {
+				fr, fg, fb = chrome.TextR, chrome.TextG, chrome.TextB
+			}
+		} else if lowContrastRGB(fr, fg, fb, br, bg, bb) {
+			br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
+			fr, fg, fb = chrome.TextR, chrome.TextG, chrome.TextB
 		}
-	}
-	// Low-contrast reverse (dark slate on darker slate) also vanishes under
-	// rain; ensure a minimum field/ink split when reverse is set.
-	if g.Mode&attrReverse != 0 && lowContrastRGB(fr, fg, fb, br, bg, bb) {
-		br, bg, bb = 220, 220, 224
-		fr, fg, fb = 18, 18, 22
 	}
 	// Explicit non-default BGs paint as-is (no host floor-lift). Absolute
 	// floors collapse multi-tone hierarchy (paste chips, code panels, prompt

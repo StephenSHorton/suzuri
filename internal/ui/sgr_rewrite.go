@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/hinshun/vt10x"
+
+	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
 
 // sgrState rewrites CSI SGR so hinshun/vt10x can see Grok's theme:
@@ -219,8 +221,11 @@ func dim1(v int) int {
 }
 
 func dimDefaultFG() []int {
-	// ~55% of default paint FG (220) → readable secondary, not body-white.
-	return []int{38, 2, 121, 121, 121}
+	r, g, b := int(chrome.SoftR), int(chrome.SoftG), int(chrome.SoftB)
+	if r+g+b < 80 {
+		return []int{38, 2, 168, 166, 160}
+	}
+	return []int{38, 2, r, g, b}
 }
 
 func encodeSGR(nums []int) []byte {

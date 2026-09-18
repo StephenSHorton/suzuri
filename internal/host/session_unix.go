@@ -182,6 +182,17 @@ func quietShellEnv(shellPath string, args []string, base []string) (env []string
 	if getenv(env, "COLORTERM") == "" {
 		env = setEnv(env, "COLORTERM", "truecolor")
 	}
+	// Suzuri is a dark canvas. Without this, Grok follows macOS Light Mode
+	// (AppleInterfaceStyle) and loads grokday — every band paints white.
+	if getenv(env, "GROK_APPEARANCE") == "" {
+		env = setEnv(env, "GROK_APPEARANCE", "dark")
+	}
+	if getenv(env, "LC_GROK_APPEARANCE") == "" {
+		env = setEnv(env, "LC_GROK_APPEARANCE", "dark")
+	}
+	if getenv(env, "COLORFGBG") == "" {
+		env = setEnv(env, "COLORFGBG", "15;0")
+	}
 	// Advertise Kitty/Ghostty-class graphics so Grok emits pixel previews
 	// (Kitty APC) instead of metadata-only image chips. Suzuri implements
 	// the Kitty graphics receive path for prompt overlays.

@@ -56,13 +56,16 @@ func TestReverseVideoHighlightVisible(t *testing.T) {
 	}
 	for x := 0; x < 8; x++ {
 		c := glyphToCell(term.Cell(x, 0))
-		// After reverse: light-ish BG, dark-ish FG (not both black).
 		if c.BR == 0 && c.BG == 0 && c.BB == 0 {
 			t.Fatalf("cell %d reverse BG is black (highlight invisible) FR=%d,%d,%d",
 				x, c.FR, c.FG, c.FB)
 		}
+		// Dark host: default reverse is a panel band, not a white card.
+		if c.BR > 180 && c.BG > 180 && c.BB > 180 {
+			t.Fatalf("cell %d reverse is white-washed BR=%d,%d,%d FR=%d,%d,%d",
+				x, c.BR, c.BG, c.BB, c.FR, c.FG, c.FB)
+		}
 		if c.FR > 100 && c.BR > 100 {
-			// Both bright — reverse didn't separate ink from field.
 			t.Fatalf("cell %d reverse not contrasted FR=%d BR=%d", x, c.FR, c.BR)
 		}
 	}
