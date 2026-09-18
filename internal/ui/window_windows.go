@@ -99,6 +99,11 @@ func Run() error {
 		log.Warn("ai control http", "err", err)
 	} else {
 		ui.ai = srv
+		srv.Wake = func() {
+			if ui.hwnd != 0 {
+				win.PostMessage(ui.hwnd, wmSuzuriMCP, 0, 0)
+			}
+		}
 		log.Info("ai control", "url", srv.URL)
 	}
 	prof := config.FindProfile(cfg, cfg.ActiveProfile)
@@ -2172,6 +2177,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Skip blink repaints during frame drag/resize — they fight WM_PAINT
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
+			// Darwin drains AI control every ebiten Update. Windows only used
+			// to drain on MCP posts, so GET /v1/layout from a pane 504'd.
+			u.drainAI()
 			u.clearToastIfDue()
 			// Inject async clipboard paste results (image dump runs off-thread).
 			u.drainPendingPaste()
@@ -2373,10 +2381,12 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if active != win.WA_INACTIVE && u.alive.Load() {
 			// Refresh client size (may have changed while unfocused) via the
 			// deferred settle path — never ConPTY-resize on the activate stack.
+			// Skip settle when the size did not change: dual Grok + settle on
+			// every WM_ACTIVATE is the "clicked back → gone" hard-crash.
 			var rc win.RECT
 			if win.GetClientRect(hwnd, &rc) {
 				w, h := rc.Right-rc.Left, rc.Bottom-rc.Top
-				if w >= 2 && h >= 2 {
+				if w >= 2 && h >= 2 && (w != u.width || h != u.height) {
 					u.width, u.height = w, h
 					u.postLayoutSettle()
 				}

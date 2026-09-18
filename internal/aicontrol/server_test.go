@@ -102,8 +102,12 @@ func TestCallRoundtrip(t *testing.T) {
 	}
 	<-done
 	env := PtyEnv()
-	if len(env) != 2 {
+	if len(env) != 3 {
 		t.Fatalf("pty env %v", env)
+	}
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "SUZURI=1") || !strings.Contains(joined, "SUZURI_CONTROL_URL=") {
+		t.Fatalf("pty env missing host flag: %v", env)
 	}
 	path := filepath.Join(os.Getenv("LOCALAPPDATA"), "suzuri", "ai.json")
 	if _, err := os.Stat(path); err != nil {

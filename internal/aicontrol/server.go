@@ -26,6 +26,7 @@ import (
 const (
 	EnvURL   = "SUZURI_CONTROL_URL"
 	EnvToken = "SUZURI_CONTROL_TOKEN"
+	EnvHost  = "SUZURI"
 	helpText = `# Suzuri AI control
 
 Loopback HTTP for this suzuri window. Not MCP. Prefer curl.
@@ -37,6 +38,7 @@ Auth (required except GET /help and GET /tools):
 
 Discovery:
   $SUZURI_CONTROL_URL  (injected into every pane PTY)
+  $SUZURI=1            (injected; grok-fork sessions_open gates on this)
   {config_dir}/ai.json
   {config_dir}/ai/{pid}.json   (one file per window process)
 
@@ -100,11 +102,14 @@ func JSONErr(status int, msg string) Reply {
 type Server struct {
 	URL   string
 	Token string
-	jobs  chan Job
-	ln    net.Listener
-	srv   *http.Server
-	pid   int
-	stop  atomic.Bool
+	// Wake is called from the HTTP goroutine after a job is queued so the UI
+	// thread drains it. Windows posts WM_APP; Darwin already drains every frame.
+	Wake func()
+	jobs chan Job
+	ln   net.Listener
+	srv  *http.Server
+	pid  int
+	stop atomic.Bool
 }
 
 var advertised struct {
@@ -123,6 +128,7 @@ func PtyEnv() []string {
 	return []string{
 		EnvURL + "=" + advertised.url,
 		EnvToken + "=" + advertised.token,
+		EnvHost + "=1",
 	}
 }
 
@@ -255,6 +261,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	select {
 	case s.jobs <- job:
+		if wfn := s.Wake; wfn != nil {
+			wfn()
+		}
 	default:
 		writeJSON(w, 503, map[string]any{"error": "ui thread busy"})
 		return
