@@ -2,6 +2,23 @@ package ui
 
 import "testing"
 
+func TestAltViewportStartKeepsCursorVisible(t *testing.T) {
+	// Split-down: 84-row Grok painted in 40 rows. Cursor on the input (row 83)
+	// must window to the bottom, not the top of the conversation.
+	if g := altViewportStart(84, 40, 83); g != 44 {
+		t.Fatalf("bottom cursor start=%d want 44", g)
+	}
+	if g := altViewportStart(84, 40, 0); g != 0 {
+		t.Fatalf("top cursor start=%d want 0", g)
+	}
+	if g := altViewportStart(40, 40, 39); g != 0 {
+		t.Fatalf("same size start=%d want 0", g)
+	}
+	if g := altViewportStart(10, 40, 9); g != 0 {
+		t.Fatalf("smaller live start=%d want 0", g)
+	}
+}
+
 func TestScreenShiftedUp(t *testing.T) {
 	prev := []string{"a", "b", "c"}
 	cur := []string{"b", "c", "d"}

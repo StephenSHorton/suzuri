@@ -13,10 +13,10 @@ const defaultScrollbackMax = 5000
 
 // History line kinds for Warp-style command blocks.
 const (
-	histNormal byte = iota
-	histBlockRule  // horizontal rule above a command
-	histBlockCmd   // path + "❯ command" (primary); path is optional prefix
-	histImage      // host-rendered image (occupies span document rows)
+	histNormal    byte = iota
+	histBlockRule      // horizontal rule above a command
+	histBlockCmd       // path + "❯ command" (primary); path is optional prefix
+	histImage          // host-rendered image (occupies span document rows)
 )
 
 type histLine struct {
@@ -74,6 +74,25 @@ func snapshotScreenText(term vt10x.Terminal) []string {
 		out[y] = string(buf)
 	}
 	return out
+}
+
+// altViewportStart is the first live row to paint when an alt-screen TUI is
+// taller than the leaf (Windows often defers ConPTY resize while Grok streams).
+// Pin the window so the cursor — Grok's input — stays visible instead of
+// copying only the top of an 84-row buffer into a 40-row pane.
+func altViewportStart(liveRows, viewportRows, cursorY int) int {
+	if liveRows <= viewportRows || viewportRows < 1 {
+		return 0
+	}
+	start := cursorY + 1 - viewportRows
+	if start < 0 {
+		start = 0
+	}
+	maxStart := liveRows - viewportRows
+	if start > maxStart {
+		start = maxStart
+	}
+	return start
 }
 
 func snapshotScreenCells(term vt10x.Terminal) [][]cellPix {
@@ -762,11 +781,12 @@ func (s *scrollback) viewCells(term vt10x.Terminal, viewportRows int) [][]cellPi
 
 	if term.Mode()&vt10x.ModeAltScreen != 0 {
 		live := snapshotScreenCells(term)
+		start := altViewportStart(len(live), viewportRows, term.Cursor().Y)
 		out := make([][]cellPix, viewportRows)
 		for i := 0; i < viewportRows; i++ {
 			row := blankRow()
-			if i < len(live) {
-				copy(row, live[i])
+			if src := start + i; src < len(live) {
+				copy(row, live[src])
 			}
 			out[i] = row
 		}

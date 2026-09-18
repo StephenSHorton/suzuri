@@ -86,6 +86,13 @@ func TabSpinnerFrame() string {
 	return g.Spin[i]
 }
 
+// TabBusyMark is the pane-title activity prefix. Uses the font-probed pack
+// (braille / geometric / ASCII) — never a hardcoded dotted circle that many
+// Windows mono faces draw as an empty tofu box.
+func TabBusyMark(alt bool) string {
+	return busyGlyph(tabGlyphs(), alt)
+}
+
 func tabGlyphs() TabGlyphSet {
 	tabGlyphMu.RLock()
 	defer tabGlyphMu.RUnlock()

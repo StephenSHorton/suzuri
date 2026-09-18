@@ -2234,8 +2234,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				} else if !u.layoutDeferredAt.IsZero() &&
 					time.Since(u.layoutDeferredAt) >= layoutDeferMaxWait {
 					u.relayoutActivePaintOnly()
-					u.requestPaint()
-					// Re-arm max-wait so we keep refreshing paint, not ConPTY.
+					// Geometry only. Blink already paints; an extra Invalidate
+					// here dual-Grok-stormed GDI every 1.5s while streaming.
 					u.layoutDeferredAt = time.Now()
 					if u.spinTick%64 == 0 {
 						log.Info("layout max-wait paint-only (still busy, skip ConPTY)",
@@ -2272,9 +2272,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				// Palette/help float over a live shell — need full composite.
 				u.requestPaint()
 			} else if u.needsShellAnimPaint() {
-				// Ambient / alt caret / intro: always full paint.
-				// Never call requestInputPaint here — sticky input-only freezes ambient.
-				u.requestPaint()
+				// Ambient / alt caret / intro. Dual alt-screen Grok at 25fps
+				// full blit is the other GDI hard-kill; drop to ~6fps then.
+				if u.altScreenCount() >= 2 {
+					if u.spinTick%uint64(tabSpinEveryNTicks*4) == 0 {
+						u.requestPaint()
+					}
+				} else {
+					u.requestPaint()
+				}
 			} else {
 				// Idle shell, no ambient: only pulse the Warp caret.
 				u.requestInputPaint()
@@ -2392,10 +2398,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				}
 			}
 		}
-		// Always repaint on focus change: blinkLoop only ticks while
-		// foreground, so without this the caret freezes mid-frame instead
-		// of hiding when we lose focus (caretAlpha → 0).
-		if u.alive.Load() {
+		// Do not full-repaint on deactivate. Dual Grok + rain + InvalidateRect
+		// here is the "clicked away → process gone" GDI hard-kill (no Go panic).
+		// Caret freeze while unfocused is cheaper than taking the host down.
+		if active != win.WA_INACTIVE && u.alive.Load() {
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
@@ -4637,7 +4643,7 @@ func (u *winUI) paintPaneTitles(hdc win.HDC, layouts []paneGeom) {
 				title = fmt.Sprintf("shell %d", g.pane.id+1)
 			}
 			if g.pane.busy() {
-				title = "◌ " + title
+				title = chrome.TabBusyMark(g.pane.altScreen()) + title
 			}
 		}
 		maxChars := int(g.w/cw) - 2
@@ -5639,6 +5645,19 @@ func (u *winUI) activeAltScreen() bool {
 	}
 	t := u.activeTab()
 	return t != nil && t.altScreen()
+}
+
+func (u *winUI) altScreenCount() int {
+	if u == nil {
+		return 0
+	}
+	n := 0
+	for _, t := range u.allPanes() {
+		if t != nil && t.altScreen() {
+			n++
+		}
+	}
+	return n
 }
 
 // anyAltScreenCursor is true when a visible pane is on alt-screen with a
