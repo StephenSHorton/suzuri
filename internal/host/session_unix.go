@@ -178,6 +178,7 @@ func mustWd() string {
 // bash: inject --rcfile that sources bashrc then sets PS1.
 func quietShellEnv(shellPath string, args []string, base []string) (env []string, zdot string, err error) {
 	env = append([]string(nil), base...)
+	env = stripNoColor(env)
 	env = setEnv(env, "TERM", "xterm-256color")
 	if getenv(env, "COLORTERM") == "" {
 		env = setEnv(env, "COLORTERM", "truecolor")

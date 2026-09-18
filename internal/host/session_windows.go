@@ -159,6 +159,7 @@ func sessionEnv(base []string, extra ...string) []string {
 // applyGraphicsBrandEnv sets TERM / COLORTERM / TERM_PROGRAM / KITTY_WINDOW_ID
 // only when absent (matches unix quietShellEnv). User or extraEnv values win.
 func applyGraphicsBrandEnv(env []string) []string {
+	env = stripNoColor(env)
 	env = setEnvIfEmpty(env, "TERM", "xterm-256color")
 	env = setEnvIfEmpty(env, "COLORTERM", "truecolor")
 	env = setEnvIfEmpty(env, "GROK_APPEARANCE", "dark")
