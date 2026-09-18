@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,6 +79,10 @@ type tab struct {
 	// lastCols/lastRows: last ConPTY/VT size applied (skip no-op Resize — rapid
 	// focus/layout thrash was hard-crashing the host via ResizePseudoConsole).
 	lastCols, lastRows int
+	// resizePending: native PTY resize was deferred (Windows hot I/O). VT already
+	// matches wantCols/wantRows; retry when quiet so Grok gets SIGWINCH.
+	resizePending      bool
+	wantCols, wantRows int
 	// kitty tracks progressive keyboard enhancement (Shift+Enter → CSI-u for Grok).
 	kitty kittyKeyboard
 	// kittyGfx: Kitty graphics protocol images (Grok prompt previews, inline media).
@@ -570,15 +575,19 @@ func (t *tab) resize(cols, rows int) {
 	// Windows: ResizePseudoConsole while a pane streams (Grok alt-screen) has
 	// hard-killed the host with no Go panic. Skip ConPTY and leave lastCols/
 	// lastRows unchanged so a later quiet layout settle retries the native call.
-	// Production 0.9.104 logged ok=false then still called conpty.Resize — never again.
+	// Darwin TIOCSWINSZ is safe during I/O — always deliver SIGWINCH or Grok
+	// stays letterboxed in the old split width after close.
 	if t.sess != nil {
-		if !ok {
+		skipNative := runtime.GOOS == "windows" && !ok
+		if skipNative {
 			log.Info("tab.resize skip ConPTY (hot I/O)",
 				"tab", t.id, "cols", cols, "rows", rows,
 				"from", fmt.Sprintf("%dx%d", t.lastCols, t.lastRows),
 				"alt", alt)
 			applog.Trail("tab.resize skip",
 				"tab", t.id, "cols", cols, "rows", rows, "reason", "hotIO")
+			t.resizePending = true
+			t.wantCols, t.wantRows = cols, rows
 			return
 		}
 		if err := t.sess.Resize(cols, rows); err != nil {
@@ -587,10 +596,25 @@ func (t *tab) resize(cols, rows int) {
 					"tab", t.id, "cols", cols, "rows", rows)
 				applog.Trail("tab.resize skip",
 					"tab", t.id, "cols", cols, "rows", rows, "reason", "sessionBusy")
+				t.resizePending = true
+				t.wantCols, t.wantRows = cols, rows
 				return
 			}
 			log.Warn("pty resize failed", "tab", t.id, "cols", cols, "rows", rows, "err", err)
 		}
 	}
+	t.resizePending = false
 	t.lastCols, t.lastRows = cols, rows
+}
+
+// flushPendingResize retries a deferred native PTY resize once I/O is quiet.
+func (t *tab) flushPendingResize() {
+	if t == nil || !t.resizePending {
+		return
+	}
+	if t.wantCols < 1 || t.wantRows < 1 {
+		t.resizePending = false
+		return
+	}
+	t.resize(t.wantCols, t.wantRows)
 }

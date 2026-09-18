@@ -2296,6 +2296,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 		u.applyLayoutAfterSizeMove(hwnd)
+		for _, t := range u.allPanes() {
+			if t != nil {
+				t.flushPendingResize()
+			}
+		}
 		return 0
 
 	case wmSuzuriSaveFinish:

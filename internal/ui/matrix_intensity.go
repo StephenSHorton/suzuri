@@ -6,12 +6,18 @@ import "github.com/StephenSHorton/suzuri/internal/config"
 
 // shellMatrixIntensity is how bright persistent shell rain is vs settings/intro
 // (quiet backdrop, not a curtain). Multiplied by config ShellMatrixOpacity.
-const shellMatrixIntensity = 0.20
+const shellMatrixIntensity = 0.10
 
 // shellMatrixAltScreenIntensity is used under alt-screen TUIs (Grok, vim, …).
-// Sparse default-bg cells make 0.20 nearly invisible; slightly higher so the
-// underlay still reads while normal shell rain stays quiet.
-const shellMatrixAltScreenIntensity = 0.48
+// Keep this well below conversation text so empty TUI cells don't glow.
+const shellMatrixAltScreenIntensity = 0.16
+
+// matrixLoopSpeedMin / Span: cells/frame-ish for always-on rain (slower than intro).
+const (
+	matrixLoopSpeedMin  = 0.07
+	matrixLoopSpeedSpan = 0.025 // + 0..8 → ~0.07–0.27
+	matrixLoopRateDiv   = 9.0
+)
 
 // effectiveShellMatrixIntensity is base rain strength × user opacity (0–1).
 func effectiveShellMatrixIntensity(cfg config.Config, altScreen bool) float64 {
@@ -25,7 +31,7 @@ func effectiveShellMatrixIntensity(cfg config.Config, altScreen bool) float64 {
 // settingsAmbientShowcaseIntensity is brighter than quiet shell ambient so the
 // chosen Ambient style reads clearly behind the settings card (matte + modal).
 func settingsAmbientShowcaseIntensity(cfg config.Config) float64 {
-	// ~3.5× quiet shell rain (0.20 → ~0.70 at full opacity), clamped.
+	// ~3.5× quiet shell rain, clamped.
 	v := effectiveShellMatrixIntensity(cfg, false) * 3.5
 	if v > 1 {
 		return 1

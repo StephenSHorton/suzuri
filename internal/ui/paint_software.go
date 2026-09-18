@@ -7,9 +7,9 @@ import (
 	"image/color"
 	"image/draw"
 
+	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
 	"golang.org/x/image/math/fixed"
-	xdraw "golang.org/x/image/draw"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
@@ -126,22 +126,22 @@ func (p *softwarePainter) close() {
 
 // paintOpts controls layered chrome/intro/shell paint.
 type paintOpts struct {
-	Shell        [][]cellPix
-	Chrome       [][]cellPix
-	Overlay      [][]cellPix
-	PadY         int
-	ShellBot     int
-	CurX, CurY   int
-	CurVis       bool
-	CurAlpha     float64
-	DimShell     bool // full-shell dim matte (settings/splash/confirm)
-	SolidPanel   bool // fill ALL default-bg overlay cells (dim modals only)
+	Shell      [][]cellPix
+	Chrome     [][]cellPix
+	Overlay    [][]cellPix
+	PadY       int
+	ShellBot   int
+	CurX, CurY int
+	CurVis     bool
+	CurAlpha   float64
+	DimShell   bool // full-shell dim matte (settings/splash/confirm)
+	SolidPanel bool // fill ALL default-bg overlay cells (dim modals only)
 	// SolidInterior fills default-bg holes only inside the card bbox (first/last
 	// non-transparent cells). Side gutters stay transparent — use for workspace.
 	SolidInterior bool
 	SettingsOpen  bool
 	// Intro / underlay (MatrixCells paint over the shell field after the grid).
-	MatrixCells   []rainCell
+	MatrixCells []rainCell
 	// ShellMatrixCells: quiet always-on rain/grain/waves UNDER shell glyphs.
 	ShellMatrixCells []rainCell
 	// CRTScanlines: 0..1 intensity for horizontal scanlines + soft side vignette.
@@ -595,6 +595,16 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 		dr, mask, maskp, _, ok := face.Glyph(fixed.P(px, py+p.ascent), r)
 		if !ok {
 			continue
+		}
+		cell := image.Rect(px, py, px+p.cellW, py+p.cellH)
+		clipped := dr.Intersect(cell)
+		if clipped.Empty() {
+			return
+		}
+		if clipped != dr {
+			maskp.X += clipped.Min.X - dr.Min.X
+			maskp.Y += clipped.Min.Y - dr.Min.Y
+			dr = clipped
 		}
 		col := image.NewUniform(color.RGBA{R: fr, G: fg, B: fb, A: 255})
 		draw.DrawMask(dst, dr, col, image.Point{}, mask, maskp, draw.Over)

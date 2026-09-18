@@ -123,13 +123,15 @@ func matrixRainCells(cols, rows int, mode matrixPaintMode, t0 time.Time, spawnFo
 	out := make([]rainCell, 0, cols*trail/2)
 	for col := 0; col < cols; col++ {
 		seed := uint32(col)*0x9E3779B9 ^ 0xA5A5A5A5
-		speed := 0.22 + float64(seed%9)*0.08
+		speed := matrixLoopSpeedMin + float64(seed%9)*matrixLoopSpeedSpan
+		rateDiv := matrixLoopRateDiv
 		if mode == matrixSpawn || mode == matrixWindDown {
 			speed = 0.50 + float64(seed%7)*0.10
+			rateDiv = 4.2
 		}
 		phase := float64(seed%1000) / 17.0
 		period := float64(rows + trail + 4)
-		rate := speed * float64(rows) / 4.2
+		rate := speed * float64(rows) / rateDiv
 
 		var head int
 		switch mode {
@@ -162,7 +164,11 @@ func matrixRainCells(cols, rows int, mode matrixPaintMode, t0 time.Time, spawnFo
 					continue
 				}
 			}
-			gi := int(seed>>3) + yCell*3 + int(t*12) + i*7
+			flicker := t * 4
+			if mode != matrixLoop {
+				flicker = t * 12
+			}
+			gi := int(seed>>3) + yCell*3 + int(flicker) + i*7
 			if gi < 0 {
 				gi = -gi
 			}
@@ -307,8 +313,8 @@ func rippleCells(cols, rows, cellW, cellH int, t0 time.Time, spawnFor time.Durat
 				continue
 			}
 			out = append(out, rainCell{
-				X: gx * 2, // fullwidth columns → mono cell x
-				Y: gy,
+				X:  gx * 2, // fullwidth columns → mono cell x
+				Y:  gy,
 				Ch: rippleGlyphRunes[h.glyph%len(rippleGlyphRunes)],
 				FR: fr, FG: fg, FB: fb,
 			})

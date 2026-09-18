@@ -717,6 +717,11 @@ drained:
 			u.markChromeDirty()
 		}
 	}
+	for _, t := range u.allPanes() {
+		if t != nil {
+			t.flushPendingResize()
+		}
+	}
 	u.handleResize()
 	u.handleMouse()
 	u.handleKeys()

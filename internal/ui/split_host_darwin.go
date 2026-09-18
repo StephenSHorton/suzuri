@@ -5,6 +5,7 @@ package ui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/log"
 	"github.com/hajimehoshi/ebiten/v2"
@@ -208,6 +209,7 @@ func (u *macUI) splitActive(dir splitDir) {
 	ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
 	u.syncChrome()
 	u.applyClientSize(u.width, u.height)
+	u.postLayoutSettle()
 	if dir == splitVert {
 		u.toast("split right")
 	} else {
@@ -280,6 +282,7 @@ func (u *macUI) applyForkOSC(src *tab, req forkPaneRequest) {
 	ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
 	u.syncChrome()
 	u.applyClientSize(u.width, u.height)
+	u.postLayoutSettle()
 	u.toast("fork " + t.displayTitle())
 	log.Info("fork pane", "new", t.id, "bin", bin)
 }
@@ -312,8 +315,29 @@ func (u *macUI) closePaneUI(paneID int, interactive bool) {
 	}
 	u.syncChrome()
 	u.applyClientSize(u.width, u.height)
+	u.postLayoutSettle()
 	u.toast(fmt.Sprintf("%d panes", pg.leafCount()))
 	u.publishBridgeSnapshot()
+}
+
+// postLayoutSettle retries applyClientSize after PTY I/O has likely gone quiet
+// so alt-screen apps (Grok) get SIGWINCH after split/close.
+func (u *macUI) postLayoutSettle() {
+	if u == nil || u.jobs == nil {
+		return
+	}
+	go func() {
+		time.Sleep(conPtyIOQuiet + 80*time.Millisecond)
+		select {
+		case u.jobs <- func() {
+			if u == nil || !u.alive.Load() {
+				return
+			}
+			u.applyClientSize(u.width, u.height)
+		}:
+		default:
+		}
+	}()
 }
 
 // closePageAt removes a chrome page and all its panes.

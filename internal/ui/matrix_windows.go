@@ -112,7 +112,7 @@ func (u *winUI) paintDimMatrixIntensity(hdc win.HDC, rect win.RECT, top, bot int
 	// Theme roles (updated by ApplyTheme / settings preview).
 	hr, hg, hb := chrome.TextR, chrome.TextG, chrome.TextB // head — bright fg
 	pr, pg, pb := chrome.PrimR, chrome.PrimG, chrome.PrimB // body — accent
-	dr, dg, db := chrome.DimR, chrome.DimG, chrome.DimB   // fade into matte
+	dr, dg, db := chrome.DimR, chrome.DimG, chrome.DimB    // fade into matte
 	sr, sg, sb := chrome.SoftR, chrome.SoftG, chrome.SoftB
 
 	t := time.Since(t0).Seconds()
@@ -136,15 +136,16 @@ func (u *winUI) paintDimMatrixIntensity(hdc win.HDC, rect win.RECT, top, bot int
 	for col := 0; col < cols; col++ {
 		seed := uint32(col)*0x9E3779B9 ^ 0xA5A5A5A5
 		// Settings overlay: full speed range including slow streams.
-		speed := 0.22 + float64(seed%9)*0.08
+		speed := matrixLoopSpeedMin + float64(seed%9)*matrixLoopSpeedSpan
+		rateDiv := matrixLoopRateDiv
 		if mode == matrixSpawn || mode == matrixWindDown {
 			// Intro: no slow tail — streams must clear soon after spawn ends.
-			// Floor ~0.50 drops the lowest ~third of the settings distribution.
 			speed = 0.50 + float64(seed%7)*0.10 // ~0.50–1.10
+			rateDiv = 4.2
 		}
 		phase := float64(seed%1000) / 17.0
 		period := float64(rows + trail + 4)
-		rate := speed * float64(rows) / 4.2 // head cells / second
+		rate := speed * float64(rows) / rateDiv
 
 		var head int
 		switch mode {
@@ -188,7 +189,11 @@ func (u *winUI) paintDimMatrixIntensity(hdc win.HDC, rect win.RECT, top, bot int
 					continue
 				}
 			}
-			gi := int(seed>>3) + yCell*3 + int(t*12) + i*7
+			flicker := t * 4
+			if mode != matrixLoop {
+				flicker = t * 12
+			}
+			gi := int(seed>>3) + yCell*3 + int(flicker) + i*7
 			if gi < 0 {
 				gi = -gi
 			}
@@ -201,4 +206,3 @@ func (u *winUI) paintDimMatrixIntensity(hdc win.HDC, rect win.RECT, top, bot int
 	}
 	return drew
 }
-

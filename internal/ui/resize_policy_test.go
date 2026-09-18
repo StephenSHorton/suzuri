@@ -78,6 +78,19 @@ func TestTabResizeNoSessionUpdatesVTWhenHot(t *testing.T) {
 	if tab.lastCols != 80 || tab.lastRows != 24 {
 		t.Fatalf("no-sess resize should update last size, got %d×%d", tab.lastCols, tab.lastRows)
 	}
+}
+
+func TestFlushPendingResizeClearsWhenNoSession(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(40, 20))
+	tab := &tab{term: term, lastCols: 40, lastRows: 20, resizePending: true, wantCols: 80, wantRows: 24}
+	tab.alive.Store(true)
+	tab.flushPendingResize()
+	if tab.resizePending {
+		t.Fatal("pending should clear without a session")
+	}
+	if tab.lastCols != 80 || tab.lastRows != 24 {
+		t.Fatalf("flush size %d×%d", tab.lastCols, tab.lastRows)
+	}
 	c, r := term.Size()
 	if c != 80 || r != 24 {
 		t.Fatalf("term size %d×%d want 80×24", c, r)
