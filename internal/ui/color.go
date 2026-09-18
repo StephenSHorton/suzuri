@@ -142,6 +142,12 @@ func nearBlackRGB(r, g, b byte) bool {
 	return r < 28 && g < 28 && b < 28
 }
 
+// cellBGChromaKey: rain shows through (GPU chrome skips all-channels < 0.09;
+// GrokNight canvas 26,27,38 is a slab on opaque CPU fills).
+func cellBGChromaKey(r, g, b byte) bool {
+	return r < 42 && g < 42 && b < 42
+}
+
 // lowContrastRGB reports FG and BG that are too close to distinguish as a band.
 func lowContrastRGB(fr, fg, fb, br, bg, bb byte) bool {
 	dr := absByte(fr, br)

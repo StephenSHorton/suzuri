@@ -157,6 +157,18 @@ func TestPasteChipBGPreserved(t *testing.T) {
 	}
 }
 
+func TestGrokCanvasBGIsChromaKeyed(t *testing.T) {
+	if !cellBGChromaKey(0, 0, 0) {
+		t.Fatal("Reset black")
+	}
+	if !cellBGChromaKey(26, 27, 38) {
+		t.Fatal("GrokNight canvas 26,27,38 must show rain (GPU underlay)")
+	}
+	if cellBGChromaKey(41, 46, 66) {
+		t.Fatal("GrokNight highlight 41,46,66 is a real band")
+	}
+}
+
 // Default-black cells stay pure black so paint can leave rain visible.
 func TestDefaultBGStaysTransparentForRain(t *testing.T) {
 	term := vt10x.New(vt10x.WithSize(8, 2))

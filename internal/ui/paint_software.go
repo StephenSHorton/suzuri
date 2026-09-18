@@ -236,10 +236,7 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 				bg = blendByte(bg, cell.FG, a)
 				bb = blendByte(bb, cell.FB, a)
 			}
-			// Default black / Reset BG: skip fill so rain and the watermark show through.
-			if br != 0 || bg != 0 || bb != 0 {
-				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
-			}
+			paintCellBackground(dst, px, py, cw, ch, br, bg, bb)
 			if cell.Ch != 0 && cell.Ch != ' ' {
 				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
 			}
@@ -655,9 +652,7 @@ func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g pan
 				bg = blendByte(bg, cell.FG, a)
 				bb = blendByte(bb, cell.FB, a)
 			}
-			if br != 0 || bg != 0 || bb != 0 {
-				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
-			}
+			paintCellBackground(dst, px, py, cw, ch, br, bg, bb)
 			if cell.Ch != 0 && cell.Ch != ' ' {
 				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
 			}
@@ -1064,6 +1059,42 @@ func max(a, b int) int {
 func isHalfwidthKatakana(r rune) bool {
 	// U+FF61–FF9F halfwidth forms (incl. ｱ-ﾝ used in matrix rain).
 	return r >= 0xFF61 && r <= 0xFF9F
+}
+
+// GPU paints remaining cell backgrounds at 0.85 over the rain underlay.
+const cellBGOverAlpha = 0.85
+
+func paintCellBackground(dst *image.RGBA, x, y, w, h int, r, g, b byte) {
+	if cellBGChromaKey(r, g, b) {
+		return
+	}
+	fillRectRGBAOver(dst, x, y, w, h, r, g, b, cellBGOverAlpha)
+}
+
+func fillRectRGBAOver(dst *image.RGBA, x, y, w, h int, r, g, b byte, a float64) {
+	if dst == nil || a <= 0 {
+		return
+	}
+	if a >= 1 {
+		fillRectRGBA(dst, x, y, w, h, r, g, b)
+		return
+	}
+	bounds := dst.Bounds()
+	rect := image.Rect(x, y, x+w, y+h).Intersect(bounds)
+	if rect.Empty() {
+		return
+	}
+	ia := 1 - a
+	sr, sg, sb := float64(r)*a, float64(g)*a, float64(b)*a
+	for py := rect.Min.Y; py < rect.Max.Y; py++ {
+		for px := rect.Min.X; px < rect.Max.X; px++ {
+			i := dst.PixOffset(px, py)
+			dst.Pix[i+0] = byte(sr + float64(dst.Pix[i+0])*ia)
+			dst.Pix[i+1] = byte(sg + float64(dst.Pix[i+1])*ia)
+			dst.Pix[i+2] = byte(sb + float64(dst.Pix[i+2])*ia)
+			dst.Pix[i+3] = 255
+		}
+	}
 }
 
 func fillRectRGBA(dst *image.RGBA, x, y, w, h int, r, g, b byte) {
