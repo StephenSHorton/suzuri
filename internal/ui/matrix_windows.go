@@ -135,7 +135,7 @@ func (u *winUI) paintDimMatrixIntensity(hdc win.HDC, rect win.RECT, top, bot int
 
 	for col := 0; col < cols; col++ {
 		seed := uint32(col)*0x9E3779B9 ^ 0xA5A5A5A5
-		if mode == matrixLoop && seed%100 < 51 {
+		if mode == matrixLoop && seed%100 < 66 {
 			continue
 		}
 		// Settings overlay: full speed range including slow streams.

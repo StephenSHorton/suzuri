@@ -7,6 +7,30 @@ import (
 	"github.com/hinshun/vt10x"
 )
 
+func TestRewriteSGRKeepsCombinedFgBg(t *testing.T) {
+	var s sgrState
+	in := []byte("\x1b[38;2;192;202;245;48;2;26;27;38mX")
+	got := s.rewrite(in)
+	if s.faint {
+		t.Fatalf("48;2 must not set faint: %q", got)
+	}
+	if !bytes.Contains(got, []byte("38;2;192;202;245")) {
+		t.Fatalf("lost fg: %q", got)
+	}
+	if !bytes.Contains(got, []byte("48;2;26;27;38")) {
+		t.Fatalf("lost bg (white-wash): %q", got)
+	}
+	term := vt10x.New(vt10x.WithSize(8, 2))
+	if _, err := term.Write(got); err != nil {
+		t.Fatal(err)
+	}
+	c := glyphToCell(term.Cell(0, 0))
+	if c.BR < 20 || c.BR > 40 || c.FR < 170 {
+		t.Fatalf("expected tokyonight-ish cell FR=%d,%d,%d BR=%d,%d,%d seq=%q",
+			c.FR, c.FG, c.FB, c.BR, c.BG, c.BB, got)
+	}
+}
+
 func TestRewriteSGRColonTruecolor(t *testing.T) {
 	var s sgrState
 	got := s.rewrite([]byte("\x1b[38:2:40:50:60mX"))

@@ -3916,6 +3916,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		ScrollTrack:      scrollTrack,
 		ShowInput:        false, // always paint bars via layout (per-pane or focused)
 		CursorStyle:      int(u.cfg.Cursor),
+		FillDefaultBG:    tab.altScreen(),
 	}
 	opts.InputPrompt = inOpts.prompt
 	opts.InputLines = inOpts.lines
@@ -4142,7 +4143,7 @@ func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
 	}
 	cur := t.term.Cursor()
 	curVis := t.altScreen() && t.term.CursorVisible() && g.focused
-	u.painter.paintPaneGrid(u.fb, grid, g, cur.X, cur.Y, curVis, curAlpha)
+	u.painter.paintPaneGrid(u.fb, grid, g, cur.X, cur.Y, curVis, curAlpha, t.altScreen())
 	if !t.altScreen() {
 		vis := t.sb.visibleImages(t.term, viewRows)
 		u.painter.paintPaneImages(u.fb, vis, g)

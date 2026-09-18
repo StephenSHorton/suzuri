@@ -127,6 +127,20 @@ func (s *sgrState) rewriteSGR(params string) []byte {
 			}
 			out = append(out, 38, 2, r, g, b)
 			i = n
+		case 48:
+			// Combined CSI is 38;2;r;g;b;48;2;r;g;b — the "2" after 48 is
+			// truecolor, NOT SGR faint. Eating it flattened Grok's bands.
+			r, g, b, n, parsed := takeSGRColor(nums, i)
+			if !parsed {
+				out = append(out, a)
+				i++
+				break
+			}
+			out = append(out, 48, 2, r, g, b)
+			i = n
+		case 49:
+			out = append(out, 49)
+			i++
 		default:
 			if a >= 30 && a <= 37 {
 				r, g, b := ansi16RGB(a - 30)
@@ -221,9 +235,10 @@ func dim1(v int) int {
 }
 
 func dimDefaultFG() []int {
-	r, g, b := int(chrome.SoftR), int(chrome.SoftG), int(chrome.SoftB)
+	// 55% of body ink — chrome.Soft on high_contrast is #e0e0e0, useless.
+	r, g, b := dimRGB(int(chrome.TextR), int(chrome.TextG), int(chrome.TextB))
 	if r+g+b < 80 {
-		return []int{38, 2, 168, 166, 160}
+		return []int{38, 2, 140, 140, 140}
 	}
 	return []int{38, 2, r, g, b}
 }

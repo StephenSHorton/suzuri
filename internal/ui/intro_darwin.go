@@ -123,8 +123,8 @@ func matrixRainCells(cols, rows int, mode matrixPaintMode, t0 time.Time, spawnFo
 	out := make([]rainCell, 0, cols*trail/2)
 	for col := 0; col < cols; col++ {
 		seed := uint32(col)*0x9E3779B9 ^ 0xA5A5A5A5
-		// Loop mode: keep ~49% of columns (30% cut, then 30% of remainder).
-		if mode == matrixLoop && seed%100 < 51 {
+		// Loop mode: ~34% of columns remain (30% then 30% of remainder).
+		if mode == matrixLoop && seed%100 < 66 {
 			continue
 		}
 		speed := matrixLoopSpeedMin + float64(seed%9)*matrixLoopSpeedSpan

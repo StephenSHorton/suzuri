@@ -164,6 +164,9 @@ type paintOpts struct {
 	InputGhost    string // soft Tab-completion preview after caret
 	ShowInput     bool
 	CursorStyle   int // config.CursorStyle as int to avoid import cycle issues — use values 0/1/2
+	// FillDefaultBG paints Reset/default-black cells with Void so alt-screen
+	// TUIs (Grok) get a real canvas instead of rain + white ink.
+	FillDefaultBG bool
 	// Scrollback-attached images (primary buffer only; alt-screen leaves empty).
 	Images []visImage
 }
@@ -236,9 +239,12 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 				bg = blendByte(bg, cell.FG, a)
 				bb = blendByte(bb, cell.FB, a)
 			}
-			// Default black BG: leave watermark visible (skip fill).
+			// Default black BG: leave watermark visible (skip fill) unless
+			// an alt-screen TUI needs an opaque canvas.
 			if br != 0 || bg != 0 || bb != 0 {
 				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
+			} else if o.FillDefaultBG {
+				fillRectRGBA(dst, px, py, cw, ch, chrome.VoidR, chrome.VoidG, chrome.VoidB)
 			}
 			if cell.Ch != 0 && cell.Ch != ' ' {
 				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
@@ -619,7 +625,7 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 // paintPaneGrid draws a VT cell grid into a pane's content rect.
 // Does not stamp a solid black card — shell band / always-on rain already
 // filled the field (Windows blitGrid: default black BG leaves rain visible).
-func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64) {
+func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64, fillDefault bool) {
 	if dst == nil || p == nil || g.w < 1 || g.h < 1 {
 		return
 	}
@@ -655,9 +661,10 @@ func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g pan
 				bg = blendByte(bg, cell.FG, a)
 				bb = blendByte(bb, cell.FB, a)
 			}
-			// Default black BG: leave shell rain / watermark visible (skip fill).
 			if br != 0 || bg != 0 || bb != 0 {
 				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
+			} else if fillDefault {
+				fillRectRGBA(dst, px, py, cw, ch, chrome.VoidR, chrome.VoidG, chrome.VoidB)
 			}
 			if cell.Ch != 0 && cell.Ch != ' ' {
 				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
