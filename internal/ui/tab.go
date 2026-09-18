@@ -87,6 +87,8 @@ type tab struct {
 	kitty kittyKeyboard
 	// kittyGfx: Kitty graphics protocol images (Grok prompt previews, inline media).
 	kittyGfx *kittyGfxState
+	// sgr rewrites colon-truecolor + SGR 2 (faint) before vt10x.
+	sgr sgrState
 
 	// Warp-bar command queue: when a job is still running, further Enter
 	// submits wait here instead of dumping into the live process stdin.
@@ -605,6 +607,17 @@ func (t *tab) resize(cols, rows int) {
 	}
 	t.resizePending = false
 	t.lastCols, t.lastRows = cols, rows
+}
+
+func (t *tab) writeVT(data []byte) {
+	if t == nil || t.term == nil || len(data) == 0 {
+		return
+	}
+	data = t.sgr.rewrite(data)
+	if len(data) == 0 {
+		return
+	}
+	_, _ = t.term.Write(data)
 }
 
 // flushPendingResize retries a deferred native PTY resize once I/O is quiet.

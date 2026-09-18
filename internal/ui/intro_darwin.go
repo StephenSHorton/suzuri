@@ -123,6 +123,10 @@ func matrixRainCells(cols, rows int, mode matrixPaintMode, t0 time.Time, spawnFo
 	out := make([]rainCell, 0, cols*trail/2)
 	for col := 0; col < cols; col++ {
 		seed := uint32(col)*0x9E3779B9 ^ 0xA5A5A5A5
+		// Loop mode: drop ~30% of columns so the field is sparser, not slower.
+		if mode == matrixLoop && seed%10 < 3 {
+			continue
+		}
 		speed := matrixLoopSpeedMin + float64(seed%9)*matrixLoopSpeedSpan
 		rateDiv := matrixLoopRateDiv
 		if mode == matrixSpawn || mode == matrixWindDown {
@@ -164,7 +168,7 @@ func matrixRainCells(cols, rows int, mode matrixPaintMode, t0 time.Time, spawnFo
 					continue
 				}
 			}
-			flicker := t * 4
+			flicker := t * 8
 			if mode != matrixLoop {
 				flicker = t * 12
 			}

@@ -135,6 +135,9 @@ func (u *winUI) paintDimMatrixIntensity(hdc win.HDC, rect win.RECT, top, bot int
 
 	for col := 0; col < cols; col++ {
 		seed := uint32(col)*0x9E3779B9 ^ 0xA5A5A5A5
+		if mode == matrixLoop && seed%10 < 3 {
+			continue
+		}
 		// Settings overlay: full speed range including slow streams.
 		speed := matrixLoopSpeedMin + float64(seed%9)*matrixLoopSpeedSpan
 		rateDiv := matrixLoopRateDiv
@@ -189,7 +192,7 @@ func (u *winUI) paintDimMatrixIntensity(hdc win.HDC, rect win.RECT, top, bot int
 					continue
 				}
 			}
-			flicker := t * 4
+			flicker := t * 8
 			if mode != matrixLoop {
 				flicker = t * 12
 			}

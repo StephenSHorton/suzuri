@@ -6,17 +6,16 @@ import "github.com/StephenSHorton/suzuri/internal/config"
 
 // shellMatrixIntensity is how bright persistent shell rain is vs settings/intro
 // (quiet backdrop, not a curtain). Multiplied by config ShellMatrixOpacity.
-const shellMatrixIntensity = 0.10
+const shellMatrixIntensity = 0.16
 
 // shellMatrixAltScreenIntensity is used under alt-screen TUIs (Grok, vim, …).
-// Keep this well below conversation text so empty TUI cells don't glow.
-const shellMatrixAltScreenIntensity = 0.16
+const shellMatrixAltScreenIntensity = 0.32
 
-// matrixLoopSpeedMin / Span: cells/frame-ish for always-on rain (slower than intro).
+// matrixLoopSpeedMin / Span: always-on rain (intro spawn stays faster).
 const (
-	matrixLoopSpeedMin  = 0.07
-	matrixLoopSpeedSpan = 0.025 // + 0..8 → ~0.07–0.27
-	matrixLoopRateDiv   = 9.0
+	matrixLoopSpeedMin  = 0.16
+	matrixLoopSpeedSpan = 0.06 // + 0..8 → ~0.16–0.64
+	matrixLoopRateDiv   = 5.2
 )
 
 // effectiveShellMatrixIntensity is base rain strength × user opacity (0–1).

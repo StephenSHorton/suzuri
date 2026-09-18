@@ -1012,13 +1012,13 @@ func (u *macUI) drainAndParse(tabID int) {
 		t.kittyGfx = newKittyGfx()
 	}
 	data = feedKittyAPCs(t.kittyGfx, data, func(b []byte) {
-		_, _ = t.term.Write(b)
+		t.writeVT(b)
 	}, func() (col, row int) {
 		c := t.term.Cursor()
 		return c.X, c.Y
 	})
 	if len(data) > 0 {
-		_, _ = t.term.Write(data)
+		t.writeVT(data)
 	}
 	t.sb.noteScreen(t.term)
 	if t.sb.atBottom() {
