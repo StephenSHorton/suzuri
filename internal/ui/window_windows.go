@@ -322,7 +322,9 @@ func (u *winUI) requestInputPaint() {
 	if u == nil || u.hwnd == 0 {
 		return
 	}
-	if u.chrome.OverlayOpen() {
+	// Overlay and alt-screen TUIs (Grok) must keep compositing rain — Darwin
+	// tryPaintInputOnly returns false in both cases.
+	if u.chrome.OverlayOpen() || u.activeAltScreen() {
 		u.inputOnlyDirty = false
 		u.requestPaint()
 		return
@@ -2250,11 +2252,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			} else if needScrollPaint {
 				u.markShellDirty()
 				u.requestPaint()
-			} else if u.inputOnlyDirty {
-				// Sticky bar-only after typing. If ambient is on, unstick every
-				// few ticks so underlays keep animating on the normal shell
-				// (not only under Grok) without full-painting every keystroke.
-				if u.shellAmbientOn() && u.spinTick%uint64(tabSpinEveryNTicks*3) == 0 {
+			} else if u.inputOnlyDirty && !u.activeAltScreen() {
+				// Sticky bar-only after Warp-bar typing. Darwin's tryPaintInputOnly
+				// returns false on alt-screen so Grok keeps compositing rain.
+				// Unstick often enough that glyph rain does not freeze while typing.
+				if u.shellAmbientOn() {
 					u.markShellDirty()
 				}
 				u.requestPaint()
@@ -3733,7 +3735,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 		// Shell rain freezes while we stay here — acceptable, same tradeoff as
 		// notes overlay scoping so typing does not re-blit the whole grid.
 		if u.inputOnlyDirty && !overlay && !dimModal &&
-			!u.matrixIntroActive() &&
+			!u.matrixIntroActive() && !u.activeAltScreen() &&
 			u.memDC != 0 && dest == u.memDC && u.font != 0 &&
 			u.memW == w && u.memH == h {
 			oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
@@ -4384,19 +4386,22 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 	// Same effective live height as viewCells (trailing blank PTY rows clipped).
 	liveRows := liveExtent(tab.term)
 	// Fill any sub-cell remainder under the grid within this pane.
+	// Chroma-key near-black (GrokNight 26,27,38) so rain shows through, same
+	// as Darwin paintCellBackground. An opaque slab here is what hid rain
+	// under Grok and created a GDI FillRect per cell on every keystroke.
 	paneBot := g.y + g.h
 	gridBot := padY + int32(len(grid))*ch
 	if gridBot < paneBot {
-		br, bg, bb := byte(12), byte(12), byte(14)
+		br, bg, bb := byte(0), byte(0), byte(0)
 		if n := len(grid); n > 0 {
 			last := grid[n-1]
 			if len(last) > 0 {
 				c := last[0]
-				if c.BR != 0 || c.BG != 0 || c.BB != 0 {
+				if !cellBGChromaKey(c.BR, c.BG, c.BB) {
 					br, bg, bb = c.BR, c.BG, c.BB
 				} else {
 					for _, cell := range last {
-						if cell.BR != 0 || cell.BG != 0 || cell.BB != 0 {
+						if !cellBGChromaKey(cell.BR, cell.BG, cell.BB) {
 							br, bg, bb = cell.BR, cell.BG, cell.BB
 							break
 						}
@@ -4404,11 +4409,7 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 				}
 			}
 		}
-		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(br, bg, bb)}
-		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			fillRect(hdc, win.RECT{Left: g.x, Top: gridBot, Right: g.x + g.w, Bottom: paneBot}, brush)
-			win.DeleteObject(win.HGDIOBJ(brush))
-		}
+		fillSolidRGB(hdc, win.RECT{Left: g.x, Top: gridBot, Right: g.x + g.w, Bottom: paneBot}, br, bg, bb)
 	}
 
 	selBrush := win.HBRUSH(0)
@@ -4420,15 +4421,36 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 		defer win.DeleteObject(win.HGDIOBJ(selBrush))
 	}
 
+	var reuse win.HBRUSH
+	var reuseR, reuseG, reuseB byte
+	defer func() {
+		if reuse != 0 {
+			win.DeleteObject(win.HGDIOBJ(reuse))
+		}
+	}()
+	brushFor := func(r, g, b byte) win.HBRUSH {
+		if reuse != 0 && r == reuseR && g == reuseG && b == reuseB {
+			return reuse
+		}
+		if reuse != 0 {
+			win.DeleteObject(win.HGDIOBJ(reuse))
+			reuse = 0
+		}
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(r, g, b)}
+		reuse = win.CreateBrushIndirect(&lb)
+		reuseR, reuseG, reuseB = r, g, b
+		return reuse
+	}
+
 	for y, row := range grid {
-		// Non-default backgrounds: one FillRect per run of the same BG.
+		// Non-chroma backgrounds: one FillRect per run of the same BG.
 		type bgRun struct {
 			x0, x1  int
 			r, g, b byte
 		}
 		var bgs []bgRun
 		for x, c := range row {
-			if c.BR == 0 && c.BG == 0 && c.BB == 0 {
+			if cellBGChromaKey(c.BR, c.BG, c.BB) {
 				continue
 			}
 			if n := len(bgs); n > 0 && bgs[n-1].x1 == x-1 &&
@@ -4439,8 +4461,7 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 			bgs = append(bgs, bgRun{x0: x, x1: x, r: c.BR, g: c.BG, b: c.BB})
 		}
 		for _, br := range bgs {
-			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(br.r, br.g, br.b)}
-			if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+			if brush := brushFor(br.r, br.g, br.b); brush != 0 {
 				r := win.RECT{
 					Left:   padX + int32(br.x0)*cw,
 					Top:    padY + int32(y)*ch,
@@ -4448,7 +4469,6 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 					Bottom: padY + int32(y+1)*ch,
 				}
 				fillRect(hdc, r, brush)
-				win.DeleteObject(win.HGDIOBJ(brush))
 			}
 		}
 
@@ -4805,6 +4825,19 @@ func measureCellSize(hdc win.HDC) (cw, ch int32) {
 // Rectangle hairlines between adjacent cells).
 func fillRect(hdc win.HDC, r win.RECT, brush win.HBRUSH) {
 	_, _, _ = procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&r)), uintptr(brush))
+}
+
+// fillSolidRGB skips chroma-key near-black so rain/watermark show through
+// (GrokNight canvas 26,27,38). Real bands stay opaque GDI fills.
+func fillSolidRGB(hdc win.HDC, r win.RECT, cr, cg, cb byte) {
+	if cellBGChromaKey(cr, cg, cb) {
+		return
+	}
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(cr, cg, cb)}
+	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+		fillRect(hdc, r, brush)
+		win.DeleteObject(win.HGDIOBJ(brush))
+	}
 }
 
 // selectFontForRune picks the primary mono face, or CJK fallback for Han/kana.
@@ -5586,6 +5619,16 @@ func (u *winUI) needsShellAnimPaint() bool {
 		return true
 	}
 	return u.anyAltScreenCursor()
+}
+
+// activeAltScreen is true when the focused pane is a full-screen TUI (Grok/vim).
+// Darwin refuses the Warp-bar-only paint path in that case so rain stays live.
+func (u *winUI) activeAltScreen() bool {
+	if u == nil {
+		return false
+	}
+	t := u.activeTab()
+	return t != nil && t.altScreen()
 }
 
 // anyAltScreenCursor is true when a visible pane is on alt-screen with a
