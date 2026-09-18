@@ -2261,10 +2261,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				u.markShellDirty()
 				u.requestPaint()
 			} else if u.inputOnlyDirty && !u.activeAltScreen() {
-				// Sticky bar-only after Warp-bar typing. Darwin's tryPaintInputOnly
-				// returns false on alt-screen so Grok keeps compositing rain.
-				// Unstick often enough that glyph rain does not freeze while typing.
-				if u.shellAmbientOn() {
+				// Sticky bar-only after Warp-bar typing. Darwin freezes rain
+				// here; we unstick every few ticks so droplets keep moving
+				// without a full 25fps grid blit on every keystroke.
+				if u.shellAmbientOn() && u.spinTick%uint64(tabSpinEveryNTicks*3) == 0 {
 					u.markShellDirty()
 				}
 				u.requestPaint()
@@ -2272,15 +2272,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				// Palette/help float over a live shell — need full composite.
 				u.requestPaint()
 			} else if u.needsShellAnimPaint() {
-				// Ambient / alt caret / intro. Dual alt-screen Grok at 25fps
-				// full blit is the other GDI hard-kill; drop to ~6fps then.
-				if u.altScreenCount() >= 2 {
-					if u.spinTick%uint64(tabSpinEveryNTicks*4) == 0 {
-						u.requestPaint()
-					}
-				} else {
-					u.requestPaint()
-				}
+				// Idle rain at full blink rate. Dual-Grok cheapens the rain
+				// painter, not the frame rate (6fps looked like lag after typing).
+				u.requestPaint()
 			} else {
 				// Idle shell, no ambient: only pulse the Warp caret.
 				u.requestInputPaint()
@@ -4257,7 +4251,7 @@ func (u *winUI) applyLayoutAfterSizeMove(hwnd win.HWND) {
 	}
 	applog.Sync()
 
-	if u.alive.Load() {
+	if u.alive.Load() && u.altScreenCount() < 2 {
 		u.requestPaint()
 	}
 }

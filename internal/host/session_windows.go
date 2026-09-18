@@ -22,6 +22,12 @@ import (
 // gate so a UI bug cannot call ResizePseudoConsole mid-stream.
 const sessionIOQuiet = 300 * time.Millisecond
 
+// nativeResizeGap: at most one ResizePseudoConsole in the process per this
+// window. Dual Grok split used to call it twice on the UI thread and die.
+const nativeResizeGap = 400 * time.Millisecond
+
+var lastNativeResizeUnix atomic.Int64
+
 // Session is a live shell attached to a Windows ConPTY.
 type Session struct {
 	cpty *conpty.ConPty
@@ -313,6 +319,12 @@ func (s *Session) Resize(cols, rows int) error {
 		applog.Trail("conpty.Resize skip", "cols", cols, "rows", rows, "reason", "recentIO")
 		return ErrResizeBusy
 	}
+	now := time.Now().UnixNano()
+	if prev := lastNativeResizeUnix.Load(); prev != 0 && now-prev < nativeResizeGap.Nanoseconds() {
+		applog.Trail("conpty.Resize skip", "cols", cols, "rows", rows, "reason", "globalGap")
+		return ErrResizeBusy
+	}
+	lastNativeResizeUnix.Store(now)
 	// Breadcrumb around the native call: hard deaths leave no Go panic trail.
 	applog.Trail("conpty.Resize enter", "cols", cols, "rows", rows, "pid", s.cpty.Pid())
 	err := s.cpty.Resize(cols, rows)
