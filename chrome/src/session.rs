@@ -94,9 +94,7 @@ impl ChromeSession {
     }
 
     pub fn focus_pane_id(&self) -> u64 {
-        self.active_tab()
-            .map(|t| t.focus_pane)
-            .unwrap_or(1)
+        self.active_tab().map(|t| t.focus_pane).unwrap_or(1)
     }
 
     pub fn active_pane(&self) -> Option<&Pane> {
@@ -111,19 +109,13 @@ impl ChromeSession {
 
     /// Draft of the focused pane.
     pub fn draft(&self) -> &str {
-        self.active_pane()
-            .map(|p| p.draft.as_str())
-            .unwrap_or("")
+        self.active_pane().map(|p| p.draft.as_str()).unwrap_or("")
     }
 
     pub fn draft_mut(&mut self) -> &mut String {
         // Ensure we always have a pane.
         let id = self.focus_pane_id();
-        &mut self
-            .panes
-            .get_mut(&id)
-            .expect("focus pane")
-            .draft
+        &mut self.panes.get_mut(&id).expect("focus pane").draft
     }
 
     pub fn display_cwd(&self) -> String {
@@ -264,7 +256,9 @@ impl ChromeSession {
         for tab in &mut self.tabs {
             let r = tab.root.tick(dt);
             result.moving |= r.moving;
-            result.finished_closes.extend(r.finished_closes.iter().copied());
+            result
+                .finished_closes
+                .extend(r.finished_closes.iter().copied());
 
             if let Some(anim) = &mut tab.solo_exit {
                 if anim.tick(dt) {
@@ -299,11 +293,10 @@ impl ChromeSession {
         }
         pane.exiting = true;
 
-        let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|t| t.root.contains_pane(pane_id) || t.solo_exit.as_ref().map(|s| s.pane_id) == Some(pane_id))
-        else {
+        let Some(tab) = self.tabs.iter_mut().find(|t| {
+            t.root.contains_pane(pane_id)
+                || t.solo_exit.as_ref().map(|s| s.pane_id) == Some(pane_id)
+        }) else {
             return false;
         };
 
@@ -595,11 +588,7 @@ impl ChromeSession {
         if !self.panes.contains_key(&pane_id) {
             return;
         }
-        if let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|t| t.root.contains_pane(pane_id))
-        {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.root.contains_pane(pane_id)) {
             self.active_id = tab.id;
             tab.focus_pane = pane_id;
         }
@@ -851,6 +840,10 @@ fn normalize_abs_path(p: &str) -> String {
         }
     }
     let mut s = out.to_string_lossy().into_owned();
+    // Compare and display with `/` so Windows `\` still maps `$HOME\foo` → `~/foo`.
+    if std::path::MAIN_SEPARATOR != '/' {
+        s = s.replace(std::path::MAIN_SEPARATOR, "/");
+    }
     // PathBuf on Unix for "/" + "Users" can look right; ensure no trailing slash.
     if s.len() > 1 && s.ends_with('/') {
         s.pop();
@@ -866,10 +859,7 @@ fn paths_equal(a: &str, b: &str) -> bool {
         return true;
     }
     // Resolve symlinks when possible (macOS /var vs /private/var, etc.).
-    if let (Ok(ca), Ok(cb)) = (
-        std::fs::canonicalize(a),
-        std::fs::canonicalize(b),
-    ) {
+    if let (Ok(ca), Ok(cb)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         return ca == cb;
     }
     false
@@ -908,7 +898,9 @@ mod tests {
 
     #[test]
     fn display_path_home_is_tilde() {
-        let home = std::env::var("HOME").expect("HOME");
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .expect("HOME or USERPROFILE");
         assert_eq!(display_path(&home), "~");
         assert_eq!(display_path(&format!("{home}/")), "~");
         assert_eq!(display_path(&format!("{home}/.")), "~");
@@ -916,7 +908,12 @@ mod tests {
             display_path(&format!("{home}/projects/foo")),
             "~/projects/foo"
         );
-        // Unrelated absolute stays absolute
+        #[cfg(windows)]
+        assert_eq!(
+            display_path(&format!("{home}\\projects\\foo")),
+            "~/projects/foo"
+        );
+        // Unrelated absolute stays absolute (slash-normalized).
         assert_eq!(display_path("/tmp"), "/tmp");
     }
 
