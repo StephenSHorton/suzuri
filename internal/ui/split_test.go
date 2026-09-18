@@ -353,3 +353,31 @@ func TestHitPaneClickFocusUsesPaneID(t *testing.T) {
 		t.Fatalf("focus=%d want 10", p.focusID)
 	}
 }
+
+func TestSplitGrowRotateSwap(t *testing.T) {
+	a := &tab{id: 1}
+	b := &tab{id: 2}
+	p := newPage(a)
+	if !p.splitFocused(splitVert, b) {
+		t.Fatal("split")
+	}
+	if !p.adjustRatio(2, 0.08) {
+		t.Fatal("grow")
+	}
+	n := parentOf(p.root, 2)
+	if n == nil || n.ratio >= 0.5 {
+		t.Fatalf("ratio=%v want <0.5 (b grew)", n)
+	}
+	if !p.equalizeAround(1) || parentOf(p.root, 1).ratio != 0.5 {
+		t.Fatal("equalize")
+	}
+	if !p.rotateAround(1) || parentOf(p.root, 1).dir != splitHoriz {
+		t.Fatal("rotate")
+	}
+	if !p.swapAround(1) {
+		t.Fatal("swap")
+	}
+	if p.root.a == nil || p.root.a.pane == nil || p.root.a.pane.id != 2 {
+		t.Fatalf("swap a=%v", p.root.a)
+	}
+}

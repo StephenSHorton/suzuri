@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/hinshun/vt10x"
 
+	"github.com/StephenSHorton/suzuri/internal/aicontrol"
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/host"
 )
@@ -293,7 +294,9 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 			cwd = wd
 		}
 	}
-	sess, err := host.StartSession(shell, cols, rows, cwd, opts.extraEnv...)
+	extra := append([]string{}, opts.extraEnv...)
+	extra = append(extra, aicontrol.PtyEnv()...)
+	sess, err := host.StartSession(shell, cols, rows, cwd, extra...)
 	if err != nil {
 		log.Error("pty start failed", "tab", id, "shell", shell, "cwd", cwd, "err", err)
 		return nil, err

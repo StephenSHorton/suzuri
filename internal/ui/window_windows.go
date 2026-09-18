@@ -19,6 +19,7 @@ import (
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 
+	"github.com/StephenSHorton/suzuri/internal/aicontrol"
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/bridge"
 	"github.com/StephenSHorton/suzuri/internal/caffeine"
@@ -94,6 +95,12 @@ func Run() error {
 	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
 	ui.bridge.BindNotes(ui.enqueueMCPNotes)
 	ui.bridge.BindWorkspace(ui.enqueueMCPWorkspace)
+	if srv, err := aicontrol.Start(); err != nil {
+		log.Warn("ai control http", "err", err)
+	} else {
+		ui.ai = srv
+		log.Info("ai control", "url", srv.URL)
+	}
 	prof := config.FindProfile(cfg, cfg.ActiveProfile)
 	opts := tabOpts{}
 	if prof != nil {
@@ -276,6 +283,7 @@ type winUI struct {
 	// MCP bridge: loopback HTTP for spawn-on-demand stdio MCP (see internal/bridge).
 	bridge  *bridge.Host
 	mcpJobs chan mcpJob
+	ai      *aicontrol.Server
 }
 
 // requestPaint marks the client dirty at most once until the next WM_PAINT.
@@ -1824,6 +1832,33 @@ func (u *winUI) enqueueMCPWorkspace(req bridge.WorkspaceRequest) bridge.Workspac
 	}
 }
 
+func (u *winUI) drainAI() {
+	if u == nil || u.ai == nil {
+		return
+	}
+	for i := 0; i < 16; i++ {
+		job, ok := u.ai.TryRecv()
+		if !ok {
+			return
+		}
+		applyAIJob(aiSurface{
+			pages:  &u.pages,
+			tabs:   u.tabs,
+			active: &u.active,
+			split:  u.splitActive,
+			close: func(id int) {
+				u.closePaneUI(id, false)
+			},
+			newTab: func() { u.newTabUI("") },
+			after: func() {
+				u.syncChrome()
+				u.postLayoutSettle()
+				u.requestPaint()
+			},
+		}, job)
+	}
+}
+
 func (u *winUI) drainMCPJobs() {
 	for {
 		select {
@@ -2251,6 +2286,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case wmSuzuriMCP:
 		u.drainMCPJobs()
+		u.drainAI()
 		return 0
 
 	case wmSuzuriLayoutSettle:
@@ -3525,6 +3561,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.alive.Store(false)
 		if u.caffeine != nil {
 			u.caffeine.Close()
+		}
+		if u.ai != nil {
+			u.ai.Close()
 		}
 		if u.bridge != nil {
 			u.bridge.Stop()

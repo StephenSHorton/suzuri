@@ -503,11 +503,11 @@ const (
 
 // sashGeom is a shared divider between two sibling panes (drag target).
 type sashGeom struct {
-	node                   *splitNode
-	dir                    splitDir
-	x, y, w, h             int32 // visual sash strip
-	parentX, parentY       int32
-	parentW, parentH       int32 // parent rect for ratio math
+	node             *splitNode
+	dir              splitDir
+	x, y, w, h       int32 // visual sash strip
+	parentX, parentY int32
+	parentW, parentH int32 // parent rect for ratio math
 }
 
 // layoutResult is leaves + shared sashes for one page tree.
@@ -736,6 +736,123 @@ func applySashDrag(s sashGeom, px, py int32) {
 		r = sashRatioMax
 	}
 	s.node.ratio = r
+}
+
+func parentOf(n *splitNode, id int) *splitNode {
+	if n == nil || n.isLeaf() {
+		return nil
+	}
+	if n.a != nil && n.a.isLeaf() && n.a.pane != nil && n.a.pane.id == id {
+		return n
+	}
+	if n.b != nil && n.b.isLeaf() && n.b.pane != nil && n.b.pane.id == id {
+		return n
+	}
+	if p := parentOf(n.a, id); p != nil {
+		return p
+	}
+	return parentOf(n.b, id)
+}
+
+func (p *page) adjustRatio(id int, delta float64) bool {
+	if p == nil {
+		return false
+	}
+	n := parentOf(p.root, id)
+	if n == nil {
+		return false
+	}
+	if findPane(n.a, id) != nil {
+		n.ratio += delta
+	} else {
+		n.ratio -= delta
+	}
+	if n.ratio < sashRatioMin {
+		n.ratio = sashRatioMin
+	}
+	if n.ratio > sashRatioMax {
+		n.ratio = sashRatioMax
+	}
+	return true
+}
+
+func (p *page) equalizeAround(id int) bool {
+	if p == nil {
+		return false
+	}
+	n := parentOf(p.root, id)
+	if n == nil {
+		return false
+	}
+	n.ratio = 0.5
+	return true
+}
+
+func (p *page) rotateAround(id int) bool {
+	if p == nil {
+		return false
+	}
+	n := parentOf(p.root, id)
+	if n == nil {
+		return false
+	}
+	if n.dir == splitVert {
+		n.dir = splitHoriz
+	} else {
+		n.dir = splitVert
+	}
+	return true
+}
+
+func (p *page) swapAround(id int) bool {
+	if p == nil {
+		return false
+	}
+	n := parentOf(p.root, id)
+	if n == nil {
+		return false
+	}
+	n.a, n.b = n.b, n.a
+	n.ratio = 1 - n.ratio
+	if n.ratio < sashRatioMin {
+		n.ratio = sashRatioMin
+	}
+	if n.ratio > sashRatioMax {
+		n.ratio = sashRatioMax
+	}
+	return true
+}
+
+func (p *page) dockExisting(targetID int, edge string, t *tab) bool {
+	if p == nil || t == nil || findPane(p.root, targetID) == nil {
+		return false
+	}
+	dir := splitVert
+	flip := false
+	switch strings.ToLower(strings.TrimSpace(edge)) {
+	case "left":
+		dir, flip = splitVert, true
+	case "right":
+		dir = splitVert
+	case "top", "up":
+		dir, flip = splitHoriz, true
+	case "bottom", "down":
+		dir = splitHoriz
+	default:
+		return false
+	}
+	p.focusID = targetID
+	if !p.splitFocused(dir, t) {
+		return false
+	}
+	if flip {
+		if n := parentOf(p.root, t.id); n != nil {
+			n.a, n.b = n.b, n.a
+			n.ratio = 1 - n.ratio
+		}
+	}
+	p.focusID = t.id
+	return true
 }
 
 // hitPane returns the layout entry containing (px,py), or -1.

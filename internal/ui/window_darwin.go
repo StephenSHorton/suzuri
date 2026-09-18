@@ -23,6 +23,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hinshun/vt10x"
 
+	"github.com/StephenSHorton/suzuri/internal/aicontrol"
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/bridge"
 	"github.com/StephenSHorton/suzuri/internal/caffeine"
@@ -74,6 +75,12 @@ func Run() error {
 	ui.bridge.BindSubmit(ui.enqueueMCPSubmit)
 	ui.bridge.BindNotes(ui.enqueueMCPNotes)
 	ui.bridge.BindWorkspace(ui.enqueueMCPWorkspace)
+	if srv, err := aicontrol.Start(); err != nil {
+		log.Warn("ai control http", "err", err)
+	} else {
+		ui.ai = srv
+		log.Info("ai control", "url", srv.URL)
+	}
 	if ui.painter != nil {
 		ui.metricW, ui.metricH = int32(ui.painter.cellW), int32(ui.painter.cellH)
 	}
@@ -168,6 +175,7 @@ type macUI struct {
 	// Deferred work from PTY/MCP goroutines → UI tick.
 	jobs    chan func()
 	mcpJobs chan mcpJob
+	ai      *aicontrol.Server
 	bridge  *bridge.Host
 
 	painter *softwarePainter
@@ -603,6 +611,9 @@ func (u *macUI) loop() error {
 	}
 	u.persistNotes()
 	u.ready.Store(false)
+	if u.ai != nil {
+		u.ai.Close()
+	}
 	if u.bridge != nil {
 		u.bridge.Stop()
 	}
@@ -669,6 +680,7 @@ func (u *macUI) Update() error {
 		}
 	}
 drained:
+	u.drainAI()
 
 	u.drainPendingPaste()
 	// Flush Warp-bar queue once the shell has been quiet (no PTY chunk required).
@@ -1141,6 +1153,33 @@ func (u *macUI) submitOnUIThread(tabID int, line string, done chan error) {
 	t.sendKey([]byte(payload + "\r"))
 	t.sb.stickBottom()
 	u.publishBridgeSnapshot()
+}
+
+func (u *macUI) drainAI() {
+	if u == nil || u.ai == nil {
+		return
+	}
+	for i := 0; i < 16; i++ {
+		job, ok := u.ai.TryRecv()
+		if !ok {
+			return
+		}
+		applyAIJob(aiSurface{
+			pages:  &u.pages,
+			tabs:   u.tabs,
+			active: &u.active,
+			split:  u.splitActive,
+			close: func(id int) {
+				u.closePaneUI(id, false)
+			},
+			newTab: func() { u.newTabUI("") },
+			after: func() {
+				u.syncChrome()
+				u.applyClientSize(u.width, u.height)
+				u.publishBridgeSnapshot()
+			},
+		}, job)
+	}
 }
 
 func (u *macUI) publishBridgeSnapshot() {
