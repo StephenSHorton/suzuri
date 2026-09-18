@@ -2,7 +2,11 @@
 
 package ui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/hinshun/vt10x"
+)
 
 func TestSplitFocusedAndRemove(t *testing.T) {
 	a := &tab{id: 0, title: "a"}
@@ -150,6 +154,45 @@ func TestLayoutEqualSplit(t *testing.T) {
 	}
 	if geoms[0].barY+geoms[0].barH != geoms[0].outerY+geoms[0].outerH {
 		t.Fatalf("bar should sit at outer bottom")
+	}
+}
+
+func TestLayoutSplitDownAltScreenHasNoWarpBar(t *testing.T) {
+	termA := vt10x.New(vt10x.WithSize(80, 24))
+	termB := vt10x.New(vt10x.WithSize(80, 24))
+	if _, err := termA.Write([]byte("\x1b[?1049h")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := termB.Write([]byte("\x1b[?1049h")); err != nil {
+		t.Fatal(err)
+	}
+	a := &tab{id: 0, term: termA}
+	b := &tab{id: 1, term: termB}
+	a.alive.Store(true)
+	b.alive.Store(true)
+	p := newPage(a)
+	if !p.splitFocused(splitHoriz, b) {
+		t.Fatal("split down")
+	}
+	const cw, ch, shellH int32 = 8, 16, 1280
+	res := layoutPage(p.root, 0, 0, 800, shellH, cw, ch, p.focusID)
+	if len(res.leaves) != 2 {
+		t.Fatalf("leaves=%d", len(res.leaves))
+	}
+	for i, g := range res.leaves {
+		if g.barH != 0 {
+			t.Fatalf("leaf %d alt-screen stole a Warp bar barH=%d (Grok input clips)", i, g.barH)
+		}
+		if g.titleH != ch {
+			t.Fatalf("leaf %d titleH=%d want %d", i, g.titleH, ch)
+		}
+		if g.rows < 1 {
+			t.Fatalf("leaf %d rows=%d", i, g.rows)
+		}
+	}
+	full := int(shellH / ch)
+	if res.leaves[0].rows+res.leaves[1].rows >= full {
+		t.Fatalf("split did not shrink VT: %d+%d full=%d", res.leaves[0].rows, res.leaves[1].rows, full)
 	}
 }
 

@@ -1,6 +1,43 @@
 package ui
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+
+	"github.com/hinshun/vt10x"
+)
+
+func TestViewCellsAltScreenWindowsToCursor(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(12, 84))
+	if _, err := term.Write([]byte("\x1b[?1049h")); err != nil {
+		t.Fatal(err)
+	}
+	for y := 0; y < 84; y++ {
+		// 1-based CUP; unique row tag in the first cells.
+		seq := fmt.Sprintf("\x1b[%d;1H%02d", y+1, y)
+		if _, err := term.Write([]byte(seq)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := term.Write([]byte("\x1b[84;1H")); err != nil {
+		t.Fatal(err)
+	}
+	if y := term.Cursor().Y; y != 83 {
+		t.Fatalf("cursor Y=%d want 83", y)
+	}
+	grid := (&scrollback{}).viewCells(term, 40)
+	if len(grid) != 40 {
+		t.Fatalf("rows=%d", len(grid))
+	}
+	got0 := string([]rune{grid[0][0].Ch, grid[0][1].Ch})
+	gotLast := string([]rune{grid[39][0].Ch, grid[39][1].Ch})
+	if got0 != "44" {
+		t.Fatalf("top painted row tag %q want 44 (not the old first-40 clip)", got0)
+	}
+	if gotLast != "83" {
+		t.Fatalf("bottom painted row tag %q want 83 (Grok input)", gotLast)
+	}
+}
 
 func TestAltViewportStartKeepsCursorVisible(t *testing.T) {
 	// Split-down: 84-row Grok painted in 40 rows. Cursor on the input (row 83)

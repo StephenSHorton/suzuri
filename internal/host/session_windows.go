@@ -314,14 +314,9 @@ func (s *Session) Resize(cols, rows int) error {
 	if s.cpty == nil {
 		return nil
 	}
-	// Re-check under lock so a chunk that landed after the UI gate still denies.
-	if s.recentIO() {
-		applog.Trail("conpty.Resize skip", "cols", cols, "rows", rows, "reason", "recentIO")
-		return ErrResizeBusy
-	}
 	now := time.Now().UnixNano()
-	if prev := lastNativeResizeUnix.Load(); prev != 0 && now-prev < nativeResizeGap.Nanoseconds() {
-		applog.Trail("conpty.Resize skip", "cols", cols, "rows", rows, "reason", "globalGap")
+	if denied, reason := NativeResizeDenied(s.recentIO(), lastNativeResizeUnix.Load(), now, nativeResizeGap.Nanoseconds()); denied {
+		applog.Trail("conpty.Resize skip", "cols", cols, "rows", rows, "reason", reason)
 		return ErrResizeBusy
 	}
 	lastNativeResizeUnix.Store(now)
