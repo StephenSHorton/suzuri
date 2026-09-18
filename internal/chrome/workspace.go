@@ -21,12 +21,12 @@ const (
 	wsComposeMax   = 2000
 	wsHistoryLimit = 120
 	// Modal size: 80% of host, capped so large windows stay "dialog" not full-screen.
-	wsModalFrac  = 0.80
-	wsMaxOuterW  = 120 // cols
-	wsMaxOuterH  = 40  // rows including card chrome
-	wsMinOuterW  = 48
-	// Fixed chrome rows inside the card (title, tabs, presence, gaps, compose, status, footer).
-	wsChromeRows = 12
+	wsModalFrac = 0.80
+	wsMaxOuterW = 120 // cols
+	wsMaxOuterH = 40  // rows including card chrome
+	wsMinOuterW = 48
+	// Fixed chrome rows inside the card (title, channel tabs, view tabs, presence, gaps, compose, status, footer).
+	wsChromeRows = 13
 	wsMsgRowsMin = 8
 	wsMsgRowsMax = 48
 	// Chat bubble: use nearly full message column (short msgs still hug content).
@@ -47,6 +47,16 @@ const (
 	wsModeNewChannel
 	wsModeAttach
 	wsModeDeleteConfirm // second Ctrl+D confirms delete of current channel
+	wsModeNewTask
+)
+
+// wsPanel is the workspace modal body: chat, tasks, or inbox.
+type wsPanel int
+
+const (
+	wsPanelChat wsPanel = iota
+	wsPanelTasks
+	wsPanelInbox
 )
 
 // OpenWorkspaceMsg opens the shared workspace panel.
@@ -67,6 +77,8 @@ func (m *Model) openWorkspace() {
 	m.wsMode = wsModeCompose
 	m.wsStickBtm = true
 	m.wsMentionIdx = 0
+	m.wsPanel = wsPanelChat
+	m.wsSel = 0
 	if m.wsChannel == "" {
 		m.wsChannel = workspace.DefaultChannel
 	}
@@ -75,7 +87,8 @@ func (m *Model) openWorkspace() {
 	}
 	m.ensureWorkspaceViewport()
 	m.reloadWorkspaceFromDisk()
-	_, _ = workspace.Default.Join(m.wsHumanName, workspace.KindHuman, "")
+	mem, _ := workspace.Default.Join(m.wsHumanName, workspace.KindHuman, "")
+	m.wsMemberID = mem.ID
 	m.reloadWorkspaceFromDisk()
 }
 
@@ -150,6 +163,21 @@ func (m *Model) reloadWorkspaceFromDisk() {
 	m.wsMessages = msgs
 	members, _ := workspace.Default.Members()
 	m.wsMembers = members
+	if tasks, err := workspace.Default.ListTasks(); err == nil {
+		m.wsTasks = tasks
+	}
+	mid := m.wsMemberID
+	if mid == "" {
+		mid = m.humanName()
+	}
+	if inbox, err := workspace.Default.Inbox(mid, "", 80); err == nil {
+		m.wsInbox = inbox
+	} else {
+		m.wsInbox = nil
+	}
+	if m.wsSel < 0 {
+		m.wsSel = 0
+	}
 	// Refresh viewport content; pin to bottom unless user scrolled up.
 	m.syncWorkspaceViewport(true)
 }
@@ -168,13 +196,115 @@ func (m *Model) syncWorkspaceViewport(refreshContent bool) {
 	if !refreshContent {
 		return
 	}
-	content := m.workspaceMessageContent(innerW)
+	content := m.workspaceBodyContent(innerW)
 	atBottom := m.wsStickBtm || m.wsVP.AtBottom()
 	m.wsVP.SetContent(content)
 	if atBottom {
 		m.wsVP.GotoBottom()
 		m.wsStickBtm = true
 	}
+}
+
+func (m Model) workspaceBodyContent(innerW int) string {
+	switch m.wsPanel {
+	case wsPanelTasks:
+		return m.workspaceTasksContent(innerW)
+	case wsPanelInbox:
+		return m.workspaceInboxContent(innerW)
+	default:
+		return m.workspaceMessageContent(innerW)
+	}
+}
+
+func (m Model) workspaceTasksContent(innerW int) string {
+	st := lipgloss.NewStyle().Foreground(colText).Background(colPanel)
+	soft := lipgloss.NewStyle().Foreground(colSoft).Background(colPanel)
+	mute := lipgloss.NewStyle().Foreground(colMute).Background(colPanel)
+	if len(m.wsTasks) == 0 {
+		return strings.Join([]string{
+			placeOpaque(innerW, lipgloss.Left, st.Bold(true).Render("No tasks"), colPanel),
+			placeOpaque(innerW, lipgloss.Left, mute.Render("ctrl+n new · enter claim · d cycle status"), colPanel),
+		}, "\n")
+	}
+	var lines []string
+	for i, t := range m.wsTasks {
+		mark := "  "
+		if i == m.wsSel {
+			mark = "▸ "
+		}
+		owner := t.Owner
+		if owner == "" {
+			owner = "—"
+		}
+		line := fmt.Sprintf("%s%s  %s  %s  %s", mark, t.ID, t.Status, t.Title, owner)
+		line = ansi.Truncate(line, innerW, "…")
+		if i == m.wsSel {
+			lines = append(lines, placeOpaque(innerW, lipgloss.Left, st.Bold(true).Render(line), colPanel))
+		} else {
+			lines = append(lines, placeOpaque(innerW, lipgloss.Left, soft.Render(line), colPanel))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) workspaceInboxContent(innerW int) string {
+	st := lipgloss.NewStyle().Foreground(colText).Background(colPanel)
+	soft := lipgloss.NewStyle().Foreground(colSoft).Background(colPanel)
+	mute := lipgloss.NewStyle().Foreground(colMute).Background(colPanel)
+	if len(m.wsInbox) == 0 {
+		return strings.Join([]string{
+			placeOpaque(innerW, lipgloss.Left, st.Bold(true).Render("Inbox empty"), colPanel),
+			placeOpaque(innerW, lipgloss.Left, mute.Render("mentions and assignments land here"), colPanel),
+		}, "\n")
+	}
+	var lines []string
+	for i, msg := range m.wsInbox {
+		mark := "  "
+		if i == m.wsSel {
+			mark = "▸ "
+		}
+		who := msg.FromName
+		if who == "" {
+			who = msg.FromID
+		}
+		line := fmt.Sprintf("%s#%s  %s  %s", mark, msg.Channel, who, strings.ReplaceAll(msg.Body, "\n", " "))
+		line = ansi.Truncate(line, innerW, "…")
+		if i == m.wsSel {
+			lines = append(lines, placeOpaque(innerW, lipgloss.Left, st.Bold(true).Render(line), colPanel))
+		} else {
+			lines = append(lines, placeOpaque(innerW, lipgloss.Left, soft.Render(line), colPanel))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderViewTabs(panel wsPanel, innerW int) string {
+	type tab struct {
+		id    wsPanel
+		label string
+	}
+	tabs := []tab{
+		{wsPanelChat, "chat"},
+		{wsPanelTasks, "tasks"},
+		{wsPanelInbox, "inbox"},
+	}
+	on := lipgloss.NewStyle().Foreground(colPrimary).Background(colPanel).Bold(true)
+	off := lipgloss.NewStyle().Foreground(colMute).Background(colPanel)
+	var b strings.Builder
+	for i, t := range tabs {
+		if i > 0 {
+			b.WriteString(lipgloss.NewStyle().Background(colPanel).Render("  "))
+		}
+		lab := t.label
+		if t.id == panel {
+			b.WriteString(on.Render("[" + lab + "]"))
+		} else {
+			b.WriteString(off.Render(lab))
+		}
+	}
+	hint := lipgloss.NewStyle().Foreground(colMute).Background(colPanel).Render("  ctrl+t")
+	line := b.String() + hint
+	return panelFillLine(innerW, line)
 }
 
 func (m Model) workspaceMessageContent(innerW int) string {
@@ -376,6 +506,112 @@ func (m *Model) workspaceDeleteCurrentChannel() {
 	m.reloadWorkspaceFromDisk()
 }
 
+func (m *Model) workspaceCyclePanel(delta int) {
+	p := int(m.wsPanel) + delta
+	if p < 0 {
+		p = int(wsPanelInbox)
+	}
+	if p > int(wsPanelInbox) {
+		p = 0
+	}
+	m.wsPanel = wsPanel(p)
+	m.wsSel = 0
+	m.wsMode = wsModeCompose
+	m.wsCompose = ""
+	m.wsStickBtm = m.wsPanel == wsPanelChat
+	m.reloadWorkspaceFromDisk()
+	switch m.wsPanel {
+	case wsPanelTasks:
+		m.wsStatus = "tasks — enter claim · ctrl+n new · ctrl+s status"
+	case wsPanelInbox:
+		m.wsStatus = "inbox — enter opens channel"
+	default:
+		m.wsStatus = ""
+	}
+}
+
+func (m *Model) workspaceCreateTask() {
+	title := strings.TrimSpace(m.wsCompose)
+	if title == "" {
+		m.wsStatus = "task title required"
+		return
+	}
+	t, err := workspace.Default.CreateTask(title, "", nil, m.wsChannel)
+	if err != nil {
+		m.wsStatus = err.Error()
+		return
+	}
+	m.wsCompose = ""
+	m.wsMode = wsModeCompose
+	m.wsPanel = wsPanelTasks
+	m.wsStatus = "created " + t.ID
+	m.reloadWorkspaceFromDisk()
+	for i, x := range m.wsTasks {
+		if x.ID == t.ID {
+			m.wsSel = i
+			break
+		}
+	}
+}
+
+func (m *Model) workspaceClaimSelectedTask() {
+	if m.wsSel < 0 || m.wsSel >= len(m.wsTasks) {
+		m.wsStatus = "no task selected"
+		return
+	}
+	t := m.wsTasks[m.wsSel]
+	mid := m.wsMemberID
+	if mid == "" {
+		mid = m.humanName()
+	}
+	got, err := workspace.Default.ClaimTask(t.ID, mid, m.wsChannel)
+	if err != nil {
+		m.wsStatus = err.Error()
+		return
+	}
+	m.wsStatus = "claimed " + got.ID
+	m.reloadWorkspaceFromDisk()
+}
+
+func (m *Model) workspaceCycleSelectedTaskStatus() {
+	if m.wsSel < 0 || m.wsSel >= len(m.wsTasks) {
+		return
+	}
+	t := m.wsTasks[m.wsSel]
+	next := workspace.TaskTodo
+	switch t.Status {
+	case workspace.TaskTodo:
+		next = workspace.TaskClaimed
+	case workspace.TaskClaimed:
+		next = workspace.TaskDone
+	case workspace.TaskDone:
+		next = workspace.TaskBlocked
+	default:
+		next = workspace.TaskTodo
+	}
+	got, err := workspace.Default.SetTaskStatus(t.ID, next, m.wsChannel)
+	if err != nil {
+		m.wsStatus = err.Error()
+		return
+	}
+	m.wsStatus = got.ID + " → " + string(got.Status)
+	m.reloadWorkspaceFromDisk()
+}
+
+func (m *Model) workspaceOpenSelectedInbox() {
+	if m.wsSel < 0 || m.wsSel >= len(m.wsInbox) {
+		return
+	}
+	msg := m.wsInbox[m.wsSel]
+	if msg.Channel != "" {
+		m.wsChannel = msg.Channel
+	}
+	m.wsPanel = wsPanelChat
+	m.wsStickBtm = true
+	m.reloadWorkspaceFromDisk()
+	m.wsStatus = "opened #" + m.wsChannel
+}
+
 func (m *Model) workspaceCycleChannel(delta int) {
 	if len(m.wsChannels) == 0 {
 		return
@@ -511,6 +747,8 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 				m.wsClampMentionIdx()
 			}
 		}
+	case "ctrl+t":
+		m.workspaceCyclePanel(1)
 	case "enter":
 		if mentionActive {
 			m.wsCompleteMention(mentionCands)
@@ -521,7 +759,17 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 			m.workspaceCreateChannel()
 		case wsModeAttach:
 			m.workspaceAttachFile()
+		case wsModeNewTask:
+			m.workspaceCreateTask()
 		default:
+			if m.wsPanel == wsPanelTasks {
+				m.workspaceClaimSelectedTask()
+				return
+			}
+			if m.wsPanel == wsPanelInbox {
+				m.workspaceOpenSelectedInbox()
+				return
+			}
 			m.workspacePostCompose()
 		}
 	case "tab":
@@ -546,6 +794,15 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 			m.workspaceCycleChannel(-1)
 		}
 	case "ctrl+n":
+		if m.wsPanel == wsPanelTasks {
+			m.wsMode = wsModeNewTask
+			m.wsCompose = ""
+			m.wsStatus = "task title — enter to create"
+			if m.wsHist != nil {
+				m.wsHist.Clear()
+			}
+			return
+		}
 		m.wsMode = wsModeNewChannel
 		m.wsCompose = ""
 		m.wsStatus = "new channel name — enter to create"
@@ -575,6 +832,12 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 			}
 			return
 		}
+		if m.wsPanel == wsPanelTasks || m.wsPanel == wsPanelInbox {
+			if m.wsSel > 0 {
+				m.wsSel--
+			}
+			return
+		}
 		m.syncWorkspaceViewport(true)
 		m.wsVP.ScrollUp(1)
 		m.wsStickBtm = m.wsVP.AtBottom()
@@ -584,11 +847,26 @@ func (m *Model) handleWorkspaceKey(msg tea.KeyMsg) {
 			m.wsMentionIdx = (m.wsMentionIdx + 1) % len(mentionCands)
 			return
 		}
+		if m.wsPanel == wsPanelTasks || m.wsPanel == wsPanelInbox {
+			n := len(m.wsInbox)
+			if m.wsPanel == wsPanelTasks {
+				n = len(m.wsTasks)
+			}
+			if n > 0 && m.wsSel < n-1 {
+				m.wsSel++
+			}
+			return
+		}
 		m.syncWorkspaceViewport(true)
 		m.wsVP.ScrollDown(1)
 		m.wsStickBtm = m.wsVP.AtBottom()
 		if m.wsScroll > 0 {
 			m.wsScroll--
+		}
+	case "ctrl+s":
+		if m.wsPanel == wsPanelTasks {
+			m.workspaceCycleSelectedTaskStatus()
+			return
 		}
 	case "pgup":
 		m.syncWorkspaceViewport(true)
@@ -771,8 +1049,8 @@ func (m Model) renderWorkspace(w int) string {
 	}
 	vp.Width = innerW
 	vp.Height = msgRows
-	content := m.workspaceMessageContent(innerW)
-	atBottom := m.wsStickBtm || vp.AtBottom() || vp.TotalLineCount() <= msgRows
+	content := m.workspaceBodyContent(innerW)
+	atBottom := m.wsPanel == wsPanelChat && (m.wsStickBtm || vp.AtBottom() || vp.TotalLineCount() <= msgRows)
 	vp.SetContent(content)
 	if atBottom {
 		vp.GotoBottom()
@@ -782,6 +1060,7 @@ func (m Model) renderWorkspace(w int) string {
 	body := solidifyOverlayLines(vp.View(), innerW)
 
 	tabs := solidifyOverlayLines(renderChannelTabs(m.wsChannels, m.wsChannel, innerW), innerW)
+	views := solidifyOverlayLines(renderViewTabs(m.wsPanel, innerW), innerW)
 	presence := solidifyOverlayLines(renderPresenceStrip(m.wsMembers, innerW), innerW)
 
 	compose := m.wsCompose
@@ -792,6 +1071,8 @@ func (m Model) renderWorkspace(w int) string {
 		prompt = lipgloss.NewStyle().Foreground(colSecondary).Bold(true).Background(colPanel).Render("# ")
 	case wsModeAttach:
 		prompt = lipgloss.NewStyle().Foreground(colCyan).Bold(true).Background(colPanel).Render("📎 ")
+	case wsModeNewTask:
+		prompt = lipgloss.NewStyle().Foreground(colSecondary).Bold(true).Background(colPanel).Render("task ")
 	default:
 		prompt = lipgloss.NewStyle().Foreground(colPrimary).Bold(true).Background(colPanel).Render("› ")
 	}
@@ -816,7 +1097,7 @@ func (m Model) renderWorkspace(w int) string {
 			Render(ansi.Truncate(m.wsStatus, innerW, "…")))
 	}
 
-	parts := []string{tabs, presence, panelFillLine(innerW, ""), body, panelFillLine(innerW, "")}
+	parts := []string{tabs, views, presence, panelFillLine(innerW, ""), body, panelFillLine(innerW, "")}
 	if mentionLine != "" {
 		parts = append(parts, mentionLine)
 	}
@@ -826,10 +1107,9 @@ func (m Model) renderWorkspace(w int) string {
 	}
 
 	// Footer: no bare "n new" — channel create is + / ctrl+n.
-	footer := styleDialogHintKey().Render("enter") + styleDialogHint().Render(" send  ") +
-		styleDialogHintKey().Render("@") + styleDialogHint().Render(" mention  ") +
+	footer := styleDialogHintKey().Render("ctrl+t") + styleDialogHint().Render(" view  ") +
+		styleDialogHintKey().Render("enter") + styleDialogHint().Render(" send/claim  ") +
 		styleDialogHintKey().Render("tab") + styleDialogHint().Render(" channel  ") +
-		styleDialogHintKey().Render("↑↓/wheel") + styleDialogHint().Render(" scroll  ") +
 		styleDialogHintKey().Render("esc")
 	return renderWorkspaceCard(outer, "Workspace", parts, footer)
 }

@@ -216,6 +216,74 @@ func (u *macUI) splitActive(dir splitDir) {
 	log.Info("split pane", "dir", dir, "new", t.id, "page", pg.id, "leaves", pg.leafCount())
 }
 
+func (u *macUI) applyForkOSC(src *tab, req forkPaneRequest) {
+	defer applog.Recover("applyForkOSC", false)
+	if u == nil || src == nil {
+		return
+	}
+	if u.paneCount() >= maxPanesTotal {
+		u.toast("max panes")
+		return
+	}
+	bin, args, env, errMsg := forkLaunchSpec(req)
+	if errMsg != "" {
+		u.toast(errMsg)
+		return
+	}
+	_, pg := u.pageByPaneID(src.id)
+	if pg == nil {
+		return
+	}
+	cols, rows := u.cols, u.rows
+	dir := splitVert
+	if g := u.paneGeomFor(src.id); g != nil {
+		dir = chooseForkSplitDir(g.cols, g.rows)
+		if dir == splitVert {
+			cols = g.cols / 2
+		} else {
+			rows = g.rows / 2
+		}
+	}
+	if cols < minPaneCols {
+		cols = minPaneCols
+	}
+	if rows < minPaneRows {
+		rows = minPaneRows
+	}
+	cwd := strings.TrimSpace(req.cwd)
+	if cwd == "" {
+		cwd = src.cwd
+	}
+	opts := tabOpts{
+		shell:    joinCommandLine(bin, args),
+		cwd:      cwd,
+		title:    forkTitle(req),
+		extraEnv: env,
+	}
+	t, err := newTab(u.nextTabID, cols, rows, opts)
+	if err != nil {
+		log.Error("fork pane failed", "err", err)
+		u.toast("fork failed")
+		return
+	}
+	u.nextTabID++
+	pg.focusID = src.id
+	if !pg.splitFocused(dir, t) {
+		t.close()
+		u.toast("fork failed")
+		return
+	}
+	u.tabs = append(u.tabs, t)
+	t.startWorkers(u)
+	u.selecting = false
+	src.sel.clear()
+	ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
+	u.syncChrome()
+	u.applyClientSize(u.width, u.height)
+	u.toast("fork " + t.displayTitle())
+	log.Info("fork pane", "new", t.id, "bin", bin)
+}
+
 // closePaneUI closes a single pane (⌘W / Ctrl+W).
 // Last pane in a page closes that chrome tab; last pane of the last tab
 // arms confirm-quit when interactive (same as closing the last strip tab).

@@ -40,8 +40,28 @@ func (r Result) ToMap() map[string]any {
 	if r.LocalPath != "" {
 		out["local_path"] = r.LocalPath
 	}
+	if r.Task != nil {
+		out["task"] = r.Task
+	}
+	if r.Tasks != nil {
+		out["tasks"] = r.Tasks
+		out["count"] = r.Count
+	}
+	if r.Lease != nil {
+		out["lease"] = r.Lease
+	}
+	if r.Leases != nil {
+		out["leases"] = r.Leases
+		out["count"] = r.Count
+	}
 	if r.Count > 0 && out["count"] == nil {
 		out["count"] = r.Count
+	}
+	if r.SessionID != "" {
+		out["session_id"] = r.SessionID
+	}
+	if r.MemberID != "" {
+		out["member_id"] = r.MemberID
 	}
 	return out
 }

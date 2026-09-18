@@ -37,12 +37,12 @@ type Model struct {
 
 	Status string
 
-	PaletteOpen  bool
-	SettingsOpen bool
-	ConfirmOpen  bool
-	HelpOpen     bool
-	SplashOpen   bool
-	RenameOpen   bool
+	PaletteOpen   bool
+	SettingsOpen  bool
+	ConfirmOpen   bool
+	HelpOpen      bool
+	SplashOpen    bool
+	RenameOpen    bool
 	NotesOpen     bool
 	WorkspaceOpen bool
 	// Transfer: path/ticket prompt, then progress panel while engine runs.
@@ -66,9 +66,9 @@ type Model struct {
 	transferDone      uint64
 	transferTotal     uint64
 	transferMsg       string
-	transferDropHover  bool   // OS file drag over window (send prompt)
-	transferDropHint   string // short feedback under drop zone
-	transferCopyFlash  string // in-panel "Copied!" after c / click copy
+	transferDropHover bool   // OS file drag over window (send prompt)
+	transferDropHint  string // short feedback under drop zone
+	transferCopyFlash string // in-panel "Copied!" after c / click copy
 	// Notes bank (persisted to notes.json; editor mirrors active note).
 	notesBank   []NoteDoc
 	notesActive int // index into notesBank
@@ -89,6 +89,11 @@ type Model struct {
 	wsChannels  []workspace.Channel
 	wsMessages  []workspace.Message
 	wsMembers   []workspace.Member
+	wsTasks     []workspace.Task
+	wsInbox     []workspace.Message
+	wsPanel     wsPanel
+	wsSel       int // selected row in tasks/inbox lists
+	wsMemberID  string
 	wsCompose   string
 	wsScroll    int // line offset from bottom (kept for simple scroll; viewport preferred)
 	wsStatus    string
@@ -727,7 +732,7 @@ func titleBudget(stripW, nTabs int) int {
 	// caffeine cup on the right + gaps.
 	const brandW = 2
 	const plusW = 3
-	const cafeW = 6 // "☕" + optional hint + padding
+	const cafeW = 6  // "☕" + optional hint + padding
 	const stateW = 2 // glyph + space (worst case)
 	const padW = 4   // lipgloss Padding(0, 2) each side
 	gaps := nTabs + 1

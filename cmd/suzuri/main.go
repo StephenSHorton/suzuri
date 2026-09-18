@@ -10,11 +10,13 @@ import (
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/chromehost"
+	"github.com/StephenSHorton/suzuri/internal/guest"
 	"github.com/StephenSHorton/suzuri/internal/mcpsrv"
 	"github.com/StephenSHorton/suzuri/internal/transfer"
 	"github.com/StephenSHorton/suzuri/internal/ui"
 	"github.com/StephenSHorton/suzuri/internal/update"
 	"github.com/StephenSHorton/suzuri/internal/winconsole"
+	"github.com/StephenSHorton/suzuri/internal/workspacesync"
 )
 
 // version is injected at release build time:
@@ -51,9 +53,16 @@ func main() {
 		winconsole.AttachParent()
 		os.Exit(transfer.RunCLI(os.Args[1:]))
 	}
-	// Native GPU chrome: explicit `suzuri chrome` always; bare `suzuri` when
-	// PreferChromeUI (SUZURI_UI=chrome|native, or chrome binary resolvable).
-	// Force classic ebiten with SUZURI_UI=classic.
+	if len(os.Args) > 1 && workspacesync.IsArg(os.Args[1]) {
+		winconsole.AttachParent()
+		os.Exit(workspacesync.RunCLI(os.Args[1:]))
+	}
+	if len(os.Args) > 1 && guest.IsArg(os.Args[1]) {
+		winconsole.AttachParent()
+		os.Exit(guest.RunCLI(os.Args[2:]))
+	}
+	// This branch defaults to classic ebiten + Charm.
+	// Native GPU chrome: `suzuri chrome` or SUZURI_UI=chrome|native.
 	if len(os.Args) > 1 && os.Args[1] == "chrome" {
 		winconsole.AttachParent()
 		os.Exit(chromehost.RunCLI(os.Args[2:]))
@@ -116,6 +125,12 @@ func main() {
 	// macOS .app: repair Info.plist / entitlements broken by older portable-zip
 	// updates (mic TCC silent deny). May re-sign and relaunch once, then exit.
 	update.HealMacAppBundle(version)
+
+	if d := chromehost.LaunchCwd(); d != "" {
+		if err := os.Chdir(d); err != nil {
+			log.Warn("launch cwd", "dir", d, "err", err)
+		}
+	}
 
 	// Windows: one interactive GUI per session. A second double-click activates
 	// the existing window instead of stacking processes (agent installs and

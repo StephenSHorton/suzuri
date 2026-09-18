@@ -3,7 +3,6 @@
 package workspace
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +26,7 @@ const (
 	maxHistoryDefault = 50
 	maxHistoryCap     = 200
 	maxUploadBytes    = 64 << 20 // 64 MiB local attach cap
+	staleWorkingAfter = 2 * time.Minute
 	messagesFileName  = "messages.jsonl"
 	metaFileName      = "meta.json"
 	membersFileName   = "members.json"
@@ -83,16 +83,23 @@ func NormalizeAvailability(s string) Availability {
 
 // Member is a workspace participant.
 type Member struct {
-	ID        string       `json:"id"`
-	Name      string       `json:"name"`
-	Kind      MemberKind   `json:"kind"`
-	SessionID string       `json:"session_id,omitempty"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Kind      MemberKind `json:"kind"`
+	SessionID string     `json:"session_id,omitempty"`
+	// Role is a claimed function (pm|engine|content). Distinct from Name.
+	Role Role `json:"role,omitempty"`
 	// Status is a short code (idle|working|waiting|blocked|away|custom).
 	Status Availability `json:"status,omitempty"`
 	// StatusNote is optional free text (e.g. "waiting on review from bob").
 	StatusNote string    `json:"status_note,omitempty"`
 	JoinedAt   time.Time `json:"joined_at"`
 	LastSeen   time.Time `json:"last_seen"`
+	// Polling / Stale / PresenceNote are computed on read (not a stored format).
+	// working + last_seen > 2m → polling=false, stale=true, presence_note=not_polling.
+	Polling      *bool  `json:"polling,omitempty"`
+	Stale        bool   `json:"stale,omitempty"`
+	PresenceNote string `json:"presence_note,omitempty"`
 }
 
 // Channel is a named room inside the workspace.
@@ -124,6 +131,16 @@ type Message struct {
 	Body     string     `json:"body"`
 	ReplyTo  string     `json:"reply_to,omitempty"`
 	File     *FileRef   `json:"file,omitempty"`
+	// Mentions are member ids resolved from @display-name tokens at post time.
+	Mentions []string `json:"mentions,omitempty"`
+	// Optional assignment / alias mention fields (read-only). Inbox reads these
+	// if present alongside Mentions member ids.
+	MentionIDs       []string `json:"mention_ids,omitempty"`
+	MentionMemberIDs []string `json:"mention_member_ids,omitempty"`
+	Assign           string   `json:"assign,omitempty"`
+	AssignTo         string   `json:"assign_to,omitempty"`
+	To               string   `json:"to,omitempty"`
+	ToID             string   `json:"to_id,omitempty"`
 }
 
 // Meta is workspace-level metadata.
@@ -345,6 +362,10 @@ func (s *Store) DeleteChannel(name string) (string, error) {
 }
 
 // Join registers or updates a member.
+// A member is reused only when sessionID is non-empty and matches an existing
+// session_id. An empty sessionID always creates a new member. If the display
+// name is taken, a numeric suffix is added (engine, engine-2).
+// Join does not post a system line to #general.
 func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -358,34 +379,27 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 	if kind != KindHuman && kind != KindAgent {
 		kind = KindAgent
 	}
+	sessionID = strings.TrimSpace(sessionID)
 	members, err := s.readMembersLocked()
 	if err != nil {
 		return Member{}, err
 	}
 	now := time.Now().UTC()
-	// Match existing by session_id (agents) or exact name+kind.
-	for i, m := range members {
-		if sessionID != "" && m.SessionID != "" && m.SessionID == sessionID {
-			members[i].Name = name
-			members[i].Kind = kind
-			members[i].LastSeen = now
-			if members[i].Status == "" {
-				members[i].Status = AvailIdle
+	// Reuse only on a non-empty session_id match. Never merge on display name.
+	if sessionID != "" {
+		for i, m := range members {
+			if m.SessionID != "" && m.SessionID == sessionID {
+				members[i].Name = uniqueDisplayName(name, members, m.ID)
+				members[i].Kind = kind
+				members[i].LastSeen = now
+				if members[i].Status == "" {
+					members[i].Status = AvailIdle
+				}
+				if err := s.writeMembersLocked(members); err != nil {
+					return Member{}, err
+				}
+				return members[i], nil
 			}
-			if err := s.writeMembersLocked(members); err != nil {
-				return Member{}, err
-			}
-			return members[i], nil
-		}
-		if sessionID == "" && m.Name == name && m.Kind == kind {
-			members[i].LastSeen = now
-			if members[i].Status == "" {
-				members[i].Status = AvailIdle
-			}
-			if err := s.writeMembersLocked(members); err != nil {
-				return Member{}, err
-			}
-			return members[i], nil
 		}
 	}
 	if len(members) >= maxMembers {
@@ -393,7 +407,7 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 	}
 	m := Member{
 		ID:        newID("m"),
-		Name:      name,
+		Name:      uniqueDisplayName(name, members, ""),
 		Kind:      kind,
 		SessionID: sessionID,
 		Status:    AvailIdle,
@@ -404,8 +418,6 @@ func (s *Store) Join(name string, kind MemberKind, sessionID string) (Member, er
 	if err := s.writeMembersLocked(members); err != nil {
 		return Member{}, err
 	}
-	// System line in #general.
-	_, _ = s.postLocked(DefaultChannel, m, "system", fmt.Sprintf("%s joined the workspace", name), "", nil)
 	return m, nil
 }
 
@@ -471,19 +483,21 @@ func (s *Store) Leave(memberID, name string) error {
 	if err := s.writeMembersLocked(out); err != nil {
 		return err
 	}
-	sys := Member{ID: "system", Name: "system", Kind: KindHuman}
-	_, _ = s.postLocked(DefaultChannel, sys, "system", fmt.Sprintf("%s left the workspace", left.Name), "", nil)
 	return nil
 }
 
-// Members returns the member list.
+// Members returns the member list with computed stale-presence fields.
 func (s *Store) Members() ([]Member, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureLocked(); err != nil {
 		return nil, err
 	}
-	return s.readMembersLocked()
+	list, err := s.readMembersLocked()
+	if err != nil {
+		return nil, err
+	}
+	return annotatePresence(list, time.Now().UTC()), nil
 }
 
 // Post appends a text message. memberID optional if name+kind identify the poster.
@@ -517,6 +531,12 @@ func (s *Store) Post(channel, body, memberID, name string, kind MemberKind, repl
 }
 
 func (s *Store) postLocked(channel string, from Member, kind, body, replyTo string, file *FileRef) (Message, error) {
+	var mentions []string
+	if kind != "system" && body != "" {
+		if mems, err := s.readMembersLocked(); err == nil {
+			mentions = ResolveMentions(body, mems)
+		}
+	}
 	msg := Message{
 		ID:       newID("msg"),
 		Channel:  channel,
@@ -528,6 +548,7 @@ func (s *Store) postLocked(channel string, from Member, kind, body, replyTo stri
 		Body:     body,
 		ReplyTo:  replyTo,
 		File:     file,
+		Mentions: mentions,
 	}
 	path := filepath.Join(s.rootLocked(), "channels", channel, messagesFileName)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -547,6 +568,13 @@ func (s *Store) postLocked(channel string, from Member, kind, body, replyTo stri
 
 // History returns the last n messages in a channel (oldest first).
 func (s *Store) History(channel string, limit int) ([]Message, error) {
+	return s.HistorySince(channel, limit, "", time.Time{})
+}
+
+// HistorySince returns messages after sinceID and/or afterTS (exclusive).
+// Without a cursor this is the last `limit` messages (existing behavior).
+// With a cursor, only newer messages are returned (oldest first, still capped).
+func (s *Store) HistorySince(channel string, limit int, sinceID string, afterTS time.Time) ([]Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureLocked(); err != nil {
@@ -559,43 +587,121 @@ func (s *Store) History(channel string, limit int) ([]Message, error) {
 	if err := s.ensureChannelLocked(channel, ""); err != nil {
 		return nil, err
 	}
+	all, err := s.readAllMessagesLocked(channel)
+	if err != nil {
+		return nil, err
+	}
+	incremental := sinceID != "" || !afterTS.IsZero()
+	all = filterAfterCursor(all, sinceID, afterTS)
+	return clampHistory(all, limit, incremental), nil
+}
+
+// readAllMessages is the unlocked-entry wrapper around readAllMessagesLocked.
+func (s *Store) readAllMessages(channel string) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLocked(); err != nil {
+		return nil, err
+	}
+	channel = NormalizeChannel(channel)
+	if channel == "" {
+		channel = DefaultChannel
+	}
+	if err := s.ensureChannelLocked(channel, ""); err != nil {
+		return nil, err
+	}
+	return s.readAllMessagesLocked(channel)
+}
+
+func filterAfterCursor(all []Message, sinceID string, afterTS time.Time) []Message {
+	if sinceID == "" && afterTS.IsZero() {
+		return all
+	}
+	out := make([]Message, 0, len(all))
+	seenID := sinceID == ""
+	for _, m := range all {
+		if !seenID {
+			if m.ID == sinceID {
+				seenID = true
+			}
+			continue
+		}
+		if !afterTS.IsZero() && !m.TS.After(afterTS) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func clampHistory(all []Message, limit int, incremental bool) []Message {
 	if limit <= 0 {
 		limit = maxHistoryDefault
 	}
 	if limit > maxHistoryCap {
 		limit = maxHistoryCap
 	}
-	path := filepath.Join(s.rootLocked(), "channels", channel, messagesFileName)
-	f, err := os.Open(path)
+	if len(all) <= limit {
+		return all
+	}
+	if incremental {
+		return all[:limit]
+	}
+	return all[len(all)-limit:]
+}
+
+// Touch updates last_seen for a member (wait/inbox heartbeat).
+func (s *Store) Touch(memberID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLocked(); err != nil {
+		return err
+	}
+	memberID = strings.TrimSpace(memberID)
+	if memberID == "" {
+		return fmt.Errorf("member_id required")
+	}
+	members, err := s.readMembersLocked()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+		return err
+	}
+	now := time.Now().UTC()
+	for i, m := range members {
+		if m.ID == memberID || strings.EqualFold(m.Name, memberID) {
+			members[i].LastSeen = now
+			return s.writeMembersLocked(members)
 		}
-		return nil, err
 	}
-	defer f.Close()
-	var all []Message
-	sc := bufio.NewScanner(f)
-	// Allow long lines (messages up to body cap + metadata).
-	sc.Buffer(make([]byte, 0, 64*1024), 256*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
+	return fmt.Errorf("member not found")
+}
+
+func annotatePresence(members []Member, now time.Time) []Member {
+	out := make([]Member, len(members))
+	for i, m := range members {
+		stale := m.Status == AvailWorking && (now.Sub(m.LastSeen) > staleWorkingAfter || m.LastSeen.IsZero())
+		polling := !stale
+		m.Polling = &polling
+		if stale {
+			m.Stale = true
+			m.PresenceNote = "not_polling"
+		} else {
+			m.Stale = false
+			m.PresenceNote = ""
 		}
-		var m Message
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue
-		}
-		all = append(all, m)
+		out[i] = m
 	}
-	if err := sc.Err(); err != nil {
-		return nil, err
+	return out
+}
+
+func stripPresenceView(members []Member) []Member {
+	out := make([]Member, len(members))
+	for i, m := range members {
+		m.Polling = nil
+		m.Stale = false
+		m.PresenceNote = ""
+		out[i] = m
 	}
-	if len(all) > limit {
-		all = all[len(all)-limit:]
-	}
-	return all, nil
+	return out
 }
 
 func (s *Store) resolveMemberLocked(id, name string, kind MemberKind) (Member, error) {
@@ -618,17 +724,17 @@ func (s *Store) resolveMemberLocked(id, name string, kind MemberKind) (Member, e
 	if kind == "" {
 		kind = KindAgent
 	}
-	for _, m := range members {
-		if m.Name == name && (kind == "" || m.Kind == kind) {
-			return m, nil
-		}
+	// Never merge on display name. Auto-join always creates a new member
+	// (suffix if the name is taken). Empty session_id never fuses.
+	if len(members) >= maxMembers {
+		return Member{}, fmt.Errorf("member limit reached (%d)", maxMembers)
 	}
-	// Auto-join for convenience (agents forget to join).
 	now := time.Now().UTC()
 	m := Member{
 		ID:       newID("m"),
-		Name:     name,
+		Name:     uniqueDisplayName(name, members, ""),
 		Kind:     kind,
+		Status:   AvailIdle,
 		JoinedAt: now,
 		LastSeen: now,
 	}
@@ -676,7 +782,7 @@ func (s *Store) readMembersLocked() ([]Member, error) {
 }
 
 func (s *Store) writeMembersLocked(members []Member) error {
-	return writeJSON(filepath.Join(s.rootLocked(), membersFileName), members)
+	return writeJSON(filepath.Join(s.rootLocked(), membersFileName), stripPresenceView(members))
 }
 
 // NormalizeChannel turns "#Fix Auth" into "fix-auth".

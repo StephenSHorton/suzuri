@@ -51,9 +51,9 @@ func TestPostHistoryJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// join system + agent + human
-	if len(hist) < 3 {
-		t.Fatalf("history len=%d want >=3: %+v", len(hist), hist)
+	// agent + human (join no longer posts a system line to #general)
+	if len(hist) < 2 {
+		t.Fatalf("history len=%d want >=2: %+v", len(hist), hist)
 	}
 	last := hist[len(hist)-1]
 	if last.Body != "looking good" || last.FromKind != KindHuman {

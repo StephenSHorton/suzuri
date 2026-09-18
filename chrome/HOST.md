@@ -86,10 +86,9 @@ Go host treats chrome as an optional UI child. Package:
    - (later: cwd / initial shell / feature toggles)
 4. Lifecycle: `suzuri chrome` starts chrome and **waits** for exit (chrome-only
    mode). Also starts MCP bridge proxy (Phase 2).
-5. **Default UI:** bare `suzuri` launches chrome when `PreferChromeUI()` is true:
-   - `SUZURI_UI=chrome` / `native` → always chrome
-   - `SUZURI_UI=classic` / `ebiten` / `legacy` → classic ebiten
-   - unset → chrome if `ResolveBinary()` succeeds (sibling install or cargo release), else classic
+5. **Default UI (this branch):** bare `suzuri` is classic ebiten + Charm.
+   - unset / `classic` / `ebiten` / `legacy` → Charm
+   - `SUZURI_UI=chrome` / `native` or `suzuri chrome` → GPU sidecar if present
 
 ```bash
 # Native chrome when binary is resolvable (install layout or cargo release)

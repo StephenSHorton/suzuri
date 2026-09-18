@@ -133,7 +133,6 @@ type mcpJob struct {
 	workspaceOut chan bridge.WorkspaceResult
 }
 
-
 type winUI struct {
 	// pages are chrome-strip tabs; each may hold a split tree of panes.
 	// tabs is the flat list of all pane sessions (I/O by id, bridge, teardown).
@@ -145,7 +144,7 @@ type winUI struct {
 	lastSashes     []sashGeom
 	lastShell      struct{ x, y, w, h int32 }
 	// sashDrag is non-nil while the user is dragging a shared pane divider.
-	sashDrag *sashGeom
+	sashDrag  *sashGeom
 	nextTabID int
 	chrome    chrome.Model // Charm UI: tabs, status, palette
 
@@ -161,14 +160,14 @@ type winUI struct {
 	symFont           win.HFONT
 	primaryHasGeo     bool // ●○◉◎ present in primary face
 	primaryHasBraille bool
-	width   int32
-	height  int32
-	cols    int
-	rows    int
-	cfg     config.Config
+	width             int32
+	height            int32
+	cols              int
+	rows              int
+	cfg               config.Config
 	// last measured cell size (for hit-testing)
-	metricW int32
-	metricH int32
+	metricW  int32
+	metricH  int32
 	chromePx int32 // pixel height of Charm chrome
 	inputPx  int32 // pixel height of Warp-style bottom input bar
 
@@ -177,11 +176,11 @@ type winUI struct {
 	lastBackspace time.Time // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
 	selecting     bool
 	// shellMulti / notesMulti: double-click word, triple-click line selection.
-	shellMulti multiClick
-	notesMulti multiClick
-	statusUntil   time.Time // clear toast Status after this (zero = none)
-	showSplash    bool      // open first-run card after window is ready
-	spinTick      uint64    // blink-loop counter for tab braille spinner
+	shellMulti  multiClick
+	notesMulti  multiClick
+	statusUntil time.Time // clear toast Status after this (zero = none)
+	showSplash  bool      // open first-run card after window is ready
+	spinTick    uint64    // blink-loop counter for tab braille spinner
 	// modalImage: full-window image viewer (click path / Open Image / image block).
 	modalImage *tabImage
 	// Startup rain: spawn until matrixIntroSpawnEnd, then wind-down until clear.
@@ -240,11 +239,11 @@ type winUI struct {
 
 	// Chrome paint cache: RenderToTerm+Lip Gloss every WM_PAINT is expensive
 	// and stress-tests GDI when the window is reactivated after idle.
-	chromeDirty   bool
-	chromeCols    int
-	chromeCells   [][]cellPix // strip [row][col]
-	overlayCells  [][]cellPix
-	overlayDirty  bool
+	chromeDirty  bool
+	chromeCols   int
+	chromeCells  [][]cellPix // strip [row][col]
+	overlayCells [][]cellPix
+	overlayDirty bool
 
 	// overlaySceneReady: memDC already holds a static dim underlay (splash/
 	// confirm) so later paints only re-draw the floating card. Palette and
@@ -1353,7 +1352,7 @@ func (u *winUI) loop() error {
 	// Stable callback: keep ui pinned via global map so GC never collects it
 	// while Win32 still has the WndProc pointer.
 	wc := win.WNDCLASSEX{
-		CbSize:        uint32(unsafe.Sizeof(win.WNDCLASSEX{})),
+		CbSize: uint32(unsafe.Sizeof(win.WNDCLASSEX{})),
 		// CS_DBLCLKS so double-click on tabs / pane titles can open rename.
 		Style:         win.CS_DBLCLKS,
 		LpfnWndProc:   wndProcCallback,
@@ -1495,7 +1494,7 @@ func uiFor(hwnd win.HWND) *winUI {
 	return uiMap[hwnd]
 }
 
-//export-style fixed callback (function, not method).
+// export-style fixed callback (function, not method).
 var wndProcCallback = syscall.NewCallback(wndProcMain)
 
 func wndProcMain(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
@@ -1604,6 +1603,13 @@ func (u *winUI) drainAndParse(tabID int) {
 		}
 	} else {
 		data = clean
+	}
+	{
+		clean, reqs := stripAndTakeFork(data)
+		data = clean
+		for _, req := range reqs {
+			u.applyForkOSC(t, req)
+		}
 	}
 	// Inline images: iTerm OSC 1337, suzuri OSC 7879, and path heuristics.
 	// Attached into scrollback under the current stream (not a sticky overlay).
@@ -2118,7 +2124,6 @@ func (u *winUI) pixelToChromeCol(px int32) int {
 	}
 	return cellX
 }
-
 
 func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	switch msg {

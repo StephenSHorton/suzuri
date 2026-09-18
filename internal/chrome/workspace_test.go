@@ -75,6 +75,37 @@ func TestWorkspaceNewChannelMode(t *testing.T) {
 	}
 }
 
+func TestWorkspaceTasksAndInboxPanels(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	m := New(80)
+	m = m.UpdateChrome(OpenWorkspaceMsg{}).Model
+	if m.wsPanel != wsPanelChat {
+		t.Fatalf("panel=%v", m.wsPanel)
+	}
+	m.handleWorkspaceKey(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if m.wsPanel != wsPanelTasks {
+		t.Fatalf("after ctrl+t panel=%v want tasks", m.wsPanel)
+	}
+	m.wsMode = wsModeNewTask
+	m.wsCompose = "ship classic"
+	m.handleWorkspaceKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.wsTasks) < 1 {
+		t.Fatal("expected a task")
+	}
+	if m.wsTasks[0].Title != "ship classic" {
+		t.Fatalf("title=%q", m.wsTasks[0].Title)
+	}
+	m.handleWorkspaceKey(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if m.wsPanel != wsPanelInbox {
+		t.Fatalf("panel=%v want inbox", m.wsPanel)
+	}
+	view := m.renderWorkspace(80)
+	if !strings.Contains(ansi.Strip(view), "inbox") {
+		t.Fatalf("view missing inbox tab: %s", ansi.Strip(view))
+	}
+}
+
 func TestWorkspaceComposeAcceptsRunes(t *testing.T) {
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	m := New(80)

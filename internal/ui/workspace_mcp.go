@@ -25,10 +25,22 @@ func runWorkspaceOnChrome(m *chrome.Model, req bridge.WorkspaceRequest) bridge.W
 		ReplyTo:    req.ReplyTo,
 		Topic:      req.Topic,
 		Limit:      req.Limit,
+		SinceID:    req.SinceID,
+		AfterTS:    req.AfterTS,
+		Since:      req.Since,
+		Timeout:    req.Timeout,
 		FilePath:   req.FilePath,
 		FileID:     req.FileID,
 		Status:     req.Status,
 		StatusNote: req.StatusNote,
+		Role:       req.Role,
+		TaskID:     req.TaskID,
+		Title:      req.Title,
+		Files:      req.Files,
+		TaskStatus: req.TaskStatus,
+		Path:       req.Path,
+		TTL:        req.TTL,
+		Steal:      req.Steal,
 	})
 	if m.WorkspaceOpen {
 		*m = m.UpdateChrome(chrome.RefreshWorkspaceMsg{}).Model
@@ -44,6 +56,28 @@ func workspaceResultToBridge(r workspace.Result) bridge.WorkspaceResult {
 		Status:    r.Status,
 		Count:     r.Count,
 		LocalPath: r.LocalPath,
+		SessionID: r.SessionID,
+		MemberID:  r.MemberID,
+	}
+	if r.Task != nil {
+		t := mapTask(*r.Task)
+		out.Task = &t
+	}
+	if r.Tasks != nil {
+		out.Tasks = make([]bridge.WorkspaceTask, 0, len(r.Tasks))
+		for _, t := range r.Tasks {
+			out.Tasks = append(out.Tasks, mapTask(t))
+		}
+	}
+	if r.Lease != nil {
+		l := mapLease(*r.Lease)
+		out.Lease = &l
+	}
+	if r.Leases != nil {
+		out.Leases = make([]bridge.WorkspaceLease, 0, len(r.Leases))
+		for _, l := range r.Leases {
+			out.Leases = append(out.Leases, mapLease(l))
+		}
 	}
 	if r.Member != nil {
 		m := mapMember(*r.Member)
@@ -98,14 +132,36 @@ func mapMember(m workspace.Member) bridge.WorkspaceMember {
 		st = string(workspace.AvailIdle)
 	}
 	return bridge.WorkspaceMember{
-		ID:         m.ID,
-		Name:       m.Name,
-		Kind:       string(m.Kind),
-		SessionID:  m.SessionID,
-		Status:     st,
-		StatusNote: m.StatusNote,
-		JoinedAt:   m.JoinedAt,
-		LastSeen:   m.LastSeen,
+		ID:           m.ID,
+		Name:         m.Name,
+		Kind:         string(m.Kind),
+		SessionID:    m.SessionID,
+		Role:         string(m.Role),
+		Status:       st,
+		StatusNote:   m.StatusNote,
+		JoinedAt:     m.JoinedAt,
+		LastSeen:     m.LastSeen,
+		Polling:      m.Polling,
+		Stale:        m.Stale,
+		PresenceNote: m.PresenceNote,
+	}
+}
+
+func mapTask(t workspace.Task) bridge.WorkspaceTask {
+	return bridge.WorkspaceTask{
+		ID:     t.ID,
+		Title:  t.Title,
+		Owner:  t.Owner,
+		Status: string(t.Status),
+		Files:  t.Files,
+	}
+}
+
+func mapLease(l workspace.Lease) bridge.WorkspaceLease {
+	return bridge.WorkspaceLease{
+		Path:     l.Path,
+		MemberID: l.MemberID,
+		Until:    l.Until,
 	}
 }
 
@@ -130,6 +186,7 @@ func mapMessage(msg workspace.Message) bridge.WorkspaceMessage {
 		Kind:     msg.Kind,
 		Body:     msg.Body,
 		ReplyTo:  msg.ReplyTo,
+		Mentions: msg.Mentions,
 	}
 	if msg.File != nil {
 		f := mapFileRef(*msg.File)

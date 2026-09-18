@@ -29,10 +29,11 @@ func TestPreferChromeUIExplicit(t *testing.T) {
 	}
 }
 
-func TestPreferChromeUIEmptyUsesResolve(t *testing.T) {
+func TestPreferChromeUIEmptyIsClassic(t *testing.T) {
 	t.Setenv(EnvUI, "")
-	// Result depends on environment; just ensure it does not panic.
-	_ = PreferChromeUI()
+	if PreferChromeUI() {
+		t.Fatal("empty SUZURI_UI should default to classic on this branch")
+	}
 	_ = SiblingChromeAvailable()
 	_ = os.Getenv(EnvUI)
 }

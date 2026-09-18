@@ -949,6 +949,13 @@ func (u *macUI) drainAndParse(tabID int) {
 	} else {
 		data = clean
 	}
+	{
+		clean, reqs := stripAndTakeFork(data)
+		data = clean
+		for _, req := range reqs {
+			u.applyForkOSC(t, req)
+		}
+	}
 	// Inline images: iTerm OSC 1337, suzuri OSC 7879, and path heuristics.
 	{
 		clean, paths, blobs := stripAndTakeImages(data)
@@ -3841,15 +3848,15 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	// focused geom's bar region via ShowInput=false + post paint.
 	inOpts := u.inputBarPaint()
 	opts := paintOpts{
-		Shell:            focusGrid,
-		Chrome:           u.chromeCells,
-		Overlay:          overlay,
-		PadY:             padY,
-		ShellBot:         shellBot,
-		CurX:             cur.X,
-		CurY:             cur.Y,
-		CurVis:           curVis,
-		CurAlpha:         curAlpha,
+		Shell:    focusGrid,
+		Chrome:   u.chromeCells,
+		Overlay:  overlay,
+		PadY:     padY,
+		ShellBot: shellBot,
+		CurX:     cur.X,
+		CurY:     cur.Y,
+		CurVis:   curVis,
+		CurAlpha: curAlpha,
 		// Dim matte: settings/splash/confirm only. Workspace floats live shell.
 		DimShell:         u.dimShellModal(),
 		SolidPanel:       u.solidOverlayPanel(),

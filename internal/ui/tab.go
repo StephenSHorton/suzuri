@@ -273,9 +273,10 @@ const (
 
 // tabOpts optional launch recipe (profile).
 type tabOpts struct {
-	shell string // empty → DefaultShell
-	cwd   string // empty → user home (not install/exe dir)
-	title string // empty → shell N
+	shell    string   // empty → DefaultShell
+	cwd      string   // empty → user home (not install/exe dir)
+	title    string   // empty → shell N
+	extraEnv []string // KEY=val pairs for the child PTY
 }
 
 func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
@@ -292,7 +293,7 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 			cwd = wd
 		}
 	}
-	sess, err := host.StartSession(shell, cols, rows, cwd)
+	sess, err := host.StartSession(shell, cols, rows, cwd, opts.extraEnv...)
 	if err != nil {
 		log.Error("pty start failed", "tab", id, "shell", shell, "cwd", cwd, "err", err)
 		return nil, err
