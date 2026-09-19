@@ -4526,16 +4526,21 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 			px := padX + int32(x)*cw
 			py := padY + int32(y)*ch
 			cell := win.RECT{Left: px, Top: py, Right: px + cw, Bottom: py + ch}
-			if drawCellGlyph(hdc, r, cell, fr, fg, fb) {
-				continue
+			if !drawCellGlyph(hdc, r, cell, fr, fg, fb) {
+				s, err := syscall.UTF16FromString(string(r))
+				if err != nil || len(s) < 2 {
+					if c.Underline {
+						paintWinUnderline(hdc, px, py, cw, ch, fr, fg, fb)
+					}
+					continue
+				}
+				u.selectFontForRune(hdc, r, c.Bold)
+				win.SetTextColor(hdc, win.RGB(fr, fg, fb))
+				win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
 			}
-			s, err := syscall.UTF16FromString(string(r))
-			if err != nil || len(s) < 2 {
-				continue
+			if c.Underline {
+				paintWinUnderline(hdc, px, py, cw, ch, fr, fg, fb)
 			}
-			u.selectFontForRune(hdc, r, c.Bold)
-			win.SetTextColor(hdc, win.RGB(fr, fg, fb))
-			win.TextOut(hdc, px, py, &s[0], int32(len(s)-1))
 		}
 	}
 	if u.font != 0 {
@@ -4668,25 +4673,14 @@ func (u *winUI) paintPaneTitles(hdc win.HDC, layouts []paneGeom) {
 	}
 }
 
-// paintPaneBorders draws a *shared* dim perimeter + internal sashes (no double
-// borders between siblings), then a primary highlight on the focused leaf.
+// paintPaneBorders draws one 1px hairline per shared sash. No outer frame
+// (left/right window edges stay open) and no per-pane ring (that doubled
+// against the sash).
 func (u *winUI) paintPaneBorders(hdc win.HDC, layouts []paneGeom) {
 	if len(layouts) < 2 || hdc == 0 {
 		return
 	}
-	dr, dg, db := chrome.MuteR, chrome.MuteG, chrome.MuteB
-	if dr == 0 && dg == 0 && db == 0 {
-		dr, dg, db = 70, 70, 80
-	}
-	pr, pg, pb := chrome.PrimR, chrome.PrimG, chrome.PrimB
-	if pr == 0 && pg == 0 && pb == 0 {
-		pr, pg, pb = 0, 230, 118
-	}
-	// Dim sash color: mute with a hint of primary.
-	dr = byte((int(dr)*3 + int(pr)) / 4)
-	dg = byte((int(dg)*3 + int(pg)) / 4)
-	db = byte((int(db)*3 + int(pb)) / 4)
-
+	dr, dg, db := paneSashRGB()
 	dlb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(dr, dg, db)}
 	dbrush := win.CreateBrushIndirect(&dlb)
 	if dbrush == 0 {
@@ -4694,104 +4688,12 @@ func (u *winUI) paintPaneBorders(hdc win.HDC, layouts []paneGeom) {
 	}
 	defer win.DeleteObject(win.HGDIOBJ(dbrush))
 
-	plb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(pr, pg, pb)}
-	pbrush := win.CreateBrushIndirect(&plb)
-	if pbrush != 0 {
-		defer win.DeleteObject(win.HGDIOBJ(pbrush))
+	for _, ln := range sashHairlines(u.lastSashes) {
+		fillRect(hdc, win.RECT{
+			Left: ln.x, Top: ln.y,
+			Right: ln.x + ln.w, Bottom: ln.y + ln.h,
+		}, dbrush)
 	}
-
-	// Outer shell perimeter (once) — shared frame for the whole split group.
-	sx, sy, sw, sh := u.lastShell.x, u.lastShell.y, u.lastShell.w, u.lastShell.h
-	if sw < 1 || sh < 1 {
-		// Fallback: union of leaf outer rects.
-		sx, sy = layouts[0].x, layouts[0].outerY
-		if layouts[0].outerH < 1 {
-			sy = layouts[0].y
-		}
-		var maxR, maxB int32
-		for _, g := range layouts {
-			oy, oh := g.outerY, g.outerH
-			if oh < 1 {
-				oy, oh = g.y, g.h
-			}
-			if g.x < sx {
-				sx = g.x
-			}
-			if oy < sy {
-				sy = oy
-			}
-			if g.x+g.w > maxR {
-				maxR = g.x + g.w
-			}
-			if oy+oh > maxB {
-				maxB = oy + oh
-			}
-		}
-		sw, sh = maxR-sx, maxB-sy
-	}
-	const dimT int32 = 1
-	u.fillPaneBorder(hdc, sx, sy, sw, sh, dimT, dbrush)
-
-	// Internal sashes: single shared divider (fills the gap between siblings).
-	for _, s := range u.lastSashes {
-		if s.w < 1 || s.h < 1 {
-			continue
-		}
-		// Draw a 1px line centered in the sash strip for a clean hairline.
-		if s.dir == splitVert {
-			cx := s.x + s.w/2
-			if cx < s.x {
-				cx = s.x
-			}
-			fillRect(hdc, win.RECT{Left: cx, Top: s.y, Right: cx + 1, Bottom: s.y + s.h}, dbrush)
-		} else {
-			cy := s.y + s.h/2
-			if cy < s.y {
-				cy = s.y
-			}
-			fillRect(hdc, win.RECT{Left: s.x, Top: cy, Right: s.x + s.w, Bottom: cy + 1}, dbrush)
-		}
-	}
-
-	// Active pane: primary highlight on its outer edges (overlays shared sashes).
-	if pbrush == 0 {
-		return
-	}
-	const hotT int32 = 2
-	for _, g := range layouts {
-		if !g.focused {
-			continue
-		}
-		oy, oh := g.outerY, g.outerH
-		if oh < 1 {
-			oy, oh = g.y, g.h
-		}
-		if g.w < 2 || oh < 2 {
-			continue
-		}
-		u.fillPaneBorder(hdc, g.x, oy, g.w, oh, hotT, pbrush)
-	}
-}
-
-// fillPaneBorder paints a hollow rectangle frame of thickness t.
-func (u *winUI) fillPaneBorder(hdc win.HDC, x, y, w, h, t int32, brush win.HBRUSH) {
-	if brush == 0 || w < 1 || h < 1 || t < 1 {
-		return
-	}
-	if t*2 > w {
-		t = w / 2
-	}
-	if t*2 > h {
-		t = h / 2
-	}
-	if t < 1 {
-		return
-	}
-	// top, bottom, left, right
-	fillRect(hdc, win.RECT{Left: x, Top: y, Right: x + w, Bottom: y + t}, brush)
-	fillRect(hdc, win.RECT{Left: x, Top: y + h - t, Right: x + w, Bottom: y + h}, brush)
-	fillRect(hdc, win.RECT{Left: x, Top: y, Right: x + t, Bottom: y + h}, brush)
-	fillRect(hdc, win.RECT{Left: x + w - t, Top: y, Right: x + w, Bottom: y + h}, brush)
 }
 
 // measureCellSize returns the monospaced cell size for the font selected in hdc.
@@ -4848,6 +4750,21 @@ func fillSolidRGB(hdc win.HDC, r win.RECT, cr, cg, cb byte) {
 		fillRect(hdc, r, brush)
 		win.DeleteObject(win.HGDIOBJ(brush))
 	}
+}
+
+func paintWinUnderline(hdc win.HDC, px, py, cw, ch int32, r, g, b byte) {
+	th := ch / 12
+	if th < 1 {
+		th = 1
+	}
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(r, g, b)}
+	brush := win.CreateBrushIndirect(&lb)
+	if brush == 0 {
+		return
+	}
+	rect := win.RECT{Left: px, Top: py + ch - th - 1, Right: px + cw, Bottom: py + ch - 1}
+	fillRect(hdc, rect, brush)
+	win.DeleteObject(win.HGDIOBJ(brush))
 }
 
 // selectFontForRune picks the primary mono face, or CJK fallback for Han/kana.
@@ -6336,21 +6253,26 @@ func (u *winUI) paintChromeCellsEx(hdc win.HDC, rect win.RECT, cells [][]cellPix
 				Right:  ox + 4 + int32(x+1)*cw,
 				Bottom: oy + int32(y+1)*ch,
 			}
-			if drawCellGlyph(hdc, r, cellRect, cell.FR, cell.FG, cell.FB) {
-				continue
+			if !drawCellGlyph(hdc, r, cellRect, cell.FR, cell.FG, cell.FB) {
+				s, err := syscall.UTF16FromString(string(r))
+				if err != nil || len(s) < 2 {
+					if cell.Underline {
+						paintWinUnderline(hdc, cellRect.Left, cellRect.Top, cw, ch, cell.FR, cell.FG, cell.FB)
+					}
+					continue
+				}
+				u.selectFontForRune(hdc, r, cell.Bold)
+				win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
+				// Clip status / any wide fallback glyphs to the cell so tab chips
+				// never spill into the title or past the pad edge.
+				if isStatusGlyphRune(r) {
+					extTextOutClipped(hdc, cellRect.Left, cellRect.Top, &cellRect, &s[0], uint32(len(s)-1))
+				} else {
+					win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
+				}
 			}
-			s, err := syscall.UTF16FromString(string(r))
-			if err != nil || len(s) < 2 {
-				continue
-			}
-			u.selectFontForRune(hdc, r, cell.Bold)
-			win.SetTextColor(hdc, win.RGB(cell.FR, cell.FG, cell.FB))
-			// Clip status / any wide fallback glyphs to the cell so tab chips
-			// never spill into the title or past the pad edge.
-			if isStatusGlyphRune(r) {
-				extTextOutClipped(hdc, cellRect.Left, cellRect.Top, &cellRect, &s[0], uint32(len(s)-1))
-			} else {
-				win.TextOut(hdc, cellRect.Left, cellRect.Top, &s[0], int32(len(s)-1))
+			if cell.Underline {
+				paintWinUnderline(hdc, cellRect.Left, cellRect.Top, cw, ch, cell.FR, cell.FG, cell.FB)
 			}
 		}
 	}

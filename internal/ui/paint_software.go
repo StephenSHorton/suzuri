@@ -237,9 +237,7 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 				bb = blendByte(bb, cell.FB, a)
 			}
 			paintCellBackground(dst, px, py, cw, ch, br, bg, bb)
-			if cell.Ch != 0 && cell.Ch != ' ' {
-				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
-			}
+			p.paintCellInk(dst, px, py, cell)
 		}
 	}
 
@@ -516,14 +514,10 @@ func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, 
 			if !barMode && empty && isTransparentOverlayBG(br, bg, bb) {
 				if fillHoles {
 					fillRectRGBA(dst, px, py, cw, ch, chrome.PanelR, chrome.PanelG, chrome.PanelB)
-					if cell.Ch != 0 && cell.Ch != ' ' {
-						p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
-					}
+					p.paintCellInk(dst, px, py, cell)
 					continue
 				}
-				if cell.Ch != 0 && cell.Ch != ' ' {
-					p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
-				}
+				p.paintCellInk(dst, px, py, cell)
 				continue
 			}
 			// Non-empty glyph with transparent/default bg inside card → panel under ink.
@@ -531,17 +525,13 @@ func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, 
 				br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
 			}
 			if barMode && br == 0 && bg == 0 && bb == 0 {
-				if !empty {
-					p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
-				}
+				p.paintCellInk(dst, px, py, cell)
 				continue
 			}
 			if !(barMode && empty && br == chrome.BarR && bg == chrome.BarG && bb == chrome.BarB) {
 				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
 			}
-			if !empty {
-				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
-			}
+			p.paintCellInk(dst, px, py, cell)
 		}
 	}
 }
@@ -554,6 +544,33 @@ func overlayCellIsSolid(cell cellPix) bool {
 	}
 	// Glyph on default bg still counts so we don't shrink past ink-only rows.
 	return cell.Ch != 0 && cell.Ch != ' '
+}
+
+func (p *softwarePainter) paintCellInk(dst *image.RGBA, px, py int, cell cellPix) {
+	if p == nil || dst == nil {
+		return
+	}
+	if cell.Ch != 0 && cell.Ch != ' ' {
+		p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
+	}
+	if cell.Underline {
+		p.paintCellUnderline(dst, px, py, cell.FR, cell.FG, cell.FB)
+	}
+}
+
+func (p *softwarePainter) paintCellUnderline(dst *image.RGBA, px, py int, fr, fg, fb byte) {
+	cw, ch := p.cellW, p.cellH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	th := ch / 12
+	if th < 1 {
+		th = 1
+	}
+	fillRectRGBA(dst, px, py+ch-th-1, cw, th, fr, fg, fb)
 }
 
 func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg, fb byte) {
@@ -653,9 +670,7 @@ func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g pan
 				bb = blendByte(bb, cell.FB, a)
 			}
 			paintCellBackground(dst, px, py, cw, ch, br, bg, bb)
-			if cell.Ch != 0 && cell.Ch != ' ' {
-				p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
-			}
+			p.paintCellInk(dst, px, py, cell)
 		}
 	}
 }
@@ -774,20 +789,15 @@ func (p *softwarePainter) paintPaneTitles(dst *image.RGBA, layouts []paneGeom, c
 	}
 }
 
-// paintPaneSashes draws shared dividers between sibling panes.
-func (p *softwarePainter) paintPaneSashes(dst *image.RGBA, sashes []sashGeom, shell struct{ x, y, w, h int32 }) {
+// paintPaneSashes draws one 1px hairline per shared sash. Window-edge sides
+// stay open so left/right (and other outer) panes do not grow a frame.
+func (p *softwarePainter) paintPaneSashes(dst *image.RGBA, sashes []sashGeom, _ struct{ x, y, w, h int32 }) {
 	if dst == nil {
 		return
 	}
-	// Outer perimeter.
-	if shell.w > 0 && shell.h > 0 {
-		fillRectRGBA(dst, int(shell.x), int(shell.y), int(shell.w), 1, 40, 40, 48)
-		fillRectRGBA(dst, int(shell.x), int(shell.y+shell.h-1), int(shell.w), 1, 40, 40, 48)
-		fillRectRGBA(dst, int(shell.x), int(shell.y), 1, int(shell.h), 40, 40, 48)
-		fillRectRGBA(dst, int(shell.x+shell.w-1), int(shell.y), 1, int(shell.h), 40, 40, 48)
-	}
-	for _, s := range sashes {
-		fillRectRGBA(dst, int(s.x), int(s.y), int(s.w), int(s.h), 48, 48, 56)
+	r, g, b := paneSashRGB()
+	for _, ln := range sashHairlines(sashes) {
+		fillRectRGBA(dst, int(ln.x), int(ln.y), int(ln.w), int(ln.h), r, g, b)
 	}
 }
 

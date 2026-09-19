@@ -180,3 +180,17 @@ func TestDefaultBGStaysTransparentForRain(t *testing.T) {
 		t.Fatalf("default BG must stay 0,0,0 for rain skip, got %d,%d,%d", c.BR, c.BG, c.BB)
 	}
 }
+
+func TestUnderlineModeIsCaptured(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(8, 2))
+	if _, err := term.Write([]byte("\x1b[4;38;2;122;162;247m/\x1b[0m")); err != nil {
+		t.Fatal(err)
+	}
+	c := glyphToCell(term.Cell(0, 0))
+	if !c.Underline {
+		t.Fatal("SGR 4 underline must land on cellPix")
+	}
+	if c.FR != 122 || c.FG != 162 || c.FB != 247 {
+		t.Fatalf("underlined slash lost FG FR=%d,%d,%d", c.FR, c.FG, c.FB)
+	}
+}

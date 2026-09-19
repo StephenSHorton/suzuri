@@ -83,15 +83,18 @@ type cellPix struct {
 	FR, FG, FB byte // foreground
 	BR, BG, BB byte // background
 	Bold       bool
+	Underline  bool
 }
 
 func glyphToCell(g vt10x.Glyph) cellPix {
-	// Mode bits match vt10x/state.go (attrReverse=1<<0 … attrBold=1<<2 …).
+	// Mode bits match vt10x/state.go (attrReverse=1<<0, underline=1<<1, bold=1<<2).
 	const (
-		attrReverse = 1 << 0
-		attrBold    = 1 << 2
+		attrReverse   = 1 << 0
+		attrUnderline = 1 << 1
+		attrBold      = 1 << 2
 	)
 	bold := g.Mode&attrBold != 0
+	underline := g.Mode&attrUnderline != 0
 	// vt10x setChar already swaps FG/BG into the stored glyph when reverse is
 	// set (and leaves Mode|attrReverse). Do not re-swap here — that undoes
 	// reverse video so selection highlights (SGR 7 / lipgloss Reverse) paint
@@ -127,14 +130,15 @@ func glyphToCell(g vt10x.Glyph) cellPix {
 	// side; pure default black (0,0,0) still skips fill so rain shows through.
 	// Bold alone never invents a band.
 	return cellPix{
-		Ch:   displayRune(g.Char),
-		FR:   fr,
-		FG:   fg,
-		FB:   fb,
-		BR:   br,
-		BG:   bg,
-		BB:   bb,
-		Bold: bold,
+		Ch:        displayRune(g.Char),
+		FR:        fr,
+		FG:        fg,
+		FB:        fb,
+		BR:        br,
+		BG:        bg,
+		BB:        bb,
+		Bold:      bold,
+		Underline: underline,
 	}
 }
 

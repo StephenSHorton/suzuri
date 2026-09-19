@@ -2,7 +2,11 @@
 
 package ui
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/StephenSHorton/suzuri/internal/chrome"
+)
 
 // Split panes within a chrome tab (equal H/V splits; no sash drag in v1).
 //
@@ -510,11 +514,52 @@ type sashGeom struct {
 	parentW, parentH int32 // parent rect for ratio math
 }
 
+// sashHairline is the 1px line painted inside a sash strip.
+// Adjacent panes share this line; window-edge sides are not drawn.
+type sashHairline struct {
+	x, y, w, h int32
+}
+
+// sashHairlines returns one 1px divider per shared sash, centered in the gap.
+func sashHairlines(sashes []sashGeom) []sashHairline {
+	if len(sashes) == 0 {
+		return nil
+	}
+	out := make([]sashHairline, 0, len(sashes))
+	for _, s := range sashes {
+		if s.w < 1 || s.h < 1 {
+			continue
+		}
+		if s.dir == splitVert {
+			cx := s.x + s.w/2
+			out = append(out, sashHairline{x: cx, y: s.y, w: 1, h: s.h})
+			continue
+		}
+		cy := s.y + s.h/2
+		out = append(out, sashHairline{x: s.x, y: cy, w: s.w, h: 1})
+	}
+	return out
+}
+
+func paneSashRGB() (r, g, b byte) {
+	r, g, b = chrome.MuteR, chrome.MuteG, chrome.MuteB
+	if r == 0 && g == 0 && b == 0 {
+		r, g, b = 70, 70, 80
+	}
+	pr, pg, pb := chrome.PrimR, chrome.PrimG, chrome.PrimB
+	if pr == 0 && pg == 0 && pb == 0 {
+		pr, pg, pb = 0, 230, 118
+	}
+	return byte((int(r)*3 + int(pr)) / 4),
+		byte((int(g)*3 + int(pg)) / 4),
+		byte((int(b)*3 + int(pb)) / 4)
+}
+
 // layoutResult is leaves + shared sashes for one page tree.
 type layoutResult struct {
 	leaves []paneGeom
 	sashes []sashGeom
-	// Outer shell rect used for the shared perimeter border.
+	// Outer shell rect (layout bounds; dividers are internal sashes only).
 	shellX, shellY, shellW, shellH int32
 }
 

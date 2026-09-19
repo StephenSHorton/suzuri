@@ -13,14 +13,32 @@ import (
 // sgrState rewrites CSI SGR so hinshun/vt10x can see Grok's theme:
 //   - colon subparams (38:2:r:g:b) → semicolons
 //   - SGR 2 (faint/dim) → actually dimmer FG (vt10x ignores 2)
+//   - SGR 58;2 (underline color) must not treat the 2 as faint — same trap as 48;2
+//
+// Incomplete CSI is held across PTY chunks so colon truecolor is rewritten
+// before vt10x. vt10x splits only on ';' and Atoi-fails on '38:2:…', which
+// it treats as empty SGR 0 (reset to default white).
 type sgrState struct {
 	faint      bool
 	hasFG      bool
 	fr, fg, fb int
+	pending    []byte
 }
 
+const maxPendingCSI = 512
+
 func (s *sgrState) rewrite(in []byte) []byte {
-	if s == nil || len(in) == 0 || !bytes.Contains(in, []byte{0x1b, '['}) {
+	if s != nil && len(s.pending) > 0 {
+		buf := make([]byte, 0, len(s.pending)+len(in))
+		buf = append(buf, s.pending...)
+		buf = append(buf, in...)
+		s.pending = nil
+		in = buf
+	}
+	if s == nil || len(in) == 0 {
+		return in
+	}
+	if !bytes.Contains(in, []byte{0x1b, '['}) {
 		return in
 	}
 	out := make([]byte, 0, len(in)+32)
@@ -40,7 +58,12 @@ func (s *sgrState) rewrite(in []byte) []byte {
 			j++
 		}
 		if j >= len(in) {
-			out = append(out, in[i:]...)
+			rest := in[i:]
+			if len(rest) > maxPendingCSI {
+				out = append(out, rest...)
+			} else {
+				s.pending = append([]byte(nil), rest...)
+			}
 			break
 		}
 		if in[j] != 'm' {
@@ -116,9 +139,11 @@ func (s *sgrState) rewriteSGR(params string) []byte {
 		case 38:
 			r, g, b, n, parsed := takeSGRColor(nums, i)
 			if !parsed {
-				out = append(out, a)
-				i++
-				break
+				// Incomplete 38;2;… — dump the tail. Do not let the following
+				// 2 be eaten as faint (that resets later ink to default white).
+				out = append(out, nums[i:]...)
+				i = len(nums)
+				continue
 			}
 			s.hasFG = true
 			s.fr, s.fg, s.fb = r, g, b
@@ -132,11 +157,32 @@ func (s *sgrState) rewriteSGR(params string) []byte {
 			// truecolor, NOT SGR faint. Eating it flattened Grok's bands.
 			r, g, b, n, parsed := takeSGRColor(nums, i)
 			if !parsed {
-				out = append(out, a)
-				i++
-				break
+				out = append(out, nums[i:]...)
+				i = len(nums)
+				continue
 			}
 			out = append(out, 48, 2, r, g, b)
+			i = n
+		case 58:
+			// Underline color (Kitty / Ghostty / ratatui underline-color).
+			// The "2" after 58 is truecolor, not SGR faint. vt10x ignores 58,
+			// so a Grok highlight that is "default ink + colored underline"
+			// would stay chrome-white unless we also apply it as FG.
+			r, g, b, n, parsed := takeSGRColor(nums, i)
+			if !parsed {
+				out = append(out, nums[i:]...)
+				i = len(nums)
+				continue
+			}
+			if !s.hasFG {
+				s.hasFG = true
+				s.fr, s.fg, s.fb = r, g, b
+				inkR, inkG, inkB := r, g, b
+				if s.faint {
+					inkR, inkG, inkB = dimRGB(r, g, b)
+				}
+				out = append(out, 38, 2, inkR, inkG, inkB)
+			}
 			i = n
 		case 49:
 			out = append(out, 49)

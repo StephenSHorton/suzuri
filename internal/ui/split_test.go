@@ -196,6 +196,49 @@ func TestLayoutSplitDownAltScreenHasNoWarpBar(t *testing.T) {
 	}
 }
 
+func TestSashHairlinesAreSingleInternalLines(t *testing.T) {
+	a := &tab{id: 0}
+	b := &tab{id: 1}
+	p := newPage(a)
+	p.splitFocused(splitVert, b)
+	const shellW, shellH int32 = 200, 100
+	res := layoutPage(p.root, 0, 0, shellW, shellH, 10, 10, p.focusID)
+	lines := sashHairlines(res.sashes)
+	if len(lines) != 1 {
+		t.Fatalf("want 1 hairline, got %d", len(lines))
+	}
+	ln := lines[0]
+	if ln.w != 1 {
+		t.Fatalf("vertical sash must be 1px wide, got %d", ln.w)
+	}
+	if ln.x <= 0 || ln.x >= shellW-1 {
+		t.Fatalf("hairline on window edge x=%d shellW=%d", ln.x, shellW)
+	}
+	if ln.y != 0 || ln.h != shellH {
+		t.Fatalf("hairline y,h = %d,%d want 0,%d", ln.y, ln.h, shellH)
+	}
+}
+
+func TestSashHairlinesHorizontalStayOffTopBottomEdges(t *testing.T) {
+	a := &tab{id: 0}
+	b := &tab{id: 1}
+	p := newPage(a)
+	p.splitFocused(splitHoriz, b)
+	const shellW, shellH int32 = 200, 100
+	res := layoutPage(p.root, 0, 0, shellW, shellH, 10, 10, p.focusID)
+	lines := sashHairlines(res.sashes)
+	if len(lines) != 1 {
+		t.Fatalf("want 1 hairline, got %d", len(lines))
+	}
+	ln := lines[0]
+	if ln.h != 1 {
+		t.Fatalf("horizontal sash must be 1px tall, got %d", ln.h)
+	}
+	if ln.y <= 0 || ln.y >= shellH-1 {
+		t.Fatalf("hairline on window edge y=%d shellH=%d", ln.y, shellH)
+	}
+}
+
 func TestSashDragUpdatesRatio(t *testing.T) {
 	a := &tab{id: 0}
 	b := &tab{id: 1}
