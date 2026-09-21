@@ -47,6 +47,16 @@ func TestPtyKeyFromEbitenCtrlLetters(t *testing.T) {
 			t.Fatalf("%s = %v want [0x%02x]", tc.name, got, tc.want)
 		}
 	}
+	// ⌘⌫ in an alt-screen app (Grok) is line-wipe, same byte as Ctrl+U.
+	b = ptyKeyFromEbiten(nil, nil, ebiten.KeyBackspace, false, false, false, true)
+	if len(b) != 1 || b[0] != 0x15 {
+		t.Fatalf("Cmd+Backspace = %v want [0x15]", b)
+	}
+	// Plain backspace stays DEL.
+	b = ptyKeyFromEbiten(nil, nil, ebiten.KeyBackspace, false, false, false, false)
+	if len(b) != 1 || b[0] != 0x7f {
+		t.Fatalf("Backspace = %v want [0x7f]", b)
+	}
 	// Super+Z must not be a C0 control from ptyKeyFromEbiten (host maps Cmd+Z separately).
 	if b := ptyKeyFromEbiten(nil, nil, ebiten.KeyZ, false, false, false, true); len(b) != 0 {
 		t.Fatalf("Super+Z should be nil, got %v", b)

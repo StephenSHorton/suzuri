@@ -35,6 +35,11 @@ func ptyKeyFromEbiten(term vt10x.Terminal, kk *kittyKeyboard, key ebiten.Key, ct
 		}
 		return []byte{'\t'}
 	case ebiten.KeyBackspace:
+		// ⌘⌫ → kill back to the start of the line. Grok calls this "wipe"
+		// and binds it to Ctrl+U. A plain DEL only removes one character.
+		if super && !alt && !ctrl && !shift {
+			return []byte{0x15}
+		}
 		// Option+Backspace → delete word (readline Meta+DEL / many TUIs Alt+BS).
 		if alt && !ctrl && !super {
 			return []byte{0x1b, 0x7f}
