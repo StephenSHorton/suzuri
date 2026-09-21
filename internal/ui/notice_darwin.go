@@ -11,6 +11,8 @@ void suzuri_notice_hide(void);
 void suzuri_play_wav(const void *bytes, int len);
 void suzuri_play_wav_sync(const void *bytes, int len);
 void suzuri_pump(double seconds);
+void suzuri_app_init(void);
+int suzuri_is_main_thread(void);
 void suzuri_focus_host(void);
 void suzuri_notice_take_click(int *kind, int *x, int *y);
 int suzuri_notice_hover(void);
@@ -44,6 +46,10 @@ func playWAVSync(b []byte) {
 }
 
 func focusNoticeHost() { C.suzuri_focus_host() }
+
+func initNoticeApp() { C.suzuri_app_init() }
+
+func onMainThread() bool { return C.suzuri_is_main_thread() == 1 }
 
 func pumpUI(d time.Duration) {
 	if d <= 0 {

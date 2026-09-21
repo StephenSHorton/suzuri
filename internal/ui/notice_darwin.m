@@ -195,10 +195,34 @@ void suzuri_play_wav_sync(const void *bytes, int len) {
 	}
 }
 
+void suzuri_app_init(void) {
+	[NSApplication sharedApplication];
+	[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+}
+
+int suzuri_is_main_thread(void) {
+	return [NSThread isMainThread] ? 1 : 0;
+}
+
 void suzuri_pump(double seconds) {
 	if (seconds <= 0) return;
-	@autoreleasepool {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
+	if (![NSThread isMainThread]) return;
+	[NSApplication sharedApplication];
+	NSDate *until = [NSDate dateWithTimeIntervalSinceNow:seconds];
+	while ([until timeIntervalSinceNow] > 0) {
+		@autoreleasepool {
+			NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
+				untilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]
+				inMode:NSDefaultRunLoopMode
+				dequeue:YES];
+			if (event == nil) continue;
+			if (gPanel != nil && event.window == gPanel &&
+				(event.type == NSEventTypeLeftMouseDown || event.type == NSEventTypeRightMouseDown)) {
+				int kind = event.type == NSEventTypeRightMouseDown ? 3 : 1;
+				suzuri_note_click(event, gPanel.contentView, kind);
+			}
+			[NSApp sendEvent:event];
+		}
 	}
 }
 

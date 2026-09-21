@@ -31,6 +31,10 @@ func playWAVSync(b []byte) {
 
 func focusNoticeHost() {}
 
+func initNoticeApp() {}
+
+func onMainThread() bool { return true }
+
 func pumpUI(d time.Duration) { time.Sleep(d) }
 
 func pollNoticeInput() {}

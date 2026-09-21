@@ -5,6 +5,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -49,6 +50,12 @@ const notifyUsage = `usage: suzuri notify [success|fail|published|all]
 `
 
 func runNotifyShow(args []string) int {
+	runtime.LockOSThread()
+	if !onMainThread() {
+		fmt.Fprintln(os.Stderr, "suzuri notify: cannot show cards from a background thread")
+		return 1
+	}
+	initNoticeApp()
 	notes, err := notifyShowArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "suzuri notify:", err)

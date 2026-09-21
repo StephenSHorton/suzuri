@@ -42,6 +42,8 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 && (os.Args[1] == "notify" || os.Args[1] == "sound") {
+		// AppKit only delivers clicks on the process main thread.
+		runtime.LockOSThread()
 		winconsole.AttachParent()
 		os.Exit(ui.RunNotifyCLI(os.Args[2:]))
 	}
