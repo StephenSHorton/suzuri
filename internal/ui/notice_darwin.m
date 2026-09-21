@@ -6,31 +6,49 @@ extern void suzuriNoticeMouse(int x, int y, int kind);
 static NSPanel *gPanel;
 static NSMutableArray *gSounds;
 
-@interface SuzuriNoticeView : NSImageView
+@interface SuzuriNoticeView : NSView
+@property (nonatomic, retain) NSImage *noticeImage;
 @end
 
 @implementation SuzuriNoticeView
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+- (BOOL)isOpaque { return NO; }
+- (BOOL)isFlipped { return NO; }
+- (void)drawRect:(NSRect)dirty {
+	[self.noticeImage drawInRect:self.bounds fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1];
+}
+- (void)resetCursorRects {
+	[self addCursorRect:self.bounds cursor:[NSCursor arrowCursor]];
+}
+- (void)cursorUpdate:(NSEvent *)event {
+	[[NSCursor arrowCursor] set];
+}
+- (void)mouseEntered:(NSEvent *)event {
+	[[NSCursor arrowCursor] set];
+	[self emit:event kind:2];
+}
+- (void)mouseExited:(NSEvent *)event {
+	[[NSCursor arrowCursor] set];
+	suzuriNoticeMouse(0, 0, 0);
+}
 - (void)mouseDown:(NSEvent *)event { [self emit:event kind:1]; }
 - (void)rightMouseDown:(NSEvent *)event { [self emit:event kind:3]; }
-- (void)mouseMoved:(NSEvent *)event { [self emit:event kind:2]; }
-- (void)mouseExited:(NSEvent *)event { suzuriNoticeMouse(0, 0, 0); }
 - (void)emit:(NSEvent *)event kind:(int)kind {
+	// The bitmap is always 2x the point size, matching renderNotices.
 	NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-	CGFloat scale = self.window.backingScaleFactor;
-	if (scale < 1) scale = 1;
+	const CGFloat scale = 2.0;
 	int x = (int)(p.x * scale);
 	int y = (int)((self.bounds.size.height - p.y) * scale);
 	suzuriNoticeMouse(x, y, kind);
 }
 - (void)updateTrackingAreas {
 	[super updateTrackingAreas];
-	for (NSTrackingArea *a in self.trackingAreas) {
+	for (NSTrackingArea *a in [self.trackingAreas copy]) {
 		[self removeTrackingArea:a];
 	}
 	NSTrackingArea *area = [[NSTrackingArea alloc]
 		initWithRect:self.bounds
-		options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+		options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect | NSTrackingCursorUpdate
 		owner:self userInfo:nil];
 	[self addTrackingArea:area];
 }
@@ -58,8 +76,6 @@ static SuzuriNoticeView *ensurePanel(void) {
 		NSWindowCollectionBehaviorFullScreenAuxiliary |
 		NSWindowCollectionBehaviorIgnoresCycle;
 	SuzuriNoticeView *view = [[SuzuriNoticeView alloc] initWithFrame:frame];
-	view.imageScaling = NSImageScaleNone;
-	view.imageAlignment = NSImageAlignBottomLeft;
 	gPanel.contentView = view;
 	return view;
 }
@@ -112,13 +128,17 @@ void suzuri_notice_present(const void *pix, int stride, int width, int height) {
 			rep.size = pt;
 			NSImage *img = [[NSImage alloc] initWithSize:pt];
 			[img addRepresentation:rep];
-			view.image = img;
+			view.noticeImage = img;
+			[view setNeedsDisplay:YES];
 
 			NSWindow *host = NSApp.mainWindow ?: NSApp.keyWindow;
 			NSScreen *screen = host.screen ?: NSScreen.mainScreen;
 			NSRect vis = screen.visibleFrame;
 			NSRect frame = NSMakeRect(vis.origin.x + 16, vis.origin.y + 16, pt.width, pt.height);
-			[gPanel setFrame:frame display:YES];
+			if (!NSEqualRects(gPanel.frame, frame)) {
+				[gPanel setFrame:frame display:YES];
+				[view resetCursorRects];
+			}
 			if (!gPanel.isVisible) {
 				[gPanel orderFrontRegardless];
 			}
