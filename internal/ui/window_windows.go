@@ -1610,6 +1610,7 @@ func (u *winUI) drainAndParse(tabID int) {
 	cw, ch, cols := paneMetrics(int(u.metricW), int(u.metricH), u.cols, paneCols)
 	res := t.ingestPTY(data, ptyHooks{
 		Focused:  u.hostFocused,
+		Visible:  true,
 		CellW:    cw,
 		CellH:    ch,
 		PaneCols: cols,
@@ -1666,6 +1667,7 @@ func (u *winUI) drainAndParse(tabID int) {
 	if res.More {
 		t.postBytes(u)
 	}
+	driveNotices(time.Now(), u.hostFocused, true)
 }
 
 func (u *winUI) tabByID(id int) *tab {

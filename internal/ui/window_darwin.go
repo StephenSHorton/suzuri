@@ -640,6 +640,8 @@ func (u *macUI) Update() error {
 		return ebiten.Termination
 	}
 
+	driveNotices(time.Now(), ebiten.IsFocused(), !ebiten.IsWindowMinimized())
+
 	focused := ebiten.IsFocused()
 	if !u.hostFocusInit || focused != u.hostFocused {
 		u.hostFocusInit = true
@@ -971,6 +973,7 @@ func (u *macUI) drainAndParse(tabID int) {
 	cw, ch, cols := paneMetrics(int(u.metricW), int(u.metricH), u.cols, paneCols)
 	res := t.ingestPTY(data, ptyHooks{
 		Focused:  ebiten.IsFocused(),
+		Visible:  !ebiten.IsWindowMinimized(),
 		CellW:    cw,
 		CellH:    ch,
 		PaneCols: cols,

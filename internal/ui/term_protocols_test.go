@@ -120,8 +120,8 @@ func TestFeedOSC8AndNotifyProgress(t *testing.T) {
 		t.Fatalf("span: %#v", res.spans)
 	}
 	note := m.feed(time.Now(), []byte("\x1b]9;build finished\x07"), 0)
-	if !note.notify || note.nbody != "build finished" {
-		t.Fatalf("notify: %+v", note)
+	if len(note.notes) != 1 || note.notes[0].Body != "build finished" {
+		t.Fatalf("notify: %+v", note.notes)
 	}
 	m.feed(time.Now(), []byte("\x1b]9;4;1;40\x07"), 0)
 	if m.progress.kind != 1 || m.progress.pct != 40 {

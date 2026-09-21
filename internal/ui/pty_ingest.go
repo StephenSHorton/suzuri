@@ -16,6 +16,7 @@ const (
 // focus (for DEC 1004), cell metrics for inline images, and fork/cwd side effects.
 type ptyHooks struct {
 	Focused  bool
+	Visible  bool
 	CellW    int
 	CellH    int
 	PaneCols int
@@ -47,7 +48,7 @@ func (t *tab) ingestPTY(data []byte, h ptyHooks) ptyResult {
 	}
 	before := snapshotScreenText(t.term)
 	var spans []osc8Span
-	data, spans = t.pullPTY(data, h.Focused)
+	data, spans = t.pullPTY(data, h.Focused, h.Visible)
 	if len(data) == 0 {
 		if len(spans) > 0 {
 			t.modes.observe(before, snapshotScreenText(t.term), spans)

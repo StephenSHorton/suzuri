@@ -49,6 +49,7 @@ type termModes struct {
 
 	links    [][]string
 	linkCols int
+	osc99    map[string]*osc99Buf
 }
 
 type termProgress struct {
@@ -62,15 +63,19 @@ type osc8Span struct {
 }
 
 type feedResult struct {
-	ready    []byte
-	spans    []osc8Span
-	replies  []byte
-	clipSet  *string
-	clipAsk  bool
-	notify   bool
-	ntitle   string
-	nbody    string
-	armFocus bool
+	ready     []byte
+	spans     []osc8Span
+	replies   []byte
+	clipSet   *string
+	clipAsk   bool
+	notify    bool
+	ntitle    string
+	nbody     string
+	notes     []deskNote
+	closedIDs []string
+	aliveID   string
+	aliveAsk  bool
+	armFocus  bool
 }
 
 const (
@@ -96,6 +101,7 @@ func (m *termModes) leaveApp() {
 	m.capturing = false
 	m.capture = nil
 	m.captureURL = ""
+	m.osc99 = nil
 	m.clearLinks()
 }
 
@@ -349,6 +355,9 @@ func (m *termModes) takeOSC(payload []byte, _ vt10x.ModeFlag, res *feedResult) b
 	case bytesHasPrefix(payload, "52;") || string(payload) == "52":
 		m.takeOSC52(payload, res)
 		return true
+	case bytesHasPrefix(payload, "99;") || string(payload) == "99":
+		m.takeOSC99(payload, res)
+		return true
 	case bytesHasPrefix(payload, "9;"):
 		m.takeOSC9(payload, res)
 		return true
@@ -455,9 +464,9 @@ func (m *termModes) takeOSC9(payload []byte, res *feedResult) {
 	if msg == "" {
 		return
 	}
-	res.notify = true
-	res.ntitle = "Suzuri"
-	res.nbody = clipRunes(msg, 200)
+	res.notes = append(res.notes, deskNote{
+		Title: "Suzuri", Body: clipRunes(msg, 200), Sound: "info", Focus: true,
+	})
 }
 
 func (m *termModes) takeOSC777(payload []byte, res *feedResult) {
@@ -485,9 +494,9 @@ func (m *termModes) takeOSC777(payload []byte, res *feedResult) {
 	if body == "" {
 		return
 	}
-	res.notify = true
-	res.ntitle = clipRunes(title, 80)
-	res.nbody = clipRunes(body, 200)
+	res.notes = append(res.notes, deskNote{
+		Title: clipRunes(title, 80), Body: clipRunes(body, 200), Sound: "info", Focus: true,
+	})
 }
 
 func (m *termModes) observe(before, after []string, spans []osc8Span) {
@@ -669,7 +678,7 @@ func (t *tab) viewCells(rows int) [][]cellPix {
 	return grid
 }
 
-func (t *tab) pullPTY(data []byte, focused bool) ([]byte, []osc8Span) {
+func (t *tab) pullPTY(data []byte, focused, visible bool) ([]byte, []osc8Span) {
 	if t == nil || t.term == nil {
 		return data, nil
 	}
@@ -684,6 +693,16 @@ func (t *tab) pullPTY(data []byte, focused bool) ([]byte, []osc8Span) {
 		if s, err := clipRead(); err == nil {
 			t.sendKey(encodeOSC52(s))
 		}
+	}
+	for _, id := range res.closedIDs {
+		closeDeskNote(id)
+	}
+	if res.aliveAsk {
+		t.sendKey(osc99AliveReply(res.aliveID, aliveDeskIDs()))
+	}
+	for _, n := range res.notes {
+		n.tab = t
+		postDeskNote(n, focused, visible)
 	}
 	if res.notify {
 		postDesktopNotification(res.ntitle, res.nbody)
