@@ -947,10 +947,13 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, 
 		col += reserve
 	}
 
-	// Quiet brand — no bordered chip, no trailing gap before the first tab.
-	brand := styleBrand().Render("硯")
-	parts = append(parts, brand)
-	col += lipgloss.Width(brand)
+	// Quiet brand. On the Mac frame the 硯 is painted as a square graphic,
+	// so the text copy is not also placed next to the tabs.
+	if m.Frame != FrameMac {
+		brand := styleBrand().Render("硯")
+		parts = append(parts, brand)
+		col += lipgloss.Width(brand)
+	}
 
 	if len(m.Tabs) == 0 {
 		// Only pad when there is no real tab card to sit flush against 硯.
@@ -1068,8 +1071,8 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, 
 // renderCaffeineChip is the top-right coffee control (empty dim / full bright).
 func (m Model) renderCaffeineChip() string {
 	if m.Frame == FrameMac {
-		// Painted as a cup graphic in the title strip. Two cells of hit area.
-		return styleGap().Render("  ")
+		// Painted from the coffee glyph, large enough to read. Three cells of hit area.
+		return styleGap().Render("   ")
 	}
 	// HOT BEVERAGE U+2615 — reads as a cup in mono Nerd Font faces.
 	const cup = "☕"

@@ -3422,7 +3422,7 @@ func (u *macUI) paintBrandMark(dst *image.RGBA) {
 }
 
 func (u *macUI) paintCaffeineCup(dst *image.RGBA) {
-	if dst == nil {
+	if dst == nil || u.painter == nil || u.painter.symbolsFace == nil {
 		return
 	}
 	b := u.chrome.CaffeineBounds()
@@ -3434,46 +3434,13 @@ func (u *macUI) paintCaffeineCup(dst *image.RGBA) {
 		cw = cellW
 	}
 	x0 := 4 + b[0]*cw
-	x1 := 4 + b[1]*cw
+	bw := (b[1] - b[0]) * cw
 	th := int(u.titleStripHeight())
-	h := th - 10
-	if h < 12 {
-		h = 12
+	fr, fg, fb := chrome.SoftR, chrome.SoftG, chrome.SoftB
+	if u.caffeine != nil && u.caffeine.Active() {
+		fr, fg, fb = chrome.PrimR, chrome.PrimG, chrome.PrimB
 	}
-	w := h * 3 / 4
-	if w > x1-x0-2 {
-		w = x1 - x0 - 2
-	}
-	x := x0 + (x1-x0-w)/2
-	y := (th - h) / 2
-	on := u.caffeine != nil && u.caffeine.Active()
-	body := color.RGBA{R: 150, G: 140, B: 130, A: 255}
-	if on {
-		body = color.RGBA{R: 230, G: 170, B: 70, A: 255}
-	}
-	fillRoundRect(dst, x, y+h/5, w-4, h-h/5, 3, body)
-	fillRectRGBA(dst, x+1, y+h/5, w-6, 2, body.R, body.G, body.B)
-	// Handle.
-	fillRectRGBA(dst, x+w-6, y+h/3, 3, h/3, body.R, body.G, body.B)
-	if on {
-		steam := color.RGBA{R: 230, G: 210, B: 170, A: 180}
-		dstSet(dst, x+w/3, y+1, steam)
-		dstSet(dst, x+w/3, y+3, steam)
-		dstSet(dst, x+w/2, y, steam)
-		dstSet(dst, x+w/2, y+2, steam)
-	}
-}
-
-func fillRoundRect(dst *image.RGBA, x, y, w, h, r int, c color.RGBA) {
-	if w < 1 || h < 1 {
-		return
-	}
-	fillRectRGBA(dst, x+r, y, w-2*r, h, c.R, c.G, c.B)
-	fillRectRGBA(dst, x, y+r, w, h-2*r, c.R, c.G, c.B)
-	fillDisk(dst, x+r, y+r, r, c)
-	fillDisk(dst, x+w-1-r, y+r, r, c)
-	fillDisk(dst, x+r, y+h-1-r, r, c)
-	fillDisk(dst, x+w-1-r, y+h-1-r, r, c)
+	u.painter.drawFaceInBox(dst, u.painter.symbolsFace, x0, 2, bw, th-4, '☕', fr, fg, fb)
 }
 
 func fillDisk(dst *image.RGBA, cx, cy, r int, c color.RGBA) {

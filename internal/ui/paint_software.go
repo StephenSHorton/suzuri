@@ -605,10 +605,14 @@ func (p *softwarePainter) paintCellUnderline(dst *image.RGBA, px, py int, fr, fg
 // drawGlyphInBox scales a CJK glyph uniformly into a square so 硯 keeps its
 // width instead of being clipped to one terminal cell.
 func (p *softwarePainter) drawGlyphInBox(dst *image.RGBA, x, y, size int, r rune, fr, fg, fb byte) {
-	if p == nil || p.cjkFace == nil || dst == nil || size < 4 {
+	p.drawFaceInBox(dst, p.cjkFace, x, y, size, size, r, fr, fg, fb)
+}
+
+func (p *softwarePainter) drawFaceInBox(dst *image.RGBA, face font.Face, x, y, bw, bh int, r rune, fr, fg, fb byte) {
+	if p == nil || face == nil || dst == nil || bw < 4 || bh < 4 {
 		return
 	}
-	dr, mask, maskp, _, ok := p.cjkFace.Glyph(fixed.P(0, p.ascent), r)
+	dr, mask, maskp, _, ok := face.Glyph(fixed.P(0, p.ascent), r)
 	if !ok || mask == nil || dr.Empty() {
 		return
 	}
@@ -616,9 +620,9 @@ func (p *softwarePainter) drawGlyphInBox(dst *image.RGBA, x, y, size int, r rune
 	if sw < 1 || sh < 1 {
 		return
 	}
-	scale := float64(size) / float64(sw)
-	if float64(sh)*scale > float64(size) {
-		scale = float64(size) / float64(sh)
+	scale := float64(bw) / float64(sw)
+	if float64(sh)*scale > float64(bh) {
+		scale = float64(bh) / float64(sh)
 	}
 	dw := int(float64(sw) * scale)
 	dh := int(float64(sh) * scale)
@@ -628,8 +632,8 @@ func (p *softwarePainter) drawGlyphInBox(dst *image.RGBA, x, y, size int, r rune
 	if dh < 1 {
 		dh = 1
 	}
-	ox := x + (size-dw)/2
-	oy := y + (size-dh)/2
+	ox := x + (bw-dw)/2
+	oy := y + (bh-dh)/2
 	ink := color.RGBA{R: fr, G: fg, B: fb, A: 255}
 	for yy := 0; yy < dh; yy++ {
 		sy := dr.Min.Y + yy*sh/dh
