@@ -41,6 +41,10 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && (os.Args[1] == "notify" || os.Args[1] == "sound") {
+		winconsole.AttachParent()
+		os.Exit(ui.RunNotifyCLI(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "-version" || os.Args[1] == "--version") {
 		// windowsgui builds have no console unless we reattach to the parent.
 		winconsole.AttachParent()

@@ -9,6 +9,7 @@ package ui
 void suzuri_notice_present(const void *pix, int stride, int width, int height);
 void suzuri_notice_hide(void);
 void suzuri_play_wav(const void *bytes, int len);
+void suzuri_play_wav_sync(const void *bytes, int len);
 void suzuri_focus_host(void);
 */
 import "C"
@@ -27,6 +28,13 @@ func playWAV(b []byte) {
 		return
 	}
 	C.suzuri_play_wav(unsafe.Pointer(&b[0]), C.int(len(b)))
+}
+
+func playWAVSync(b []byte) {
+	if len(b) == 0 {
+		return
+	}
+	C.suzuri_play_wav_sync(unsafe.Pointer(&b[0]), C.int(len(b)))
 }
 
 func focusNoticeHost() { C.suzuri_focus_host() }

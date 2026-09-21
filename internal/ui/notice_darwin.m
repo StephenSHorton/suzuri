@@ -143,6 +143,21 @@ void suzuri_play_wav(const void *bytes, int len) {
 	});
 }
 
+void suzuri_play_wav_sync(const void *bytes, int len) {
+	if (bytes == NULL || len < 44) return;
+	@autoreleasepool {
+		NSData *data = [[NSData alloc] initWithBytes:bytes length:(NSUInteger)len];
+		NSSound *sound = [[NSSound alloc] initWithData:data];
+		[data release];
+		if (sound == nil) return;
+		[sound play];
+		while ([sound isPlaying]) {
+			[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+		}
+		[sound release];
+	}
+}
+
 void suzuri_focus_host(void) {
 	dispatch_async(dispatch_get_main_queue(), ^{
 		for (NSWindow *w in NSApp.windows) {
