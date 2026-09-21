@@ -334,6 +334,7 @@ func hitNotice(cards []noticeCard, x, y int) int {
 var noticeCards []noticeCard
 
 func driveNotices(now time.Time, focused, visible bool) {
+	pollNoticeInput()
 	for _, n := range tickNotices(now) {
 		nn := n
 		sendNoticeClose(&nn)

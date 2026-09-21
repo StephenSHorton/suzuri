@@ -1,7 +1,21 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
+#include <stdatomic.h>
 
-extern void suzuriNoticeMouse(int x, int y, int kind);
+// Mouse handlers must not call into Go. The notify command pumps this run
+// loop from a Go call, and a re-entrant Go callback deadlocks the click.
+static atomic_int gHover;
+static atomic_int gClick;
+static atomic_int gClickX;
+static atomic_int gClickY;
+
+static void suzuri_note_click(NSEvent *event, NSView *view, int kind) {
+	NSPoint p = [view convertPoint:event.locationInWindow fromView:nil];
+	const CGFloat scale = 2.0;
+	atomic_store(&gClickX, (int)(p.x * scale));
+	atomic_store(&gClickY, (int)((view.bounds.size.height - p.y) * scale));
+	atomic_store(&gClick, kind);
+}
 
 static NSPanel *gPanel;
 static NSMutableArray *gSounds;
@@ -25,22 +39,14 @@ static NSMutableArray *gSounds;
 }
 - (void)mouseEntered:(NSEvent *)event {
 	[[NSCursor arrowCursor] set];
-	[self emit:event kind:2];
+	atomic_store(&gHover, 1);
 }
 - (void)mouseExited:(NSEvent *)event {
 	[[NSCursor arrowCursor] set];
-	suzuriNoticeMouse(0, 0, 0);
+	atomic_store(&gHover, 0);
 }
-- (void)mouseDown:(NSEvent *)event { [self emit:event kind:1]; }
-- (void)rightMouseDown:(NSEvent *)event { [self emit:event kind:3]; }
-- (void)emit:(NSEvent *)event kind:(int)kind {
-	// The bitmap is always 2x the point size, matching renderNotices.
-	NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
-	const CGFloat scale = 2.0;
-	int x = (int)(p.x * scale);
-	int y = (int)((self.bounds.size.height - p.y) * scale);
-	suzuriNoticeMouse(x, y, kind);
-}
+- (void)mouseDown:(NSEvent *)event { suzuri_note_click(event, self, 1); }
+- (void)rightMouseDown:(NSEvent *)event { suzuri_note_click(event, self, 3); }
 - (void)updateTrackingAreas {
 	[super updateTrackingAreas];
 	for (NSTrackingArea *a in [self.trackingAreas copy]) {
@@ -78,6 +84,17 @@ static SuzuriNoticeView *ensurePanel(void) {
 	SuzuriNoticeView *view = [[SuzuriNoticeView alloc] initWithFrame:frame];
 	gPanel.contentView = view;
 	return view;
+}
+
+void suzuri_notice_take_click(int *kind, int *x, int *y) {
+	int k = atomic_exchange(&gClick, 0);
+	if (kind) *kind = k;
+	if (x) *x = atomic_load(&gClickX);
+	if (y) *y = atomic_load(&gClickY);
+}
+
+int suzuri_notice_hover(void) {
+	return atomic_load(&gHover);
 }
 
 void suzuri_notice_hide(void) {
