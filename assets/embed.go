@@ -20,3 +20,15 @@ var BundledFontRegular []byte
 //
 //go:embed icon/suzuri.ico
 var AppIconICO []byte
+
+// Editor notification tweets from the s&box editor.
+// See sounds/editor/NOTICE.md (Facepunch Studios, MIT).
+
+//go:embed sounds/editor/success.wav
+var EditorSuccessWAV []byte
+
+//go:embed sounds/editor/fail.wav
+var EditorFailWAV []byte
+
+//go:embed sounds/editor/published.wav
+var EditorPublishedWAV []byte
