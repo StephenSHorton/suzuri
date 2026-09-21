@@ -105,6 +105,12 @@ func Run() error {
 	ui.syncChrome()
 	ui.showSplash = !cfg.FirstRunDone
 	revealNoticePane = ui.revealPane
+	onNoticeBell = func() {
+		count, unread := noticeBellState()
+		r := ui.chrome.UpdateChrome(chrome.SyncBellMsg{Count: count, Unread: unread})
+		ui.chrome = r.Model
+		ui.markChromeDirty()
+	}
 	return ui.loop()
 }
 
@@ -1341,6 +1347,12 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		u.zoomFontReset()
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
+	case chrome.ActionOpenNotifications:
+		u.toggleNoticeHistory()
+	case chrome.ActionFocusNoticePane:
+		if r.Index >= 0 {
+			u.revealPane(r.Index)
+		}
 	case chrome.ActionCheckUpdates:
 		runUpdateCheck(updateCheckHooks{
 			toast: u.postToast,
@@ -2067,7 +2079,7 @@ func (u *macUI) handleKeys() {
 			r := u.chrome.UpdateChrome(*km)
 			u.chrome = r.Model
 			// Text-entry overlays: only dirty the floating card.
-			if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
+			if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen || u.chrome.NotificationsOpen ||
 				u.chrome.WorkspaceOpen ||
 				u.chrome.TransferPromptOpen || u.chrome.TransferPanelOpen {
 				u.overlayDirty = true
@@ -2635,7 +2647,7 @@ func (u *macUI) handleTextInput() {
 		// Palette filter, rename, notes, workspace compose, transfer prompt
 		// *and* progress panel (c = copy ticket) accept runes.
 		// Workspace was missing here historically — keys never reached handleWorkspaceKey.
-		if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen ||
+		if u.chrome.PaletteOpen || u.chrome.RenameOpen || u.chrome.NotesOpen || u.chrome.NotificationsOpen ||
 			u.chrome.WorkspaceOpen || u.chrome.TransferPromptOpen ||
 			u.chrome.TransferPanelOpen {
 			for _, ch := range chars {
@@ -3119,6 +3131,10 @@ func (u *macUI) handleMouse() {
 		}
 		if int32(my) < chromeH {
 			if int32(my) < tabStripH {
+				if u.hitBell(int32(mx)) {
+					u.toggleNoticeHistory()
+					return
+				}
 				if u.hitCaffeine(int32(mx)) {
 					if msg, ok := applyCaffeineAction(u.caffeine, chrome.ActionCaffeineToggle, 0); ok {
 						if msg != "" {
@@ -3272,6 +3288,31 @@ func (u *macUI) hitPlus(px int32) bool {
 }
 
 // hitCaffeine is true when the pixel x hits the top-right coffee chip.
+func (u *macUI) hitBell(px int32) bool {
+	u.syncChrome()
+	cellX := u.pixelToChromeCol(px)
+	if cellX < 0 {
+		return false
+	}
+	b := u.chrome.BellBounds()
+	return cellX >= b[0] && cellX < b[1]
+}
+
+func (u *macUI) toggleNoticeHistory() {
+	if u.chrome.NotificationsOpen {
+		r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
+		u.chrome = r.Model
+	} else {
+		openNoticeHistory(func(msg chrome.OpenNotificationsMsg) {
+			r := u.chrome.UpdateChrome(msg)
+			u.chrome = r.Model
+		})
+	}
+	u.overlayCells = nil
+	u.overlayDirty = true
+	u.markChromeDirty()
+}
+
 func (u *macUI) hitCaffeine(px int32) bool {
 	u.syncChrome()
 	cellX := u.pixelToChromeCol(px)

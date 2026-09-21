@@ -5,6 +5,7 @@ package chrome
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -113,6 +114,12 @@ type Model struct {
 	// Caffeine strip chip (host owns the power assertion; chrome only paints).
 	CaffeineOn   bool
 	CaffeineHint string // "" off, "∞" indefinite, or short remaining ("15m")
+	// Session notification history (not persisted).
+	BellCount         int
+	BellUnread        bool
+	Notices           []NoticeLine
+	NoticeCursor      int
+	NotificationsOpen bool
 }
 
 type (
@@ -150,7 +157,24 @@ type (
 		Active bool
 		Hint   string // "∞", "15m", or ""
 	}
+	// SyncBellMsg updates the top-right bell.
+	SyncBellMsg struct {
+		Count  int
+		Unread bool
+	}
+	// OpenNotificationsMsg shows this session's notification history.
+	OpenNotificationsMsg struct {
+		Items []NoticeLine
+	}
 )
+
+// NoticeLine is one played notification in the session list.
+type NoticeLine struct {
+	Title string
+	Body  string
+	When  string
+	TabID int
+}
 
 // HostAction is returned to the Win32 host after UpdateChrome.
 type HostAction int
@@ -179,6 +203,10 @@ const (
 	ActionReplayIntro
 	// ActionCheckUpdates queries GitHub Releases (host may open confirm).
 	ActionCheckUpdates
+	// ActionOpenNotifications shows the session notification list.
+	ActionOpenNotifications
+	// ActionFocusNoticePane focuses Result.Index (tab id) from that list.
+	ActionFocusNoticePane
 	// ActionInstallUpdate downloads and applies a pending update (after confirm).
 	ActionInstallUpdate
 	// ActionUpdateLater: user dismissed the update confirm (do not re-offer this session).
@@ -304,7 +332,7 @@ func (m Model) Init() tea.Cmd { return nil }
 func (m Model) OverlayOpen() bool {
 	return m.PaletteOpen || m.SettingsOpen || m.ConfirmOpen || m.HelpOpen ||
 		m.SplashOpen || m.RenameOpen || m.NotesOpen || m.WorkspaceOpen ||
-		m.TransferPromptOpen || m.TransferPanelOpen
+		m.TransferPromptOpen || m.TransferPanelOpen || m.NotificationsOpen
 }
 
 // TransferTicket returns the ticket shown on the progress panel (for copy).
@@ -336,6 +364,15 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 	case SyncCaffeineMsg:
 		m.CaffeineOn = msg.Active
 		m.CaffeineHint = strings.TrimSpace(msg.Hint)
+	case SyncBellMsg:
+		m.BellCount = msg.Count
+		m.BellUnread = msg.Unread
+	case OpenNotificationsMsg:
+		m.closeModalsExcept("notices")
+		m.Notices = msg.Items
+		m.NoticeCursor = 0
+		m.NotificationsOpen = true
+		m.BellUnread = false
 	case SyncConfigMsg:
 		m.lastCfg = config.Normalize(msg.Config)
 		// Avoid rebuilding the palette list while settings is open — live
@@ -496,6 +533,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		m.SettingsOpen = false
 		m.ConfirmOpen = false
 		m.HelpOpen = false
+		m.NotificationsOpen = false
 		m.SplashOpen = false
 		m.RenameOpen = false
 		m.renameBuf = ""
@@ -530,6 +568,30 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 				m.HelpOpen = false
 			}
 			return Result{Model: m, Action: act, Settings: settings}
+		}
+		if m.NotificationsOpen {
+			s := msg.String()
+			switch s {
+			case "esc", "q", "ctrl+c":
+				m.NotificationsOpen = false
+			case "up", "k":
+				if m.NoticeCursor > 0 {
+					m.NoticeCursor--
+				}
+			case "down", "j":
+				if m.NoticeCursor+1 < len(m.Notices) {
+					m.NoticeCursor++
+				}
+			case "enter":
+				if m.NoticeCursor >= 0 && m.NoticeCursor < len(m.Notices) {
+					idx = m.Notices[m.NoticeCursor].TabID
+					if idx >= 0 {
+						act = ActionFocusNoticePane
+					}
+				}
+				m.NotificationsOpen = false
+			}
+			return Result{Model: m, Action: act, Index: idx, Settings: settings}
 		}
 		if m.ConfirmOpen {
 			s := msg.String()
@@ -667,6 +729,9 @@ func (m *Model) closeModalsExcept(keep string) {
 	if keep != "help" {
 		m.HelpOpen = false
 	}
+	if keep != "notices" {
+		m.NotificationsOpen = false
+	}
 	if keep != "splash" {
 		m.SplashOpen = false
 	}
@@ -788,7 +853,7 @@ func (m Model) StripView() string {
 	if w < 20 {
 		w = 20
 	}
-	tabs, _, _, _ := m.layoutTabCards(w)
+	tabs, _, _, _, _ := m.layoutTabCards(w)
 	if m.showStatus() {
 		return tabs + "\n" + m.renderStatus(w)
 	}
@@ -807,6 +872,17 @@ func (m Model) OverlayView() string {
 		card = splashBody(w)
 	case m.HelpOpen:
 		card = helpBody(w)
+	case m.NotificationsOpen:
+		outer := clampDialogWidth(56, w)
+		innerW := dialogInnerWidth(outer)
+		if innerW < 16 {
+			innerW = 16
+		}
+		body := []string{m.renderNoticeList(innerW)}
+		footer := styleDialogHintKey().Render("up/down  ") +
+			styleDialogHint().Render("enter open  ") +
+			styleDialogHintKey().Render("esc")
+		card = renderDialogCard(outer, "Notifications", body, footer)
 	case m.ConfirmOpen:
 		card = m.confirm.render(w)
 	case m.SettingsOpen:
@@ -852,10 +928,10 @@ func (m Model) View() string {
 	return m.StripView()
 }
 
-func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int) {
+func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int) {
 	bounds := make([][2]int, len(m.Tabs))
 	var parts []string
-	var plusB, cafeB [2]int
+	var plusB, bellB, cafeB [2]int
 
 	// Quiet brand — no bordered chip, no trailing gap before the first tab.
 	brand := styleBrand().Render("硯")
@@ -902,17 +978,23 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int) {
 	left := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 	leftW := lipgloss.Width(left)
 
+	bell := m.renderBellChip()
+	bellW := lipgloss.Width(bell)
+	if bellW < 1 {
+		bellW = 2
+	}
 	cup := m.renderCaffeineChip()
 	cupW := lipgloss.Width(cup)
 	if cupW < 1 {
 		cupW = 2
 	}
+	rightW := bellW + gapW + cupW
 
-	// Spacer between + and the coffee chip; keep at least one gap cell when possible.
-	spacerW := w - leftW - cupW
+	// Spacer between + and the bell; the cup sits at the far right.
+	spacerW := w - leftW - rightW
 	if spacerW < 1 {
 		// Collapse tabs if the strip is too tight for a right-aligned cup.
-		maxLeft := w - cupW - 1
+		maxLeft := w - rightW - 1
 		if maxLeft < 8 {
 			maxLeft = 8
 		}
@@ -926,9 +1008,10 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int) {
 		}
 	}
 	spacer := styleGap().Render(strings.Repeat(" ", spacerW))
-	cafeB = [2]int{leftW + spacerW, leftW + spacerW + cupW}
+	bellB = [2]int{leftW + spacerW, leftW + spacerW + bellW}
+	cafeB = [2]int{bellB[1] + gapW, bellB[1] + gapW + cupW}
 
-	row := left + spacer + cup
+	row := left + spacer + bell + gap + cup
 	// Guarantee full-width bar surface (clip only if still over).
 	lw := lipgloss.Width(row)
 	if lw < w {
@@ -942,9 +1025,14 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int) {
 				cafeB[0] = 0
 			}
 			cafeB[1] = w
+			bellB[1] = cafeB[0] - gapW
+			bellB[0] = bellB[1] - bellW
+			if bellB[0] < 0 {
+				bellB[0] = 0
+			}
 		}
 	}
-	return styleBar().Width(w).Render(row), bounds, plusB, cafeB
+	return styleBar().Width(w).Render(row), bounds, plusB, bellB, cafeB
 }
 
 // renderCaffeineChip is the top-right coffee control (empty dim / full bright).
@@ -962,6 +1050,55 @@ func (m Model) renderCaffeineChip() string {
 	return styleCaffeineOff().Render(cup)
 }
 
+// renderBellChip is the session notification control, just left of the cup.
+func (m Model) renderBellChip() string {
+	const bell = "🔔"
+	label := bell
+	if m.BellCount > 0 {
+		n := m.BellCount
+		if n > 9 {
+			n = 9
+		}
+		label = bell + " " + strconv.Itoa(n)
+	}
+	if m.BellUnread {
+		return styleBellUnread().Render(label)
+	}
+	return styleCaffeineOff().Render(label)
+}
+
+func (m Model) renderNoticeList(innerW int) string {
+	if len(m.Notices) == 0 {
+		return styleDialogHint().Width(innerW).Render("No notifications this session")
+	}
+	var lines []string
+	limit := len(m.Notices)
+	if limit > 12 {
+		limit = 12
+	}
+	for i := 0; i < limit; i++ {
+		n := m.Notices[i]
+		mark := "  "
+		if i == m.NoticeCursor {
+			mark = "▸ "
+		}
+		text := n.Title
+		if n.Body != "" {
+			text += " — " + n.Body
+		}
+		line := n.When + "  " + text
+		if lipgloss.Width(line) > innerW-2 {
+			line = lipgloss.NewStyle().MaxWidth(innerW - 2).Render(line)
+		}
+		style := styleDialogHint()
+		if i == m.NoticeCursor {
+			style = styleDialogHintKey()
+		}
+		lines = append(lines, style.Render(mark+line))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m Model) showStatus() bool {
 	s := strings.TrimSpace(m.Status)
 	return s != "" && s != "ready"
@@ -977,7 +1114,7 @@ func (m Model) TabBounds() [][2]int {
 	if w < 20 {
 		w = 20
 	}
-	_, bounds, _, _ := m.layoutTabCards(w)
+	_, bounds, _, _, _ := m.layoutTabCards(w)
 	return bounds
 }
 
@@ -987,7 +1124,7 @@ func (m Model) PlusBounds() [2]int {
 	if w < 20 {
 		w = 20
 	}
-	_, _, plus, _ := m.layoutTabCards(w)
+	_, _, plus, _, _ := m.layoutTabCards(w)
 	return plus
 }
 
@@ -997,8 +1134,18 @@ func (m Model) CaffeineBounds() [2]int {
 	if w < 20 {
 		w = 20
 	}
-	_, _, _, cafe := m.layoutTabCards(w)
+	_, _, _, _, cafe := m.layoutTabCards(w)
 	return cafe
+}
+
+// BellBounds is [startCol,endCol) of the bell just left of the coffee chip.
+func (m Model) BellBounds() [2]int {
+	w := m.Width
+	if w < 20 {
+		w = 20
+	}
+	_, _, _, bell, _ := m.layoutTabCards(w)
+	return bell
 }
 
 // RowCount is strip rows only (overlay floats over the shell).
@@ -1018,6 +1165,15 @@ func (m Model) OverlayRowCount() int {
 	case m.HelpOpen:
 		// Two-column compact card; actual height from lipgloss.
 		return 26
+	case m.NotificationsOpen:
+		n := len(m.Notices)
+		if n < 1 {
+			n = 1
+		}
+		if n > 12 {
+			n = 12
+		}
+		return n + 6
 	case m.ConfirmOpen:
 		return 10
 	case m.SettingsOpen:

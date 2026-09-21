@@ -30,6 +30,7 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		{ID: "zoom_reset", Title: "Reset zoom", Desc: KeyCtrl("0") + " · default font size · Appearance", Category: "Appearance", Action: ActionZoomReset},
 		{ID: "replay_intro", Title: "Replay intro", Desc: "Play startup curtain again · Appearance", Category: "Appearance", Action: ActionReplayIntro},
 		{ID: "check_updates", Title: "Check for updates", Desc: "GitHub Releases · System", Category: "System", Action: ActionCheckUpdates},
+		{ID: "notifications", Title: "Notifications", Desc: "Session history · bell · System", Category: "System", Action: ActionOpenNotifications},
 		{ID: "caffeine_toggle", Title: "Toggle caffeine", Desc: "☕ strip · prevent sleep · System", Category: "System", Action: ActionCaffeineToggle},
 		{ID: "caffeine_15", Title: "Caffeine 15 minutes", Desc: "Stay awake 15m · System", Category: "System", Action: ActionCaffeineFor, Minutes: 15},
 		{ID: "caffeine_1h", Title: "Caffeine 1 hour", Desc: "Stay awake 1h · System", Category: "System", Action: ActionCaffeineFor, Minutes: 60},

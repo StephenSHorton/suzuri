@@ -126,6 +126,12 @@ func Run() error {
 	ui.active = 0
 	ui.syncChrome()
 	ui.showSplash = !cfg.FirstRunDone
+	onNoticeBell = func() {
+		count, unread := noticeBellState()
+		r := ui.chrome.UpdateChrome(chrome.SyncBellMsg{Count: count, Unread: unread})
+		ui.chrome = r.Model
+		ui.markChromeDirty()
+	}
 	return ui.loop()
 }
 
@@ -1108,6 +1114,12 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.zoomFontReset()
 	case chrome.ActionReplayIntro:
 		u.replayIntro()
+	case chrome.ActionOpenNotifications:
+		u.toggleNoticeHistory()
+	case chrome.ActionFocusNoticePane:
+		if r.Index >= 0 {
+			u.revealPane(r.Index)
+		}
 	case chrome.ActionCheckUpdates:
 		u.startUpdateCheck()
 	case chrome.ActionInstallUpdate:
@@ -2053,6 +2065,48 @@ func (u *winUI) hitPlus(px int32) bool {
 	}
 	b := u.chrome.PlusBounds()
 	return cellX >= b[0] && cellX < b[1]
+}
+
+func (u *winUI) hitBell(px int32) bool {
+	u.syncChrome()
+	cellX := u.pixelToChromeCol(px)
+	if cellX < 0 {
+		return false
+	}
+	b := u.chrome.BellBounds()
+	return cellX >= b[0] && cellX < b[1]
+}
+
+func (u *winUI) toggleNoticeHistory() {
+	if u.chrome.NotificationsOpen {
+		r := u.chrome.UpdateChrome(chrome.DismissOverlayMsg{})
+		u.chrome = r.Model
+	} else {
+		openNoticeHistory(func(msg chrome.OpenNotificationsMsg) {
+			r := u.chrome.UpdateChrome(msg)
+			u.chrome = r.Model
+		})
+	}
+	u.markChromeDirty()
+	u.requestPaint()
+}
+
+func (u *winUI) revealPane(id int) {
+	for i, pg := range u.pages {
+		if pg == nil || findPane(pg.root, id) == nil {
+			continue
+		}
+		u.active = i
+		pg.setFocus(id)
+		if t := u.activeTab(); t != nil {
+			setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
+		}
+		u.syncChrome()
+		u.markChromeDirty()
+		u.markShellDirty()
+		u.requestPaint()
+		return
+	}
 }
 
 func (u *winUI) hitCaffeine(px int32) bool {
@@ -3252,6 +3306,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Top tab strip / + chip / caffeine cup.
 		if py < chromeH {
 			if py < tabStripH {
+				if u.hitBell(px) {
+					u.toggleNoticeHistory()
+					return
+				}
 				if u.hitCaffeine(px) {
 					if msg, ok := applyCaffeineAction(u.caffeine, chrome.ActionCaffeineToggle, 0); ok {
 						if msg != "" {

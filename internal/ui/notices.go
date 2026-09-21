@@ -49,10 +49,24 @@ type liveNote struct {
 }
 
 var (
-	noticeMu    sync.Mutex
-	noticeLive  []liveNote
-	noticeHover bool
+	noticeMu     sync.Mutex
+	noticeLive   []liveNote
+	noticeHover  bool
+	noticeHist   []playedNotice
+	noticeUnread int
+	bellDirty    bool
 )
+
+// onNoticeBell runs on the UI thread when the session history changes.
+var onNoticeBell func()
+
+type playedNotice struct {
+	Title string
+	Body  string
+	At    time.Time
+	TabID int
+	ID    string
+}
 
 func postDeskNote(n deskNote, focused, visible bool) {
 	switch n.Occasion {
@@ -86,6 +100,9 @@ func postDeskNote(n deskNote, focused, visible bool) {
 			if noticeLive[i].ID == n.ID {
 				keep := noticeLive[i].born
 				noticeLive[i] = liveNote{deskNote: n, born: keep, until: expireAt(now, n)}
+				noticeMu.Unlock()
+				rememberNotice(n)
+				noticeMu.Lock()
 				return
 			}
 		}
@@ -106,6 +123,7 @@ func postDeskNote(n deskNote, focused, visible bool) {
 	ln := liveNote{deskNote: n, born: now, until: expireAt(now, n)}
 	noticeLive = append(noticeLive, ln)
 	noticeMu.Unlock()
+	rememberNotice(n)
 	if dropped != nil {
 		sendNoticeClose(dropped)
 	}
@@ -132,6 +150,59 @@ func closeDeskNote(id string) {
 			return
 		}
 	}
+}
+
+func rememberNotice(n deskNote) {
+	id := -1
+	if n.tab != nil {
+		id = n.tab.id
+	}
+	item := playedNotice{
+		Title: strings.TrimSpace(n.Title),
+		Body:  strings.TrimSpace(n.Body),
+		At:    time.Now(),
+		TabID: id,
+		ID:    n.ID,
+	}
+	noticeMu.Lock()
+	if item.ID != "" {
+		for i := range noticeHist {
+			if noticeHist[i].ID == item.ID {
+				noticeHist = append(noticeHist[:i], noticeHist[i+1:]...)
+				break
+			}
+		}
+	}
+	noticeHist = append([]playedNotice{item}, noticeHist...)
+	if len(noticeHist) > 40 {
+		noticeHist = noticeHist[:40]
+	}
+	noticeUnread++
+	bellDirty = true
+	noticeMu.Unlock()
+}
+
+func noticeHistory() []playedNotice {
+	noticeMu.Lock()
+	defer noticeMu.Unlock()
+	out := make([]playedNotice, len(noticeHist))
+	copy(out, noticeHist)
+	noticeUnread = 0
+	return out
+}
+
+func takeBellDirty() bool {
+	noticeMu.Lock()
+	defer noticeMu.Unlock()
+	d := bellDirty
+	bellDirty = false
+	return d
+}
+
+func noticeBellState() (count int, unread bool) {
+	noticeMu.Lock()
+	defer noticeMu.Unlock()
+	return len(noticeHist), noticeUnread > 0
 }
 
 func noticeCount() int {
@@ -343,6 +414,9 @@ var noticeCards []noticeCard
 
 func driveNotices(now time.Time, focused, visible bool) {
 	pollNoticeInput()
+	if takeBellDirty() && onNoticeBell != nil {
+		onNoticeBell()
+	}
 	for _, n := range tickNotices(now) {
 		nn := n
 		sendNoticeClose(&nn)

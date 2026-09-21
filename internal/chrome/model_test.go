@@ -710,6 +710,10 @@ func TestCaffeineBoundsRight(t *testing.T) {
 	if b[0] < 40 {
 		t.Fatalf("expected right-side cup, got %v", b)
 	}
+	bell := m.BellBounds()
+	if bell[1] > b[0] {
+		t.Fatalf("bell %v overlaps caffeine %v", bell, b)
+	}
 	// Plus is left of caffeine with a spacer.
 	plus := m.PlusBounds()
 	if plus[1] > b[0] {

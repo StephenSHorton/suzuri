@@ -37,10 +37,10 @@ var (
 
 // Bar / void for GDI.
 var (
-	BarR, BarG, BarB       byte
-	VoidR, VoidG, VoidB    byte
-	DimR, DimG, DimB       byte // shell dim matte
-	PanelR, PanelG, PanelB byte // input bar / panel surface
+	BarR, BarG, BarB          byte
+	VoidR, VoidG, VoidB       byte
+	DimR, DimG, DimB          byte // shell dim matte
+	PanelR, PanelG, PanelB    byte // input bar / panel surface
 	PrimR, PrimG, PrimB       byte // primary accent (prompt glyph, border)
 	OnPrimR, OnPrimG, OnPrimB byte // text on primary fills (selection / block caret)
 	TextR, TextG, TextB       byte // primary fg
@@ -83,15 +83,15 @@ func init() {
 // Order matches setPalette args; ansi is 16× hex for SGR 0–15.
 // empty ansi + stockANSI uses StockANSI16 (optionally punched for HC).
 type themeSpec struct {
-	void, bar, panel       string
-	primary, secondary     string
-	onPrimary              string
-	text, soft, dim, mute  string
-	sel, match, cyan       string
-	border, dimMatte       string
-	ansi                   [16]string // empty → stock
-	stockANSI              bool
-	punchHC                bool // brighten a few stock slots (high contrast)
+	void, bar, panel      string
+	primary, secondary    string
+	onPrimary             string
+	text, soft, dim, mute string
+	sel, match, cyan      string
+	border, dimMatte      string
+	ansi                  [16]string // empty → stock
+	stockANSI             bool
+	punchHC               bool // brighten a few stock slots (high contrast)
 }
 
 // themeCatalog is keyed by config.Theme* ids. Unknown ids fall back to inkstone.
@@ -469,7 +469,6 @@ func styleInactiveTab() lipgloss.Style {
 		Padding(0, 2)
 }
 
-
 func stylePlus() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(colMute).
@@ -489,6 +488,14 @@ func styleCaffeineOff() lipgloss.Style {
 func styleCaffeineOn() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(colSecondary).
+		Background(colBar).
+		Bold(true).
+		Padding(0, 1)
+}
+
+func styleBellUnread() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(colPrimary).
 		Background(colBar).
 		Bold(true).
 		Padding(0, 1)
