@@ -940,23 +940,10 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, 
 	gapW := lipgloss.Width(gap)
 
 	if m.Frame == FrameMac {
-		for i, glyph := range []string{"●", "●", "●"} {
-			var chip string
-			switch FrameButton(i) {
-			case FrameClose:
-				chip = styleFrameClose().Render(glyph)
-			case FrameMinimize:
-				chip = styleFrameMin().Render(glyph)
-			default:
-				chip = styleFrameZoom().Render(glyph)
-			}
-			cw := lipgloss.Width(chip)
-			frameBtn[i] = [2]int{col, col + cw}
-			parts = append(parts, chip)
-			col += cw
-			parts = append(parts, gap)
-			col += gapW
-		}
+		// Room for the 12pt traffic lights painted over the bar, not as glyphs.
+		const reserve = 8
+		parts = append(parts, styleGap().Render(strings.Repeat(" ", reserve)))
+		col += reserve
 	}
 
 	// Quiet brand — no bordered chip, no trailing gap before the first tab.

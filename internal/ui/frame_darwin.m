@@ -1,6 +1,8 @@
 #import <AppKit/AppKit.h>
 #include <string.h>
 
+static void suzuri_toggle_zoom(NSWindow *w);
+
 static int gTitleH;
 static int gBlock[64 * 4];
 static int gBlockN;
@@ -46,7 +48,7 @@ void suzuri_round_main(void) {
 			NSPoint p = [e locationInWindow];
 			if (titleBlocked(win, p)) return e;
 			if (e.clickCount >= 2) {
-				[win zoom:nil];
+				suzuri_toggle_zoom(win);
 				return nil;
 			}
 			[win performWindowDragWithEvent:e];
@@ -62,6 +64,33 @@ void suzuri_set_title_hits(int titleH, const int *rects, int n) {
 	if (rects != NULL && n > 0) {
 		memcpy(gBlock, rects, (size_t)n * 4 * sizeof(int));
 	}
+}
+
+static NSRect gUnzoomed;
+
+static BOOL nearf(CGFloat a, CGFloat b) {
+	CGFloat d = a - b;
+	if (d < 0) d = -d;
+	return d < 2;
+}
+
+static BOOL framesClose(NSRect a, NSRect b) {
+	return nearf(a.origin.x, b.origin.x) && nearf(a.origin.y, b.origin.y) &&
+		nearf(a.size.width, b.size.width) && nearf(a.size.height, b.size.height);
+}
+
+// Toggle between the window's last size and the screen area below the menu bar.
+// NSWindow zoom: on a borderless window treats every call as "grow" and the
+// second one uses the full screen, which slides under the menu bar.
+void suzuri_toggle_zoom(NSWindow *w) {
+	if (w == nil) return;
+	NSRect vis = w.screen.visibleFrame;
+	if (framesClose(w.frame, vis) && gUnzoomed.size.width > 40 && gUnzoomed.size.height > 40) {
+		[w setFrame:gUnzoomed display:YES animate:YES];
+		return;
+	}
+	gUnzoomed = w.frame;
+	[w setFrame:vis display:YES animate:YES];
 }
 
 void suzuri_screen_cursor(int *x, int *y) {

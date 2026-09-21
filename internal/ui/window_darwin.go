@@ -3154,9 +3154,9 @@ func (u *macUI) handleMouse() {
 		}
 		if int32(my) < chromeH {
 			if int32(my) < tabStripH {
-				if hit := hitFrameButton(u.chrome, u.pixelToChromeCol(int32(mx))); hit >= 0 {
+				if hit := u.hitMacLight(int32(mx), int32(my)); hit >= 0 {
 					u.frameDrag.on = false
-					switch frameActionForHit(u.chrome.Frame, hit) {
+					switch chrome.FrameButton(hit) {
 					case chrome.FrameClose:
 						u.quit = true
 					case chrome.FrameMinimize:
@@ -3326,6 +3326,62 @@ func (u *macUI) hitPlus(px int32) bool {
 }
 
 // hitCaffeine is true when the pixel x hits the top-right coffee chip.
+// macLights are the standard macOS traffic lights: 12pt circles, 8pt apart,
+// 14pt from the left edge, centered in the title strip.
+func (u *macUI) macLights() [3]struct{ x, y, d int } {
+	const d, gap, left = 12, 8, 14
+	th := int(u.titleStripHeight())
+	y := (th - d) / 2
+	if y < 0 {
+		y = 0
+	}
+	var out [3]struct{ x, y, d int }
+	for i := 0; i < 3; i++ {
+		out[i].x = left + i*(d+gap)
+		out[i].y = y
+		out[i].d = d
+	}
+	return out
+}
+
+func (u *macUI) hitMacLight(px, py int32) int {
+	for i, L := range u.macLights() {
+		if int(px) >= L.x-4 && int(px) < L.x+L.d+4 && int(py) >= L.y-4 && int(py) < L.y+L.d+4 {
+			return i
+		}
+	}
+	return -1
+}
+
+func (u *macUI) paintMacLights(dst *image.RGBA) {
+	if dst == nil {
+		return
+	}
+	colors := []color.RGBA{
+		{R: 255, G: 95, B: 87, A: 255},
+		{R: 254, G: 188, B: 46, A: 255},
+		{R: 40, G: 200, B: 64, A: 255},
+	}
+	for i, L := range u.macLights() {
+		fillDisk(dst, L.x+L.d/2, L.y+L.d/2, L.d/2, colors[i])
+	}
+}
+
+func fillDisk(dst *image.RGBA, cx, cy, r int, c color.RGBA) {
+	for y := cy - r; y <= cy+r; y++ {
+		for x := cx - r; x <= cx+r; x++ {
+			dx, dy := x-cx, y-cy
+			if dx*dx+dy*dy > r*r {
+				continue
+			}
+			if !image.Pt(x, y).In(dst.Bounds()) {
+				continue
+			}
+			dst.SetRGBA(x, y, c)
+		}
+	}
+}
+
 func (u *macUI) publishTitleHits() {
 	cw := int(u.metricW)
 	if cw < 1 {
@@ -3339,8 +3395,8 @@ func (u *macUI) publishTitleHits() {
 		}
 		rects = append(rects, 4+b[0]*cw, 0, (b[1]-b[0])*cw, th)
 	}
-	for _, b := range u.chrome.FrameButtonBounds() {
-		add(b)
+	for _, L := range u.macLights() {
+		rects = append(rects, L.x, L.y, L.d, L.d)
 	}
 	for _, b := range u.chrome.TabBounds() {
 		add(b)
@@ -4020,6 +4076,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 
 	u.painter.paintFrame(u.fb, opts)
+	u.paintMacLights(u.fb)
 
 	// Grok prompt image previews (Kitty graphics APC) — over the cell grid.
 	if tab.kittyGfx != nil {
