@@ -29,7 +29,6 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/caffeine"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
-	"github.com/StephenSHorton/suzuri/internal/vt"
 )
 
 // Run opens a native macOS window with one shell tab (more via Ctrl+Shift+T).
@@ -965,126 +964,47 @@ func (u *macUI) drainAndParse(tabID int) {
 		return
 	}
 	data := t.takeInput()
-	if len(data) == 0 {
-		return
+	paneCols := 0
+	if g := u.paneGeomFor(t.id); g != nil {
+		paneCols = g.cols
 	}
-	beforeScreen := snapshotScreenText(t.term)
-	var linkSpans []osc8Span
-	data, linkSpans = t.pullPTY(data, ebiten.IsFocused())
-	if len(data) == 0 {
-		if len(linkSpans) > 0 {
-			t.modes.observe(beforeScreen, snapshotScreenText(t.term), linkSpans)
-		}
-		t.inMu.Lock()
-		more := len(t.inBuf) > 0
-		t.inMu.Unlock()
-		if more {
-			t.postBytes(u)
-		}
-		return
-	}
-	data = t.echo.feed(data)
-	if clean, path, ok := stripAndTakeCwd(data); ok {
-		t.setCwd(path)
-		data = clean
-		if u.activeTab() == t && !t.altScreen() {
-			u.maybeResizeForInput()
-		}
-	} else {
-		data = clean
-	}
-	{
-		clean, reqs := stripAndTakeFork(data)
-		data = clean
-		for _, req := range reqs {
-			u.applyForkOSC(t, req)
-		}
-	}
-	// Inline images: iTerm OSC 1337, suzuri OSC 7879, and path heuristics.
-	{
-		clean, paths, blobs := stripAndTakeImages(data)
-		data = clean
-		if len(paths) > 0 || len(blobs) > 0 {
-			cw, ch := int(u.metricW), int(u.metricH)
-			if cw < 1 {
-				cw = cellW
+	cw, ch, cols := paneMetrics(int(u.metricW), int(u.metricH), u.cols, paneCols)
+	res := t.ingestPTY(data, ptyHooks{
+		Focused:  ebiten.IsFocused(),
+		CellW:    cw,
+		CellH:    ch,
+		PaneCols: cols,
+		OnFork:   func(req forkPaneRequest) { u.applyForkOSC(t, req) },
+		OnCwd: func(_, _ string) {
+			if u.activeTab() == t && !t.altScreen() {
+				u.maybeResizeForInput()
 			}
-			if ch < 1 {
-				ch = cellH
+		},
+		OnAlt: func() {
+			if u.activeTab() == t {
+				u.maybeResizeForInput()
 			}
-			paneCols := u.cols
-			if g := u.paneGeomFor(t.id); g != nil && g.cols > 0 {
-				paneCols = g.cols
-			}
-			t.ingestImages(paths, blobs, cw, ch, paneCols)
-		}
-	}
-	if len(data) == 0 {
-		// Still re-arm if more buffered.
-		t.inMu.Lock()
-		more := len(t.inBuf) > 0
-		t.inMu.Unlock()
-		if more {
-			t.postBytes(u)
-		}
-		return
-	}
-	// Answer Kitty keyboard / DA probes before VT parse (Grok Shift+Enter).
-	t.handleHostQueries(data)
-	// Unwrap OSC 8 hyperlinks so markdown link labels stay visible.
-	data = vt.StripOSC8Hyperlinks(data)
-	// Kitty graphics APCs (Grok image previews): strip + apply against live
-	// cursor between VT segments so a=p places at the CSI-H position.
-	if t.kittyGfx == nil {
-		t.kittyGfx = newKittyGfx()
-	}
-	data = feedKittyAPCs(t.kittyGfx, data, func(b []byte) {
-		t.writeVT(b)
-	}, func() (col, row int) {
-		c := t.term.Cursor()
-		return c.X, c.Y
+		},
 	})
-	if len(data) > 0 {
-		t.writeVT(data)
+	if res.Action == ptyNone {
+		return
 	}
-	t.modes.observe(beforeScreen, snapshotScreenText(t.term), linkSpans)
-	t.sb.noteScreen(t.term)
-	if t.sb.atBottom() {
-		t.sb.stickBottom()
-	}
-	if title := t.term.Title(); title != "" {
-		// Spinner frames don't change the stripped display title — skip thrash.
-		if t.applyTitle(title) && u.activeTab() == t {
-			ebiten.SetWindowTitle("suzuri — " + t.title)
+	if res.Action == ptyQuiet {
+		if res.Dirty {
+			u.markShellDirty()
 		}
-	}
-	nowAlt := t.altScreen()
-	if nowAlt != t.wasAlt {
-		if t.wasAlt {
-			// Leaving alt-screen (clean exit or hard kill): stop mouse inject
-			// and drop Kitty placements so the shell doesn't print SGR garbage.
-			resetHostAfterAltApp(t.term)
-			t.modes.leaveApp()
-			if t.kittyGfx != nil {
-				t.kittyGfx.clear()
-			}
-			t.markShellIdle()
+		if res.More {
+			t.postBytes(u)
 		}
-		t.wasAlt = nowAlt
-		log.Info("alt screen", "tab", t.id, "on", nowAlt)
-		if u.activeTab() == t {
-			u.maybeResizeForInput()
-		}
+		return
 	}
-	// Cwd OSC already called markShellIdle; also release on quiet PTY.
-	t.maybeReleaseBarAwaiting()
+	if res.TitleChanged && u.activeTab() == t {
+		ebiten.SetWindowTitle("suzuri — " + res.Title)
+	}
 	u.tryFlushCmdQueue(t)
 	u.publishBridgeSnapshot()
 	u.markShellDirty()
-	t.inMu.Lock()
-	more := len(t.inBuf) > 0
-	t.inMu.Unlock()
-	if more {
+	if res.More {
 		t.postBytes(u)
 	}
 }

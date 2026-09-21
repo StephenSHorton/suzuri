@@ -25,7 +25,6 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/caffeine"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
-	"github.com/StephenSHorton/suzuri/internal/vt"
 )
 
 const (
@@ -1603,82 +1602,39 @@ func (u *winUI) drainAndParse(tabID int) {
 		return
 	}
 	data := t.takeInput()
-	if len(data) == 0 {
-		return
+	visible := u.paneVisible(t.id)
+	paneCols := 0
+	if g := u.paneGeomFor(t.id); g != nil {
+		paneCols = g.cols
 	}
-	beforeScreen := snapshotScreenText(t.term)
-	var linkSpans []osc8Span
-	data, linkSpans = t.pullPTY(data, u.hostFocused)
-	if len(data) == 0 {
-		if len(linkSpans) > 0 {
-			t.modes.observe(beforeScreen, snapshotScreenText(t.term), linkSpans)
-		}
-		t.inMu.Lock()
-		more := len(t.inBuf) > 0
-		t.inMu.Unlock()
-		if more {
-			t.postBytes(u)
-		}
-		if u.paneVisible(t.id) {
-			u.markShellDirty()
-			u.requestPaint()
-		}
-		return
-	}
-	// Drop shell local-echo of the bar-submitted command (ANSI-colored on PS).
-	data = t.echo.feed(data)
-	// Host cwd OSC from quiet prompt (strip before VT so it never paints).
-	if clean, path, ok := stripAndTakeCwd(data); ok {
-		prevPath := t.cwd
-		t.setCwd(path)
-		data = clean
-		// Path above the input bar — reflow only if cwd row presence changes
-		// (empty ↔ non-empty). Spammed prompts used to post settle every OSC.
-		if u.activeTab() == t && !t.altScreen() {
-			was := displayPath(prevPath) != ""
-			now := displayPath(t.cwd) != ""
-			if was != now {
+	cw, ch, cols := paneMetrics(int(u.metricW), int(u.metricH), u.cols, paneCols)
+	res := t.ingestPTY(data, ptyHooks{
+		Focused:  u.hostFocused,
+		CellW:    cw,
+		CellH:    ch,
+		PaneCols: cols,
+		OnFork:   func(req forkPaneRequest) { u.applyForkOSC(t, req) },
+		// Reflow only when the cwd row appears or disappears. Spammed prompts
+		// used to post settle on every OSC.
+		OnCwd: func(prev, next string) {
+			if u.activeTab() != t || t.altScreen() {
+				return
+			}
+			if (displayPath(prev) != "") != (displayPath(next) != "") {
 				u.maybeResizeForInput()
 			}
-		}
-	} else {
-		data = clean
+		},
+		OnLeaveAlt: func() { clearKittyHBMCache(t.id) },
+		// Alt-screen enter/leave hides or shows the Warp bar. Never
+		// ConPTY-resize in that callback — dual Grok plus ResizePseudoConsole
+		// mid-stream hard-crashes. onAltScreenToggled is paint-only.
+		OnAlt: func() { u.onAltScreenToggled(t) },
+	})
+	if res.Action == ptyNone {
+		return
 	}
-	{
-		clean, reqs := stripAndTakeFork(data)
-		data = clean
-		for _, req := range reqs {
-			u.applyForkOSC(t, req)
-		}
-	}
-	// Inline images: iTerm OSC 1337, suzuri OSC 7879, and path heuristics.
-	// Attached into scrollback under the current stream (not a sticky overlay).
-	{
-		clean, paths, blobs := stripAndTakeImages(data)
-		data = clean
-		if len(paths) > 0 || len(blobs) > 0 {
-			cw, ch := int(u.metricW), int(u.metricH)
-			if cw < 1 {
-				cw = cellW
-			}
-			if ch < 1 {
-				ch = cellH
-			}
-			paneCols := u.cols
-			if g := u.paneGeomFor(t.id); g != nil && g.cols > 0 {
-				paneCols = g.cols
-			}
-			t.ingestImages(paths, blobs, cw, ch, paneCols)
-		}
-	}
-	// Visible if this pane is on the active page (any leaf, not only focused).
-	visible := u.paneVisible(t.id)
-	if len(data) == 0 {
-		// More may have been queued; re-arm if needed.
-		t.inMu.Lock()
-		more := len(t.inBuf) > 0
-		t.inMu.Unlock()
-		if more {
+	if res.Action == ptyQuiet {
+		if res.More {
 			t.postBytes(u)
 		}
 		if visible {
@@ -1687,87 +1643,27 @@ func (u *winUI) drainAndParse(tabID int) {
 		}
 		return
 	}
-	// Answer Kitty keyboard / DA probes before VT parse (Grok Shift+Enter).
-	t.handleHostQueries(data)
-	// Unwrap OSC 8 hyperlinks so markdown link labels stay visible.
-	data = vt.StripOSC8Hyperlinks(data)
-	// Kitty graphics APCs (Grok image previews): strip + apply against live
-	// cursor between VT segments so a=p places at the CSI-H position.
-	if t.kittyGfx == nil {
-		t.kittyGfx = newKittyGfx()
-	}
-	data = feedKittyAPCs(t.kittyGfx, data, func(b []byte) {
-		t.writeVT(b)
-	}, func() (col, row int) {
-		c := t.term.Cursor()
-		return c.X, c.Y
-	})
-	if len(data) > 0 {
-		t.writeVT(data)
-	}
-	t.modes.observe(beforeScreen, snapshotScreenText(t.term), linkSpans)
-	t.sb.noteScreen(t.term)
 	u.markShellDirty()
-	// No host image injection on alt-screen (Grok) — use click → modal instead.
-	if t.sb.atBottom() {
-		t.sb.stickBottom()
+	// Spinner frames must not call SetWindowText — that thrash was part of
+	// the dual-Grok crash path. Refresh the strip only when the label or
+	// the busy bit actually changes.
+	if res.BusyChanged {
+		u.chromeDirty = true
+		u.syncChrome()
+	} else if res.TitleChanged {
+		u.chromeDirty = true
 	}
-	// Grok (and others) set OSC 0/2 window title with a braille spinner while
-	// working; strip for display, keep titleBusy for the tab strip spinner.
-	if title := t.term.Title(); title != "" {
-		prevBusy := t.busy()
-		titleChanged := t.applyTitle(title)
-		if t.busy() != prevBusy {
-			u.chromeDirty = true
-			u.syncChrome()
-		} else if titleChanged {
-			// Real title text change (not a spinner frame) — refresh strip labels.
-			u.chromeDirty = true
-		}
-		// Never SetWindowText on spinner frames — that thrash was part of the
-		// dual-Grok crash path. Use the stripped display title only.
-		if titleChanged && u.activeTab() == t {
-			setWindowTitle(u.hwnd, "suzuri — "+t.title)
-		}
+	if res.TitleChanged && u.activeTab() == t {
+		setWindowTitle(u.hwnd, "suzuri — "+res.Title)
 	}
-	// Alt-screen enter/leave: hide/show Warp bar. Never ConPTY-resize here —
-	// dual Grok + ResizePseudoConsole mid-stream hard-crashes (log dies with
-	// no panic after "layout settle"). Paint-only now; settle when idle.
-	nowAlt := t.altScreen()
-	if nowAlt != t.wasAlt {
-		if t.wasAlt {
-			resetHostAfterAltApp(t.term)
-			t.modes.leaveApp()
-			if t.kittyGfx != nil {
-				t.kittyGfx.clear()
-			}
-			clearKittyHBMCache(t.id)
-			t.markShellIdle()
-		}
-		t.wasAlt = nowAlt
-		log.Info("alt screen", "tab", t.id, "on", nowAlt)
-		u.onAltScreenToggled(t)
-	}
-	t.maybeReleaseBarAwaiting()
 	u.tryFlushCmdQueue(t)
-	// Bridge snapshot is relatively expensive — skip on pure spam frames.
-	// (MCP clients still get updates on submit / tab change.)
-	if u.bridge != nil && len(data) > 0 {
-		// Coalesce: at most ~10/s via existing invalidate path is enough;
-		// full snapshot every PTY chunk under spam flooded layout work.
-		if u.spinTick%8 == 0 {
-			u.publishBridgeSnapshot()
-		}
+	if u.bridge != nil && u.spinTick%8 == 0 {
+		u.publishBridgeSnapshot()
 	}
-	// Only repaint if this pane is on the visible page. Coalesce — dual busy
-	// alt-screen panes used to invalidate hundreds of times per second.
 	if visible {
 		u.requestPaint()
 	}
-	t.inMu.Lock()
-	more := len(t.inBuf) > 0
-	t.inMu.Unlock()
-	if more {
+	if res.More {
 		t.postBytes(u)
 	}
 }

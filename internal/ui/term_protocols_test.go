@@ -168,6 +168,15 @@ func TestFindLinksUsesCellLink(t *testing.T) {
 	}
 }
 
+func TestFeedPassesThroughTitleAndCwd(t *testing.T) {
+	var m termModes
+	raw := []byte("\x1b]0;title\x07\x1b]7878;cwd=/tmp\x07x")
+	res := m.feed(time.Now(), raw, 0)
+	if string(res.ready) != string(raw) {
+		t.Fatalf("dropped host OSC: %q", res.ready)
+	}
+}
+
 func TestFocusArmDoesNotRequireModeYet(t *testing.T) {
 	var m termModes
 	res := m.feed(time.Now(), []byte("\x1b[?1004h"), 0)

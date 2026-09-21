@@ -174,7 +174,9 @@ func (m *termModes) feed(now time.Time, data []byte, vtMode vt10x.ModeFlag) feed
 				i = len(in)
 				break
 			}
-			m.takeOSC(payload, vtMode, &res)
+			if !m.takeOSC(payload, vtMode, &res) {
+				appendBytes(in[i : i+seqLen])
+			}
 			i += seqLen
 		case '[':
 			body, final, seqLen, done, bad := csiSeq(in[i:])
@@ -337,21 +339,24 @@ func (m *termModes) decrpm(priv bool, mode int, vtMode vt10x.ModeFlag) int {
 	}
 }
 
-func (m *termModes) takeOSC(payload []byte, _ vt10x.ModeFlag, res *feedResult) {
-	if bytesHasPrefix(payload, "8;") || string(payload) == "8" {
+// takeOSC reports whether the sequence was consumed. Titles, cwd reports,
+// and inline-image OSCs must pass through to the rest of the pipeline.
+func (m *termModes) takeOSC(payload []byte, _ vt10x.ModeFlag, res *feedResult) bool {
+	switch {
+	case bytesHasPrefix(payload, "8;") || string(payload) == "8":
 		m.takeOSC8(payload, res)
-		return
-	}
-	if bytesHasPrefix(payload, "52;") || string(payload) == "52" {
+		return true
+	case bytesHasPrefix(payload, "52;") || string(payload) == "52":
 		m.takeOSC52(payload, res)
-		return
-	}
-	if bytesHasPrefix(payload, "9;") {
+		return true
+	case bytesHasPrefix(payload, "9;"):
 		m.takeOSC9(payload, res)
-		return
-	}
-	if bytesHasPrefix(payload, "777;") {
+		return true
+	case bytesHasPrefix(payload, "777;"):
 		m.takeOSC777(payload, res)
+		return true
+	default:
+		return false
 	}
 }
 
