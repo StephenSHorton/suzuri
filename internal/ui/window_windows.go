@@ -70,13 +70,14 @@ func Run() error {
 	log.Info("ui.Run", "cols", cols, "rows", rows, "font", cfg.FontFace, "fontPx", cfg.FontSizePx,
 		"theme", cfg.Theme, "ansi", cfg.ShellANSIMap, "config", config.Path())
 	ui := &winUI{
-		cols:       cols,
-		rows:       rows,
-		cfg:        cfg,
-		blinkStart: time.Now(),
-		nextTabID:  0,
-		chrome:     chrome.New(cols),
-		caffeine:   caffeine.New(),
+		cols:        cols,
+		rows:        rows,
+		cfg:         cfg,
+		blinkStart:  time.Now(),
+		nextTabID:   0,
+		chrome:      chrome.New(cols),
+		caffeine:    caffeine.New(),
+		hostFocused: true,
 	}
 	// Caffeine on by default so long sessions don't sleep under the user.
 	if ui.caffeine != nil {
@@ -216,6 +217,8 @@ type winUI struct {
 	hoverLink    linkSpan
 	hoverLinkOK  bool
 	linkCursorOn bool
+	// hostFocused mirrors WM_ACTIVATE for DECSET 1004 focus reports.
+	hostFocused bool
 	// altMouseDown: left button held while reporting clicks to an alt-screen app.
 	altMouseDown bool
 	// Last SGR motion cell (1-based) sent to alt-screen; avoid flooding the PTY.
@@ -1596,10 +1599,32 @@ func (u *winUI) blinkLoop() {
 // drainAndParse runs ONLY on the UI thread for the given tab id.
 func (u *winUI) drainAndParse(tabID int) {
 	t := u.tabByID(tabID)
-	if t == nil {
+	if t == nil || t.term == nil {
 		return
 	}
 	data := t.takeInput()
+	if len(data) == 0 {
+		return
+	}
+	beforeScreen := snapshotScreenText(t.term)
+	var linkSpans []osc8Span
+	data, linkSpans = t.pullPTY(data, u.hostFocused)
+	if len(data) == 0 {
+		if len(linkSpans) > 0 {
+			t.modes.observe(beforeScreen, snapshotScreenText(t.term), linkSpans)
+		}
+		t.inMu.Lock()
+		more := len(t.inBuf) > 0
+		t.inMu.Unlock()
+		if more {
+			t.postBytes(u)
+		}
+		if u.paneVisible(t.id) {
+			u.markShellDirty()
+			u.requestPaint()
+		}
+		return
+	}
 	// Drop shell local-echo of the bar-submitted command (ANSI-colored on PS).
 	data = t.echo.feed(data)
 	// Host cwd OSC from quiet prompt (strip before VT so it never paints).
@@ -1680,6 +1705,7 @@ func (u *winUI) drainAndParse(tabID int) {
 	if len(data) > 0 {
 		t.writeVT(data)
 	}
+	t.modes.observe(beforeScreen, snapshotScreenText(t.term), linkSpans)
 	t.sb.noteScreen(t.term)
 	u.markShellDirty()
 	// No host image injection on alt-screen (Grok) — use click → modal instead.
@@ -1711,6 +1737,7 @@ func (u *winUI) drainAndParse(tabID int) {
 	if nowAlt != t.wasAlt {
 		if t.wasAlt {
 			resetHostAfterAltApp(t.term)
+			t.modes.leaveApp()
 			if t.kittyGfx != nil {
 				t.kittyGfx.clear()
 			}
@@ -2375,6 +2402,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_ACTIVATE:
 		// Log re-focus after idle — helps correlate "clicked back → gone".
 		active := win.LOWORD(uint32(wParam))
+		focused := active != win.WA_INACTIVE
+		if focused != u.hostFocused {
+			u.hostFocused = focused
+			if t := u.activeTab(); t != nil {
+				t.reportFocus(focused)
+			}
+		}
 		log.Info("WM_ACTIVATE", "active", active, "alive", u.alive.Load(),
 			"w", u.width, "h", u.height, "cols", u.cols, "rows", u.rows)
 		applog.Sync()
@@ -3798,13 +3832,38 @@ func (u *winUI) paint(hwnd win.HWND) {
 				if viewRows < 1 {
 					viewRows = u.rows
 				}
-				grid := g.pane.sb.viewCells(g.pane.term, viewRows)
+				grid := g.pane.viewCells(viewRows)
 				if g.pane == u.activeTab() && u.hoverLinkOK {
 					applyLinkHoverTint(grid, u.hoverLink)
 				}
 				cur := g.pane.term.Cursor()
 				curVis := g.pane.altScreen() && g.pane.term.CursorVisible() && g.focused
 				u.blitGridPane(dest, rect, grid, cur.X, cur.Y, curVis, g)
+				if pk := g.pane.modes.progress.kind; pk != 0 {
+					pct := g.pane.modes.progress.pct
+					if pct < 0 {
+						pct = 0
+					}
+					if pct > 100 {
+						pct = 100
+					}
+					bw := g.w
+					if pk == 1 || pk == 4 {
+						bw = g.w * int32(pct) / 100
+					}
+					if bw < 2 && pct > 0 {
+						bw = 2
+					}
+					br, bgc, bb := byte(90), byte(160), byte(255)
+					if pk == 2 {
+						br, bgc, bb = 220, 70, 70
+						bw = g.w
+					}
+					if pk == 4 {
+						br, bgc, bb = 210, 170, 60
+					}
+					fillSolidRGB(dest, win.RECT{Left: g.x, Top: g.y, Right: g.x + bw, Bottom: g.y + 3}, br, bgc, bb)
+				}
 				if !g.pane.altScreen() {
 					u.paintPaneImages(dest, rect, g)
 				}
@@ -4562,6 +4621,10 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 			}
 		}
 		a := u.caretAlpha()
+		curStyle, curSteady := tab.modes.shellCursor(int(u.cfg.Cursor))
+		if curSteady {
+			a = 1
+		}
 		if a > 0 {
 			cr, cg, cb := blendRGB(bgR, bgG, bgB, 220, 220, 220, a)
 			lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(cr, cg, cb)}
@@ -4569,7 +4632,7 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 				cellL := padX + int32(curX)*cw
 				cellT := padY + int32(curY)*ch
 				var r win.RECT
-				switch u.cfg.Cursor {
+				switch config.CursorStyle(curStyle) {
 				case config.CursorUnderline:
 					th := ch / 8
 					if th < 2 {
@@ -5133,7 +5196,7 @@ func (u *winUI) updateLinkHover(px, py int32) {
 	if viewRows < 1 {
 		viewRows = u.rows
 	}
-	grid := tab.sb.viewCells(tab.term, viewRows)
+	grid := tab.viewCells(viewRows)
 	span, ok := linkAt(findLinksInGrid(grid), x, y)
 	if !ok {
 		clear()
@@ -5168,7 +5231,7 @@ func (u *winUI) linkURLAt(px, py int32) string {
 	if viewRows < 1 {
 		viewRows = u.rows
 	}
-	grid := tab.sb.viewCells(tab.term, viewRows)
+	grid := tab.viewCells(viewRows)
 	span, ok := linkAt(findLinksInGrid(grid), x, y)
 	if !ok {
 		return ""
@@ -5305,7 +5368,7 @@ func (u *winUI) pasteClipboard() {
 		if u.pasteBusy.Swap(true) {
 			return // already dumping a clipboard image
 		}
-		go u.pasteAltScreenAsync()
+		go u.pasteAltScreenAsync(u.pasteBrackets())
 		return
 	}
 	text, err := getClipboardText(u.hwnd)
@@ -5329,12 +5392,17 @@ func (u *winUI) pasteClipboard() {
 }
 
 // pasteAltScreenAsync reads the clipboard off-thread and queues PTY inject.
-func (u *winUI) pasteAltScreenAsync() {
+func (u *winUI) pasteBrackets() bool {
+	t := u.activeTab()
+	return t != nil && t.modes.bracketPaste
+}
+
+func (u *winUI) pasteAltScreenAsync(bracket bool) {
 	defer u.pasteBusy.Store(false)
 	if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
 		log.Info("paste clipboard image", "path", imgPath)
 		u.pendingPasteMu.Lock()
-		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(imgPath), toast: "image pasted"})
+		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: framePaste(imgPath, bracket), toast: "image pasted"})
 		u.pendingPasteMu.Unlock()
 		return
 	} else if err != nil {
@@ -5346,7 +5414,7 @@ func (u *winUI) pasteAltScreenAsync() {
 	}
 	// Host bracketed paste only — Super+V + payload double-pasted into Grok.
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text)})
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
 	u.pendingPasteMu.Unlock()
 }
 

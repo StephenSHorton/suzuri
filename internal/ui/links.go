@@ -33,6 +33,18 @@ func findLinksInGrid(grid [][]cellPix) []linkSpan {
 		if len(row) == 0 {
 			continue
 		}
+		for x := 0; x < len(row); {
+			if row[x].Link == "" {
+				x++
+				continue
+			}
+			url := row[x].Link
+			x0 := x
+			for x < len(row) && row[x].Link == url {
+				x++
+			}
+			out = append(out, linkSpan{row: y, x0: x0, x1: x, url: url})
+		}
 		rs := make([]rune, len(row))
 		for x, c := range row {
 			ch := c.Ch
@@ -73,6 +85,9 @@ func findLinksInGrid(grid [][]cellPix) []linkSpan {
 			x1 := x0 + len(rr)
 			if x0 < 0 {
 				x0 = 0
+			}
+			if x0 < len(row) && row[x0].Link != "" {
+				continue
 			}
 			if x1 > len(row) {
 				x1 = len(row)

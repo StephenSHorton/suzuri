@@ -14,10 +14,20 @@ func bracketedPaste(text string) []byte {
 	return []byte("\x1b[200~" + text + "\x1b[201~")
 }
 
+// framePaste brackets text only when the app has enabled DECSET 2004.
+func framePaste(text string, bracket bool) []byte {
+	if bracket {
+		return bracketedPaste(text)
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\n", "\r")
+	return []byte(text)
+}
+
 // pendingPaste is an async alt-screen paste result drained on the UI thread.
 type pendingPaste struct {
-	payload       []byte
-	toast         string
-	preferSuperV  bool // empty board: try Kitty Super+V first
-	reclaimFocus  bool // macOS: re-activate window after osascript paste
+	payload      []byte
+	toast        string
+	preferSuperV bool // empty board: try Kitty Super+V first
+	reclaimFocus bool // macOS: re-activate window after osascript paste
 }

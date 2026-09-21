@@ -89,6 +89,8 @@ type tab struct {
 	kittyGfx *kittyGfxState
 	// sgr rewrites colon-truecolor + SGR 2 (faint) before vt10x.
 	sgr sgrState
+	// modes tracks host protocols vt10x does not (sync output, paste, OSC 52).
+	modes termModes
 
 	// Warp-bar command queue: when a job is still running, further Enter
 	// submits wait here instead of dumping into the live process stdin.

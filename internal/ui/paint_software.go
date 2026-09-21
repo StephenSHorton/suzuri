@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"time"
 
 	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
@@ -164,6 +165,13 @@ type paintOpts struct {
 	InputGhost    string // soft Tab-completion preview after caret
 	ShowInput     bool
 	CursorStyle   int // config.CursorStyle as int to avoid import cycle issues — use values 0/1/2
+	// ShellCursor is the alt-screen caret (DECSCUSR or the user's cursor).
+	// 0 block, 1 underline, 2 bar. Independent of the Warp-bar CursorStyle.
+	ShellCursor       int
+	ShellCursorSteady bool
+	// ProgKind is ConEmu OSC 9;4: 0 off, 1 value, 2 error, 3 indeterminate, 4 paused.
+	ProgKind int
+	ProgPct  int
 	// Scrollback-attached images (primary buffer only; alt-screen leaves empty).
 	Images []visImage
 }
@@ -224,8 +232,11 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 				break
 			}
 			br, bg, bb := cell.BR, cell.BG, cell.BB
-			if o.CurVis && x == o.CurX && y == o.CurY {
+			if o.CurVis && o.ShellCursor == 0 && x == o.CurX && y == o.CurY {
 				a := o.CurAlpha
+				if o.ShellCursorSteady {
+					a = 1
+				}
 				if a < 0.15 {
 					a = 0.15
 				}
@@ -239,6 +250,16 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 			paintCellBackground(dst, px, py, cw, ch, br, bg, bb)
 			p.paintCellInk(dst, px, py, cell)
 		}
+	}
+	if o.CurVis && o.ShellCursor != 0 && o.CurY >= 0 && o.CurX >= 0 {
+		a := o.CurAlpha
+		if o.ShellCursorSteady {
+			a = 1
+		}
+		p.paintInputCaret(dst, padX+o.CurX*cw, padY+o.CurY*ch-yShift, o.ShellCursor, a)
+	}
+	if o.ProgKind != 0 {
+		p.paintProgress(dst, padX, padY, shellRight-padX, o.ProgKind, o.ProgPct)
 	}
 
 	// Scrollbar on the right edge of the shell band (not Charm — host paint).
@@ -633,7 +654,7 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 // paintPaneGrid draws a VT cell grid into a pane's content rect.
 // Does not stamp a solid black card — shell band / always-on rain already
 // filled the field (Windows blitGrid: default black BG leaves rain visible).
-func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64) {
+func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64, curStyle int, curSteady bool, progKind, progPct int) {
 	if dst == nil || p == nil || g.w < 1 || g.h < 1 {
 		return
 	}
@@ -657,8 +678,11 @@ func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g pan
 				break
 			}
 			br, bg, bb := cell.BR, cell.BG, cell.BB
-			if curVis && x == curX && y == curY {
+			if curVis && curStyle == 0 && x == curX && y == curY {
 				a := curAlpha
+				if curSteady {
+					a = 1
+				}
 				if a < 0.15 {
 					a = 0.15
 				}
@@ -673,6 +697,60 @@ func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g pan
 			p.paintCellInk(dst, px, py, cell)
 		}
 	}
+	if curVis && curStyle != 0 {
+		a := curAlpha
+		if curSteady {
+			a = 1
+		}
+		p.paintInputCaret(dst, int(g.x)+padX+curX*cw, int(g.y)+curY*ch, curStyle, a)
+	}
+	if progKind != 0 {
+		p.paintProgress(dst, int(g.x), int(g.y), int(g.w), progKind, progPct)
+	}
+}
+
+func (p *softwarePainter) paintProgress(dst *image.RGBA, x, y, w, kind, pct int) {
+	if p == nil || dst == nil || w < 2 || kind == 0 {
+		return
+	}
+	h := 3
+	r, g, b := byte(90), byte(160), byte(255)
+	switch kind {
+	case 2:
+		r, g, b = 220, 70, 70
+		pct = 100
+	case 3:
+		chunk := w / 3
+		if chunk < 4 {
+			chunk = 4
+		}
+		if chunk > w {
+			chunk = w
+		}
+		span := w - chunk
+		if span < 1 {
+			span = 1
+		}
+		x += int(time.Now().UnixMilli()/12) % span
+		w = chunk
+		pct = 100
+	case 4:
+		r, g, b = 210, 170, 60
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	fw := w * pct / 100
+	if kind != 3 && fw < 2 && pct > 0 {
+		fw = 2
+	}
+	if kind == 3 {
+		fw = w
+	}
+	fillRectRGBA(dst, x, y, fw, h, r, g, b)
 }
 
 // paintPaneImages draws scrollback images clipped to a pane layout rect.

@@ -84,6 +84,7 @@ type cellPix struct {
 	BR, BG, BB byte // background
 	Bold       bool
 	Underline  bool
+	Link       string // OSC 8 target, when the cell is a hyperlink
 }
 
 func glyphToCell(g vt10x.Glyph) cellPix {

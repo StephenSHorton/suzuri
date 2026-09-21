@@ -207,6 +207,9 @@ type macUI struct {
 	hoverLink    linkSpan
 	hoverLinkOK  bool
 	linkCursorOn bool
+	// hostFocused is the last ebiten focus bit, for DECSET 1004 reports.
+	hostFocused   bool
+	hostFocusInit bool
 
 	// modalImage: full-window lightbox (click path / Open Image / image block).
 	modalImage *tabImage
@@ -638,6 +641,15 @@ func (u *macUI) Update() error {
 		return ebiten.Termination
 	}
 
+	focused := ebiten.IsFocused()
+	if !u.hostFocusInit || focused != u.hostFocused {
+		u.hostFocusInit = true
+		u.hostFocused = focused
+		if t := u.activeTab(); t != nil {
+			t.reportFocus(focused)
+		}
+	}
+
 	// Maximize after the native window exists (Set before RunGame is a no-op).
 	if u.restoreMax && !u.maxApplied {
 		u.maxApplied = true
@@ -956,6 +968,21 @@ func (u *macUI) drainAndParse(tabID int) {
 	if len(data) == 0 {
 		return
 	}
+	beforeScreen := snapshotScreenText(t.term)
+	var linkSpans []osc8Span
+	data, linkSpans = t.pullPTY(data, ebiten.IsFocused())
+	if len(data) == 0 {
+		if len(linkSpans) > 0 {
+			t.modes.observe(beforeScreen, snapshotScreenText(t.term), linkSpans)
+		}
+		t.inMu.Lock()
+		more := len(t.inBuf) > 0
+		t.inMu.Unlock()
+		if more {
+			t.postBytes(u)
+		}
+		return
+	}
 	data = t.echo.feed(data)
 	if clean, path, ok := stripAndTakeCwd(data); ok {
 		t.setCwd(path)
@@ -1020,6 +1047,7 @@ func (u *macUI) drainAndParse(tabID int) {
 	if len(data) > 0 {
 		t.writeVT(data)
 	}
+	t.modes.observe(beforeScreen, snapshotScreenText(t.term), linkSpans)
 	t.sb.noteScreen(t.term)
 	if t.sb.atBottom() {
 		t.sb.stickBottom()
@@ -1036,6 +1064,7 @@ func (u *macUI) drainAndParse(tabID int) {
 			// Leaving alt-screen (clean exit or hard kill): stop mouse inject
 			// and drop Kitty placements so the shell doesn't print SGR garbage.
 			resetHostAfterAltApp(t.term)
+			t.modes.leaveApp()
 			if t.kittyGfx != nil {
 				t.kittyGfx.clear()
 			}
@@ -3499,7 +3528,7 @@ func (u *macUI) pasteClipboard() {
 		}
 		if imgPath, err := readClipboardImageFileUI(); err == nil && imgPath != "" {
 			log.Info("paste clipboard image", "path", imgPath)
-			u.sendKey(bracketedPaste(imgPath))
+			u.sendKey(framePaste(imgPath, u.pasteBrackets()))
 			u.toast("image pasted")
 			return
 		} else if err != nil {
@@ -3507,13 +3536,13 @@ func (u *macUI) pasteClipboard() {
 		}
 		// No image via NSPasteboard — text now, or slow osascript image fallback.
 		if text, _ := clipboard.ReadAll(); text != "" {
-			u.sendKey(bracketedPaste(text))
+			u.sendKey(framePaste(text, u.pasteBrackets()))
 			return
 		}
 		if u.pasteBusy.Swap(true) {
 			return
 		}
-		go u.pasteAltScreenAsyncOsascript()
+		go u.pasteAltScreenAsyncOsascript(u.pasteBrackets())
 		return
 	}
 	text, err := clipboard.ReadAll()
@@ -3557,13 +3586,18 @@ func (u *macUI) pasteChordJustPressed(mod, shift, alt bool) bool {
 
 // pasteAltScreenAsyncOsascript is the off-thread fallback when the UI-thread
 // NSPasteboard dump found no image and no text. Must not call AppKit.
-func (u *macUI) pasteAltScreenAsyncOsascript() {
+func (u *macUI) pasteBrackets() bool {
+	t := u.activeTab()
+	return t != nil && t.modes.bracketPaste
+}
+
+func (u *macUI) pasteAltScreenAsyncOsascript(bracket bool) {
 	defer u.pasteBusy.Store(false)
 	if imgPath, err := readClipboardImageFileOsascript(); err == nil && imgPath != "" {
 		log.Info("paste clipboard image (osascript)", "path", imgPath)
 		u.pendingPasteMu.Lock()
 		u.pendingPaste = append(u.pendingPaste, pendingPaste{
-			payload: bracketedPaste(imgPath), toast: "image pasted",
+			payload: framePaste(imgPath, bracket), toast: "image pasted",
 		})
 		u.pendingPasteMu.Unlock()
 		return
@@ -3580,7 +3614,7 @@ func (u *macUI) pasteAltScreenAsyncOsascript() {
 		return
 	}
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: bracketedPaste(text)})
+	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
 	u.pendingPasteMu.Unlock()
 }
 
@@ -3858,9 +3892,9 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 
 	// Paint focused pane as primary shell (watermark/intro/chrome/overlay via paintFrame).
 	// Additional panes are blitted after with paintPaneGrid.
-	focusGrid := tab.sb.viewCells(tab.term, u.rows)
+	focusGrid := tab.viewCells(u.rows)
 	if g := u.focusedGeom(); g != nil && g.rows > 0 {
-		focusGrid = tab.sb.viewCells(tab.term, g.rows)
+		focusGrid = tab.viewCells(g.rows)
 	}
 	if !tab.sel.empty() {
 		applySelectionTint(focusGrid, tab, len(focusGrid))
@@ -3917,6 +3951,11 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		ShowInput:        false, // always paint bars via layout (per-pane or focused)
 		CursorStyle:      int(u.cfg.Cursor),
 	}
+	shellCur, shellSteady := tab.modes.shellCursor(int(u.cfg.Cursor))
+	opts.ShellCursor = shellCur
+	opts.ShellCursorSteady = shellSteady
+	opts.ProgKind = tab.modes.progress.kind
+	opts.ProgPct = tab.modes.progress.pct
 	opts.InputPrompt = inOpts.prompt
 	opts.InputLines = inOpts.lines
 	opts.InputCaretRow = inOpts.caretRow
@@ -4133,7 +4172,7 @@ func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
 	if viewRows < 1 {
 		viewRows = u.rows
 	}
-	grid := t.sb.viewCells(t.term, viewRows)
+	grid := t.viewCells(viewRows)
 	if t == u.activeTab() && !t.sel.empty() {
 		applySelectionTint(grid, t, viewRows)
 	}
@@ -4142,7 +4181,8 @@ func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
 	}
 	cur := t.term.Cursor()
 	curVis := t.altScreen() && t.term.CursorVisible() && g.focused
-	u.painter.paintPaneGrid(u.fb, grid, g, cur.X, cur.Y, curVis, curAlpha)
+	shellCur, shellSteady := t.modes.shellCursor(int(u.cfg.Cursor))
+	u.painter.paintPaneGrid(u.fb, grid, g, cur.X, cur.Y, curVis, curAlpha, shellCur, shellSteady, t.modes.progress.kind, t.modes.progress.pct)
 	if !t.altScreen() {
 		vis := t.sb.visibleImages(t.term, viewRows)
 		u.painter.paintPaneImages(u.fb, vis, g)
@@ -4323,7 +4363,7 @@ func (u *macUI) updateLinkHover(mx, my int) {
 	if viewRows < 1 {
 		viewRows = u.rows
 	}
-	grid := tab.sb.viewCells(tab.term, viewRows)
+	grid := tab.viewCells(viewRows)
 	spans := findLinksInGrid(grid)
 	span, ok := linkAt(spans, x, y)
 	if !ok {
@@ -4405,7 +4445,7 @@ func (u *macUI) linkURLAt(mx, my int) string {
 	if viewRows < 1 {
 		viewRows = u.rows
 	}
-	grid := tab.sb.viewCells(tab.term, viewRows)
+	grid := tab.viewCells(viewRows)
 	span, ok := linkAt(findLinksInGrid(grid), x, y)
 	if !ok {
 		return ""
