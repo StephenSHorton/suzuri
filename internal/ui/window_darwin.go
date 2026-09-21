@@ -484,7 +484,16 @@ func (u *macUI) chromePixelHeight() int32 {
 	if h < 1 {
 		h = int32(tabBarFallback)
 	}
-	return h
+	// The title strip is one text row, drawn 50% taller than a shell row.
+	return h + ch/2
+}
+
+func (u *macUI) titleStripHeight() int32 {
+	ch := u.metricH
+	if ch < 1 {
+		ch = cellH
+	}
+	return ch + ch/2
 }
 
 func (u *macUI) shellPadY() int32 { return u.chromePixelHeight() }
@@ -643,10 +652,8 @@ func (u *macUI) Update() error {
 
 	driveNotices(time.Now(), ebiten.IsFocused(), !ebiten.IsWindowMinimized())
 
-	if !u.frameRounded {
-		roundMainWindow()
-		u.frameRounded = true
-	}
+	roundMainWindow()
+	u.publishTitleHits()
 
 	focused := ebiten.IsFocused()
 	if !u.hostFocusInit || focused != u.hostFocused {
@@ -3053,7 +3060,7 @@ func (u *macUI) handleMouse() {
 		chH = cellH
 	}
 	chromeH := u.chromePixelHeight()
-	tabStripH := int32(chrome.TabStripRows()) * chH
+	tabStripH := u.titleStripHeight()
 
 	if justPressed {
 		// Image lightbox: any click closes.
@@ -3319,6 +3326,31 @@ func (u *macUI) hitPlus(px int32) bool {
 }
 
 // hitCaffeine is true when the pixel x hits the top-right coffee chip.
+func (u *macUI) publishTitleHits() {
+	cw := int(u.metricW)
+	if cw < 1 {
+		cw = cellW
+	}
+	th := int(u.titleStripHeight())
+	var rects []int
+	add := func(b [2]int) {
+		if b[1] <= b[0] {
+			return
+		}
+		rects = append(rects, 4+b[0]*cw, 0, (b[1]-b[0])*cw, th)
+	}
+	for _, b := range u.chrome.FrameButtonBounds() {
+		add(b)
+	}
+	for _, b := range u.chrome.TabBounds() {
+		add(b)
+	}
+	add(u.chrome.PlusBounds())
+	add(u.chrome.BellBounds())
+	add(u.chrome.CaffeineBounds())
+	setTitleHits(th, rects)
+}
+
 func (u *macUI) beginFrameDrag() {
 	now := time.Now()
 	sx, sy := screenCursor()
@@ -3928,8 +3960,15 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	// focused geom's bar region via ShowInput=false + post paint.
 	inOpts := u.inputBarPaint()
 	opts := paintOpts{
-		Shell:    focusGrid,
-		Chrome:   u.chromeCells,
+		Shell:  focusGrid,
+		Chrome: u.chromeCells,
+		TitleExtra: int(u.titleStripHeight() - func() int32 {
+			ch := u.metricH
+			if ch < 1 {
+				ch = cellH
+			}
+			return ch
+		}()),
 		Overlay:  overlay,
 		PadY:     padY,
 		ShellBot: shellBot,

@@ -129,6 +129,7 @@ func (p *softwarePainter) close() {
 type paintOpts struct {
 	Shell      [][]cellPix
 	Chrome     [][]cellPix
+	TitleExtra int // pixels added under the first chrome row
 	Overlay    [][]cellPix
 	PadY       int
 	ShellBot   int
@@ -331,9 +332,16 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	// Chrome strip — bar fill first so empty cells show theme bar, not void.
 	chromeH := 0
 	if len(o.Chrome) > 0 {
-		chromeH = len(o.Chrome) * ch
+		extra := o.TitleExtra
+		if extra < 0 {
+			extra = 0
+		}
+		chromeH = len(o.Chrome)*ch + extra
 		fillRectRGBA(dst, 0, 0, w, chromeH, chrome.BarR, chrome.BarG, chrome.BarB)
-		paintCellStrip(p, dst, o.Chrome, padX, 0, true, false, false)
+		paintCellStrip(p, dst, o.Chrome[:1], padX, extra/2, true, false, false)
+		if len(o.Chrome) > 1 {
+			paintCellStrip(p, dst, o.Chrome[1:], padX, ch+extra, true, false, false)
+		}
 	}
 
 	// Themed Warp input bar.
