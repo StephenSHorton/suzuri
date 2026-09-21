@@ -34,22 +34,13 @@ static NSWindow *hostWindow(void) {
 	return nil;
 }
 
-// A shape mask clips the Metal surface. cornerRadius alone does not.
-static void maskView(NSView *v, CGFloat radius) {
+// Clip the content view only. A mask on the Metal layer faults the renderer.
+static void roundContent(NSView *v, CGFloat radius) {
 	if (v == nil || v.bounds.size.width < 2 || v.bounds.size.height < 2) return;
 	v.wantsLayer = YES;
 	CALayer *layer = v.layer;
 	if (layer == nil) return;
-	CGRect r = CGRectMake(0, 0, v.bounds.size.width, v.bounds.size.height);
-	CAShapeLayer *mask = [layer.mask isKindOfClass:[CAShapeLayer class]] ? (CAShapeLayer *)layer.mask : nil;
-	if (mask == nil) {
-		mask = [CAShapeLayer layer];
-		layer.mask = mask;
-	}
-	CGPathRef path = CGPathCreateWithRoundedRect(r, radius, radius, NULL);
-	mask.frame = r;
-	mask.path = path;
-	CGPathRelease(path);
+	// cornerRadius clips. A shape mask on CAMetalLayer faults the renderer.
 	layer.cornerRadius = radius;
 	layer.masksToBounds = YES;
 }
@@ -65,10 +56,7 @@ void suzuri_round_main(void) {
 		w.hasShadow = YES;
 		w.opaque = NO;
 		w.backgroundColor = NSColor.clearColor;
-		maskView(w.contentView, 16);
-		for (NSView *sub in w.contentView.subviews) {
-			maskView(sub, 16);
-		}
+		roundContent(w.contentView, 16);
 		if (gTitleMonitor != nil) return;
 	gTitleMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskMouseMoved | NSEventMaskMouseExited
 		handler:^NSEvent *(NSEvent *e) {
