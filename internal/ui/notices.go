@@ -7,7 +7,6 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +15,8 @@ import (
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/math/fixed"
+
+	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
 
 // deskNote is one desktop notification requested by a terminal program.
@@ -51,7 +52,6 @@ var (
 	noticeMu    sync.Mutex
 	noticeLive  []liveNote
 	noticeHover bool
-	demoShown   bool
 )
 
 func postDeskNote(n deskNote, focused, visible bool) {
@@ -261,25 +261,22 @@ func renderNotices(now time.Time) (pix []byte, stride, width, height int, cards 
 }
 
 func drawCard(dst *image.RGBA, scale, x, y, w, h int, n liveNote) {
-	accent := color.RGBA{R: 90, G: 160, B: 255, A: 255}
+	accent := color.RGBA{R: chrome.PrimR, G: chrome.PrimG, B: chrome.PrimB, A: 255}
 	switch {
 	case n.Urgency >= 2 || n.Icon == "error":
 		accent = color.RGBA{R: 220, G: 70, B: 70, A: 255}
-	case n.Urgency == 0:
-		accent = color.RGBA{R: 120, G: 140, B: 160, A: 255}
 	case n.Icon == "warn" || n.Icon == "warning":
 		accent = color.RGBA{R: 210, G: 170, B: 60, A: 255}
-	case n.Icon == "question":
-		accent = color.RGBA{R: 140, G: 120, B: 220, A: 255}
 	}
-	bg := color.RGBA{R: 22, G: 22, B: 28, A: 242}
-	// Soft shadow.
+	bg := color.RGBA{R: chrome.PanelR, G: chrome.PanelG, B: chrome.PanelB, A: 242}
+	text := color.RGBA{R: chrome.TextR, G: chrome.TextG, B: chrome.TextB, A: 255}
+	soft := color.RGBA{R: chrome.SoftR, G: chrome.SoftG, B: chrome.SoftB, A: 255}
 	fillNoticeRect(dst, (x+3)*scale, (y+4)*scale, w*scale, h*scale, color.RGBA{A: 70})
 	fillNoticeRound(dst, x*scale, y*scale, w*scale, h*scale, 8*scale, bg)
 	fillNoticeRect(dst, x*scale, y*scale, 4*scale, h*scale, accent)
-	drawString(dst, n.Title, (x+16)*scale, (y+12)*scale, scale, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+	drawString(dst, n.Title, (x+16)*scale, (y+12)*scale, scale, text)
 	if n.Body != "" {
-		drawString(dst, n.Body, (x+16)*scale, (y+36)*scale, scale, color.RGBA{R: 190, G: 190, B: 205, A: 255})
+		drawString(dst, n.Body, (x+16)*scale, (y+36)*scale, scale, soft)
 	}
 }
 
@@ -337,14 +334,6 @@ func hitNotice(cards []noticeCard, x, y int) int {
 var noticeCards []noticeCard
 
 func driveNotices(now time.Time, focused, visible bool) {
-	if !demoShown && strings.TrimSpace(os.Getenv("SUZURI_NOTICE_DEMO")) == "1" {
-		demoShown = true
-		postDeskNote(deskNote{
-			Title: "Suzuri",
-			Body:  "Notifications are on",
-			Sound: "info",
-		}, false, true)
-	}
 	for _, n := range tickNotices(now) {
 		nn := n
 		sendNoticeClose(&nn)
