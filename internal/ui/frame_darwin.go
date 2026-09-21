@@ -3,7 +3,7 @@
 package ui
 
 /*
-#cgo LDFLAGS: -framework AppKit -framework Foundation
+#cgo LDFLAGS: -framework AppKit -framework Foundation -framework QuartzCore
 void suzuri_round_main(void);
 void suzuri_screen_cursor(int *x, int *y);
 void suzuri_set_title_hits(int titleH, const int *rects, int n);

@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <QuartzCore/QuartzCore.h>
 #include <string.h>
 
 static void suzuri_toggle_zoom(NSWindow *w);
@@ -24,27 +25,54 @@ static BOOL titleBlocked(NSWindow *w, NSPoint winPt) {
 	return NO;
 }
 
-static void clipView(NSView *v, CGFloat radius) {
-	if (v == nil) return;
-	v.wantsLayer = YES;
-	v.layer.cornerRadius = radius;
-	v.layer.masksToBounds = YES;
-	for (NSView *sub in v.subviews) {
-		clipView(sub, radius);
+static NSWindow *hostWindow(void) {
+	for (NSWindow *w in NSApp.windows) {
+		if ([w isKindOfClass:[NSPanel class]]) continue;
+		if (w.contentView == nil) continue;
+		return w;
 	}
+	return nil;
 }
 
+// A shape mask clips the Metal surface. cornerRadius alone does not.
+static void maskView(NSView *v, CGFloat radius) {
+	if (v == nil || v.bounds.size.width < 2 || v.bounds.size.height < 2) return;
+	v.wantsLayer = YES;
+	CALayer *layer = v.layer;
+	if (layer == nil) return;
+	CGRect r = CGRectMake(0, 0, v.bounds.size.width, v.bounds.size.height);
+	CAShapeLayer *mask = [layer.mask isKindOfClass:[CAShapeLayer class]] ? (CAShapeLayer *)layer.mask : nil;
+	if (mask == nil) {
+		mask = [CAShapeLayer layer];
+		layer.mask = mask;
+	}
+	CGPathRef path = CGPathCreateWithRoundedRect(r, radius, radius, NULL);
+	mask.frame = r;
+	mask.path = path;
+	CGPathRelease(path);
+	layer.cornerRadius = radius;
+	layer.masksToBounds = YES;
+}
+
+static int gRoundQueued;
+
 void suzuri_round_main(void) {
-	NSWindow *w = NSApp.mainWindow ?: NSApp.keyWindow;
-	if (w == nil) return;
-	w.hasShadow = YES;
-	w.opaque = NO;
-	w.backgroundColor = NSColor.clearColor;
-	clipView(w.contentView, 16);
-	if (gTitleMonitor != nil) return;
+	if (!__sync_bool_compare_and_swap(&gRoundQueued, 0, 1)) return;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		gRoundQueued = 0;
+		NSWindow *w = hostWindow();
+		if (w == nil) return;
+		w.hasShadow = YES;
+		w.opaque = NO;
+		w.backgroundColor = NSColor.clearColor;
+		maskView(w.contentView, 16);
+		for (NSView *sub in w.contentView.subviews) {
+			maskView(sub, 16);
+		}
+		if (gTitleMonitor != nil) return;
 	gTitleMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskMouseMoved | NSEventMaskMouseExited
 		handler:^NSEvent *(NSEvent *e) {
-			NSWindow *win = NSApp.mainWindow ?: NSApp.keyWindow;
+			NSWindow *win = hostWindow();
 			if (win == nil) return e;
 			NSPoint p = [e locationInWindow];
 			gHoverLight = -1;
@@ -71,6 +99,7 @@ void suzuri_round_main(void) {
 			[win performWindowDragWithEvent:e];
 			return nil;
 		}];
+	});
 }
 
 void suzuri_set_title_hits(int titleH, const int *rects, int n) {
