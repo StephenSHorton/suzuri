@@ -125,6 +125,7 @@ func Run() error {
 	ui.pages = []*page{newPage(t)}
 	ui.active = 0
 	ui.syncChrome()
+	ui.chrome.Frame = chrome.FrameWindows
 	ui.showSplash = !cfg.FirstRunDone
 	onNoticeBell = func() {
 		count, unread := noticeBellState()
@@ -1428,6 +1429,7 @@ func (u *winUI) loop() error {
 	u.hwnd = hwnd
 	// Ensure title bar / taskbar pick up the icon even if class was re-registered.
 	applyWindowIcons(hwnd, iconBig, iconSm)
+	disableWindowRounding(hwnd)
 	u.font = createFontFor(u.cfg, false)
 	u.fontBold = createFontFor(u.cfg, true)
 	u.cjkFont = createCJKFont(u.cfg.FontSizePx)
@@ -3306,9 +3308,24 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Top tab strip / + chip / caffeine cup.
 		if py < chromeH {
 			if py < tabStripH {
+				if hit := hitFrameButton(u.chrome, u.pixelToChromeCol(px)); hit >= 0 {
+					switch frameActionForHit(u.chrome.Frame, hit) {
+					case chrome.FrameClose:
+						win.PostMessage(hwnd, win.WM_CLOSE, 0, 0)
+					case chrome.FrameMinimize:
+						win.ShowWindow(hwnd, win.SW_MINIMIZE)
+					case chrome.FrameZoom:
+						if win.IsZoomed(hwnd) {
+							win.ShowWindow(hwnd, win.SW_RESTORE)
+						} else {
+							win.ShowWindow(hwnd, win.SW_MAXIMIZE)
+						}
+					}
+					return 0
+				}
 				if u.hitBell(px) {
 					u.toggleNoticeHistory()
-					return
+					return 0
 				}
 				if u.hitCaffeine(px) {
 					if msg, ok := applyCaffeineAction(u.caffeine, chrome.ActionCaffeineToggle, 0); ok {
@@ -3602,6 +3619,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		win.PostQuitMessage(0)
 		return 0
 
+	case win.WM_NCCALCSIZE:
+		if wParam != 0 && u.chrome.Frame == chrome.FrameWindows {
+			return u.frameCalcSize(hwnd, msg, wParam, lParam)
+		}
+	case win.WM_NCHITTEST:
+		if u.chrome.Frame == chrome.FrameWindows {
+			if hit := u.frameHitTest(hwnd, lParam); hit != 0 {
+				return hit
+			}
+		}
 	case win.WM_QUIT:
 		// DefWindowProc path — message loop also sees GetMessage==0.
 		log.Info("WM_QUIT")

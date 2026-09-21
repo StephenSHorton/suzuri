@@ -103,6 +103,7 @@ func Run() error {
 	ui.pages = []*page{newPage(t)}
 	ui.active = 0
 	ui.syncChrome()
+	ui.chrome.Frame = chrome.FrameMac
 	ui.showSplash = !cfg.FirstRunDone
 	revealNoticePane = ui.revealPane
 	onNoticeBell = func() {
@@ -216,6 +217,8 @@ type macUI struct {
 	// hostFocused is the last ebiten focus bit, for DECSET 1004 reports.
 	hostFocused   bool
 	hostFocusInit bool
+	frameRounded  bool
+	frameDrag     frameDrag
 
 	// modalImage: full-window lightbox (click path / Open Image / image block).
 	modalImage *tabImage
@@ -562,6 +565,7 @@ func (u *macUI) loop() error {
 	u.applyClientSize(u.width, u.height)
 
 	ebiten.SetWindowTitle(appTitle)
+	ebiten.SetWindowDecorated(false)
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetWindowSize(w, h)
 	// Set before RunGame so ebiten does not center the window itself.
@@ -638,6 +642,11 @@ func (u *macUI) Update() error {
 	}
 
 	driveNotices(time.Now(), ebiten.IsFocused(), !ebiten.IsWindowMinimized())
+
+	if !u.frameRounded {
+		roundMainWindow()
+		u.frameRounded = true
+	}
 
 	focused := ebiten.IsFocused()
 	if !u.hostFocusInit || focused != u.hostFocused {
@@ -3000,6 +3009,13 @@ func (u *macUI) handleMouse() {
 	mx, my := ebiten.CursorPosition()
 	pressed := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
 	justPressed := inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft)
+	if u.frameDrag.on {
+		if pressed && !justPressed {
+			u.dragFrame()
+		} else if !pressed {
+			u.frameDrag.on = false
+		}
+	}
 	justReleased := inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonLeft)
 	rightUp := inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonRight)
 
@@ -3131,6 +3147,18 @@ func (u *macUI) handleMouse() {
 		}
 		if int32(my) < chromeH {
 			if int32(my) < tabStripH {
+				if hit := hitFrameButton(u.chrome, u.pixelToChromeCol(int32(mx))); hit >= 0 {
+					u.frameDrag.on = false
+					switch frameActionForHit(u.chrome.Frame, hit) {
+					case chrome.FrameClose:
+						u.quit = true
+					case chrome.FrameMinimize:
+						ebiten.MinimizeWindow()
+					case chrome.FrameZoom:
+						toggleFrameZoom()
+					}
+					return
+				}
 				if u.hitBell(int32(mx)) {
 					u.toggleNoticeHistory()
 					return
@@ -3150,6 +3178,7 @@ func (u *macUI) handleMouse() {
 					return
 				}
 				if i := u.hitTab(int32(mx)); i >= 0 {
+					u.frameDrag.on = false
 					u.active = i
 					u.selecting = false
 					if t := u.activeTab(); t != nil {
@@ -3158,6 +3187,8 @@ func (u *macUI) handleMouse() {
 					}
 					u.syncChrome()
 					u.maybeResizeForInput()
+				} else {
+					u.beginFrameDrag()
 				}
 			}
 			return
@@ -3288,6 +3319,33 @@ func (u *macUI) hitPlus(px int32) bool {
 }
 
 // hitCaffeine is true when the pixel x hits the top-right coffee chip.
+func (u *macUI) beginFrameDrag() {
+	now := time.Now()
+	sx, sy := screenCursor()
+	if !u.frameDrag.lastHit.IsZero() && now.Sub(u.frameDrag.lastHit) < 350*time.Millisecond {
+		u.frameDrag.lastHit = time.Time{}
+		u.frameDrag.on = false
+		toggleFrameZoom()
+		return
+	}
+	wx, wy := ebiten.WindowPosition()
+	u.frameDrag.on = true
+	u.frameDrag.startSX, u.frameDrag.startSY = sx, sy
+	u.frameDrag.startWX, u.frameDrag.startWY = wx, wy
+	u.frameDrag.lastHit = now
+}
+
+func (u *macUI) dragFrame() {
+	if !u.frameDrag.on || ebiten.IsWindowMaximized() {
+		return
+	}
+	sx, sy := screenCursor()
+	ebiten.SetWindowPosition(
+		u.frameDrag.startWX+sx-u.frameDrag.startSX,
+		u.frameDrag.startWY+sy-u.frameDrag.startSY,
+	)
+}
+
 func (u *macUI) hitBell(px int32) bool {
 	u.syncChrome()
 	cellX := u.pixelToChromeCol(px)

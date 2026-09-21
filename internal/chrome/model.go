@@ -114,6 +114,8 @@ type Model struct {
 	// Caffeine strip chip (host owns the power assertion; chrome only paints).
 	CaffeineOn   bool
 	CaffeineHint string // "" off, "∞" indefinite, or short remaining ("15m")
+	// Frame hides the OS title bar and draws window buttons in the strip.
+	Frame Frame
 	// Session notification history (not persisted).
 	BellCount         int
 	BellUnread        bool
@@ -853,7 +855,7 @@ func (m Model) StripView() string {
 	if w < 20 {
 		w = 20
 	}
-	tabs, _, _, _, _ := m.layoutTabCards(w)
+	tabs, _, _, _, _, _ := m.layoutTabCards(w)
 	if m.showStatus() {
 		return tabs + "\n" + m.renderStatus(w)
 	}
@@ -928,18 +930,39 @@ func (m Model) View() string {
 	return m.StripView()
 }
 
-func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int) {
+func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, [3][2]int) {
 	bounds := make([][2]int, len(m.Tabs))
 	var parts []string
 	var plusB, bellB, cafeB [2]int
+	var frameBtn [3][2]int
+	col := 0
+	gap := styleGap().Render(" ")
+	gapW := lipgloss.Width(gap)
+
+	if m.Frame == FrameMac {
+		for i, glyph := range []string{"●", "●", "●"} {
+			var chip string
+			switch FrameButton(i) {
+			case FrameClose:
+				chip = styleFrameClose().Render(glyph)
+			case FrameMinimize:
+				chip = styleFrameMin().Render(glyph)
+			default:
+				chip = styleFrameZoom().Render(glyph)
+			}
+			cw := lipgloss.Width(chip)
+			frameBtn[i] = [2]int{col, col + cw}
+			parts = append(parts, chip)
+			col += cw
+			parts = append(parts, gap)
+			col += gapW
+		}
+	}
 
 	// Quiet brand — no bordered chip, no trailing gap before the first tab.
 	brand := styleBrand().Render("硯")
 	parts = append(parts, brand)
-	col := lipgloss.Width(brand)
-
-	gap := styleGap().Render(" ")
-	gapW := lipgloss.Width(gap)
+	col += lipgloss.Width(brand)
 
 	if len(m.Tabs) == 0 {
 		// Only pad when there is no real tab card to sit flush against 硯.
@@ -988,7 +1011,14 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int) 
 	if cupW < 1 {
 		cupW = 2
 	}
-	rightW := bellW + gapW + cupW
+	winBtnW := 0
+	if m.Frame == FrameWindows {
+		for _, g := range []string{"—", "□", "✕"} {
+			winBtnW += lipgloss.Width(styleFrameWin().Render(g))
+		}
+		winBtnW += gapW
+	}
+	rightW := bellW + gapW + cupW + winBtnW
 
 	// Spacer between + and the bell; the cup sits at the far right.
 	spacerW := w - leftW - rightW
@@ -1011,7 +1041,19 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int) 
 	bellB = [2]int{leftW + spacerW, leftW + spacerW + bellW}
 	cafeB = [2]int{bellB[1] + gapW, bellB[1] + gapW + cupW}
 
-	row := left + spacer + bell + gap + cup
+	var winBtns string
+	if m.Frame == FrameWindows {
+		glyphs := []string{"—", "□", "✕"}
+		x := cafeB[1] + gapW
+		for i, g := range glyphs {
+			chip := styleFrameWin().Render(g)
+			cw := lipgloss.Width(chip)
+			frameBtn[i] = [2]int{x, x + cw}
+			winBtns += chip
+			x += cw
+		}
+	}
+	row := left + spacer + bell + gap + cup + winBtns
 	// Guarantee full-width bar surface (clip only if still over).
 	lw := lipgloss.Width(row)
 	if lw < w {
@@ -1032,7 +1074,7 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int) 
 			}
 		}
 	}
-	return styleBar().Width(w).Render(row), bounds, plusB, bellB, cafeB
+	return styleBar().Width(w).Render(row), bounds, plusB, bellB, cafeB, frameBtn
 }
 
 // renderCaffeineChip is the top-right coffee control (empty dim / full bright).
@@ -1114,7 +1156,7 @@ func (m Model) TabBounds() [][2]int {
 	if w < 20 {
 		w = 20
 	}
-	_, bounds, _, _, _ := m.layoutTabCards(w)
+	_, bounds, _, _, _, _ := m.layoutTabCards(w)
 	return bounds
 }
 
@@ -1124,7 +1166,7 @@ func (m Model) PlusBounds() [2]int {
 	if w < 20 {
 		w = 20
 	}
-	_, _, plus, _, _ := m.layoutTabCards(w)
+	_, _, plus, _, _, _ := m.layoutTabCards(w)
 	return plus
 }
 
@@ -1134,17 +1176,27 @@ func (m Model) CaffeineBounds() [2]int {
 	if w < 20 {
 		w = 20
 	}
-	_, _, _, _, cafe := m.layoutTabCards(w)
+	_, _, _, _, cafe, _ := m.layoutTabCards(w)
 	return cafe
 }
 
-// BellBounds is [startCol,endCol) of the bell just left of the coffee chip.
+// FrameButtonBounds is the three window controls in visual order.
+func (m Model) FrameButtonBounds() [3][2]int {
+	w := m.Width
+	if w < 20 {
+		w = 20
+	}
+	_, _, _, _, _, btns := m.layoutTabCards(w)
+	return btns
+}
+
+// BellBounds is [startCol,endCol) of the bell just left of the coffee cup.
 func (m Model) BellBounds() [2]int {
 	w := m.Width
 	if w < 20 {
 		w = 20
 	}
-	_, _, _, bell, _ := m.layoutTabCards(w)
+	_, _, _, bell, _, _ := m.layoutTabCards(w)
 	return bell
 }
 
