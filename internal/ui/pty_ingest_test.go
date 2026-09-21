@@ -38,3 +38,33 @@ func TestIngestPTYSharedPipeline(t *testing.T) {
 		t.Fatalf("sync hold action %d ready grid %q", held.Action, snapshotScreenText(term)[0])
 	}
 }
+
+func TestIngestPTYTitleReachesHost(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(40, 6))
+	tab := &tab{term: term, sb: newScrollback()}
+	res := tab.ingestPTY([]byte("\x1b]0;workspace\x07"), ptyHooks{})
+	if res.Action != ptyFrame || !res.TitleChanged || res.Title != "workspace" {
+		t.Fatalf("title result: %+v tab=%q", res, tab.title)
+	}
+}
+
+func TestLeaveAppDropsHeldSync(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(40, 6))
+	tab := &tab{term: term, sb: newScrollback()}
+	tab.ingestPTY([]byte("\x1b[?2004h\x1b[?2026hHELD"), ptyHooks{})
+	if !tab.modes.bracketPaste || !tab.modes.syncOn {
+		t.Fatal("modes not armed")
+	}
+	tab.modes.leaveApp()
+	if tab.modes.bracketPaste || tab.modes.syncOn || len(tab.modes.syncBuf) != 0 {
+		t.Fatal("leaveApp left protocol state")
+	}
+	res := tab.ingestPTY([]byte("after\r\n"), ptyHooks{})
+	if res.Action != ptyFrame {
+		t.Fatalf("action %d", res.Action)
+	}
+	screen := snapshotScreenText(term)
+	if strings.Contains(screen[0], "HELD") || !strings.Contains(screen[0], "after") {
+		t.Fatalf("grid: %q", screen[0])
+	}
+}
