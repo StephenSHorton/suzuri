@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 )
 
 func presentNoticeImage(pix []byte, stride, width, height int) {}
@@ -29,3 +30,5 @@ func playWAVSync(b []byte) {
 }
 
 func focusNoticeHost() {}
+
+func pumpUI(d time.Duration) { time.Sleep(d) }

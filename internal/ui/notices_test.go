@@ -71,9 +71,3 @@ func TestNoticeOccasionAndSound(t *testing.T) {
 		t.Fatal("not closed")
 	}
 }
-
-func noticeCount() int {
-	noticeMu.Lock()
-	defer noticeMu.Unlock()
-	return len(noticeLive)
-}

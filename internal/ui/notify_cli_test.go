@@ -19,4 +19,12 @@ func TestNotifySoundArgs(t *testing.T) {
 	if len(wavForNotifyName("success")) < 44 || len(wavForNotifyName("fail")) < 44 {
 		t.Fatal("embedded wav missing")
 	}
+	shown, err := notifyShowArgs(nil)
+	if err != nil || len(shown) != 3 || shown[1].Icon != "error" {
+		t.Fatalf("%+v %v", shown, err)
+	}
+	card, err := notifyShowArgs([]string{"fail", "Nope", "detail here"})
+	if err != nil || card[0].Title != "Nope" || card[0].Body != "detail here" || card[0].Urgency != 2 {
+		t.Fatalf("%+v %v", card, err)
+	}
 }

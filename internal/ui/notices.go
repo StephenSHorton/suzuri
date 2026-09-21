@@ -124,6 +124,12 @@ func closeDeskNote(id string) {
 	}
 }
 
+func noticeCount() int {
+	noticeMu.Lock()
+	defer noticeMu.Unlock()
+	return len(noticeLive)
+}
+
 func aliveDeskIDs() []string {
 	noticeMu.Lock()
 	defer noticeMu.Unlock()

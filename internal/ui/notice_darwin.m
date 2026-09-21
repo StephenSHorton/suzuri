@@ -158,6 +158,13 @@ void suzuri_play_wav_sync(const void *bytes, int len) {
 	}
 }
 
+void suzuri_pump(double seconds) {
+	if (seconds <= 0) return;
+	@autoreleasepool {
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
+	}
+}
+
 void suzuri_focus_host(void) {
 	dispatch_async(dispatch_get_main_queue(), ^{
 		for (NSWindow *w in NSApp.windows) {
