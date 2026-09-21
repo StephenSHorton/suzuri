@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <objc/message.h>
 #import <QuartzCore/QuartzCore.h>
 #include <string.h>
 
@@ -47,6 +48,78 @@ static void roundContent(NSView *v, CGFloat radius) {
 
 static int gRoundQueued;
 
+static const CGFloat kResizeEdge = 6;
+
+static int edgeAt(NSWindow *w, NSPoint p) {
+	NSRect b = w.contentView.bounds;
+	int e = 0;
+	if (p.x <= kResizeEdge) e |= 1;
+	if (p.x >= b.size.width - kResizeEdge) e |= 2;
+	if (p.y <= kResizeEdge) e |= 4;
+	if (p.y >= b.size.height - kResizeEdge) e |= 8;
+	return e;
+}
+
+static NSCursor *edgeCursor(int e) {
+	BOOL nwse = ((e & 1) && (e & 4)) || ((e & 2) && (e & 8));
+	BOOL nesw = ((e & 1) && (e & 8)) || ((e & 2) && (e & 4));
+	if (nwse || nesw) {
+		SEL sel = NSSelectorFromString(nwse ? @"_windowResizeNorthWestSouthEastCursor" : @"_windowResizeNorthEastSouthWestCursor");
+		if ([[NSCursor class] respondsToSelector:sel]) {
+			return ((NSCursor *(*)(id, SEL))objc_msgSend)([NSCursor class], sel);
+		}
+	}
+	if ((e & 1) || (e & 2)) return [NSCursor resizeLeftRightCursor];
+	if ((e & 4) || (e & 8)) return [NSCursor resizeUpDownCursor];
+	return [NSCursor arrowCursor];
+}
+
+static void trackResize(NSWindow *w, int edge) {
+	NSRect start = w.frame;
+	NSPoint origin = [NSEvent mouseLocation];
+	const CGFloat minW = 640, minH = 400;
+	for (;;) {
+		NSEvent *ev = [w nextEventMatchingMask:(NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp)
+			untilDate:[NSDate distantFuture]
+			inMode:NSEventTrackingRunLoopMode
+			dequeue:YES];
+		if (ev == nil || ev.type == NSEventTypeLeftMouseUp) break;
+		NSPoint now = [NSEvent mouseLocation];
+		CGFloat dx = now.x - origin.x;
+		CGFloat dy = now.y - origin.y;
+		NSRect f = start;
+		if (edge & 1) {
+			CGFloat nw = start.size.width - dx;
+			if (nw < minW) {
+				dx = start.size.width - minW;
+				nw = minW;
+			}
+			f.origin.x = start.origin.x + dx;
+			f.size.width = nw;
+		}
+		if (edge & 2) {
+			f.size.width = start.size.width + dx;
+			if (f.size.width < minW) f.size.width = minW;
+		}
+		if (edge & 4) {
+			CGFloat nh = start.size.height - dy;
+			if (nh < minH) {
+				dy = start.size.height - minH;
+				nh = minH;
+			}
+			f.origin.y = start.origin.y + dy;
+			f.size.height = nh;
+		}
+		if (edge & 8) {
+			f.size.height = start.size.height + dy;
+			if (f.size.height < minH) f.size.height = minH;
+		}
+		[w setFrame:f display:YES];
+		[edgeCursor(edge) set];
+	}
+	[[NSCursor arrowCursor] set];
+}
+
 void suzuri_round_main(void) {
 	if (!__sync_bool_compare_and_swap(&gRoundQueued, 0, 1)) return;
 	dispatch_async(dispatch_get_main_queue(), ^{
@@ -75,6 +148,17 @@ void suzuri_round_main(void) {
 						gHoverLight = i;
 						break;
 					}
+				}
+			}
+			if (e.window == win) {
+				int edge = edgeAt(win, p);
+				if (e.type == NSEventTypeMouseMoved || e.type == NSEventTypeMouseExited) {
+					if (edge) [edgeCursor(edge) set];
+					return e;
+				}
+				if (e.type == NSEventTypeLeftMouseDown && edge) {
+					trackResize(win, edge);
+					return nil;
 				}
 			}
 			if (e.type != NSEventTypeLeftMouseDown) return e;
