@@ -54,6 +54,30 @@ func TestOSC9And777StillNotify(t *testing.T) {
 	}
 }
 
+func TestUpdateNoticeStaysUntilDismiss(t *testing.T) {
+	noticeMu.Lock()
+	noticeLive = nil
+	noticeMu.Unlock()
+	var activated, dismissed bool
+	n := sampleUpdateNote("9.9.9")
+	n.OnActivate = func() { activated = true }
+	n.OnDismiss = func() { dismissed = true }
+	postDeskNote(n, false, true)
+	tickNotices(time.Now().Add(24 * time.Hour))
+	if noticeCount() != 1 {
+		t.Fatalf("permanent card expired, count %d", noticeCount())
+	}
+	dismissNoticeAt(0)
+	if !dismissed || activated || noticeCount() != 0 {
+		t.Fatalf("dismiss activated=%v dismissed=%v count=%d", activated, dismissed, noticeCount())
+	}
+	postDeskNote(n, false, true)
+	activateNotice(0)
+	if !activated || noticeCount() != 0 {
+		t.Fatalf("activate activated=%v count=%d", activated, noticeCount())
+	}
+}
+
 func TestNoticeOccasionAndSound(t *testing.T) {
 	noticeMu.Lock()
 	noticeLive = nil

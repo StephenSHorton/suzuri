@@ -33,7 +33,11 @@ type deskNote struct {
 	Report   bool
 	Focus    bool
 	CloseEvt bool
-	tab      *tab
+	// OnActivate runs on a left click (install, for the update card).
+	OnActivate func()
+	// OnDismiss runs on a right click.
+	OnDismiss func()
+	tab       *tab
 }
 
 type liveNote struct {
@@ -82,15 +86,21 @@ func postDeskNote(n deskNote, focused, visible bool) {
 			if noticeLive[i].ID == n.ID {
 				keep := noticeLive[i].born
 				noticeLive[i] = liveNote{deskNote: n, born: keep, until: expireAt(now, n)}
-				playNoticeSound(n.Sound, n.Urgency)
 				return
 			}
 		}
 	}
 	var dropped *liveNote
 	if len(noticeLive) >= 5 {
-		d := noticeLive[0]
-		noticeLive = noticeLive[1:]
+		dropIdx := 0
+		for i, existing := range noticeLive {
+			if !existing.Never {
+				dropIdx = i
+				break
+			}
+		}
+		d := noticeLive[dropIdx]
+		noticeLive = append(noticeLive[:dropIdx], noticeLive[dropIdx+1:]...)
 		dropped = &d
 	}
 	ln := liveNote{deskNote: n, born: now, until: expireAt(now, n)}
@@ -184,7 +194,9 @@ func activateNotice(idx int) {
 	if n.Focus {
 		focusNoticeHost()
 	}
-	if n.Report && n.tab != nil {
+	if n.OnActivate != nil {
+		n.OnActivate()
+	} else if n.Report && n.tab != nil {
 		id := n.ID
 		if id == "" {
 			id = "0"
@@ -203,6 +215,9 @@ func dismissNoticeAt(idx int) {
 	n := noticeLive[idx]
 	noticeLive = append(noticeLive[:idx], noticeLive[idx+1:]...)
 	noticeMu.Unlock()
+	if n.OnDismiss != nil {
+		n.OnDismiss()
+	}
 	sendNoticeClose(&n)
 }
 
@@ -259,26 +274,26 @@ func drawCard(dst *image.RGBA, scale, x, y, w, h int, n liveNote) {
 	}
 	bg := color.RGBA{R: 22, G: 22, B: 28, A: 242}
 	// Soft shadow.
-	fillRect(dst, (x+3)*scale, (y+4)*scale, w*scale, h*scale, color.RGBA{A: 70})
-	fillRound(dst, x*scale, y*scale, w*scale, h*scale, 8*scale, bg)
-	fillRect(dst, x*scale, y*scale, 4*scale, h*scale, accent)
+	fillNoticeRect(dst, (x+3)*scale, (y+4)*scale, w*scale, h*scale, color.RGBA{A: 70})
+	fillNoticeRound(dst, x*scale, y*scale, w*scale, h*scale, 8*scale, bg)
+	fillNoticeRect(dst, x*scale, y*scale, 4*scale, h*scale, accent)
 	drawString(dst, n.Title, (x+16)*scale, (y+12)*scale, scale, color.RGBA{R: 255, G: 255, B: 255, A: 255})
 	if n.Body != "" {
 		drawString(dst, n.Body, (x+16)*scale, (y+36)*scale, scale, color.RGBA{R: 190, G: 190, B: 205, A: 255})
 	}
 }
 
-func fillRect(dst *image.RGBA, x, y, w, h int, c color.RGBA) {
+func fillNoticeRect(dst *image.RGBA, x, y, w, h int, c color.RGBA) {
 	draw.Draw(dst, image.Rect(x, y, x+w, y+h), &image.Uniform{C: c}, image.Point{}, draw.Over)
 }
 
-func fillRound(dst *image.RGBA, x, y, w, h, r int, c color.RGBA) {
-	fillRect(dst, x+r, y, w-2*r, h, c)
-	fillRect(dst, x, y+r, w, h-2*r, c)
-	fillRect(dst, x, y, r, r, c)
-	fillRect(dst, x+w-r, y, r, r, c)
-	fillRect(dst, x, y+h-r, r, r, c)
-	fillRect(dst, x+w-r, y+h-r, r, r, c)
+func fillNoticeRound(dst *image.RGBA, x, y, w, h, r int, c color.RGBA) {
+	fillNoticeRect(dst, x+r, y, w-2*r, h, c)
+	fillNoticeRect(dst, x, y+r, w, h-2*r, c)
+	fillNoticeRect(dst, x, y, r, r, c)
+	fillNoticeRect(dst, x+w-r, y, r, r, c)
+	fillNoticeRect(dst, x, y+h-r, r, r, c)
+	fillNoticeRect(dst, x+w-r, y+h-r, r, r, c)
 }
 
 func drawString(dst *image.RGBA, s string, x, y, scale int, col color.RGBA) {

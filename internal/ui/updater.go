@@ -91,7 +91,8 @@ type updateCheckHooks struct {
 	toast func(string)
 	// offerUpdate opens the confirm modal (must run on UI thread or post to it).
 	offerUpdate func(version string)
-	// quiet: if true, skip "checking…" toast (unused; startup always announces).
+	// quiet skips status-line toasts. Startup uses this so the only prompt
+	// is the permanent update card.
 	quiet bool
 }
 
@@ -134,7 +135,7 @@ func runUpdateCheck(h updateCheckHooks) {
 		}
 		if info == nil {
 			log.Info("update: up to date", "version", s.Current())
-			if h.toast != nil {
+			if h.toast != nil && !h.quiet {
 				h.toast(fmt.Sprintf("up to date (v%s)", s.Current()))
 			}
 			return
@@ -146,16 +147,15 @@ func runUpdateCheck(h updateCheckHooks) {
 		offerMu.Unlock()
 		if later {
 			log.Info("update: available but deferred (Later)", "version", info.Version)
-			if h.toast != nil {
+			if h.toast != nil && !h.quiet {
 				h.toast(fmt.Sprintf("v%s available (deferred)", info.Version))
 			}
 			// Keep pending so palette check can re-offer if we clear later? User said Later — don't re-modal.
 			return
 		}
 		if already && peekPendingUpdate() != nil {
-			// Confirm already shown once this session for this version.
 			log.Debug("update: offer already shown", "version", info.Version)
-			if h.toast != nil {
+			if h.toast != nil && !h.quiet {
 				h.toast(fmt.Sprintf("v%s available", info.Version))
 			}
 			return
@@ -167,8 +167,7 @@ func runUpdateCheck(h updateCheckHooks) {
 		offerMu.Lock()
 		offeredVersion = info.Version
 		offerMu.Unlock()
-		// Single toast + single modal (don't also toast "vX available" separately).
-		if h.toast != nil {
+		if h.toast != nil && !h.quiet {
 			h.toast(fmt.Sprintf("update available: v%s", info.Version))
 		}
 		if h.offerUpdate != nil {
@@ -205,17 +204,23 @@ func applyPendingUpdate(toast func(string)) {
 			offerMu.Lock()
 			offeredVersion = info.Version
 			offerMu.Unlock()
+			if reofferUpdate != nil {
+				reofferUpdate(info.Version, toast)
+			}
 		}
 	}()
 }
 
+// reofferUpdate is set on hosts that show the update card. Nil elsewhere.
+var reofferUpdate func(version string, toast func(string))
+
 // scheduleStartupUpdateCheck runs at most once per process after the window is up.
+// It does not toast into the chrome strip. The offer callback raises the prompt.
 func scheduleStartupUpdateCheck(toast func(string), offerUpdate func(version string)) {
 	startupCheckOnce.Do(func() {
 		go func() {
-			// Let the first paint settle so the toast is visible.
 			time.Sleep(900 * time.Millisecond)
-			runUpdateCheck(updateCheckHooks{toast: toast, offerUpdate: offerUpdate})
+			runUpdateCheck(updateCheckHooks{toast: toast, offerUpdate: offerUpdate, quiet: true})
 		}()
 	})
 }

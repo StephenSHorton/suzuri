@@ -589,20 +589,10 @@ func (u *macUI) loop() error {
 	u.beginIntro(false)
 	u.keyRep = newKeyRepeat()
 
-	// Startup update check: toast + confirm before install (same as Windows).
-	scheduleStartupUpdateCheck(u.postToast, func(ver string) {
-		if u.jobs != nil {
-			select {
-			case u.jobs <- func() {
-				r := u.chrome.UpdateChrome(chrome.OpenConfirmUpdateMsg{Version: ver})
-				u.chrome = r.Model
-				u.overlayCells = nil
-				u.overlayDirty = true
-				u.markChromeDirty()
-			}:
-			default:
-			}
-		}
+	// Startup update check stays out of the way. A newer release is a card
+	// that stays until the user installs it or right-clicks it away.
+	scheduleStartupUpdateCheck(nil, func(ver string) {
+		offerUpdateNotice(ver, u.postToast)
 	})
 
 	log.Info("starting ebiten window", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
@@ -1354,18 +1344,7 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		runUpdateCheck(updateCheckHooks{
 			toast: u.postToast,
 			offerUpdate: func(ver string) {
-				if u.jobs != nil {
-					select {
-					case u.jobs <- func() {
-						r := u.chrome.UpdateChrome(chrome.OpenConfirmUpdateMsg{Version: ver})
-						u.chrome = r.Model
-						u.overlayCells = nil
-						u.overlayDirty = true
-						u.markChromeDirty()
-					}:
-					default:
-					}
-				}
+				offerUpdateNotice(ver, u.postToast)
 			},
 		})
 	case chrome.ActionInstallUpdate:

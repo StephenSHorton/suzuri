@@ -40,11 +40,12 @@ func RunNotifyCLI(args []string) int {
 }
 
 const notifyUsage = `usage: suzuri notify [success|fail|published|all]
-       suzuri notify show [success|fail|published] [title] [body]
+       suzuri notify show [success|fail|published|update] [title] [body]
 
   notify                 play the three sounds
   notify show            show one card of each kind, with its sound
   notify show fail "Compile failed" "main.go:12"
+  notify show update     the permanent update card (click or right-click)
 `
 
 func runNotifyShow(args []string) int {
@@ -65,7 +66,9 @@ func runNotifyShow(args []string) int {
 			driveNotices(time.Now(), false, true)
 			pumpUI(40 * time.Millisecond)
 		}
-		if n.Expire > 0 {
+		if n.Never {
+			last = time.Now().Add(2 * time.Minute)
+		} else if n.Expire > 0 {
 			end := time.Now().Add(n.Expire)
 			if end.After(last) {
 				last = end
@@ -108,6 +111,12 @@ func notifyShowArgs(args []string) ([]deskNote, error) {
 		title, body = "Compile failed", "main.go:12"
 	case "published", "warn", "warning", "question":
 		title, body = "Published", "workshop item is live"
+	case "update":
+		n := sampleUpdateNote("")
+		if len(args) > 1 {
+			n = sampleUpdateNote(strings.TrimPrefix(args[1], "v"))
+		}
+		return []deskNote{n}, nil
 	default:
 		return nil, fmt.Errorf("unknown notification %q", args[0])
 	}
