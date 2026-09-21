@@ -9,7 +9,6 @@ void suzuri_screen_cursor(int *x, int *y);
 void suzuri_set_title_hits(int titleH, const int *rects, int n);
 */
 import "C"
-import "unsafe"
 
 import "github.com/hajimehoshi/ebiten/v2"
 
@@ -20,7 +19,13 @@ func setTitleHits(titleH int, rects []int) {
 		C.suzuri_set_title_hits(C.int(titleH), nil, 0)
 		return
 	}
-	C.suzuri_set_title_hits(C.int(titleH), (*C.int)(unsafe.Pointer(&rects[0])), C.int(len(rects)/4))
+	// Go int is 8 bytes; the C side reads 4-byte ints. A raw pointer cast
+	// scrambles every rectangle, so the whole strip looks empty and drags.
+	buf := make([]C.int, len(rects))
+	for i, v := range rects {
+		buf[i] = C.int(v)
+	}
+	C.suzuri_set_title_hits(C.int(titleH), &buf[0], C.int(len(buf)/4))
 }
 
 func toggleFrameZoom() {
