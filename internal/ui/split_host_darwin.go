@@ -432,6 +432,32 @@ func (u *macUI) focusPaneDir(dir int) {
 	u.computeActiveLayout()
 }
 
+// revealPane focuses the pane that produced a notification, switching
+// pages when that pane is not on the current page, and raises the window.
+func (u *macUI) revealPane(id int) {
+	if u == nil {
+		return
+	}
+	for i, pg := range u.pages {
+		if pg == nil || findPane(pg.root, id) == nil {
+			continue
+		}
+		u.active = i
+		pg.setFocus(id)
+		u.selecting = false
+		if t := u.activeTab(); t != nil {
+			ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
+		}
+		u.syncChrome()
+		u.computeActiveLayout()
+		u.markChromeDirty()
+		u.markShellDirty()
+		focusNoticeHost()
+		return
+	}
+	focusNoticeHost()
+}
+
 // focusPaneByID sets focus to a pane on the active page (click-to-focus).
 func (u *macUI) focusPaneByID(id int) bool {
 	pg := u.activePage()

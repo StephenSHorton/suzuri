@@ -104,6 +104,7 @@ func Run() error {
 	ui.active = 0
 	ui.syncChrome()
 	ui.showSplash = !cfg.FirstRunDone
+	revealNoticePane = ui.revealPane
 	return ui.loop()
 }
 

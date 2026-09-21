@@ -191,17 +191,21 @@ func activateNotice(idx int) {
 	n := noticeLive[idx]
 	noticeLive = append(noticeLive[:idx], noticeLive[idx+1:]...)
 	noticeMu.Unlock()
-	if n.Focus {
-		focusNoticeHost()
-	}
 	if n.OnActivate != nil {
 		n.OnActivate()
-	} else if n.Report && n.tab != nil {
-		id := n.ID
-		if id == "" {
-			id = "0"
+	} else {
+		if n.Focus && n.tab != nil && revealNoticePane != nil {
+			revealNoticePane(n.tab.id)
+		} else if n.Focus {
+			focusNoticeHost()
 		}
-		n.tab.sendKey([]byte("\x1b]99;i=" + id + "\x1b\\"))
+		if n.Report && n.tab != nil {
+			id := n.ID
+			if id == "" {
+				id = "0"
+			}
+			n.tab.sendKey([]byte("\x1b]99;i=" + id + "\x1b\\"))
+		}
 	}
 	sendNoticeClose(&n)
 }
@@ -330,6 +334,10 @@ func hitNotice(cards []noticeCard, x, y int) int {
 	}
 	return -1
 }
+
+// revealNoticePane focuses the pane that emitted a notification.
+// The running host installs it. Nil in the notify preview command.
+var revealNoticePane func(tabID int)
 
 var noticeCards []noticeCard
 

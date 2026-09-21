@@ -54,6 +54,21 @@ func TestOSC9And777StillNotify(t *testing.T) {
 	}
 }
 
+func TestActivateNoticeRevealsSourcePane(t *testing.T) {
+	noticeMu.Lock()
+	noticeLive = nil
+	noticeMu.Unlock()
+	var got int
+	prev := revealNoticePane
+	revealNoticePane = func(id int) { got = id }
+	defer func() { revealNoticePane = prev }()
+	postDeskNote(deskNote{Title: "done", Focus: true, tab: &tab{id: 7}, Expire: time.Second}, false, true)
+	activateNotice(0)
+	if got != 7 || noticeCount() != 0 {
+		t.Fatalf("got %d count %d", got, noticeCount())
+	}
+}
+
 func TestUpdateNoticeStaysUntilDismiss(t *testing.T) {
 	noticeMu.Lock()
 	noticeLive = nil
