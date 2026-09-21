@@ -940,8 +940,9 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, 
 	gapW := lipgloss.Width(gap)
 
 	if m.Frame == FrameMac {
-		// Room for the 12pt traffic lights painted over the bar, not as glyphs.
-		const reserve = 8
+		// Lights plus a square 硯, painted as graphics so the mark is not
+		// squeezed into one cell.
+		const reserve = 14
 		parts = append(parts, styleGap().Render(strings.Repeat(" ", reserve)))
 		col += reserve
 	}
@@ -1066,6 +1067,10 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, 
 
 // renderCaffeineChip is the top-right coffee control (empty dim / full bright).
 func (m Model) renderCaffeineChip() string {
+	if m.Frame == FrameMac {
+		// Painted as a cup graphic in the title strip. Two cells of hit area.
+		return styleGap().Render("  ")
+	}
 	// HOT BEVERAGE U+2615 — reads as a cup in mono Nerd Font faces.
 	const cup = "☕"
 	label := cup

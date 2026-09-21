@@ -7,10 +7,10 @@ package ui
 void suzuri_round_main(void);
 void suzuri_screen_cursor(int *x, int *y);
 void suzuri_set_title_hits(int titleH, const int *rects, int n);
+void suzuri_toggle_zoom_main(void);
+int suzuri_hover_light(void);
 */
 import "C"
-
-import "github.com/hajimehoshi/ebiten/v2"
 
 func roundMainWindow() { C.suzuri_round_main() }
 
@@ -28,13 +28,9 @@ func setTitleHits(titleH int, rects []int) {
 	C.suzuri_set_title_hits(C.int(titleH), &buf[0], C.int(len(buf)/4))
 }
 
-func toggleFrameZoom() {
-	if ebiten.IsWindowMaximized() {
-		ebiten.RestoreWindow()
-		return
-	}
-	ebiten.MaximizeWindow()
-}
+func toggleFrameZoom() { C.suzuri_toggle_zoom_main() }
+
+func hoveredTrafficLight() int { return int(C.suzuri_hover_light()) }
 
 func screenCursor() (x, y int) {
 	var sx, sy C.int

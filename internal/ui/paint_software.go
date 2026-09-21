@@ -602,6 +602,52 @@ func (p *softwarePainter) paintCellUnderline(dst *image.RGBA, px, py int, fr, fg
 	fillRectRGBA(dst, px, py+ch-th-1, cw, th, fr, fg, fb)
 }
 
+// drawGlyphInBox scales a CJK glyph uniformly into a square so 硯 keeps its
+// width instead of being clipped to one terminal cell.
+func (p *softwarePainter) drawGlyphInBox(dst *image.RGBA, x, y, size int, r rune, fr, fg, fb byte) {
+	if p == nil || p.cjkFace == nil || dst == nil || size < 4 {
+		return
+	}
+	dr, mask, maskp, _, ok := p.cjkFace.Glyph(fixed.P(0, p.ascent), r)
+	if !ok || mask == nil || dr.Empty() {
+		return
+	}
+	sw, sh := dr.Dx(), dr.Dy()
+	if sw < 1 || sh < 1 {
+		return
+	}
+	scale := float64(size) / float64(sw)
+	if float64(sh)*scale > float64(size) {
+		scale = float64(size) / float64(sh)
+	}
+	dw := int(float64(sw) * scale)
+	dh := int(float64(sh) * scale)
+	if dw < 1 {
+		dw = 1
+	}
+	if dh < 1 {
+		dh = 1
+	}
+	ox := x + (size-dw)/2
+	oy := y + (size-dh)/2
+	ink := color.RGBA{R: fr, G: fg, B: fb, A: 255}
+	for yy := 0; yy < dh; yy++ {
+		sy := dr.Min.Y + yy*sh/dh
+		for xx := 0; xx < dw; xx++ {
+			sx := dr.Min.X + xx*sw/dw
+			_, _, _, a := mask.At(sx-dr.Min.X+maskp.X, sy-dr.Min.Y+maskp.Y).RGBA()
+			if a < 0x4000 {
+				continue
+			}
+			px, py := ox+xx, oy+yy
+			if !image.Pt(px, py).In(dst.Bounds()) {
+				continue
+			}
+			dst.SetRGBA(px, py, ink)
+		}
+	}
+}
+
 func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg, fb byte) {
 	if p == nil {
 		return

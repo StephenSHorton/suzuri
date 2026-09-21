@@ -3362,9 +3362,118 @@ func (u *macUI) paintMacLights(dst *image.RGBA) {
 		{R: 254, G: 188, B: 46, A: 255},
 		{R: 40, G: 200, B: 64, A: 255},
 	}
+	hover := hoveredTrafficLight()
+	ink := color.RGBA{R: 50, G: 36, B: 28, A: 230}
 	for i, L := range u.macLights() {
-		fillDisk(dst, L.x+L.d/2, L.y+L.d/2, L.d/2, colors[i])
+		cx, cy := L.x+L.d/2, L.y+L.d/2
+		fillDisk(dst, cx, cy, L.d/2, colors[i])
+		if hover != i {
+			continue
+		}
+		switch i {
+		case 0:
+			drawCross(dst, cx, cy, 3, ink)
+		case 1:
+			fillRectRGBA(dst, cx-3, cy, 7, 2, ink.R, ink.G, ink.B)
+		default:
+			drawZoomMark(dst, cx, cy, ink)
+		}
 	}
+}
+
+func drawCross(dst *image.RGBA, cx, cy, r int, c color.RGBA) {
+	for i := -r; i <= r; i++ {
+		fillDisk(dst, cx+i, cy+i, 0, c)
+		fillDisk(dst, cx+i, cy-i, 0, c)
+	}
+}
+
+func drawZoomMark(dst *image.RGBA, cx, cy int, c color.RGBA) {
+	// Two opposing corners, the mark macOS uses for zoom.
+	for i := 0; i < 4; i++ {
+		dstSet(dst, cx-4+i, cy-3, c)
+		dstSet(dst, cx-4, cy-3+i, c)
+		dstSet(dst, cx+4-i, cy+3, c)
+		dstSet(dst, cx+4, cy+3-i, c)
+	}
+}
+
+func dstSet(dst *image.RGBA, x, y int, c color.RGBA) {
+	if dst == nil || !image.Pt(x, y).In(dst.Bounds()) {
+		return
+	}
+	dst.SetRGBA(x, y, c)
+}
+
+func (u *macUI) paintBrandMark(dst *image.RGBA) {
+	if u.painter == nil || u.painter.cjkFace == nil || dst == nil {
+		return
+	}
+	lights := u.macLights()
+	last := lights[2]
+	th := int(u.titleStripHeight())
+	size := th - 8
+	if size < 14 {
+		size = 14
+	}
+	x := last.x + last.d + 10
+	y := (th - size) / 2
+	u.painter.drawGlyphInBox(dst, x, y, size, '硯', chrome.PrimR, chrome.PrimG, chrome.PrimB)
+}
+
+func (u *macUI) paintCaffeineCup(dst *image.RGBA) {
+	if dst == nil {
+		return
+	}
+	b := u.chrome.CaffeineBounds()
+	if b[1] <= b[0] {
+		return
+	}
+	cw := int(u.metricW)
+	if cw < 1 {
+		cw = cellW
+	}
+	x0 := 4 + b[0]*cw
+	x1 := 4 + b[1]*cw
+	th := int(u.titleStripHeight())
+	h := th - 10
+	if h < 12 {
+		h = 12
+	}
+	w := h * 3 / 4
+	if w > x1-x0-2 {
+		w = x1 - x0 - 2
+	}
+	x := x0 + (x1-x0-w)/2
+	y := (th - h) / 2
+	on := u.caffeine != nil && u.caffeine.Active()
+	body := color.RGBA{R: 150, G: 140, B: 130, A: 255}
+	if on {
+		body = color.RGBA{R: 230, G: 170, B: 70, A: 255}
+	}
+	fillRoundRect(dst, x, y+h/5, w-4, h-h/5, 3, body)
+	fillRectRGBA(dst, x+1, y+h/5, w-6, 2, body.R, body.G, body.B)
+	// Handle.
+	fillRectRGBA(dst, x+w-6, y+h/3, 3, h/3, body.R, body.G, body.B)
+	if on {
+		steam := color.RGBA{R: 230, G: 210, B: 170, A: 180}
+		dstSet(dst, x+w/3, y+1, steam)
+		dstSet(dst, x+w/3, y+3, steam)
+		dstSet(dst, x+w/2, y, steam)
+		dstSet(dst, x+w/2, y+2, steam)
+	}
+}
+
+func fillRoundRect(dst *image.RGBA, x, y, w, h, r int, c color.RGBA) {
+	if w < 1 || h < 1 {
+		return
+	}
+	fillRectRGBA(dst, x+r, y, w-2*r, h, c.R, c.G, c.B)
+	fillRectRGBA(dst, x, y+r, w, h-2*r, c.R, c.G, c.B)
+	fillDisk(dst, x+r, y+r, r, c)
+	fillDisk(dst, x+w-1-r, y+r, r, c)
+	fillDisk(dst, x+r, y+h-1-r, r, c)
+	fillDisk(dst, x+w-1-r, y+h-1-r, r, c)
 }
 
 func fillDisk(dst *image.RGBA, cx, cy, r int, c color.RGBA) {
@@ -4077,6 +4186,8 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 
 	u.painter.paintFrame(u.fb, opts)
 	u.paintMacLights(u.fb)
+	u.paintBrandMark(u.fb)
+	u.paintCaffeineCup(u.fb)
 
 	// Grok prompt image previews (Kitty graphics APC) — over the cell grid.
 	if tab.kittyGfx != nil {

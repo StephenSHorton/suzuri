@@ -4,6 +4,7 @@
 static void suzuri_toggle_zoom(NSWindow *w);
 
 static int gTitleH;
+static int gHoverLight = -1;
 static int gBlock[64 * 4];
 static int gBlockN;
 static id gTitleMonitor;
@@ -41,11 +42,27 @@ void suzuri_round_main(void) {
 	w.backgroundColor = NSColor.clearColor;
 	clipView(w.contentView, 16);
 	if (gTitleMonitor != nil) return;
-	gTitleMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown
+	gTitleMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskMouseMoved | NSEventMaskMouseExited
 		handler:^NSEvent *(NSEvent *e) {
 			NSWindow *win = NSApp.mainWindow ?: NSApp.keyWindow;
-			if (e.window != win || gTitleH < 1) return e;
+			if (win == nil) return e;
 			NSPoint p = [e locationInWindow];
+			gHoverLight = -1;
+			if (e.window == win) {
+				CGFloat H = win.contentView.bounds.size.height;
+				CGFloat yTop = H - p.y;
+				CGFloat x = p.x;
+				for (int i = 0; i < 3 && i < gBlockN; i++) {
+					int bx = gBlock[i * 4], by = gBlock[i * 4 + 1];
+					int bw = gBlock[i * 4 + 2], bh = gBlock[i * 4 + 3];
+					if (x >= bx && x < bx + bw && yTop >= by && yTop < by + bh) {
+						gHoverLight = i;
+						break;
+					}
+				}
+			}
+			if (e.type != NSEventTypeLeftMouseDown) return e;
+			if (e.window != win || gTitleH < 1) return e;
 			if (titleBlocked(win, p)) return e;
 			if (e.clickCount >= 2) {
 				suzuri_toggle_zoom(win);
@@ -92,6 +109,12 @@ void suzuri_toggle_zoom(NSWindow *w) {
 	gUnzoomed = w.frame;
 	[w setFrame:vis display:YES animate:YES];
 }
+
+void suzuri_toggle_zoom_main(void) {
+	suzuri_toggle_zoom(NSApp.mainWindow ?: NSApp.keyWindow);
+}
+
+int suzuri_hover_light(void) { return gHoverLight; }
 
 void suzuri_screen_cursor(int *x, int *y) {
 	NSPoint p = [NSEvent mouseLocation];
