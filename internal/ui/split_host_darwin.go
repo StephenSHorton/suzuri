@@ -473,6 +473,7 @@ func (u *macUI) focusPaneByID(id int) bool {
 	}
 	u.syncChrome()
 	u.computeActiveLayout()
+	u.syncTermFocus()
 	return true
 }
 

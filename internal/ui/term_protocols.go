@@ -50,6 +50,19 @@ type termModes struct {
 	links    [][]string
 	linkCols int
 	osc99    map[string]*osc99Buf
+
+	// Shell command completion (OSC 133 / 633 / private 7879).
+	pendingCmd   string
+	queuedFinish []cmdFinish
+	lastFinishAt time.Time
+	lastFinish   cmdFinish
+}
+
+// cmdFinish is one foreground command that just returned to the prompt.
+type cmdFinish struct {
+	cmd     string
+	exit    int
+	hasExit bool
 }
 
 type termProgress struct {
@@ -205,6 +218,7 @@ func (m *termModes) feed(now time.Time, data []byte, vtMode vt10x.ModeFlag) feed
 			i += 2
 		}
 	}
+	m.flushCmdFinishes(&res)
 	res.ready = out
 	return res
 }
@@ -364,9 +378,104 @@ func (m *termModes) takeOSC(payload []byte, _ vt10x.ModeFlag, res *feedResult) b
 	case bytesHasPrefix(payload, "777;"):
 		m.takeOSC777(payload, res)
 		return true
+	case bytesHasPrefix(payload, "7879;"):
+		m.takeOSC7879(payload, res)
+		return true
+	case bytesHasPrefix(payload, "133;"):
+		m.takeShellMark("133;", payload, res)
+		return true
+	case bytesHasPrefix(payload, "633;"):
+		m.takeShellMark("633;", payload, res)
+		return true
 	default:
 		return false
 	}
+}
+
+// takeOSC7879 is suzuri's own command-finished report:
+// 7879 ; done ; exit ; base64-command
+func (m *termModes) takeOSC7879(payload []byte, _ *feedResult) {
+	rest := string(payload)
+	rest = strings.TrimPrefix(rest, "7879;")
+	kind, tail, _ := strings.Cut(rest, ";")
+	if kind != "done" {
+		return
+	}
+	exitRaw, b64, _ := strings.Cut(tail, ";")
+	exit, err := strconv.Atoi(strings.TrimSpace(exitRaw))
+	cmd := ""
+	if b64 != "" {
+		cmd = decodeOSC99Payload(b64, true)
+	}
+	m.queueFinish(cmd, exit, err == nil)
+}
+
+// takeShellMark consumes FinalTerm OSC 133 and VS Code OSC 633.
+// D reports the exit. E carries the command line. Other marks are eaten
+// so they do not land in the grid.
+func (m *termModes) takeShellMark(prefix string, payload []byte, _ *feedResult) {
+	rest := string(payload)
+	rest = strings.TrimPrefix(rest, prefix)
+	mark, tail, _ := strings.Cut(rest, ";")
+	switch mark {
+	case "E":
+		m.pendingCmd = strings.TrimSpace(tail)
+	case "D":
+		raw, _, _ := strings.Cut(tail, ";")
+		raw = strings.TrimSpace(raw)
+		exit, err := strconv.Atoi(raw)
+		m.queueFinish(m.pendingCmd, exit, raw != "" && err == nil)
+		m.pendingCmd = ""
+	}
+}
+
+func (m *termModes) queueFinish(cmd string, exit int, hasExit bool) {
+	if m == nil {
+		return
+	}
+	cmd = strings.TrimSpace(cmd)
+	if strings.HasPrefix(cmd, "_suzuri_") {
+		return
+	}
+	m.queuedFinish = append(m.queuedFinish, cmdFinish{cmd: cmd, exit: exit, hasExit: hasExit})
+}
+
+func (m *termModes) flushCmdFinishes(res *feedResult) {
+	if m == nil || len(m.queuedFinish) == 0 {
+		return
+	}
+	best := m.queuedFinish[0]
+	for _, f := range m.queuedFinish[1:] {
+		if best.cmd == "" && f.cmd != "" {
+			best = f
+		}
+	}
+	m.queuedFinish = nil
+	if !m.lastFinishAt.IsZero() && time.Since(m.lastFinishAt) < 400*time.Millisecond {
+		sameExit := m.lastFinish.hasExit == best.hasExit && (!best.hasExit || m.lastFinish.exit == best.exit)
+		cmdClose := best.cmd == m.lastFinish.cmd || best.cmd == "" || m.lastFinish.cmd == ""
+		if sameExit && cmdClose {
+			return
+		}
+	}
+	m.lastFinishAt = time.Now()
+	m.lastFinish = best
+	title := clipRunes(best.cmd, 120)
+	if title == "" {
+		title = "Command"
+	}
+	body := "finished"
+	sound := "info"
+	switch {
+	case best.hasExit && best.exit == 0:
+		body = "succeeded"
+	case best.hasExit:
+		body = fmt.Sprintf("failed (exit %d)", best.exit)
+		sound = "error"
+	}
+	res.notes = append(res.notes, deskNote{
+		Title: title, Body: body, Sound: sound, Occasion: "unfocused", Focus: true,
+	})
 }
 
 func (m *termModes) takeOSC8(payload []byte, res *feedResult) {
@@ -709,7 +818,8 @@ func (t *tab) pullPTY(data []byte, focused, visible bool) ([]byte, []osc8Span) {
 	}
 	if res.armFocus {
 		// 1004 is applied when the bytes reach vt10x, which is after this
-		// reply. Send the current focus now; later changes use reportFocus.
+		// reply. focused means the user is looking at this pane (window
+		// focused and this pane active). Later changes use reportFocus.
 		if focused {
 			t.sendKey([]byte("\x1b[I"))
 		} else {

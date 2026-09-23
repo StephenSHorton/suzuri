@@ -473,6 +473,7 @@ func (u *winUI) focusPaneByID(id int) bool {
 		setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
 	}
 	u.syncChrome()
+	u.syncTermFocus()
 	next := u.activeTab()
 	nextAlt := next != nil && next.altScreen()
 	if prevAlt != nextAlt {

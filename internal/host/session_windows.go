@@ -82,7 +82,7 @@ func QuietPrompt(commandLine string) string {
 		// and command blocks. ESC]7878;cwd=<path>BEL — parsed by the host.
 		// Clear-Host wipes the leftover banner row after -NoLogo.
 		// Emit cwd once at startup and on every subsequent prompt.
-		ps := `function global:prompt { try { $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}; ' ' }; Clear-Host; try { $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}`
+		ps := `function global:prompt { $ok=$?; $native=$global:LASTEXITCODE; try { $h=Get-History -Count 1 -ErrorAction SilentlyContinue; if ($h -and $h.Id -ne $global:SuzuriHist) { $global:SuzuriHist=$h.Id; $ec=0; if (-not $ok) { if ($native) { $ec=[int]$native } else { $ec=1 } }; $b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$h.CommandLine)); $e=[char]27; $b=[char]7; [Console]::Out.Write(('{0}]7879;done;{1};{2}{3}' -f $e,$ec,$b64,$b)) }; $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}; ' ' }; Clear-Host`
 		return cl + ` -NoExit -Command "` + ps + `"`
 	case strings.EqualFold(base, "cmd.exe") || strings.EqualFold(base, "cmd"):
 		// $S = space in cmd PROMPT; $E = ESC. Emit OSC cwd + blank visual.

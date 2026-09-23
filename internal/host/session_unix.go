@@ -239,9 +239,23 @@ _suzuri_quiet_prompt() {
   PROMPT_EOL_MARK=''
   _suzuri_emit_cwd
 }
-_suzuri_quiet_prompt
+# ESC]7879;done=<exit>;<base64 command>BEL — host notifies when this pane
+# is not the one the user is looking at.
+_suzuri_preexec() { _suzuri_cmd=$1 }
+_suzuri_precmd() {
+  local ec=$?
+  if [[ -n ${_suzuri_cmd:-} ]]; then
+    local b64
+    b64=$(printf '%s' "$_suzuri_cmd" | command base64 | tr -d '\n')
+    printf '\033]7879;done;%s;%s\007' "$ec" "$b64"
+    _suzuri_cmd=
+  fi
+  _suzuri_quiet_prompt
+}
+_suzuri_precmd
 # Run after theme precmd hooks so starship/p10k/oh-my-zsh cannot repaint a prompt.
-precmd_functions+=(_suzuri_quiet_prompt)
+precmd_functions+=(_suzuri_precmd)
+preexec_functions+=(_suzuri_preexec)
 `
 		if err := os.WriteFile(filepath.Join(dir, ".zshrc"), []byte(content), 0o644); err != nil {
 			_ = os.RemoveAll(dir)
@@ -262,9 +276,33 @@ precmd_functions+=(_suzuri_quiet_prompt)
 		content := `# suzuri quiet-prompt bootstrap
 [[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
 PS1=' '
+_suzuri_cmd=
+_suzuri_ec=0
 _suzuri_emit_cwd() { printf '\033]7878;cwd=%s\007' "$PWD"; }
-PROMPT_COMMAND='_suzuri_emit_cwd'
-_suzuri_emit_cwd
+# Save $? in PROMPT_COMMAND before any command can clear it. The DEBUG
+# trap records the command line and ignores the prompt machinery.
+_suzuri_prompt() {
+  _suzuri_in_prompt=1
+  if [[ -n ${_suzuri_cmd:-} ]]; then
+    local b64
+    b64=$(printf '%s' "$_suzuri_cmd" | command base64 | tr -d '\n')
+    printf '\033]7879;done;%s;%s\007' "$_suzuri_ec" "$b64"
+    _suzuri_cmd=
+  fi
+  _suzuri_emit_cwd
+  _suzuri_in_prompt=
+}
+_suzuri_debug() {
+  [[ -n ${_suzuri_in_prompt:-} ]] && return
+  case $BASH_COMMAND in
+    _suzuri_*) return ;;
+  esac
+  _suzuri_cmd=$BASH_COMMAND
+}
+PROMPT_COMMAND='_suzuri_ec=$?; _suzuri_prompt'
+trap _suzuri_debug DEBUG
+_suzuri_ec=0
+_suzuri_prompt
 `
 		rc := filepath.Join(dir, "bashrc")
 		if err := os.WriteFile(rc, []byte(content), 0o644); err != nil {

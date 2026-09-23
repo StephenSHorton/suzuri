@@ -17,6 +17,9 @@ func TestQuietPromptPowerShellUsesSpacePrompt(t *testing.T) {
 	if !strings.Contains(got, "7878;cwd=") {
 		t.Fatalf("expected cwd OSC, got %q", got)
 	}
+	if !strings.Contains(got, "7879;done;") {
+		t.Fatalf("expected command-done OSC, got %q", got)
+	}
 	if !strings.Contains(got, "Clear-Host") {
 		t.Fatalf("expected Clear-Host, got %q", got)
 	}

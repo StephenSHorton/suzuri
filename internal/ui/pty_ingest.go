@@ -13,8 +13,12 @@ const (
 )
 
 // ptyHooks carries the few host decisions the shared pipeline cannot see:
-// focus (for DEC 1004), cell metrics for inline images, and fork/cwd side effects.
+// focus (the user is looking at this pane), cell metrics for inline images,
+// and fork/cwd side effects.
 type ptyHooks struct {
+	// Focused is true only when the window is focused and this pane is the
+	// active one. Command-finished cards and DEC 1004 use that, not the
+	// window bit alone.
 	Focused  bool
 	Visible  bool
 	CellW    int
@@ -161,6 +165,12 @@ func (t *tab) inputWaiting() bool {
 	t.inMu.Lock()
 	defer t.inMu.Unlock()
 	return len(t.inBuf) > 0
+}
+
+// paneWatched reports whether the user is looking at pane: the window has
+// focus and pane is the active leaf.
+func paneWatched(windowFocused bool, active, pane *tab) bool {
+	return windowFocused && active != nil && pane != nil && active == pane
 }
 
 func paneMetrics(metricW, metricH, fallbackCols, paneCols int) (cw, ch, cols int) {

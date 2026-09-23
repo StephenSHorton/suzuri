@@ -225,6 +225,9 @@ type winUI struct {
 	linkCursorOn bool
 	// hostFocused mirrors WM_ACTIVATE for DECSET 1004 focus reports.
 	hostFocused bool
+	// termFocus is the pane we last told "you are focused" (nil = none).
+	termFocus     *tab
+	termFocusInit bool
 	// altMouseDown: left button held while reporting clicks to an alt-screen app.
 	altMouseDown bool
 	// Last SGR motion cell (1-based) sent to alt-screen; avoid flooding the PTY.
@@ -386,6 +389,30 @@ func (u *winUI) activeTab() *tab {
 		return nil
 	}
 	return u.tabs[u.active]
+}
+
+// syncTermFocus tells the pane the user is looking at that it gained focus,
+// and the previous one that it lost it. A background pane stays unfocused
+// even while the window is focused, so programs there can notify on finish.
+func (u *winUI) syncTermFocus() {
+	if u == nil {
+		return
+	}
+	var cur *tab
+	if u.hostFocused {
+		cur = u.activeTab()
+	}
+	if u.termFocusInit && u.termFocus == cur {
+		return
+	}
+	if u.termFocus != nil && u.termFocus != cur {
+		u.termFocus.reportFocus(false)
+	}
+	if cur != nil {
+		cur.reportFocus(true)
+	}
+	u.termFocus = cur
+	u.termFocusInit = true
 }
 
 // activeInput returns the Warp bar for the active tab (nil if none).
@@ -1623,7 +1650,7 @@ func (u *winUI) drainAndParse(tabID int) {
 	}
 	cw, ch, cols := paneMetrics(int(u.metricW), int(u.metricH), u.cols, paneCols)
 	res := t.ingestPTY(data, ptyHooks{
-		Focused:  u.hostFocused,
+		Focused:  paneWatched(u.hostFocused, u.activeTab(), t),
 		Visible:  true,
 		CellW:    cw,
 		CellH:    ch,
@@ -2158,6 +2185,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Skip blink repaints during frame drag/resize — they fight WM_PAINT
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
+			u.syncTermFocus()
 			// Darwin drains AI control every ebiten Update. Windows only used
 			// to drain on MCP posts, so GET /v1/layout from a pane 504'd.
 			u.drainAI()
@@ -2359,9 +2387,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		focused := active != win.WA_INACTIVE
 		if focused != u.hostFocused {
 			u.hostFocused = focused
-			if t := u.activeTab(); t != nil {
-				t.reportFocus(focused)
-			}
+			u.syncTermFocus()
 		}
 		log.Info("WM_ACTIVATE", "active", active, "alive", u.alive.Load(),
 			"w", u.width, "h", u.height, "cols", u.cols, "rows", u.rows)

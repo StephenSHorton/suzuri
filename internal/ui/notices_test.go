@@ -110,3 +110,56 @@ func TestNoticeOccasionAndSound(t *testing.T) {
 		t.Fatal("not closed")
 	}
 }
+
+func TestCommandFinishOSC(t *testing.T) {
+	var m termModes
+	res := m.feed(time.Now(), []byte("\x1b]7879;done;0;Z28gdGVzdA==\x07"), 0)
+	if len(res.notes) != 1 || res.notes[0].Title != "go test" || res.notes[0].Body != "succeeded" {
+		t.Fatalf("success: %+v", res.notes)
+	}
+	if res.notes[0].Occasion != "unfocused" || res.notes[0].Sound != "info" {
+		t.Fatalf("gate: %+v", res.notes[0])
+	}
+	fail := m.feed(time.Now().Add(time.Second), []byte("\x1b]133;E;make\x1b\\\x1b]133;D;2\x1b\\"), 0)
+	if len(fail.notes) != 1 || fail.notes[0].Title != "make" || fail.notes[0].Body != "failed (exit 2)" {
+		t.Fatalf("fail: %+v", fail.notes)
+	}
+	if fail.notes[0].Sound != "error" {
+		t.Fatalf("sound: %s", fail.notes[0].Sound)
+	}
+	var both termModes
+	dup := both.feed(time.Now(), []byte("\x1b]133;D;0\x1b\\\x1b]7879;done;0;bHM=\x1b\\"), 0)
+	if len(dup.notes) != 1 || dup.notes[0].Title != "ls" || dup.notes[0].Body != "succeeded" {
+		t.Fatalf("dedupe: %+v", dup.notes)
+	}
+	again := both.feed(time.Now(), []byte("\x1b]133;D;0\x1b\\"), 0)
+	if len(again.notes) != 0 {
+		t.Fatalf("second card: %+v", again.notes)
+	}
+	img := m.feed(time.Now(), []byte("\x1b]1337;File=inline=1:QQ==\x07"), 0)
+	if !strings.Contains(string(img.ready), "1337;File=") {
+		t.Fatalf("1337 swallowed: %q", img.ready)
+	}
+}
+
+func TestCommandFinishHiddenWhileWatching(t *testing.T) {
+	noticeMu.Lock()
+	noticeLive = nil
+	noticeMu.Unlock()
+	var m termModes
+	res := m.feed(time.Now(), []byte("\x1b]7879;done;1;ZmFpbA==\x07"), 0)
+	if len(res.notes) != 1 || res.notes[0].Body != "failed (exit 1)" {
+		t.Fatal(res.notes)
+	}
+	postDeskNote(res.notes[0], true, true)
+	if noticeCount() != 0 {
+		t.Fatal("card while the pane is watched")
+	}
+	postDeskNote(res.notes[0], false, true)
+	if noticeCount() != 1 {
+		t.Fatal("missing card for a background pane")
+	}
+	noticeMu.Lock()
+	noticeLive = nil
+	noticeMu.Unlock()
+}

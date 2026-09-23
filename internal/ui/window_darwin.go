@@ -217,6 +217,9 @@ type macUI struct {
 	// hostFocused is the last ebiten focus bit, for DECSET 1004 reports.
 	hostFocused   bool
 	hostFocusInit bool
+	// termFocus is the pane we last told "you are focused" (nil = none).
+	termFocus     *tab
+	termFocusInit bool
 	frameRounded  bool
 	frameDrag     frameDrag
 
@@ -285,6 +288,33 @@ func (u *macUI) activeTab() *tab {
 		return nil
 	}
 	return u.tabs[u.active]
+}
+
+// syncTermFocus tells the pane the user is looking at that it gained focus,
+// and the previous one that it lost it. A background pane stays unfocused
+// even while the window is focused, so programs there can notify on finish.
+func (u *macUI) syncTermFocus() {
+	if u == nil {
+		return
+	}
+	win := ebiten.IsFocused()
+	u.hostFocused = win
+	u.hostFocusInit = true
+	var cur *tab
+	if win {
+		cur = u.activeTab()
+	}
+	if u.termFocusInit && u.termFocus == cur {
+		return
+	}
+	if u.termFocus != nil && u.termFocus != cur {
+		u.termFocus.reportFocus(false)
+	}
+	if cur != nil {
+		cur.reportFocus(true)
+	}
+	u.termFocus = cur
+	u.termFocusInit = true
 }
 
 func (u *macUI) activeInput() *inputBar {
@@ -655,14 +685,7 @@ func (u *macUI) Update() error {
 	roundMainWindow()
 	u.publishTitleHits()
 
-	focused := ebiten.IsFocused()
-	if !u.hostFocusInit || focused != u.hostFocused {
-		u.hostFocusInit = true
-		u.hostFocused = focused
-		if t := u.activeTab(); t != nil {
-			t.reportFocus(focused)
-		}
-	}
+	u.syncTermFocus()
 
 	// Maximize after the native window exists (Set before RunGame is a no-op).
 	if u.restoreMax && !u.maxApplied {
@@ -985,7 +1008,7 @@ func (u *macUI) drainAndParse(tabID int) {
 	}
 	cw, ch, cols := paneMetrics(int(u.metricW), int(u.metricH), u.cols, paneCols)
 	res := t.ingestPTY(data, ptyHooks{
-		Focused:  ebiten.IsFocused(),
+		Focused:  paneWatched(ebiten.IsFocused(), u.activeTab(), t),
 		Visible:  !ebiten.IsWindowMinimized(),
 		CellW:    cw,
 		CellH:    ch,
