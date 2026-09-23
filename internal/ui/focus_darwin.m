@@ -62,3 +62,32 @@ int suzuri_clipboard_png_write(const char *path) {
 		return ok ? 1 : -1;
 	}
 }
+
+// Latched ⌘V keyDown, seen by a native monitor. Ebiten samples key state once
+// per tick, so a synthetic ⌘V whose down+up both land between ticks (dictation
+// apps like Wispr Flow, Raycast, Keyboard Maestro paste this way) never shows
+// up as pressed. The monitor observes every keyDown and never consumes it.
+static id gPasteMonitor;
+static _Atomic int gPasteChord;
+
+void suzuri_install_paste_monitor(void) {
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (gPasteMonitor != nil) return;
+		gPasteMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+			handler:^NSEvent *(NSEvent *e) {
+				NSEventModifierFlags mods = e.modifierFlags &
+					(NSEventModifierFlagShift | NSEventModifierFlagControl |
+					 NSEventModifierFlagOption | NSEventModifierFlagCommand);
+				// 9 = kVK_ANSI_V (physical key, same as ebiten.KeyV).
+				if (e.keyCode == 9 && mods == NSEventModifierFlagCommand && !e.isARepeat) {
+					gPasteChord = 1;
+				}
+				return e;
+			}];
+	});
+}
+
+// Returns 1 once per latched ⌘V keyDown and clears the latch.
+int suzuri_take_paste_chord(void) {
+	return __c11_atomic_exchange(&gPasteChord, 0, __ATOMIC_SEQ_CST);
+}

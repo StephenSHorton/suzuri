@@ -248,6 +248,10 @@ type macUI struct {
 	// prevPasteChord: edge-detect Meta/Ctrl+V. IsKeyJustPressed can miss
 	// Command+letter on some macOS/GLFW frames; IsKeyPressed still goes true.
 	prevPasteChord bool
+	// nativePasteChord: ⌘V keyDown latched by the AppKit monitor this tick.
+	// Catches synthetic ⌘V (Wispr Flow etc.) whose down+up fall between ticks.
+	nativePasteChord bool
+	pasteMonitorOnce sync.Once
 	// lastPasteAt debounces double-fire from overlapping chord edge paths.
 	lastPasteAt time.Time
 }
@@ -773,6 +777,9 @@ drained:
 	}
 	u.handleResize()
 	u.handleMouse()
+	u.pasteMonitorOnce.Do(installPasteMonitor)
+	// Fresh each tick: a latch no paste path consumed this tick is dropped.
+	u.nativePasteChord = takeNativePasteChord()
 	u.handleKeys()
 	u.handleTextInput()
 	// File drops: only consume when Send-file prompt is open (see AcceptsFileDrop).
@@ -3768,7 +3775,8 @@ func (u *macUI) pasteChordJustPressed(mod, shift, alt bool) bool {
 	metaHeld := mod || modMeta() || ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight)
 	vDown := ebiten.IsKeyPressed(ebiten.KeyV)
 	held := metaHeld && vDown
-	just := held && !u.prevPasteChord
+	just := (held && !u.prevPasteChord) || u.nativePasteChord
+	u.nativePasteChord = false
 	u.prevPasteChord = held
 	return just
 }

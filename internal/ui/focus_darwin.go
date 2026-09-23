@@ -8,6 +8,8 @@ package ui
 
 void suzuri_reclaim_focus(void);
 int suzuri_clipboard_png_write(const char *path);
+void suzuri_install_paste_monitor(void);
+int suzuri_take_paste_chord(void);
 */
 import "C"
 
@@ -41,4 +43,16 @@ func writeClipboardPNGNative(path string) (bool, error) {
 	default:
 		return false, fmt.Errorf("NSPasteboard PNG write failed")
 	}
+}
+
+// installPasteMonitor starts the native ⌘V keyDown monitor (idempotent;
+// installs on the main queue).
+func installPasteMonitor() {
+	C.suzuri_install_paste_monitor()
+}
+
+// takeNativePasteChord reports whether a ⌘V keyDown arrived since the last
+// call, including synthetic ones too short for ebiten's per-tick key sampling.
+func takeNativePasteChord() bool {
+	return C.suzuri_take_paste_chord() != 0
 }
