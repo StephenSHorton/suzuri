@@ -243,7 +243,23 @@ if command -v hdiutil >/dev/null 2>&1; then
     cp -R "$APP_PATH" "$STAGE/$APP_NAME"
   fi
   ln -s /Applications "$STAGE/Applications"
-  hdiutil create -volname "suzuri" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null
+  # GitHub's macOS runners often return "Resource busy" from hdiutil create.
+  # Detach leftovers and retry; the .app zip is already written above.
+  dmg_ok=0
+  for attempt in 1 2 3 4 5; do
+    hdiutil detach "$STAGE" -force >/dev/null 2>&1 || true
+    if hdiutil create -volname "suzuri" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH"; then
+      dmg_ok=1
+      break
+    fi
+    echo "==> hdiutil create failed (attempt ${attempt}); retrying" >&2
+    rm -f "$DMG_PATH"
+    sleep $((attempt * 5))
+  done
+  if [[ "$dmg_ok" -ne 1 ]]; then
+    echo "error: hdiutil create failed for $DMG_PATH" >&2
+    exit 1
+  fi
   rm -rf "$STAGE"
   echo "==> $DMG_PATH"
 
