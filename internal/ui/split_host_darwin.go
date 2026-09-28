@@ -115,7 +115,7 @@ func (u *macUI) computeActiveLayout() []paneGeom {
 		clientH = int32(u.rows)*ch + u.chromePx
 	}
 	sx, sy, sw, sh := u.shellRect(clientW, clientH)
-	res := layoutPage(p.root, sx, sy, sw, sh, cw, ch, p.focusID)
+	res := layoutPageZoom(p.root, sx, sy, sw, sh, cw, ch, p.focusID, p.zoomID)
 	u.lastPaneLayout = res.leaves
 	u.lastSashes = res.sashes
 	u.lastShell.x, u.lastShell.y, u.lastShell.w, u.lastShell.h = res.shellX, res.shellY, res.shellW, res.shellH
@@ -420,8 +420,14 @@ func (u *macUI) focusPaneDir(dir int) {
 	if pg == nil {
 		return
 	}
-	layouts := u.computeActiveLayout()
-	if !pg.focusNeighbor(dir, layouts) {
+	zoomed := pg.zoomed()
+	var moved bool
+	if zoomed {
+		moved = pg.focusZoomCycle(dir)
+	} else {
+		moved = pg.focusNeighbor(dir, u.computeActiveLayout())
+	}
+	if !moved {
 		return
 	}
 	u.selecting = false
@@ -429,7 +435,28 @@ func (u *macUI) focusPaneDir(dir int) {
 		ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
 	}
 	u.syncChrome()
+	u.markChromeDirty()
+	if zoomed {
+		u.applyClientSize(u.width, u.height)
+		u.markShellDirty()
+		return
+	}
 	u.computeActiveLayout()
+}
+
+// togglePaneZoom maximizes the focused pane, or restores the split.
+func (u *macUI) togglePaneZoom() {
+	pg := u.activePage()
+	if pg == nil || !pg.toggleZoom() {
+		return
+	}
+	if t := u.activeTab(); t != nil {
+		ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
+	}
+	u.syncChrome()
+	u.markChromeDirty()
+	u.applyClientSize(u.width, u.height)
+	u.markShellDirty()
 }
 
 // revealPane focuses the pane that produced a notification, switching
@@ -449,8 +476,12 @@ func (u *macUI) revealPane(id int) {
 			ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
 		}
 		u.syncChrome()
-		u.computeActiveLayout()
 		u.markChromeDirty()
+		if pg.zoomed() {
+			u.applyClientSize(u.width, u.height)
+		} else {
+			u.computeActiveLayout()
+		}
 		u.markShellDirty()
 		focusNoticeHost()
 		return
@@ -472,7 +503,13 @@ func (u *macUI) focusPaneByID(id int) bool {
 		ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
 	}
 	u.syncChrome()
-	u.computeActiveLayout()
+	u.markChromeDirty()
+	if pg.zoomed() {
+		u.applyClientSize(u.width, u.height)
+		u.markShellDirty()
+	} else {
+		u.computeActiveLayout()
+	}
 	u.syncTermFocus()
 	return true
 }

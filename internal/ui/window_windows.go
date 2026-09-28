@@ -162,6 +162,8 @@ type winUI struct {
 	lastPaneLayout []paneGeom
 	lastSashes     []sashGeom
 	lastShell      struct{ x, y, w, h int32 }
+	// zoomBadge is the "ZOOM · N hidden" pill. Empty when the page is not zoomed.
+	zoomBadge zoomBadgeGeom
 	// sashDrag is non-nil while the user is dragging a shared pane divider.
 	sashDrag  *sashGeom
 	nextTabID int
@@ -489,6 +491,7 @@ func (u *winUI) syncChrome() {
 		if title == "" {
 			title = fmt.Sprintf("shell %d", i+1)
 		}
+		title += p.zoomTabSuffix()
 		focus := p.focused()
 		alive := p.anyAlive()
 		alt := false
@@ -979,7 +982,7 @@ func (u *winUI) maybeResizeForInput() {
 	sx, sy, sw, sh := u.shellRect(u.width, u.height)
 	need := false
 	if p := u.activePage(); p != nil && p.root != nil {
-		geoms := layoutPage(p.root, sx, sy, sw, sh, cw, ch, p.focusID).leaves
+		geoms := layoutPageZoom(p.root, sx, sy, sw, sh, cw, ch, p.focusID, p.zoomID).leaves
 		for _, g := range geoms {
 			if g.pane != nil && (g.pane.lastCols != g.cols || g.pane.lastRows != g.rows) {
 				need = true
@@ -1039,6 +1042,8 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.focusPaneDir(2)
 	case chrome.ActionFocusPaneDown:
 		u.focusPaneDir(3)
+	case chrome.ActionTogglePaneZoom:
+		u.togglePaneZoom()
 	case chrome.ActionNextTab:
 		u.switchTab(1)
 	case chrome.ActionPrevTab:
@@ -2090,6 +2095,9 @@ func (u *winUI) revealPane(id int) {
 		u.syncChrome()
 		u.markChromeDirty()
 		u.markShellDirty()
+		if pg.zoomed() {
+			u.postLayoutSettle()
+		}
 		u.requestPaint()
 		return
 	}
@@ -2770,6 +2778,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			case 'E', 'e':
 				u.splitActive(splitHoriz)
 				return 0
+			case win.VK_RETURN:
+				u.togglePaneZoom()
+				return 0
 			}
 		}
 		// Pane focus: Alt+arrows (Windows Terminal style). Word-jump is Ctrl+arrows
@@ -3339,6 +3350,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 		// Sash drag starts before pane hit-test (shared divider between panes).
+		if u.zoomBadge.hit(px, py) {
+			u.togglePaneZoom()
+			win.InvalidateRect(hwnd, nil, false)
+			return 0
+		}
 		layouts := u.computeActiveLayout()
 		if si := hitSash(u.lastSashes, px, py); si >= 0 {
 			s := u.lastSashes[si]
@@ -3872,6 +3888,11 @@ func (u *winUI) paint(hwnd win.HWND) {
 		if !dimModal && len(layouts) > 1 {
 			u.paintPaneBorders(dest, layouts)
 		}
+		if !dimModal {
+			u.paintZoomBadge(dest)
+		} else {
+			u.zoomBadge = zoomBadgeGeom{}
+		}
 		// Freeze static dim underlay for splash/confirm card-only redraws.
 		if u.staticDimUnderlay() && dest == u.memDC && u.memDC != 0 {
 			u.overlaySceneReady = true
@@ -4082,7 +4103,7 @@ func (u *winUI) anyPaneSizeMismatch() bool {
 		if pg == nil || pg.root == nil {
 			continue
 		}
-		for _, g := range layoutPage(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID).leaves {
+		for _, g := range layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomID).leaves {
 			t := g.pane
 			if t == nil || !t.alive.Load() {
 				continue
@@ -4185,7 +4206,7 @@ func (u *winUI) relayoutActivePaintOnly() {
 		return
 	}
 	sx, sy, sw, sh := u.shellRect(u.width, u.height)
-	res := layoutPage(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID)
+	res := layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomID)
 	u.lastPaneLayout = res.leaves
 	u.lastSashes = res.sashes
 	u.lastShell.x, u.lastShell.y = res.shellX, res.shellY
@@ -4346,7 +4367,7 @@ func (u *winUI) applyClientSize(w, h int32) {
 		if pg == nil || pg.root == nil {
 			continue
 		}
-		res := layoutPage(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID)
+		res := layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomID)
 		if pg == u.activePage() {
 			u.lastPaneLayout = res.leaves
 			u.lastSashes = res.sashes
@@ -4617,6 +4638,58 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 				win.DeleteObject(win.HGDIOBJ(brush))
 			}
 		}
+	}
+}
+
+// paintZoomBadge draws the maximized-pane cue over the top-right of the shell.
+// The pane underneath stays full size; the pill names the hidden panes.
+func (u *winUI) paintZoomBadge(hdc win.HDC) {
+	u.zoomBadge = zoomBadgeGeom{}
+	if u == nil || hdc == 0 {
+		return
+	}
+	pg := u.activePage()
+	if pg == nil {
+		return
+	}
+	label := pg.zoomBadgeLabel()
+	if label == "" {
+		return
+	}
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	g := placeZoomBadge(u.lastShell.x, u.lastShell.y, u.lastShell.w, cw, ch, label)
+	if g.w < 1 {
+		return
+	}
+	u.zoomBadge = g
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.PanelR, chrome.PanelG, chrome.PanelB)}
+	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+		fillRect(hdc, win.RECT{Left: g.x, Top: g.y, Right: g.x + g.w, Bottom: g.y + g.h}, brush)
+		win.DeleteObject(win.HGDIOBJ(brush))
+	}
+	ar, ag, ab := chrome.PrimR, chrome.PrimG, chrome.PrimB
+	if ar == 0 && ag == 0 && ab == 0 {
+		ar, ag, ab = 0, 230, 118
+	}
+	ulb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(ar, ag, ab)}
+	if ub := win.CreateBrushIndirect(&ulb); ub != 0 {
+		fillRect(hdc, win.RECT{Left: g.x, Top: g.y, Right: g.x + g.w, Bottom: g.y + 2}, ub)
+		win.DeleteObject(win.HGDIOBJ(ub))
+	}
+	if u.font != 0 {
+		oldF := win.SelectObject(hdc, win.HGDIOBJ(u.font))
+		win.SetBkMode(hdc, win.TRANSPARENT)
+		win.SetTextColor(hdc, win.RGB(chrome.TextR, chrome.TextG, chrome.TextB))
+		if s, err := syscall.UTF16FromString(g.label); err == nil && len(s) > 1 {
+			win.TextOut(hdc, g.x+cw/2, g.y+2, &s[0], int32(len(s)-1))
+		}
+		win.SelectObject(hdc, oldF)
 	}
 }
 

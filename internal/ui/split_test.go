@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/hinshun/vt10x"
@@ -465,5 +466,69 @@ func TestSplitGrowRotateSwap(t *testing.T) {
 	}
 	if p.root.a == nil || p.root.a.pane == nil || p.root.a.pane.id != 2 {
 		t.Fatalf("swap a=%v", p.root.a)
+	}
+}
+
+func TestZoomHidesOtherPanesUntilToggle(t *testing.T) {
+	a := &tab{id: 1, title: "alpha"}
+	b := &tab{id: 2, title: "beta"}
+	p := newPage(a)
+	if !p.splitFocused(splitVert, b) {
+		t.Fatal("split")
+	}
+	if p.toggleZoom() == false || p.zoomID != b.id || !p.zoomed() {
+		t.Fatalf("zoom id=%d zoomed=%v", p.zoomID, p.zoomed())
+	}
+	res := layoutPageZoom(p.root, 0, 0, 200, 100, 10, 20, p.focusID, p.zoomID)
+	if len(res.leaves) != 1 || !res.leaves[0].zoomed || res.leaves[0].pane.id != 2 {
+		t.Fatalf("zoomed leaves=%d", len(res.leaves))
+	}
+	if len(res.sashes) != 0 {
+		t.Fatalf("zoomed sashes=%d", len(res.sashes))
+	}
+	if res.leaves[0].w != 200 || res.leaves[0].titleH != 0 {
+		t.Fatalf("zoomed geom w=%d titleH=%d", res.leaves[0].w, res.leaves[0].titleH)
+	}
+	label := p.zoomBadgeLabel()
+	if !strings.Contains(label, "ZOOM") || !strings.Contains(label, "alpha") || !strings.Contains(label, "1 pane hidden") {
+		t.Fatalf("badge %q", label)
+	}
+	if p.zoomTabSuffix() == "" {
+		t.Fatal("tab suffix")
+	}
+	badge := placeZoomBadge(0, 0, 400, 10, 20, label)
+	if !badge.hit(badge.x+1, badge.y+1) || badge.hit(0, 0) {
+		t.Fatalf("badge geom %+v", badge)
+	}
+	if !p.focusZoomCycle(0) || p.zoomID != 1 || p.focusID != 1 {
+		t.Fatalf("cycle zoom=%d focus=%d", p.zoomID, p.focusID)
+	}
+	if !strings.Contains(p.zoomBadgeLabel(), "beta") {
+		t.Fatalf("badge after cycle %q", p.zoomBadgeLabel())
+	}
+	if !p.toggleZoom() || p.zoomID != 0 || p.zoomed() {
+		t.Fatal("restore")
+	}
+	res = layoutPageZoom(p.root, 0, 0, 200, 100, 10, 20, p.focusID, p.zoomID)
+	if len(res.leaves) != 2 || len(res.sashes) != 1 {
+		t.Fatalf("restored leaves=%d sashes=%d", len(res.leaves), len(res.sashes))
+	}
+
+	if !p.toggleZoom() {
+		t.Fatal("rezoom")
+	}
+	if !p.splitFocused(splitHoriz, &tab{id: 3, title: "gamma"}) || p.zoomID != 0 {
+		t.Fatal("split should leave zoom")
+	}
+	p.setFocus(1)
+	if !p.toggleZoom() || p.zoomID != 1 {
+		t.Fatal("zoom a")
+	}
+	if _, _, focus := p.removePane(1); p.zoomID != 0 || focus == 1 {
+		t.Fatalf("close zoomed zoom=%d focus=%d", p.zoomID, focus)
+	}
+	solo := newPage(&tab{id: 9})
+	if solo.toggleZoom() {
+		t.Fatal("solo zoom")
 	}
 }

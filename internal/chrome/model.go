@@ -218,6 +218,8 @@ const (
 	ActionFocusPaneRight
 	ActionFocusPaneUp
 	ActionFocusPaneDown
+	// ActionTogglePaneZoom fills the focused pane and hides the others, or restores them.
+	ActionTogglePaneZoom
 	// ActionOpenRenamePane / Tab: host opens OpenRenameMsg with a seed name.
 	ActionOpenRenamePane
 	ActionOpenRenameTab

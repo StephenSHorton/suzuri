@@ -73,6 +73,7 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		Command{ID: "focus_right", Title: "Focus pane right", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneRight},
 		Command{ID: "focus_up", Title: "Focus pane up", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneUp},
 		Command{ID: "focus_down", Title: "Focus pane down", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneDown},
+		Command{ID: "zoom_pane", Title: "Maximize pane", Desc: KeyCtrlShift("Enter") + " · hide other panes · again to restore · Panes", Category: "Panes", Action: ActionTogglePaneZoom},
 	)
 	return cmds
 }

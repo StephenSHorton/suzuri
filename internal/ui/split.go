@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
@@ -61,6 +62,9 @@ type page struct {
 	root *splitNode
 	// focusID is the focused leaf pane id (*tab.id).
 	focusID int
+	// zoomID, when non-zero, is the pane laid out alone across the page.
+	// Other leaves stay in the tree (and keep their PTY size) until zoom ends.
+	zoomID int
 	// userTitle is a manual strip name for this page. When set, the chrome tab
 	// label no longer follows panes (or stickyTitle).
 	userTitle string
@@ -105,7 +109,111 @@ func (p *page) setFocus(id int) bool {
 		return false
 	}
 	p.focusID = id
+	// While zoomed, focus and the filled pane stay the same so keyboard
+	// focus never lands on a leaf that is not on screen.
+	if p.zoomID != 0 {
+		p.zoomID = id
+	}
 	return true
+}
+
+// zoomed reports whether this page is showing one pane and hiding the rest.
+func (p *page) zoomed() bool {
+	return p != nil && p.zoomID != 0 && p.leafCount() > 1 && findPane(p.root, p.zoomID) != nil
+}
+
+// toggleZoom fills the focused pane and hides the others, or restores the split.
+// A solo page is a no-op (there is nothing to hide).
+func (p *page) toggleZoom() bool {
+	if p == nil || p.leafCount() < 2 {
+		if p != nil {
+			p.zoomID = 0
+		}
+		return false
+	}
+	focus := p.focused()
+	if focus == nil {
+		return false
+	}
+	if p.zoomID == focus.id {
+		p.zoomID = 0
+		return true
+	}
+	p.zoomID = focus.id
+	return true
+}
+
+// focusZoomCycle moves zoom to the previous (left/up) or next (right/down) leaf.
+// Normal geometry focus cannot see hidden panes, so zoom uses tree order.
+func (p *page) focusZoomCycle(dir int) bool {
+	if !p.zoomed() {
+		return false
+	}
+	leaves := p.leaves()
+	if len(leaves) < 2 {
+		return false
+	}
+	idx := 0
+	for i, t := range leaves {
+		if t != nil && t.id == p.focusID {
+			idx = i
+			break
+		}
+	}
+	delta := 1
+	if dir == 0 || dir == 2 {
+		delta = -1
+	}
+	n := len(leaves)
+	for step := 1; step <= n; step++ {
+		j := (idx + delta*step) % n
+		if j < 0 {
+			j += n
+		}
+		if leaves[j] != nil && leaves[j].id != p.focusID {
+			return p.setFocus(leaves[j].id)
+		}
+	}
+	return false
+}
+
+// zoomBadgeLabel is the overlay shown while zoomed: that you are zoomed, and
+// the names of the panes that are still running but hidden.
+func (p *page) zoomBadgeLabel() string {
+	if !p.zoomed() {
+		return ""
+	}
+	var names []string
+	for _, t := range p.leaves() {
+		if t == nil || t.id == p.zoomID {
+			continue
+		}
+		name := strings.TrimSpace(t.displayTitle())
+		if name == "" {
+			name = "shell"
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	noun := "pane"
+	if len(names) != 1 {
+		noun = "panes"
+	}
+	joined := strings.Join(names, ", ")
+	if rs := []rune(joined); len(rs) > 42 {
+		joined = string(rs[:41]) + "…"
+	}
+	return fmt.Sprintf("ZOOM · %d %s hidden · %s", len(names), noun, joined)
+}
+
+// zoomTabSuffix marks a strip tab whose page is currently zoomed.
+func (p *page) zoomTabSuffix() string {
+	if !p.zoomed() {
+		return ""
+	}
+	return " · ZOOM"
 }
 
 func (p *page) leaves() []*tab {
@@ -267,6 +375,8 @@ func (p *page) splitFocused(dir splitDir, newPane *tab) bool {
 	p.root = splitReplace(p.root, p.focusID, dir, newPane, &ok)
 	if ok {
 		p.focusID = newPane.id
+		// A new split is why you left a single view — show the panes.
+		p.zoomID = 0
 	} else if wasSolo {
 		// Split failed — don't leave a sticky from a no-op.
 		p.stickyTitle = ""
@@ -343,6 +453,10 @@ func (p *page) removePane(id int) (closed *tab, empty bool, newFocus int) {
 		p.focusID = pickFocusAfterClose(siblingFocus, leaves)
 	}
 	p.clearStickyTitleIfSolo()
+	// Closing the maximized pane (or the last sibling) puts the split back.
+	if p.zoomID != 0 && (p.leafCount() < 2 || findPane(p.root, p.zoomID) == nil) {
+		p.zoomID = 0
+	}
 	return removed, false, p.focusID
 }
 
@@ -491,6 +605,50 @@ type paneGeom struct {
 	barCols    int // wrap width for this pane's input bar
 	outerY     int32
 	outerH     int32
+	// zoomed is set when this leaf is the only one on screen because the page
+	// is maximized onto it. Other panes are omitted from the layout.
+	zoomed bool
+}
+
+// zoomBadgeGeom is the clickable "you are zoomed" pill in the shell's top-right.
+type zoomBadgeGeom struct {
+	x, y, w, h int32
+	label      string
+}
+
+func (g zoomBadgeGeom) hit(px, py int32) bool {
+	return g.w > 0 && g.h > 0 && px >= g.x && px < g.x+g.w && py >= g.y && py < g.y+g.h
+}
+
+// placeZoomBadge sits the label over the top-right of the shell. It does not
+// shrink the pane — the terminal stays full size and the pill draws on top.
+func placeZoomBadge(shellX, shellY, shellW, cw, ch int32, label string) zoomBadgeGeom {
+	if label == "" || cw < 1 || ch < 1 || shellW < cw*6 {
+		return zoomBadgeGeom{}
+	}
+	rs := []rune(label)
+	maxCols := int(shellW/cw) - 2
+	if maxCols < 8 {
+		return zoomBadgeGeom{}
+	}
+	if len(rs) > maxCols {
+		rs = append(rs[:maxCols-1], '…')
+		label = string(rs)
+	}
+	padX := cw / 2
+	if padX < 4 {
+		padX = 4
+	}
+	w := int32(len(rs))*cw + padX*2
+	if w > shellW {
+		w = shellW
+	}
+	x := shellX + shellW - w - 6
+	if x < shellX {
+		x = shellX
+	}
+	y := shellY + 6
+	return zoomBadgeGeom{x: x, y: y, w: w, h: ch + 4, label: label}
 }
 
 const (
@@ -568,12 +726,27 @@ type layoutResult struct {
 // Multi-leaf trees get a mini title row; each non-alt leaf gets its own input bar.
 // Sibling panes share a single sash (no double borders).
 func layoutPage(root *splitNode, shellX, shellY, shellW, shellH int32, cw, ch int32, focusID int) layoutResult {
+	return layoutPageZoom(root, shellX, shellY, shellW, shellH, cw, ch, focusID, 0)
+}
+
+// layoutPageZoom is layoutPage. zoomID non-zero and present among two or more
+// leaves lays that pane out as if it were alone (no title row, no sashes).
+// Hidden leaves are left out so callers do not resize their PTYs.
+func layoutPageZoom(root *splitNode, shellX, shellY, shellW, shellH int32, cw, ch int32, focusID, zoomID int) layoutResult {
 	res := layoutResult{shellX: shellX, shellY: shellY, shellW: shellW, shellH: shellH}
 	if root == nil || shellW < 1 || shellH < 1 || cw < 1 || ch < 1 {
 		return res
 	}
+	leaves := collectLeaves(root)
+	if zoomID != 0 && len(leaves) > 1 && findPane(root, zoomID) != nil {
+		layoutNode(leafNode(findPane(root, zoomID)), shellX, shellY, shellW, shellH, cw, ch, focusID, 0, &res)
+		if len(res.leaves) == 1 {
+			res.leaves[0].zoomed = true
+		}
+		return res
+	}
 	titleH := int32(0)
-	if len(collectLeaves(root)) > 1 {
+	if len(leaves) > 1 {
 		titleH = ch // one cell row for pane tab title
 	}
 	layoutNode(root, shellX, shellY, shellW, shellH, cw, ch, focusID, titleH, &res)

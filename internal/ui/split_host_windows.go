@@ -114,7 +114,7 @@ func (u *winUI) computeActiveLayout() []paneGeom {
 		clientH = int32(u.rows)*ch + u.chromePx + u.inputPx
 	}
 	sx, sy, sw, sh := u.shellRect(clientW, clientH)
-	res := layoutPage(p.root, sx, sy, sw, sh, cw, ch, p.focusID)
+	res := layoutPageZoom(p.root, sx, sy, sw, sh, cw, ch, p.focusID, p.zoomID)
 	u.lastPaneLayout = res.leaves
 	u.lastSashes = res.sashes
 	u.lastShell.x, u.lastShell.y, u.lastShell.w, u.lastShell.h = res.shellX, res.shellY, res.shellW, res.shellH
@@ -434,8 +434,14 @@ func (u *winUI) focusPaneDir(dir int) {
 	}
 	prev := u.activeTab()
 	prevAlt := prev != nil && prev.altScreen()
-	layouts := u.computeActiveLayout()
-	if !pg.focusNeighbor(dir, layouts) {
+	zoomed := pg.zoomed()
+	var moved bool
+	if zoomed {
+		moved = pg.focusZoomCycle(dir)
+	} else {
+		moved = pg.focusNeighbor(dir, u.computeActiveLayout())
+	}
+	if !moved {
 		return
 	}
 	u.selecting = false
@@ -443,14 +449,33 @@ func (u *winUI) focusPaneDir(dir int) {
 		setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
 	}
 	u.syncChrome()
-	// Reflow when Warp bar height would change (alt-screen focus).
+	u.markChromeDirty()
+	// Reflow when Warp bar height would change (alt-screen focus), or when
+	// zoom follows focus onto a different pane.
 	next := u.activeTab()
 	nextAlt := next != nil && next.altScreen()
-	if prevAlt != nextAlt {
+	if zoomed || prevAlt != nextAlt {
 		u.postLayoutSettle()
 	} else {
 		u.computeActiveLayout()
 	}
+	if u.hwnd != 0 {
+		u.requestPaint()
+	}
+}
+
+// togglePaneZoom maximizes the focused pane, or restores the split.
+func (u *winUI) togglePaneZoom() {
+	pg := u.activePage()
+	if pg == nil || !pg.toggleZoom() {
+		return
+	}
+	if t := u.activeTab(); t != nil {
+		setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
+	}
+	u.syncChrome()
+	u.markChromeDirty()
+	u.postLayoutSettle()
 	if u.hwnd != 0 {
 		u.requestPaint()
 	}
@@ -473,10 +498,11 @@ func (u *winUI) focusPaneByID(id int) bool {
 		setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
 	}
 	u.syncChrome()
+	u.markChromeDirty()
 	u.syncTermFocus()
 	next := u.activeTab()
 	nextAlt := next != nil && next.altScreen()
-	if prevAlt != nextAlt {
+	if pg.zoomed() || prevAlt != nextAlt {
 		u.postLayoutSettle()
 	} else {
 		u.computeActiveLayout()
