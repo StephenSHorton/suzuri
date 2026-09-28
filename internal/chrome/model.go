@@ -36,8 +36,6 @@ type Model struct {
 	Tabs   []Tab
 	Active int
 
-	Status string
-
 	PaletteOpen   bool
 	SettingsOpen  bool
 	ConfirmOpen   bool
@@ -129,7 +127,6 @@ type (
 		Tabs   []Tab
 		Active int
 	}
-	StatusMsg       string
 	OpenPaletteMsg  struct{}
 	ClosePaletteMsg struct{}
 	// OpenSettingsMsg opens the settings dialog with a snapshot of host config.
@@ -317,7 +314,6 @@ func New(width int) Model {
 	m := Model{
 		Width:     width,
 		Height:    TabStripRows(),
-		Status:    "",
 		lastCfg:   cfg,
 		notesSel:  -1,
 		notesHist: textedit.NewHistory(200),
@@ -361,8 +357,6 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		if m.Active >= len(m.Tabs) && len(m.Tabs) > 0 {
 			m.Active = len(m.Tabs) - 1
 		}
-	case StatusMsg:
-		m.Status = string(msg)
 	case SyncCaffeineMsg:
 		m.CaffeineOn = msg.Active
 		m.CaffeineHint = strings.TrimSpace(msg.Hint)
@@ -849,16 +843,13 @@ func tabLabel(t Tab, i int, maxRunes int) string {
 // TabStripRows is a single calm row (no 3-line rounded tab boxes).
 func TabStripRows() int { return 1 }
 
-// StripView is tab strip (+ optional status) — always used for chrome strip paint.
+// StripView is the tab strip. Host feedback uses desktop notice cards.
 func (m Model) StripView() string {
 	w := m.Width
 	if w < 20 {
 		w = 20
 	}
 	tabs, _, _, _, _, _ := m.layoutTabCards(w)
-	if m.showStatus() {
-		return tabs + "\n" + m.renderStatus(w)
-	}
 	return tabs
 }
 
@@ -1136,15 +1127,6 @@ func (m Model) renderNoticeList(innerW int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) showStatus() bool {
-	s := strings.TrimSpace(m.Status)
-	return s != "" && s != "ready"
-}
-
-func (m Model) renderStatus(w int) string {
-	return styleStatus().Width(w).Render(m.Status)
-}
-
 // TabBounds matches layoutTabCards.
 func (m Model) TabBounds() [][2]int {
 	w := m.Width
@@ -1197,11 +1179,7 @@ func (m Model) BellBounds() [2]int {
 
 // RowCount is strip rows only (overlay floats over the shell).
 func (m Model) RowCount() int {
-	n := TabStripRows()
-	if m.showStatus() {
-		n++
-	}
-	return n
+	return TabStripRows()
 }
 
 // OverlayRowCount estimates rows for the floating card paint.

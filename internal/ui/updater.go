@@ -87,7 +87,7 @@ func markUpdateLater() {
 
 // updateCheckHooks are UI callbacks (must be goroutine-safe where noted).
 type updateCheckHooks struct {
-	// toast posts a status line (UI-thread safe, e.g. postToast).
+	// toast raises a notice card (UI-thread safe, e.g. postToast).
 	toast func(string)
 	// offerUpdate opens the confirm modal (must run on UI thread or post to it).
 	offerUpdate func(version string)
@@ -215,7 +215,8 @@ func applyPendingUpdate(toast func(string)) {
 var reofferUpdate func(version string, toast func(string))
 
 // scheduleStartupUpdateCheck runs at most once per process after the window is up.
-// It does not toast into the chrome strip. The offer callback raises the prompt.
+// quiet skips routine status cards. Failures still raise a card.
+// The offer callback raises the update card.
 func scheduleStartupUpdateCheck(toast func(string), offerUpdate func(version string)) {
 	startupCheckOnce.Do(func() {
 		go func() {

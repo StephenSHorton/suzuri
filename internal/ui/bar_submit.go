@@ -50,7 +50,7 @@ func sendBarPayload(t *tab, payload string) {
 }
 
 // submitBarLine is the shared Warp-bar Enter path (macOS + Windows).
-// toast may be nil. Returns a short status toast when a line was queued.
+// toast may be nil. It raises a notice card when a line was queued.
 func submitBarLine(t *tab, line string, cols int, toast func(string)) {
 	if t == nil {
 		return

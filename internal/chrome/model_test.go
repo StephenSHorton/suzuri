@@ -6,7 +6,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
@@ -267,30 +266,13 @@ func TestTransferPanelCopyKeyAndClick(t *testing.T) {
 	}
 }
 
-func TestStatusToastRow(t *testing.T) {
+func TestStripStaysOneRow(t *testing.T) {
 	m := New(80)
 	if m.RowCount() != 1 {
-		t.Fatalf("idle rows=%d want 1", m.RowCount())
+		t.Fatalf("rows=%d want 1", m.RowCount())
 	}
-	if m.showStatus() {
-		t.Fatal("empty status should not show")
-	}
-	r := m.UpdateChrome(StatusMsg("opened link"))
-	m = r.Model
-	if !m.showStatus() || m.Status != "opened link" {
-		t.Fatalf("status=%q show=%v", m.Status, m.showStatus())
-	}
-	if m.RowCount() != 2 {
-		t.Fatalf("toast rows=%d want 2", m.RowCount())
-	}
-	strip := m.StripView()
-	if !strings.Contains(ansi.Strip(strip), "opened link") {
-		t.Fatalf("strip missing toast: %q", ansi.Strip(strip))
-	}
-	r = m.UpdateChrome(StatusMsg(""))
-	m = r.Model
-	if m.showStatus() || m.RowCount() != 1 {
-		t.Fatalf("cleared status still showing rows=%d", m.RowCount())
+	if strings.Contains(m.StripView(), "\n") {
+		t.Fatal("strip has a second row")
 	}
 }
 

@@ -195,11 +195,10 @@ type winUI struct {
 	lastBackspace time.Time // rate-limit BS so a queued KEYDOWN burst cannot wipe the line
 	selecting     bool
 	// shellMulti / notesMulti: double-click word, triple-click line selection.
-	shellMulti  multiClick
-	notesMulti  multiClick
-	statusUntil time.Time // clear toast Status after this (zero = none)
-	showSplash  bool      // open first-run card after window is ready
-	spinTick    uint64    // blink-loop counter for tab braille spinner
+	shellMulti multiClick
+	notesMulti multiClick
+	showSplash bool   // open first-run card after window is ready
+	spinTick   uint64 // blink-loop counter for tab braille spinner
 	// modalImage: full-window image viewer (click path / Open Image / image block).
 	modalImage *tabImage
 	// Startup rain: spawn until matrixIntroSpawnEnd, then wind-down until clear.
@@ -805,15 +804,11 @@ func (u *winUI) finishConfigSave() {
 		u.metricW, u.metricH = 0, 0
 	}
 	u.saveNeedFontLayout = false
-	// Reflow for toast status row and any font metric change.
 	u.postLayoutSettle()
 
-	// Status line without a second nested invalidate storm.
 	func() {
 		defer applog.Recover("finishConfigSave.toast", false)
-		u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("settings saved")).Model
-		u.statusUntil = time.Now().Add(2500 * time.Millisecond)
-		u.markChromeDirty()
+		u.toast("settings saved")
 	}()
 	if u.hwnd != 0 {
 		win.InvalidateRect(u.hwnd, nil, false)
@@ -822,30 +817,13 @@ func (u *winUI) finishConfigSave() {
 	applog.Sync()
 }
 
-// toast sets a short-lived status line under the tab strip (UI thread only).
+// toast raises a bottom-left notice card (UI thread only).
 func (u *winUI) toast(msg string) {
 	if u == nil {
 		return
 	}
-	msg = strings.TrimSpace(msg)
-	prevRows := u.chrome.RowCount()
-	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg(msg)).Model
-	// Update results need a bit longer to read than split toasts.
-	dur := 2500 * time.Millisecond
-	if strings.Contains(msg, "update") || strings.Contains(msg, "up to date") ||
-		strings.Contains(msg, "installing") || strings.Contains(msg, "opened") {
-		dur = 4 * time.Second
-	}
-	u.statusUntil = time.Now().Add(dur)
-	u.markChromeDirty()
-	// Extra strip row for status — settle layout so toast has its own band.
-	if u.chrome.RowCount() != prevRows && u.hwnd != 0 {
-		u.postLayoutSettle()
-	}
-	if u.hwnd != 0 {
-		win.InvalidateRect(u.hwnd, nil, false)
-	}
-	log.Debug("toast", "msg", msg, "rows", u.chrome.RowCount())
+	postHostToast(msg)
+	log.Debug("toast", "msg", msg)
 }
 
 // postToast queues a toast for the UI thread (safe from background goroutines).
@@ -911,27 +889,6 @@ func (u *winUI) startUpdateCheck() {
 		toast:       u.postToast,
 		offerUpdate: u.postUpdateOffer,
 	})
-}
-
-func (u *winUI) clearToastIfDue() {
-	if u.statusUntil.IsZero() {
-		return
-	}
-	if time.Now().Before(u.statusUntil) {
-		return
-	}
-	u.statusUntil = time.Time{}
-	prevRows := u.chrome.RowCount()
-	u.chrome = u.chrome.UpdateChrome(chrome.StatusMsg("")).Model
-	u.markChromeDirty()
-	// Toast band changes chrome height → shell rows; settle via the coalesced
-	// path (defers under dual Grok I/O instead of ResizePseudoConsole mid-stream).
-	if u.chrome.RowCount() != prevRows && u.hwnd != 0 {
-		u.postLayoutSettle()
-	}
-	if u.hwnd != 0 {
-		win.InvalidateRect(u.hwnd, nil, false)
-	}
 }
 
 func (u *winUI) chromePixelHeight() int32 {
@@ -2189,7 +2146,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			// Darwin drains AI control every ebiten Update. Windows only used
 			// to drain on MCP posts, so GET /v1/layout from a pane 504'd.
 			u.drainAI()
-			u.clearToastIfDue()
 			// Inject async clipboard paste results (image dump runs off-thread).
 			u.drainPendingPaste()
 			for _, t := range u.allPanes() {

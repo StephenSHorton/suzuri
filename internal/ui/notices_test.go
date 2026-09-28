@@ -93,6 +93,60 @@ func TestUpdateNoticeStaysUntilDismiss(t *testing.T) {
 	}
 }
 
+func TestHostToastReplacesFamilyAndClassifies(t *testing.T) {
+	noticeMu.Lock()
+	noticeLive = nil
+	noticeHist = nil
+	noticeMu.Unlock()
+
+	postHostToast("caffeine on · sleep prevented")
+	postHostToast("caffeine off")
+	if noticeCount() != 1 {
+		t.Fatalf("caffeine stacked, count %d", noticeCount())
+	}
+	noticeMu.Lock()
+	got := noticeLive[0].deskNote
+	noticeMu.Unlock()
+	if got.ID != "host-caffeine" || got.Title != "caffeine off" || got.Sound != "info" {
+		t.Fatalf("caffeine card %+v", got)
+	}
+
+	postHostToast("split failed")
+	postHostToast("font 14px")
+	postHostToast("clipboard empty")
+	if noticeCount() != 4 {
+		t.Fatalf("count %d", noticeCount())
+	}
+	noticeMu.Lock()
+	var failed, font, empty deskNote
+	for _, n := range noticeLive {
+		switch n.ID {
+		case "host-layout":
+			failed = n.deskNote
+		case "host-font":
+			font = n.deskNote
+		case "":
+			if n.Title == "clipboard empty" {
+				empty = n.deskNote
+			}
+		}
+	}
+	noticeMu.Unlock()
+	if failed.Sound != "error" || failed.Title != "split failed" {
+		t.Fatalf("split %+v", failed)
+	}
+	if font.Sound != "info" || font.ID != "host-font" {
+		t.Fatalf("font %+v", font)
+	}
+	if empty.Sound != "warn" {
+		t.Fatalf("empty %+v", empty)
+	}
+	postHostToast("")
+	if noticeCount() != 4 {
+		t.Fatal("empty toast posted")
+	}
+}
+
 func TestNoticeOccasionAndSound(t *testing.T) {
 	noticeMu.Lock()
 	noticeLive = nil

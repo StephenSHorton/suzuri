@@ -68,6 +68,70 @@ type playedNotice struct {
 	ID    string
 }
 
+// postHostToast raises a bottom-left card for host feedback that used to
+// sit on the tab-strip status row (caffeine, splits, copy, updates, …).
+// Repeated messages in the same family replace one card instead of stacking.
+func postHostToast(msg string) {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return
+	}
+	n := deskNote{
+		ID:    hostToastID(msg),
+		Title: msg,
+		Sound: hostToastSound(msg),
+	}
+	if hostToastLong(msg) {
+		n.Expire = 4 * time.Second
+	}
+	postDeskNote(n, false, true)
+}
+
+func hostToastID(msg string) string {
+	s := strings.ToLower(msg)
+	switch {
+	case strings.HasPrefix(s, "caffeine"):
+		return "host-caffeine"
+	case strings.HasPrefix(s, "font "):
+		return "host-font"
+	case strings.HasPrefix(s, "queued"), strings.HasPrefix(s, "ran queued"), strings.HasPrefix(s, "cleared "):
+		return "host-queue"
+	case strings.Contains(s, "update"), strings.Contains(s, "up to date"), strings.HasPrefix(s, "installing"),
+		strings.Contains(s, "available"):
+		return "host-update"
+	case strings.HasPrefix(s, "split "), strings.HasPrefix(s, "fork "),
+		strings.HasSuffix(s, " panes"), strings.HasSuffix(s, " tabs"), s == "1 tab",
+		s == "tab limit", strings.HasPrefix(s, "max "):
+		return "host-layout"
+	case strings.HasPrefix(s, "transfer"), strings.HasPrefix(s, "send:"), strings.HasPrefix(s, "receive:"),
+		strings.HasPrefix(s, "ticket "):
+		return "host-transfer"
+	default:
+		return ""
+	}
+}
+
+func hostToastSound(msg string) string {
+	s := strings.ToLower(msg)
+	switch {
+	case strings.Contains(s, "fail"), strings.Contains(s, "not found"), strings.Contains(s, "unavailable"),
+		strings.Contains(s, "not allowlisted"), strings.Contains(s, "missing session"):
+		return "error"
+	case strings.Contains(s, "ignored"), strings.Contains(s, "limit"), strings.HasPrefix(s, "max "),
+		strings.Contains(s, "empty"), strings.Contains(s, "deferred"), strings.Contains(s, "already off"),
+		strings.Contains(s, "fallback"):
+		return "warn"
+	default:
+		return "info"
+	}
+}
+
+func hostToastLong(msg string) bool {
+	s := strings.ToLower(msg)
+	return strings.Contains(s, "update") || strings.Contains(s, "up to date") ||
+		strings.Contains(s, "installing") || strings.Contains(s, "opened")
+}
+
 func postDeskNote(n deskNote, focused, visible bool) {
 	switch n.Occasion {
 	case "unfocused":

@@ -505,14 +505,6 @@ func styleGap() lipgloss.Style {
 	return lipgloss.NewStyle().Background(colBar)
 }
 
-func styleStatus() lipgloss.Style {
-	// Use soft (not dim) so toasts stay readable on high-contrast / dark bars.
-	return lipgloss.NewStyle().
-		Foreground(colSoft).
-		Background(colBar).
-		Padding(0, 1)
-}
-
 // styleDialogView = Crush s.Dialog.View + Quit.Frame padding.
 func styleDialogView() lipgloss.Style {
 	return lipgloss.NewStyle().
