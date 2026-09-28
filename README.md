@@ -27,7 +27,7 @@ Most “pretty terminals” are either:
 |------|------------|
 | **Host** | Native window (Win32 / macOS), ConPTY or POSIX PTY shells, scrollback, selection, copy/paste |
 | **Chrome** | Tabs, command palette (`Ctrl+K`), settings (`Ctrl+,`), help, themes |
-| **Panes** | Split right/down, shared sashes, per-pane Warp bars, focus with ⌘⌥+arrows (macOS) / Alt+arrows (Windows) |
+| **Panes** | Split right/down, shared sashes, per-pane Warp bars, focus with ⌘⌥+arrows (macOS) / Alt+arrows (Windows). ⌘⇧Enter (Ctrl+Shift+Enter on Windows) maximizes the focused pane and hides the others; press again to restore. A corner badge names the hidden panes. |
 | **Input** | Warp-style bottom bar — local edit, multiline, history, echo filter |
 | **Look** | 16 themes (Inkstone, Charmtone, Nord, Dracula, Tokyo Night, …) · bundled Gohu mono · app icon · box-drawing |
 | **Polish** | Intros (matrix, ripple, ink wash, CRT) · shell ambient (rain, grain, waves, fireflies, CRT) · 猫咪 dim under settings · floating chrome |

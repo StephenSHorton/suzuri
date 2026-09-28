@@ -191,6 +191,7 @@ func helpSectionsRight(colW int) []helpSectionBlock {
 			rows: [][2]string{
 				{KeyCtrlShift("D"), "Split right"},
 				{KeyCtrlShift("E"), "Split down"},
+				{KeyCtrlShift("Enter"), "Maximize pane"},
 				{focusPanes, "Focus pane"},
 				{wordJump, "Word jump"},
 				{lineEnds, "Line ends"},
@@ -259,7 +260,8 @@ func helpRow(inner int, key, desc string) string {
 	// Wider key column when using "Ctrl+Shift+…" ASCII forms.
 	kw := 10
 	if !keyFancyOn() {
-		kw = 14
+		// Cmd+Shift+Enter / Ctrl+Shift+Enter.
+		kw = 16
 	}
 	// Two-column help is narrower — keep key column proportional.
 	if inner < 30 {

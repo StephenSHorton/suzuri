@@ -144,6 +144,8 @@ type macUI struct {
 	lastPaneLayout []paneGeom
 	lastSashes     []sashGeom
 	lastShell      struct{ x, y, w, h int32 }
+	// zoomBadge is the "ZOOM · N hidden" pill. Empty when the page is not zoomed.
+	zoomBadge zoomBadgeGeom
 	// sashDrag is non-nil while the user is dragging a shared pane divider.
 	sashDrag *sashGeom
 
@@ -378,6 +380,7 @@ func (u *macUI) syncChrome() {
 		if title == "" {
 			title = fmt.Sprintf("shell %d", i+1)
 		}
+		title += p.zoomTabSuffix()
 		focus := p.focused()
 		alive := p.anyAlive()
 		alt := false
@@ -900,7 +903,7 @@ func (u *macUI) applyClientSize(w, h int32) {
 		if pg == nil || pg.root == nil {
 			continue
 		}
-		res := layoutPage(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID)
+		res := layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomID)
 		if pg == u.activePage() {
 			u.lastPaneLayout = res.leaves
 			u.lastSashes = res.sashes
@@ -1299,6 +1302,8 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		u.focusPaneDir(2)
 	case chrome.ActionFocusPaneDown:
 		u.focusPaneDir(3)
+	case chrome.ActionTogglePaneZoom:
+		u.togglePaneZoom()
 	case chrome.ActionNextTab:
 		u.switchTab(1)
 	case chrome.ActionPrevTab:
@@ -1982,6 +1987,12 @@ func (u *macUI) handleKeys() {
 	}
 	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyE) {
 		u.splitActive(splitHoriz)
+		return
+	}
+	// Maximize the focused pane / restore the split. Host-owned even while
+	// Grok has the keyboard, so the chord never becomes a newline or submit.
+	if ctrl && shift && !alt && (inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeyKPEnter)) {
+		u.togglePaneZoom()
 		return
 	}
 	// ⌘W closes the focused pane (Ctrl+W only outside alt-screen — Grok uses
@@ -3069,6 +3080,10 @@ func (u *macUI) handleMouse() {
 		}
 		// Sash drag start (multi-pane).
 		if !u.chrome.OverlayOpen() {
+			if u.zoomBadge.hit(int32(mx), int32(my)) {
+				u.togglePaneZoom()
+				return
+			}
 			layouts := u.computeActiveLayout()
 			if si := hitSash(u.lastSashes, int32(mx), int32(my)); si >= 0 && si < len(u.lastSashes) {
 				s := u.lastSashes[si]
@@ -4188,6 +4203,12 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		}
 	}
 
+	if !dimModal {
+		u.paintZoomBadge()
+	} else {
+		u.zoomBadge = zoomBadgeGeom{}
+	}
+
 	// Re-paint overlay on top of pane content (paintFrame already drew it once
 	// before multi-pane grids; draw again so cards float above shells).
 	if len(layouts) > 1 && len(overlay) > 0 {
@@ -4324,6 +4345,47 @@ func (u *macUI) paintNotesCaret(dst *image.RGBA, overlay [][]cellPix, padY, shel
 		return
 	}
 	u.painter.paintInputCaret(dst, x, y, style, a)
+}
+
+// paintZoomBadge draws the maximized-pane cue over the top-right of the shell.
+// The pane underneath stays full size; the pill names the hidden panes.
+func (u *macUI) paintZoomBadge() {
+	u.zoomBadge = zoomBadgeGeom{}
+	if u == nil || u.painter == nil || u.fb == nil {
+		return
+	}
+	pg := u.activePage()
+	if pg == nil {
+		return
+	}
+	label := pg.zoomBadgeLabel()
+	if label == "" {
+		return
+	}
+	cw, ch := u.metricW, u.metricH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	g := placeZoomBadge(u.lastShell.x, u.lastShell.y, u.lastShell.w, cw, ch, label)
+	if g.w < 1 {
+		return
+	}
+	u.zoomBadge = g
+	fillRectRGBA(u.fb, int(g.x), int(g.y), int(g.w), int(g.h), chrome.PanelR, chrome.PanelG, chrome.PanelB)
+	ar, ag, ab := chrome.PrimR, chrome.PrimG, chrome.PrimB
+	if ar == 0 && ag == 0 && ab == 0 {
+		ar, ag, ab = 0, 230, 118
+	}
+	fillRectRGBA(u.fb, int(g.x), int(g.y), int(g.w), 2, ar, ag, ab)
+	x := int(g.x) + int(cw)/2
+	y := int(g.y) + 2
+	for _, r := range []rune(g.label) {
+		u.painter.drawGlyph(u.fb, x, y, r, chrome.TextR, chrome.TextG, chrome.TextB)
+		x += int(cw)
+	}
 }
 
 // paintPaneIntoFB draws one leaf's VT grid (+ images) into the framebuffer.
