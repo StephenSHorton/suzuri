@@ -227,6 +227,12 @@ func (p *page) leafCount() int {
 	return len(p.leaves())
 }
 
+// hidesStripBusy is true when this page already paints a spinner on each
+// pane title, so the strip tab should not repeat it.
+func (p *page) hidesStripBusy() bool {
+	return p != nil && p.leafCount() > 1 && !p.zoomed()
+}
+
 func (p *page) anyBusy() bool {
 	for _, t := range p.leaves() {
 		if t != nil && t.busy() {

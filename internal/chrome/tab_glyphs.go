@@ -3,6 +3,7 @@ package chrome
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Tab strip state glyphs. Prefer braille (the classic CLI spinner family);
@@ -84,6 +85,24 @@ func TabSpinnerFrame() string {
 	}
 	i := spinFrame.Load() % uint64(len(g.Spin))
 	return g.Spin[i]
+}
+
+// DotsFrame is the cli-spinners "dots" frame for this instant (80ms).
+// Pane titles and background tabs share it so the two marks stay in step.
+func DotsFrame() string {
+	n := len(brailleSpinFrames)
+	if n == 0 {
+		return ""
+	}
+	i := time.Now().UnixMilli() / 80
+	if i < 0 {
+		i = 0
+	}
+	s := brailleSpinFrames[int(i%int64(n))]
+	if len(s) > 0 && s[len(s)-1] == ' ' {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // TabBusyMark is the pane-title activity prefix. Uses the font-probed pack

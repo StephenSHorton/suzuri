@@ -457,6 +457,15 @@ func (u *winUI) anyTabBusy() bool {
 	return false
 }
 
+func (u *winUI) chromeStripBusy() bool {
+	for _, t := range u.chrome.Tabs {
+		if t.Busy && !t.HideBusy {
+			return true
+		}
+	}
+	return false
+}
+
 func (u *winUI) syncChrome() {
 	// One chrome strip entry per page (split panes share a strip tab).
 	src := u.pages
@@ -505,6 +514,7 @@ func (u *winUI) syncChrome() {
 			Alive:     alive,
 			AltScreen: alt,
 			Busy:      busy,
+			HideBusy:  i == u.active && p.hidesStripBusy(),
 		}
 	}
 	// Only invalidate the chrome cell cache when something visible changed.
@@ -518,7 +528,7 @@ func (u *winUI) syncChrome() {
 			prev, next := u.chrome.Tabs[i], tabs[i]
 			if prev.Title != next.Title || prev.ID != next.ID ||
 				prev.Alive != next.Alive || prev.AltScreen != next.AltScreen ||
-				prev.Busy != next.Busy {
+				prev.Busy != next.Busy || prev.HideBusy != next.HideBusy {
 				dirty = true
 				break
 			}
@@ -2192,7 +2202,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			}
 			// Animate braille (or geometric) busy marks on the tab strip.
 			u.spinTick++
-			if u.anyTabBusy() && u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
+			if (u.anyTabBusy() || u.chromeStripBusy()) && u.spinTick%uint64(tabSpinEveryNTicks) == 0 {
 				chrome.AdvanceTabSpinner()
 				u.chromeDirty = true
 				u.syncChrome()

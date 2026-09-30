@@ -26,6 +26,9 @@ type Tab struct {
 	Alive     bool // PTY still live
 	AltScreen bool // fullscreen TUI (Grok, vim, less, …)
 	Busy      bool // activity spinner (PTY I/O and/or OSC title spinner)
+	// HideBusy suppresses the strip spinner. Set on the focused page when
+	// its pane titles already show the same mark.
+	HideBusy bool
 }
 
 // Model is the Bubble Tea model for host chrome.
@@ -773,14 +776,13 @@ func tabStateGlyph(t Tab) string {
 	if !t.Alive {
 		return g.Dead
 	}
-	if t.AltScreen {
-		if t.Busy {
-			return busyGlyph(g, true)
-		}
-		return g.AltIdle
+	// Background tabs show the dots spinner when any pane in the page is
+	// working. The focused page skips it: split titles already carry the mark.
+	if t.Busy && !t.HideBusy {
+		return DotsFrame() + " "
 	}
-	if t.Busy {
-		return busyGlyph(g, false)
+	if t.AltScreen && !t.Busy {
+		return g.AltIdle
 	}
 	return ""
 }

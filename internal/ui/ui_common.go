@@ -5,6 +5,8 @@ package ui
 import (
 	"strings"
 	"time"
+
+	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
 
 const (
@@ -107,34 +109,8 @@ func idleLampAt(x, y, w, h int32) idleLamp {
 	return idleLamp{cx: cx, cy: cy, r: r, ok: true}
 }
 
-// paneBusyFrames is cli-spinners "dots" (sindresorhus, MIT): the classic
-// braille cycle, one column, 80ms per frame. The OSC title spinner is
-// stripped before display, so the pane title draws this mark itself.
-var paneBusyFrames = []string{
-	"⠋",
-	"⠙",
-	"⠹",
-	"⠸",
-	"⠼",
-	"⠴",
-	"⠦",
-	"⠧",
-	"⠇",
-	"⠏",
-}
-
-const paneBusyFrameMS = 80
-
 func paneBusyMark() string {
-	n := len(paneBusyFrames)
-	if n == 0 {
-		return ""
-	}
-	i := time.Now().UnixMilli() / paneBusyFrameMS
-	if i < 0 {
-		i = 0
-	}
-	return paneBusyFrames[int(i%int64(n))]
+	return chrome.DotsFrame()
 }
 
 // idleLampReserve is how many pixels of the title row the ring occupies,

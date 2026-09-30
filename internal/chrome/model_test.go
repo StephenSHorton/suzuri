@@ -755,10 +755,7 @@ func TestWideRuneAlignment(t *testing.T) {
 func TestTabStateGlyphs(t *testing.T) {
 	SetTabStateGlyphs(TabGlyphsBraille)
 	t.Cleanup(func() { SetTabStateGlyphs(TabGlyphsASCII) })
-	// Reset spin to a known frame.
-	for spinFrame.Load()%uint64(len(brailleSpinFrames)) != 0 {
-		AdvanceTabSpinner()
-	}
+	dots := DotsFrame() + " "
 	cases := []struct {
 		name string
 		tab  Tab
@@ -766,19 +763,16 @@ func TestTabStateGlyphs(t *testing.T) {
 	}{
 		{"dead", Tab{Alive: false}, "⠁ "},
 		{"idle shell", Tab{Alive: true}, ""},
-		{"busy shell", Tab{Alive: true, Busy: true}, "⠋ "}, // first spin frame
+		{"busy shell", Tab{Alive: true, Busy: true}, dots},
 		{"alt idle", Tab{Alive: true, AltScreen: true}, "⠿ "},
-		{"alt busy", Tab{Alive: true, AltScreen: true, Busy: true}, "⠋ "},
+		{"alt busy", Tab{Alive: true, AltScreen: true, Busy: true}, dots},
+		{"focused split hides spinner", Tab{Alive: true, Busy: true, HideBusy: true}, ""},
+		{"focused split alt hides spinner", Tab{Alive: true, AltScreen: true, Busy: true, HideBusy: true}, ""},
 	}
 	for _, tc := range cases {
 		if g := tabStateGlyph(tc.tab); g != tc.want {
 			t.Fatalf("%s: got %q want %q", tc.name, g, tc.want)
 		}
-	}
-	// Animation advances.
-	AdvanceTabSpinner()
-	if g := tabStateGlyph(Tab{Alive: true, Busy: true}); g != "⠙ " {
-		t.Fatalf("after advance: %q", g)
 	}
 }
 

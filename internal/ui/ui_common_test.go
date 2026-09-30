@@ -49,16 +49,11 @@ func TestRestingMeansAliveAndQuiet(t *testing.T) {
 
 func TestPaneBusyFramesAreDots(t *testing.T) {
 	want := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	if len(paneBusyFrames) != len(want) {
-		t.Fatalf("len %d", len(paneBusyFrames))
-	}
-	for i, f := range paneBusyFrames {
-		if f != want[i] || len([]rune(f)) != 1 {
-			t.Fatalf("frame %d = %q", i, f)
-		}
-	}
 	got := paneBusyMark()
-	for _, f := range paneBusyFrames {
+	if len([]rune(got)) != 1 {
+		t.Fatalf("frame %q is not one column", got)
+	}
+	for _, f := range want {
 		if got == f {
 			return
 		}
