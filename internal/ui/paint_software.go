@@ -895,19 +895,38 @@ func (p *softwarePainter) paintPaneTitles(dst *image.RGBA, layouts []paneGeom, c
 		if g.titleH < 1 || g.pane == nil {
 			continue
 		}
-		// Focused: slightly brighter bar.
+		resting := g.pane.resting()
+		busy := g.pane.alive.Load() && !resting
+		lamp := idleLamp{}
+		if resting {
+			lamp = idleLampAt(g.x, g.titleY, g.w, g.titleH)
+		}
+		// Focused stays lit so keyboard focus is obvious. An unfocused
+		// resting pane sinks toward the void so a working neighbor reads
+		// brighter without a second frame around the cells.
 		br, bg, bb := chrome.BarR, chrome.BarG, chrome.BarB
 		if g.focused {
 			br = blendByte(br, chrome.PrimR, 0.25)
 			bg = blendByte(bg, chrome.PrimG, 0.25)
 			bb = blendByte(bb, chrome.PrimB, 0.25)
+		} else if resting {
+			br = blendByte(br, chrome.VoidR, 0.62)
+			bg = blendByte(bg, chrome.VoidG, 0.62)
+			bb = blendByte(bb, chrome.VoidB, 0.62)
 		}
 		fillRectRGBA(dst, int(g.x), int(g.titleY), int(g.w), int(g.titleH), br, bg, bb)
 		title := g.pane.displayTitle()
 		if title == "" {
 			title = "shell"
 		}
-		maxCols := int(g.w)/cw - 2
+		reserve := 8
+		if busy {
+			reserve += (len([]rune(paneBusyMark())) + 1) * cw
+		}
+		if lamp.ok {
+			reserve += idleLampReserve(lamp)
+		}
+		maxCols := (int(g.w) - reserve) / cw
 		if maxCols < 1 {
 			maxCols = 1
 		}
@@ -915,12 +934,50 @@ func (p *softwarePainter) paintPaneTitles(dst *image.RGBA, layouts []paneGeom, c
 		fr, fg, fb := chrome.SoftR, chrome.SoftG, chrome.SoftB
 		if g.focused {
 			fr, fg, fb = chrome.TextR, chrome.TextG, chrome.TextB
+		} else if resting {
+			fr, fg, fb = chrome.MuteR, chrome.MuteG, chrome.MuteB
 		}
 		x := int(g.x) + 4
 		y := int(g.titleY)
+		if busy {
+			for _, r := range paneBusyMark() {
+				p.drawGlyph(dst, x, y, r, chrome.PrimR, chrome.PrimG, chrome.PrimB)
+				x += cw
+			}
+			x += cw
+		}
 		for _, r := range []rune(label) {
 			p.drawGlyph(dst, x, y, r, fr, fg, fb)
 			x += cw
+		}
+		if lamp.ok {
+			// Unfocused: full accent, so a waiting pane is easy to pick out.
+			// Focused: a quieter mix, so the ring doesn't sit on the text you're reading.
+			lr, lg, lb := chrome.PrimR, chrome.PrimG, chrome.PrimB
+			if g.focused {
+				lr = blendByte(chrome.MuteR, chrome.PrimR, 0.45)
+				lg = blendByte(chrome.MuteG, chrome.PrimG, 0.45)
+				lb = blendByte(chrome.MuteB, chrome.PrimB, 0.45)
+			}
+			paintIdleRing(dst, lamp, lr, lg, lb)
+		}
+	}
+}
+
+// paintIdleRing draws a 1px ring. Hollow, so it reads as waiting rather than a badge.
+func paintIdleRing(dst *image.RGBA, lamp idleLamp, r, g, b byte) {
+	if dst == nil || !lamp.ok {
+		return
+	}
+	rad := lamp.r
+	inner2 := (rad - 1) * (rad - 1)
+	outer2 := rad * rad
+	for dy := -rad; dy <= rad; dy++ {
+		for dx := -rad; dx <= rad; dx++ {
+			d2 := dx*dx + dy*dy
+			if d2 <= outer2 && d2 > inner2 {
+				setRGB(dst, lamp.cx+dx, lamp.cy+dy, r, g, b)
+			}
 		}
 	}
 }

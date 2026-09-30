@@ -4709,9 +4709,19 @@ func (u *winUI) paintPaneTitles(hdc win.HDC, layouts []paneGeom) {
 		if g.titleH < 1 {
 			continue
 		}
+		resting := g.pane != nil && g.pane.resting()
+		busy := g.pane != nil && g.pane.alive.Load() && !resting
+		lamp := idleLamp{}
+		if resting {
+			lamp = idleLampAt(g.x, g.titleY, g.w, g.titleH)
+		}
 		br, bg, bb := chrome.BarR, chrome.BarG, chrome.BarB
 		if g.focused {
 			br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
+		} else if resting {
+			br = blendByte(br, chrome.VoidR, 0.62)
+			bg = blendByte(bg, chrome.VoidG, 0.62)
+			bb = blendByte(bb, chrome.VoidB, 0.62)
 		}
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(br, bg, bb)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
@@ -4742,11 +4752,19 @@ func (u *winUI) paintPaneTitles(hdc win.HDC, layouts []paneGeom) {
 			} else {
 				title = fmt.Sprintf("shell %d", g.pane.id+1)
 			}
-			if g.pane.busy() {
-				title = chrome.TabBusyMark(g.pane.altScreen()) + title
-			}
 		}
-		maxChars := int(g.w/cw) - 2
+		mark := ""
+		if busy {
+			mark = paneBusyMark()
+		}
+		reserveCols := 2
+		if mark != "" {
+			reserveCols += len([]rune(mark)) + 1
+		}
+		if lamp.ok {
+			reserveCols += (idleLampReserve(lamp) + int(cw) - 1) / int(cw)
+		}
+		maxChars := int(g.w/cw) - reserveCols
 		if maxChars < 1 {
 			maxChars = 1
 		}
@@ -4761,16 +4779,56 @@ func (u *winUI) paintPaneTitles(hdc win.HDC, layouts []paneGeom) {
 		tr, tg, tb := chrome.SoftR, chrome.SoftG, chrome.SoftB
 		if g.focused {
 			tr, tg, tb = chrome.TextR, chrome.TextG, chrome.TextB
+		} else if resting {
+			tr, tg, tb = chrome.MuteR, chrome.MuteG, chrome.MuteB
 		}
 		if u.font != 0 {
 			oldF := win.SelectObject(hdc, win.HGDIOBJ(u.font))
 			win.SetBkMode(hdc, win.TRANSPARENT)
+			x := g.x
+			if mark != "" {
+				win.SetTextColor(hdc, win.RGB(chrome.PrimR, chrome.PrimG, chrome.PrimB))
+				if s, err := syscall.UTF16FromString(" " + mark); err == nil && len(s) > 1 {
+					win.TextOut(hdc, x, g.titleY, &s[0], int32(len(s)-1))
+				}
+				x += cw * int32(len([]rune(" "+mark)))
+			}
 			win.SetTextColor(hdc, win.RGB(tr, tg, tb))
 			if s, err := syscall.UTF16FromString(" " + title); err == nil && len(s) > 1 {
-				win.TextOut(hdc, g.x, g.titleY, &s[0], int32(len(s)-1))
+				win.TextOut(hdc, x, g.titleY, &s[0], int32(len(s)-1))
 			}
 			win.SelectObject(hdc, oldF)
 		}
+		if lamp.ok {
+			lr, lg, lb := chrome.PrimR, chrome.PrimG, chrome.PrimB
+			if g.focused {
+				lr = blendByte(chrome.MuteR, chrome.PrimR, 0.45)
+				lg = blendByte(chrome.MuteG, chrome.PrimG, 0.45)
+				lb = blendByte(chrome.MuteB, chrome.PrimB, 0.45)
+			}
+			paintIdleRingWin(hdc, lamp, lr, lg, lb)
+		}
+	}
+}
+
+func paintIdleRingWin(hdc win.HDC, lamp idleLamp, r, g, b byte) {
+	if hdc == 0 || !lamp.ok {
+		return
+	}
+	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(r, g, b)}
+	pen := win.ExtCreatePen(win.PS_GEOMETRIC|win.PS_SOLID, 1, &lb, 0, nil)
+	if pen == 0 {
+		return
+	}
+	defer win.DeleteObject(win.HGDIOBJ(pen))
+	oldPen := win.SelectObject(hdc, win.HGDIOBJ(pen))
+	oldBr := win.SelectObject(hdc, win.GetStockObject(win.NULL_BRUSH))
+	win.Ellipse(hdc,
+		int32(lamp.cx-lamp.r), int32(lamp.cy-lamp.r),
+		int32(lamp.cx+lamp.r+1), int32(lamp.cy+lamp.r+1))
+	win.SelectObject(hdc, oldPen)
+	if oldBr != 0 {
+		win.SelectObject(hdc, oldBr)
 	}
 }
 

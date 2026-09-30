@@ -98,6 +98,12 @@ type tab struct {
 	barAwaiting bool // true after a bar command until shell looks idle
 }
 
+// resting is the pane-idle cue: the session is up, and neither a title
+// spinner nor recent PTY output says it is working. A dead pane is not resting.
+func (t *tab) resting() bool {
+	return t != nil && t.alive.Load() && !t.busy()
+}
+
 // busy is true when this tab should show an activity spinner:
 //   - OSC title has a braille/spinner prefix (Grok and similar TUIs), or
 //   - recent PTY output (shell commands / short jobs).

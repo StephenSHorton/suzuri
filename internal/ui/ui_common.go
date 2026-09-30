@@ -31,6 +31,9 @@ const (
 	// Advance braille spinner every N blink ticks (40ms → ~80ms/frame).
 	tabSpinEveryNTicks = 2
 
+	// idleLampInset is the gap between the rest ring and the title's right edge.
+	idleLampInset = 10
+
 	// conPtyIOQuiet: do not ResizePseudoConsole while a pane has recent I/O.
 	// Dual alt-screen Grok + mid-stream resize hard-crashes the Windows host
 	// (no Go panic). Title spinners alone must NOT block forever — only bytes.
@@ -76,6 +79,71 @@ func shortTitle(s string) string {
 		return string(rs[:maxStoredTitleRunes-1]) + "…"
 	}
 	return s
+}
+
+// idleLamp is a small ring drawn in a split pane's title when that pane is resting.
+type idleLamp struct {
+	cx, cy, r int
+	ok        bool
+}
+
+// idleLampAt places the rest ring inside a title strip. Too-small strips skip it.
+func idleLampAt(x, y, w, h int32) idleLamp {
+	if w < 48 || h < 8 {
+		return idleLamp{}
+	}
+	r := int(h) / 5
+	if r < 3 {
+		r = 3
+	}
+	if r > 5 {
+		r = 5
+	}
+	cx := int(x+w) - r - idleLampInset
+	cy := int(y) + int(h)/2
+	if cx-r < int(x)+4 || cy-r < int(y) || cy+r >= int(y+h) {
+		return idleLamp{}
+	}
+	return idleLamp{cx: cx, cy: cy, r: r, ok: true}
+}
+
+// paneBusyFrames is cli-spinners "dots" (sindresorhus, MIT): the classic
+// braille cycle, one column, 80ms per frame. The OSC title spinner is
+// stripped before display, so the pane title draws this mark itself.
+var paneBusyFrames = []string{
+	"⠋",
+	"⠙",
+	"⠹",
+	"⠸",
+	"⠼",
+	"⠴",
+	"⠦",
+	"⠧",
+	"⠇",
+	"⠏",
+}
+
+const paneBusyFrameMS = 80
+
+func paneBusyMark() string {
+	n := len(paneBusyFrames)
+	if n == 0 {
+		return ""
+	}
+	i := time.Now().UnixMilli() / paneBusyFrameMS
+	if i < 0 {
+		i = 0
+	}
+	return paneBusyFrames[int(i%int64(n))]
+}
+
+// idleLampReserve is how many pixels of the title row the ring occupies,
+// including a gap so the label does not run into it.
+func idleLampReserve(lamp idleLamp) int {
+	if !lamp.ok {
+		return 0
+	}
+	return lamp.r*2 + idleLampInset + 6
 }
 
 // titleReportsBusy is true when an app embeds a CLI spinner in its OSC title
