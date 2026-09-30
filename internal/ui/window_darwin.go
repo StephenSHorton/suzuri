@@ -160,6 +160,7 @@ type macUI struct {
 	inputPx  int32
 
 	blinkStart    time.Time
+	stripDots     string // last dots frame painted into a background tab
 	alive         atomic.Bool
 	ready         atomic.Bool
 	lastBackspace time.Time
@@ -391,6 +392,7 @@ func (u *macUI) syncChrome() {
 		tabs[i] = chrome.Tab{
 			ID: p.id, Title: title, Alive: alive,
 			AltScreen: alt, Busy: busy,
+			HideBusy: i == u.active && p.hidesStripBusy(),
 		}
 	}
 	dirty := u.chromeDirty ||
@@ -402,7 +404,7 @@ func (u *macUI) syncChrome() {
 			prev, next := u.chrome.Tabs[i], tabs[i]
 			if prev.Title != next.Title || prev.ID != next.ID ||
 				prev.Alive != next.Alive || prev.AltScreen != next.AltScreen ||
-				prev.Busy != next.Busy {
+				prev.Busy != next.Busy || prev.HideBusy != next.HideBusy {
 				dirty = true
 				break
 			}
@@ -745,7 +747,45 @@ drained:
 	u.handleTextInput()
 	// File drops: only consume when Send-file prompt is open (see AcceptsFileDrop).
 	u.pollTransferFileDrop()
+	u.refreshBackgroundTabSpinner()
 	return nil
+}
+
+// refreshBackgroundTabSpinner keeps the strip dots moving, and drops them
+// once every pane in a background tab is idle. The focused split page does
+// not show the strip mark; its pane titles do.
+func (u *macUI) refreshBackgroundTabSpinner() {
+	if u == nil {
+		return
+	}
+	frame := chrome.DotsFrame()
+	if frame == u.stripDots {
+		return
+	}
+	u.stripDots = frame
+	if !u.anyPageBusy() && !u.chromeShowsBusy() {
+		return
+	}
+	u.syncChrome()
+	u.chromeDirty = true
+}
+
+func (u *macUI) anyPageBusy() bool {
+	for _, p := range u.pages {
+		if p != nil && p.anyBusy() {
+			return true
+		}
+	}
+	return false
+}
+
+func (u *macUI) chromeShowsBusy() bool {
+	for _, t := range u.chrome.Tabs {
+		if t.Busy && !t.HideBusy {
+			return true
+		}
+	}
+	return false
 }
 
 // pollTransferFileDrop reads ebiten.DroppedFiles only while the send prompt
@@ -805,7 +845,7 @@ func (u *macUI) handleResize() {
 	// Soft magnetic snap only while windowed. Skip maximize/fullscreen:
 	// SetWindowSize during fullscreen mutates the restored windowed size
 	// (ebiten docs), and content size is already applied in Layout.
-	if ebiten.IsFullscreen() || ebiten.IsWindowMaximized() {
+	if ebiten.IsFullscreen() || ebiten.IsWindowMaximized() || frameInFullscreen() {
 		return
 	}
 	w, h := ebiten.WindowSize()
@@ -1783,6 +1823,13 @@ func (u *macUI) applyConfigSaveQuiet(cfg config.Config) {
 // Position origin is the upper-left of the window's current monitor (GLFW).
 func (u *macUI) captureWindowPlacement() (config.WindowPlacement, bool) {
 	if u == nil || !u.ready.Load() {
+		return config.WindowPlacement{}, false
+	}
+	// Native fullscreen reports the display size. Keep the last windowed frame.
+	if frameInFullscreen() {
+		if u.lastPlacement.Valid() {
+			return u.lastPlacement, true
+		}
 		return config.WindowPlacement{}, false
 	}
 	// After RunGame returns the window is gone — prefer last in-loop capture.
@@ -2956,6 +3003,12 @@ func (u *macUI) persistNotes() {
 }
 
 func (u *macUI) handleMouse() {
+	// The title-strip monitor owns the traffic lights and asks us to quit
+	// from the AppKit thread, where the window may already be fullscreen.
+	if takeFrameClose() {
+		u.quit = true
+		return
+	}
 	_, wheelY := ebiten.Wheel()
 	if wheelY != 0 {
 		// Workspace owns the wheel while open — do not scroll the shell/Grok under it.
@@ -3165,7 +3218,15 @@ func (u *macUI) handleMouse() {
 					case chrome.FrameMinimize:
 						ebiten.MinimizeWindow()
 					case chrome.FrameZoom:
-						toggleFrameZoom()
+						// Option-click is the macOS zoom (fill below the menu bar).
+						// A plain click enters the fullscreen Space. The title-strip
+						// monitor usually swallows the click and does this itself;
+						// a second call in the same turn is coalesced.
+						if !frameInFullscreen() && ebiten.IsKeyPressed(ebiten.KeyAlt) {
+							toggleFrameZoom()
+						} else {
+							toggleFrameFullscreen()
+						}
 					}
 					return
 				}
@@ -3379,7 +3440,13 @@ func (u *macUI) paintMacLights(dst *image.RGBA) {
 		case 1:
 			fillRectRGBA(dst, cx-3, cy, 7, 2, ink.R, ink.G, ink.B)
 		default:
-			drawZoomMark(dst, cx, cy, ink)
+			if frameInFullscreen() {
+				drawFullscreenMark(dst, cx, cy, ink, true)
+			} else if ebiten.IsKeyPressed(ebiten.KeyAlt) {
+				drawZoomMark(dst, cx, cy, ink)
+			} else {
+				drawFullscreenMark(dst, cx, cy, ink, false)
+			}
 		}
 	}
 }
@@ -3392,13 +3459,42 @@ func drawCross(dst *image.RGBA, cx, cy, r int, c color.RGBA) {
 }
 
 func drawZoomMark(dst *image.RGBA, cx, cy int, c color.RGBA) {
-	// Two opposing corners, the mark macOS uses for zoom.
+	// Two opposing corners, the mark macOS uses for zoom (Option-click).
 	for i := 0; i < 4; i++ {
 		dstSet(dst, cx-4+i, cy-3, c)
 		dstSet(dst, cx-4, cy-3+i, c)
 		dstSet(dst, cx+4-i, cy+3, c)
 		dstSet(dst, cx+4, cy+3-i, c)
 	}
+}
+
+func drawFullscreenMark(dst *image.RGBA, cx, cy int, c color.RGBA, exit bool) {
+	if exit {
+		drawDiagArrow(dst, cx+4, cy-4, cx+1, cy-1, c)
+		drawDiagArrow(dst, cx-4, cy+4, cx-1, cy+1, c)
+		return
+	}
+	drawDiagArrow(dst, cx+1, cy-1, cx+4, cy-4, c)
+	drawDiagArrow(dst, cx-1, cy+1, cx-4, cy+4, c)
+}
+
+func drawDiagArrow(dst *image.RGBA, x0, y0, x1, y1 int, c color.RGBA) {
+	n := x1 - x0
+	if n < 0 {
+		n = -n
+	}
+	sx, sy := 1, 1
+	if x1 < x0 {
+		sx = -1
+	}
+	if y1 < y0 {
+		sy = -1
+	}
+	for i := 0; i <= n; i++ {
+		dstSet(dst, x0+sx*i, y0+sy*i, c)
+	}
+	dstSet(dst, x1-sx, y1, c)
+	dstSet(dst, x1, y1-sy, c)
 }
 
 func dstSet(dst *image.RGBA, x, y int, c color.RGBA) {
@@ -3487,6 +3583,9 @@ func (u *macUI) publishTitleHits() {
 }
 
 func (u *macUI) beginFrameDrag() {
+	if frameInFullscreen() {
+		return
+	}
 	now := time.Now()
 	sx, sy := screenCursor()
 	if !u.frameDrag.lastHit.IsZero() && now.Sub(u.frameDrag.lastHit) < 350*time.Millisecond {
@@ -3503,7 +3602,7 @@ func (u *macUI) beginFrameDrag() {
 }
 
 func (u *macUI) dragFrame() {
-	if !u.frameDrag.on || ebiten.IsWindowMaximized() {
+	if !u.frameDrag.on || ebiten.IsWindowMaximized() || frameInFullscreen() {
 		return
 	}
 	sx, sy := screenCursor()

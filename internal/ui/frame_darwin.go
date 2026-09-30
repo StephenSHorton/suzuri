@@ -8,7 +8,10 @@ void suzuri_round_main(void);
 void suzuri_screen_cursor(int *x, int *y);
 void suzuri_set_title_hits(int titleH, const int *rects, int n);
 void suzuri_toggle_zoom_main(void);
+void suzuri_toggle_fullscreen_main(void);
 int suzuri_hover_light(void);
+int suzuri_in_fullscreen(void);
+int suzuri_take_close(void);
 */
 import "C"
 
@@ -30,7 +33,13 @@ func setTitleHits(titleH int, rects []int) {
 
 func toggleFrameZoom() { C.suzuri_toggle_zoom_main() }
 
+func toggleFrameFullscreen() { C.suzuri_toggle_fullscreen_main() }
+
 func hoveredTrafficLight() int { return int(C.suzuri_hover_light()) }
+
+func frameInFullscreen() bool { return C.suzuri_in_fullscreen() != 0 }
+
+func takeFrameClose() bool { return C.suzuri_take_close() != 0 }
 
 func screenCursor() (x, y int) {
 	var sx, sy C.int

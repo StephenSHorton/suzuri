@@ -1,15 +1,32 @@
 #import <AppKit/AppKit.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
+#include <stdatomic.h>
 #include <string.h>
 
 static void suzuri_toggle_zoom(NSWindow *w);
+static void restoreBorderless(NSWindow *w);
+static BOOL framesClose(NSRect a, NSRect b);
+void suzuri_toggle_fullscreen(NSWindow *w);
 
 static int gTitleH;
 static int gHoverLight = -1;
 static int gBlock[64 * 4];
 static int gBlockN;
 static id gTitleMonitor;
+
+// gInFullscreen covers the whole transition, so layout does not resize the
+// window mid-animation. gFSBusy ignores a second toggle until the animation ends.
+static atomic_int gInFullscreen;
+static atomic_int gFSBusy;
+static atomic_int gFSScheduled;
+static atomic_int gRequestClose;
+static int gFSSawWill;
+static int gFSNotes;
+
+@interface GLFWWindow : NSWindow
+@end
 
 static BOOL titleBlocked(NSWindow *w, NSPoint winPt) {
 	CGFloat H = w.contentView.bounds.size.height;
@@ -43,10 +60,137 @@ static void roundContent(NSView *v, CGFloat radius) {
 	if (layer == nil) return;
 	// cornerRadius clips. A shape mask on CAMetalLayer faults the renderer.
 	layer.cornerRadius = radius;
-	layer.masksToBounds = YES;
+	// A clipped layer makes the fullscreen transition fail and fall back.
+	layer.masksToBounds = radius > 0;
 }
 
 static int gRoundQueued;
+
+// A borderless window (style mask without NSWindowStyleMaskTitled) ignores
+// toggleFullScreen:. macOS only starts the fullscreen Space when the window is
+// titled and resizable. FullSizeContentView keeps our painted title strip
+// under a transparent title bar instead of inset below a native one.
+// Electron and Chromium do the same dance in windowWillEnterFullScreen, then
+// put the borderless mask back after the Space exits.
+static void hideStandardButtons(NSWindow *w) {
+	NSWindowButton types[3] = {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton};
+	for (int i = 0; i < 3; i++) {
+		NSButton *b = [w standardWindowButton:types[i]];
+		b.hidden = YES;
+	}
+}
+
+static void applyChromeLook(NSWindow *w) {
+	w.titlebarAppearsTransparent = YES;
+	w.titleVisibility = NSWindowTitleHidden;
+	if ([w respondsToSelector:@selector(setTitlebarSeparatorStyle:)]) {
+		w.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
+	}
+	w.opaque = NO;
+	w.backgroundColor = NSColor.clearColor;
+	w.hasShadow = YES;
+	[w makeFirstResponder:w.contentView];
+}
+
+static void prepareEnterFullscreen(NSWindow *w) {
+	NSWindowCollectionBehavior behavior = w.collectionBehavior;
+	behavior |= NSWindowCollectionBehaviorFullScreenPrimary | NSWindowCollectionBehaviorManaged;
+	behavior &= ~NSWindowCollectionBehaviorFullScreenNone;
+	w.collectionBehavior = behavior;
+
+	// A clear, non-opaque window is rejected by the fullscreen Space animation.
+	w.opaque = YES;
+	w.backgroundColor = NSColor.blackColor;
+	applyChromeLook(w);
+	w.opaque = YES;
+	w.backgroundColor = NSColor.blackColor;
+	NSRect before = w.frame;
+	NSUInteger mask = w.styleMask;
+	mask |= NSWindowStyleMaskTitled | NSWindowStyleMaskResizable |
+		NSWindowStyleMaskFullSizeContentView | NSWindowStyleMaskMiniaturizable;
+	w.styleMask = mask;
+	if (!framesClose(w.frame, before)) {
+		[w setFrame:before display:YES animate:NO];
+	}
+	applyChromeLook(w);
+	w.opaque = YES;
+	w.backgroundColor = NSColor.blackColor;
+	hideStandardButtons(w);
+	roundContent(w.contentView, 0);
+}
+
+static void restoreBorderless(NSWindow *w) {
+	if (w == nil) return;
+	NSRect before = w.frame;
+	// Keep Resizable. GLFW added it for the custom frame, and dropping it
+	// clears fullscreen eligibility on the next click.
+	w.styleMask = NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
+	if (!framesClose(w.frame, before)) {
+		[w setFrame:before display:YES animate:NO];
+	}
+	applyChromeLook(w);
+	roundContent(w.contentView, 16);
+	atomic_store(&gInFullscreen, 0);
+	atomic_store(&gFSBusy, 0);
+}
+
+static void suzuri_fullscreen_failed(id self, SEL cmd, NSWindow *window) {
+	(void)self;
+	(void)cmd;
+	restoreBorderless(window);
+}
+
+static void noteFullscreen(NSWindow *w) {
+	NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+	[nc addObserverForName:NSWindowWillEnterFullScreenNotification object:w queue:nil usingBlock:^(NSNotification *note) {
+		gFSSawWill = 1;
+		atomic_store(&gInFullscreen, 1);
+		NSWindow *win = note.object;
+		hideStandardButtons(win);
+		roundContent(win.contentView, 0);
+	}];
+	[nc addObserverForName:NSWindowDidEnterFullScreenNotification object:w queue:nil usingBlock:^(NSNotification *note) {
+		atomic_store(&gFSBusy, 0);
+		hideStandardButtons(note.object);
+		roundContent(((NSWindow *)note.object).contentView, 0);
+	}];
+	[nc addObserverForName:NSWindowWillExitFullScreenNotification object:w queue:nil usingBlock:^(NSNotification *note) {
+		(void)note;
+		gFSSawWill = 1;
+	}];
+	[nc addObserverForName:NSWindowDidExitFullScreenNotification object:w queue:nil usingBlock:^(NSNotification *note) {
+		restoreBorderless(note.object);
+	}];
+	// Failure is a delegate callback, not a notification. Ebiten's delegate
+	// does not implement it, so add the callback once on that class.
+	Class delegateClass = NSClassFromString(@"EbitengineWindowDelegate");
+	if (delegateClass != Nil) {
+		class_addMethod(delegateClass, @selector(windowDidFailToEnterFullScreen:), (IMP)suzuri_fullscreen_failed, "v@:@");
+	}
+}
+
+@implementation GLFWWindow (SuzuriFullScreen)
+
+- (void)toggleFullScreen:(id)sender {
+	if (atomic_load(&gFSBusy)) return;
+	atomic_store(&gFSBusy, 1);
+	BOOL entering = (self.styleMask & NSWindowStyleMaskFullScreen) == 0;
+	if (entering) prepareEnterFullscreen(self);
+	gFSSawWill = 0;
+	Method m = class_getInstanceMethod([NSWindow class], @selector(toggleFullScreen:));
+	void (*imp)(id, SEL, id) = (void (*)(id, SEL, id))method_getImplementation(m);
+	imp(self, @selector(toggleFullScreen:), sender);
+	if (gFSSawWill) return;
+	// toggleFullScreen: is synchronous about will-enter. No callback means the
+	// call was ignored; put the borderless mask back.
+	atomic_store(&gFSBusy, 0);
+	if (entering && (self.styleMask & NSWindowStyleMaskTitled) != 0 &&
+		(self.styleMask & NSWindowStyleMaskFullScreen) == 0) {
+		restoreBorderless(self);
+	}
+}
+
+@end
 
 static const CGFloat kResizeEdge = 6;
 
@@ -130,6 +274,10 @@ void suzuri_round_main(void) {
 		w.opaque = NO;
 		w.backgroundColor = NSColor.clearColor;
 		roundContent(w.contentView, 16);
+		if (!gFSNotes) {
+			gFSNotes = 1;
+			noteFullscreen(w);
+		}
 		if (gTitleMonitor != nil) return;
 	gTitleMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskMouseMoved | NSEventMaskMouseExited
 		handler:^NSEvent *(NSEvent *e) {
@@ -144,24 +292,49 @@ void suzuri_round_main(void) {
 				for (int i = 0; i < 3 && i < gBlockN; i++) {
 					int bx = gBlock[i * 4], by = gBlock[i * 4 + 1];
 					int bw = gBlock[i * 4 + 2], bh = gBlock[i * 4 + 3];
-					if (x >= bx && x < bx + bw && yTop >= by && yTop < by + bh) {
+					// 4pt slop matches hitMacLight in the Go host.
+					if (x >= bx - 4 && x < bx + bw + 4 && yTop >= by - 4 && yTop < by + bh + 4) {
 						gHoverLight = i;
 						break;
 					}
 				}
 			}
+			BOOL fullscreen = atomic_load(&gInFullscreen) || (win.styleMask & NSWindowStyleMaskFullScreen);
+			if (e.window == win && e.type == NSEventTypeLeftMouseDown && gHoverLight >= 0) {
+				switch (gHoverLight) {
+				case 0:
+					atomic_store(&gRequestClose, 1);
+					return nil;
+				case 1:
+					[win miniaturize:nil];
+					return nil;
+				default:
+					if (!fullscreen && (e.modifierFlags & NSEventModifierFlagOption)) {
+						suzuri_toggle_zoom(win);
+						return nil;
+					}
+					suzuri_toggle_fullscreen(win);
+					return nil;
+				}
+			}
 			if (e.window == win) {
 				int edge = edgeAt(win, p);
-				if (e.type == NSEventTypeMouseMoved || e.type == NSEventTypeMouseExited) {
+				if (!fullscreen && (e.type == NSEventTypeMouseMoved || e.type == NSEventTypeMouseExited)) {
 					if (edge) [edgeCursor(edge) set];
 					return e;
 				}
-				if (e.type == NSEventTypeLeftMouseDown && edge) {
+				if (!fullscreen && e.type == NSEventTypeLeftMouseDown && edge) {
 					trackResize(win, edge);
 					return nil;
 				}
 			}
 			if (e.type != NSEventTypeLeftMouseDown) return e;
+			if (fullscreen) {
+				// The temporary title bar sits above the content view and would
+				// treat an empty-strip click as a native zoom or drag.
+				if (e.window == win && gTitleH > 0 && !titleBlocked(win, p)) return nil;
+				return e;
+			}
 			if (e.window != win || gTitleH < 1) return e;
 			if (titleBlocked(win, p)) return e;
 			if (e.clickCount >= 2) {
@@ -201,7 +374,8 @@ static BOOL framesClose(NSRect a, NSRect b) {
 // NSWindow zoom: on a borderless window treats every call as "grow" and the
 // second one uses the full screen, which slides under the menu bar.
 void suzuri_toggle_zoom(NSWindow *w) {
-	if (w == nil) return;
+	if (w == nil || atomic_load(&gInFullscreen)) return;
+	if (w.styleMask & NSWindowStyleMaskFullScreen) return;
 	NSRect vis = w.screen.visibleFrame;
 	if (framesClose(w.frame, vis) && gUnzoomed.size.width > 40 && gUnzoomed.size.height > 40) {
 		[w setFrame:gUnzoomed display:YES animate:YES];
@@ -215,7 +389,41 @@ void suzuri_toggle_zoom_main(void) {
 	suzuri_toggle_zoom(NSApp.mainWindow ?: NSApp.keyWindow);
 }
 
+// One scheduled toggle. A second click in the same turn, or a Go fallback
+// for a click the monitor also saw, does not start a second animation.
+void suzuri_toggle_fullscreen(NSWindow *w) {
+	if (w == nil) return;
+	if (atomic_exchange(&gFSScheduled, 1)) return;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (atomic_load(&gFSBusy)) {
+			atomic_store(&gFSScheduled, 0);
+			return;
+		}
+		// Hold layout still as soon as the transition is requested. Will-enter
+		// confirms it; a rejected toggle clears it again.
+		if ((w.styleMask & NSWindowStyleMaskFullScreen) == 0) {
+			atomic_store(&gInFullscreen, 1);
+		}
+		atomic_store(&gFSScheduled, 0);
+		[w toggleFullScreen:nil];
+		// A non-GLFW window never hits the override, so the optimistic flag
+		// would otherwise stick and freeze resizing.
+		if (atomic_load(&gInFullscreen) && !gFSSawWill && !atomic_load(&gFSBusy) &&
+			(w.styleMask & NSWindowStyleMaskFullScreen) == 0) {
+			atomic_store(&gInFullscreen, 0);
+		}
+	});
+}
+
+void suzuri_toggle_fullscreen_main(void) {
+	suzuri_toggle_fullscreen(hostWindow());
+}
+
 int suzuri_hover_light(void) { return gHoverLight; }
+
+int suzuri_in_fullscreen(void) { return atomic_load(&gInFullscreen); }
+
+int suzuri_take_close(void) { return atomic_exchange(&gRequestClose, 0); }
 
 void suzuri_screen_cursor(int *x, int *y) {
 	NSPoint p = [NSEvent mouseLocation];
