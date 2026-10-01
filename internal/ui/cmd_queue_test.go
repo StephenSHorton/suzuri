@@ -4,6 +4,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/hinshun/vt10x"
 )
 
 func TestBarShouldQueueWhileAwaiting(t *testing.T) {
@@ -15,14 +17,22 @@ func TestBarShouldQueueWhileAwaiting(t *testing.T) {
 	if !tab.barShouldQueue() {
 		t.Fatal("expected queue after bar send")
 	}
-	// Simulate quiet past idle window.
+	if !tab.programOwnsKeys() {
+		t.Fatal("running command should own the keyboard")
+	}
+	// A prompt waiting for input is quiet. That must not hand the bar back.
 	tab.lastIOUnixNano.Store(time.Now().Add(-2 * time.Second).UnixNano())
 	tab.maybeReleaseBarAwaiting()
-	if tab.barAwaiting {
-		t.Fatal("expected barAwaiting cleared after quiet")
+	if !tab.barAwaiting || !tab.programOwnsKeys() {
+		t.Fatal("quiet wait should keep the command on the keyboard")
+	}
+	tab.markShellIdle()
+	tab.lastIOUnixNano.Store(time.Now().Add(-2 * time.Second).UnixNano())
+	if tab.barAwaiting || tab.programOwnsKeys() {
+		t.Fatal("prompt return should restore the bar")
 	}
 	if tab.barShouldQueue() {
-		t.Fatal("quiet tab should not queue")
+		t.Fatal("idle tab should not queue")
 	}
 }
 
@@ -38,8 +48,8 @@ func TestCmdQueueFIFO(t *testing.T) {
 	if _, ok := tab.popCmdQueue(); ok {
 		t.Fatal("should not pop while awaiting")
 	}
+	tab.markShellIdle()
 	tab.lastIOUnixNano.Store(time.Now().Add(-2 * time.Second).UnixNano())
-	tab.maybeReleaseBarAwaiting()
 	cmd, ok := tab.popCmdQueue()
 	if !ok || cmd.display != "a" {
 		t.Fatalf("first=%v ok=%v", cmd, ok)
@@ -48,6 +58,80 @@ func TestCmdQueueFIFO(t *testing.T) {
 	cmd, ok = tab.popCmdQueue()
 	if !ok || cmd.display != "b" {
 		t.Fatalf("second=%v ok=%v", cmd, ok)
+	}
+}
+
+func TestCwdRedrawKeepsKeyboard(t *testing.T) {
+	zshTab := &tab{alive: atomicBool(true), shell: "/bin/zsh", cwd: "/tmp"}
+	zshTab.markBarCommandSent()
+	zshTab.setCwd("/tmp")
+	if !zshTab.programOwnsKeys() {
+		t.Fatal("cwd redraw took the keyboard back")
+	}
+	cmdTab := &tab{alive: atomicBool(true), shell: `C:\Windows\System32\cmd.exe`, cwd: `C:\`}
+	cmdTab.markBarCommandSent()
+	cmdTab.setCwd(`C:\`)
+	if cmdTab.programOwnsKeys() {
+		t.Fatal("cmd.exe cwd OSC should return the keyboard")
+	}
+}
+
+func TestFinishOSCReturnsKeyboard(t *testing.T) {
+	tab := &tab{alive: atomicBool(true), shell: "/bin/zsh"}
+	tab.term = vt10x.New(vt10x.WithSize(20, 5))
+	tab.markBarCommandSent()
+	tab.pullPTY([]byte("\x1b]7879;done;0;bHM=\x07"), false, true)
+	if tab.programOwnsKeys() {
+		t.Fatal("finish OSC left the command on the keyboard")
+	}
+}
+
+func TestCommandStartHoldsKeyboardUntilDone(t *testing.T) {
+	tab := &tab{alive: atomicBool(true), shell: "/bin/zsh", cwd: "/tmp"}
+	tab.term = vt10x.New(vt10x.WithSize(40, 8))
+	tab.markBarCommandSent()
+	// Paste off then on is a zle redraw, not the prompt returning.
+	tab.pullPTY([]byte("\x1b[?2004l\x1b[?2004h"), false, true)
+	tab.setCwd("/tmp")
+	if !tab.programOwnsKeys() {
+		t.Fatal("redraw took the keyboard")
+	}
+	// Start then done, and nothing else holds the terminal: the command
+	// finished in this chunk (ls). The bar comes back.
+	tab.pullPTY([]byte("\x1b]7879;start\x07\x1b]7879;done;0;bHM=\x07"), false, true)
+	if tab.foreground || tab.programOwnsKeys() {
+		t.Fatal("finished command kept the keyboard")
+	}
+	// The same bytes while a child still has the tty stay with the program.
+	tab.markBarCommandSent()
+	tab.forceChild = true
+	tab.pullPTY([]byte("\x1b]7879;start\x07\x1b]7879;done;0;bHM=\x07"), false, true)
+	if !tab.programOwnsKeys() {
+		t.Fatal("child process group handed the bar back")
+	}
+	tab.forceChild = false
+	if tab.programOwnsKeys() {
+		t.Fatal("shell process group kept the keyboard")
+	}
+	tab.markBarCommandSent()
+	// A finish for the previous line and a new start in one chunk stays with the program.
+	tab.pullPTY([]byte("\x1b]7879;done;0;bHM=\x07\x1b]7879;start\x07"), false, true)
+	if !tab.programOwnsKeys() {
+		t.Fatal("start after done handed the bar back")
+	}
+	tab.pullPTY([]byte("\x1b]7879;done;0;bHM=\x07\x1b[?2004h"), false, true)
+	if tab.foreground || tab.barAwaiting || tab.programOwnsKeys() {
+		t.Fatal("done should return the bar")
+	}
+}
+
+func TestDiscardCmdQueueKeepsKeyboard(t *testing.T) {
+	tab := &tab{alive: atomicBool(true)}
+	tab.markBarCommandSent()
+	tab.enqueueBarCmd("next", "next")
+	n := tab.discardCmdQueue()
+	if n != 1 || tab.queueLen() != 0 || !tab.programOwnsKeys() {
+		t.Fatalf("n=%d len=%d owns=%v", n, tab.queueLen(), tab.programOwnsKeys())
 	}
 }
 

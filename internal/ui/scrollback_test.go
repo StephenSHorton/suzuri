@@ -7,6 +7,34 @@ import (
 	"github.com/hinshun/vt10x"
 )
 
+func TestLiveCursorViewFollowsPromptLine(t *testing.T) {
+	term := vt10x.New(vt10x.WithSize(20, 6))
+	if _, err := term.Write([]byte("Password:")); err != nil {
+		t.Fatal(err)
+	}
+	sb := newScrollback()
+	for i := 0; i < 20; i++ {
+		sb.push("history line")
+	}
+	sb.stickBottom()
+	cur := term.Cursor()
+	x, y, ok := sb.liveCursorView(term, 10)
+	if !ok {
+		t.Fatal("prompt cursor scrolled out of the block")
+	}
+	if x != cur.X {
+		t.Fatalf("x=%d want %d", x, cur.X)
+	}
+	grid := sb.viewCells(term, 10)
+	if y < 0 || y >= len(grid) || grid[y][0].Ch != 'P' {
+		got := rune(0)
+		if y >= 0 && y < len(grid) {
+			got = grid[y][0].Ch
+		}
+		t.Fatalf("viewport row %d starts with %q, want P", y, string(got))
+	}
+}
+
 func TestViewCellsAltScreenWindowsToCursor(t *testing.T) {
 	term := vt10x.New(vt10x.WithSize(12, 84))
 	if _, err := term.Write([]byte("\x1b[?1049h")); err != nil {

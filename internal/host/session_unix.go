@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
+	"unsafe"
 
 	"github.com/creack/pty"
 )
@@ -241,9 +243,18 @@ _suzuri_quiet_prompt() {
 }
 # ESC]7879;done=<exit>;<base64 command>BEL — host notifies when this pane
 # is not the one the user is looking at.
-_suzuri_preexec() { _suzuri_cmd=$1 }
+_suzuri_preexec() {
+  # Hooks re-enter when precmd shells out (base64). Ignore that.
+  [[ ${_suzuri_depth:-0} != 0 ]] && return 0
+  _suzuri_cmd=$1
+  # ESC]7879;start BEL — a program owns the keyboard until precmd.
+  printf '\033]7879;start\007'
+}
 _suzuri_precmd() {
+  # $? first. A test or assignment above this would replace the command's status.
   local ec=$?
+  [[ ${_suzuri_depth:-0} != 0 ]] && return 0
+  _suzuri_depth=1
   if [[ -n ${_suzuri_cmd:-} ]]; then
     local b64
     b64=$(printf '%s' "$_suzuri_cmd" | command base64 | tr -d '\n')
@@ -251,6 +262,7 @@ _suzuri_precmd() {
     _suzuri_cmd=
   fi
   _suzuri_quiet_prompt
+  _suzuri_depth=0
 }
 _suzuri_precmd
 # Run after theme precmd hooks so starship/p10k/oh-my-zsh cannot repaint a prompt.
@@ -298,6 +310,7 @@ _suzuri_debug() {
     _suzuri_*) return ;;
   esac
   _suzuri_cmd=$BASH_COMMAND
+  printf '\033]7879;start\007'
 }
 PROMPT_COMMAND='_suzuri_ec=$?; _suzuri_prompt'
 trap _suzuri_debug DEBUG
@@ -441,12 +454,35 @@ func (s *Session) Resize(cols, rows int) error {
 	})
 }
 
+// SetReadDeadline bounds the next Read. A zero time clears it.
+func (s *Session) SetReadDeadline(t time.Time) error {
+	if s == nil || s.ptmx == nil {
+		return nil
+	}
+	return s.ptmx.SetReadDeadline(t)
+}
+
 // Pid of the attached shell process.
 func (s *Session) Pid() int {
 	if s == nil || s.cmd == nil || s.cmd.Process == nil {
 		return 0
 	}
 	return s.cmd.Process.Pid
+}
+
+// ForegroundPGID is the process group currently in the foreground of this
+// PTY. It differs from Pid while a command is running (the shell gives that
+// command the terminal). Zero means the query failed.
+func (s *Session) ForegroundPGID() int {
+	if s == nil || s.ptmx == nil {
+		return 0
+	}
+	var pg int32
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, s.ptmx.Fd(), uintptr(syscall.TIOCGPGRP), uintptr(unsafe.Pointer(&pg)))
+	if errno != 0 || pg <= 0 {
+		return 0
+	}
+	return int(pg)
 }
 
 // Wait blocks until the process exits.

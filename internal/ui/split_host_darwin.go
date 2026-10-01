@@ -206,7 +206,7 @@ func (u *macUI) splitActive(dir splitDir) {
 	t.startWorkers(u)
 	u.selecting = false
 	focus.sel.clear()
-	ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
+	ebiten.SetWindowTitle(hostWindowTitle(t.displayTitle()))
 	u.syncChrome()
 	u.applyClientSize(u.width, u.height)
 	u.postLayoutSettle()
@@ -279,7 +279,7 @@ func (u *macUI) applyForkOSC(src *tab, req forkPaneRequest) {
 	t.startWorkers(u)
 	u.selecting = false
 	src.sel.clear()
-	ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
+	ebiten.SetWindowTitle(hostWindowTitle(t.displayTitle()))
 	u.syncChrome()
 	u.applyClientSize(u.width, u.height)
 	u.postLayoutSettle()
@@ -383,7 +383,7 @@ func (u *macUI) removePageAt(idx int, toast bool) {
 	}
 	if at := u.activeTab(); at != nil {
 		at.sel.clear()
-		ebiten.SetWindowTitle("suzuri — " + at.title)
+		ebiten.SetWindowTitle(hostWindowTitle(at.title))
 	}
 	u.syncChrome()
 	u.applyClientSize(u.width, u.height)
@@ -432,7 +432,7 @@ func (u *macUI) focusPaneDir(dir int) {
 	}
 	u.selecting = false
 	if t := u.activeTab(); t != nil {
-		ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
+		ebiten.SetWindowTitle(hostWindowTitle(t.displayTitle()))
 	}
 	u.syncChrome()
 	u.markChromeDirty()
@@ -451,7 +451,7 @@ func (u *macUI) togglePaneZoom() {
 		return
 	}
 	if t := u.activeTab(); t != nil {
-		ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
+		ebiten.SetWindowTitle(hostWindowTitle(t.displayTitle()))
 	}
 	u.syncChrome()
 	u.markChromeDirty()
@@ -473,7 +473,7 @@ func (u *macUI) revealPane(id int) {
 		pg.setFocus(id)
 		u.selecting = false
 		if t := u.activeTab(); t != nil {
-			ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
+			ebiten.SetWindowTitle(hostWindowTitle(t.displayTitle()))
 		}
 		u.syncChrome()
 		u.markChromeDirty()
@@ -500,7 +500,7 @@ func (u *macUI) focusPaneByID(id int) bool {
 	}
 	u.selecting = false
 	if t := u.activeTab(); t != nil {
-		ebiten.SetWindowTitle("suzuri — " + t.displayTitle())
+		ebiten.SetWindowTitle(hostWindowTitle(t.displayTitle()))
 	}
 	u.syncChrome()
 	u.markChromeDirty()

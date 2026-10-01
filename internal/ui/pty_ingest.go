@@ -30,6 +30,9 @@ type ptyHooks struct {
 	// VT modes are cleared and before the host reflows.
 	OnLeaveAlt func()
 	OnAlt      func()
+	// OnInputOwner runs when a foreground command takes or returns the
+	// keyboard (Warp bar hides or comes back). Hosts reflow the bar.
+	OnInputOwner func()
 }
 
 // ptyResult is what the host still has to do after the shared pipeline.
@@ -50,6 +53,13 @@ func (t *tab) ingestPTY(data []byte, h ptyHooks) ptyResult {
 	if t == nil || t.term == nil || len(data) == 0 {
 		return res
 	}
+	wasOwner := t.programOwnsKeys()
+	defer func() {
+		t.logOwnerFlip(wasOwner, "pty")
+		if wasOwner != t.programOwnsKeys() && h.OnInputOwner != nil {
+			h.OnInputOwner()
+		}
+	}()
 	before := snapshotScreenText(t.term)
 	var spans []osc8Span
 	data, spans = t.pullPTY(data, h.Focused, h.Visible)

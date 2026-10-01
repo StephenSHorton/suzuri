@@ -56,8 +56,8 @@ func TestLeaveAppDropsHeldSync(t *testing.T) {
 		t.Fatal("modes not armed")
 	}
 	tab.modes.leaveApp()
-	if tab.modes.bracketPaste || tab.modes.syncOn || len(tab.modes.syncBuf) != 0 {
-		t.Fatal("leaveApp left protocol state")
+	if !tab.modes.bracketPaste || tab.modes.syncOn || len(tab.modes.syncBuf) != 0 {
+		t.Fatal("leaveApp should drop sync output and keep the shell paste mode")
 	}
 	res := tab.ingestPTY([]byte("after\r\n"), ptyHooks{})
 	if res.Action != ptyFrame {
