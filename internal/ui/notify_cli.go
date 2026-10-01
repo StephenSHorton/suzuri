@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/StephenSHorton/suzuri/assets"
+	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
 // RunNotifyCLI plays the editor notification sounds, or shows the cards.
 // With no arguments it plays success, fail, and published in order.
-// `show` raises the same bottom-left cards a terminal program would get.
+// `show` raises the same cards a terminal program would get.
 func RunNotifyCLI(args []string) int {
 	if len(args) > 0 && (args[0] == "show" || args[0] == "toast") {
 		return runNotifyShow(args[1:])
@@ -56,6 +57,9 @@ func runNotifyShow(args []string) int {
 		return 1
 	}
 	initNoticeApp()
+	if cfg, err := config.Load(); err == nil {
+		setNoticeAnchor(config.Normalize(cfg).NoticePosition, false)
+	}
 	notes, err := notifyShowArgs(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "suzuri notify:", err)

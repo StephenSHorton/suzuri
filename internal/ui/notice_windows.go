@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func presentNoticeImage(pix []byte, stride, width, height int) {}
+func presentNoticeImage(pix []byte, stride, width, height, anchor int) {}
 
 func playWAV(b []byte) {}
 

@@ -107,7 +107,41 @@ void suzuri_notice_hide(void) {
 
 static int gPresentQueued;
 
-void suzuri_notice_present(const void *pix, int stride, int width, int height) {
+// anchor matches config.NoticePositionIndex: 0 bottom-left, then bottom-center,
+// bottom-right, center-left, center, center-right, top-left, top-center, top-right.
+// Origin is the panel's bottom-left in a y-up visibleFrame. Edge anchors inset
+// by 16pt; a centered axis ignores the inset. Keep this in step with
+// noticePanelOrigin in notices.go.
+static NSRect suzuri_notice_frame(NSRect vis, NSSize pt, int anchor) {
+	const CGFloat inset = 16;
+	int col = 0;
+	int row = 0;
+	switch (anchor) {
+	case 1: case 4: case 7: col = 1; break;
+	case 2: case 5: case 8: col = 2; break;
+	default: break;
+	}
+	switch (anchor) {
+	case 3: case 4: case 5: row = 1; break;
+	case 6: case 7: case 8: row = 2; break;
+	default: break;
+	}
+	CGFloat x = vis.origin.x + inset;
+	CGFloat y = vis.origin.y + inset;
+	if (col == 1) {
+		x = vis.origin.x + (vis.size.width - pt.width) / 2.0;
+	} else if (col == 2) {
+		x = vis.origin.x + vis.size.width - pt.width - inset;
+	}
+	if (row == 1) {
+		y = vis.origin.y + (vis.size.height - pt.height) / 2.0;
+	} else if (row == 2) {
+		y = vis.origin.y + vis.size.height - pt.height - inset;
+	}
+	return NSMakeRect(x, y, pt.width, pt.height);
+}
+
+void suzuri_notice_present(const void *pix, int stride, int width, int height, int anchor) {
 	if (pix == NULL || width < 1 || height < 1) {
 		dispatch_async(dispatch_get_main_queue(), ^{ suzuri_notice_hide(); });
 		return;
@@ -151,7 +185,7 @@ void suzuri_notice_present(const void *pix, int stride, int width, int height) {
 			NSWindow *host = NSApp.mainWindow ?: NSApp.keyWindow;
 			NSScreen *screen = host.screen ?: NSScreen.mainScreen;
 			NSRect vis = screen.visibleFrame;
-			NSRect frame = NSMakeRect(vis.origin.x + 16, vis.origin.y + 16, pt.width, pt.height);
+			NSRect frame = suzuri_notice_frame(vis, pt, anchor);
 			if (!NSEqualRects(gPanel.frame, frame)) {
 				[gPanel setFrame:frame display:YES];
 				[view resetCursorRects];

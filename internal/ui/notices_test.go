@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
 func TestOSC99SimpleAndChunked(t *testing.T) {
@@ -90,6 +92,82 @@ func TestUpdateNoticeStaysUntilDismiss(t *testing.T) {
 	activateNotice(0)
 	if !activated || noticeCount() != 0 {
 		t.Fatalf("activate activated=%v count=%d", activated, noticeCount())
+	}
+}
+
+func TestNoticeStackAndPanelOrigins(t *testing.T) {
+	// Resting bottom-left matches the original card geometry.
+	w, h, slots := noticeStackLayout(2, 0, 0)
+	if w != noticeMargin+noticeCardW+noticeSlidePad || h != noticeMargin+2*(noticeCardH+noticeGap) {
+		t.Fatalf("size %d×%d", w, h)
+	}
+	if slots[0].X != noticeMargin || slots[0].Y != h-noticeMargin-noticeCardH {
+		t.Fatalf("oldest %+v", slots[0])
+	}
+	if slots[1].Y >= slots[0].Y {
+		t.Fatalf("newest should stack upward: %+v", slots)
+	}
+	// Entrance still slides in from the left.
+	_, _, slid := noticeStackLayout(1, 0, noticeSlideMax)
+	if slid[0].X != noticeMargin-noticeSlideMax {
+		t.Fatalf("slide x %d", slid[0].X)
+	}
+
+	visW, visH := 1440, 900
+	panelW, panelH := 400, 200
+	for _, id := range []string{
+		"bottom-left", "bottom-center", "bottom-right",
+		"center-left", "center", "center-right",
+		"top-left", "top-center", "top-right",
+	} {
+		a := config.NoticePositionIndex(id)
+		_, _, slots = noticeStackLayout(1, a, 0)
+		right := slots[0].X + noticeCardW
+		switch noticeColumn(a) {
+		case 0:
+			if slots[0].X != noticeMargin {
+				t.Fatalf("%s x %d", id, slots[0].X)
+			}
+		case 1:
+			bw, _, _ := noticeStackLayout(1, a, 0)
+			if slots[0].X != (bw-noticeCardW)/2 {
+				t.Fatalf("%s center x %d", id, slots[0].X)
+			}
+		case 2:
+			bw, _, _ := noticeStackLayout(1, a, 0)
+			if right != bw-noticeMargin {
+				t.Fatalf("%s right %d bw %d", id, right, bw)
+			}
+		}
+		x, y := noticePanelOrigin(0, 0, visW, visH, panelW, panelH, noticeScreenInset, a)
+		switch noticeColumn(a) {
+		case 0:
+			if x != noticeScreenInset {
+				t.Fatalf("%s panel x %d", id, x)
+			}
+		case 1:
+			if x != (visW-panelW)/2 {
+				t.Fatalf("%s panel x %d", id, x)
+			}
+		case 2:
+			if x != visW-panelW-noticeScreenInset {
+				t.Fatalf("%s panel x %d", id, x)
+			}
+		}
+		switch noticeRow(a) {
+		case 0:
+			if y != noticeScreenInset {
+				t.Fatalf("%s panel y %d", id, y)
+			}
+		case 1:
+			if y != (visH-panelH)/2 {
+				t.Fatalf("%s panel y %d", id, y)
+			}
+		case 2:
+			if y != visH-panelH-noticeScreenInset {
+				t.Fatalf("%s panel y %d", id, y)
+			}
+		}
 	}
 }
 

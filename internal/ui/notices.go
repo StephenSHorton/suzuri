@@ -17,6 +17,7 @@ import (
 	"golang.org/x/image/math/fixed"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
+	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
 // deskNote is one desktop notification requested by a terminal program.
@@ -68,7 +69,7 @@ type playedNotice struct {
 	ID    string
 }
 
-// postHostToast raises a bottom-left card for host feedback that used to
+// postHostToast raises a notice card for host feedback that used to
 // sit on the tab-strip status row (caffeine, splits, copy, updates, …).
 // Repeated messages in the same family replace one card instead of stacking.
 func postHostToast(msg string) {
@@ -365,38 +366,182 @@ type noticeCard struct {
 	index      int // index in bottom-up visual order, 0 = bottom (oldest)
 }
 
-func renderNotices(now time.Time) (pix []byte, stride, width, height int, cards []noticeCard) {
+// Notice bitmap geometry, in points. The panel is presented at 2×.
+const (
+	noticeCardW       = 320
+	noticeCardH       = 72
+	noticeGap         = 8
+	noticeMargin      = 16
+	noticeSlideMax    = 36
+	noticeSlidePad    = 48
+	noticeScreenInset = 16
+)
+
+// noticeAnchorIdx matches config.NoticePositionIndex (0 = bottom-left).
+var noticeAnchorIdx int
+
+// setNoticeAnchor applies a saved or previewed anchor. preview shows one
+// silent sample card when the spot actually changes.
+func setNoticeAnchor(id string, preview bool) {
+	idx := config.NoticePositionIndex(id)
+	noticeMu.Lock()
+	prev := noticeAnchorIdx
+	noticeAnchorIdx = idx
+	noticeMu.Unlock()
+	if preview && idx != prev {
+		previewNoticeAnchor(config.NoticePositionLabel(config.NoticePositionIDs()[idx]))
+	}
+}
+
+func previewNoticeAnchor(label string) {
+	n := deskNote{
+		ID:     "host-notice-place",
+		Title:  "Notifications",
+		Body:   label,
+		Sound:  "silent",
+		Expire: 2400 * time.Millisecond,
+	}
+	now := time.Now()
+	noticeMu.Lock()
+	defer noticeMu.Unlock()
+	for i := range noticeLive {
+		if noticeLive[i].ID == n.ID {
+			keep := noticeLive[i].born
+			noticeLive[i] = liveNote{deskNote: n, born: keep, until: expireAt(now, n)}
+			return
+		}
+	}
+	if len(noticeLive) >= 5 {
+		return
+	}
+	noticeLive = append(noticeLive, liveNote{deskNote: n, born: now, until: expireAt(now, n)})
+}
+
+// noticeColumn is 0 left, 1 center, 2 right. noticeRow is 0 bottom, 1 center, 2 top.
+func noticeColumn(anchor int) int {
+	switch anchor {
+	case config.NoticePositionIndex(config.NoticeBottomCenter),
+		config.NoticePositionIndex(config.NoticeCenter),
+		config.NoticePositionIndex(config.NoticeTopCenter):
+		return 1
+	case config.NoticePositionIndex(config.NoticeBottomRight),
+		config.NoticePositionIndex(config.NoticeCenterRight),
+		config.NoticePositionIndex(config.NoticeTopRight):
+		return 2
+	default:
+		return 0
+	}
+}
+
+func noticeRow(anchor int) int {
+	switch anchor {
+	case config.NoticePositionIndex(config.NoticeCenterLeft),
+		config.NoticePositionIndex(config.NoticeCenter),
+		config.NoticePositionIndex(config.NoticeCenterRight):
+		return 1
+	case config.NoticePositionIndex(config.NoticeTopLeft),
+		config.NoticePositionIndex(config.NoticeTopCenter),
+		config.NoticePositionIndex(config.NoticeTopRight):
+		return 2
+	default:
+		return 0
+	}
+}
+
+// noticeStackLayout places cards in a bitmap whose origin is top-left.
+// Oldest (index 0) sits at the bottom of the stack. slide is 0 at rest
+// and noticeSlideMax at the start of the entrance.
+// Left anchors enter from the left, right anchors from the right, and
+// every anchor also nudges vertically toward its edge (center rises).
+func noticeStackLayout(n, anchor, slide int) (wpx, hpx int, slots []image.Point) {
+	if n < 1 {
+		return 0, 0, nil
+	}
+	if slide < 0 {
+		slide = 0
+	}
+	hpx = noticeMargin + n*(noticeCardH+noticeGap)
+	if noticeColumn(anchor) == 1 {
+		wpx = noticeMargin*2 + noticeCardW
+	} else {
+		wpx = noticeMargin + noticeCardW + noticeSlidePad
+	}
+	y := hpx - noticeMargin - noticeCardH
+	dy := slide
+	if noticeRow(anchor) == 2 {
+		dy = -slide
+	}
+	var xRest int
+	switch noticeColumn(anchor) {
+	case 1:
+		xRest = (wpx - noticeCardW) / 2
+	case 2:
+		xRest = wpx - noticeMargin - noticeCardW
+	default:
+		xRest = noticeMargin
+	}
+	dx := 0
+	switch noticeColumn(anchor) {
+	case 2:
+		dx = slide
+	case 0:
+		dx = -slide
+	}
+	slots = make([]image.Point, n)
+	for i := 0; i < n; i++ {
+		slots[i] = image.Point{X: xRest + dx, Y: y + dy}
+		y -= noticeCardH + noticeGap
+	}
+	return wpx, hpx, slots
+}
+
+// noticePanelOrigin is the panel's bottom-left in a y-up visible frame
+// (macOS). inset pulls edge anchors off the dock, menu bar, and screen edges.
+// Centered axes ignore inset.
+func noticePanelOrigin(visX, visY, visW, visH, panelW, panelH, inset, anchor int) (x, y int) {
+	switch noticeColumn(anchor) {
+	case 1:
+		x = visX + (visW-panelW)/2
+	case 2:
+		x = visX + visW - panelW - inset
+	default:
+		x = visX + inset
+	}
+	switch noticeRow(anchor) {
+	case 1:
+		y = visY + (visH-panelH)/2
+	case 2:
+		y = visY + visH - panelH - inset
+	default:
+		y = visY + inset
+	}
+	return x, y
+}
+
+func renderNotices(now time.Time) (pix []byte, stride, width, height, anchor int, cards []noticeCard) {
 	noticeMu.Lock()
 	items := append([]liveNote(nil), noticeLive...)
+	anchor = noticeAnchorIdx
 	noticeMu.Unlock()
 	if len(items) == 0 {
-		return nil, 0, 0, 0, nil
+		return nil, 0, 0, 0, anchor, nil
 	}
-	const (
-		scale  = 2
-		cardW  = 320
-		cardH  = 72
-		gap    = 8
-		margin = 16
-	)
-	hpx := margin + len(items)*(cardH+gap)
-	wpx := margin + cardW + 48
+	const scale = 2
+	wpx, hpx, _ := noticeStackLayout(len(items), anchor, 0)
 	img := image.NewRGBA(image.Rect(0, 0, wpx*scale, hpx*scale))
 	cards = make([]noticeCard, len(items))
-	// Oldest sits on the bottom, matching the s&box stack.
-	y := hpx - margin - cardH
 	for i, n := range items {
 		slide := 0
 		age := now.Sub(n.born)
 		if age < 180*time.Millisecond {
-			slide = int((1 - float64(age)/float64(180*time.Millisecond)) * 36)
+			slide = int((1 - float64(age)/float64(180*time.Millisecond)) * noticeSlideMax)
 		}
-		x := margin - slide
-		drawCard(img, scale, x, y, cardW, cardH, n)
-		cards[i] = noticeCard{x: x * scale, y: y * scale, w: cardW * scale, h: cardH * scale, index: i}
-		y -= cardH + gap
+		_, _, slots := noticeStackLayout(len(items), anchor, slide)
+		x, y := slots[i].X, slots[i].Y
+		drawCard(img, scale, x, y, noticeCardW, noticeCardH, n)
+		cards[i] = noticeCard{x: x * scale, y: y * scale, w: noticeCardW * scale, h: noticeCardH * scale, index: i}
 	}
-	return img.Pix, img.Stride, img.Bounds().Dx(), img.Bounds().Dy(), cards
+	return img.Pix, img.Stride, img.Bounds().Dx(), img.Bounds().Dy(), anchor, cards
 }
 
 func drawCard(dst *image.RGBA, scale, x, y, w, h int, n liveNote) {
@@ -485,9 +630,9 @@ func driveNotices(now time.Time, focused, visible bool) {
 		nn := n
 		sendNoticeClose(&nn)
 	}
-	pix, stride, width, height, cards := renderNotices(now)
+	pix, stride, width, height, anchor, cards := renderNotices(now)
 	noticeCards = cards
-	presentNoticeImage(pix, stride, width, height)
+	presentNoticeImage(pix, stride, width, height, anchor)
 	_ = focused
 	_ = visible
 }

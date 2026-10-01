@@ -102,6 +102,9 @@ type Config struct {
 	// AnimateUnfocused keeps the paint clock running when another app has focus
 	// (matrix rain, tab spinner, caret). Off freezes chrome animation in background.
 	AnimateUnfocused bool
+	// NoticePosition is where desktop notification cards sit
+	// (bottom-left, bottom-center, center, top-right, …). See NoticePositionIDs.
+	NoticePosition string
 	// Window is last outer frame placement (multi-monitor). Zero = use default.
 	Window WindowPlacement
 }
@@ -132,21 +135,22 @@ func (w WindowPlacement) Valid() bool {
 }
 
 type fileDTO struct {
-	FontFace      string           `json:"font_face"`
-	FontSizePx    int              `json:"font_size_px"`
-	Cursor        string           `json:"cursor"`
-	Theme         string           `json:"theme"`
-	ShellANSIMap  string           `json:"shell_ansi_map"`
-	Profiles      []Profile        `json:"profiles,omitempty"`
-	ActiveProfile string           `json:"active_profile,omitempty"`
-	FirstRunDone  bool            `json:"first_run_done,omitempty"`
-	Intro         string          `json:"intro,omitempty"`
-	ShellAmbient  string          `json:"shell_ambient,omitempty"`
+	FontFace      string    `json:"font_face"`
+	FontSizePx    int       `json:"font_size_px"`
+	Cursor        string    `json:"cursor"`
+	Theme         string    `json:"theme"`
+	ShellANSIMap  string    `json:"shell_ansi_map"`
+	Profiles      []Profile `json:"profiles,omitempty"`
+	ActiveProfile string    `json:"active_profile,omitempty"`
+	FirstRunDone  bool      `json:"first_run_done,omitempty"`
+	Intro         string    `json:"intro,omitempty"`
+	ShellAmbient  string    `json:"shell_ambient,omitempty"`
 	// Ptr fields distinguish "missing" from false / 0 when loading JSON.
-	ShellMatrixPtr         *bool           `json:"shell_matrix,omitempty"`
-	ShellMatrixOpacityPtr  *int            `json:"shell_matrix_opacity,omitempty"`
-	AnimateUnfocusedPtr    *bool           `json:"animate_unfocused,omitempty"`
-	Window                 WindowPlacement `json:"window,omitempty"`
+	ShellMatrixPtr        *bool           `json:"shell_matrix,omitempty"`
+	ShellMatrixOpacityPtr *int            `json:"shell_matrix_opacity,omitempty"`
+	AnimateUnfocusedPtr   *bool           `json:"animate_unfocused,omitempty"`
+	NoticePosition        string          `json:"notice_position,omitempty"`
+	Window                WindowPlacement `json:"window,omitempty"`
 }
 
 // DefaultFontFace is the shipping monospaced face (bundled GohuFont uni14 Mono).
@@ -160,19 +164,20 @@ const DefaultFontSizePx = 14
 // Default returns shipping defaults.
 func Default() Config {
 	return Config{
-		Cursor:        CursorBlock,
-		FontFace:      DefaultFontFace,
-		FontSizePx:    DefaultFontSizePx,
-		Theme:         ThemeHighContrast,
-		ShellANSIMap:  ANSIMapSoft,
-		Intro:                IntroMatrix,
-		ShellAmbient:         AmbientRain, // quiet always-on rain under shell cells
-		ShellMatrix:          true,        // mirrors ambient==rain for legacy
-		ShellMatrixOpacity:   100,         // full designed intensity
-		AnimateUnfocused:     true,        // keep ambient/spinners smooth in the background
-		Profiles:             DefaultProfiles(),
-		ActiveProfile:        "Default",
-		FirstRunDone:         false,
+		Cursor:             CursorBlock,
+		FontFace:           DefaultFontFace,
+		FontSizePx:         DefaultFontSizePx,
+		Theme:              ThemeHighContrast,
+		ShellANSIMap:       ANSIMapSoft,
+		Intro:              IntroMatrix,
+		ShellAmbient:       AmbientRain, // quiet always-on rain under shell cells
+		ShellMatrix:        true,        // mirrors ambient==rain for legacy
+		ShellMatrixOpacity: 100,         // full designed intensity
+		AnimateUnfocused:   true,        // keep ambient/spinners smooth in the background
+		NoticePosition:     NoticeBottomLeft,
+		Profiles:           DefaultProfiles(),
+		ActiveProfile:      "Default",
+		FirstRunDone:       false,
 	}
 }
 
@@ -333,6 +338,11 @@ func Normalize(c Config) Config {
 	}
 	if c.ShellMatrixOpacity > 100 {
 		c.ShellMatrixOpacity = 100
+	}
+	if id := strings.ToLower(strings.TrimSpace(c.NoticePosition)); ValidNoticePosition(id) {
+		c.NoticePosition = id
+	} else {
+		c.NoticePosition = NoticeBottomLeft
 	}
 	return c
 }
@@ -615,6 +625,81 @@ func AmbientDesc(id string) string {
 	}
 }
 
+// Notice card anchors. Index order is the settings cycle and the native
+// placement code (0 = bottom-left). Corners, edge centers, and the screen center.
+const (
+	NoticeBottomLeft   = "bottom-left"
+	NoticeBottomCenter = "bottom-center"
+	NoticeBottomRight  = "bottom-right"
+	NoticeCenterLeft   = "center-left"
+	NoticeCenter       = "center"
+	NoticeCenterRight  = "center-right"
+	NoticeTopLeft      = "top-left"
+	NoticeTopCenter    = "top-center"
+	NoticeTopRight     = "top-right"
+)
+
+// NoticePositionIDs lists anchors in settings left/right order.
+// The index is the placement code shared with the native notice panel.
+func NoticePositionIDs() []string {
+	return []string{
+		NoticeBottomLeft,
+		NoticeBottomCenter,
+		NoticeBottomRight,
+		NoticeCenterLeft,
+		NoticeCenter,
+		NoticeCenterRight,
+		NoticeTopLeft,
+		NoticeTopCenter,
+		NoticeTopRight,
+	}
+}
+
+// ValidNoticePosition is true for a known anchor id.
+func ValidNoticePosition(id string) bool {
+	for _, x := range NoticePositionIDs() {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
+// NoticePositionIndex is the placement code for id, or 0 (bottom-left).
+func NoticePositionIndex(id string) int {
+	id = strings.ToLower(strings.TrimSpace(id))
+	for i, x := range NoticePositionIDs() {
+		if x == id {
+			return i
+		}
+	}
+	return 0
+}
+
+// NoticePositionLabel is the settings value for an anchor id.
+func NoticePositionLabel(id string) string {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case NoticeBottomCenter:
+		return "Bottom center"
+	case NoticeBottomRight:
+		return "Bottom right"
+	case NoticeCenterLeft:
+		return "Center left"
+	case NoticeCenter:
+		return "Center"
+	case NoticeCenterRight:
+		return "Center right"
+	case NoticeTopLeft:
+		return "Top left"
+	case NoticeTopCenter:
+		return "Top center"
+	case NoticeTopRight:
+		return "Top right"
+	default:
+		return "Bottom left"
+	}
+}
+
 // AmbientActive is true when an always-on underlay should paint.
 func (c Config) AmbientActive() bool {
 	return ValidAmbient(c.ShellAmbient) && c.ShellAmbient != AmbientNone
@@ -650,17 +735,18 @@ func MonoFontFaces() []string {
 
 func fromDTO(d fileDTO) Config {
 	c := Config{
-		FontFace:      d.FontFace,
-		FontSizePx:    d.FontSizePx,
-		Cursor:        ParseCursor(d.Cursor),
-		Theme:         d.Theme,
-		ShellANSIMap:  d.ShellANSIMap,
-		Profiles:      d.Profiles,
-		ActiveProfile: d.ActiveProfile,
-		FirstRunDone:  d.FirstRunDone,
-		Intro:         d.Intro,
-		ShellAmbient:  d.ShellAmbient,
-		Window:        d.Window,
+		FontFace:       d.FontFace,
+		FontSizePx:     d.FontSizePx,
+		Cursor:         ParseCursor(d.Cursor),
+		Theme:          d.Theme,
+		ShellANSIMap:   d.ShellANSIMap,
+		Profiles:       d.Profiles,
+		ActiveProfile:  d.ActiveProfile,
+		FirstRunDone:   d.FirstRunDone,
+		Intro:          d.Intro,
+		ShellAmbient:   d.ShellAmbient,
+		NoticePosition: d.NoticePosition,
+		Window:         d.Window,
 	}
 	dflt := Default()
 	if d.ShellMatrixPtr != nil {
@@ -704,6 +790,7 @@ func toDTO(c Config) fileDTO {
 		ShellMatrixPtr:        &sm,
 		ShellMatrixOpacityPtr: &op,
 		AnimateUnfocusedPtr:   &au,
+		NoticePosition:        c.NoticePosition,
 		Window:                c.Window,
 	}
 }

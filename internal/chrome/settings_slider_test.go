@@ -22,6 +22,37 @@ func TestFormatRainOpacitySlider(t *testing.T) {
 	}
 }
 
+func TestNoticePositionCycle(t *testing.T) {
+	st := newSettingsState(config.Default())
+	for st.field != fieldNotice {
+		st.moveField(1)
+		if int(st.field) == 0 {
+			t.Fatal("notice field missing")
+		}
+	}
+	if st.valueLabel(fieldNotice) != "Bottom left" {
+		t.Fatalf("label %q", st.valueLabel(fieldNotice))
+	}
+	ids := config.NoticePositionIDs()
+	for i := 0; i < len(ids); i++ {
+		if st.edit.NoticePosition != ids[i] {
+			t.Fatalf("step %d got %q want %q", i, st.edit.NoticePosition, ids[i])
+		}
+		st.nudge(1)
+	}
+	if st.edit.NoticePosition != config.NoticeBottomLeft {
+		t.Fatalf("wrap %q", st.edit.NoticePosition)
+	}
+	view := st.render(100)
+	if !strings.Contains(view, "Notices") || !strings.Contains(view, "Bottom left") {
+		t.Fatalf("settings view missing notice row:\n%s", view)
+	}
+	_, paras := st.helpContent()
+	if len(paras) == 0 || !strings.Contains(strings.Join(paras, " "), "center") {
+		t.Fatalf("help %v", paras)
+	}
+}
+
 func TestRainOpacityNudge(t *testing.T) {
 	st := newSettingsState(config.Default())
 	// Move to opacity field

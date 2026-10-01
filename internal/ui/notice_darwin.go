@@ -6,7 +6,7 @@ package ui
 #cgo LDFLAGS: -framework AppKit -framework Foundation
 #include <stdlib.h>
 
-void suzuri_notice_present(const void *pix, int stride, int width, int height);
+void suzuri_notice_present(const void *pix, int stride, int width, int height, int anchor);
 void suzuri_notice_hide(void);
 void suzuri_play_wav(const void *bytes, int len);
 void suzuri_play_wav_sync(const void *bytes, int len);
@@ -23,12 +23,12 @@ import (
 	"unsafe"
 )
 
-func presentNoticeImage(pix []byte, stride, width, height int) {
+func presentNoticeImage(pix []byte, stride, width, height, anchor int) {
 	if width < 1 || height < 1 || len(pix) == 0 {
 		C.suzuri_notice_hide()
 		return
 	}
-	C.suzuri_notice_present(unsafe.Pointer(&pix[0]), C.int(stride), C.int(width), C.int(height))
+	C.suzuri_notice_present(unsafe.Pointer(&pix[0]), C.int(stride), C.int(width), C.int(height), C.int(anchor))
 }
 
 func playWAV(b []byte) {

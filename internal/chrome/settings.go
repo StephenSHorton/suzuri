@@ -21,6 +21,7 @@ const (
 	fieldShellAmbient
 	fieldRainOpacity // ambient intensity (JSON: shell_matrix_opacity)
 	fieldAnimateUnfocused
+	fieldNotice
 	fieldProfile
 	settingsFieldCount
 )
@@ -149,6 +150,14 @@ func (s *settingsState) nudge(delta int) {
 		s.edit = config.Normalize(s.edit)
 	case fieldAnimateUnfocused:
 		s.edit.AnimateUnfocused = !s.edit.AnimateUnfocused
+	case fieldNotice:
+		ids := config.NoticePositionIDs()
+		i := indexFold(ids, s.edit.NoticePosition)
+		if i < 0 {
+			i = 0
+		}
+		i = (i + delta + len(ids)) % len(ids)
+		s.edit.NoticePosition = ids[i]
 	case fieldProfile:
 		names := config.ProfileNames(s.edit)
 		if len(names) == 0 {
@@ -190,6 +199,8 @@ func (s settingsState) valueLabel(f settingsField) string {
 			return "On"
 		}
 		return "Off"
+	case fieldNotice:
+		return config.NoticePositionLabel(s.edit.NoticePosition)
 	case fieldProfile:
 		if s.edit.ActiveProfile == "" {
 			return "Default"
@@ -220,6 +231,8 @@ func (s settingsState) fieldLabel(f settingsField) string {
 		return "Intensity"
 	case fieldAnimateUnfocused:
 		return "Bg anim"
+	case fieldNotice:
+		return "Notices"
 	case fieldProfile:
 		return "Profile"
 	default:
@@ -381,6 +394,12 @@ func (s settingsState) helpContent() (title string, paras []string) {
 				"Pause animation clocks when another app has focus. Saves a bit of CPU; rain and spinners freeze until you return.",
 			}
 		}
+	case fieldNotice:
+		title = "Notices · " + val
+		paras = []string{
+			"Where notification cards sit on the screen. The nine spots are the four corners, the middle of each edge, and the center.",
+			"Left/right moves through them. A sample card follows the spot while you change it. Enter saves.",
+		}
 	case fieldProfile:
 		title = "Profile · " + val
 		paras = []string{
@@ -517,4 +536,3 @@ func indexFold(list []string, want string) int {
 	}
 	return -1
 }
-

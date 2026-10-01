@@ -64,6 +64,7 @@ func Run() error {
 		cfg = config.Default()
 	}
 	cfg = config.Normalize(cfg)
+	setNoticeAnchor(cfg.NoticePosition, false)
 	chrome.ApplyTheme(cfg.Theme)
 	SetShellANSIMap(cfg.ShellANSIMap)
 	log.Info("ui.Run", "cols", cols, "rows", rows, "font", cfg.FontFace, "fontPx", cfg.FontSizePx,
@@ -572,6 +573,7 @@ func (u *winUI) applyConfigLive(cfg config.Config) {
 	cfg = config.Normalize(cfg)
 	prev := u.cfg
 	u.cfg = cfg
+	setNoticeAnchor(cfg.NoticePosition, prev.NoticePosition != cfg.NoticePosition)
 	chrome.ApplyTheme(cfg.Theme)
 	SetShellANSIMap(cfg.ShellANSIMap)
 
@@ -635,6 +637,7 @@ func (u *winUI) applyConfigSave(cfg config.Config) {
 
 	cfg = config.Normalize(cfg)
 	fontChanged := !strings.EqualFold(u.cfg.FontFace, cfg.FontFace) || u.cfg.FontSizePx != cfg.FontSizePx
+	setNoticeAnchor(cfg.NoticePosition, false)
 
 	// Enter-stack work must stay light. Theme/ANSI globals only — no palette
 	// rebuild, GDI cache drop, ConPTY settle, or toast here (those hard-crashed
@@ -3947,6 +3950,7 @@ func configVisualEqual(a, b config.Config) bool {
 		strings.EqualFold(a.Intro, b.Intro) &&
 		strings.EqualFold(a.ShellAmbient, b.ShellAmbient) &&
 		a.ShellMatrixOpacity == b.ShellMatrixOpacity &&
+		strings.EqualFold(a.NoticePosition, b.NoticePosition) &&
 		strings.EqualFold(a.ActiveProfile, b.ActiveProfile)
 }
 

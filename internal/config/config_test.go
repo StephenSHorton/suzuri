@@ -124,6 +124,44 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 	}
 }
 
+func TestNoticePositionRoundTrip(t *testing.T) {
+	if got := Normalize(Config{}).NoticePosition; got != NoticeBottomLeft {
+		t.Fatalf("default %q", got)
+	}
+	if got := Normalize(Config{NoticePosition: "nope"}).NoticePosition; got != NoticeBottomLeft {
+		t.Fatalf("unknown %q", got)
+	}
+	ids := NoticePositionIDs()
+	if len(ids) != 9 {
+		t.Fatalf("ids %v", ids)
+	}
+	// Native placement switches on this index order.
+	want := []string{
+		"bottom-left", "bottom-center", "bottom-right",
+		"center-left", "center", "center-right",
+		"top-left", "top-center", "top-right",
+	}
+	for i, id := range want {
+		if ids[i] != id || NoticePositionIndex(id) != i || NoticePositionLabel(id) == "" || !ValidNoticePosition(id) {
+			t.Fatalf("id %d %q idx %d", i, ids[i], NoticePositionIndex(id))
+		}
+	}
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+	wantCfg := Default()
+	wantCfg.NoticePosition = NoticeCenter
+	if err := Save(wantCfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.NoticePosition != NoticeCenter {
+		t.Fatalf("loaded %q", got.NoticePosition)
+	}
+}
+
 func TestAmbientAndIntroIDs(t *testing.T) {
 	if len(IntroIDs()) < 5 {
 		t.Fatalf("intro ids: %v", IntroIDs())
