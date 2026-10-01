@@ -27,7 +27,10 @@ const (
 	EnvURL   = "SUZURI_CONTROL_URL"
 	EnvToken = "SUZURI_CONTROL_TOKEN"
 	EnvHost  = "SUZURI"
-	helpText = `# Suzuri AI control
+	// EnvPaneID is the leaf id of the PTY that received it. Agents pass it
+	// back as pane_id on report_agent.
+	EnvPaneID = "SUZURI_PANE_ID"
+	helpText  = `# Suzuri AI control
 
 Loopback HTTP for this suzuri window. Not MCP. Prefer curl.
 
@@ -60,6 +63,11 @@ Tools (POST /v1/call):
   close       {pane_id?}
   rename      {pane_id, title}
   new_tab
+  report_agent {pane_id, state: "idle"|"working"|"blocked"|"done"|"clear"}
+               explicit lifecycle for that pane. Replaces the title-spinner
+               and recent-output guess until the next report. blocked means
+               the agent is waiting on a person. clear (or unknown) restores
+               the guess. The pane's shell has SUZURI_PANE_ID.
 `
 )
 
@@ -315,6 +323,7 @@ func toolsJSON() map[string]any {
 			{"name": "close", "args": map[string]any{"pane_id": "u64?"}, "doc": "Close pane (or its tab if last pane)."},
 			{"name": "rename", "args": map[string]any{"pane_id": "u64", "title": "string"}, "doc": "Set the pane title."},
 			{"name": "new_tab", "args": map[string]any{}, "doc": "Open a new tab with a shell."},
+			{"name": "report_agent", "args": map[string]any{"pane_id": "u64", "state": "idle|working|blocked|done|clear"}, "doc": "Explicit agent lifecycle for a pane. Replaces the title and PTY activity guess. blocked means waiting on a person. clear restores the guess."},
 		},
 	}
 }

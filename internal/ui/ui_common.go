@@ -113,6 +113,12 @@ func paneBusyMark() string {
 	return chrome.DotsFrame()
 }
 
+// paneBlockedMark is the one-cell cue that an agent is waiting on a person.
+// ASCII so it does not depend on the braille fallback used for the spinner.
+func paneBlockedMark() string {
+	return "?"
+}
+
 // idleLampReserve is how many pixels of the title row the ring occupies,
 // including a gap so the label does not run into it.
 func idleLampReserve(lamp idleLamp) int {

@@ -25,9 +25,12 @@ type Tab struct {
 	// Session state for the strip glyph (host fills these on SyncTabs).
 	Alive     bool // PTY still live
 	AltScreen bool // fullscreen TUI (Grok, vim, less, …)
-	Busy      bool // activity spinner (PTY I/O and/or OSC title spinner)
-	// HideBusy suppresses the strip spinner. Set on the focused page when
-	// its pane titles already show the same mark.
+	Busy      bool // activity spinner (reported working, or the PTY/title guess)
+	// Blocked means an agent reported it is waiting on a person. It wins
+	// over Busy on the strip: a question is the thing to glance at.
+	Blocked bool
+	// HideBusy suppresses the strip mark. Set on the focused page when
+	// its pane titles already show the same spinner or blocked cue.
 	HideBusy bool
 }
 
@@ -776,8 +779,11 @@ func tabStateGlyph(t Tab) string {
 	if !t.Alive {
 		return g.Dead
 	}
-	// Background tabs show the dots spinner when any pane in the page is
-	// working. The focused page skips it: split titles already carry the mark.
+	// A reported block rolls up ahead of the working spinner. The focused
+	// page skips the strip mark: split titles already carry it.
+	if t.Blocked && !t.HideBusy {
+		return "? "
+	}
 	if t.Busy && !t.HideBusy {
 		return DotsFrame() + " "
 	}

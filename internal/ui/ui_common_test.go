@@ -47,6 +47,49 @@ func TestRestingMeansAliveAndQuiet(t *testing.T) {
 	}
 }
 
+func TestReportedAgentStateOverridesGuess(t *testing.T) {
+	var live tab
+	live.alive.Store(true)
+	live.titleBusy.Store(true)
+	live.noteIO()
+	if !live.setAgentState("idle") {
+		t.Fatal("idle should be accepted")
+	}
+	if !live.resting() || live.busy() || live.blocked() {
+		t.Fatal("reported idle rests even while the title spinner and recent output say working")
+	}
+	if live.activity() != "idle" || live.agentState() != "idle" {
+		t.Fatalf("state=%q activity=%q", live.agentState(), live.activity())
+	}
+	if !live.setAgentState("working") || !live.busy() || live.resting() {
+		t.Fatal("reported working stays busy after the pane goes quiet")
+	}
+	live.lastIOUnixNano.Store(0)
+	live.titleBusy.Store(false)
+	if !live.busy() {
+		t.Fatal("reported working does not need PTY output")
+	}
+	if !live.setAgentState("blocked") || !live.blocked() || live.busy() || live.resting() {
+		t.Fatal("blocked is waiting on a person, not a spinner and not the idle ring")
+	}
+	if live.activity() != "blocked" {
+		t.Fatalf("activity=%q", live.activity())
+	}
+	if !live.setAgentState("done") || !live.resting() || live.agentState() != "done" {
+		t.Fatal("done is idle that has not been looked at; the pane rests")
+	}
+	live.titleBusy.Store(true)
+	if !live.setAgentState("clear") {
+		t.Fatal("clear")
+	}
+	if live.agentState() != "" || live.resting() || !live.busy() {
+		t.Fatal("clear restores the title and PTY guess")
+	}
+	if live.setAgentState("waiting") {
+		t.Fatal("waiting is a workspace presence code, not a pane lifecycle")
+	}
+}
+
 func TestPaneBusyFramesAreDots(t *testing.T) {
 	want := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	got := paneBusyMark()

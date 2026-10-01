@@ -118,15 +118,17 @@ func paneJSON(s aiSurface, id, lines int) (map[string]any, bool) {
 	}
 	live := trimLiveLines(snapshotLiveText(t.term))
 	return map[string]any{
-		"id":        t.id,
-		"title":     t.displayTitle(),
-		"kind":      "terminal",
-		"cwd":       t.cwd,
-		"cols":      t.lastCols,
-		"rows":      t.lastRows,
-		"guest_url": nil,
-		"tail":      hist,
-		"live":      live,
+		"id":          t.id,
+		"title":       t.displayTitle(),
+		"kind":        "terminal",
+		"cwd":         t.cwd,
+		"cols":        t.lastCols,
+		"rows":        t.lastRows,
+		"guest_url":   nil,
+		"agent_state": t.agentState(),
+		"activity":    t.activity(),
+		"tail":        hist,
+		"live":        live,
 	}, true
 }
 
@@ -235,6 +237,26 @@ func applyAICall(s aiSurface, tool string, args map[string]any) (map[string]any,
 			return nil, 404, "no such pane"
 		}
 		t.setUserTitle(title)
+		if s.after != nil {
+			s.after()
+		}
+		return layoutJSON(s), 200, ""
+	case "report_agent":
+		id, ok := aicontrol.ArgUint(args, "pane_id")
+		if !ok {
+			return nil, 400, "pane_id required"
+		}
+		state, ok := aicontrol.ArgString(args, "state")
+		if !ok {
+			return nil, 400, "state required"
+		}
+		t := findTab(s, id)
+		if t == nil {
+			return nil, 404, "no such pane"
+		}
+		if !t.setAgentState(state) {
+			return nil, 400, "state must be idle|working|blocked|done|clear"
+		}
 		if s.after != nil {
 			s.after()
 		}

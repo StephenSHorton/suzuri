@@ -768,6 +768,8 @@ func TestTabStateGlyphs(t *testing.T) {
 		{"alt busy", Tab{Alive: true, AltScreen: true, Busy: true}, dots},
 		{"focused split hides spinner", Tab{Alive: true, Busy: true, HideBusy: true}, ""},
 		{"focused split alt hides spinner", Tab{Alive: true, AltScreen: true, Busy: true, HideBusy: true}, ""},
+		{"blocked beats busy", Tab{Alive: true, Busy: true, Blocked: true}, "? "},
+		{"focused split hides blocked", Tab{Alive: true, Blocked: true, HideBusy: true}, ""},
 	}
 	for _, tc := range cases {
 		if g := tabStateGlyph(tc.tab); g != tc.want {

@@ -242,6 +242,17 @@ func (p *page) anyBusy() bool {
 	return false
 }
 
+// anyBlocked is true when an agent in this page has reported it is waiting
+// on a person. That rolls up ahead of a working spinner on the strip.
+func (p *page) anyBlocked() bool {
+	for _, t := range p.leaves() {
+		if t != nil && t.blocked() {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *page) anyAlt() bool {
 	for _, t := range p.leaves() {
 		if t != nil && t.altScreen() {

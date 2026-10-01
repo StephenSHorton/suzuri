@@ -363,7 +363,7 @@ func (u *macUI) syncChrome() {
 			}
 			tabs[i] = chrome.Tab{
 				ID: t.id, Title: title, Alive: t.alive.Load(),
-				AltScreen: t.altScreen(), Busy: t.busy(),
+				AltScreen: t.altScreen(), Busy: t.busy(), Blocked: t.blocked(),
 			}
 		}
 		r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
@@ -386,12 +386,13 @@ func (u *macUI) syncChrome() {
 		alive := p.anyAlive()
 		alt := false
 		busy := p.anyBusy()
+		blocked := p.anyBlocked()
 		if focus != nil {
 			alt = focus.altScreen()
 		}
 		tabs[i] = chrome.Tab{
 			ID: p.id, Title: title, Alive: alive,
-			AltScreen: alt, Busy: busy,
+			AltScreen: alt, Busy: busy, Blocked: blocked,
 			HideBusy: i == u.active && p.hidesStripBusy(),
 		}
 	}
@@ -404,7 +405,7 @@ func (u *macUI) syncChrome() {
 			prev, next := u.chrome.Tabs[i], tabs[i]
 			if prev.Title != next.Title || prev.ID != next.ID ||
 				prev.Alive != next.Alive || prev.AltScreen != next.AltScreen ||
-				prev.Busy != next.Busy || prev.HideBusy != next.HideBusy {
+				prev.Busy != next.Busy || prev.Blocked != next.Blocked || prev.HideBusy != next.HideBusy {
 				dirty = true
 				break
 			}

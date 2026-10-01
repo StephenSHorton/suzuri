@@ -896,7 +896,8 @@ func (p *softwarePainter) paintPaneTitles(dst *image.RGBA, layouts []paneGeom, c
 			continue
 		}
 		resting := g.pane.resting()
-		busy := g.pane.alive.Load() && !resting
+		busy := g.pane.busy()
+		blocked := g.pane.blocked()
 		lamp := idleLamp{}
 		if resting {
 			lamp = idleLampAt(g.x, g.titleY, g.w, g.titleH)
@@ -919,9 +920,15 @@ func (p *softwarePainter) paintPaneTitles(dst *image.RGBA, layouts []paneGeom, c
 		if title == "" {
 			title = "shell"
 		}
-		reserve := 8
+		mark := ""
 		if busy {
-			reserve += (len([]rune(paneBusyMark())) + 1) * cw
+			mark = paneBusyMark()
+		} else if blocked {
+			mark = paneBlockedMark()
+		}
+		reserve := 8
+		if mark != "" {
+			reserve += (len([]rune(mark)) + 1) * cw
 		}
 		if lamp.ok {
 			reserve += idleLampReserve(lamp)
@@ -939,8 +946,8 @@ func (p *softwarePainter) paintPaneTitles(dst *image.RGBA, layouts []paneGeom, c
 		}
 		x := int(g.x) + 4
 		y := int(g.titleY)
-		if busy {
-			for _, r := range paneBusyMark() {
+		if mark != "" {
+			for _, r := range mark {
 				p.drawGlyph(dst, x, y, r, chrome.PrimR, chrome.PrimG, chrome.PrimB)
 				x += cw
 			}

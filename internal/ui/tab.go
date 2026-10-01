@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,7 +73,11 @@ type tab struct {
 	lastIOUnixNano atomic.Int64
 	// titleBusy: OSC window title has a CLI spinner prefix (e.g. Grok while working).
 	// Cleared when the title is rewritten without a spinner frame.
+	// Ignored while agentReported is set — an explicit report replaces the guess.
 	titleBusy atomic.Bool
+	// agentReported is an explicit lifecycle from the agent in this pane
+	// (see agentUnset). 0 means fall back to the title spinner and recent PTY output.
+	agentReported atomic.Int32
 	// wasAlt tracks ModeAltScreen across PTY drains so the host can resize
 	// when a full-screen app (Claude, Grok Build, vim…) enters/leaves.
 	wasAlt bool
@@ -98,17 +103,43 @@ type tab struct {
 	barAwaiting bool // true after a bar command until shell looks idle
 }
 
-// resting is the pane-idle cue: the session is up, and neither a title
-// spinner nor recent PTY output says it is working. A dead pane is not resting.
+// Explicit agent lifecycle. A non-zero value replaces the title-spinner and
+// recent-output guess until the agent reports again or clears it.
+// blocked means the agent is waiting on a person (approval or question).
+// done is idle that has not been looked at yet; the pane still rests.
+const (
+	agentUnset int32 = iota
+	agentIdle
+	agentWorking
+	agentBlocked
+	agentDone
+)
+
+// resting is the pane-idle cue: the session is up, nothing is working, and
+// nobody is waiting on the user. A dead pane is not resting. A blocked pane
+// is not resting either — the idle ring would read as "nothing to do".
 func (t *tab) resting() bool {
-	return t != nil && t.alive.Load() && !t.busy()
+	return t != nil && t.alive.Load() && !t.busy() && !t.blocked()
 }
 
-// busy is true when this tab should show an activity spinner:
-//   - OSC title has a braille/spinner prefix (Grok and similar TUIs), or
-//   - recent PTY output (shell commands / short jobs).
+// blocked is true when the agent has reported it is waiting on a person.
+// Screen silence and a title spinner cannot establish this.
+func (t *tab) blocked() bool {
+	return t != nil && t.alive.Load() && t.agentReported.Load() == agentBlocked
+}
+
+// busy is true when this tab should show an activity spinner.
+// An explicit report wins: working shows the spinner even if the PTY is quiet,
+// and idle, done, or blocked hide it even if the title still carries a spinner.
+// With no report, the OSC title spinner or recent PTY output is the guess.
 func (t *tab) busy() bool {
 	if t == nil || !t.alive.Load() {
+		return false
+	}
+	switch t.agentReported.Load() {
+	case agentWorking:
+		return true
+	case agentIdle, agentBlocked, agentDone:
 		return false
 	}
 	if t.titleBusy.Load() {
@@ -123,6 +154,71 @@ func (t *tab) busy() bool {
 		window = tabBusyWindowAlt
 	}
 	return time.Since(time.Unix(0, ns)) < window
+}
+
+// setAgentState stores an explicit lifecycle. clear and unknown drop the
+// report so the title and PTY guess apply again.
+func (t *tab) setAgentState(state string) bool {
+	if t == nil {
+		return false
+	}
+	phase, ok := parseAgentState(state)
+	if !ok {
+		return false
+	}
+	t.agentReported.Store(phase)
+	return true
+}
+
+func parseAgentState(state string) (int32, bool) {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "clear", "unknown", "":
+		return agentUnset, true
+	case "idle":
+		return agentIdle, true
+	case "working":
+		return agentWorking, true
+	case "blocked":
+		return agentBlocked, true
+	case "done":
+		return agentDone, true
+	default:
+		return agentUnset, false
+	}
+}
+
+// agentState is the explicit report, or "" when the pane is still on the guess.
+func (t *tab) agentState() string {
+	if t == nil {
+		return ""
+	}
+	switch t.agentReported.Load() {
+	case agentIdle:
+		return "idle"
+	case agentWorking:
+		return "working"
+	case agentBlocked:
+		return "blocked"
+	case agentDone:
+		return "done"
+	default:
+		return ""
+	}
+}
+
+// activity is the mark the host should paint: working, blocked, or idle.
+// idle covers an explicit done report and an unreported quiet pane.
+func (t *tab) activity() string {
+	if t == nil || !t.alive.Load() {
+		return "dead"
+	}
+	if t.blocked() {
+		return "blocked"
+	}
+	if t.busy() {
+		return "working"
+	}
+	return "idle"
 }
 
 // ingestImages attaches images into scrollback under the current shell stream
@@ -311,6 +407,7 @@ func newTab(id, cols, rows int, opts tabOpts) (*tab, error) {
 	}
 	extra := append([]string{}, opts.extraEnv...)
 	extra = append(extra, aicontrol.PtyEnv()...)
+	extra = append(extra, aicontrol.EnvPaneID+"="+strconv.Itoa(id))
 	sess, err := host.StartSession(shell, cols, rows, cwd, extra...)
 	if err != nil {
 		log.Error("pty start failed", "tab", id, "shell", shell, "cwd", cwd, "err", err)

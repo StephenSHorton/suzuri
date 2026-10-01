@@ -482,7 +482,7 @@ func (u *winUI) syncChrome() {
 			}
 			tabs[i] = chrome.Tab{
 				ID: t.id, Title: title, Alive: t.alive.Load(),
-				AltScreen: t.altScreen(), Busy: t.busy(),
+				AltScreen: t.altScreen(), Busy: t.busy(), Blocked: t.blocked(),
 			}
 		}
 		r := u.chrome.UpdateChrome(chrome.SyncTabsMsg{Tabs: tabs, Active: u.active})
@@ -505,6 +505,7 @@ func (u *winUI) syncChrome() {
 		alive := p.anyAlive()
 		alt := false
 		busy := p.anyBusy()
+		blocked := p.anyBlocked()
 		if focus != nil {
 			alt = focus.altScreen()
 		}
@@ -514,6 +515,7 @@ func (u *winUI) syncChrome() {
 			Alive:     alive,
 			AltScreen: alt,
 			Busy:      busy,
+			Blocked:   blocked,
 			HideBusy:  i == u.active && p.hidesStripBusy(),
 		}
 	}
@@ -528,7 +530,7 @@ func (u *winUI) syncChrome() {
 			prev, next := u.chrome.Tabs[i], tabs[i]
 			if prev.Title != next.Title || prev.ID != next.ID ||
 				prev.Alive != next.Alive || prev.AltScreen != next.AltScreen ||
-				prev.Busy != next.Busy || prev.HideBusy != next.HideBusy {
+				prev.Busy != next.Busy || prev.Blocked != next.Blocked || prev.HideBusy != next.HideBusy {
 				dirty = true
 				break
 			}
@@ -4720,7 +4722,8 @@ func (u *winUI) paintPaneTitles(hdc win.HDC, layouts []paneGeom) {
 			continue
 		}
 		resting := g.pane != nil && g.pane.resting()
-		busy := g.pane != nil && g.pane.alive.Load() && !resting
+		busy := g.pane != nil && g.pane.busy()
+		blocked := g.pane != nil && g.pane.blocked()
 		lamp := idleLamp{}
 		if resting {
 			lamp = idleLampAt(g.x, g.titleY, g.w, g.titleH)
@@ -4766,6 +4769,8 @@ func (u *winUI) paintPaneTitles(hdc win.HDC, layouts []paneGeom) {
 		mark := ""
 		if busy {
 			mark = paneBusyMark()
+		} else if blocked {
+			mark = paneBlockedMark()
 		}
 		reserveCols := 2
 		if mark != "" {
