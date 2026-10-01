@@ -23,6 +23,7 @@ func (s *Session) Read(p []byte) (int, error)  { return 0, errUnsupported }
 func (s *Session) Write(p []byte) (int, error) { return 0, errUnsupported }
 func (s *Session) Resize(cols, rows int) error { return errUnsupported }
 func (s *Session) Pid() int                    { return 0 }
+func (s *Session) ForegroundPGID() int         { return 0 }
 func (s *Session) Wait(ctx context.Context) (uint32, error) {
 	return 0, errUnsupported
 }

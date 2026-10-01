@@ -56,7 +56,18 @@ type termModes struct {
 	queuedFinish []cmdFinish
 	lastFinishAt time.Time
 	lastFinish   cmdFinish
+	idlePending  bool
+	// sawStart / sawDone record shell-integration edges in this feed.
+	// lastShellMark is which edge arrived last (start wins over an earlier done).
+	sawStart      bool
+	sawDone       bool
+	lastShellMark int
 }
+
+const (
+	shellMarkStart = 1
+	shellMarkDone  = 2
+)
 
 // cmdFinish is one foreground command that just returned to the prompt.
 type cmdFinish struct {
@@ -89,6 +100,12 @@ type feedResult struct {
 	aliveID   string
 	aliveAsk  bool
 	armFocus  bool
+	// shellIdle is set when a foreground command reports that it finished
+	// (OSC 7879;done or FinalTerm/VS Code 133;D / 633;D).
+	shellIdle bool
+	// cmdStart is OSC 7879;start from the shell's preexec. It wins over a
+	// finish mark that appears earlier in the same chunk.
+	cmdStart bool
 }
 
 const (
@@ -105,7 +122,9 @@ func (m *termModes) leaveApp() {
 	if m == nil {
 		return
 	}
-	m.bracketPaste = false
+	// Keep bracketPaste. The shell's prompt mode is tracked across alt-screen
+	// teardown; wiping it here hid the Warp bar after vim when the same
+	// chunk had already re-armed paste.
 	m.syncOn = false
 	m.syncBuf = nil
 	m.heldSpans = nil
@@ -392,12 +411,22 @@ func (m *termModes) takeOSC(payload []byte, _ vt10x.ModeFlag, res *feedResult) b
 	}
 }
 
-// takeOSC7879 is suzuri's own command-finished report:
-// 7879 ; done ; exit ; base64-command
+// takeOSC7879 is suzuri's shell integration:
+//
+//	7879 ; start
+//	7879 ; done ; exit ; base64-command
+//
+// start is preexec (a program now owns the keyboard). done is precmd
+// (the prompt is back). Paste mode is not consulted.
 func (m *termModes) takeOSC7879(payload []byte, _ *feedResult) {
 	rest := string(payload)
 	rest = strings.TrimPrefix(rest, "7879;")
 	kind, tail, _ := strings.Cut(rest, ";")
+	if kind == "start" {
+		m.sawStart = true
+		m.lastShellMark = shellMarkStart
+		return
+	}
 	if kind != "done" {
 		return
 	}
@@ -437,11 +466,30 @@ func (m *termModes) queueFinish(cmd string, exit int, hasExit bool) {
 	if strings.HasPrefix(cmd, "_suzuri_") {
 		return
 	}
+	m.idlePending = true
+	m.sawDone = true
+	m.lastShellMark = shellMarkDone
 	m.queuedFinish = append(m.queuedFinish, cmdFinish{cmd: cmd, exit: exit, hasExit: hasExit})
 }
 
 func (m *termModes) flushCmdFinishes(res *feedResult) {
-	if m == nil || len(m.queuedFinish) == 0 {
+	if m == nil {
+		return
+	}
+	// Start then done is a command that already returned (or a done the
+	// process-group check will ignore). Done then start is a new command
+	// and must keep the keyboard.
+	if m.sawStart {
+		res.cmdStart = true
+	}
+	if m.lastShellMark != shellMarkStart && (m.sawDone || m.idlePending) {
+		res.shellIdle = true
+	}
+	m.sawStart = false
+	m.sawDone = false
+	m.idlePending = false
+	m.lastShellMark = 0
+	if len(m.queuedFinish) == 0 {
 		return
 	}
 	best := m.queuedFinish[0]
@@ -792,6 +840,12 @@ func (t *tab) pullPTY(data []byte, focused, visible bool) ([]byte, []osc8Span) {
 		return data, nil
 	}
 	res := t.modes.feed(time.Now(), data, t.term.Mode())
+	if res.cmdStart {
+		t.markCommandStarted()
+	}
+	if res.shellIdle {
+		t.markShellIdle()
+	}
 	if len(res.replies) > 0 {
 		t.sendKey(res.replies)
 	}

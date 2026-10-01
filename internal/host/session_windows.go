@@ -331,6 +331,9 @@ func (s *Session) Resize(cols, rows int) error {
 	return err
 }
 
+// ForegroundPGID is unused on Windows (no POSIX foreground group).
+func (s *Session) ForegroundPGID() int { return 0 }
+
 // Pid of the attached console process.
 func (s *Session) Pid() int {
 	if s == nil || s.cpty == nil {

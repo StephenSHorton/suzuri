@@ -55,7 +55,7 @@ func paneInputContentCols(paneW, cw int32) int {
 // paneInputBarPixelHeight is the bar height for one pane (0 on alt-screen).
 // ch/cw are cell metrics; paneW is the leaf width in pixels.
 func paneInputBarPixelHeight(t *tab, paneW, cw, ch int32) int32 {
-	if t == nil || t.altScreen() {
+	if t == nil || t.altScreen() || t.programOwnsKeys() {
 		return 0
 	}
 	if ch < 1 {

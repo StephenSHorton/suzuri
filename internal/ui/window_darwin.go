@@ -205,6 +205,9 @@ type macUI struct {
 	// inputOnlyDirty: Warp bar text/caret changed but shell cells did not.
 	// When shell matrix rain is off, Draw can re-paint only the bar(s).
 	inputOnlyDirty bool
+	// progOwns is the last programOwnsKeys result, so a foreground-group
+	// change resizes the shell once instead of every frame.
+	progOwns bool
 
 	// Mouse
 	mouseDown bool
@@ -535,7 +538,7 @@ func (u *macUI) inputBarCwd() string {
 
 func (u *macUI) appOwnsKeyboard() bool {
 	t := u.activeTab()
-	return t != nil && t.altScreen()
+	return t != nil && (t.altScreen() || t.programOwnsKeys())
 }
 
 func (u *macUI) maybeResizeForInput() {
@@ -576,7 +579,7 @@ func (u *macUI) loop() error {
 	u.width, u.height = int32(w), int32(h)
 	u.applyClientSize(u.width, u.height)
 
-	ebiten.SetWindowTitle(appTitle)
+	ebiten.SetWindowTitle(hostWindowTitle(""))
 	ebiten.SetWindowDecorated(false)
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetWindowSize(w, h)
@@ -741,6 +744,15 @@ drained:
 	for _, t := range u.allPanes() {
 		if t != nil {
 			t.flushPendingResize()
+		}
+	}
+	if t := u.activeTab(); t != nil {
+		owns := t.programOwnsKeys()
+		if owns != u.progOwns {
+			u.progOwns = owns
+			log.Info("input owner", "tab", t.id, "program", owns, "why", "tick")
+			u.maybeResizeForInput()
+			u.markShellDirty()
 		}
 	}
 	u.handleResize()
@@ -993,6 +1005,7 @@ func (u *macUI) submitBarLine(tab *tab, line string) {
 		return
 	}
 	submitBarLine(tab, line, u.barCols(tab), u.toast)
+	u.maybeResizeForInput()
 	u.publishBridgeSnapshot()
 }
 
@@ -1034,6 +1047,11 @@ func (u *macUI) drainAndParse(tabID int) {
 				u.maybeResizeForInput()
 			}
 		},
+		OnInputOwner: func() {
+			if u.activeTab() == t {
+				u.maybeResizeForInput()
+			}
+		},
 	})
 	if res.Action == ptyNone {
 		return
@@ -1048,7 +1066,7 @@ func (u *macUI) drainAndParse(tabID int) {
 		return
 	}
 	if res.TitleChanged && u.activeTab() == t {
-		ebiten.SetWindowTitle("suzuri — " + res.Title)
+		ebiten.SetWindowTitle(hostWindowTitle(res.Title))
 	}
 	u.tryFlushCmdQueue(t)
 	u.publishBridgeSnapshot()
@@ -1277,7 +1295,7 @@ func (u *macUI) newTabUI(profileName string) {
 	t.startWorkers(u)
 	u.syncChrome()
 	u.maybeResizeForInput()
-	ebiten.SetWindowTitle("suzuri — " + t.title)
+	ebiten.SetWindowTitle(hostWindowTitle(t.title))
 	u.publishBridgeSnapshot()
 }
 
@@ -1308,7 +1326,7 @@ func (u *macUI) switchTab(delta int) {
 	u.selecting = false
 	if t := u.activeTab(); t != nil {
 		t.sel.clear()
-		ebiten.SetWindowTitle("suzuri — " + t.title)
+		ebiten.SetWindowTitle(hostWindowTitle(t.title))
 	}
 	u.syncChrome()
 	u.maybeResizeForInput()
@@ -2097,7 +2115,7 @@ func (u *macUI) handleKeys() {
 			u.selecting = false
 			if t := u.activeTab(); t != nil {
 				t.sel.clear()
-				ebiten.SetWindowTitle("suzuri — " + t.title)
+				ebiten.SetWindowTitle(hostWindowTitle(t.title))
 			}
 			u.syncChrome()
 			u.maybeResizeForInput()
@@ -2227,6 +2245,11 @@ func (u *macUI) handleKeys() {
 			}
 			if realCtrl && !super {
 				// Ctrl+C → always PTY interrupt (^C). Copy is Cmd+C only.
+				if tab.programOwnsKeys() {
+					if n := tab.discardCmdQueue(); n > 0 {
+						u.toast(fmt.Sprintf("cleared %d queued", n))
+					}
+				}
 				u.sendKey([]byte{0x03})
 				return
 			}
@@ -2404,6 +2427,8 @@ func (u *macUI) handleKeys() {
 			return
 		}
 		line := in.submit()
+		u.keyRep.suppressUntilRelease(ebiten.KeyEnter)
+		u.keyRep.suppressUntilRelease(ebiten.KeyKPEnter)
 		u.maybeResizeForInput()
 		u.submitBarLine(tab, line)
 		return
@@ -3258,7 +3283,7 @@ func (u *macUI) handleMouse() {
 					u.selecting = false
 					if t := u.activeTab(); t != nil {
 						t.sel.clear()
-						ebiten.SetWindowTitle("suzuri — " + t.title)
+						ebiten.SetWindowTitle(hostWindowTitle(t.title))
 					}
 					u.syncChrome()
 					u.maybeResizeForInput()
@@ -3945,6 +3970,10 @@ func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool
 			cols: u.cols, rows: u.rows, focused: true,
 		}}
 	}
+	// Bar hidden (foreground program): a bar-only frame would keep the old strip.
+	if u.inputBarPixelHeight() < 1 {
+		return false
+	}
 	// Re-draw each leaf bar (caret alpha updates here too).
 	for _, g := range layouts {
 		if g.barH > 0 {
@@ -4175,8 +4204,6 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if u.hoverLinkOK {
 		applyLinkHoverTint(focusGrid, u.hoverLink)
 	}
-	cur := tab.term.Cursor()
-	curVis := tab.altScreen() && tab.term.CursorVisible()
 	curAlpha := u.caretAlpha()
 
 	// Scrollbar for focused pane only (hide on alt-screen / overlays).
@@ -4185,6 +4212,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if g := u.focusedGeom(); g != nil && g.rows > 0 {
 		viewRows = g.rows
 	}
+	curX, curY, curVis := tab.gridCursor(viewRows, true)
 	scrollTrack := !tab.altScreen() && !u.chrome.OverlayOpen() && len(layouts) <= 1
 	var thumbY, thumbH int
 	if scrollTrack {
@@ -4210,8 +4238,8 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		Overlay:  overlay,
 		PadY:     padY,
 		ShellBot: shellBot,
-		CurX:     cur.X,
-		CurY:     cur.Y,
+		CurX:     curX,
+		CurY:     curY,
 		CurVis:   curVis,
 		CurAlpha: curAlpha,
 		// Dim matte: settings/splash/confirm only. Workspace floats live shell.
@@ -4508,10 +4536,9 @@ func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
 	if t == u.activeTab() && u.hoverLinkOK {
 		applyLinkHoverTint(grid, u.hoverLink)
 	}
-	cur := t.term.Cursor()
-	curVis := t.altScreen() && t.term.CursorVisible() && g.focused
+	curX, curY, curVis := t.gridCursor(viewRows, g.focused)
 	shellCur, shellSteady := t.modes.shellCursor(int(u.cfg.Cursor))
-	u.painter.paintPaneGrid(u.fb, grid, g, cur.X, cur.Y, curVis, curAlpha, shellCur, shellSteady, t.modes.progress.kind, t.modes.progress.pct)
+	u.painter.paintPaneGrid(u.fb, grid, g, curX, curY, curVis, curAlpha, shellCur, shellSteady, t.modes.progress.kind, t.modes.progress.pct)
 	if !t.altScreen() {
 		vis := t.sb.visibleImages(t.term, viewRows)
 		u.painter.paintPaneImages(u.fb, vis, g)

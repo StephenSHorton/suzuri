@@ -976,7 +976,7 @@ func (u *winUI) inputBarCwd() string {
 // raw keys (alt-screen). Host chrome shortcuts still win first.
 func (u *winUI) appOwnsKeyboard() bool {
 	t := u.activeTab()
-	return t != nil && t.altScreen()
+	return t != nil && (t.altScreen() || t.programOwnsKeys())
 }
 
 // maybeResizeForInput recomputes shell rows when a pane bar height changes.
@@ -1583,6 +1583,7 @@ func (u *winUI) submitBarLine(tab *tab, line string) {
 		return
 	}
 	submitBarLine(tab, line, u.barCols(tab), u.toast)
+	u.maybeResizeForInput()
 	u.publishBridgeSnapshot()
 }
 
@@ -1648,6 +1649,11 @@ func (u *winUI) drainAndParse(tabID int) {
 		// ConPTY-resize in that callback — dual Grok plus ResizePseudoConsole
 		// mid-stream hard-crashes. onAltScreenToggled is paint-only.
 		OnAlt: func() { u.onAltScreenToggled(t) },
+		OnInputOwner: func() {
+			if u.activeTab() == t {
+				u.maybeResizeForInput()
+			}
+		},
 	})
 	if res.Action == ptyNone {
 		return
@@ -2895,6 +2901,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				if !tab.sel.empty() {
 					u.copySelection()
 				} else {
+					if tab.programOwnsKeys() {
+						if n := tab.discardCmdQueue(); n > 0 {
+							u.toast(fmt.Sprintf("cleared %d queued", n))
+						}
+					}
 					u.sendKey([]byte{0x03})
 				}
 				return 0
@@ -3832,9 +3843,8 @@ func (u *winUI) paint(hwnd win.HWND) {
 				if g.pane == u.activeTab() && u.hoverLinkOK {
 					applyLinkHoverTint(grid, u.hoverLink)
 				}
-				cur := g.pane.term.Cursor()
-				curVis := g.pane.altScreen() && g.pane.term.CursorVisible() && g.focused
-				u.blitGridPane(dest, rect, grid, cur.X, cur.Y, curVis, g)
+				curX, curY, curVis := g.pane.gridCursor(viewRows, g.focused)
+				u.blitGridPane(dest, rect, grid, curX, curY, curVis, g)
 				if pk := g.pane.modes.progress.kind; pk != 0 {
 					pct := g.pane.modes.progress.pct
 					if pct < 0 {

@@ -3,11 +3,25 @@
 package ui
 
 import (
+	"os"
 	"strings"
 	"time"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
+
+// hostWindowTitle is the OS window title. SUZURI_TITLE_TAG replaces the
+// product name so a dev build is not mistaken for the installed app.
+func hostWindowTitle(rest string) string {
+	base := appTitle
+	if tag := strings.TrimSpace(os.Getenv("SUZURI_TITLE_TAG")); tag != "" {
+		base = tag
+	}
+	if rest == "" {
+		return base
+	}
+	return base + " — " + rest
+}
 
 const (
 	appTitle = "suzuri（硯）"

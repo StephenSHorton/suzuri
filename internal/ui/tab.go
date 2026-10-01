@@ -100,7 +100,16 @@ type tab struct {
 	// Warp-bar command queue: when a job is still running, further Enter
 	// submits wait here instead of dumping into the live process stdin.
 	cmdQueue    []queuedCmd
-	barAwaiting bool // true after a bar command until shell looks idle
+	barAwaiting bool // true after a bar command until the shell reports the prompt
+	// foreground is latched by OSC 7879;start and cleared when the prompt
+	// returns. It survives a cwd redraw that clears barAwaiting.
+	foreground bool
+	// ttyChild is set once a program other than the shell holds the PTY.
+	// When that program gives the terminal back, the prompt is back even
+	// if a finish OSC was early or missing.
+	ttyChild bool
+	// forceChild is a test stand-in for a foreign foreground process group.
+	forceChild bool
 }
 
 // Explicit agent lifecycle. A non-zero value replaces the title-spinner and
@@ -370,6 +379,29 @@ func (t *tab) altScreen() bool {
 	return t.term.Mode()&vt10x.ModeAltScreen != 0
 }
 
+// gridCursor is the caret cell inside a viewCells grid.
+// Full-screen apps use the terminal cursor as painted today.
+// A foreground command that owns the keyboard uses the same cursor, shifted
+// down by the history sitting above the live screen. The Warp bar hides its
+// own caret in that case.
+func (t *tab) gridCursor(viewRows int, focused bool) (x, y int, vis bool) {
+	if t == nil || t.term == nil || !focused {
+		return 0, 0, false
+	}
+	cur := t.term.Cursor()
+	if t.altScreen() {
+		return cur.X, cur.Y, t.term.CursorVisible()
+	}
+	if !t.programOwnsKeys() || t.sb == nil {
+		return 0, 0, false
+	}
+	x, y, ok := t.sb.liveCursorView(t.term, viewRows)
+	if !ok || !t.term.CursorVisible() {
+		return 0, 0, false
+	}
+	return x, y, true
+}
+
 const maxPtyTail = 8192
 
 // PTY read / input buffer sizing for full-screen apps that flood Kitty
@@ -451,8 +483,11 @@ func (t *tab) setCwd(path string) {
 	if path == "" {
 		return
 	}
-	// Prompt OSC often re-reports the same cwd — still means idle.
-	t.markShellIdle()
+	// A cwd report is not a prompt. Shells that only emit cwd (cmd.exe) still
+	// end the command here. zsh emits cwd on precmd and on some redraws.
+	if t.cwdOSCEndsCommand() || (!t.barAwaiting && !t.foreground) {
+		t.markShellIdle()
+	}
 	if path == t.cwd {
 		return
 	}

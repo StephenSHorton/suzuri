@@ -146,6 +146,26 @@ func liveExtent(term vt10x.Terminal) int {
 	return last + 1
 }
 
+// liveCursorView maps the primary-screen cursor into a viewCells grid.
+// History sits above the live rows, so term.Cursor().Y is not a viewport row.
+func (s *scrollback) liveCursorView(term vt10x.Terminal, viewportRows int) (x, y int, ok bool) {
+	if s == nil || term == nil || viewportRows < 1 {
+		return 0, 0, false
+	}
+	cur := term.Cursor()
+	liveN := len(snapshotLiveCells(term))
+	if cur.Y < 0 || cur.Y >= liveN {
+		return cur.X, 0, false
+	}
+	histDoc := s.docLen()
+	start, pad := s.viewWindow(viewportRows, liveN)
+	vy := pad + (histDoc + cur.Y) - start
+	if vy < 0 || vy >= viewportRows {
+		return cur.X, vy, false
+	}
+	return cur.X, vy, true
+}
+
 func snapshotLiveCells(term vt10x.Terminal) [][]cellPix {
 	live := snapshotScreenCells(term)
 	n := liveExtent(term)
