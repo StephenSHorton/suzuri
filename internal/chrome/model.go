@@ -754,6 +754,10 @@ func (m Model) updateSettingsKey(msg tea.KeyMsg) Result {
 		m.lastCfg = settings
 		m.SettingsOpen = false
 		act = ActionSettingsApply
+	case "tab":
+		m.settings.moveTab(1)
+	case "shift+tab":
+		m.settings.moveTab(-1)
 	case "up", "k":
 		m.settings.moveField(-1)
 	case "down", "j":

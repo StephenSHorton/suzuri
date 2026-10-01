@@ -69,6 +69,53 @@ const (
 	AmbientCRT       = "crt"       // scanlines + soft vignette
 )
 
+// Window backdrop behind empty / near-black shell cells.
+const (
+	BackdropSolid = "solid" // opaque void (shipping default)
+	BackdropGlass = "glass" // desktop shows through those cells, blurred on macOS
+)
+
+// Glass knobs apply when Backdrop is glass. Blur is the macOS desktop blur
+// radius in points (Windows still paints a solid shell). Veil is a black wash
+// over the holes, 0–100. Rim is the dark glyph outline on those holes, 0–100.
+const (
+	GlassBlurDefault = 48
+	GlassBlurMax     = 80
+	GlassVeilDefault = 0
+	GlassRimDefault  = 25 // light outline; a saved glass_rim value wins
+	ShellLogoDefault = 20 // quiet center mark; 100 is solid
+)
+
+// logoValue is the center-mark opacity. It accepts a percent, or the earlier
+// on/off bool (true = 100, false = 0).
+type logoValue struct {
+	set bool
+	n   int
+}
+
+func (v logoValue) IsZero() bool { return !v.set }
+
+func (v logoValue) MarshalJSON() ([]byte, error) {
+	return json.Marshal(v.n)
+}
+
+func (v *logoValue) UnmarshalJSON(b []byte) error {
+	switch strings.TrimSpace(string(b)) {
+	case "true":
+		v.set, v.n = true, ShellLogoDefault
+		return nil
+	case "false":
+		v.set, v.n = true, 0
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil {
+		return err
+	}
+	v.set, v.n = true, n
+	return nil
+}
+
 // Profile is a named shell launch recipe (cwd + command + optional theme).
 type Profile struct {
 	Name  string `json:"name"`
@@ -102,6 +149,17 @@ type Config struct {
 	// AnimateUnfocused keeps the paint clock running when another app has focus
 	// (matrix rain, tab spinner, caret). Off freezes chrome animation in background.
 	AnimateUnfocused bool
+	// Backdrop is what shows through empty and near-black shell cells
+	// (solid | glass). Glass is a Mac blur; Windows still paints solid.
+	Backdrop string
+	// ShellLogo is the center 硯 opacity, 0–100. 0 hides it, 100 is solid.
+	// The default is the quiet mark. Same scale on Solid and Glass.
+	// The tab-strip mark stays.
+	ShellLogo int
+	// GlassBlur, GlassVeil, and GlassRim tune glass. See the Glass*Default constants.
+	GlassBlur int
+	GlassVeil int
+	GlassRim  int
 	// NoticePosition is where desktop notification cards sit
 	// (bottom-left, bottom-center, center, top-right, …). See NoticePositionIDs.
 	NoticePosition string
@@ -145,6 +203,11 @@ type fileDTO struct {
 	FirstRunDone  bool      `json:"first_run_done,omitempty"`
 	Intro         string    `json:"intro,omitempty"`
 	ShellAmbient  string    `json:"shell_ambient,omitempty"`
+	Backdrop      string    `json:"backdrop,omitempty"`
+	GlassBlurPtr  *int      `json:"glass_blur,omitempty"`
+	GlassVeilPtr  *int      `json:"glass_veil,omitempty"`
+	GlassRimPtr   *int      `json:"glass_rim,omitempty"`
+	ShellLogo     logoValue `json:"shell_logo,omitempty"`
 	// Ptr fields distinguish "missing" from false / 0 when loading JSON.
 	ShellMatrixPtr        *bool           `json:"shell_matrix,omitempty"`
 	ShellMatrixOpacityPtr *int            `json:"shell_matrix_opacity,omitempty"`
@@ -170,10 +233,15 @@ func Default() Config {
 		Theme:              ThemeHighContrast,
 		ShellANSIMap:       ANSIMapSoft,
 		Intro:              IntroMatrix,
-		ShellAmbient:       AmbientRain, // quiet always-on rain under shell cells
-		ShellMatrix:        true,        // mirrors ambient==rain for legacy
-		ShellMatrixOpacity: 100,         // full designed intensity
-		AnimateUnfocused:   true,        // keep ambient/spinners smooth in the background
+		ShellAmbient:       AmbientRain,      // quiet always-on rain under shell cells
+		ShellMatrix:        true,             // mirrors ambient==rain for legacy
+		ShellMatrixOpacity: 100,              // full designed intensity
+		AnimateUnfocused:   true,             // keep ambient/spinners smooth in the background
+		Backdrop:           BackdropSolid,    // opaque shell; glass is opt-in
+		ShellLogo:          ShellLogoDefault, // quiet center 硯; 100 is solid
+		GlassBlur:          GlassBlurDefault,
+		GlassVeil:          GlassVeilDefault,
+		GlassRim:           GlassRimDefault,
 		NoticePosition:     NoticeBottomLeft,
 		Profiles:           DefaultProfiles(),
 		ActiveProfile:      "Default",
@@ -312,6 +380,11 @@ func Normalize(c Config) Config {
 	}
 	// Keep ShellMatrix in sync so older code paths (matrix intro skip) still work.
 	c.ShellMatrix = c.ShellAmbient == AmbientRain
+	if id := strings.ToLower(strings.TrimSpace(c.Backdrop)); ValidBackdrop(id) {
+		c.Backdrop = id
+	} else {
+		c.Backdrop = BackdropSolid
+	}
 	if len(c.Profiles) == 0 {
 		c.Profiles = DefaultProfiles()
 	}
@@ -339,12 +412,68 @@ func Normalize(c Config) Config {
 	if c.ShellMatrixOpacity > 100 {
 		c.ShellMatrixOpacity = 100
 	}
+	if c.GlassBlur < 0 {
+		c.GlassBlur = 0
+	}
+	if c.GlassBlur > GlassBlurMax {
+		c.GlassBlur = GlassBlurMax
+	}
+	if c.GlassVeil < 0 {
+		c.GlassVeil = 0
+	}
+	if c.GlassVeil > 100 {
+		c.GlassVeil = 100
+	}
+	if c.GlassRim < 0 {
+		c.GlassRim = 0
+	}
+	if c.GlassRim > 100 {
+		c.GlassRim = 100
+	}
+	if c.ShellLogo < 0 {
+		c.ShellLogo = 0
+	}
+	if c.ShellLogo > 100 {
+		c.ShellLogo = 100
+	}
 	if id := strings.ToLower(strings.TrimSpace(c.NoticePosition)); ValidNoticePosition(id) {
 		c.NoticePosition = id
 	} else {
 		c.NoticePosition = NoticeBottomLeft
 	}
 	return c
+}
+
+// GlassVeilAlpha is the black wash over glass holes, 0–255.
+func (c Config) GlassVeilAlpha() byte {
+	return pctAlpha(c.GlassVeil)
+}
+
+// GlassRimAlpha is the dark glyph outline on glass holes, 0–255.
+// ShellLogoOpacity is the center 硯 strength in [0,1]. 1 is a solid mark.
+func (c Config) ShellLogoOpacity() float64 {
+	n := c.ShellLogo
+	if n < 0 {
+		n = 0
+	}
+	if n > 100 {
+		n = 100
+	}
+	return float64(n) / 100
+}
+
+func (c Config) GlassRimAlpha() byte {
+	return pctAlpha(c.GlassRim)
+}
+
+func pctAlpha(pct int) byte {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return byte((pct*255 + 50) / 100)
 }
 
 // ShellMatrixOpacity01 returns always-on rain strength in [0,1].
@@ -700,6 +829,41 @@ func NoticePositionLabel(id string) string {
 	}
 }
 
+// BackdropIDs lists settings left/right order.
+func BackdropIDs() []string {
+	return []string{BackdropSolid, BackdropGlass}
+}
+
+// ValidBackdrop is true for solid or glass.
+func ValidBackdrop(id string) bool {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case BackdropSolid, BackdropGlass:
+		return true
+	default:
+		return false
+	}
+}
+
+// BackdropLabel is the settings value for a backdrop id.
+func BackdropLabel(id string) string {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case BackdropGlass:
+		return "Glass"
+	default:
+		return "Solid"
+	}
+}
+
+// BackdropDesc is settings help for a backdrop id.
+func BackdropDesc(id string) string {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case BackdropGlass:
+		return "Empty and near-black cells show the desktop. Blur, Veil, and Rim on this page tune how frosted, dark, and outlined that looks. The tab strip, text, and real background colors stay solid. Rain glyphs stay on top. Fullscreen turns this off. Windows still paints a solid shell."
+	default:
+		return "Opaque shell. Empty cells show the theme void and whatever ambient is on."
+	}
+}
+
 // AmbientActive is true when an always-on underlay should paint.
 func (c Config) AmbientActive() bool {
 	return ValidAmbient(c.ShellAmbient) && c.ShellAmbient != AmbientNone
@@ -745,6 +909,7 @@ func fromDTO(d fileDTO) Config {
 		FirstRunDone:   d.FirstRunDone,
 		Intro:          d.Intro,
 		ShellAmbient:   d.ShellAmbient,
+		Backdrop:       d.Backdrop,
 		NoticePosition: d.NoticePosition,
 		Window:         d.Window,
 	}
@@ -767,6 +932,26 @@ func fromDTO(d fileDTO) Config {
 	} else {
 		c.AnimateUnfocused = dflt.AnimateUnfocused
 	}
+	if d.GlassBlurPtr != nil {
+		c.GlassBlur = *d.GlassBlurPtr
+	} else {
+		c.GlassBlur = dflt.GlassBlur
+	}
+	if d.GlassVeilPtr != nil {
+		c.GlassVeil = *d.GlassVeilPtr
+	} else {
+		c.GlassVeil = dflt.GlassVeil
+	}
+	if d.GlassRimPtr != nil {
+		c.GlassRim = *d.GlassRimPtr
+	} else {
+		c.GlassRim = dflt.GlassRim
+	}
+	if d.ShellLogo.set {
+		c.ShellLogo = d.ShellLogo.n
+	} else {
+		c.ShellLogo = dflt.ShellLogo
+	}
 	return c
 }
 
@@ -776,6 +961,8 @@ func toDTO(c Config) fileDTO {
 	sm := c.ShellAmbient == AmbientRain || (c.ShellAmbient == "" && c.ShellMatrix)
 	op := c.ShellMatrixOpacity
 	au := c.AnimateUnfocused
+	blur, veil, rim := c.GlassBlur, c.GlassVeil, c.GlassRim
+	logo := logoValue{set: true, n: c.ShellLogo}
 	return fileDTO{
 		FontFace:              c.FontFace,
 		FontSizePx:            c.FontSizePx,
@@ -787,6 +974,11 @@ func toDTO(c Config) fileDTO {
 		FirstRunDone:          c.FirstRunDone,
 		Intro:                 c.Intro,
 		ShellAmbient:          c.ShellAmbient,
+		Backdrop:              c.Backdrop,
+		GlassBlurPtr:          &blur,
+		GlassVeilPtr:          &veil,
+		GlassRimPtr:           &rim,
+		ShellLogo:             logo,
 		ShellMatrixPtr:        &sm,
 		ShellMatrixOpacityPtr: &op,
 		AnimateUnfocusedPtr:   &au,

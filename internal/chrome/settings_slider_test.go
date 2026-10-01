@@ -24,11 +24,10 @@ func TestFormatRainOpacitySlider(t *testing.T) {
 
 func TestNoticePositionCycle(t *testing.T) {
 	st := newSettingsState(config.Default())
-	for st.field != fieldNotice {
-		st.moveField(1)
-		if int(st.field) == 0 {
-			t.Fatal("notice field missing")
-		}
+	st.moveTab(1) // Shell
+	st.moveTab(1) // Session
+	if st.field != fieldNotice {
+		t.Fatalf("session opens on %v", st.field)
 	}
 	if st.valueLabel(fieldNotice) != "Bottom left" {
 		t.Fatalf("label %q", st.valueLabel(fieldNotice))
@@ -55,12 +54,11 @@ func TestNoticePositionCycle(t *testing.T) {
 
 func TestRainOpacityNudge(t *testing.T) {
 	st := newSettingsState(config.Default())
-	// Move to opacity field
-	for st.field != fieldRainOpacity {
-		st.moveField(1)
-		if int(st.field) == 0 {
-			t.Fatal("opacity field missing")
-		}
+	st.moveTab(1) // Shell: Intro, Ambient, Intensity
+	st.moveField(1)
+	st.moveField(1)
+	if st.field != fieldRainOpacity {
+		t.Fatalf("field %v", st.field)
 	}
 	start := st.edit.ShellMatrixOpacity
 	st.nudge(1)
@@ -83,5 +81,55 @@ func TestRainOpacityNudge(t *testing.T) {
 	val := st.valueLabel(fieldRainOpacity)
 	if !strings.Contains(val, "%") {
 		t.Fatalf("value label %q", val)
+	}
+}
+
+func TestSettingsTabsAndGlassSliders(t *testing.T) {
+	st := newSettingsState(config.Default())
+	view := st.render(100)
+	if !strings.Contains(view, "Look") || !strings.Contains(view, "Font") {
+		t.Fatalf("look tab:\n%s", view)
+	}
+	if strings.Contains(view, "Notices") || strings.Contains(view, "Blur") {
+		t.Fatalf("other pages leaked onto Look:\n%s", view)
+	}
+	if !strings.Contains(view, "tab") || !strings.Contains(view, "esc") {
+		t.Fatalf("footer missing hints:\n%s", view)
+	}
+
+	st.moveTab(1)
+	if st.edit.GlassBlur != config.GlassBlurDefault || st.edit.GlassRim != config.GlassRimDefault {
+		t.Fatalf("defaults blur %d rim %d", st.edit.GlassBlur, st.edit.GlassRim)
+	}
+	for st.field != fieldGlassBlur {
+		st.moveField(1)
+	}
+	st.nudge(1)
+	if st.edit.GlassBlur != config.GlassBlurDefault+glassBlurStep {
+		t.Fatalf("blur nudge %d", st.edit.GlassBlur)
+	}
+	st.edit.GlassBlur = 2
+	st.nudge(-1)
+	if st.edit.GlassBlur != 0 {
+		t.Fatalf("blur clamp %d", st.edit.GlassBlur)
+	}
+	st.edit.GlassBlur = config.GlassBlurMax
+	st.nudge(1)
+	if st.edit.GlassBlur != config.GlassBlurMax {
+		t.Fatalf("blur max %d", st.edit.GlassBlur)
+	}
+	for st.field != fieldGlassVeil {
+		st.moveField(1)
+	}
+	st.nudge(1)
+	if st.edit.GlassVeil != rainOpacityStep {
+		t.Fatalf("veil %d", st.edit.GlassVeil)
+	}
+	view = st.render(100)
+	if !strings.Contains(view, "Veil") || !strings.Contains(view, "Rim") {
+		t.Fatalf("shell tab:\n%s", view)
+	}
+	if strings.Contains(view, "Font") {
+		t.Fatalf("look row on shell tab:\n%s", view)
 	}
 }

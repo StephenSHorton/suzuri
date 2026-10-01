@@ -20,11 +20,16 @@ type softwarePainter struct {
 	face        font.Face
 	cjkFace     font.Face
 	symbolsFace font.Face // Apple Symbols — ☕ and other UI marks mono lacks
-	cellW       int
-	cellH       int
-	ascent      int
-	sizePx      float64
-	faceName    string
+	// inkHalo draws a dark rim under the next glyph so shell text stays
+	// readable on a glass hole. Rain and chrome leave it false.
+	inkHalo bool
+	// glassRim is the outline alpha for that halo (0 hides it).
+	glassRim byte
+	cellW    int
+	cellH    int
+	ascent   int
+	sizePx   float64
+	faceName string
 }
 
 // newSoftwarePainter builds a painter for the settings face name + size.
@@ -146,6 +151,13 @@ type paintOpts struct {
 	MatrixCells []rainCell
 	// ShellMatrixCells: quiet always-on rain/grain/waves UNDER shell glyphs.
 	ShellMatrixCells []rainCell
+	// Glass leaves chroma-key shell pixels at alpha 0 so the desktop blur
+	// shows through. Chrome, text, and real cell colors stay opaque.
+	Glass bool
+	// GlassVeil is a black wash (0–255) painted into those holes.
+	GlassVeil byte
+	// GlassRim is the dark glyph outline alpha on glass holes.
+	GlassRim byte
 	// CRTScanlines: 0..1 intensity for horizontal scanlines + soft side vignette.
 	CRTScanlines  float64
 	WatermarkFade float64
@@ -183,10 +195,17 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		return
 	}
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
-	// Theme void background (not hardcoded grey).
-	draw.Draw(dst, dst.Bounds(), &image.Uniform{C: color.RGBA{
-		R: chrome.VoidR, G: chrome.VoidG, B: chrome.VoidB, A: 255,
-	}}, image.Point{}, draw.Src)
+	p.glassRim = o.GlassRim
+	if o.Glass {
+		// Straight alpha 0. Present with CompositeModeCopy so these holes
+		// reach the transparent Metal layer instead of leaving the last frame.
+		draw.Draw(dst, dst.Bounds(), &image.Uniform{C: color.RGBA{}}, image.Point{}, draw.Src)
+	} else {
+		// Theme void background (not hardcoded grey).
+		draw.Draw(dst, dst.Bounds(), &image.Uniform{C: color.RGBA{
+			R: chrome.VoidR, G: chrome.VoidG, B: chrome.VoidB, A: 255,
+		}}, image.Point{}, draw.Src)
+	}
 
 	cw, ch := p.cellW, p.cellH
 	const padX = 4
@@ -196,8 +215,12 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	}
 
 	// Shell band base (black) — same as Windows BLACK_BRUSH before watermark.
-	if shellBot > padY {
+	// Glass leaves this clear so chroma-key cells stay holes, then a veil
+	// (if any) tints those holes without covering real cell colors.
+	if shellBot > padY && !o.Glass {
 		fillRectRGBA(dst, 0, padY, w, shellBot-padY, 0, 0, 0)
+	} else if shellBot > padY && o.Glass && o.GlassVeil > 0 {
+		fillRectAlpha(dst, 0, padY, w, shellBot-padY, 0, 0, 0, o.GlassVeil)
 	}
 
 	// Always-on shell ambient under glyphs (grain/waves/fireflies/rain).
@@ -209,7 +232,7 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	// Center 硯 UNDER shell cells (Windows blitGrid order). Only ink pixels
 	// so we never stamp a black "card" over the field.
 	if o.WatermarkFade > 0.01 && !o.DimShell {
-		p.paintShellWatermark(dst, padY, shellBot, o.WatermarkFade)
+		p.paintShellWatermark(dst, padY, shellBot, o.WatermarkFade, o.Glass, false)
 	}
 
 	// Sub-line smooth scroll: shift grid up by a fraction of a cell.
@@ -249,7 +272,7 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 				bb = blendByte(bb, cell.FB, a)
 			}
 			paintCellBackground(dst, px, py, cw, ch, br, bg, bb)
-			p.paintCellInk(dst, px, py, cell)
+			p.paintCellInk(dst, px, py, cell, o.Glass && cellBGChromaKey(br, bg, bb))
 		}
 	}
 	if o.CurVis && o.ShellCursor != 0 && o.CurY >= 0 && o.CurX >= 0 {
@@ -300,24 +323,26 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	// Intro / settings underlay over the shell field.
 	// Settings default: Ambient showcase (MatrixCells / CRTScanlines).
 	// Settings + Intro focused: startup curtain preview (MatrixCells).
-	if o.SettingsOpen || (o.DimShell && len(o.MatrixCells) > 0) {
-		// Theme matte so rain/ambient read on a dark field (not live shell).
-		fillShellMatte(dst, padY, shellBot, true)
+	// Glass keeps the holes. The showcase glyphs draw on the desktop,
+	// and the opaque matte is only for a solid backdrop.
+	if o.SettingsOpen || (o.DimShell && len(o.MatrixCells) > 0 && !o.Glass) {
+		if !o.Glass {
+			fillShellMatte(dst, padY, shellBot, true)
+		}
 		if len(o.MatrixCells) > 0 {
 			p.paintMatrixRain(dst, padY, shellBot, o.MatrixCells)
 		}
-		// CRT ambient / CRT intro scanlines on the matte.
 		if o.SettingsOpen && o.CRTScanlines > 0.01 {
 			p.paintCRTScanlines(dst, padY, shellBot, o.CRTScanlines)
 		}
-	} else if o.DimShell && !o.SettingsOpen {
+	} else if o.DimShell && !o.SettingsOpen && !o.Glass {
 		// Non-settings overlay: dim matte + 猫咪 texture.
 		fillShellMatte(dst, padY, shellBot, false)
 		p.paintDimNekoField(dst, padY, shellBot)
-	} else if len(o.MatrixCells) > 0 {
+	} else if len(o.MatrixCells) > 0 && !(o.Glass && o.SettingsOpen) {
 		// Live intro curtain over the shell (no matte).
 		p.paintMatrixRain(dst, padY, shellBot, o.MatrixCells)
-	} else if o.DimShell {
+	} else if o.DimShell && !(o.Glass && o.SettingsOpen) {
 		// Generic dim.
 		for y := padY; y < shellBot && y < h; y++ {
 			for x := 0; x < w; x++ {
@@ -543,10 +568,10 @@ func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, 
 			if !barMode && empty && isTransparentOverlayBG(br, bg, bb) {
 				if fillHoles {
 					fillRectRGBA(dst, px, py, cw, ch, chrome.PanelR, chrome.PanelG, chrome.PanelB)
-					p.paintCellInk(dst, px, py, cell)
+					p.paintCellInk(dst, px, py, cell, false)
 					continue
 				}
-				p.paintCellInk(dst, px, py, cell)
+				p.paintCellInk(dst, px, py, cell, false)
 				continue
 			}
 			// Non-empty glyph with transparent/default bg inside card → panel under ink.
@@ -554,13 +579,13 @@ func paintCellStrip(p *softwarePainter, dst *image.RGBA, cells [][]cellPix, ox, 
 				br, bg, bb = chrome.PanelR, chrome.PanelG, chrome.PanelB
 			}
 			if barMode && br == 0 && bg == 0 && bb == 0 {
-				p.paintCellInk(dst, px, py, cell)
+				p.paintCellInk(dst, px, py, cell, false)
 				continue
 			}
 			if !(barMode && empty && br == chrome.BarR && bg == chrome.BarG && bb == chrome.BarB) {
 				fillRectRGBA(dst, px, py, cw, ch, br, bg, bb)
 			}
-			p.paintCellInk(dst, px, py, cell)
+			p.paintCellInk(dst, px, py, cell, false)
 		}
 	}
 }
@@ -575,14 +600,19 @@ func overlayCellIsSolid(cell cellPix) bool {
 	return cell.Ch != 0 && cell.Ch != ' '
 }
 
-func (p *softwarePainter) paintCellInk(dst *image.RGBA, px, py int, cell cellPix) {
+func (p *softwarePainter) paintCellInk(dst *image.RGBA, px, py int, cell cellPix, hole bool) {
 	if p == nil || dst == nil {
 		return
 	}
 	if cell.Ch != 0 && cell.Ch != ' ' {
+		p.inkHalo = hole
 		p.drawGlyph(dst, px, py, cell.Ch, cell.FR, cell.FG, cell.FB)
+		p.inkHalo = false
 	}
 	if cell.Underline {
+		if hole {
+			p.paintCellUnderlineHalo(dst, px, py)
+		}
 		p.paintCellUnderline(dst, px, py, cell.FR, cell.FG, cell.FB)
 	}
 }
@@ -600,6 +630,23 @@ func (p *softwarePainter) paintCellUnderline(dst *image.RGBA, px, py int, fr, fg
 		th = 1
 	}
 	fillRectRGBA(dst, px, py+ch-th-1, cw, th, fr, fg, fb)
+}
+
+// paintCellUnderlineHalo is a dark rim under a glass-hole underline so the
+// stroke does not bloom into the desktop.
+func (p *softwarePainter) paintCellUnderlineHalo(dst *image.RGBA, px, py int) {
+	cw, ch := p.cellW, p.cellH
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	th := ch / 12
+	if th < 1 {
+		th = 1
+	}
+	fillRectAlpha(dst, px-1, py+ch-th-2, cw+2, th+2, 0, 0, 0, p.glassRim)
 }
 
 // drawGlyphInBox scales a CJK glyph uniformly into a square so 硯 keeps its
@@ -699,6 +746,9 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 			maskp.Y += clipped.Min.Y - dr.Min.Y
 			dr = clipped
 		}
+		if p.inkHalo {
+			p.stampGlassHalo(dst, dr, mask, maskp)
+		}
 		col := image.NewUniform(color.RGBA{R: fr, G: fg, B: fb, A: 255})
 		draw.DrawMask(dst, dr, col, image.Point{}, mask, maskp, draw.Over)
 		return
@@ -712,7 +762,7 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 // paintPaneGrid draws a VT cell grid into a pane's content rect.
 // Does not stamp a solid black card — shell band / always-on rain already
 // filled the field (Windows blitGrid: default black BG leaves rain visible).
-func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64, curStyle int, curSteady bool, progKind, progPct int) {
+func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64, curStyle int, curSteady bool, progKind, progPct int, glass bool) {
 	if dst == nil || p == nil || g.w < 1 || g.h < 1 {
 		return
 	}
@@ -752,7 +802,7 @@ func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g pan
 				bb = blendByte(bb, cell.FB, a)
 			}
 			paintCellBackground(dst, px, py, cw, ch, br, bg, bb)
-			p.paintCellInk(dst, px, py, cell)
+			p.paintCellInk(dst, px, py, cell, glass && cellBGChromaKey(br, bg, bb))
 		}
 	}
 	if curVis && curStyle != 0 {
@@ -1324,15 +1374,107 @@ func fillRectRGBA(dst *image.RGBA, x, y, w, h int, r, g, b byte) {
 	}
 }
 
+func fillRectAlpha(dst *image.RGBA, x, y, w, h int, r, g, b, a byte) {
+	if dst == nil || a == 0 {
+		return
+	}
+	rect := image.Rect(x, y, x+w, y+h).Intersect(dst.Bounds())
+	if rect.Empty() {
+		return
+	}
+	for py := rect.Min.Y; py < rect.Max.Y; py++ {
+		for px := rect.Min.X; px < rect.Max.X; px++ {
+			overPix(dst, px, py, r, g, b, a)
+		}
+	}
+}
+
+// stampGlassHalo paints a 1px dark rim from a glyph mask. The ink is drawn
+// on top, so the letter stays solid and only the fringe glows.
+func (p *softwarePainter) stampGlassHalo(dst *image.RGBA, dr image.Rectangle, mask image.Image, maskp image.Point) {
+	if dst == nil || mask == nil || p == nil || p.glassRim == 0 {
+		return
+	}
+	aRim := p.glassRim
+	put := func(x, y int) {
+		if image.Pt(x, y).In(dst.Bounds()) {
+			overPix(dst, x, y, 0, 0, 0, aRim)
+		}
+	}
+	stamp := func(x, y int, a uint32) {
+		if a < 96 {
+			return
+		}
+		put(x, y)
+		put(x-1, y)
+		put(x+1, y)
+		put(x, y-1)
+		put(x, y+1)
+	}
+	if a, ok := mask.(*image.Alpha); ok {
+		for y := dr.Min.Y; y < dr.Max.Y; y++ {
+			my := maskp.Y + (y - dr.Min.Y)
+			iy := my - a.Rect.Min.Y
+			if iy < 0 || iy >= a.Rect.Dy() {
+				continue
+			}
+			row := a.Pix[iy*a.Stride:]
+			for x := dr.Min.X; x < dr.Max.X; x++ {
+				mx := maskp.X + (x - dr.Min.X)
+				ix := mx - a.Rect.Min.X
+				if ix < 0 || ix >= a.Rect.Dx() || ix >= len(row) {
+					continue
+				}
+				stamp(x, y, uint32(row[ix]))
+			}
+		}
+		return
+	}
+	for y := dr.Min.Y; y < dr.Max.Y; y++ {
+		for x := dr.Min.X; x < dr.Max.X; x++ {
+			_, _, _, a := mask.At(maskp.X+(x-dr.Min.X), maskp.Y+(y-dr.Min.Y)).RGBA()
+			stamp(x, y, a>>8)
+		}
+	}
+}
+
+func overPix(dst *image.RGBA, x, y int, r, g, b, a byte) {
+	i := dst.PixOffset(x, y)
+	if a == 255 || dst.Pix[i+3] == 0 {
+		dst.Pix[i+0] = r
+		dst.Pix[i+1] = g
+		dst.Pix[i+2] = b
+		dst.Pix[i+3] = a
+		return
+	}
+	ia := uint32(255 - a)
+	da := uint32(dst.Pix[i+3])
+	outA := uint32(a) + da*ia/255
+	if outA == 0 {
+		return
+	}
+	dst.Pix[i+0] = byte((uint32(r)*uint32(a) + uint32(dst.Pix[i+0])*da*ia/255) / outA)
+	dst.Pix[i+1] = byte((uint32(g)*uint32(a) + uint32(dst.Pix[i+1])*da*ia/255) / outA)
+	dst.Pix[i+2] = byte((uint32(b)*uint32(a) + uint32(dst.Pix[i+2])*da*ia/255) / outA)
+	if outA > 255 {
+		outA = 255
+	}
+	dst.Pix[i+3] = byte(outA)
+}
+
 func setRGB(dst *image.RGBA, x, y int, r, g, b byte) {
-	if !image.Pt(x, y).In(dst.Bounds()) {
+	setRGBA(dst, x, y, r, g, b, 255)
+}
+
+func setRGBA(dst *image.RGBA, x, y int, r, g, b, a byte) {
+	if dst == nil || !image.Pt(x, y).In(dst.Bounds()) {
 		return
 	}
 	i := dst.PixOffset(x, y)
 	dst.Pix[i+0] = r
 	dst.Pix[i+1] = g
 	dst.Pix[i+2] = b
-	dst.Pix[i+3] = 255
+	dst.Pix[i+3] = a
 }
 
 // isTransparentOverlayBG is true for cells that should not cover the dim underlay.

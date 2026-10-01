@@ -2,6 +2,8 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <QuartzCore/QuartzCore.h>
+#include <dlfcn.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -264,16 +266,126 @@ static void trackResize(NSWindow *w, int edge) {
 	[[NSCursor arrowCursor] set];
 }
 
+// Desktop blur for alpha-0 shell holes. NSVisualEffectView materials on
+// macOS 26 paint a solid slab and hide the desktop. This private WindowServer
+// call blurs whatever is behind the window into transparent framebuffer
+// pixels. Developer ID builds can call it; the App Store would not.
+typedef int32_t CGSConnectionID;
+typedef CGSConnectionID (*CGSConnectionFn)(void);
+typedef int32_t (*CGSBlurFn)(CGSConnectionID, int32_t wid, int32_t radius);
+
+static CGSConnectionFn gDefaultConn;
+static CGSBlurFn gSetBlur;
+static int gBlurLookup;
+static int gBlurMissLogged;
+static atomic_int gGlassWant;
+static atomic_int gBlurRadius;
+static int gGlassApplied = -1;
+static int gBlurApplied = -1;
+static int gBlurW, gBlurH;
+
+static int loadBlur(void) {
+	if (gBlurLookup != 0) return gBlurLookup;
+	void *h = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY);
+	if (h == NULL) {
+		gBlurLookup = -1;
+		return -1;
+	}
+	gDefaultConn = (CGSConnectionFn)dlsym(h, "CGSDefaultConnectionForThread");
+	gSetBlur = (CGSBlurFn)dlsym(h, "CGSSetWindowBackgroundBlurRadius");
+	if (gDefaultConn == NULL || gSetBlur == NULL) {
+		gBlurLookup = -1;
+		return -1;
+	}
+	gBlurLookup = 1;
+	return 1;
+}
+
+static void applyGlassNow(NSWindow *w) {
+	if (w == nil || w.windowNumber <= 0) return;
+	int on = atomic_load(&gGlassWant) && !atomic_load(&gInFullscreen);
+	int radius = on ? atomic_load(&gBlurRadius) : 0;
+	NSRect frame = w.frame;
+	int ww = (int)frame.size.width;
+	int hh = (int)frame.size.height;
+	// The chrome pass sets a clear background and a corner radius every
+	// frame, which clears this frost. Always send the radius again.
+	if (loadBlur() != 1) {
+		if (!gBlurMissLogged) {
+			fprintf(stderr, "suzuri: desktop blur unavailable\n");
+			gBlurMissLogged = 1;
+		}
+		gGlassApplied = on;
+		gBlurApplied = radius;
+		gBlurW = ww;
+		gBlurH = hh;
+		return;
+	}
+	int err = gSetBlur(gDefaultConn(), (int32_t)w.windowNumber, radius);
+	if (gBlurApplied != radius || gGlassApplied != on) {
+		fprintf(stderr, "suzuri: glass blur on=%d radius=%d err=%d window=%ld\n",
+			on, radius, err, (long)w.windowNumber);
+	}
+	gGlassApplied = on;
+	gBlurApplied = radius;
+	gBlurW = ww;
+	gBlurH = hh;
+}
+
+// Reapply after every main-queue drain. Ebiten and the chrome pass both
+// clear the frost later in the same turn, so a one-shot apply does not last.
+static void ensureBlurObserver(void) {
+	static int once;
+	if (once) return;
+	once = 1;
+	CFRunLoopObserverRef obs = CFRunLoopObserverCreateWithHandler(
+		kCFAllocatorDefault, kCFRunLoopBeforeWaiting, true, 0,
+		^(CFRunLoopObserverRef observer, CFRunLoopActivity activity) {
+			(void)observer;
+			(void)activity;
+			applyGlassNow(hostWindow());
+		});
+	if (obs == NULL) return;
+	CFRunLoopAddObserver(CFRunLoopGetMain(), obs, kCFRunLoopCommonModes);
+}
+
+void suzuri_set_glass(int on, int radius) {
+	if (radius < 0) radius = 0;
+	if (radius > 80) radius = 80;
+	atomic_store(&gBlurRadius, radius);
+	atomic_store(&gGlassWant, on ? 1 : 0);
+}
+
+void suzuri_apply_glass(void) {
+	dispatch_async(dispatch_get_main_queue(), ^{
+		NSWindow *w = hostWindow();
+		if (w == nil) return;
+		applyGlassNow(w);
+	});
+}
+
 void suzuri_round_main(void) {
 	if (!__sync_bool_compare_and_swap(&gRoundQueued, 0, 1)) return;
 	dispatch_async(dispatch_get_main_queue(), ^{
 		gRoundQueued = 0;
 		NSWindow *w = hostWindow();
 		if (w == nil) return;
-		w.hasShadow = YES;
-		w.opaque = NO;
-		w.backgroundColor = NSColor.clearColor;
-		roundContent(w.contentView, 16);
+		// Setting a clear background and a corner radius clears the frost.
+		// Do that only when the frame size changes, then let the run-loop
+		// observer put the blur back and keep it there.
+		int ww = (int)w.frame.size.width;
+		int hh = (int)w.frame.size.height;
+		static int gChromeW, gChromeH;
+		if (gChromeW != ww || gChromeH != hh) {
+			w.hasShadow = YES;
+			w.opaque = NO;
+			w.backgroundColor = NSColor.clearColor;
+			roundContent(w.contentView, 16);
+			gChromeW = ww;
+			gChromeH = hh;
+		}
+		ensureBlurObserver();
+		applyGlassNow(w);
 		if (!gFSNotes) {
 			gFSNotes = 1;
 			noteFullscreen(w);

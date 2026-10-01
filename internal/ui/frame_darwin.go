@@ -5,6 +5,8 @@ package ui
 /*
 #cgo LDFLAGS: -framework AppKit -framework Foundation -framework QuartzCore
 void suzuri_round_main(void);
+void suzuri_set_glass(int on, int radius);
+void suzuri_apply_glass(void);
 void suzuri_screen_cursor(int *x, int *y);
 void suzuri_set_title_hits(int titleH, const int *rects, int n);
 void suzuri_toggle_zoom_main(void);
@@ -16,6 +18,16 @@ int suzuri_take_close(void);
 import "C"
 
 func roundMainWindow() { C.suzuri_round_main() }
+
+func setWindowGlass(on bool, radius int) {
+	v := C.int(0)
+	if on {
+		v = 1
+	}
+	C.suzuri_set_glass(v, C.int(radius))
+}
+
+func applyWindowGlass() { C.suzuri_apply_glass() }
 
 func setTitleHits(titleH int, rects []int) {
 	if len(rects) == 0 {

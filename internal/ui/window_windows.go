@@ -3926,6 +3926,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 		}
 		if overlay {
 			u.paintOverlay(dest, rect)
+			u.paintLogoPreview(dest, rect)
 		}
 		// Warp bars after the floating card so palette/help never cover inputs.
 		if !dimModal {
@@ -3959,6 +3960,11 @@ func configVisualEqual(a, b config.Config) bool {
 		a.Cursor == b.Cursor &&
 		strings.EqualFold(a.Intro, b.Intro) &&
 		strings.EqualFold(a.ShellAmbient, b.ShellAmbient) &&
+		strings.EqualFold(a.Backdrop, b.Backdrop) &&
+		a.GlassBlur == b.GlassBlur &&
+		a.GlassVeil == b.GlassVeil &&
+		a.GlassRim == b.GlassRim &&
+		a.ShellLogo == b.ShellLogo &&
 		a.ShellMatrixOpacity == b.ShellMatrixOpacity &&
 		strings.EqualFold(a.NoticePosition, b.NoticePosition) &&
 		strings.EqualFold(a.ActiveProfile, b.ActiveProfile)
@@ -5813,11 +5819,11 @@ func (u *winUI) finishMatrixIntro() {
 // are still winding down (not waiting until the last drop leaves).
 func (u *winUI) watermarkFade() float64 {
 	if u == nil {
-		return 1
+		return 0
 	}
-	// No intro scheduled: full mark.
+	// No intro scheduled: the saved opacity, with no intro fade.
 	if u.matrixIntroStart.IsZero() || u.matrixIntroSpawnEnd.IsZero() {
-		return 1
+		return u.cfg.ShellLogoOpacity()
 	}
 	// Let drops start leaving first, then bring the mark up under them.
 	const (
@@ -5826,6 +5832,7 @@ func (u *winUI) watermarkFade() float64 {
 	)
 	fadeStart := u.matrixIntroSpawnEnd.Add(time.Duration(afterSpawnDelay * float64(time.Second)))
 	now := time.Now()
+	scale := u.cfg.ShellLogoOpacity()
 	if now.Before(fadeStart) {
 		return 0
 	}
@@ -5834,10 +5841,10 @@ func (u *winUI) watermarkFade() float64 {
 		return 0
 	}
 	if t >= 1 {
-		return 1
+		return scale
 	}
 	// Smoothstep ease-in so it doesn't pop at the start.
-	return t * t * (3 - 2*t)
+	return t * t * (3 - 2*t) * scale
 }
 
 // paintMatrixIntro is the startup rain over the shell viewport (not chrome/bar).
@@ -6532,6 +6539,25 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	}
 	u.paintChromeCells(hdc, rect, cells, 0, 0, true)
 	u.chromePx = chromeH
+}
+
+// paintLogoPreview draws the center 硯 under the settings card while the
+// Logo row is focused. The card covers the mark in the middle of the shell.
+func (u *winUI) paintLogoPreview(hdc win.HDC, rect win.RECT) {
+	if u == nil || hdc == 0 || !u.chrome.SettingsLogoPreview() || len(u.overlayCells) == 0 {
+		return
+	}
+	ch := u.metricH
+	if ch < 1 {
+		ch = cellH
+	}
+	oy := u.overlayOriginY(rect.Bottom-rect.Top, len(u.overlayCells))
+	top := oy + int32(len(u.overlayCells))*ch + ch/2
+	shellBot := u.shellBottomY(rect.Bottom - rect.Top)
+	if shellBot-top < ch*6 {
+		return
+	}
+	u.paintShellWatermark(hdc, rect, top, shellBot)
 }
 
 // overlayOriginY matches paintOverlay placement (shell region, slight top bias).

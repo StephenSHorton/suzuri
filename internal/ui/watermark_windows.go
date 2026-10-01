@@ -95,10 +95,8 @@ func (u *winUI) paintShellWatermark(hdc win.HDC, rect win.RECT, padY, shellBot i
 		win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)))
 
 	oldF := win.SelectObject(memDC, win.HGDIOBJ(font))
-	// Theme-tinted whisper, scaled by fade-in after matrix intro.
-	fr, fg, fb := blendRGB(0, 0, 0, chrome.PrimR, chrome.PrimG, chrome.PrimB, 0.055)
-	fr, fg, fb = blendRGB(fr, fg, fb, chrome.SoftR, chrome.SoftG, chrome.SoftB, 0.04)
-	fr, fg, fb = blendRGB(0, 0, 0, fr, fg, fb, fade)
+	// fade is already 0–1 opacity (intro ease × the Logo slider).
+	fr, fg, fb := blendRGB(0, 0, 0, chrome.PrimR, chrome.PrimG, chrome.PrimB, fade)
 	win.SetBkMode(memDC, win.TRANSPARENT)
 	win.SetTextColor(memDC, win.RGB(fr, fg, fb))
 	win.TextOut(memDC, 0, 0, &s[0], int32(len(s)-1))
@@ -135,8 +133,10 @@ func (u *winUI) paintShellWatermark(hdc win.HDC, rect win.RECT, padY, shellBot i
 	}
 
 	// COLORONCOLOR / STRETCH_DELETESCANS = nearest neighbor (no smooth filter).
+	// Black in the source is the empty cell, not a rim. TransparentBlt keeps
+	// only the glyph, whose color already follows the Logo slider.
 	oldMode := win.SetStretchBltMode(hdc, win.COLORONCOLOR)
-	_ = win.StretchBlt(hdc, dx, dy, destW, destH, memDC, 0, 0, srcW, srcH, win.SRCCOPY)
+	_ = win.TransparentBlt(hdc, dx, dy, destW, destH, memDC, 0, 0, srcW, srcH, win.RGB(0, 0, 0))
 	if oldMode != 0 {
 		win.SetStretchBltMode(hdc, oldMode)
 	}

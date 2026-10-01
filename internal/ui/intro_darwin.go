@@ -353,7 +353,7 @@ func (p *softwarePainter) paintMatrixRain(dst *image.RGBA, padY, shellBot int, c
 // Shape must read as one solid symbol: anti-aliased low-alpha edges looked
 // "fragmented in dimness". We binarize the glyph mask, nearest-neighbor scale
 // (chunky mono, like Windows StretchBlt), then stamp one uniform quiet color.
-func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot int, fade float64) {
+func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot int, fade float64, glass, preview bool) {
 	if p == nil || dst == nil || fade <= 0.01 {
 		return
 	}
@@ -363,29 +363,24 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 	w := dst.Bounds().Dx()
 	shellH := shellBot - padY
 	shellW := w
-	if shellW < 80 || shellH < 60 {
+	minH := 60
+	if preview {
+		minH = 28
+	}
+	if shellW < 48 || shellH < minH {
 		return
 	}
 
 	// Quiet but even ink — one solid shade (not brighter; just coherent).
 	// ~8–12% of primary so strokes read as a shape on black.
-	inkA := 0.10 * fade
-	if inkA < 0.03 {
+	// fade is already 0–1 opacity (intro ease × the Logo slider).
+	inkA := fade
+	if inkA < 0.004 {
 		return
 	}
 	fr := blendByte(0, chrome.PrimR, inkA)
 	fg := blendByte(0, chrome.PrimG, inkA)
 	fb := blendByte(0, chrome.PrimB, inkA)
-	// Floor so the mark never dissolves into single sparse pixels.
-	if fr < 10 && chrome.PrimR > 0 {
-		fr = 10
-	}
-	if fg < 10 && chrome.PrimG > 0 {
-		fg = 10
-	}
-	if fb < 10 && chrome.PrimB > 0 {
-		fb = 10
-	}
 
 	// Rasterize at a moderate size for clean topology, then NN-scale up.
 	// Cell-sized source was too small — AA crumbs scaled into static.
@@ -486,10 +481,18 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 	}
 	// Fit ink box into ~40% of the shorter shell axis (preserve aspect).
 	destSide := side * 40 / 100
-	if destSide < p.cellH*7 {
+	if preview {
+		// Fit the sample in the band under the settings card.
+		if destSide > shellH*3/4 {
+			destSide = shellH * 3 / 4
+		}
+		if destSide > 140 {
+			destSide = 140
+		}
+	} else if destSide < p.cellH*7 {
 		destSide = p.cellH * 7
 	}
-	if destSide > 220 {
+	if !preview && destSide > 220 {
 		destSide = 220
 	}
 	var destW, destH int
@@ -519,23 +522,53 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 		dy = shellBot - destH
 	}
 
-	// Nearest-neighbor from cropped ink bounds only.
-	for y := 0; y < destH; y++ {
-		sy := minY + y*inkH/destH
-		if sy > maxY {
-			sy = maxY
-		}
-		for x := 0; x < destW; x++ {
-			sx := minX + x*inkW/destW
-			if sx > maxX {
-				sx = maxX
+	// Logo opacity is the fill and the outline. The shell Rim slider is not
+	// used here; that one is only for text on glass holes.
+	a := int(inkA * 255)
+	if a < 1 {
+		a = 1
+	}
+	if a > 255 {
+		a = 255
+	}
+	ab := byte(a)
+	eachInk := func(fn func(px, py int)) {
+		for y := 0; y < destH; y++ {
+			sy := minY + y*inkH/destH
+			if sy > maxY {
+				sy = maxY
 			}
-			if !bin[sy*srcPx+sx] {
-				continue
+			for x := 0; x < destW; x++ {
+				sx := minX + x*inkW/destW
+				if sx > maxX {
+					sx = maxX
+				}
+				if !bin[sy*srcPx+sx] {
+					continue
+				}
+				fn(dx+x, dy+y)
 			}
-			setRGB(dst, dx+x, dy+y, fr, fg, fb)
 		}
 	}
+	eachInk(func(px, py int) {
+		setRGBA(dst, px-1, py, 0, 0, 0, ab)
+		setRGBA(dst, px+1, py, 0, 0, 0, ab)
+		setRGBA(dst, px, py-1, 0, 0, 0, ab)
+		setRGBA(dst, px, py+1, 0, 0, 0, ab)
+	})
+	eachInk(func(px, py int) {
+		if glass {
+			// The framebuffer is premultiplied. Full primary with a small
+			// alpha is drawn almost solid, so 5% looked like 95%.
+			setRGBA(dst, px, py,
+				byte(int(chrome.PrimR)*int(ab)/255),
+				byte(int(chrome.PrimG)*int(ab)/255),
+				byte(int(chrome.PrimB)*int(ab)/255),
+				ab)
+			return
+		}
+		setRGB(dst, px, py, fr, fg, fb)
+	})
 }
 
 // paintDimNekoField draws a faint 猫咪 underlay (settings / overlay texture).

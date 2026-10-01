@@ -13,6 +13,35 @@ func TestNormalizeDefaults(t *testing.T) {
 	}
 }
 
+func TestBackdropNormalizeAndRoundTrip(t *testing.T) {
+	c := Normalize(Config{})
+	if c.Backdrop != BackdropSolid {
+		t.Fatalf("default backdrop %q", c.Backdrop)
+	}
+	c = Normalize(Config{Backdrop: "GLASS"})
+	if c.Backdrop != BackdropGlass {
+		t.Fatalf("glass normalize %q", c.Backdrop)
+	}
+	c = Normalize(Config{Backdrop: "nope"})
+	if c.Backdrop != BackdropSolid {
+		t.Fatalf("unknown backdrop %q", c.Backdrop)
+	}
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+	want := Default()
+	want.Backdrop = BackdropGlass
+	if err := Save(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Backdrop != BackdropGlass {
+		t.Fatalf("round trip %q", got.Backdrop)
+	}
+}
+
 func TestShellMatrixOpacityClamp(t *testing.T) {
 	c := Normalize(Config{ShellMatrixOpacity: 150})
 	if c.ShellMatrixOpacity != 100 {
@@ -60,6 +89,108 @@ func TestShellMatrixOpacityRoundTrip(t *testing.T) {
 	}
 	if got.ShellMatrixOpacity != 100 {
 		t.Fatalf("missing opacity should default 100, got %d", got.ShellMatrixOpacity)
+	}
+}
+
+func TestGlassKnobsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+	want := Default()
+	want.GlassBlur = 16
+	want.GlassVeil = 40
+	want.GlassRim = 0
+	if err := Save(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GlassBlur != 16 || got.GlassVeil != 40 || got.GlassRim != 0 {
+		t.Fatalf("round trip blur %d veil %d rim %d", got.GlassBlur, got.GlassVeil, got.GlassRim)
+	}
+	if Default().GlassBlur != GlassBlurDefault || Default().GlassRim != GlassRimDefault || Default().GlassVeil != 0 {
+		t.Fatalf("defaults %+v", Default())
+	}
+	c := Normalize(Config{GlassBlur: 200, GlassVeil: -3, GlassRim: 140})
+	if c.GlassBlur != GlassBlurMax || c.GlassVeil != 0 || c.GlassRim != 100 {
+		t.Fatalf("clamp blur %d veil %d rim %d", c.GlassBlur, c.GlassVeil, c.GlassRim)
+	}
+	// Missing keys keep the original fixed look.
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	path := Path()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"font_face":"x","font_size_px":14}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GlassBlur != GlassBlurDefault || got.GlassVeil != 0 || got.GlassRim != GlassRimDefault {
+		t.Fatalf("missing keys blur %d veil %d rim %d", got.GlassBlur, got.GlassVeil, got.GlassRim)
+	}
+	if got.GlassVeilAlpha() != 0 {
+		t.Fatalf("veil alpha %d", got.GlassVeilAlpha())
+	}
+	// 25% of 255 rounds to 64.
+	if Default().GlassRimAlpha() != 64 {
+		t.Fatalf("rim alpha %d", Default().GlassRimAlpha())
+	}
+}
+
+func TestShellLogoOpacity(t *testing.T) {
+	if Default().ShellLogo != ShellLogoDefault {
+		t.Fatalf("default logo %d", Default().ShellLogo)
+	}
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+	path := Path()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"font_face":"x","font_size_px":14}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShellLogo != ShellLogoDefault {
+		t.Fatalf("missing logo %d", got.ShellLogo)
+	}
+	if err := os.WriteFile(path, []byte(`{"shell_logo":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShellLogo != ShellLogoDefault {
+		t.Fatalf("true logo %d", got.ShellLogo)
+	}
+	if err := os.WriteFile(path, []byte(`{"shell_logo":false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShellLogo != 0 {
+		t.Fatalf("false logo %d", got.ShellLogo)
+	}
+	got.ShellLogo = 35
+	if err := Save(got); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ShellLogo != 35 {
+		t.Fatalf("saved logo %d", got.ShellLogo)
 	}
 }
 

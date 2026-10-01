@@ -150,15 +150,18 @@ type macUI struct {
 	// sashDrag is non-nil while the user is dragging a shared pane divider.
 	sashDrag *sashGeom
 
-	width    int32
-	height   int32
-	cols     int
-	rows     int
-	cfg      config.Config
-	metricW  int32
-	metricH  int32
-	chromePx int32
-	inputPx  int32
+	width       int32
+	height      int32
+	cols        int
+	rows        int
+	cfg         config.Config
+	glassOn     bool
+	glassSent   bool
+	glassRadius int
+	metricW     int32
+	metricH     int32
+	chromePx    int32
+	inputPx     int32
 
 	blinkStart    time.Time
 	stripDots     string // last dots frame painted into a background tab
@@ -590,6 +593,10 @@ func (u *macUI) loop() error {
 	ebiten.SetScreenClearedEveryFrame(false)
 	ebiten.SetVsyncEnabled(true)
 	ebiten.SetTPS(60)
+	// Must be set before RunGame. The Metal layer stays non-opaque so glass
+	// holes can show the desktop. Solid mode still paints every pixel at
+	// alpha 255, so the window looks the same until Backdrop is Glass.
+	ebiten.SetScreenTransparent(true)
 
 	// Start first tab workers after window setup.
 	u.ready.Store(true)
@@ -659,6 +666,7 @@ func (u *macUI) Update() error {
 	driveNotices(time.Now(), ebiten.IsFocused(), !ebiten.IsWindowMinimized())
 
 	roundMainWindow()
+	u.syncGlass()
 	u.publishTitleHits()
 
 	u.syncTermFocus()
@@ -1681,10 +1689,10 @@ func (u *macUI) finishMatrixIntro() {
 // watermarkFade is 0..1 opacity for the center 硯 during/after intro rain.
 func (u *macUI) watermarkFade() float64 {
 	if u == nil {
-		return 1
+		return 0
 	}
 	if u.matrixIntroStart.IsZero() || u.matrixIntroSpawnEnd.IsZero() {
-		return 1
+		return u.cfg.ShellLogoOpacity()
 	}
 	const (
 		afterSpawnDelay = 0.55
@@ -1692,6 +1700,7 @@ func (u *macUI) watermarkFade() float64 {
 	)
 	fadeStart := u.matrixIntroSpawnEnd.Add(time.Duration(afterSpawnDelay * float64(time.Second)))
 	now := time.Now()
+	scale := u.cfg.ShellLogoOpacity()
 	if now.Before(fadeStart) {
 		return 0
 	}
@@ -1700,9 +1709,9 @@ func (u *macUI) watermarkFade() float64 {
 		return 0
 	}
 	if t >= 1 {
-		return 1
+		return scale
 	}
-	return t * t * (3 - 2*t)
+	return t * t * (3 - 2*t) * scale
 }
 
 func configVisualEqual(a, b config.Config) bool {
@@ -1714,15 +1723,56 @@ func configVisualEqual(a, b config.Config) bool {
 		a.Cursor == b.Cursor &&
 		strings.EqualFold(a.Intro, b.Intro) &&
 		strings.EqualFold(a.ShellAmbient, b.ShellAmbient) &&
+		strings.EqualFold(a.Backdrop, b.Backdrop) &&
+		a.GlassBlur == b.GlassBlur &&
+		a.GlassVeil == b.GlassVeil &&
+		a.GlassRim == b.GlassRim &&
+		a.ShellLogo == b.ShellLogo &&
 		a.ShellMatrixOpacity == b.ShellMatrixOpacity &&
 		strings.EqualFold(a.NoticePosition, b.NoticePosition) &&
 		strings.EqualFold(a.ActiveProfile, b.ActiveProfile)
+}
+
+func (u *macUI) shellGlass() bool {
+	return u != nil && u.cfg.Backdrop == config.BackdropGlass && !frameInFullscreen()
+}
+
+func (u *macUI) syncGlass() {
+	if u == nil {
+		return
+	}
+	on := u.cfg.Backdrop == config.BackdropGlass
+	radius := u.cfg.GlassBlur
+	if on && radius <= 0 {
+		radius = config.GlassBlurDefault
+	}
+	if u.glassSent && u.glassOn == on && u.glassRadius == radius {
+		return
+	}
+	log.Info("glass sync", "on", on, "radius", radius, "cfgBlur", u.cfg.GlassBlur)
+	setWindowGlass(on, radius)
+	applyWindowGlass()
+	u.glassOn = on
+	u.glassRadius = radius
+	u.glassSent = true
+}
+
+func presentFB(screen, tex *ebiten.Image) {
+	if screen == nil || tex == nil {
+		return
+	}
+	op := &ebiten.DrawImageOptions{}
+	// Copy writes alpha 0 through. SourceOver would leave the previous frame
+	// in those pixels, so glass holes would smear instead of showing the desktop.
+	op.CompositeMode = ebiten.CompositeModeCopy
+	screen.DrawImage(tex, op)
 }
 
 func (u *macUI) applyConfigLive(cfg config.Config) {
 	cfg = config.Normalize(cfg)
 	prev := u.cfg
 	u.cfg = cfg
+	u.syncGlass()
 	setNoticeAnchor(cfg.NoticePosition, prev.NoticePosition != cfg.NoticePosition)
 	chrome.ApplyTheme(cfg.Theme)
 	SetShellANSIMap(cfg.ShellANSIMap)
@@ -3997,8 +4047,7 @@ func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool
 		}
 	}
 	u.tex.WritePixels(u.fb.Pix)
-	op := &ebiten.DrawImageOptions{}
-	screen.DrawImage(u.tex, op)
+	presentFB(screen, u.tex)
 	return true
 }
 
@@ -4249,6 +4298,9 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		SettingsOpen:     u.chrome.SettingsOpen,
 		MatrixCells:      rain,
 		ShellMatrixCells: shellRain,
+		Glass:            u.shellGlass(),
+		GlassVeil:        u.cfg.GlassVeilAlpha(),
+		GlassRim:         u.cfg.GlassRimAlpha(),
 		CRTScanlines:     crtIntensity,
 		WatermarkFade:    u.watermarkFade(),
 		ScrollFrac:       tab.sb.scrollFrac(),
@@ -4350,6 +4402,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if u.chrome.NotesOpen && u.painter != nil && len(overlay) > 0 {
 		u.paintNotesCaret(u.fb, overlay, padY, shellBot)
 	}
+	u.paintLogoPreview(overlay, padY, shellBot)
 
 	// Image lightbox on top of everything.
 	if u.modalImage != nil {
@@ -4357,8 +4410,28 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 
 	u.tex.WritePixels(u.fb.Pix)
-	op := &ebiten.DrawImageOptions{}
-	screen.DrawImage(u.tex, op)
+	presentFB(screen, u.tex)
+}
+
+// paintLogoPreview draws the center 硯 under the settings card while the
+// Logo row is focused, so the slider can be seen. The card covers the
+// real mark in the middle of the shell.
+func (u *macUI) paintLogoPreview(overlay [][]cellPix, padY, shellBot int) {
+	if u == nil || u.painter == nil || u.fb == nil || !u.chrome.SettingsLogoPreview() {
+		return
+	}
+	ch := int(u.metricH)
+	if ch < 1 {
+		ch = cellH
+	}
+	top := padY
+	if len(overlay) > 0 {
+		top = u.overlayOriginY(padY, shellBot, len(overlay)) + len(overlay)*ch + ch/2
+	}
+	if shellBot-top < 28 {
+		return
+	}
+	u.painter.paintShellWatermark(u.fb, top, shellBot, u.cfg.ShellLogoOpacity(), u.shellGlass(), true)
 }
 
 // overlayOriginY matches paintFrame / paintOverlayOnly placement.
@@ -4538,7 +4611,7 @@ func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
 	}
 	curX, curY, curVis := t.gridCursor(viewRows, g.focused)
 	shellCur, shellSteady := t.modes.shellCursor(int(u.cfg.Cursor))
-	u.painter.paintPaneGrid(u.fb, grid, g, curX, curY, curVis, curAlpha, shellCur, shellSteady, t.modes.progress.kind, t.modes.progress.pct)
+	u.painter.paintPaneGrid(u.fb, grid, g, curX, curY, curVis, curAlpha, shellCur, shellSteady, t.modes.progress.kind, t.modes.progress.pct, u.shellGlass())
 	if !t.altScreen() {
 		vis := t.sb.visibleImages(t.term, viewRows)
 		u.painter.paintPaneImages(u.fb, vis, g)
