@@ -38,7 +38,13 @@ func TestQuietZshHidesUserHostPrompt(t *testing.T) {
 }
 
 func TestTIOCGPGRPSeesRunningCommand(t *testing.T) {
-	s, err := StartSession("", 80, 24, t.TempDir())
+	// Pin zsh. The default shell on a CI runner is often bash, which never
+	// emits the bracketed-paste sequence this used to wait on.
+	zsh, err := exec.LookPath("zsh")
+	if err != nil {
+		t.Skip("zsh not installed")
+	}
+	s, err := StartSession(zsh, 80, 24, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,12 +67,13 @@ func TestTIOCGPGRPSeesRunningCommand(t *testing.T) {
 			}
 		}
 	}()
-	// 2004h is zle at the prompt. Writing before that can be eaten by rc files.
+	// 7878 is the quiet-prompt cwd mark, emitted after the rc files finish.
+	// Bracketed paste is a zsh default on this machine and absent on others.
 	deadline := time.Now().Add(12 * time.Second)
 	gotPrompt := false
 	for time.Now().Before(deadline) {
 		mu.Lock()
-		gotPrompt = strings.Contains(string(acc), "\x1b[?2004h")
+		gotPrompt = strings.Contains(string(acc), "7878;cwd=")
 		mu.Unlock()
 		if gotPrompt {
 			break
