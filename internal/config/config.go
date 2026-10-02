@@ -76,8 +76,9 @@ const (
 )
 
 // Glass knobs apply when Backdrop is glass. Blur is the macOS desktop blur
-// radius in points (Windows still paints a solid shell). Veil is a black wash
-// over the holes, 0–100. Rim is the dark glyph outline on those holes, 0–100.
+// radius in points. Windows maps 0 to Mica and any positive value to Desktop
+// Acrylic (DWM has no point radius). Veil is a black wash over the holes,
+// 0–100. Rim is the dark glyph outline on those holes, 0–100.
 const (
 	GlassBlurDefault = 48
 	GlassBlurMax     = 80
@@ -150,7 +151,7 @@ type Config struct {
 	// (matrix rain, tab spinner, caret). Off freezes chrome animation in background.
 	AnimateUnfocused bool
 	// Backdrop is what shows through empty and near-black shell cells
-	// (solid | glass). Glass is a Mac blur; Windows still paints solid.
+	// (solid | glass). Glass is a Mac blur; Windows uses DWM Mica/Acrylic.
 	Backdrop string
 	// ShellLogo is the center 硯 opacity, 0–100. 0 hides it, 100 is solid.
 	// The default is the quiet mark. Same scale on Solid and Glass.
@@ -858,7 +859,7 @@ func BackdropLabel(id string) string {
 func BackdropDesc(id string) string {
 	switch strings.ToLower(strings.TrimSpace(id)) {
 	case BackdropGlass:
-		return "Empty and near-black cells show the desktop. Blur, Veil, and Rim on this page tune how frosted, dark, and outlined that looks. The tab strip, text, and real background colors stay solid. Rain glyphs stay on top. Fullscreen turns this off. Windows still paints a solid shell."
+		return "Empty and near-black cells show the desktop. Blur, Veil, and Rim on this page tune how frosted, dark, and outlined that looks. The tab strip, text, and real background colors stay solid. Rain glyphs stay on top. Fullscreen turns this off on Mac. Windows shows Mica (blur 0) or Desktop Acrylic through those cells."
 	default:
 		return "Opaque shell. Empty cells show the theme void and whatever ambient is on."
 	}

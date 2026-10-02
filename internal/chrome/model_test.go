@@ -681,6 +681,33 @@ func TestPlusBounds(t *testing.T) {
 	}
 }
 
+func TestFrameWindowsCaptionReserve(t *testing.T) {
+	m := New(80)
+	m.Frame = FrameWindows
+	m.Tabs = []Tab{{ID: 0, Title: "shell"}}
+	v := m.StripView()
+	for _, g := range []string{"—", "□", "✕", "硯"} {
+		if strings.Contains(v, g) {
+			t.Fatalf("strip still draws %q: %q", g, v)
+		}
+	}
+	btns := m.FrameButtonBounds()
+	prev := 0
+	for i, span := range btns {
+		if span[1] <= span[0] {
+			t.Fatalf("button %d bounds %v", i, span)
+		}
+		if span[0] < prev {
+			t.Fatalf("button %d not ordered: %v", i, btns)
+		}
+		prev = span[0]
+	}
+	cafe := m.CaffeineBounds()
+	if cafe[1] > btns[0][0] {
+		t.Fatalf("cup %v overlaps caption %v", cafe, btns[0])
+	}
+}
+
 func TestCaffeineBoundsRight(t *testing.T) {
 	m := New(80)
 	m.Tabs = []Tab{{ID: 0, Title: "shell"}}

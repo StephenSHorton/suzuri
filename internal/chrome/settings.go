@@ -502,7 +502,7 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		title = "Blur · " + fmt.Sprintf("%dpt", s.edit.GlassBlur)
 		paras = []string{
 			"How much the desktop behind empty cells is frosted, in points. 48 is the original look. 0 is sharp.",
-			"Used when Backdrop is Glass. Mac only — Windows keeps a solid shell. Enter saves.",
+			"Used when Backdrop is Glass. Windows has no point radius: 0 is Mica, anything higher is Desktop Acrylic. Enter saves.",
 		}
 	case fieldGlassVeil:
 		title = "Veil · " + fmt.Sprintf("%d%%", s.edit.GlassVeil)

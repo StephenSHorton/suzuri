@@ -46,3 +46,121 @@ type frameDrag struct {
 	lastHit time.Time
 	lastX   int
 }
+
+// Win32 WM_NCHITTEST codes. Local so hit tests do not need an HWND.
+const (
+	hitNowhere     = 0
+	hitClient      = 1
+	hitCaption     = 2
+	hitLeft        = 10
+	hitRight       = 11
+	hitTop         = 12
+	hitTopLeft     = 13
+	hitTopRight    = 14
+	hitBottom      = 15
+	hitBottomLeft  = 16
+	hitBottomRight = 17
+	frameResizePx  = 6
+	captionButtonW = 46
+)
+
+// titleStripHeightPx is the Mac rule: one text row, 50% taller than a shell cell.
+func titleStripHeightPx(ch int32) int32 {
+	if ch < 1 {
+		ch = cellH
+	}
+	return ch + ch/2
+}
+
+// pixRect is a half-open client rectangle [L,R) × [T,B).
+type pixRect struct {
+	L, T, R, B int32
+}
+
+func (r pixRect) contains(x, y int32) bool {
+	return x >= r.L && x < r.R && y >= r.T && y < r.B
+}
+
+func (r pixRect) empty() bool { return r.R <= r.L || r.B <= r.T }
+
+// winCaptionButtons is minimize, zoom/restore, close — flush to the right edge,
+// each captionButtonW wide and the full title-strip tall.
+func winCaptionButtons(clientW, stripH int32) [3]pixRect {
+	var out [3]pixRect
+	if clientW < 1 || stripH < 1 {
+		return out
+	}
+	bw := int32(captionButtonW)
+	if bw*3 > clientW {
+		bw = clientW / 3
+		if bw < 1 {
+			bw = 1
+		}
+	}
+	right := clientW
+	for i := 2; i >= 0; i-- {
+		left := right - bw
+		if left < 0 {
+			left = 0
+		}
+		out[i] = pixRect{L: left, T: 0, R: right, B: stripH}
+		right = left
+	}
+	return out
+}
+
+// titleHitQuery is a client-space hit. Buttons win over the resize band.
+// Controls are tabs, +, bell, and the cup — not the brand mark.
+type titleHitQuery struct {
+	X, Y     int32
+	ClientW  int32
+	ClientH  int32
+	StripH   int32
+	Buttons  [3]pixRect
+	Controls []pixRect
+}
+
+// hitTestTitleBar returns a Win32 HT code, or hitNowhere for the shell interior
+// (the caller lets DefWindowProc answer that).
+func hitTestTitleBar(q titleHitQuery) int {
+	if q.ClientW < 1 || q.ClientH < 1 {
+		return hitNowhere
+	}
+	for _, b := range q.Buttons {
+		if b.contains(q.X, q.Y) {
+			return hitClient
+		}
+	}
+	const border = frameResizePx
+	left := q.X < border
+	right := q.X >= q.ClientW-border
+	top := q.Y < border
+	bottom := q.Y >= q.ClientH-border
+	switch {
+	case top && left:
+		return hitTopLeft
+	case top && right:
+		return hitTopRight
+	case bottom && left:
+		return hitBottomLeft
+	case bottom && right:
+		return hitBottomRight
+	case top:
+		return hitTop
+	case bottom:
+		return hitBottom
+	case left:
+		return hitLeft
+	case right:
+		return hitRight
+	}
+	if q.StripH > 0 && q.Y >= 0 && q.Y < q.StripH {
+		for _, c := range q.Controls {
+			if c.contains(q.X, q.Y) {
+				return hitClient
+			}
+		}
+		return hitCaption
+	}
+	return hitNowhere
+}

@@ -7,6 +7,8 @@ import (
 
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
+
+	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
 
 type ncCalcSizeParams struct {
@@ -40,31 +42,76 @@ func (u *winUI) frameHitTest(hwnd win.HWND, lParam uintptr) uintptr {
 	if !win.GetClientRect(hwnd, &rc) {
 		return 0
 	}
-	const border = 6
-	if pt.Y < border {
-		return win.HTTOP
+	w := rc.Right - rc.Left
+	h := rc.Bottom - rc.Top
+	strip := u.chromePixelHeight()
+	return uintptr(hitTestTitleBar(titleHitQuery{
+		X: pt.X, Y: pt.Y,
+		ClientW: w, ClientH: h,
+		StripH:   strip,
+		Buttons:  winCaptionButtons(w, strip),
+		Controls: u.chromeControlRects(strip),
+	}))
+}
+
+// hitCaptionButton is 0 minimize, 1 zoom, 2 close, or -1. Pixel rects, not cells.
+func (u *winUI) hitCaptionButton(px, py int32) int {
+	if u == nil || u.chrome.Frame != chrome.FrameWindows {
+		return -1
 	}
-	if pt.Y >= rc.Bottom-border {
-		return win.HTBOTTOM
+	w := u.clientWidth()
+	strip := u.chromePixelHeight()
+	btns := winCaptionButtons(w, strip)
+	for i, b := range btns {
+		if b.contains(px, py) {
+			return i
+		}
 	}
-	if pt.X < border {
-		return win.HTLEFT
-	}
-	if pt.X >= rc.Right-border {
-		return win.HTRIGHT
-	}
-	ch := u.metricH
-	if ch < 1 {
-		ch = cellH
-	}
-	if pt.Y >= int32(ch) {
+	return -1
+}
+
+func (u *winUI) clientWidth() int32 {
+	if u == nil {
 		return 0
 	}
-	cellX := u.pixelToChromeCol(pt.X)
-	if hitFrameButton(u.chrome, cellX) >= 0 || u.hitBell(pt.X) || u.hitCaffeine(pt.X) || u.hitPlus(pt.X) || u.hitTab(pt.X) >= 0 {
-		return win.HTCLIENT
+	if u.hwnd != 0 {
+		var rc win.RECT
+		if win.GetClientRect(u.hwnd, &rc) && rc.Right > rc.Left {
+			return rc.Right - rc.Left
+		}
 	}
-	return win.HTCAPTION
+	return u.width
+}
+
+// chromeControlRects are tabs, +, bell, and the cup across the title strip.
+// The brand mark is not a control — those pixels stay HTCAPTION.
+func (u *winUI) chromeControlRects(stripH int32) []pixRect {
+	if u == nil || stripH < 1 {
+		return nil
+	}
+	cw := u.metricW
+	if cw < 1 {
+		cw = cellW
+	}
+	var out []pixRect
+	add := func(b [2]int) {
+		if b[1] <= b[0] {
+			return
+		}
+		out = append(out, pixRect{
+			L: 4 + int32(b[0])*cw,
+			T: 0,
+			R: 4 + int32(b[1])*cw,
+			B: stripH,
+		})
+	}
+	for _, b := range u.chrome.TabBounds() {
+		add(b)
+	}
+	add(u.chrome.PlusBounds())
+	add(u.chrome.BellBounds())
+	add(u.chrome.CaffeineBounds())
+	return out
 }
 
 func disableWindowRounding(hwnd win.HWND) {

@@ -136,7 +136,7 @@ func (u *winUI) paintShellWatermark(hdc win.HDC, rect win.RECT, padY, shellBot i
 	// Black in the source is the empty cell, not a rim. TransparentBlt keeps
 	// only the glyph, whose color already follows the Logo slider.
 	oldMode := win.SetStretchBltMode(hdc, win.COLORONCOLOR)
-	_ = win.TransparentBlt(hdc, dx, dy, destW, destH, memDC, 0, 0, srcW, srcH, win.RGB(0, 0, 0))
+	_ = win.TransparentBlt(hdc, dx, dy, destW, destH, memDC, 0, 0, srcW, srcH, uint32(win.RGB(0, 0, 0)))
 	if oldMode != 0 {
 		win.SetStretchBltMode(hdc, oldMode)
 	}

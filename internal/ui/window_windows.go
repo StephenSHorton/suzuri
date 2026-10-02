@@ -78,6 +78,7 @@ func Run() error {
 		chrome:      chrome.New(cols),
 		caffeine:    caffeine.New(),
 		hostFocused: true,
+		captionHot:  -1,
 	}
 	// Caffeine on by default so long sessions don't sleep under the user.
 	if ui.caffeine != nil {
@@ -182,11 +183,17 @@ type winUI struct {
 	symFont           win.HFONT
 	primaryHasGeo     bool // ●○◉◎ present in primary face
 	primaryHasBraille bool
-	width             int32
-	height            int32
-	cols              int
-	rows              int
-	cfg               config.Config
+	// Title-strip faces sized to the caption, not the shell cell.
+	titleFontPx     int32
+	titleBrandFont  win.HFONT
+	titleCupFont    win.HFONT
+	captionHot      int // 0 min, 1 zoom, 2 close; -1 none
+	captionLeaveTrk bool
+	width           int32
+	height          int32
+	cols            int
+	rows            int
+	cfg             config.Config
 	// last measured cell size (for hit-testing)
 	metricW  int32
 	metricH  int32
@@ -573,6 +580,8 @@ func (u *winUI) applyConfigLive(cfg config.Config) {
 	cfg = config.Normalize(cfg)
 	prev := u.cfg
 	u.cfg = cfg
+	// DWM glass/mica. Live Shell backdrop, blur, and veil — no restart.
+	u.applyGlassBackdrop()
 	setNoticeAnchor(cfg.NoticePosition, prev.NoticePosition != cfg.NoticePosition)
 	chrome.ApplyTheme(cfg.Theme)
 	SetShellANSIMap(cfg.ShellANSIMap)
@@ -918,6 +927,10 @@ func (u *winUI) chromePixelHeight() int32 {
 	h := int32(rows) * ch
 	if h < 1 {
 		h = int32(tabBarFallback)
+	}
+	if u.chrome.Frame == chrome.FrameWindows {
+		// Same rule as the Mac title strip: one text row, half a cell taller.
+		return h + ch/2
 	}
 	return h
 }
@@ -1515,6 +1528,10 @@ func registerUI(hwnd win.HWND, u *winUI) {
 	uiMu.Lock()
 	uiMap[hwnd] = u
 	uiMu.Unlock()
+	// HWND exists; saved glass must apply before the first ShowWindow.
+	if u != nil && u.hwnd != 0 {
+		u.applyGlassBackdrop()
+	}
 }
 
 func unregisterUI(hwnd win.HWND) {
@@ -2272,6 +2289,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			} else {
 				// Idle shell, no ambient: only pulse the Warp caret.
 				u.requestInputPaint()
+			}
+			// Cards slide and expire on this tick. Mac does it every frame;
+			// PTY bytes alone would leave a card up until the next write.
+			if noticeCount() > 0 || noticePanelUp() {
+				driveNotices(time.Now(), u.hostFocused, !win.IsIconic(hwnd))
 			}
 		}
 		return 0
@@ -3186,12 +3208,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if u.modalImage != nil || u.chrome.OverlayOpen() {
 			return 0
 		}
-		chH := u.metricH
-		if chH < 1 {
-			chH = cellH
-		}
-		tabStripH := int32(chrome.TabStripRows()) * chH
-		if py < tabStripH {
+		if py < u.chromePixelHeight() {
+			if u.hitCaptionButton(px, py) >= 0 {
+				return 0
+			}
 			if i := u.hitTab(px); i >= 0 {
 				u.active = i
 				u.selecting = false
@@ -3222,11 +3242,6 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.InvalidateRect(hwnd, nil, false)
 			return 0
 		}
-		chH := u.metricH
-		if chH < 1 {
-			chH = cellH
-		}
-		tabStripH := int32(chrome.TabStripRows()) * chH
 		chromeH := u.chromePixelHeight()
 
 		// Click outside floating overlay (on shell) dismisses it.
@@ -3324,54 +3339,53 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 
-		// Top tab strip / + chip / caffeine cup.
+		// Title strip: caption buttons, bell, cup, +, tabs. Empty pixels are
+		// HTCAPTION, so they never arrive here.
 		if py < chromeH {
-			if py < tabStripH {
-				if hit := hitFrameButton(u.chrome, u.pixelToChromeCol(px)); hit >= 0 {
-					switch frameActionForHit(u.chrome.Frame, hit) {
-					case chrome.FrameClose:
-						win.PostMessage(hwnd, win.WM_CLOSE, 0, 0)
-					case chrome.FrameMinimize:
-						win.ShowWindow(hwnd, win.SW_MINIMIZE)
-					case chrome.FrameZoom:
-						if win.IsZoomed(hwnd) {
-							win.ShowWindow(hwnd, win.SW_RESTORE)
-						} else {
-							win.ShowWindow(hwnd, win.SW_MAXIMIZE)
-						}
+			if hit := u.hitCaptionButton(px, py); hit >= 0 {
+				switch frameActionForHit(u.chrome.Frame, hit) {
+				case chrome.FrameClose:
+					win.PostMessage(hwnd, win.WM_CLOSE, 0, 0)
+				case chrome.FrameMinimize:
+					win.ShowWindow(hwnd, win.SW_MINIMIZE)
+				case chrome.FrameZoom:
+					if win.IsZoomed(hwnd) {
+						win.ShowWindow(hwnd, win.SW_RESTORE)
+					} else {
+						win.ShowWindow(hwnd, win.SW_MAXIMIZE)
 					}
-					return 0
 				}
-				if u.hitBell(px) {
-					u.toggleNoticeHistory()
-					return 0
-				}
-				if u.hitCaffeine(px) {
-					if msg, ok := applyCaffeineAction(u.caffeine, chrome.ActionCaffeineToggle, 0); ok {
-						if msg != "" {
-							u.toast(msg)
-						}
-						u.markChromeDirty()
-						u.syncChrome()
-						win.InvalidateRect(hwnd, nil, false)
+				return 0
+			}
+			if u.hitBell(px) {
+				u.toggleNoticeHistory()
+				return 0
+			}
+			if u.hitCaffeine(px) {
+				if msg, ok := applyCaffeineAction(u.caffeine, chrome.ActionCaffeineToggle, 0); ok {
+					if msg != "" {
+						u.toast(msg)
 					}
-					return 0
-				}
-				if u.hitPlus(px) {
-					u.newTabUI("")
-					return 0
-				}
-				if i := u.hitTab(px); i >= 0 {
-					u.active = i
-					u.selecting = false
-					if t := u.activeTab(); t != nil {
-						t.sel.clear()
-						setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
-					}
+					u.markChromeDirty()
 					u.syncChrome()
-					u.maybeResizeForInput()
 					win.InvalidateRect(hwnd, nil, false)
 				}
+				return 0
+			}
+			if u.hitPlus(px) {
+				u.newTabUI("")
+				return 0
+			}
+			if i := u.hitTab(px); i >= 0 {
+				u.active = i
+				u.selecting = false
+				if t := u.activeTab(); t != nil {
+					t.sel.clear()
+					setWindowTitle(u.hwnd, "suzuri — "+t.displayTitle())
+				}
+				u.syncChrome()
+				u.maybeResizeForInput()
+				win.InvalidateRect(hwnd, nil, false)
 			}
 			return 0
 		}
@@ -3465,6 +3479,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_MOUSEMOVE:
 		px := int32(win.LOWORD(uint32(lParam)))
 		py := int32(win.HIWORD(uint32(lParam)))
+		u.trackCaptionHover(hwnd, px, py)
 		// Link hover (hand cursor + primary tint) when not dragging.
 		if u.sashDrag == nil && !u.selecting && !u.notesDragging {
 			u.updateLinkHover(px, py)
@@ -3532,6 +3547,18 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
+
+	case win.WM_MOUSELEAVE:
+		u.captionLeaveTrk = false
+		u.trackCaptionHover(hwnd, -1, -1)
+		return 0
+
+	case win.WM_NCMOUSEMOVE:
+		if u.captionHot >= 0 {
+			u.captionHot = -1
+			u.captionLeaveTrk = false
+			win.InvalidateRect(hwnd, nil, false)
+		}
 
 	case win.WM_LBUTTONUP:
 		if u.sashDrag != nil {
@@ -3638,6 +3665,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.DeleteObject(win.HGDIOBJ(u.symFont))
 			u.symFont = 0
 		}
+		u.releaseTitleFonts()
 		releaseAppIcons()
 		u.hwnd = 0
 		win.PostQuitMessage(0)
@@ -3699,11 +3727,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 	// GDI AVs on mouse-up. Real content returns on EXITSIZEMOVE.
 	if u.inSizeMove {
 		u.width, u.height = w, h
-		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.VoidR, chrome.VoidG, chrome.VoidB)}
-		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			fillRect(hdc, rect, brush)
-			win.DeleteObject(win.HGDIOBJ(brush))
-		}
+		u.fillClientBase(hdc, rect)
 		return
 	}
 
@@ -3777,6 +3801,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 			u.memDC != 0 && dest == u.memDC && u.font != 0 {
 			oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
 			u.paintOverlay(dest, rect)
+			u.paintWinCaption(dest, rect)
 			u.paintImageModal(dest, rect)
 			win.SelectObject(dest, oldF)
 			return
@@ -3792,6 +3817,8 @@ func (u *winUI) paint(hwnd win.HWND) {
 			oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
 			if u.chromeDirty {
 				u.paintChrome(dest, rect)
+			} else {
+				u.paintWinCaption(dest, rect)
 			}
 			u.paintInputBar(dest, rect)
 			u.paintImageModal(dest, rect)
@@ -3809,11 +3836,8 @@ func (u *winUI) paint(hwnd win.HWND) {
 		u.inputOnlyDirty = false
 
 		// Void fill once; per-pane blit draws cells only.
-		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.VoidR, chrome.VoidG, chrome.VoidB)}
-		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-			fillRect(dest, rect, brush)
-			win.DeleteObject(win.HGDIOBJ(brush))
-		}
+		// Glass: stock black (DWM color key). Chroma cells skip their fill.
+		u.fillClientBase(dest, rect)
 		padY := u.shellPadY()
 		shellBot := u.shellBottomY(rect.Bottom - rect.Top)
 
@@ -4358,7 +4382,7 @@ func (u *winUI) applyClientSize(w, h int32) {
 	if cols > maxTermCols {
 		cols = maxTermCols
 	}
-	shellHApprox := h - int32(chrome.TabStripRows())*ch
+	shellHApprox := h - u.chromePixelHeight()
 	if shellHApprox < ch {
 		shellHApprox = ch
 	}
@@ -5895,15 +5919,19 @@ func (u *winUI) paintDimShell(hdc win.HDC, rect win.RECT) {
 // paintSettingsUnderlay fills the settings matte and previews Ambient (default)
 // or the focused Intro curtain behind the modal.
 func (u *winUI) paintSettingsUnderlay(hdc win.HDC, rect win.RECT, padY, bot int32) {
-	// Theme-tinted matte first (same base as paintMatrixMatteAndRain).
-	baseR, baseG, baseB := blendRGB(0, 0, 0, chrome.DimR, chrome.DimG, chrome.DimB, 0.35)
-	matteR, matteG, matteB := blendRGB(baseR, baseG, baseB,
-		chrome.PrimR, chrome.PrimG, chrome.PrimB, 0.05)
-	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(matteR, matteG, matteB)}
-	if brush := win.CreateBrushIndirect(&lb); brush != 0 {
-		r := win.RECT{Left: 0, Top: padY, Right: rect.Right, Bottom: bot}
-		fillRect(hdc, r, brush)
-		win.DeleteObject(win.HGDIOBJ(brush))
+	// Glass keeps the color-key holes (Mac settings does not lay a matte).
+	// Showcase glyphs still draw. Veil 100 is an opaque wash, so it mats.
+	if !(u.shellGlass() && u.cfg.GlassVeil < 100) {
+		// Theme-tinted matte first (same base as paintMatrixMatteAndRain).
+		baseR, baseG, baseB := blendRGB(0, 0, 0, chrome.DimR, chrome.DimG, chrome.DimB, 0.35)
+		matteR, matteG, matteB := blendRGB(baseR, baseG, baseB,
+			chrome.PrimR, chrome.PrimG, chrome.PrimB, 0.05)
+		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(matteR, matteG, matteB)}
+		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
+			r := win.RECT{Left: 0, Top: padY, Right: rect.Right, Bottom: bot}
+			fillRect(hdc, r, brush)
+			win.DeleteObject(win.HGDIOBJ(brush))
+		}
 	}
 
 	if u.chrome.SettingsShowcaseIntro() {
@@ -6516,19 +6544,28 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 		u.chromeDirty = false
 	}
 
-	cw, ch := u.metricW, u.metricH
-	if cw < 1 {
-		cw = cellW
-	}
+	ch := u.metricH
 	if ch < 1 {
 		ch = cellH
 	}
 	chromeH := int32(len(cells)) * ch
+	if u.chrome.Frame == chrome.FrameWindows {
+		chromeH = u.chromePixelHeight()
+	}
 	if chromeH > rect.Bottom-rect.Top {
 		chromeH = rect.Bottom - rect.Top
 	}
+	cellShift := int32(0)
+	if u.chrome.Frame == chrome.FrameWindows {
+		// Center the text row in the taller strip (Mac paints at extra/2).
+		cellShift = (chromeH - int32(len(cells))*ch) / 2
+		if cellShift < 0 {
+			cellShift = 0
+		}
+	}
 
-	// Tab strip at the top of the client area.
+	// Tab strip at the top of the client area. Windows frame is ch+ch/2,
+	// with the cell row centered the way the Mac title strip is.
 	{
 		lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(chrome.BarR, chrome.BarG, chrome.BarB)}
 		if brush := win.CreateBrushIndirect(&lb); brush != 0 {
@@ -6537,7 +6574,12 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 			win.DeleteObject(win.HGDIOBJ(brush))
 		}
 	}
-	u.paintChromeCells(hdc, rect, cells, 0, 0, true)
+	u.paintChromeCells(hdc, rect, cells, 0, cellShift, true)
+	if u.chrome.Frame == chrome.FrameWindows {
+		u.paintBrandMark(hdc, chromeH)
+		u.paintCaffeineCup(hdc, chromeH)
+		u.paintWinCaption(hdc, rect)
+	}
 	u.chromePx = chromeH
 }
 

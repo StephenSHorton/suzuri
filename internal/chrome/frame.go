@@ -34,7 +34,3 @@ func styleFrameMin() lipgloss.Style {
 func styleFrameZoom() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color("#6ecf8a")).Background(colBar).Padding(0, 0)
 }
-
-func styleFrameWin() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(colSoft).Background(colBar).Padding(0, 1)
-}

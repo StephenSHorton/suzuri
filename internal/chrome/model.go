@@ -935,6 +935,10 @@ func (m Model) View() string {
 	return m.StripView()
 }
 
+// winCaptionCells is blank strip space for the three painted caption buttons.
+// 18 cells covers 3×46px at typical mono widths so the cup stays left of them.
+const winCaptionCells = 18
+
 func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, [3][2]int) {
 	bounds := make([][2]int, len(m.Tabs))
 	var parts []string
@@ -950,11 +954,13 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, 
 		const reserve = 14
 		parts = append(parts, styleGap().Render(strings.Repeat(" ", reserve)))
 		col += reserve
-	}
-
-	// Quiet brand. On the Mac frame the 硯 is painted as a square graphic,
-	// so the text copy is not also placed next to the tabs.
-	if m.Frame != FrameMac {
+	} else if m.Frame == FrameWindows {
+		// Square 硯 is painted in the title strip. Blank cells so the text
+		// mark is not drawn on top of it.
+		const reserve = 4
+		parts = append(parts, styleGap().Render(strings.Repeat(" ", reserve)))
+		col += reserve
+	} else {
 		brand := styleBrand().Render("硯")
 		parts = append(parts, brand)
 		col += lipgloss.Width(brand)
@@ -1009,10 +1015,9 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, 
 	}
 	winBtnW := 0
 	if m.Frame == FrameWindows {
-		for _, g := range []string{"—", "□", "✕"} {
-			winBtnW += lipgloss.Width(styleFrameWin().Render(g))
-		}
-		winBtnW += gapW
+		// Painted caption buttons are ~46px and flush right. Reserve cells
+		// instead of the tiny "— □ ✕" glyphs.
+		winBtnW = gapW + winCaptionCells
 	}
 	rightW := bellW + gapW + cupW + winBtnW
 
@@ -1039,14 +1044,19 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, 
 
 	var winBtns string
 	if m.Frame == FrameWindows {
-		glyphs := []string{"—", "□", "✕"}
+		winBtns = styleGap().Render(strings.Repeat(" ", gapW+winCaptionCells))
 		x := cafeB[1] + gapW
-		for i, g := range glyphs {
-			chip := styleFrameWin().Render(g)
-			cw := lipgloss.Width(chip)
-			frameBtn[i] = [2]int{x, x + cw}
-			winBtns += chip
-			x += cw
+		each := winCaptionCells / 3
+		if each < 1 {
+			each = 1
+		}
+		for i := 0; i < 3; i++ {
+			w := each
+			if i == 2 {
+				w = winCaptionCells - each*2
+			}
+			frameBtn[i] = [2]int{x, x + w}
+			x += w
 		}
 	}
 	row := left + spacer + bell + gap + cup + winBtns
