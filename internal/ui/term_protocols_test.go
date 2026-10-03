@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,38 @@ func TestFeedSyncOutputHoldsUntilEnd(t *testing.T) {
 	}
 	if m.syncOn {
 		t.Fatal("sync still on")
+	}
+}
+
+func TestFeedSyncByteCapFlushes(t *testing.T) {
+	var m termModes
+	now := time.Now()
+	body := bytes.Repeat([]byte("A"), maxSyncBuf+64)
+	raw := append([]byte("\x1b[?2026h"), body...)
+	got := m.feed(now, raw, 0)
+	if m.syncOn {
+		t.Fatal("sync should drop after the byte cap")
+	}
+	if len(m.syncBuf) != 0 {
+		t.Fatalf("syncBuf still holding %d", len(m.syncBuf))
+	}
+	if len(got.ready) < maxSyncBuf {
+		t.Fatalf("ready %d, want flushed cap", len(got.ready))
+	}
+}
+
+func TestOSC8CaptureCapped(t *testing.T) {
+	var m termModes
+	open := m.feed(time.Now(), []byte("\x1b]8;;https://example.com/x\x07"), 0)
+	if !m.capturing {
+		t.Fatalf("expected capture, ready=%q", open.ready)
+	}
+	m.feed(time.Now(), bytes.Repeat([]byte("x"), maxCapture*2), 0)
+	if len(m.capture) > maxCapture {
+		t.Fatalf("capture grew to %d", len(m.capture))
+	}
+	if !m.capturing {
+		t.Fatal("close should still be able to finish the hyperlink")
 	}
 }
 

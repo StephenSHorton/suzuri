@@ -518,13 +518,58 @@ func noticePanelOrigin(visX, visY, visW, visH, panelW, panelH, inset, anchor int
 	return x, y
 }
 
+type noticePixCache struct {
+	key    string
+	pix    []byte
+	stride int
+	width  int
+	height int
+	anchor int
+	cards  []noticeCard
+}
+
+var noticeCache noticePixCache
+
+func noticeRenderKey(items []liveNote, now time.Time, anchor int) string {
+	var b strings.Builder
+	b.WriteByte(byte(anchor))
+	b.WriteByte('|')
+	b.WriteByte(byte(len(items)))
+	for _, n := range items {
+		slide := 0
+		age := now.Sub(n.born)
+		if age < 180*time.Millisecond {
+			slide = int((1 - float64(age)/float64(180*time.Millisecond)) * noticeSlideMax)
+			slide = (slide / 4) * 4
+		}
+		b.WriteByte('|')
+		b.WriteString(n.ID)
+		b.WriteByte('/')
+		b.WriteString(n.Title)
+		b.WriteByte('/')
+		b.WriteString(n.Body)
+		b.WriteByte('/')
+		b.WriteString(strconv.Itoa(slide))
+		b.WriteByte('/')
+		b.WriteString(strconv.Itoa(n.Urgency))
+		b.WriteByte('/')
+		b.WriteString(n.Icon)
+	}
+	return b.String()
+}
+
 func renderNotices(now time.Time) (pix []byte, stride, width, height, anchor int, cards []noticeCard) {
 	noticeMu.Lock()
 	items := append([]liveNote(nil), noticeLive...)
 	anchor = noticeAnchorIdx
 	noticeMu.Unlock()
 	if len(items) == 0 {
+		noticeCache = noticePixCache{}
 		return nil, 0, 0, 0, anchor, nil
+	}
+	key := noticeRenderKey(items, now, anchor)
+	if noticeCache.key == key && len(noticeCache.pix) > 0 {
+		return noticeCache.pix, noticeCache.stride, noticeCache.width, noticeCache.height, noticeCache.anchor, noticeCache.cards
 	}
 	const scale = 2
 	wpx, hpx, _ := noticeStackLayout(len(items), anchor, 0)
@@ -540,6 +585,11 @@ func renderNotices(now time.Time) (pix []byte, stride, width, height, anchor int
 		x, y := slots[i].X, slots[i].Y
 		drawCard(img, scale, x, y, noticeCardW, noticeCardH, n)
 		cards[i] = noticeCard{x: x * scale, y: y * scale, w: noticeCardW * scale, h: noticeCardH * scale, index: i}
+	}
+	noticeCache = noticePixCache{
+		key: key, pix: img.Pix, stride: img.Stride,
+		width: img.Bounds().Dx(), height: img.Bounds().Dy(),
+		anchor: anchor, cards: cards,
 	}
 	return img.Pix, img.Stride, img.Bounds().Dx(), img.Bounds().Dy(), anchor, cards
 }
@@ -700,10 +750,16 @@ func (m *termModes) takeOSC99(payload []byte, res *feedResult) {
 	key := id
 	buf := m.osc99[key]
 	if buf == nil {
-		buf = &osc99Buf{urgency: 1, sound: "system", occasion: "always", expireMS: -1, focus: true}
 		if m.osc99 == nil {
 			m.osc99 = map[string]*osc99Buf{}
 		}
+		if len(m.osc99) >= maxOSC99Pending {
+			for k := range m.osc99 {
+				delete(m.osc99, k)
+				break
+			}
+		}
+		buf = &osc99Buf{urgency: 1, sound: "system", occasion: "always", expireMS: -1, focus: true}
 		m.osc99[key] = buf
 	}
 	if id != "" {
@@ -711,9 +767,9 @@ func (m *termModes) takeOSC99(payload []byte, res *feedResult) {
 	}
 	applyOSC99Meta(buf, kv)
 	if p == "title" {
-		buf.title += text
+		buf.title = clipRunes(buf.title+text, 180)
 	} else if p == "body" {
-		buf.body += text
+		buf.body = clipRunes(buf.body+text, 400)
 	}
 	if !done {
 		return

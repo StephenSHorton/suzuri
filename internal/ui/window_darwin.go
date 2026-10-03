@@ -265,8 +265,18 @@ type macUI struct {
 	lastPasteAt time.Time
 }
 
-func (u *macUI) queueBytes(tabID int) {
-	u.enqueue(func() { u.drainAndParse(tabID) })
+func (u *macUI) queueBytes(tabID int) bool {
+	if u == nil || !u.alive.Load() {
+		return false
+	}
+	select {
+	case u.jobs <- func() { u.drainAndParse(tabID) }:
+		return true
+	default:
+		// Do not leave bytesMsg set — postBytes retries, and Update
+		// kicks ingestStalled so a full jobs queue cannot freeze PTY.
+		return false
+	}
 }
 func (u *macUI) queueClosed(tabID int) {
 	// Shell exited (e.g. user typed `exit`) — close that pane; last pane of last page quits.
@@ -717,6 +727,11 @@ func (u *macUI) Update() error {
 		}
 	}
 drained:
+	for _, t := range u.allPanes() {
+		if t != nil && t.ingestStalled() {
+			u.drainAndParse(t.id)
+		}
+	}
 	u.drainAI()
 
 	u.drainPendingPaste()
@@ -3951,7 +3966,7 @@ func (u *macUI) pasteAltScreenAsyncOsascript(bracket bool) {
 	if imgPath, err := readClipboardImageFileOsascript(); err == nil && imgPath != "" {
 		log.Info("paste clipboard image (osascript)", "path", imgPath)
 		u.pendingPasteMu.Lock()
-		u.pendingPaste = append(u.pendingPaste, pendingPaste{
+		u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{
 			payload: framePaste(imgPath, bracket), toast: "image pasted",
 		})
 		u.pendingPasteMu.Unlock()
@@ -3962,14 +3977,14 @@ func (u *macUI) pasteAltScreenAsyncOsascript(bracket bool) {
 	text, _ := clipboard.ReadAll()
 	if text == "" {
 		u.pendingPasteMu.Lock()
-		u.pendingPaste = append(u.pendingPaste, pendingPaste{
+		u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{
 			toast: "clipboard empty",
 		})
 		u.pendingPasteMu.Unlock()
 		return
 	}
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
+	u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
 	u.pendingPasteMu.Unlock()
 }
 

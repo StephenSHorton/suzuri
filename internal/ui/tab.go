@@ -24,7 +24,7 @@ import (
 
 // tabHost is the UI surface a tab posts I/O events to (Win32 or AppKit host).
 type tabHost interface {
-	queueBytes(tabID int)
+	queueBytes(tabID int) bool
 	queueClosed(tabID int)
 	isAlive() bool
 	windowReady() bool
@@ -413,6 +413,10 @@ const (
 	ptyReadSize = 64 << 10 // 64 KiB per Read
 	// Cap above one max-sized Kitty transmit stream + a little VT headroom.
 	maxInBuf = maxKittyOpenBuf + (256 << 10)
+	// One UI tick must not parse the whole inBuf (up to ~16MiB). A 256KiB
+	// slice keeps Ebiten/Win32 responsive while termModes/Kitty reassemble
+	// sequences across drains.
+	ptyIngestChunk = 256 << 10
 )
 
 // tabOpts optional launch recipe (profile).
@@ -625,17 +629,39 @@ func (t *tab) postBytes(u tabHost) {
 		return
 	}
 	if t.bytesMsg.CompareAndSwap(false, true) {
-		u.queueBytes(t.id)
+		if !u.queueBytes(t.id) {
+			// Host dropped the wake-up (Mac job queue full). Clear the
+			// coalesce flag so the next read — or the UI-thread stall
+			// kick — can try again. Leaving it set froze ingest forever.
+			t.bytesMsg.Store(false)
+		}
 	}
 }
 
 func (t *tab) takeInput() []byte {
 	t.inMu.Lock()
 	data := t.inBuf
+	if len(data) > ptyIngestChunk {
+		chunk := append([]byte(nil), data[:ptyIngestChunk]...)
+		t.inBuf = append([]byte(nil), data[ptyIngestChunk:]...)
+		t.inMu.Unlock()
+		t.bytesMsg.Store(false)
+		return chunk
+	}
 	t.inBuf = nil
 	t.inMu.Unlock()
 	t.bytesMsg.Store(false)
 	return data
+}
+
+// ingestStalled is true when bytes sit in inBuf but no UI job is queued.
+// Mac enqueue used to drop the job while bytesMsg stayed true, so the UI
+// never drained and the child blocked on a full PTY.
+func (t *tab) ingestStalled() bool {
+	if t == nil {
+		return false
+	}
+	return t.inputWaiting() && !t.bytesMsg.Load()
 }
 
 func (t *tab) ptyTailCopy() []byte {

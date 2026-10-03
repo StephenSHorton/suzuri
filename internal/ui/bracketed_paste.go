@@ -31,3 +31,13 @@ type pendingPaste struct {
 	preferSuperV bool // empty board: try Kitty Super+V first
 	reclaimFocus bool // macOS: re-activate window after osascript paste
 }
+
+const maxPendingPaste = 8
+
+func appendPendingPaste(dst []pendingPaste, p pendingPaste) []pendingPaste {
+	dst = append(dst, p)
+	if extra := len(dst) - maxPendingPaste; extra > 0 {
+		dst = append([]pendingPaste(nil), dst[extra:]...)
+	}
+	return dst
+}

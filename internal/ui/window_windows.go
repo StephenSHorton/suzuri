@@ -384,7 +384,7 @@ func (u *winUI) markShellDirty() {
 	u.inputOnlyDirty = false
 }
 
-func (u *winUI) queueBytes(tabID int)  { postBytes(u, tabID) }
+func (u *winUI) queueBytes(tabID int) bool { return postBytes(u, tabID) }
 func (u *winUI) queueClosed(tabID int) { postClosed(u, tabID) }
 func (u *winUI) isAlive() bool         { return u != nil && u.alive.Load() }
 func (u *winUI) windowReady() bool     { return u != nil && u.hwnd != 0 }
@@ -1559,11 +1559,11 @@ func wndProcMain(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	return u.handle(hwnd, msg, wParam, lParam)
 }
 
-func postBytes(u *winUI, tabID int) {
-	if u.hwnd == 0 {
-		return
+func postBytes(u *winUI, tabID int) bool {
+	if u == nil || u.hwnd == 0 {
+		return false
 	}
-	win.PostMessage(u.hwnd, wmSuzuriBytes, uintptr(tabID), 0)
+	return win.PostMessage(u.hwnd, wmSuzuriBytes, uintptr(tabID), 0) != 0
 }
 
 func postClosed(u *winUI, tabID int) {
@@ -2294,6 +2294,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			// PTY bytes alone would leave a card up until the next write.
 			if noticeCount() > 0 || noticePanelUp() {
 				driveNotices(time.Now(), u.hostFocused, !win.IsIconic(hwnd))
+			}
+			for _, t := range u.allPanes() {
+				if t != nil && t.ingestStalled() {
+					u.drainAndParse(t.id)
+				}
 			}
 		}
 		return 0
@@ -5557,7 +5562,7 @@ func (u *winUI) pasteAltScreenAsync(bracket bool) {
 	if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
 		log.Info("paste clipboard image", "path", imgPath)
 		u.pendingPasteMu.Lock()
-		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: framePaste(imgPath, bracket), toast: "image pasted"})
+		u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{payload: framePaste(imgPath, bracket), toast: "image pasted"})
 		u.pendingPasteMu.Unlock()
 		return
 	} else if err != nil {
@@ -5569,7 +5574,7 @@ func (u *winUI) pasteAltScreenAsync(bracket bool) {
 	}
 	// Host bracketed paste only — Super+V + payload double-pasted into Grok.
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
+	u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
 	u.pendingPasteMu.Unlock()
 }
 
