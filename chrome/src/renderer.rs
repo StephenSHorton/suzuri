@@ -217,6 +217,8 @@ pub struct Renderer {
 
     wallpaper: WallpaperGpu,
     wallpaper_paused: bool,
+    /// Frames since last glyphon atlas trim (even when the body is cached).
+    atlas_trim_age: u32,
 }
 
 /// One Kitty graphics placement to blit into a terminal well.
@@ -778,6 +780,7 @@ impl Renderer {
             kitty_blits: Vec::new(),
             wallpaper,
             wallpaper_paused: false,
+            atlas_trim_age: 0,
         }
     }
 
@@ -1633,6 +1636,7 @@ impl Renderer {
         ghost.text.render(&self.device, &mut encoder, &view);
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+        let _ = self.device.poll(wgpu::Maintain::Poll);
         Ok(())
     }
 
@@ -2243,8 +2247,13 @@ impl Renderer {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
-        if body_changed {
+        // Reclaim staging buffers / transient bind groups. Without a poll,
+        // Metal (and some Vulkan allocators) hold them until the process dies.
+        let _ = self.device.poll(wgpu::Maintain::Poll);
+        self.atlas_trim_age = self.atlas_trim_age.saturating_add(1);
+        if body_changed || self.atlas_trim_age >= 120 {
             self.text.trim_atlas();
+            self.atlas_trim_age = 0;
         }
         Ok(())
     }

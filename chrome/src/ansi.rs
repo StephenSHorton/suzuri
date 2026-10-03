@@ -356,8 +356,10 @@ impl AnsiDecoder {
                         .saturating_add((b - b'0') as u16);
                 }
                 b';' => {
-                    self.csi_params
-                        .push(if self.csi_has_num { self.csi_num } else { 0 });
+                    if self.csi_params.len() < 32 {
+                        self.csi_params
+                            .push(if self.csi_has_num { self.csi_num } else { 0 });
+                    }
                     self.csi_num = 0;
                     self.csi_has_num = false;
                 }
@@ -1293,6 +1295,24 @@ mod tests {
         assert_eq!(snap[1], "b");
         assert_eq!(snap[2], "c");
         assert_eq!(snap[3], "d");
+    }
+
+    #[test]
+    fn unterminated_csi_params_stay_bounded() {
+        let mut dec = AnsiDecoder::new();
+        let mut grid = CellGrid::new(8, 2);
+        let mut flood = vec![0x1b, b'['];
+        flood.extend(std::iter::repeat(b';').take(8_000));
+        dec.feed(&mut grid, &flood);
+        assert!(
+            dec.csi_params.len() <= 32,
+            "csi_params grew to {}",
+            dec.csi_params.len()
+        );
+        // Recover: a later complete sequence still works.
+        dec.feed(&mut grid, b"31mX");
+        let snap = grid.snapshot_strings();
+        assert!(snap[0].contains('X'), "got {:?}", snap[0]);
     }
 }
 

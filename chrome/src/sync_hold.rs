@@ -18,7 +18,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(64);
 pub const BURST_QUIET: Duration = Duration::from_millis(16);
 /// Cap so a continuous Grok stream still updates (~2-3 frames).
 pub const BURST_MAX: Duration = Duration::from_millis(48);
-const MAX_HOLD: usize = 1 << 20;
+pub const MAX_HOLD: usize = 1 << 20;
 
 /// Bytes that are safe to write into the VT grid.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -65,6 +65,11 @@ impl SyncHold {
 
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Bytes currently held (tests / diagnostics). Capped by [`MAX_HOLD`].
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 
     pub fn set_coalesce(&mut self, on: bool) {
@@ -122,7 +127,7 @@ impl SyncHold {
     }
 
     fn drain(&mut self, mut force: bool) -> Release {
-        if self.open && self.pending.len() > MAX_HOLD {
+        if self.pending.len() > MAX_HOLD {
             force = true;
         }
         let mut out = Vec::new();
@@ -497,6 +502,31 @@ mod tests {
         let r = s.flush_if_stale(t0 + BURST_QUIET);
         assert_eq!(r.bytes, b"MENU");
         assert!(!s.has_pending());
+    }
+
+    #[test]
+    #[test]
+    fn coalesce_pending_is_capped() {
+        let mut s = SyncHold::new();
+        s.set_coalesce(true);
+        let t0 = Instant::now();
+        let chunk = vec![b'X'; 64 * 1024];
+        let mut released = 0usize;
+        // Far more than MAX_HOLD without waiting for BURST_MAX.
+        for _ in 0..24 {
+            let r = s.feed_at(&chunk, t0);
+            released += r.bytes.len();
+            assert!(
+                s.pending.len() <= MAX_HOLD,
+                "pending {} exceeded cap",
+                s.pending.len()
+            );
+        }
+        assert!(
+            released + s.pending.len() >= 24 * chunk.len(),
+            "bytes vanished: released={released} pending={}",
+            s.pending.len()
+        );
     }
 
     #[test]

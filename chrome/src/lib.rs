@@ -65,6 +65,7 @@ pub mod kitty;
 pub mod kitty_gfx;
 pub mod layout;
 pub mod links;
+pub mod mem_bound;
 pub mod mouse_pty;
 pub mod new_window;
 pub mod notes;
