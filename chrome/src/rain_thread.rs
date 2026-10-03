@@ -207,6 +207,25 @@ fn worker(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    // Reused every encode. A new bind group per frame leaked GPU memory on Metal.
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("rain bg (worker)"),
+        layout: &bgl,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&atlas_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
     let mut cur_w = 0u32;
     let mut cur_h = 0u32;
     let mut back = 1usize;
@@ -271,25 +290,6 @@ fn worker(
         // busy with keys — don't wait on the caller's dt.
         u.res_time[2] = 7.3 + start.elapsed().as_secs_f32();
         queue.write_buffer(&uniform_buf, 0, bytemuck::bytes_of(&u));
-
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rain bg (worker)"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("rain worker"),

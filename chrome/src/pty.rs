@@ -1,24 +1,86 @@
 //! Local shell PTY via `portable-pty`.
 //!
-//! Reader runs on a background thread and pushes bytes into an mpsc channel so
-//! the UI event loop can drain with non-blocking `try_read`.
+//! Reader runs on a background thread and pushes bytes into a **bounded**
+//! channel so a fast child (Grok alt-screen, `yes`, ConPTY bursts) cannot
+//! grow RSS without limit while the UI thread paints. `try_read` also caps
+//! how much it copies in one wake so a single frame cannot freeze the loop.
+//!
+//! Windows: `ResizePseudoConsole` concurrent with hot Read/Write has
+//! hard-killed the process (no Rust panic). Native resize is debounced and
+//! skipped while I/O is recent; the cell grid still reflows immediately.
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+/// Max unread PTY chunks queued by the reader thread (~8 KiB each).
+/// Sync send blocks the reader (and therefore the child) instead of allocating.
+pub const PTY_QUEUE_CHUNKS: usize = 128;
+
+/// Max bytes copied out of the queue on one UI `try_read` (256 KiB).
+pub const PTY_DRAIN_BYTES: usize = 256 * 1024;
+
+/// Hold native winsize until the animated size stops changing.
+pub const RESIZE_DEBOUNCE: Duration = Duration::from_millis(50);
+
+/// Windows: do not call `ResizePseudoConsole` while a pane streamed recently.
+/// Matches the Go host `sessionIOQuiet` gate.
+pub const CONPTY_IO_QUIET: Duration = Duration::from_millis(300);
 
 /// Live local PTY + shell child process.
 ///
 /// Not `Sync`; own it on the UI/event-loop thread. The reader thread only
-/// touches the cloned reader and the channel sender.
+/// touches the cloned reader, the channel sender, and the I/O timestamp.
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     rx: Receiver<Vec<u8>>,
+    /// Nanos since [`PtySession`] construction; `0` = no I/O yet.
+    last_io_ns: Arc<AtomicU64>,
+    origin: Instant,
+    pending_resize: Option<PtySize>,
+    pending_since: Instant,
+    applied_resize: Option<PtySize>,
     /// Join handle for the reader thread (detached on drop after kill).
     _reader: Option<JoinHandle<()>>,
+}
+
+/// True when a native ConPTY resize would race in-flight stream data.
+pub fn should_defer_conpty_resize(
+    treat_as_windows: bool,
+    last_io: Option<Instant>,
+    now: Instant,
+) -> bool {
+    if !treat_as_windows {
+        return false;
+    }
+    last_io.is_some_and(|t| now.saturating_duration_since(t) < CONPTY_IO_QUIET)
+}
+
+/// True when the latest requested size has been stable long enough to apply.
+pub fn resize_debounce_elapsed(pending_since: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(pending_since) >= RESIZE_DEBOUNCE
+}
+
+/// Copy queued chunks into `out` until empty, disconnected, or `max_bytes`.
+/// Returns how many chunks were taken. Leftover chunks stay with the caller.
+pub fn drain_chunks_capped(
+    chunks: &mut Vec<Vec<u8>>,
+    out: &mut Vec<u8>,
+    max_bytes: usize,
+) -> usize {
+    let mut n = 0;
+    while !chunks.is_empty() && out.len() < max_bytes {
+        let chunk = chunks.remove(0);
+        out.extend_from_slice(&chunk);
+        n += 1;
+    }
+    n
 }
 
 impl PtySession {
@@ -116,7 +178,10 @@ impl PtySession {
             .take_writer()
             .map_err(|e| format!("take writer: {e}"))?;
 
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PTY_QUEUE_CHUNKS);
+        let last_io_ns = Arc::new(AtomicU64::new(0));
+        let origin = Instant::now();
+        let io_stamp = Arc::clone(&last_io_ns);
         let reader_handle = thread::Builder::new()
             .name("suzuri-pty-reader".into())
             .spawn(move || {
@@ -125,6 +190,9 @@ impl PtySession {
                     match reader.read(&mut buf) {
                         Ok(0) => break, // EOF — slave closed
                         Ok(n) => {
+                            stamp_io(&io_stamp, origin);
+                            // Blocks when the UI is behind — backpressure into the
+                            // kernel PTY instead of an unbounded userspace queue.
                             if tx.send(buf[..n].to_vec()).is_err() {
                                 break; // receiver dropped
                             }
@@ -140,6 +208,11 @@ impl PtySession {
             writer,
             child,
             rx,
+            last_io_ns,
+            origin,
+            pending_resize: None,
+            pending_since: origin,
+            applied_resize: Some(size),
             _reader: Some(reader_handle),
         })
     }
@@ -150,6 +223,9 @@ impl PtySession {
     }
 
     /// Resize with pixel dimensions (helps apps that query `TIOCGWINSZ` px fields).
+    ///
+    /// Records the latest size and applies it when debounce + (Windows) I/O
+    /// quiet gates pass. Safe to call every animation frame.
     pub fn resize_with_pixels(
         &mut self,
         cols: u16,
@@ -157,17 +233,54 @@ impl PtySession {
         pixel_width: u16,
         pixel_height: u16,
     ) -> Result<(), String> {
-        self.master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width,
-                pixel_height,
-            })
-            .map_err(|e| format!("resize: {e}"))
+        let size = PtySize {
+            rows,
+            cols,
+            pixel_width,
+            pixel_height,
+        };
+        if self.applied_resize.is_some_and(|s| pty_size_eq(s, size)) && self.pending_resize.is_none()
+        {
+            return Ok(());
+        }
+        if !self.pending_resize.is_some_and(|s| pty_size_eq(s, size)) {
+            self.pending_resize = Some(size);
+            self.pending_since = Instant::now();
+        }
+        self.flush_pending_resize()
     }
 
-    /// Non-blocking: drain all bytes currently queued from the reader thread.
+    /// Apply a deferred winsize if gates allow. Called from [`try_read`].
+    pub fn flush_pending_resize(&mut self) -> Result<(), String> {
+        let Some(size) = self.pending_resize else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if !resize_debounce_elapsed(self.pending_since, now) {
+            return Ok(());
+        }
+        if should_defer_conpty_resize(cfg!(windows), self.last_io(), now) {
+            return Ok(());
+        }
+        self.master
+            .resize(size)
+            .map_err(|e| format!("resize: {e}"))?;
+        self.applied_resize = Some(size);
+        self.pending_resize = None;
+        Ok(())
+    }
+
+    fn last_io(&self) -> Option<Instant> {
+        let ns = self.last_io_ns.load(Ordering::Acquire);
+        if ns == 0 {
+            None
+        } else {
+            Some(self.origin + Duration::from_nanos(ns))
+        }
+    }
+
+    /// Non-blocking: drain up to [`PTY_DRAIN_BYTES`] from the reader thread.
+    /// Leftover chunks stay queued for the next wake.
     /// Raw bytes — do **not** UTF-8-lossy here. ConPTY splits multi-byte
     /// runes across reads; lossy replacement at the seam is what mixed Grok
     /// text (braille spinners, CJK, box drawing). `AnsiDecoder` already holds
@@ -175,17 +288,24 @@ impl PtySession {
     pub fn try_read(&mut self) -> Vec<u8> {
         let mut bytes = Vec::new();
         loop {
+            if bytes.len() >= PTY_DRAIN_BYTES {
+                break;
+            }
             match self.rx.try_recv() {
                 Ok(chunk) => bytes.extend_from_slice(&chunk),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
         }
+        let _ = self.flush_pending_resize();
         bytes
     }
 
     /// Write raw bytes to the PTY master (user input, submitted line + `\n`/`\r`).
     pub fn write_all(&mut self, data: &[u8]) -> Result<(), String> {
+        if !data.is_empty() {
+            stamp_io(&self.last_io_ns, self.origin);
+        }
         self.writer
             .write_all(data)
             .map_err(|e| format!("pty write: {e}"))?;
@@ -214,6 +334,18 @@ impl Drop for PtySession {
         // briefly). Handle is dropped with the struct.
         let _ = self._reader.take();
     }
+}
+
+fn pty_size_eq(a: PtySize, b: PtySize) -> bool {
+    a.rows == b.rows
+        && a.cols == b.cols
+        && a.pixel_width == b.pixel_width
+        && a.pixel_height == b.pixel_height
+}
+
+fn stamp_io(last_io_ns: &AtomicU64, origin: Instant) {
+    let ns = origin.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    last_io_ns.store(ns.max(1), Ordering::Release);
 }
 
 fn apply_host_env(cmd: &mut CommandBuilder, pane_id: u64) {
@@ -360,6 +492,57 @@ mod tests {
             "expected OSC cwd hook in {:?}",
             shell.args
         );
+    }
+
+    #[test]
+    fn drain_chunks_stops_at_byte_cap() {
+        let mut chunks = vec![vec![1u8; 100], vec![2u8; 100], vec![3u8; 100]];
+        let mut out = Vec::new();
+        let n = drain_chunks_capped(&mut chunks, &mut out, 150);
+        assert_eq!(n, 2);
+        assert_eq!(out.len(), 200);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0][0], 3);
+    }
+
+    #[test]
+    fn drain_chunks_empty_is_zero() {
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        let mut out = Vec::new();
+        assert_eq!(drain_chunks_capped(&mut chunks, &mut out, 64), 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn windows_resize_skipped_while_hot() {
+        let now = Instant::now();
+        let hot = now - Duration::from_millis(10);
+        assert!(should_defer_conpty_resize(true, Some(hot), now));
+        assert!(!should_defer_conpty_resize(
+            true,
+            Some(now - CONPTY_IO_QUIET - Duration::from_millis(1)),
+            now
+        ));
+        assert!(!should_defer_conpty_resize(true, None, now));
+        // POSIX winsize is safe during I/O — never defer.
+        assert!(!should_defer_conpty_resize(false, Some(hot), now));
+    }
+
+    #[test]
+    fn resize_debounce_waits_for_settle() {
+        let t0 = Instant::now();
+        assert!(!resize_debounce_elapsed(t0, t0 + Duration::from_millis(10)));
+        assert!(resize_debounce_elapsed(
+            t0,
+            t0 + RESIZE_DEBOUNCE + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn queue_and_drain_caps_are_bounded() {
+        assert!(PTY_QUEUE_CHUNKS * 8192 <= 2 * 1024 * 1024);
+        assert!(PTY_DRAIN_BYTES <= 512 * 1024);
+        assert!(PTY_QUEUE_CHUNKS >= 8);
     }
 
     #[test]

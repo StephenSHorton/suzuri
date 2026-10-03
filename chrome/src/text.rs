@@ -634,6 +634,11 @@ impl TextLayer {
                 FontMetrics::new(14.0, 18.0),
             ));
         }
+        // Drop leftovers after a large TUI / window so cosmic-text Buffers
+        // do not stay at the high-water mark for the rest of the session.
+        if self.buffers.len() > n.saturating_add(64) {
+            self.buffers.truncate(n);
+        }
     }
 
     fn reshape_range(&mut self, start: usize, labels: &[TextLabel]) {

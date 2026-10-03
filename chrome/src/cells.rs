@@ -74,7 +74,7 @@ pub struct Cursor {
 }
 
 /// Max scrollback rows retained when the viewport scrolls.
-const MAX_SCROLLBACK: usize = 2000;
+pub const MAX_SCROLLBACK: usize = 2000;
 
 /// Logical-px scrollbar geometry for the terminal cell well (product-style).
 #[derive(Clone, Copy, Debug, Default)]
@@ -1102,5 +1102,24 @@ mod tests {
         assert!(g.scrollback_len() >= 1);
         let t0 = g.line_text_abs(0);
         assert!(t0.starts_with("one") || t0.starts_with("two"), "got {t0:?}");
+    }
+
+    #[test]
+    fn scrollback_stays_capped_under_heavy_output() {
+        let mut g = CellGrid::new(80, 24);
+        for i in 0..50_000 {
+            g.writeln(&format!("line-{i}"));
+        }
+        assert!(
+            g.scrollback_len() <= MAX_SCROLLBACK,
+            "scrollback grew to {}",
+            g.scrollback_len()
+        );
+        let cells = g.scrollback_len() * g.cols() as usize + g.cells().len();
+        let bytes = cells * std::mem::size_of::<Cell>();
+        assert!(
+            bytes < 8 * 1024 * 1024,
+            "grid retained {bytes} bytes after 50k lines"
+        );
     }
 }
