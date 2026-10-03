@@ -21,9 +21,9 @@ func (h *fakeTabHost) queueBytes(int) bool {
 	h.n++
 	return h.accept
 }
-func (h *fakeTabHost) queueClosed(int) {}
-func (h *fakeTabHost) isAlive() bool      { return true }
-func (h *fakeTabHost) windowReady() bool  { return true }
+func (h *fakeTabHost) queueClosed(int)   {}
+func (h *fakeTabHost) isAlive() bool     { return true }
+func (h *fakeTabHost) windowReady() bool { return true }
 
 func TestTakeInputChunks(t *testing.T) {
 	tab := &tab{}

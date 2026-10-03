@@ -385,9 +385,9 @@ func (u *winUI) markShellDirty() {
 }
 
 func (u *winUI) queueBytes(tabID int) bool { return postBytes(u, tabID) }
-func (u *winUI) queueClosed(tabID int) { postClosed(u, tabID) }
-func (u *winUI) isAlive() bool         { return u != nil && u.alive.Load() }
-func (u *winUI) windowReady() bool     { return u != nil && u.hwnd != 0 }
+func (u *winUI) queueClosed(tabID int)     { postClosed(u, tabID) }
+func (u *winUI) isAlive() bool             { return u != nil && u.alive.Load() }
+func (u *winUI) windowReady() bool         { return u != nil && u.hwnd != 0 }
 
 func (u *winUI) activeTab() *tab {
 	if p := u.activePage(); p != nil {
