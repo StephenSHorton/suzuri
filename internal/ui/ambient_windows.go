@@ -25,7 +25,7 @@ func themeAmbientColors() ambientColors {
 
 // shellAmbientOn is true when settings pick any always-on underlay.
 func (u *winUI) shellAmbientOn() bool {
-	return u != nil && u.cfg.AmbientActive()
+	return u != nil && !u.ambientSuppressed && u.cfg.AmbientActive()
 }
 
 // shellMatrixOn is true when ambient is classic rain (legacy name).
