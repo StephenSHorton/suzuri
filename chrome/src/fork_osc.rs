@@ -210,7 +210,7 @@ fn other_axis(axis: SplitAxis) -> SplitAxis {
     }
 }
 
-fn half_size(w: f32, h: f32, axis: SplitAxis) -> (f32, f32) {
+fn half_size(w: f32, h: f32, axis: SplitAxis) -> (f32, f2) {
     match axis {
         SplitAxis::Vertical => (w * 0.5, h),
         SplitAxis::Horizontal => (w, h * 0.5),
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[cfg(windows)]
-    const SAMPLE_BIN: &str = r"C:\\bin\\grok-fork.exe";
+    const SAMPLE_BIN: &str = r"C:\bin\grok-fork.exe";
     #[cfg(not(windows))]
     const SAMPLE_BIN: &str = "/usr/bin/grok-fork";
 
@@ -326,18 +326,18 @@ mod tests {
     fn allowlist() {
         assert!(allowed_fork_bin(SAMPLE_BIN));
         #[cfg(windows)]
-        assert!(allowed_fork_bin(r"C:\\tmp\\xai-grok-pager.exe"));
+        assert!(allowed_fork_bin(r"C:\tmp\xai-grok-pager.exe"));
         #[cfg(not(windows))]
         assert!(allowed_fork_bin("/tmp/xai-grok-pager"));
         #[cfg(windows)]
-        assert!(allowed_fork_bin(r"C:\\bin\\rock.exe"));
+        assert!(allowed_fork_bin(r"C:\bin\rock.exe"));
         #[cfg(not(windows))]
         assert!(allowed_fork_bin("/usr/local/bin/rock"));
         assert!(!allowed_fork_bin("rock"));
         assert!(!allowed_fork_bin("grok-fork"));
         assert!(!allowed_fork_bin("/bin/zsh"));
         #[cfg(windows)]
-        assert!(!allowed_fork_bin(r"C:\\usr\\bin\\..\\bin\\zsh.exe"));
+        assert!(!allowed_fork_bin(r"C:\usr\bin\..\bin\zsh.exe"));
         #[cfg(not(windows))]
         assert!(!allowed_fork_bin("/usr/bin/../bin/zsh"));
     }
@@ -383,7 +383,7 @@ mod tests {
             bin: {
                 #[cfg(windows)]
                 {
-                    r"C:\\bin\\rock.exe"
+                    r"C:\bin\rock.exe"
                 }
                 #[cfg(not(windows))]
                 {
@@ -399,7 +399,7 @@ mod tests {
         })
         .unwrap();
         #[cfg(windows)]
-        assert_eq!(bin, r"C:\\bin\\rock.exe");
+        assert_eq!(bin, r"C:\bin\rock.exe");
         #[cfg(not(windows))]
         assert_eq!(bin, "/usr/local/bin/rock");
         assert_eq!(args, ["--session-id", "sess-rock", "--", "review the diff"]);
