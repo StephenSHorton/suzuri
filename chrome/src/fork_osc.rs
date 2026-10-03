@@ -1,5 +1,5 @@
-//! OSC 7880 — grok-fork asks this host to split the emitting pane and launch
-//! a Grok session in the new leaf.
+//! OSC 7880 — an allowlisted agent asks this host to split the emitting pane
+//! and launch a session in the new leaf. Grok and Rock both use it.
 //!
 //! ```text
 //! ESC]7880;fork=1;resume=…;cwd=…;bin=…;prompt=…;title=…;brand=…BEL
@@ -104,7 +104,7 @@ fn from_hex(b: u8) -> Option<u8> {
     }
 }
 
-/// Absolute path, no `..`, basename grok / grok-fork / xai-grok-pager.
+/// Absolute path, no `..`, basename grok / grok-fork / xai-grok-pager / rock.
 pub fn allowed_fork_bin(path: &str) -> bool {
     let path = path.trim();
     if path.is_empty() {
@@ -122,7 +122,7 @@ pub fn allowed_fork_bin(path: &str) -> bool {
     };
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "grok" | "grok-fork" | "xai-grok-pager"
+        "grok" | "grok-fork" | "xai-grok-pager" | "rock"
     )
 }
 
@@ -146,6 +146,15 @@ pub fn fork_launch_spec(
         args.push("--".into());
         args.push(prompt.to_string());
     }
+    let title = req.title.trim();
+    if stem_is_rock(&req.bin) {
+        // Rock reads ROCK_SESSION_TITLE. It does not use the GROK_* launcher env.
+        let mut env = Vec::new();
+        if !title.is_empty() {
+            env.push(("ROCK_SESSION_TITLE".into(), title.to_string()));
+        }
+        return Ok((req.bin.clone(), args, env));
+    }
     let mut env = vec![
         ("GROK_SKIP_SYNC".into(), "1".into()),
         ("GROK_SKIP_REBUILD".into(), "1".into()),
@@ -156,11 +165,18 @@ pub fn fork_launch_spec(
         env.push(("GROK_FORK".into(), "1".into()));
         env.push(("GROK_MCP_CHANNELS".into(), "1".into()));
     }
-    let title = req.title.trim();
     if !title.is_empty() {
         env.push(("GROK_SESSION_TITLE".into(), title.to_string()));
     }
     Ok((req.bin.clone(), args, env))
+}
+
+fn stem_is_rock(path: &str) -> bool {
+    Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("rock"))
+        .unwrap_or(false)
 }
 
 /// Pick H vs V so the new pane keeps the larger minimum visual dimension.
@@ -313,6 +329,11 @@ mod tests {
         assert!(allowed_fork_bin(r"C:\tmp\xai-grok-pager.exe"));
         #[cfg(not(windows))]
         assert!(allowed_fork_bin("/tmp/xai-grok-pager"));
+        #[cfg(windows)]
+        assert!(allowed_fork_bin(r"C:\bin\rock.exe"));
+        #[cfg(not(windows))]
+        assert!(allowed_fork_bin("/usr/local/bin/rock"));
+        assert!(!allowed_fork_bin("rock"));
         assert!(!allowed_fork_bin("grok-fork"));
         assert!(!allowed_fork_bin("/bin/zsh"));
         #[cfg(windows)]
@@ -353,6 +374,39 @@ mod tests {
         assert_eq!(bin, SAMPLE_BIN);
         assert_eq!(args, ["--session-id", "sess-new", "--", "own this review"]);
         assert!(env.iter().any(|(k, v)| k == "GROK_SKIP_SYNC" && v == "1"));
+    }
+
+    #[test]
+    fn launch_spec_rock_uses_rock_title_env() {
+        let (bin, args, env) = fork_launch_spec(&ForkPaneRequest {
+            resume: "sess-rock".into(),
+            bin: {
+                #[cfg(windows)]
+                {
+                    r"C:\bin\rock.exe"
+                }
+                #[cfg(not(windows))]
+                {
+                    "/usr/local/bin/rock"
+                }
+            }
+            .into(),
+            prompt: "review the diff".into(),
+            title: "review".into(),
+            brand: "rock".into(),
+            new_session: true,
+            ..Default::default()
+        })
+        .unwrap();
+        #[cfg(windows)]
+        assert_eq!(bin, r"C:\bin\rock.exe");
+        #[cfg(not(windows))]
+        assert_eq!(bin, "/usr/local/bin/rock");
+        assert_eq!(args, ["--session-id", "sess-rock", "--", "review the diff"]);
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "ROCK_SESSION_TITLE" && v == "review"));
+        assert!(!env.iter().any(|(k, _)| k.starts_with("GROK_")));
     }
 
     #[test]
