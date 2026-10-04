@@ -41,16 +41,30 @@ func TestGlassBackdropFollowsConfig(t *testing.T) {
 	if glassBackdropType(live) != dwmsbtTabbedWindow {
 		t.Fatalf("max blur kind %d want tabbed", glassBackdropType(live))
 	}
-	s16, c16 := glassAccentForBlur(16, 0)
-	s48, c48 := glassAccentForBlur(48, 0)
+	s16, f16, c16 := glassAccentForBlur(16, 0)
+	s48, f48, c48 := glassAccentForBlur(48, 0)
 	if s16 != accentAcrylic || s48 != accentAcrylic {
 		t.Fatalf("positive blur should enable acrylic accent %d %d", s16, s48)
+	}
+	if f16 != accentFlagUseGradient || f48 != accentFlagUseGradient {
+		t.Fatalf("accent must set Flags=2 or DWM uses the system color: %d %d", f16, f48)
 	}
 	if c16>>24 >= c48>>24 {
 		t.Fatalf("blur 48 must frost more than 16: %#x %#x", c16, c48)
 	}
-	if st, _ := glassAccentForBlur(0, 0); st != accentDisabled {
+	if rgb := c16 & 0x00FFFFFF; rgb != glassThemeTint(0)&0x00FFFFFF {
+		t.Fatalf("accent RGB must be theme void AABBGGRR, got %#x", c16)
+	}
+	if st, _, _ := glassAccentForBlur(0, 0); st != accentDisabled {
 		t.Fatal("blur 0 is mica — no accent")
+	}
+	st11, fl11, col11 := glassCompositionAccent(win11BackdropBuild, 16, 0)
+	if st11 != accentDisabled || fl11 != 0 || col11 != 0 {
+		t.Fatalf("Win11 must not stack acrylic accent on Mica/Tabbed: %d %d %#x", st11, fl11, col11)
+	}
+	st10, fl10, col10 := glassCompositionAccent(19041, 16, 0)
+	if st10 != accentAcrylic || fl10 != accentFlagUseGradient || col10>>24 == 0 {
+		t.Fatalf("Win10 fallback %#x flags %d color %#x", st10, fl10, col10)
 	}
 
 	opaque := live

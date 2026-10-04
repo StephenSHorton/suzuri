@@ -25,9 +25,11 @@ import (
 // show that material. Chroma-key cells already skip their own fill; the
 // glass underlay is stock black so those cells remain the key.
 //
-// DWM has no point radius. Blur 0 selects Mica (no live blur). Any positive
-// blur selects Desktop Acrylic. Veil is a black tint on the legacy acrylic
-// accent policy, because the system-backdrop attribute has no tint. Veil 100
+// DWM has no point radius. Blur 0 selects Mica (no live blur). 1–39 is
+// Desktop Acrylic. 40–80 is Tabbed Mica. Win11 22H2+ uses those materials
+// only. The Win10 fallback is ACCENT_ENABLE_ACRYLICBLURBEHIND with
+// AccentFlags=2 and a theme-void AABBGGRR tint — Flags=0 paints the
+// system accent over the holes (bright orange on many machines). Veil 100
 // is an opaque near-black fill instead of the color key. Rim stays in the
 // Mac software painter; GDI text has no alpha glyph mask.
 
@@ -49,6 +51,11 @@ const (
 	wcaAccentPolicy = 19
 	accentDisabled  = 0
 	accentAcrylic   = 4
+
+	// AccentFlags bit 1: honor GradientColor. Flags=0 makes DWM ignore the
+	// packed tint and wash ACCENT_ENABLE_ACRYLICBLURBEHIND with the Windows
+	// system accent (often a saturated orange / blue).
+	accentFlagUseGradient = 2
 )
 
 type dwmMargins struct {
@@ -86,9 +93,17 @@ func winBuildNumber() uint32 {
 	return info.BuildNumber
 }
 
+// glassThemeTint is a theme-void wash in AABBGGRR. Dark mica already tints
+// itself; this is the Win10 acrylic fallback so Flags=2 never falls back
+// to the system accent.
+func glassThemeTint(alpha byte) uint32 {
+	return glassAccentColor(alpha, chrome.VoidR, chrome.VoidG, chrome.VoidB)
+}
+
 // glassBackdropType is the DWM material for cfg. Solid is none. DWM has no
-// blur radius: 0 is Mica, 1–39 Acrylic, 40–80 Tabbed. Accent alpha still
-// changes on every slider step so blur is never a silent no-op.
+// blur radius: 0 is Mica, 1–39 Acrylic, 40–80 Tabbed. Win11 22H2+ uses
+// that material only — stacking an acrylic accent on top of it paints
+// the system accent over the holes.
 func glassBackdropType(c config.Config) int32 {
 	if c.Backdrop != config.BackdropGlass {
 		return dwmsbtNone
@@ -102,11 +117,12 @@ func glassBackdropType(c config.Config) int32 {
 	return dwmsbtTabbedWindow
 }
 
-// glassAccentForBlur is the Win10/11 composition tint. Higher blur → more
-// frost (larger alpha). Veil adds a black wash on top of that.
-func glassAccentForBlur(blur, veil int) (state, color uint32) {
+// glassAccentForBlur is the Win10 composition tint. Higher blur → more
+// frost. Veil adds theme-void wash. Flags is always accentFlagUseGradient
+// when the accent is on, so GradientColor is not replaced by the accent.
+func glassAccentForBlur(blur, veil int) (state, flags, color uint32) {
 	if blur <= 0 && veil <= 0 {
-		return accentDisabled, 0
+		return accentDisabled, 0, 0
 	}
 	a := 28 + blur*2
 	if veil > 0 {
@@ -116,9 +132,31 @@ func glassAccentForBlur(blur, veil int) (state, color uint32) {
 		a = 220
 	}
 	if blur <= 0 {
-		return accentDisabled, glassVeilABGR(veil)
+		if veil < 0 {
+			veil = 0
+		}
+		if veil > 100 {
+			veil = 100
+		}
+		return accentDisabled, 0, glassThemeTint(byte((veil*255 + 50) / 100))
 	}
-	return accentAcrylic, uint32(a) << 24
+	return accentAcrylic, accentFlagUseGradient, glassThemeTint(byte(a))
+}
+
+// glassCompositionAccent is what SetWindowCompositionAttribute should
+// receive. Win11 22H2+ must disable the accent so Mica / Desktop Acrylic
+// / Tabbed stay visible through the color-key holes.
+func glassCompositionAccent(build uint32, blur, veil int) (state, flags, color uint32) {
+	if build >= win11BackdropBuild {
+		return accentDisabled, 0, 0
+	}
+	state, flags, color = glassAccentForBlur(blur, veil)
+	if state == accentDisabled {
+		// No SYSTEMBACKDROP on Win10. Keep a faint theme-neutral acrylic
+		// so glass-on at blur 0 is not a no-op.
+		return accentAcrylic, accentFlagUseGradient, glassThemeTint(8)
+	}
+	return state, flags, color
 }
 
 // glassUsesColorKey is true when empty cells must stay pure black so DWM
@@ -127,7 +165,7 @@ func glassUsesColorKey(c config.Config) bool {
 	return c.Backdrop == config.BackdropGlass && c.GlassVeil < 100
 }
 
-// glassVeilABGR is a black tint, alpha in the high byte (0–255 from 0–100).
+// glassVeilABGR is a black AABBGGRR tint (0–100 → alpha 0–255).
 func glassVeilABGR(veil int) uint32 {
 	if veil < 0 {
 		veil = 0
@@ -135,8 +173,7 @@ func glassVeilABGR(veil int) uint32 {
 	if veil > 100 {
 		veil = 100
 	}
-	a := uint32((veil*255 + 50) / 100)
-	return a << 24
+	return glassAccentColor(byte((veil*255+50)/100), 0, 0, 0)
 }
 
 func glassMaterialName(kind int32) string {
@@ -179,11 +216,11 @@ func extendFrame(hwnd win.HWND, m dwmMargins) {
 	_, _, _ = dwmExtend.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&m)))
 }
 
-func setAccent(hwnd win.HWND, state, gradient uint32) {
+func setAccent(hwnd win.HWND, state, flags, gradient uint32) {
 	if err := setWinComp.Find(); err != nil {
 		return
 	}
-	policy := accentPolicy{State: state, Gradient: gradient}
+	policy := accentPolicy{State: state, Flags: flags, Gradient: gradient}
 	data := compositionAttribData{
 		Attrib: wcaAccentPolicy,
 		data:   unsafe.Pointer(&policy),
@@ -233,17 +270,10 @@ func (u *winUI) applyGlassBackdrop() {
 	build := winBuildNumber()
 	switch {
 	case !on:
-		setAccent(u.hwnd, accentDisabled, 0)
+		setAccent(u.hwnd, accentDisabled, 0, 0)
 	default:
-		// Always push an accent that follows the blur slider. System
-		// backdrop (Mica/Acrylic/Tabbed) is the Win11 22H2+ material;
-		// acrylic-behind is the live frost and the Win10 fallback.
-		state, color := glassAccentForBlur(blur, veil)
-		if state == accentDisabled && build < win11BackdropBuild {
-			setAccent(u.hwnd, accentAcrylic, 1<<24)
-		} else {
-			setAccent(u.hwnd, state, color)
-		}
+		state, flags, color := glassCompositionAccent(build, blur, veil)
+		setAccent(u.hwnd, state, flags, color)
 	}
 
 	glassStateStore(u.hwnd, on, kind, blur, veil)

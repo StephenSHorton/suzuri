@@ -77,9 +77,10 @@ const (
 
 // Glass knobs apply when Backdrop is glass. Blur is the macOS desktop blur
 // radius in points. Windows has no radius: 0 is Mica, 1–39 Acrylic, 40–80
-// Tabbed, and the slider also drives the acrylic frost alpha so every step
-// is visible. Veil is a black wash over the holes, 0–100. Rim is the dark
-// glyph outline on those holes, 0–100.
+// Tabbed (Win11 22H2+ SYSTEMBACKDROP only — do not stack an acrylic accent
+// on top; Flags=0 accent uses the system color and paints the holes orange).
+// Veil is a black wash over the holes, 0–100. Rim is the dark glyph outline
+// on those holes, 0–100.
 const (
 	GlassBlurDefault = 48
 	GlassBlurMax     = 80
@@ -860,7 +861,7 @@ func BackdropLabel(id string) string {
 func BackdropDesc(id string) string {
 	switch strings.ToLower(strings.TrimSpace(id)) {
 	case BackdropGlass:
-		return "Empty and near-black cells show the desktop. Blur, Veil, and Rim on this page tune how frosted, dark, and outlined that looks. The tab strip, text, and real background colors stay solid. Rain glyphs stay on top. Fullscreen turns this off on Mac. Windows shows Mica (blur 0) or Desktop Acrylic through those cells."
+		return "Empty and near-black cells show the desktop. Blur, Veil, and Rim on this page tune how frosted, dark, and outlined that looks. The tab strip, text, and real background colors stay solid. Rain glyphs stay on top. Fullscreen turns this off on Mac. Windows shows Mica (blur 0), Desktop Acrylic (mid), or Tabbed Mica (high) through those cells — a theme-neutral frost, not the system accent."
 	default:
 		return "Opaque shell. Empty cells show the theme void and whatever ambient is on."
 	}
