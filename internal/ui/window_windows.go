@@ -199,6 +199,8 @@ type winUI struct {
 	titleBrandFont    win.HFONT
 	titleCupFont      win.HFONT
 	captionHot        int // 0 min, 1 zoom, 2 close; -1 none
+	captionDown       int
+	captionPress      bool
 	captionLeaveTrk   bool
 	captionNCLeaveTrk bool
 	width             int32
@@ -3699,6 +3701,22 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.captionNCLeaveTrk = false
 		u.clearCaptionHover(hwnd)
 		return 0
+
+	case win.WM_NCLBUTTONDOWN:
+		if u.chrome.Frame == chrome.FrameWindows {
+			u.setCaptionDown(hwnd, u.hitCaptionButtonScreen(lParam))
+		}
+
+	case win.WM_NCLBUTTONUP:
+		if u.chrome.Frame == chrome.FrameWindows {
+			u.setCaptionDown(hwnd, -1)
+		}
+
+	case 0x00AE, 0x00AF: // WM_NCUAHDRAWCAPTION / WM_NCUAHDRAWFRAME
+		// Stop the theme from stamping a second min/max/close over ours.
+		if u.chrome.Frame == chrome.FrameWindows {
+			return 0
+		}
 
 	case win.WM_NCMOUSEMOVE:
 		// Update custom-button hover, then let DefWindowProc see HTMAXBUTTON

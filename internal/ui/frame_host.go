@@ -49,22 +49,23 @@ type frameDrag struct {
 
 // Win32 WM_NCHITTEST codes. Local so hit tests do not need an HWND.
 const (
-	hitNowhere     = 0
-	hitClient      = 1
-	hitCaption     = 2
-	hitLeft        = 10
-	hitRight       = 11
-	hitTop         = 12
-	hitTopLeft     = 13
-	hitTopRight    = 14
-	hitBottom      = 15
-	hitBottomLeft  = 16
-	hitBottomRight = 17
-	hitMinButton   = 8
-	hitMaxButton   = 9
-	hitClose       = 20
-	frameResizePx  = 6
-	captionButtonW = 46
+	hitNowhere       = 0
+	hitClient        = 1
+	hitCaption       = 2
+	hitLeft          = 10
+	hitRight         = 11
+	hitTop           = 12
+	hitTopLeft       = 13
+	hitTopRight      = 14
+	hitBottom        = 15
+	hitBottomLeft    = 16
+	hitBottomRight   = 17
+	hitMinButton     = 8
+	hitMaxButton     = 9
+	hitClose         = 20
+	frameResizePx    = 6
+	captionButtonDIP = 46
+	captionButtonW   = captionButtonDIP // 96-DPI width
 )
 
 // titleStripHeightPx is the Mac rule: one text row, 50% taller than a shell cell.
@@ -89,27 +90,7 @@ func (r pixRect) empty() bool { return r.R <= r.L || r.B <= r.T }
 // winCaptionButtons is minimize, zoom/restore, close — flush to the right edge,
 // each captionButtonW wide and the full title-strip tall.
 func winCaptionButtons(clientW, stripH int32) [3]pixRect {
-	var out [3]pixRect
-	if clientW < 1 || stripH < 1 {
-		return out
-	}
-	bw := int32(captionButtonW)
-	if bw*3 > clientW {
-		bw = clientW / 3
-		if bw < 1 {
-			bw = 1
-		}
-	}
-	right := clientW
-	for i := 2; i >= 0; i-- {
-		left := right - bw
-		if left < 0 {
-			left = 0
-		}
-		out[i] = pixRect{L: left, T: 0, R: right, B: stripH}
-		right = left
-	}
-	return out
+	return winCaptionButtonsDPI(clientW, stripH, 96)
 }
 
 // titleHitQuery is a client-space hit. Buttons win over the resize band.

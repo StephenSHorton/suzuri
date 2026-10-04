@@ -74,7 +74,7 @@ func (u *winUI) frameHitTest(hwnd win.HWND, lParam uintptr) uintptr {
 		X: pt.X, Y: pt.Y,
 		ClientW: w, ClientH: h,
 		StripH:   strip,
-		Buttons:  winCaptionButtons(w, strip),
+		Buttons:  u.captionButtons(w, strip),
 		Controls: u.chromeControlRects(strip),
 	}))
 }
@@ -86,7 +86,7 @@ func (u *winUI) hitCaptionButton(px, py int32) int {
 	}
 	w := u.clientWidth()
 	strip := u.chromePixelHeight()
-	btns := winCaptionButtons(w, strip)
+	btns := u.captionButtons(w, strip)
 	for i, b := range btns {
 		if b.contains(px, py) {
 			return i

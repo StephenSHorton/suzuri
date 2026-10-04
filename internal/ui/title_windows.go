@@ -7,9 +7,19 @@ import (
 	"unsafe"
 
 	"github.com/lxn/win"
+	"golang.org/x/sys/windows"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
+
+var procSetPixel = windows.NewLazySystemDLL("gdi32.dll").NewProc("SetPixel")
+
+func setCaptionPixel(hdc win.HDC, x, y int32, color win.COLORREF) {
+	if hdc == 0 {
+		return
+	}
+	_, _, _ = procSetPixel.Call(uintptr(hdc), uintptr(x), uintptr(y), uintptr(color))
+}
 
 func (u *winUI) releaseTitleFonts() {
 	if u == nil {
@@ -164,7 +174,7 @@ func (u *winUI) paintWinCaption(hdc win.HDC, rect win.RECT) {
 	if strip < 1 {
 		return
 	}
-	btns := winCaptionButtons(clientW, strip)
+	btns := u.captionButtons(clientW, strip)
 	zoomed := u.hwnd != 0 && win.IsZoomed(u.hwnd)
 	for i, b := range btns {
 		if b.empty() {
@@ -172,7 +182,9 @@ func (u *winUI) paintWinCaption(hdc win.HDC, rect win.RECT) {
 		}
 		br, bg, bb := chrome.BarR, chrome.BarG, chrome.BarB
 		gr, gg, gb := chrome.TextR, chrome.TextG, chrome.TextB
-		if i == u.captionHot {
+		if u.captionPress && i == u.captionDown {
+			br, bg, bb = mixRGB(br, bg, bb, 0, 0, 0, 1, 4)
+		} else if i == u.captionHot {
 			if i == 2 {
 				br, bg, bb = mixRGB(br, bg, bb, 196, 48, 43, 3, 4)
 				gr, gg, gb = 255, 255, 255
@@ -209,6 +221,20 @@ func (u *winUI) trackCaptionHover(hwnd win.HWND, px, py int32) {
 	}
 }
 
+func (u *winUI) hitCaptionButtonScreen(lParam uintptr) int {
+	if u == nil || u.hwnd == 0 || u.chrome.Frame != chrome.FrameWindows {
+		return -1
+	}
+	pt := win.POINT{
+		X: int32(int16(lParam & 0xffff)),
+		Y: int32(int16((lParam >> 16) & 0xffff)),
+	}
+	if !win.ScreenToClient(u.hwnd, &pt) {
+		return -1
+	}
+	return u.hitCaptionButton(pt.X, pt.Y)
+}
+
 func (u *winUI) trackCaptionHoverScreen(hwnd win.HWND, lParam uintptr) {
 	if u == nil || hwnd == 0 || u.chrome.Frame != chrome.FrameWindows {
 		return
@@ -243,6 +269,7 @@ func (u *winUI) clearCaptionHover(hwnd win.HWND) {
 	}
 	hot, trk, _, dirty := captionApplyLeave(u.captionHot, u.captionLeaveTrk)
 	u.captionHot = hot
+	u.captionPress = false
 	u.captionLeaveTrk = trk
 	if dirty && hwnd != 0 {
 		win.InvalidateRect(hwnd, nil, false)
@@ -309,76 +336,46 @@ func paintOpaqueRects(hdc win.HDC, rects []win.RECT, cr, cg, cb byte) {
 	win.DeleteObject(win.HGDIOBJ(brush))
 }
 
-// paintCaptionGlyph draws minimize / maximize-or-restore / close, centered.
-// kind is the Windows visual order: 0 min, 1 zoom, 2 close.
+// paintCaptionGlyph draws one minimize / maximize-or-restore / close icon.
+// Same stroke and AA fringe on all three — no offset shadow copy.
 func paintCaptionGlyph(hdc win.HDC, kind int, b pixRect, zoomed bool, cr, cg, cb, br, bg, bb byte) {
-	h := b.B - b.T
-	bw := b.R - b.L
-	s := h * 2 / 5
-	if s < 10 {
-		s = 10
+	if hdc == 0 {
+		return
 	}
-	if s > h-6 {
-		s = h - 6
-	}
-	if bw > 8 && s > bw-8 {
-		s = bw - 8
-	}
-	if s < 6 {
-		s = 6
-	}
+	s := captionIconSize(b.R-b.L, b.B-b.T)
 	cx := (b.L + b.R) / 2
 	cy := (b.T + b.B) / 2
-	stroke := s / 8
-	if stroke < 1 {
-		stroke = 1
-	}
-	switch kind {
-	case 0:
-		paintOpaqueRects(hdc, []win.RECT{{
-			Left: cx - s/2, Top: cy - stroke/2, Right: cx + s/2, Bottom: cy - stroke/2 + stroke,
-		}}, cr, cg, cb)
-	case 1:
-		if zoomed {
-			back := win.RECT{Left: cx - s/5, Top: cy - s/2, Right: cx + s/2, Bottom: cy + s/5}
-			front := win.RECT{Left: cx - s/2, Top: cy - s/5, Right: cx + s/5, Bottom: cy + s/2}
-			paintOpaqueRects(hdc, outlineRects(back, stroke), cr, cg, cb)
-			paintOpaqueRGB(hdc, front, br, bg, bb)
-			paintOpaqueRects(hdc, outlineRects(front, stroke), cr, cg, cb)
-			return
+	for _, p := range captionGlyphInk(kind, zoomed, cx, cy, s) {
+		if p.a == 0 {
+			continue
 		}
-		sq := win.RECT{Left: cx - s/2, Top: cy - s/2, Right: cx + s/2, Bottom: cy + s/2}
-		paintOpaqueRects(hdc, outlineRects(sq, stroke), cr, cg, cb)
-	default:
-		paintOpaqueRects(hdc, crossRects(cx-s/2, cy-s/2, s, stroke), cr, cg, cb)
+		setCaptionPixel(hdc, p.x, p.y, win.RGB(
+			mixCover(br, cr, p.a),
+			mixCover(bg, cg, p.a),
+			mixCover(bb, cb, p.a),
+		))
 	}
 }
 
-func outlineRects(r win.RECT, t int32) []win.RECT {
-	if t < 1 {
-		t = 1
+func (u *winUI) captionButtons(clientW, stripH int32) [3]pixRect {
+	dpi := int32(96)
+	if u != nil && u.hwnd != 0 {
+		dpi = hwndDPI(u.hwnd)
 	}
-	if r.Right-r.Left <= t*2 || r.Bottom-r.Top <= t*2 {
-		return []win.RECT{r}
-	}
-	return []win.RECT{
-		{Left: r.Left, Top: r.Top, Right: r.Right, Bottom: r.Top + t},
-		{Left: r.Left, Top: r.Bottom - t, Right: r.Right, Bottom: r.Bottom},
-		{Left: r.Left, Top: r.Top, Right: r.Left + t, Bottom: r.Bottom},
-		{Left: r.Right - t, Top: r.Top, Right: r.Right, Bottom: r.Bottom},
-	}
+	return winCaptionButtonsDPI(clientW, stripH, dpi)
 }
 
-func crossRects(x, y, s, t int32) []win.RECT {
-	if t < 2 {
-		t = 2
+func (u *winUI) setCaptionDown(hwnd win.HWND, down int) {
+	if u == nil {
+		return
 	}
-	var out []win.RECT
-	for i := int32(0); i < s; i += t / 2 {
-		out = append(out,
-			win.RECT{Left: x + i, Top: y + i, Right: x + i + t, Bottom: y + i + t},
-			win.RECT{Left: x + s - t - i, Top: y + i, Right: x + s - i, Bottom: y + i + t},
-		)
+	press := down >= 0
+	if press == u.captionPress && down == u.captionDown {
+		return
 	}
-	return out
+	u.captionDown = down
+	u.captionPress = press
+	if hwnd != 0 {
+		win.InvalidateRect(hwnd, nil, false)
+	}
 }
