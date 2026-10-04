@@ -64,3 +64,16 @@ func shouldDisableAmbient(elapsed time.Duration, slowCount int) bool {
 func skipAmbientFrame(sinceLast time.Duration) bool {
 	return sinceLast > 0 && sinceLast < minAmbientPaintGap
 }
+
+// ambientFramePeriod is the rain/settings underlay tick. Cap at 60 fps so a
+// 239 Hz desktop cannot flood GDI; floor at 30 fps so a bogus 0 Hz DC
+// still animates.
+func ambientFramePeriod(hz int32) time.Duration {
+	if hz < 30 {
+		hz = 60
+	}
+	if hz > 60 {
+		hz = 60
+	}
+	return time.Second / time.Duration(hz)
+}

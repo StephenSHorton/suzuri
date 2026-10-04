@@ -36,8 +36,13 @@ const (
 	dwmwaSystemBackdropType   = 38
 
 	dwmsbtNone            int32 = 1
-	dwmsbtMainWindow      int32 = 2 // Mica
-	dwmsbtTransientWindow int32 = 3 // Desktop Acrylic
+	dwmsbtMainWindow      int32 = 2 // Mica (static wallpaper tint)
+	dwmsbtTransientWindow int32 = 3 // Desktop Acrylic (live blur)
+	dwmsbtTabbedWindow    int32 = 4 // Tabbed Mica (heavier frost)
+
+	// Blur slider → material. DWM has no radius; these are the visible steps.
+	glassBlurAcrylicAfter = 0
+	glassBlurTabbedAfter  = 39
 
 	win11BackdropBuild = 22621
 
@@ -81,16 +86,39 @@ func winBuildNumber() uint32 {
 	return info.BuildNumber
 }
 
-// glassBackdropType is the DWM material for cfg. Solid is none. Glass with
-// blur 0 is Mica; any positive blur is Desktop Acrylic.
+// glassBackdropType is the DWM material for cfg. Solid is none. DWM has no
+// blur radius: 0 is Mica, 1–39 Acrylic, 40–80 Tabbed. Accent alpha still
+// changes on every slider step so blur is never a silent no-op.
 func glassBackdropType(c config.Config) int32 {
 	if c.Backdrop != config.BackdropGlass {
 		return dwmsbtNone
 	}
-	if c.GlassBlur <= 0 {
+	if c.GlassBlur <= glassBlurAcrylicAfter {
 		return dwmsbtMainWindow
 	}
-	return dwmsbtTransientWindow
+	if c.GlassBlur <= glassBlurTabbedAfter {
+		return dwmsbtTransientWindow
+	}
+	return dwmsbtTabbedWindow
+}
+
+// glassAccentForBlur is the Win10/11 composition tint. Higher blur → more
+// frost (larger alpha). Veil adds a black wash on top of that.
+func glassAccentForBlur(blur, veil int) (state, color uint32) {
+	if blur <= 0 && veil <= 0 {
+		return accentDisabled, 0
+	}
+	a := 28 + blur*2
+	if veil > 0 {
+		a += veil * 255 / 200
+	}
+	if a > 220 {
+		a = 220
+	}
+	if blur <= 0 {
+		return accentDisabled, glassVeilABGR(veil)
+	}
+	return accentAcrylic, uint32(a) << 24
 }
 
 // glassUsesColorKey is true when empty cells must stay pure black so DWM
@@ -109,6 +137,19 @@ func glassVeilABGR(veil int) uint32 {
 	}
 	a := uint32((veil*255 + 50) / 100)
 	return a << 24
+}
+
+func glassMaterialName(kind int32) string {
+	switch kind {
+	case dwmsbtMainWindow:
+		return "mica"
+	case dwmsbtTransientWindow:
+		return "acrylic"
+	case dwmsbtTabbedWindow:
+		return "tabbed"
+	default:
+		return "none"
+	}
 }
 
 func (u *winUI) shellGlass() bool {
@@ -193,19 +234,21 @@ func (u *winUI) applyGlassBackdrop() {
 	switch {
 	case !on:
 		setAccent(u.hwnd, accentDisabled, 0)
-	case veil > 0 && veil < 100:
-		// Tint the blur. On 22621+ this can override the system material
-		// with legacy acrylic; that is what carries the veil.
-		setAccent(u.hwnd, accentAcrylic, glassVeilABGR(veil))
-	case build < win11BackdropBuild:
-		// No Mica/Acrylic attribute. Legacy acrylic, nearly clear tint.
-		setAccent(u.hwnd, accentAcrylic, 1<<24)
 	default:
-		setAccent(u.hwnd, accentDisabled, 0)
+		// Always push an accent that follows the blur slider. System
+		// backdrop (Mica/Acrylic/Tabbed) is the Win11 22H2+ material;
+		// acrylic-behind is the live frost and the Win10 fallback.
+		state, color := glassAccentForBlur(blur, veil)
+		if state == accentDisabled && build < win11BackdropBuild {
+			setAccent(u.hwnd, accentAcrylic, 1<<24)
+		} else {
+			setAccent(u.hwnd, state, color)
+		}
 	}
 
 	glassStateStore(u.hwnd, on, kind, blur, veil)
-	log.Info("glass backdrop", "on", on, "kind", kind, "blur", blur, "veil", veil, "build", build)
+	log.Info("glass backdrop", "on", on, "kind", kind, "blur", blur, "veil", veil,
+		"material", glassMaterialName(kind), "build", build)
 	u.inputOnlyDirty = false
 	u.overlaySceneReady = false
 	u.chromeDirty = true

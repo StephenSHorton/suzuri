@@ -52,6 +52,9 @@ const (
 	wmSuzuriUpdateOffer = win.WM_APP + 9
 	// wmSuzuriTransfer drains transfer progress/status from engine goroutines.
 	wmSuzuriTransfer = win.WM_APP + 10
+	// wmSuzuriFrame drives shell rain/settings underlay at display pace
+	// (capped), independent of the 40ms caret blink.
+	wmSuzuriFrame = win.WM_APP + 11
 )
 
 // Run opens a native Win32 window with one shell tab (more via Ctrl+Shift+T).
@@ -238,6 +241,7 @@ type winUI struct {
 	memH      int32
 
 	blinkPosted       atomic.Bool
+	framePosted       atomic.Bool
 	lastFullPaint     time.Time
 	slowPaintN        int
 	ambientSuppressed bool
@@ -366,7 +370,7 @@ func (u *winUI) requestInputPaint() {
 	}
 	// Overlay and alt-screen TUIs (Grok) must keep compositing rain — Darwin
 	// tryPaintInputOnly returns false in both cases.
-	if u.chrome.OverlayOpen() || u.activeAltScreen() {
+	if u.chrome.OverlayOpen() || u.activeAltScreen() || u.wantsAmbientFrames() {
 		u.inputOnlyDirty = false
 		u.requestPaint()
 		return
@@ -1514,6 +1518,7 @@ func (u *winUI) loop() error {
 		win.InvalidateRect(hwnd, nil, false)
 	}
 	go u.blinkLoop()
+	go u.frameLoop()
 
 	var msg win.MSG
 	for {
@@ -1584,6 +1589,8 @@ func wmPhaseName(msg uint32) string {
 		return "WM_PAINT"
 	case wmSuzuriBlink:
 		return "wmSuzuriBlink"
+	case wmSuzuriFrame:
+		return "wmSuzuriFrame"
 	case wmSuzuriBytes:
 		return "wmSuzuriBytes"
 	case wmSuzuriLayoutSettle:
@@ -1682,6 +1689,46 @@ func (u *winUI) blinkLoop() {
 		}
 		if win.PostMessage(u.hwnd, wmSuzuriBlink, 0, 0) == 0 {
 			u.blinkPosted.Store(false)
+		}
+	}
+}
+
+func (u *winUI) wantsAmbientFrames() bool {
+	if u == nil {
+		return false
+	}
+	return u.shellAmbientOn() || u.matrixIntroActive() || u.chrome.SettingsOpen
+}
+
+func (u *winUI) displayRefreshHz() int32 {
+	if u == nil || u.hwnd == 0 {
+		return 60
+	}
+	_, _, hz := deviceCaps(u.hwnd)
+	return hz
+}
+
+func (u *winUI) frameLoop() {
+	period := ambientFramePeriod(u.displayRefreshHz())
+	t := time.NewTicker(period)
+	defer t.Stop()
+	log.Info("ambient frame loop", "period", period.Round(time.Millisecond).String(),
+		"hz", u.displayRefreshHz())
+	for range t.C {
+		if !u.alive.Load() || u.hwnd == 0 {
+			return
+		}
+		if !u.cfg.AnimateUnfocused && !u.hostFocused {
+			continue
+		}
+		if !u.wantsAmbientFrames() {
+			continue
+		}
+		if !u.framePosted.CompareAndSwap(false, true) {
+			continue
+		}
+		if win.PostMessage(u.hwnd, wmSuzuriFrame, 0, 0) == 0 {
+			u.framePosted.Store(false)
 		}
 	}
 }
@@ -2239,6 +2286,14 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.drainAndParse(int(wParam))
 		return 0
 
+	case wmSuzuriFrame:
+		u.framePosted.Store(false)
+		if u.alive.Load() && !u.inSizeMove && u.wantsAmbientFrames() {
+			u.markShellDirty()
+			u.requestPaint()
+		}
+		return 0
+
 	case wmSuzuriBlink:
 		u.blinkPosted.Store(false)
 		// Skip blink repaints during frame drag/resize — they fight WM_PAINT
@@ -2327,25 +2382,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			} else if needScrollPaint {
 				u.markShellDirty()
 				u.requestPaint()
-			} else if u.inputOnlyDirty && !u.activeAltScreen() {
-				// Sticky bar-only after Warp-bar typing. Darwin freezes rain
-				// here; we unstick every few ticks so droplets keep moving
-				// without a full 25fps grid blit on every keystroke.
-				if u.shellAmbientOn() && u.spinTick%uint64(tabSpinEveryNTicks*3) == 0 {
-					u.markShellDirty()
-				}
+			} else if u.inputOnlyDirty && !u.activeAltScreen() && !u.wantsAmbientFrames() {
+				// Sticky bar-only after Warp-bar typing. Rain/settings use
+				// wmSuzuriFrame so this path never starves the underlay.
 				u.requestPaint()
 			} else if u.chrome.OverlayOpen() {
 				// Palette/help float over a live shell — need full composite.
 				u.requestPaint()
 			} else if u.needsShellAnimPaint() {
-				// Rain follows the blink clock (~25 fps). Skip only if we
-				// already presented within the frame budget.
-				if !u.lastFullPaint.IsZero() && skipAmbientFrame(time.Since(u.lastFullPaint)) {
-					u.requestInputPaint()
-				} else {
-					u.requestPaint()
+				// Caret / alt-screen cursor. Rain is owned by frameLoop.
+				if u.wantsAmbientFrames() {
+					u.markShellDirty()
 				}
+				u.requestPaint()
 			} else {
 				// Idle shell, no ambient: only pulse the Warp caret.
 				u.requestInputPaint()
@@ -3897,7 +3946,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 		// Shell rain freezes while we stay here — acceptable, same tradeoff as
 		// notes overlay scoping so typing does not re-blit the whole grid.
 		if u.inputOnlyDirty && !overlay && !dimModal &&
-			!u.matrixIntroActive() && !u.activeAltScreen() &&
+			!u.matrixIntroActive() && !u.shellAmbientOn() && !u.activeAltScreen() &&
 			u.memDC != 0 && dest == u.memDC && u.font != 0 &&
 			u.memW == w && u.memH == h {
 			oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))

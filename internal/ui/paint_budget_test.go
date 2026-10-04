@@ -37,6 +37,21 @@ func TestSkipAmbientFrame(t *testing.T) {
 	}
 }
 
+func TestAmbientFramePeriodCapsRefresh(t *testing.T) {
+	if ambientFramePeriod(0) != time.Second/60 {
+		t.Fatal("0 Hz must fall back to 60 fps")
+	}
+	if ambientFramePeriod(30) != time.Second/30 {
+		t.Fatal("30 Hz should pace to the display")
+	}
+	if ambientFramePeriod(60) != time.Second/60 {
+		t.Fatal("60 Hz")
+	}
+	if ambientFramePeriod(239) != time.Second/60 {
+		t.Fatal("239 Hz must not chase the panel")
+	}
+}
+
 func TestEnvFlagOn(t *testing.T) {
 	t.Setenv("SUZURI_SAFE_MODE", "1")
 	if !safeModeRequested() {

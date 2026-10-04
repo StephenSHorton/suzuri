@@ -29,13 +29,28 @@ func TestGlassBackdropFollowsConfig(t *testing.T) {
 	}
 
 	live := sharp
-	live.GlassBlur = config.GlassBlurDefault
+	live.GlassBlur = 16
 	if glassBackdropType(live) != dwmsbtTransientWindow {
-		t.Fatalf("default blur kind %d", glassBackdropType(live))
+		t.Fatalf("blur 16 kind %d want acrylic", glassBackdropType(live))
+	}
+	live.GlassBlur = config.GlassBlurDefault
+	if glassBackdropType(live) != dwmsbtTabbedWindow {
+		t.Fatalf("default blur kind %d want tabbed", glassBackdropType(live))
 	}
 	live.GlassBlur = config.GlassBlurMax
-	if glassBackdropType(live) != dwmsbtTransientWindow {
-		t.Fatalf("max blur kind %d", glassBackdropType(live))
+	if glassBackdropType(live) != dwmsbtTabbedWindow {
+		t.Fatalf("max blur kind %d want tabbed", glassBackdropType(live))
+	}
+	s16, c16 := glassAccentForBlur(16, 0)
+	s48, c48 := glassAccentForBlur(48, 0)
+	if s16 != accentAcrylic || s48 != accentAcrylic {
+		t.Fatalf("positive blur should enable acrylic accent %d %d", s16, s48)
+	}
+	if c16>>24 >= c48>>24 {
+		t.Fatalf("blur 48 must frost more than 16: %#x %#x", c16, c48)
+	}
+	if st, _ := glassAccentForBlur(0, 0); st != accentDisabled {
+		t.Fatal("blur 0 is mica — no accent")
 	}
 
 	opaque := live

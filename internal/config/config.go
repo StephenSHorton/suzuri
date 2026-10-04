@@ -76,9 +76,10 @@ const (
 )
 
 // Glass knobs apply when Backdrop is glass. Blur is the macOS desktop blur
-// radius in points. Windows maps 0 to Mica and any positive value to Desktop
-// Acrylic (DWM has no point radius). Veil is a black wash over the holes,
-// 0–100. Rim is the dark glyph outline on those holes, 0–100.
+// radius in points. Windows has no radius: 0 is Mica, 1–39 Acrylic, 40–80
+// Tabbed, and the slider also drives the acrylic frost alpha so every step
+// is visible. Veil is a black wash over the holes, 0–100. Rim is the dark
+// glyph outline on those holes, 0–100.
 const (
 	GlassBlurDefault = 48
 	GlassBlurMax     = 80
