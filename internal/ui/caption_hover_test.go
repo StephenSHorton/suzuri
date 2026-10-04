@@ -19,6 +19,19 @@ func TestCaptionLeaveDoesNotRearmTrackMouse(t *testing.T) {
 	}
 }
 
+func TestCaptionNCLeaveDoesNotRearm(t *testing.T) {
+	if captionShouldArmNCLeave(true) {
+		t.Fatal("already tracking must not arm TME_NONCLIENT")
+	}
+	if !captionShouldArmNCLeave(false) {
+		t.Fatal("first NC move should arm")
+	}
+	_, _, arm, _ := captionApplyLeave(1, true)
+	if arm {
+		t.Fatal("WM_NCMOUSELEAVE must use the same no-arm leave transition")
+	}
+}
+
 func TestCaptionApplyLeaveNeverArms(t *testing.T) {
 	hot, trk, arm, dirty := captionApplyLeave(2, true)
 	if hot != -1 || trk || arm {

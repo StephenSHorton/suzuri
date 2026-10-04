@@ -209,6 +209,34 @@ func (u *winUI) trackCaptionHover(hwnd win.HWND, px, py int32) {
 	}
 }
 
+func (u *winUI) trackCaptionHoverScreen(hwnd win.HWND, lParam uintptr) {
+	if u == nil || hwnd == 0 || u.chrome.Frame != chrome.FrameWindows {
+		return
+	}
+	pt := win.POINT{
+		X: int32(int16(lParam & 0xffff)),
+		Y: int32(int16((lParam >> 16) & 0xffff)),
+	}
+	if !win.ScreenToClient(hwnd, &pt) {
+		return
+	}
+	hot := u.hitCaptionButton(pt.X, pt.Y)
+	if hot != u.captionHot {
+		u.captionHot = hot
+		win.InvalidateRect(hwnd, nil, false)
+	}
+	if !captionShouldArmNCLeave(u.captionNCLeaveTrk) {
+		return
+	}
+	var tme win.TRACKMOUSEEVENT
+	tme.CbSize = uint32(unsafe.Sizeof(tme))
+	tme.DwFlags = win.TME_LEAVE | win.TME_NONCLIENT
+	tme.HwndTrack = hwnd
+	if win.TrackMouseEvent(&tme) {
+		u.captionNCLeaveTrk = true
+	}
+}
+
 func (u *winUI) clearCaptionHover(hwnd win.HWND) {
 	if u == nil {
 		return

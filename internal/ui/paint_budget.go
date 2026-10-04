@@ -10,10 +10,10 @@ import (
 
 const (
 	uiStallAfter       = 2 * time.Second
-	minAmbientPaintGap = 70 * time.Millisecond
-	slowPaintWarn      = 80 * time.Millisecond
-	slowPaintKill      = 200 * time.Millisecond
-	slowPaintKillCount = 2
+	minAmbientPaintGap = 40 * time.Millisecond // blink clock (~25 fps)
+	slowPaintWarn      = 150 * time.Millisecond
+	slowPaintKill      = 400 * time.Millisecond
+	slowPaintKillCount = 3
 	envSafeMode        = "SUZURI_SAFE_MODE"
 	envNoAmbient       = "SUZURI_NO_AMBIENT"
 	envFrameTiming     = "SUZURI_FRAME_TIMING"
@@ -52,8 +52,8 @@ func watchdogDisabled() bool {
 	return envFlagOff(envWatchdogDisable)
 }
 
-// shouldDisableAmbient is true when GDI/present is so slow that rain would
-// pin the UI thread (dual-GPU / high-refresh hangs look like this).
+// shouldDisableAmbient is true only for genuinely slow presents. Healthy
+// GDI frames on Stephen's PC were 0–15ms; do not trip on a layout hitch.
 func shouldDisableAmbient(elapsed time.Duration, slowCount int) bool {
 	if elapsed >= slowPaintKill {
 		return true

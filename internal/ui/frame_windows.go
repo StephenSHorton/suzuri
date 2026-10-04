@@ -6,7 +6,6 @@ import (
 	"unsafe"
 
 	"github.com/lxn/win"
-	"golang.org/x/sys/windows"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 )
@@ -20,6 +19,8 @@ func (u *winUI) frameCalcSize(hwnd win.HWND, msg uint32, wParam, lParam uintptr)
 	params := (*ncCalcSizeParams)(unsafe.Pointer(lParam))
 	proposed := params.Rgrc[0]
 	_ = win.DefWindowProc(hwnd, msg, wParam, lParam)
+	// Keep left/right/bottom from DefWindowProc (resize borders) and pull
+	// the client top up into the caption so DWM does not paint a native bar.
 	params.Rgrc[0].Top = proposed.Top
 	if win.IsZoomed(hwnd) {
 		var mi win.MONITORINFO
@@ -29,6 +30,24 @@ func (u *winUI) frameCalcSize(hwnd win.HWND, msg uint32, wParam, lParam uintptr)
 		}
 	}
 	return 0
+}
+
+const (
+	dwmwaWindowCornerPreference = 33
+	dwmwcpRound                 = 2
+)
+
+// applyWindowChromeFrame reapplies NCCALCSIZE after the HWND is registered
+// (CreateWindow's first calc runs before uiMap has the winUI) and asks DWM
+// for Win11 rounded corners. Shadow comes from the glass/extend path.
+func applyWindowChromeFrame(hwnd win.HWND) {
+	if hwnd == 0 {
+		return
+	}
+	pref := int32(dwmwcpRound)
+	dwmSetInt32(hwnd, dwmwaWindowCornerPreference, pref)
+	win.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+		win.SWP_FRAMECHANGED|win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE)
 }
 
 func (u *winUI) frameHitTest(hwnd win.HWND, lParam uintptr) uintptr {
@@ -115,9 +134,6 @@ func (u *winUI) chromeControlRects(stripH int32) []pixRect {
 }
 
 func disableWindowRounding(hwnd win.HWND) {
-	// DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_DONOTROUND = 1.
-	pref := int32(1)
-	mod := windows.NewLazySystemDLL("dwmapi.dll")
-	proc := mod.NewProc("DwmSetWindowAttribute")
-	_, _, _ = proc.Call(uintptr(hwnd), 33, uintptr(unsafe.Pointer(&pref)), unsafe.Sizeof(pref))
+	// Kept for older call sites; custom frame now wants rounded corners.
+	applyWindowChromeFrame(hwnd)
 }

@@ -17,3 +17,9 @@ func captionShouldArmLeave(alreadyTracking bool, clientX, clientY int32) bool {
 func captionApplyLeave(hot int, tracking bool) (nextHot int, nextTracking bool, arm bool, dirty bool) {
 	return -1, false, false, hot >= 0 || tracking
 }
+
+// captionShouldArmNCLeave is the non-client counterpart. WM_NCMOUSELEAVE
+// must never re-arm TME_NONCLIENT|TME_LEAVE (same tight loop as 0x2a3).
+func captionShouldArmNCLeave(alreadyTracking bool) bool {
+	return !alreadyTracking
+}

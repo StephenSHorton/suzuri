@@ -184,7 +184,9 @@ func (u *winUI) applyGlassBackdrop() {
 	if on {
 		extendFrame(u.hwnd, dwmMargins{-1, -1, -1, -1})
 	} else {
-		extendFrame(u.hwnd, dwmMargins{})
+		// 1px extend keeps the DWM shadow and stops the native caption
+		// from painting over a FrameWindows client that already ate it.
+		extendFrame(u.hwnd, dwmMargins{Bottom: 1})
 	}
 
 	build := winBuildNumber()

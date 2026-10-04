@@ -60,6 +60,9 @@ const (
 	hitBottom      = 15
 	hitBottomLeft  = 16
 	hitBottomRight = 17
+	hitMinButton   = 8
+	hitMaxButton   = 9
+	hitClose       = 20
 	frameResizePx  = 6
 	captionButtonW = 46
 )
@@ -126,9 +129,16 @@ func hitTestTitleBar(q titleHitQuery) int {
 	if q.ClientW < 1 || q.ClientH < 1 {
 		return hitNowhere
 	}
-	for _, b := range q.Buttons {
+	for i, b := range q.Buttons {
 		if b.contains(q.X, q.Y) {
-			return hitClient
+			switch i {
+			case 0:
+				return hitMinButton
+			case 1:
+				return hitMaxButton
+			default:
+				return hitClose
+			}
 		}
 	}
 	const border = frameResizePx

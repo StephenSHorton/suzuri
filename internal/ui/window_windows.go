@@ -192,16 +192,17 @@ type winUI struct {
 	primaryHasGeo     bool // ●○◉◎ present in primary face
 	primaryHasBraille bool
 	// Title-strip faces sized to the caption, not the shell cell.
-	titleFontPx     int32
-	titleBrandFont  win.HFONT
-	titleCupFont    win.HFONT
-	captionHot      int // 0 min, 1 zoom, 2 close; -1 none
-	captionLeaveTrk bool
-	width           int32
-	height          int32
-	cols            int
-	rows            int
-	cfg             config.Config
+	titleFontPx       int32
+	titleBrandFont    win.HFONT
+	titleCupFont      win.HFONT
+	captionHot        int // 0 min, 1 zoom, 2 close; -1 none
+	captionLeaveTrk   bool
+	captionNCLeaveTrk bool
+	width             int32
+	height            int32
+	cols              int
+	rows              int
+	cfg               config.Config
 	// last measured cell size (for hit-testing)
 	metricW  int32
 	metricH  int32
@@ -1461,7 +1462,6 @@ func (u *winUI) loop() error {
 	u.hwnd = hwnd
 	// Ensure title bar / taskbar pick up the icon even if class was re-registered.
 	applyWindowIcons(hwnd, iconBig, iconSm)
-	disableWindowRounding(hwnd)
 	u.font = createFontFor(u.cfg, false)
 	u.fontBold = createFontFor(u.cfg, true)
 	u.cjkFont = createCJKFont(u.cfg.FontSizePx)
@@ -1547,6 +1547,7 @@ func registerUI(hwnd win.HWND, u *winUI) {
 	// HWND exists; saved glass must apply before the first ShowWindow.
 	if u != nil && u.hwnd != 0 {
 		u.applyGlassBackdrop()
+		applyWindowChromeFrame(hwnd)
 	}
 }
 
@@ -1595,6 +1596,8 @@ func wmPhaseName(msg uint32) string {
 		return "WM_MOUSEMOVE"
 	case win.WM_MOUSELEAVE:
 		return "WM_MOUSELEAVE"
+	case win.WM_NCMOUSELEAVE:
+		return "WM_NCMOUSELEAVE"
 	case win.WM_NCHITTEST:
 		return "WM_NCHITTEST"
 	default:
@@ -2336,9 +2339,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				// Palette/help float over a live shell — need full composite.
 				u.requestPaint()
 			} else if u.needsShellAnimPaint() {
-				// Rain/CRT must not run at the 25 Hz blink clock. On a 239 Hz
-				// dual-GPU desktop, full GDI presents stacked in the queue and
-				// the window stopped taking input while WM_CLOSE still worked.
+				// Rain follows the blink clock (~25 fps). Skip only if we
+				// already presented within the frame budget.
 				if !u.lastFullPaint.IsZero() && skipAmbientFrame(time.Since(u.lastFullPaint)) {
 					u.requestInputPaint()
 				} else {
@@ -3629,10 +3631,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.clearCaptionHover(hwnd)
 		return 0
 
+	case win.WM_NCMOUSELEAVE:
+		u.captionNCLeaveTrk = false
+		u.clearCaptionHover(hwnd)
+		return 0
+
 	case win.WM_NCMOUSEMOVE:
-		if u.captionHot >= 0 || u.captionLeaveTrk {
-			u.clearCaptionHover(hwnd)
-		}
+		// Update custom-button hover, then let DefWindowProc see HTMAXBUTTON
+		// so Win11 Snap Layouts still appear.
+		u.trackCaptionHoverScreen(hwnd, lParam)
 
 	case win.WM_LBUTTONUP:
 		if u.sashDrag != nil {

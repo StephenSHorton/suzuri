@@ -11,14 +11,17 @@ func TestShouldDisableAmbient(t *testing.T) {
 	if shouldDisableAmbient(50*time.Millisecond, 10) {
 		t.Fatal("fast paints must keep rain")
 	}
-	if shouldDisableAmbient(90*time.Millisecond, 1) {
-		t.Fatal("one 90ms paint is a warning, not a kill")
+	if shouldDisableAmbient(90*time.Millisecond, 4) {
+		t.Fatal("sub-warn paints must keep rain")
 	}
-	if !shouldDisableAmbient(90*time.Millisecond, 2) {
-		t.Fatal("two slow paints should disable rain")
+	if shouldDisableAmbient(160*time.Millisecond, 2) {
+		t.Fatal("two 160ms paints are a warning, not a kill")
 	}
-	if !shouldDisableAmbient(200*time.Millisecond, 1) {
-		t.Fatal("a 200ms paint should disable rain immediately")
+	if !shouldDisableAmbient(160*time.Millisecond, 3) {
+		t.Fatal("three slow paints should disable rain")
+	}
+	if !shouldDisableAmbient(400*time.Millisecond, 1) {
+		t.Fatal("a 400ms paint should disable rain immediately")
 	}
 }
 
