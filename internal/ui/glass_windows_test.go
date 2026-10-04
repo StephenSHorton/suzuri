@@ -21,8 +21,8 @@ func TestGlassBackdropFollowsConfig(t *testing.T) {
 	}
 
 	sharp := config.Normalize(config.Config{Backdrop: config.BackdropGlass, GlassBlur: 0, GlassVeil: 0})
-	if glassBackdropType(sharp) != dwmsbtMainWindow {
-		t.Fatalf("blur 0 kind %d", glassBackdropType(sharp))
+	if glassBackdropType(sharp) != dwmsbtNone {
+		t.Fatalf("glass kind %d want none (accent acrylic, not HostBackdrop)", glassBackdropType(sharp))
 	}
 	if !glassUsesColorKey(sharp) {
 		t.Fatal("glass veil 0 should color-key")
@@ -30,37 +30,58 @@ func TestGlassBackdropFollowsConfig(t *testing.T) {
 
 	live := sharp
 	live.GlassBlur = 16
-	if glassBackdropType(live) != dwmsbtTransientWindow {
-		t.Fatalf("blur 16 kind %d want acrylic", glassBackdropType(live))
+	if glassBackdropType(live) != dwmsbtNone {
+		t.Fatalf("blur 16 kind %d want none", glassBackdropType(live))
 	}
 	live.GlassBlur = config.GlassBlurDefault
-	if glassBackdropType(live) != dwmsbtTabbedWindow {
-		t.Fatalf("default blur kind %d want tabbed", glassBackdropType(live))
+	if glassBackdropType(live) != dwmsbtNone {
+		t.Fatalf("default blur kind %d want none", glassBackdropType(live))
 	}
 	live.GlassBlur = config.GlassBlurMax
-	if glassBackdropType(live) != dwmsbtTabbedWindow {
-		t.Fatalf("max blur kind %d want tabbed", glassBackdropType(live))
+	if glassBackdropType(live) != dwmsbtNone {
+		t.Fatalf("max blur kind %d want none", glassBackdropType(live))
 	}
+
+	s0, f0, c0 := glassAccentForBlur(0, 0)
 	s16, f16, c16 := glassAccentForBlur(16, 0)
+	s36, f36, c36 := glassAccentForBlur(36, 0)
+	s40, f40, c40 := glassAccentForBlur(40, 0)
 	s48, f48, c48 := glassAccentForBlur(48, 0)
-	if s16 != accentAcrylic || s48 != accentAcrylic {
-		t.Fatalf("positive blur should enable acrylic accent %d %d", s16, s48)
-	}
-	if f16 != accentFlagUseGradient || f48 != accentFlagUseGradient {
-		t.Fatalf("accent must set Flags=2 or DWM uses the system color: %d %d", f16, f48)
+	for _, tc := range []struct {
+		blur  int
+		state uint32
+		flags uint32
+		color uint32
+	}{
+		{0, s0, f0, c0},
+		{16, s16, f16, c16},
+		{36, s36, f36, c36},
+		{40, s40, f40, c40},
+		{48, s48, f48, c48},
+	} {
+		if tc.state != accentAcrylic {
+			t.Fatalf("blur %d should stay acrylic, got %d", tc.blur, tc.state)
+		}
+		if tc.flags != accentFlagUseGradient {
+			t.Fatalf("blur %d Flags=%d want 2 (else DWM uses the system accent)", tc.blur, tc.flags)
+		}
+		if rgb := tc.color & 0x00FFFFFF; rgb != glassThemeTint(0)&0x00FFFFFF {
+			t.Fatalf("blur %d RGB %#x want theme void", tc.blur, tc.color)
+		}
 	}
 	if c16>>24 >= c48>>24 {
 		t.Fatalf("blur 48 must frost more than 16: %#x %#x", c16, c48)
 	}
-	if rgb := c16 & 0x00FFFFFF; rgb != glassThemeTint(0)&0x00FFFFFF {
-		t.Fatalf("accent RGB must be theme void AABBGGRR, got %#x", c16)
+	if int(c40>>24)-int(c36>>24) > 12 {
+		t.Fatalf("36→40 must not cliff: %#x %#x", c36, c40)
 	}
-	if st, _, _ := glassAccentForBlur(0, 0); st != accentDisabled {
-		t.Fatal("blur 0 is mica — no accent")
+
+	st11, fl11, col11 := glassCompositionAccent(22621, 16, 0)
+	if st11 != accentAcrylic || fl11 != accentFlagUseGradient {
+		t.Fatalf("Win11 must keep Flags=2 acrylic (not HostBackdrop): %d %d %#x", st11, fl11, col11)
 	}
-	st11, fl11, col11 := glassCompositionAccent(win11BackdropBuild, 16, 0)
-	if st11 != accentDisabled || fl11 != 0 || col11 != 0 {
-		t.Fatalf("Win11 must not stack acrylic accent on Mica/Tabbed: %d %d %#x", st11, fl11, col11)
+	if col11>>24 == 0 || col11&0x00FFFFFF != glassThemeTint(0)&0x00FFFFFF {
+		t.Fatalf("Win11 tint must be theme void AABBGGRR %#x", col11)
 	}
 	st10, fl10, col10 := glassCompositionAccent(19041, 16, 0)
 	if st10 != accentAcrylic || fl10 != accentFlagUseGradient || col10>>24 == 0 {
@@ -106,7 +127,7 @@ func TestGlassConfigRoundTrip(t *testing.T) {
 	if got.Backdrop != config.BackdropGlass || got.GlassBlur != 16 || got.GlassVeil != 40 || got.GlassRim != 10 {
 		t.Fatalf("round trip %+v", got)
 	}
-	if glassBackdropType(got) != dwmsbtTransientWindow {
+	if glassBackdropType(got) != dwmsbtNone {
 		t.Fatalf("loaded kind %d", glassBackdropType(got))
 	}
 	if !glassUsesColorKey(got) {

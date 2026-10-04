@@ -2527,13 +2527,28 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				}
 			}
 		}
-		// Do not full-repaint on deactivate. Dual Grok + rain + InvalidateRect
-		// here is the "clicked away → process gone" GDI hard-kill (no Go panic).
-		// Caret freeze while unfocused is cheaper than taking the host down.
+		// Re-push acrylic on focus change. DWM drops HostBackdrop when
+		// inactive; the accent policy stays live if we keep Flags=2 on it.
+		// Do not full-repaint on deactivate — that GDI path hard-kills
+		// dual-GPU + rain.
+		if u.shellGlass() {
+			u.applyGlassBackdropForced()
+		}
 		if active != win.WA_INACTIVE && u.alive.Load() {
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
+
+	case win.WM_NCACTIVATE:
+		// Skip native NC paint (lParam=-1) so DWM does not flash a light
+		// caption over FrameWindows. Re-apply glass without a full paint.
+		if u.shellGlass() {
+			u.applyGlassBackdropForced()
+		}
+		if u.chrome.Frame == chrome.FrameWindows {
+			return win.DefWindowProc(hwnd, msg, wParam, ^uintptr(0))
+		}
+		return win.DefWindowProc(hwnd, msg, wParam, lParam)
 
 	case win.WM_ENTERSIZEMOVE:
 		// Begin move or resize: defer ConPTY/tab resize until the gesture ends.

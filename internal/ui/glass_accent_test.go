@@ -1,6 +1,10 @@
 package ui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/StephenSHorton/suzuri/internal/config"
+)
 
 func TestGlassAccentColorPacksAABBGGRR(t *testing.T) {
 	// Windows GradientColor is AABBGGRR. A cool RGB tint packed as
@@ -29,5 +33,35 @@ func TestGlassAccentColorPacksAABBGGRR(t *testing.T) {
 	}
 	if glassAccentColor(0xFF, 0, 0, 0xFF) != 0xFFFF0000 {
 		t.Fatal("blue must sit in the 0x00FF0000 byte")
+	}
+}
+
+func TestGlassFrostAlphaIsContinuous(t *testing.T) {
+	prev := glassFrostAlpha(0, 0)
+	if prev < 16 || prev > 32 {
+		t.Fatalf("blur 0 frost %d", prev)
+	}
+	for blur := 1; blur <= config.GlassBlurMax; blur++ {
+		cur := glassFrostAlpha(blur, 0)
+		if cur < prev {
+			t.Fatalf("frost dropped at blur %d: %d → %d", blur, prev, cur)
+		}
+		if int(cur)-int(prev) > 4 {
+			t.Fatalf("frost jumped at blur %d: %d → %d", blur, prev, cur)
+		}
+		prev = cur
+	}
+	jump := int(glassFrostAlpha(40, 0)) - int(glassFrostAlpha(36, 0))
+	if jump < 0 || jump > 12 {
+		t.Fatalf("36→40 must not cliff: Δ %d", jump)
+	}
+	if glassFrostAlpha(config.GlassBlurMax, 0) <= glassFrostAlpha(0, 0) {
+		t.Fatal("max blur must frost more than 0")
+	}
+	if glassFrostAlpha(16, 40) <= glassFrostAlpha(16, 0) {
+		t.Fatal("veil must add frost")
+	}
+	if glassFrostAlpha(0, 100) > 220 || glassFrostAlpha(config.GlassBlurMax, 100) > 220 {
+		t.Fatal("frost alpha cap")
 	}
 }
