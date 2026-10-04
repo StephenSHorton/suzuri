@@ -252,6 +252,8 @@ func (u *winUI) pushGlassBackdrop(force bool) {
 	}
 
 	applyGlassChromeColors(u.hwnd, on)
+	// Square corners — DWM can forget DONOTROUND when extend/accent change.
+	dwmSetInt32(u.hwnd, dwmwaWindowCornerPreference, windowCornerPreference())
 	// Always None. A HostBackdrop type is what DWM replaces with a solid
 	// (often light) fallback on deactivate.
 	dwmSetInt32(u.hwnd, dwmwaSystemBackdropType, dwmsbtNone)

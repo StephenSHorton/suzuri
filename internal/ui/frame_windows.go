@@ -34,18 +34,24 @@ func (u *winUI) frameCalcSize(hwnd win.HWND, msg uint32, wParam, lParam uintptr)
 
 const (
 	dwmwaWindowCornerPreference = 33
-	dwmwcpRound                 = 2
+	dwmwcpDoNotRound            = 1 // DWMWCP_DONOTROUND — square corners
+	dwmwcpRound                 = 2 // kept so a stray ROUND=2 is obvious in review
 )
 
+// windowCornerPreference is square. Win11 defaults to rounded; we opt out
+// everywhere this HWND is configured (create, glass toggle, activate).
+func windowCornerPreference() int32 {
+	return dwmwcpDoNotRound
+}
+
 // applyWindowChromeFrame reapplies NCCALCSIZE after the HWND is registered
-// (CreateWindow's first calc runs before uiMap has the winUI) and asks DWM
-// for Win11 rounded corners. Shadow comes from the glass/extend path.
+// (CreateWindow's first calc runs before uiMap has the winUI) and forces
+// square Win11 corners. Shadow comes from the glass/extend path.
 func applyWindowChromeFrame(hwnd win.HWND) {
 	if hwnd == 0 {
 		return
 	}
-	pref := int32(dwmwcpRound)
-	dwmSetInt32(hwnd, dwmwaWindowCornerPreference, pref)
+	dwmSetInt32(hwnd, dwmwaWindowCornerPreference, windowCornerPreference())
 	win.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
 		win.SWP_FRAMECHANGED|win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE)
 }
@@ -134,6 +140,5 @@ func (u *winUI) chromeControlRects(stripH int32) []pixRect {
 }
 
 func disableWindowRounding(hwnd win.HWND) {
-	// Kept for older call sites; custom frame now wants rounded corners.
 	applyWindowChromeFrame(hwnd)
 }
