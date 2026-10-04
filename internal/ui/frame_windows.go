@@ -36,7 +36,28 @@ const (
 	dwmwaWindowCornerPreference = 33
 	dwmwcpDoNotRound            = 1 // DWMWCP_DONOTROUND — square corners
 	dwmwcpRound                 = 2 // kept so a stray ROUND=2 is obvious in review
+
+	cChildrenTitleBar    = 5
+	stateSystemInvisible = 0x00008000
 )
+
+type titleBarInfoEx struct {
+	CbSize     uint32
+	RcTitleBar win.RECT
+	Rgstate    [cChildrenTitleBar + 1]uint32
+	Rgrect     [cChildrenTitleBar + 1]win.RECT
+}
+
+func hideDWMCaptionButtons(info *titleBarInfoEx) {
+	if info == nil {
+		return
+	}
+	// rgrect[2]=min, [3]=max, [4]=help, [5]=close
+	for i := 2; i <= 5 && i < len(info.Rgrect); i++ {
+		info.Rgstate[i] |= stateSystemInvisible
+		info.Rgrect[i] = win.RECT{}
+	}
+}
 
 // windowCornerPreference is square. Win11 defaults to rounded; we opt out
 // everywhere this HWND is configured (create, glass toggle, activate).

@@ -3480,10 +3480,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 
-		// Title strip: caption buttons, bell, cup, +, tabs. Empty pixels are
-		// HTCAPTION, so they never arrive here.
+		// Title strip: caption buttons are HTCLIENT (so DWM does not paint
+		// a second set). Empty strip pixels stay HTCAPTION.
 		if py < chromeH {
 			if hit := u.hitCaptionButton(px, py); hit >= 0 {
+				u.setCaptionDown(hwnd, hit)
 				switch frameActionForHit(u.chrome.Frame, hit) {
 				case chrome.FrameClose:
 					win.PostMessage(hwnd, win.WM_CLOSE, 0, 0)
@@ -3724,6 +3725,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.trackCaptionHoverScreen(hwnd, lParam)
 
 	case win.WM_LBUTTONUP:
+		u.setCaptionDown(hwnd, -1)
 		if u.sashDrag != nil {
 			u.sashDrag = nil
 			win.ReleaseCapture()
@@ -3838,9 +3840,23 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if wParam != 0 && u.chrome.Frame == chrome.FrameWindows {
 			return u.frameCalcSize(hwnd, msg, wParam, lParam)
 		}
+	case 0x033F: // WM_GETTITLEBARINFOEX — hide DWM's caption-button sprites
+		if u.chrome.Frame == chrome.FrameWindows && lParam != 0 {
+			ret := win.DefWindowProc(hwnd, msg, wParam, lParam)
+			hideDWMCaptionButtons((*titleBarInfoEx)(unsafe.Pointer(lParam)))
+			return ret
+		}
+
 	case win.WM_NCHITTEST:
 		if u.chrome.Frame == chrome.FrameWindows {
 			if hit := u.frameHitTest(hwnd, lParam); hit != 0 {
+				// Returning HTMIN/MAX/CLOSE makes DWM paint a second set of
+				// caption icons on top of ours. Clicks stay in the client so
+				// LBUTTONDOWN owns min/max/close; snap flyout is the trade.
+				switch hit {
+				case hitMinButton, hitMaxButton, hitClose:
+					return hitClient
+				}
 				return hit
 			}
 		}
@@ -6836,8 +6852,7 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	u.paintChromeCells(hdc, rect, cells, 0, cellShift, true)
 	if u.chrome.Frame == chrome.FrameWindows {
 		u.paintBrandMark(hdc, chromeH)
-		u.paintCaffeineCup(hdc, chromeH)
-		u.paintWinCaption(hdc, rect)
+		u.paintStripTrailingIcons(hdc, rect)
 	}
 	u.chromePx = chromeH
 }

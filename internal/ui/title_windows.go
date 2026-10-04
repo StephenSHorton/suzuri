@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
+	"github.com/StephenSHorton/suzuri/internal/iconstroke"
 )
 
 var procSetPixel = windows.NewLazySystemDLL("gdi32.dll").NewProc("SetPixel")
@@ -127,38 +128,18 @@ func (u *winUI) paintBrandMark(hdc win.HDC, stripH int32) {
 }
 
 func (u *winUI) paintCaffeineCup(hdc win.HDC, stripH int32) {
-	if u == nil || hdc == 0 || stripH < 4 {
-		return
-	}
-	u.ensureTitleFonts(stripH)
-	if u.titleCupFont == 0 {
-		// Cell glyph stays as the visible cup when the symbol face has no ☕.
-		return
-	}
-	b := u.chrome.CaffeineBounds()
-	if b[1] <= b[0] {
-		return
-	}
-	cw := u.metricW
-	if cw < 1 {
-		cw = cellW
-	}
-	x0 := 4 + int32(b[0])*cw
-	bw := int32(b[1]-b[0]) * cw
-	if bw < 4 {
-		return
-	}
-	// Cover the lipgloss cup so only the strip-sized glyph shows.
-	paintOpaqueRGB(hdc, win.RECT{Left: x0, Top: 0, Right: x0 + bw, Bottom: stripH}, chrome.BarR, chrome.BarG, chrome.BarB)
-	fr, fg, fb := chrome.SoftR, chrome.SoftG, chrome.SoftB
-	if u.caffeine != nil && u.caffeine.Active() {
-		fr, fg, fb = chrome.PrimR, chrome.PrimG, chrome.PrimB
-	}
-	rc := win.RECT{Left: x0, Top: 2, Right: x0 + bw, Bottom: stripH - 2}
-	drawCenteredRune(hdc, u.titleCupFont, rc, '☕', fr, fg, fb)
+	// Cup is painted once in paintStripTrailingIcons from the shared stroke set.
 }
 
 func (u *winUI) paintWinCaption(hdc win.HDC, rect win.RECT) {
+	u.paintStripTrailingIcons(hdc, rect)
+}
+
+// stripIconDraws is reset at the start of each trailing-icon paint. Tests
+// and logs use it to prove bell/coffee/min/max/close each draw once.
+var stripIconDraws [5]int
+
+func (u *winUI) paintStripTrailingIcons(hdc win.HDC, rect win.RECT) {
 	if u == nil || hdc == 0 || u.chrome.Frame != chrome.FrameWindows {
 		return
 	}
@@ -174,14 +155,55 @@ func (u *winUI) paintWinCaption(hdc win.HDC, rect win.RECT) {
 	if strip < 1 {
 		return
 	}
-	btns := u.captionButtons(clientW, strip)
+	for i := range stripIconDraws {
+		stripIconDraws[i] = 0
+	}
+	barR, barG, barB := chrome.BarR, chrome.BarG, chrome.BarB
+	fgR, fgG, fgB := chrome.TextR, chrome.TextG, chrome.TextB
+	paintChip := func(slot int, kind iconstroke.Kind, box pixRect, fr, fg, fb byte) {
+		if box.empty() {
+			return
+		}
+		wr := win.RECT{Left: box.L, Top: box.T, Right: box.R, Bottom: box.B}
+		paintOpaqueRGB(hdc, wr, barR, barG, barB)
+		s := captionIconSize(box.R-box.L, box.B-box.T)
+		cx := (box.L + box.R) / 2
+		cy := (box.T + box.B) / 2
+		paintCaptionInk(hdc, stripIconInk(kind, cx, cy, s), fr, fg, fb, barR, barG, barB)
+		stripIconDraws[slot]++
+	}
+	chipBox := func(span [2]int) pixRect {
+		if span[1] <= span[0] {
+			return pixRect{}
+		}
+		cw := u.metricW
+		if cw < 1 {
+			cw = cellW
+		}
+		x0 := 4 + int32(span[0])*cw
+		bw := int32(span[1]-span[0]) * cw
+		if bw < 4 {
+			return pixRect{}
+		}
+		return pixRect{L: x0, T: 0, R: x0 + bw, B: strip}
+	}
+	if u.chrome.BellUnread {
+		paintChip(0, iconstroke.Bell, chipBox(u.chrome.BellBounds()), chrome.PrimR, chrome.PrimG, chrome.PrimB)
+	} else {
+		paintChip(0, iconstroke.Bell, chipBox(u.chrome.BellBounds()), chrome.SoftR, chrome.SoftG, chrome.SoftB)
+	}
+	if u.caffeine != nil && u.caffeine.Active() {
+		paintChip(1, iconstroke.Coffee, chipBox(u.chrome.CaffeineBounds()), chrome.PrimR, chrome.PrimG, chrome.PrimB)
+	} else {
+		paintChip(1, iconstroke.Coffee, chipBox(u.chrome.CaffeineBounds()), chrome.SoftR, chrome.SoftG, chrome.SoftB)
+	}
 	zoomed := u.hwnd != 0 && win.IsZoomed(u.hwnd)
-	for i, b := range btns {
+	for i, b := range u.captionButtons(clientW, strip) {
 		if b.empty() {
 			continue
 		}
-		br, bg, bb := chrome.BarR, chrome.BarG, chrome.BarB
-		gr, gg, gb := chrome.TextR, chrome.TextG, chrome.TextB
+		br, bg, bb := barR, barG, barB
+		gr, gg, gb := fgR, fgG, fgB
 		if u.captionPress && i == u.captionDown {
 			br, bg, bb = mixRGB(br, bg, bb, 0, 0, 0, 1, 4)
 		} else if i == u.captionHot {
@@ -194,7 +216,19 @@ func (u *winUI) paintWinCaption(hdc win.HDC, rect win.RECT) {
 		}
 		wr := win.RECT{Left: b.L, Top: b.T, Right: b.R, Bottom: b.B}
 		paintOpaqueRGB(hdc, wr, br, bg, bb)
-		paintCaptionGlyph(hdc, i, b, zoomed, gr, gg, gb, br, bg, bb)
+		k := iconstroke.Min
+		switch i {
+		case 1:
+			k = iconstroke.Max
+			if zoomed {
+				k = iconstroke.Restore
+			}
+		case 2:
+			k = iconstroke.Close
+		}
+		s := captionIconSize(b.R-b.L, b.B-b.T)
+		paintCaptionInk(hdc, stripIconInk(k, (b.L+b.R)/2, (b.T+b.B)/2, s), gr, gg, gb, br, bg, bb)
+		stripIconDraws[2+i]++
 	}
 }
 
@@ -345,7 +379,14 @@ func paintCaptionGlyph(hdc win.HDC, kind int, b pixRect, zoomed bool, cr, cg, cb
 	s := captionIconSize(b.R-b.L, b.B-b.T)
 	cx := (b.L + b.R) / 2
 	cy := (b.T + b.B) / 2
-	for _, p := range captionGlyphInk(kind, zoomed, cx, cy, s) {
+	paintCaptionInk(hdc, captionGlyphInk(kind, zoomed, cx, cy, s), cr, cg, cb, br, bg, bb)
+}
+
+func paintCaptionInk(hdc win.HDC, ink []captionInk, cr, cg, cb, br, bg, bb byte) {
+	if hdc == 0 {
+		return
+	}
+	for _, p := range ink {
 		if p.a == 0 {
 			continue
 		}
