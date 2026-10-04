@@ -197,7 +197,7 @@ func (u *winUI) trackCaptionHover(hwnd win.HWND, px, py int32) {
 			win.InvalidateRect(hwnd, nil, false)
 		}
 	}
-	if u.captionLeaveTrk || hwnd == 0 {
+	if hwnd == 0 || !captionShouldArmLeave(u.captionLeaveTrk, px, py) {
 		return
 	}
 	var tme win.TRACKMOUSEEVENT
@@ -206,6 +206,18 @@ func (u *winUI) trackCaptionHover(hwnd win.HWND, px, py int32) {
 	tme.HwndTrack = hwnd
 	if win.TrackMouseEvent(&tme) {
 		u.captionLeaveTrk = true
+	}
+}
+
+func (u *winUI) clearCaptionHover(hwnd win.HWND) {
+	if u == nil {
+		return
+	}
+	hot, trk, _, dirty := captionApplyLeave(u.captionHot, u.captionLeaveTrk)
+	u.captionHot = hot
+	u.captionLeaveTrk = trk
+	if dirty && hwnd != 0 {
+		win.InvalidateRect(hwnd, nil, false)
 	}
 }
 

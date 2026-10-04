@@ -1593,6 +1593,8 @@ func wmPhaseName(msg uint32) string {
 		return "WM_KEYDOWN"
 	case win.WM_MOUSEMOVE:
 		return "WM_MOUSEMOVE"
+	case win.WM_MOUSELEAVE:
+		return "WM_MOUSELEAVE"
 	case win.WM_NCHITTEST:
 		return "WM_NCHITTEST"
 	default:
@@ -3620,15 +3622,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_MOUSELEAVE:
-		u.captionLeaveTrk = false
-		u.trackCaptionHover(hwnd, -1, -1)
+		// Do not call trackCaptionHover here. Re-arming TME_LEAVE while the
+		// cursor is already outside the client (or over HTCAPTION on the
+		// custom frame) makes Windows post another WM_MOUSELEAVE immediately
+		// and starves the UI thread — the 0.9.160 / 7b0eb25 freeze.
+		u.clearCaptionHover(hwnd)
 		return 0
 
 	case win.WM_NCMOUSEMOVE:
-		if u.captionHot >= 0 {
-			u.captionHot = -1
-			u.captionLeaveTrk = false
-			win.InvalidateRect(hwnd, nil, false)
+		if u.captionHot >= 0 || u.captionLeaveTrk {
+			u.clearCaptionHover(hwnd)
 		}
 
 	case win.WM_LBUTTONUP:
