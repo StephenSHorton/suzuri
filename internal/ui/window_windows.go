@@ -1596,8 +1596,11 @@ func registerUI(hwnd win.HWND, u *winUI) {
 	uiMu.Unlock()
 	// HWND exists; saved glass must apply before the first ShowWindow.
 	if u != nil && u.hwnd != 0 {
-		u.applyGlassBackdrop()
+		// FRAMECHANGED first, then DwmExtend. The other order (96146e7)
+		// let SetWindowPos drop the sheet-of-glass so only a frame sliver
+		// showed desktop and the client stayed opaque black.
 		applyWindowChromeFrame(hwnd)
+		u.applyGlassBackdrop()
 	}
 }
 

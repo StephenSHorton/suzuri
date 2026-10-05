@@ -114,6 +114,11 @@ func applyWindowChromeFrame(hwnd win.HWND) {
 	dwmSetInt32(hwnd, dwmwaWindowCornerPreference, windowCornerPreference())
 	win.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
 		win.SWP_FRAMECHANGED|win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE)
+	// FRAMECHANGED resets DwmExtend margins. Put the sheet back so
+	// BLACK_BRUSH holes color-key again.
+	if u := uiFor(hwnd); u != nil {
+		extendFrame(hwnd, glassFrameMargins(u.shellGlass()))
+	}
 }
 
 func (u *winUI) frameHitTest(hwnd win.HWND, lParam uintptr) uintptr {

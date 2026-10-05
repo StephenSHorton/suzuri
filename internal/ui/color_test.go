@@ -161,6 +161,8 @@ func TestPasteChipBGPreserved(t *testing.T) {
 }
 
 func TestThemeVoidAndDefaultShowGlass(t *testing.T) {
+	// High-contrast void is #000 — same as the DWM color key. That is a
+	// hole (skip fill), not an opaque theme slab.
 	if !cellBGShowsGlass(0, 0, 0) {
 		t.Fatal("default VT bg")
 	}

@@ -37,10 +37,14 @@ func TestGlassAccentColorPacksAABBGGRR(t *testing.T) {
 }
 
 func TestGlassFrostAlphaIsContinuous(t *testing.T) {
-	prev := glassFrostAlpha(0, 0)
-	if prev < 16 || prev > 32 {
-		t.Fatalf("blur 0 frost %d", prev)
+	if glassFrostAlpha(0, 0) != 0 {
+		t.Fatalf("blur 0 veil 0 must be clear, frost %d", glassFrostAlpha(0, 0))
 	}
+	// Old 20–196 curve put blur 36 at 99 — a solid dark slab.
+	if a := glassFrostAlpha(36, 0); a == 0 || a >= 64 {
+		t.Fatalf("blur 36 frost %d must stay see-through (was 99)", a)
+	}
+	prev := glassFrostAlpha(0, 0)
 	for blur := 1; blur <= config.GlassBlurMax; blur++ {
 		cur := glassFrostAlpha(blur, 0)
 		if cur < prev {
@@ -61,7 +65,17 @@ func TestGlassFrostAlphaIsContinuous(t *testing.T) {
 	if glassFrostAlpha(16, 40) <= glassFrostAlpha(16, 0) {
 		t.Fatal("veil must add frost")
 	}
-	if glassFrostAlpha(0, 100) > 220 || glassFrostAlpha(config.GlassBlurMax, 100) > 220 {
+	if glassFrostAlpha(0, 100) > 200 || glassFrostAlpha(config.GlassBlurMax, 100) > 200 {
 		t.Fatal("frost alpha cap")
+	}
+}
+
+func TestGlassTintRGBLiftsBlackVoid(t *testing.T) {
+	r, g, b := glassTintRGB()
+	if r == 0 && g == 0 && b == 0 {
+		t.Fatal("black GradientColor RGB is a solid plate; lift HC void")
+	}
+	if glassAccentColor(50, r, g, b)&0x00FFFFFF == 0 {
+		t.Fatal("tinted acrylic must not be #000")
 	}
 }

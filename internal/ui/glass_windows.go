@@ -93,7 +93,8 @@ func winBuildNumber() uint32 {
 // glassThemeTint is a theme-void wash in AABBGGRR. Flags=2 makes DWM
 // honor this instead of the system accent.
 func glassThemeTint(alpha byte) uint32 {
-	return glassAccentColor(alpha, chrome.VoidR, chrome.VoidG, chrome.VoidB)
+	r, g, b := glassTintRGB()
+	return glassAccentColor(alpha, r, g, b)
 }
 
 // glassBackdropType is always None. HostBackdrop materials (Mica / Acrylic
@@ -206,11 +207,22 @@ func applyGlassChromeColors(hwnd win.HWND, on bool) {
 	dwmSetU32(hwnd, dwmwaTextColor, uint32(win.RGB(chrome.TextR, chrome.TextG, chrome.TextB)))
 }
 
-func extendFrame(hwnd win.HWND, m dwmMargins) {
-	if err := dwmExtend.Find(); err != nil {
-		return
+func extendFrame(hwnd win.HWND, m dwmMargins) bool {
+	if hwnd == 0 {
+		return false
 	}
-	_, _, _ = dwmExtend.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&m)))
+	if err := dwmExtend.Find(); err != nil {
+		log.Warn("DwmExtendFrameIntoClientArea missing", "err", err)
+		return false
+	}
+	hr, _, callErr := dwmExtend.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&m)))
+	if hr != 0 {
+		log.Warn("DwmExtendFrameIntoClientArea failed",
+			"hr", hr, "err", callErr,
+			"left", m.Left, "right", m.Right, "top", m.Top, "bottom", m.Bottom)
+		return false
+	}
+	return true
 }
 
 // glassFrameMargins is a full sheet of glass while acrylic is on so
@@ -281,10 +293,11 @@ func (u *winUI) pushGlassBackdrop(force bool, fromMsg uint32) {
 	// Always None. A HostBackdrop type is what DWM replaces with a solid
 	// (often light) fallback on deactivate.
 	dwmSetInt32(u.hwnd, dwmwaSystemBackdropType, dwmsbtNone)
-	extendFrame(u.hwnd, glassFrameMargins(on))
-	// Sheet-of-glass would otherwise let DWM stamp native min/max/close.
-	// Style bits, not the top margin, hide those sprites.
+	// Style bits first (no FRAMECHANGED here — that re-enters WndProc).
+	// Extend LAST so SWP_FRAMECHANGED from applyWindowChromeFrame cannot
+	// drop the sheet-of-glass; caller must extend after FRAMECHANGED too.
 	applyFrameChromeStyle(u.hwnd)
+	okExt := extendFrame(u.hwnd, glassFrameMargins(on))
 
 	if on {
 		state, flags, color := glassCompositionAccent(winBuildNumber(), blur, veil)
@@ -298,7 +311,8 @@ func (u *winUI) pushGlassBackdrop(force bool, fromMsg uint32) {
 		return
 	}
 	log.Info("glass backdrop", "on", on, "blur", blur, "veil", veil,
-		"material", glassMaterialName(on), "frost", glassFrostAlpha(blur, veil))
+		"material", glassMaterialName(on), "frost", glassFrostAlpha(blur, veil),
+		"extend_ok", okExt)
 	u.inputOnlyDirty = false
 	u.overlaySceneReady = false
 	u.chromeDirty = true
