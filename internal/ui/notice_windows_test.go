@@ -29,6 +29,29 @@ func TestNoticeScreenOriginMatchesAnchors(t *testing.T) {
 	}
 }
 
+func TestNoticePresentSizeMatchesMacDIPsAt96(t *testing.T) {
+	w, h := noticePresentSize(640, 144, 96, 14, 2000)
+	if w != 320 || h != 72 {
+		t.Fatalf("96-DPI 14px (%d,%d) want 320x72", w, h)
+	}
+	w, h = noticePresentSize(640, 144, 192, 28, 2000)
+	if w != 640 || h != 144 {
+		t.Fatalf("192-DPI 28px font (%d,%d) want 640x144", w, h)
+	}
+	w, h = noticePresentSize(640, 144, 144, 14, 2000)
+	// 320 DIP * 144/96 = 480, then font 14 vs design 21 → 320.
+	if w != 320 || h != 72 {
+		t.Fatalf("144-DPI 14px physical font (%d,%d) want 320x72", w, h)
+	}
+	w, h = noticePresentSize(640, 144, 96, 14, 800)
+	if w > 800*36/100 {
+		t.Fatalf("small window must cap width, got %d", w)
+	}
+	if w < 160 || h < 1 {
+		t.Fatalf("capped size vanished: %dx%d", w, h)
+	}
+}
+
 func TestNoticeBitmapPointDoublesClient(t *testing.T) {
 	x, y := noticeBitmapPoint(10, 12, 320, 144, 640, 288)
 	if x != 20 || y != 24 {

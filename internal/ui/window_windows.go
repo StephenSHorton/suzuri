@@ -52,6 +52,12 @@ const (
 	wmSuzuriUpdateOffer = win.WM_APP + 9
 	// wmSuzuriTransfer drains transfer progress/status from engine goroutines.
 	wmSuzuriTransfer = win.WM_APP + 10
+	// wmSuzuriFrame drives shell rain/settings underlay at display pace
+	// (capped), independent of the 40ms caret blink.
+	wmSuzuriFrame = win.WM_APP + 11
+	// wmSuzuriGlassRefresh re-pushes accent on a clean loop stack after
+	// WM_ACTIVATE. Never run DwmExtend/SetAccent inside NCACTIVATE.
+	wmSuzuriGlassRefresh = win.WM_APP + 12
 )
 
 // Run opens a native Win32 window with one shell tab (more via Ctrl+Shift+T).
@@ -64,11 +70,20 @@ func Run() error {
 		cfg = config.Default()
 	}
 	cfg = config.Normalize(cfg)
+	if safeModeRequested() {
+		log.Warn("safe mode: disabling intro and shell ambient",
+			"env", envSafeMode+" / "+envNoAmbient)
+		cfg.Intro = config.IntroNone
+		cfg.ShellAmbient = config.AmbientNone
+	}
 	setNoticeAnchor(cfg.NoticePosition, false)
+	InstallProcessExitHooks()
+	startUIWatchdog()
 	chrome.ApplyTheme(cfg.Theme)
 	SetShellANSIMap(cfg.ShellANSIMap)
 	log.Info("ui.Run", "cols", cols, "rows", rows, "font", cfg.FontFace, "fontPx", cfg.FontSizePx,
-		"theme", cfg.Theme, "ansi", cfg.ShellANSIMap, "config", config.Path())
+		"theme", cfg.Theme, "ansi", cfg.ShellANSIMap, "ambient", cfg.ShellAmbient,
+		"safe_mode", safeModeRequested(), "config", config.Path())
 	ui := &winUI{
 		cols:        cols,
 		rows:        rows,
@@ -184,16 +199,19 @@ type winUI struct {
 	primaryHasGeo     bool // ●○◉◎ present in primary face
 	primaryHasBraille bool
 	// Title-strip faces sized to the caption, not the shell cell.
-	titleFontPx     int32
-	titleBrandFont  win.HFONT
-	titleCupFont    win.HFONT
-	captionHot      int // 0 min, 1 zoom, 2 close; -1 none
-	captionLeaveTrk bool
-	width           int32
-	height          int32
-	cols            int
-	rows            int
-	cfg             config.Config
+	titleFontPx       int32
+	titleBrandFont    win.HFONT
+	titleCupFont      win.HFONT
+	captionHot        int // 0 min, 1 zoom, 2 close; -1 none
+	captionDown       int
+	captionPress      bool
+	captionLeaveTrk   bool
+	captionNCLeaveTrk bool
+	width             int32
+	height            int32
+	cols              int
+	rows              int
+	cfg               config.Config
 	// last measured cell size (for hit-testing)
 	metricW  int32
 	metricH  int32
@@ -220,11 +238,26 @@ type winUI struct {
 	// Reused double-buffer (recreated on resize) to avoid GDI thrash.
 	// memOldBmp is the object that was in memDC before memBmp — must be
 	// re-selected before DeleteObject(memBmp) or GDI can AV later.
+	// memBmp is a system-memory DIB (not a device bitmap) so BitBlt cannot
+	// stall across NVIDIA+AMD adapters on a 239 Hz display.
 	memDC     win.HDC
 	memBmp    win.HBITMAP
 	memOldBmp win.HGDIOBJ
 	memW      int32
 	memH      int32
+
+	blinkPosted        atomic.Bool
+	framePosted        atomic.Bool
+	glassRefreshPosted atomic.Bool
+	// glassRefreshDeferred: composition was requested during size/move or
+	// WA_CLICKACTIVE. Must not PostMessage then — the modal drag loop
+	// would DispatchMessage it mid-drag (c67fd3f ntdll AV). Flushed
+	// after EXITSIZEMOVE (or the next idle blink if no drag happened).
+	glassRefreshDeferred bool
+	lastFullPaint        time.Time
+	lastPaintMS          atomic.Int64
+	slowPaintN           int
+	ambientSuppressed    bool
 
 	// notesDragging: LBUTTON held after a notes body click (drag-select text).
 	notesDragging bool
@@ -321,6 +354,39 @@ func (u *winUI) requestPaint() {
 	win.InvalidateRect(u.hwnd, nil, false)
 }
 
+// requestPaintFromPTY invalidates after ingest. Focused: same as requestPaint.
+// Unfocused: at most one full present per unfocusedPaintGap so a grok-fork
+// build flood cannot stack 300ms GDI paints on the UI thread.
+func (u *winUI) requestPaintFromPTY() {
+	if u == nil || u.hwnd == 0 {
+		return
+	}
+	since := time.Duration(0)
+	if !u.lastFullPaint.IsZero() {
+		since = time.Since(u.lastFullPaint)
+	}
+	if !shouldInvalidateFromPTY(u.hostFocused, true, u.paintPending, since) {
+		return
+	}
+	u.requestPaint()
+}
+
+func (u *winUI) allowUnfocusedPresent() bool {
+	if u == nil {
+		return false
+	}
+	if u.hostFocused {
+		return true
+	}
+	if u.paintPending {
+		return false
+	}
+	if u.lastFullPaint.IsZero() {
+		return true
+	}
+	return time.Since(u.lastFullPaint) >= unfocusedPaintGap
+}
+
 // monitorWorkArea returns the nearest monitor's work rect (excludes taskbar).
 func (u *winUI) monitorWorkArea() (left, top, right, bottom int, ok bool) {
 	if u == nil || u.hwnd == 0 {
@@ -350,7 +416,7 @@ func (u *winUI) requestInputPaint() {
 	}
 	// Overlay and alt-screen TUIs (Grok) must keep compositing rain — Darwin
 	// tryPaintInputOnly returns false in both cases.
-	if u.chrome.OverlayOpen() || u.activeAltScreen() {
+	if u.chrome.OverlayOpen() || u.activeAltScreen() || u.wantsAmbientFrames() {
 		u.inputOnlyDirty = false
 		u.requestPaint()
 		return
@@ -384,10 +450,10 @@ func (u *winUI) markShellDirty() {
 	u.inputOnlyDirty = false
 }
 
-func (u *winUI) queueBytes(tabID int)  { postBytes(u, tabID) }
-func (u *winUI) queueClosed(tabID int) { postClosed(u, tabID) }
-func (u *winUI) isAlive() bool         { return u != nil && u.alive.Load() }
-func (u *winUI) windowReady() bool     { return u != nil && u.hwnd != 0 }
+func (u *winUI) queueBytes(tabID int) bool { return postBytes(u, tabID) }
+func (u *winUI) queueClosed(tabID int)     { postClosed(u, tabID) }
+func (u *winUI) isAlive() bool             { return u != nil && u.alive.Load() }
+func (u *winUI) windowReady() bool         { return u != nil && u.hwnd != 0 }
 
 func (u *winUI) activeTab() *tab {
 	if p := u.activePage(); p != nil {
@@ -1446,7 +1512,6 @@ func (u *winUI) loop() error {
 	u.hwnd = hwnd
 	// Ensure title bar / taskbar pick up the icon even if class was re-registered.
 	applyWindowIcons(hwnd, iconBig, iconSm)
-	disableWindowRounding(hwnd)
 	u.font = createFontFor(u.cfg, false)
 	u.fontBold = createFontFor(u.cfg, true)
 	u.cjkFont = createCJKFont(u.cfg.FontSizePx)
@@ -1463,6 +1528,7 @@ func (u *winUI) loop() error {
 		u.applyClientSize(rc.Right-rc.Left, rc.Bottom-rc.Top)
 		log.Info("initial client size", "w", u.width, "h", u.height, "cols", u.cols, "rows", u.rows)
 	}
+	logDisplayTopology(hwnd)
 
 	if wantMax {
 		win.ShowWindow(hwnd, win.SW_SHOWMAXIMIZED)
@@ -1498,17 +1564,22 @@ func (u *winUI) loop() error {
 		win.InvalidateRect(hwnd, nil, false)
 	}
 	go u.blinkLoop()
+	go u.frameLoop()
+	go u.heartbeatLoop()
 
 	var msg win.MSG
 	for {
 		ret := win.GetMessage(&msg, 0, 0, 0)
 		if ret == 0 {
 			log.Info("WM_QUIT — message loop exit")
+			applog.WriteCrashNote("message-loop", "reason", "WM_QUIT")
+			applog.Sync()
 			break
 		}
 		if ret == -1 {
 			err := lastErr("GetMessage")
 			log.Error("GetMessage failed", "err", err)
+			applog.WriteCrashNote("message-loop", "reason", "GetMessage-failed", "err", err)
 			return err
 		}
 		win.TranslateMessage(&msg)
@@ -1530,6 +1601,10 @@ func registerUI(hwnd win.HWND, u *winUI) {
 	uiMu.Unlock()
 	// HWND exists; saved glass must apply before the first ShowWindow.
 	if u != nil && u.hwnd != 0 {
+		// FRAMECHANGED first, then DwmExtend. The other order (96146e7)
+		// let SetWindowPos drop the sheet-of-glass so only a frame sliver
+		// showed desktop and the client stayed opaque black.
+		applyWindowChromeFrame(hwnd)
 		u.applyGlassBackdrop()
 	}
 }
@@ -1552,6 +1627,14 @@ var wndProcCallback = syscall.NewCallback(wndProcMain)
 func wndProcMain(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	// A panic in WndProc would otherwise kill the process with no trail.
 	defer applog.Recover("wndproc", false)
+	uiWatchEnter(wmPhaseName(msg))
+	defer uiWatchLeave()
+	if d := uiWatchDepth.Load(); wndProcShouldAbort(d) {
+		applog.WriteCrashNote("wndproc-depth", "depth", d, "msg", fmt.Sprintf("0x%x", msg))
+		log.Error("wndproc depth abort", "depth", d, "msg", fmt.Sprintf("0x%x", msg))
+		applog.Sync()
+		return win.DefWindowProc(hwnd, msg, wParam, lParam)
+	}
 	u := uiFor(hwnd)
 	if u == nil {
 		return win.DefWindowProc(hwnd, msg, wParam, lParam)
@@ -1559,11 +1642,42 @@ func wndProcMain(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	return u.handle(hwnd, msg, wParam, lParam)
 }
 
-func postBytes(u *winUI, tabID int) {
-	if u.hwnd == 0 {
-		return
+func wmPhaseName(msg uint32) string {
+	switch msg {
+	case win.WM_PAINT:
+		return "WM_PAINT"
+	case wmSuzuriBlink:
+		return "wmSuzuriBlink"
+	case wmSuzuriFrame:
+		return "wmSuzuriFrame"
+	case wmSuzuriGlassRefresh:
+		return "wmSuzuriGlassRefresh"
+	case wmSuzuriBytes:
+		return "wmSuzuriBytes"
+	case wmSuzuriLayoutSettle:
+		return "wmSuzuriLayoutSettle"
+	case win.WM_SIZE:
+		return "WM_SIZE"
+	case win.WM_KEYDOWN:
+		return "WM_KEYDOWN"
+	case win.WM_MOUSEMOVE:
+		return "WM_MOUSEMOVE"
+	case win.WM_MOUSELEAVE:
+		return "WM_MOUSELEAVE"
+	case win.WM_NCMOUSELEAVE:
+		return "WM_NCMOUSELEAVE"
+	case win.WM_NCHITTEST:
+		return "WM_NCHITTEST"
+	default:
+		return fmt.Sprintf("msg=0x%x", msg)
 	}
-	win.PostMessage(u.hwnd, wmSuzuriBytes, uintptr(tabID), 0)
+}
+
+func postBytes(u *winUI, tabID int) bool {
+	if u == nil || u.hwnd == 0 {
+		return false
+	}
+	return win.PostMessage(u.hwnd, wmSuzuriBytes, uintptr(tabID), 0) != 0
 }
 
 func postClosed(u *winUI, tabID int) {
@@ -1620,15 +1734,136 @@ func (u *winUI) blinkLoop() {
 	defer t.Stop()
 	// Full-rate ticks when focused (or when AnimateUnfocused is on). Skipping
 	// entirely while backgrounded freezes rain/spinners — optional for low CPU.
+	// Never pile blinks: if the UI thread is in WM_PAINT, extra PostMessage
+	// turns a slow GDI present into a frozen input queue.
 	for range t.C {
 		if !u.alive.Load() || u.hwnd == 0 {
 			return
 		}
-		if !u.cfg.AnimateUnfocused && win.GetForegroundWindow() != u.hwnd {
+		if !u.cfg.AnimateUnfocused && !u.hostFocused {
+			uiWatchExpectFrames(false)
 			continue
 		}
-		win.PostMessage(u.hwnd, wmSuzuriBlink, 0, 0)
+		uiWatchExpectFrames(true)
+		if !u.blinkPosted.CompareAndSwap(false, true) {
+			continue
+		}
+		if win.PostMessage(u.hwnd, wmSuzuriBlink, 0, 0) == 0 {
+			u.blinkPosted.Store(false)
+		}
 	}
+}
+
+func (u *winUI) wantsAmbientFrames() bool {
+	if u == nil {
+		return false
+	}
+	return u.shellAmbientOn() || u.matrixIntroActive() || u.chrome.SettingsOpen
+}
+
+func (u *winUI) displayRefreshHz() int32 {
+	if u == nil || u.hwnd == 0 {
+		return 60
+	}
+	_, _, hz := deviceCaps(u.hwnd)
+	return hz
+}
+
+func (u *winUI) scheduleGlassRefresh() {
+	if u == nil || u.hwnd == 0 || !u.shellGlass() {
+		return
+	}
+	// Never PostMessage during size/move — the modal drag loop will
+	// dispatch it and call DWM mid-drag (c67fd3f).
+	if !glassMayPostRefresh(u.inSizeMove) {
+		u.glassRefreshDeferred = true
+		return
+	}
+	if !u.glassRefreshPosted.CompareAndSwap(false, true) {
+		return
+	}
+	if win.PostMessage(u.hwnd, wmSuzuriGlassRefresh, 0, 0) == 0 {
+		u.glassRefreshPosted.Store(false)
+		u.glassRefreshDeferred = true
+	}
+}
+
+func (u *winUI) flushDeferredGlassRefresh() {
+	if u == nil || u.inSizeMove || !u.glassRefreshDeferred {
+		return
+	}
+	u.glassRefreshDeferred = false
+	u.scheduleGlassRefresh()
+}
+
+func (u *winUI) frameLoop() {
+	period := ambientFramePeriod(u.displayRefreshHz())
+	t := time.NewTicker(period)
+	defer t.Stop()
+	log.Info("ambient frame loop", "period", period.Round(time.Millisecond).String(),
+		"hz", u.displayRefreshHz())
+	for range t.C {
+		if !u.alive.Load() || u.hwnd == 0 {
+			return
+		}
+		if !u.cfg.AnimateUnfocused && !u.hostFocused {
+			continue
+		}
+		if !u.hostFocused && !shouldAmbientWhileUnfocused(
+			u.cfg.AnimateUnfocused, u.anyPaneConPtyBusy(), u.slowPaintN > 0) {
+			continue
+		}
+		if !u.hostFocused && !u.allowUnfocusedPresent() {
+			continue
+		}
+		if !u.wantsAmbientFrames() {
+			continue
+		}
+		if !u.framePosted.CompareAndSwap(false, true) {
+			continue
+		}
+		if win.PostMessage(u.hwnd, wmSuzuriFrame, 0, 0) == 0 {
+			u.framePosted.Store(false)
+		}
+	}
+}
+
+func (u *winUI) heartbeatLoop() {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if !u.alive.Load() {
+			return
+		}
+		writeUIHeartbeat(u)
+	}
+}
+
+func writeUIHeartbeat(u *winUI) {
+	if u == nil {
+		return
+	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	gdi, user := guiObjectCounts()
+	inbuf := 0
+	if t := u.activeTab(); t != nil {
+		t.inMu.Lock()
+		inbuf = len(t.inBuf)
+		t.inMu.Unlock()
+	}
+	applog.Heartbeat(
+		"goroutines", runtime.NumGoroutine(),
+		"heap_mb", ms.HeapAlloc>>20,
+		"gdi", gdi,
+		"user", user,
+		"handles", processHandleCount(),
+		"paint_ms", u.lastPaintMS.Load(),
+		"focused", u.hostFocused,
+		"inbuf", inbuf,
+		"pty_hot", u.anyPaneConPtyBusy(),
+		"slow_n", u.slowPaintN,
+	)
 }
 
 // drainAndParse runs ONLY on the UI thread for the given tab id.
@@ -1681,7 +1916,7 @@ func (u *winUI) drainAndParse(tabID int) {
 		}
 		if visible {
 			u.markShellDirty()
-			u.requestPaint()
+			u.requestPaintFromPTY()
 		}
 		return
 	}
@@ -1695,7 +1930,9 @@ func (u *winUI) drainAndParse(tabID int) {
 	} else if res.TitleChanged {
 		u.chromeDirty = true
 	}
-	if res.TitleChanged && u.activeTab() == t {
+	// SetWindowText is a SendMessage. Skip it while alt-tabbed during a
+	// grok-fork flood — the title can wait for the next focused paint.
+	if res.TitleChanged && u.activeTab() == t && u.hostFocused {
 		setWindowTitle(u.hwnd, "suzuri — "+res.Title)
 	}
 	u.tryFlushCmdQueue(t)
@@ -1703,12 +1940,14 @@ func (u *winUI) drainAndParse(tabID int) {
 		u.publishBridgeSnapshot()
 	}
 	if visible {
-		u.requestPaint()
+		u.requestPaintFromPTY()
 	}
 	if res.More {
 		t.postBytes(u)
 	}
-	driveNotices(time.Now(), u.hostFocused, true)
+	if u.hostFocused {
+		driveNotices(time.Now(), u.hostFocused, true)
+	}
 }
 
 func (u *winUI) tabByID(id int) *tab {
@@ -2032,6 +2271,7 @@ func (u *winUI) closeTabUI(id int) {
 // Last pane of last page quits immediately (no confirm) — shell semantics.
 func (u *winUI) sessionEndedCloseTab(id int) {
 	defer applog.Recover("sessionEndedCloseTab", false)
+	applog.Trail("session ended", "tab", id, "tabs", len(u.tabs), "pages", len(u.pages))
 	u.closePaneUI(id, false)
 }
 
@@ -2184,10 +2424,35 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.drainAndParse(int(wParam))
 		return 0
 
+	case wmSuzuriFrame:
+		u.framePosted.Store(false)
+		if u.alive.Load() && !u.inSizeMove {
+			u.flushDeferredGlassRefresh()
+			if u.wantsAmbientFrames() {
+				u.markShellDirty()
+				u.requestPaint()
+			}
+		}
+		return 0
+
+	case wmSuzuriGlassRefresh:
+		u.glassRefreshPosted.Store(false)
+		if !u.alive.Load() || !u.shellGlass() {
+			return 0
+		}
+		if u.inSizeMove {
+			u.glassRefreshDeferred = true
+			return 0
+		}
+		u.pushGlassBackdrop(true, win.WM_ACTIVATE)
+		return 0
+
 	case wmSuzuriBlink:
+		u.blinkPosted.Store(false)
 		// Skip blink repaints during frame drag/resize — they fight WM_PAINT
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
+			u.flushDeferredGlassRefresh()
 			u.syncTermFocus()
 			// Darwin drains AI control every ebiten Update. Windows only used
 			// to drain on MCP posts, so GET /v1/layout from a pane 504'd.
@@ -2271,21 +2536,21 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			} else if needScrollPaint {
 				u.markShellDirty()
 				u.requestPaint()
-			} else if u.inputOnlyDirty && !u.activeAltScreen() {
-				// Sticky bar-only after Warp-bar typing. Darwin freezes rain
-				// here; we unstick every few ticks so droplets keep moving
-				// without a full 25fps grid blit on every keystroke.
-				if u.shellAmbientOn() && u.spinTick%uint64(tabSpinEveryNTicks*3) == 0 {
-					u.markShellDirty()
-				}
+			} else if u.inputOnlyDirty && !u.activeAltScreen() && !u.wantsAmbientFrames() {
+				// Sticky bar-only after Warp-bar typing. Rain/settings use
+				// wmSuzuriFrame so this path never starves the underlay.
 				u.requestPaint()
 			} else if u.chrome.OverlayOpen() {
 				// Palette/help float over a live shell — need full composite.
 				u.requestPaint()
 			} else if u.needsShellAnimPaint() {
-				// Idle rain at full blink rate. Dual-Grok cheapens the rain
-				// painter, not the frame rate (6fps looked like lag after typing).
-				u.requestPaint()
+				// Caret / alt-screen cursor. Rain is owned by frameLoop.
+				if u.wantsAmbientFrames() {
+					u.markShellDirty()
+				}
+				if u.allowUnfocusedPresent() {
+					u.requestPaint()
+				}
 			} else {
 				// Idle shell, no ambient: only pulse the Warp caret.
 				u.requestInputPaint()
@@ -2294,6 +2559,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			// PTY bytes alone would leave a card up until the next write.
 			if noticeCount() > 0 || noticePanelUp() {
 				driveNotices(time.Now(), u.hostFocused, !win.IsIconic(hwnd))
+			}
+			for _, t := range u.allPanes() {
+				if t != nil && t.ingestStalled() {
+					u.drainAndParse(t.id)
+				}
 			}
 		}
 		return 0
@@ -2413,16 +2683,40 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				}
 			}
 		}
-		// Do not full-repaint on deactivate. Dual Grok + rain + InvalidateRect
-		// here is the "clicked away → process gone" GDI hard-kill (no Go panic).
-		// Caret freeze while unfocused is cheaper than taking the host down.
+		// Never DwmExtend/SetAccent on this stack. Those APIs send
+		// WM_NCACTIVATE synchronously and overflow the native callback
+		// (silent death, no Go panic, no WER). Post a coalesced refresh
+		// only when this is not a caption click (WA_CLICKACTIVE starts
+		// a drag; the posted refresh would run inside the modal loop).
+		if u.shellGlass() {
+			if post, deferUntilExit := glassActivatePolicy(uint32(active), u.inSizeMove); post {
+				u.scheduleGlassRefresh()
+			} else if deferUntilExit {
+				u.glassRefreshDeferred = true
+			}
+		}
 		if active != win.WA_INACTIVE && u.alive.Load() {
 			win.InvalidateRect(hwnd, nil, false)
 		}
 		return 0
 
+	case win.WM_NCACTIVATE:
+		// Mid-drag: do not DefWindowProc / DwmDefWindowProc — those
+		// re-apply chrome and re-enter DWM on the size/move stack.
+		if u.inSizeMove {
+			return 1
+		}
+		// Skip native NC paint (lParam=-1) so DWM does not flash a light
+		// caption over FrameWindows. Do not touch DWM composition here —
+		// SetAccent/DwmExtend re-enter this handler and blow the stack.
+		if u.chrome.Frame == chrome.FrameWindows {
+			return win.DefWindowProc(hwnd, msg, wParam, ^uintptr(0))
+		}
+		return win.DefWindowProc(hwnd, msg, wParam, lParam)
+
 	case win.WM_ENTERSIZEMOVE:
-		// Begin move or resize: defer ConPTY/tab resize until the gesture ends.
+		// Begin move or resize: defer ConPTY/tab resize and all DWM
+		// composition until the gesture ends.
 		u.inSizeMove = true
 		log.Debug("WM_ENTERSIZEMOVE")
 		return 0
@@ -2453,12 +2747,19 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if w >= 2 && h >= 2 {
 				u.width, u.height = w, h
 			}
-			log.Info("WM_EXITSIZEMOVE", "w", w, "h", h)
+			var wr win.RECT
+			win.GetWindowRect(hwnd, &wr)
+			log.Info("WM_EXITSIZEMOVE",
+				"client_w", w, "client_h", h,
+				"win_x", wr.Left, "win_y", wr.Top,
+				"win_w", wr.Right-wr.Left, "win_h", wr.Bottom-wr.Top)
 			applog.Sync()
 		}
 		// Remember frame pos/size (and monitor) after the user finishes dragging.
 		u.persistWindowPlacement(false)
 		u.postLayoutSettle()
+		// Post glass — do not call DWM on the EXITSIZEMOVE stack.
+		u.flushDeferredGlassRefresh()
 		return 0
 
 	case win.WM_MOVE:
@@ -2565,6 +2866,16 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		alt := win.GetKeyState(win.VK_MENU) < 0
 		tab := u.activeTab()
 
+		// Ctrl+Shift+F8 — verbose frame timing for the next freeze report.
+		if ctrl && shift && !alt && wParam == win.VK_F8 {
+			on := toggleFrameTiming()
+			if on {
+				u.toast("frame timing on")
+			} else {
+				u.toast("frame timing off")
+			}
+			return 0
+		}
 		// Ctrl+Shift+M — toggle notes (works even while notes overlay is open).
 		if ctrl && shift && !alt && (wParam == 'M' || wParam == 'm') {
 			r := u.chrome.UpdateChrome(chrome.ToggleNotesMsg{})
@@ -3339,10 +3650,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 
-		// Title strip: caption buttons, bell, cup, +, tabs. Empty pixels are
-		// HTCAPTION, so they never arrive here.
+		// Title strip: caption buttons are HTCLIENT (so DWM does not paint
+		// a second set). Empty strip pixels stay HTCAPTION.
 		if py < chromeH {
 			if hit := u.hitCaptionButton(px, py); hit >= 0 {
+				u.setCaptionDown(hwnd, hit)
 				switch frameActionForHit(u.chrome.Frame, hit) {
 				case chrome.FrameClose:
 					win.PostMessage(hwnd, win.WM_CLOSE, 0, 0)
@@ -3549,18 +3861,41 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_MOUSELEAVE:
-		u.captionLeaveTrk = false
-		u.trackCaptionHover(hwnd, -1, -1)
+		// Do not call trackCaptionHover here. Re-arming TME_LEAVE while the
+		// cursor is already outside the client (or over HTCAPTION on the
+		// custom frame) makes Windows post another WM_MOUSELEAVE immediately
+		// and starves the UI thread — the 0.9.160 / 7b0eb25 freeze.
+		u.clearCaptionHover(hwnd)
 		return 0
 
-	case win.WM_NCMOUSEMOVE:
-		if u.captionHot >= 0 {
-			u.captionHot = -1
-			u.captionLeaveTrk = false
-			win.InvalidateRect(hwnd, nil, false)
+	case win.WM_NCMOUSELEAVE:
+		u.captionNCLeaveTrk = false
+		u.clearCaptionHover(hwnd)
+		return 0
+
+	case win.WM_NCLBUTTONDOWN:
+		if u.chrome.Frame == chrome.FrameWindows {
+			u.setCaptionDown(hwnd, u.hitCaptionButtonScreen(lParam))
 		}
 
+	case win.WM_NCLBUTTONUP:
+		if u.chrome.Frame == chrome.FrameWindows {
+			u.setCaptionDown(hwnd, -1)
+		}
+
+	case 0x00AE, 0x00AF: // WM_NCUAHDRAWCAPTION / WM_NCUAHDRAWFRAME
+		// Stop the theme from stamping a second min/max/close over ours.
+		if u.chrome.Frame == chrome.FrameWindows {
+			return 0
+		}
+
+	case win.WM_NCMOUSEMOVE:
+		// Hover for our glyphs. Snap Layouts come from returning
+		// HTMAXBUTTON in WM_NCHITTEST, not from DwmDefWindowProc.
+		u.trackCaptionHoverScreen(hwnd, lParam)
+
 	case win.WM_LBUTTONUP:
+		u.setCaptionDown(hwnd, -1)
 		if u.sashDrag != nil {
 			u.sashDrag = nil
 			win.ReleaseCapture()
@@ -3623,9 +3958,17 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_CLOSE:
 		log.Info("WM_CLOSE")
+		applog.WriteCrashNote("WM_CLOSE", "tabs", len(u.tabs))
+		applog.Sync()
 		// Capture placement while the HWND is still valid.
 		u.persistWindowPlacement(true)
 		win.DestroyWindow(hwnd)
+		return 0
+
+	case 0x0016: // WM_ENDSESSION
+		applog.WriteCrashNote("WM_ENDSESSION", "wparam", wParam, "lparam", lParam)
+		applog.MarkClean()
+		applog.Sync()
 		return 0
 
 	case win.WM_DESTROY:
@@ -3633,6 +3976,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.persistWindowPlacement(true)
 		u.persistNotes()
 		log.Info("WM_DESTROY — tearing down", "tabs", len(u.tabs))
+		applog.WriteCrashNote("WM_DESTROY", "tabs", len(u.tabs))
+		applog.MarkClean()
 		u.alive.Store(false)
 		if u.caffeine != nil {
 			u.caffeine.Close()
@@ -3671,19 +4016,38 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		win.PostQuitMessage(0)
 		return 0
 
+	case win.WM_SYSCOMMAND:
+		// No WS_SYSMENU — DWM will not draw caption sprites. Taskbar /
+		// Win+arrow / Alt+F4 still send these; we own min/max/restore/close.
+		if u.chrome.Frame == chrome.FrameWindows && handleFrameSysCommand(hwnd, wParam) {
+			return 0
+		}
+
 	case win.WM_NCCALCSIZE:
-		if wParam != 0 && u.chrome.Frame == chrome.FrameWindows {
+		if u.chrome.Frame == chrome.FrameWindows {
 			return u.frameCalcSize(hwnd, msg, wParam, lParam)
 		}
+	case 0x033F: // WM_GETTITLEBARINFOEX — hide DWM's caption-button sprites
+		if u.chrome.Frame == chrome.FrameWindows && lParam != 0 {
+			ret := win.DefWindowProc(hwnd, msg, wParam, lParam)
+			hideDWMCaptionButtons((*titleBarInfoEx)(unsafe.Pointer(lParam)))
+			return ret
+		}
+
 	case win.WM_NCHITTEST:
 		if u.chrome.Frame == chrome.FrameWindows {
 			if hit := u.frameHitTest(hwnd, lParam); hit != 0 {
-				return hit
+				// Do not call DwmDefWindowProc — it returns HTMIN/MAX/CLOSE
+				// in DWM's default button rects and those sprites come back.
+				// presentCaptionHit keeps HTMAXBUTTON for Snap Layouts.
+				return uintptr(presentCaptionHit(int(hit)))
 			}
 		}
 	case win.WM_QUIT:
 		// DefWindowProc path — message loop also sees GetMessage==0.
 		log.Info("WM_QUIT")
+		applog.WriteCrashNote("WM_QUIT", "wparam", wParam)
+		applog.Sync()
 		return 0
 	}
 	return win.DefWindowProc(hwnd, msg, wParam, lParam)
@@ -3692,6 +4056,20 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 func (u *winUI) paint(hwnd win.HWND) {
 	// Native AVs still won't land here, but Go panics in chrome/VT must not
 	// kill the process with no trail (focus-after-idle was a common path).
+	started := time.Now()
+	var paintW, paintH int32
+	fullPaint := false
+	timing := frameTimingOn()
+	var stageBuf []string
+	stageLast := started
+	mark := func(name string) {
+		if !timing {
+			return
+		}
+		now := time.Now()
+		stageBuf = append(stageBuf, fmt.Sprintf("%s=%d", name, now.Sub(stageLast).Milliseconds()))
+		stageLast = now
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("paint panic",
@@ -3700,6 +4078,15 @@ func (u *winUI) paint(hwnd win.HWND) {
 			)
 			applog.Sync()
 		}
+		if timing && len(stageBuf) > 0 {
+			log.Info("paint stages",
+				"ms", time.Since(started).Milliseconds(),
+				"full", fullPaint,
+				"w", paintW, "h", paintH,
+				"parts", strings.Join(stageBuf, " "),
+			)
+		}
+		u.notePaintDuration(time.Since(started), paintW, paintH, fullPaint)
 	}()
 
 	// Accept new coalesced invalidates while we paint.
@@ -3717,6 +4104,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 	win.GetClientRect(hwnd, &rect)
 	w := rect.Right - rect.Left
 	h := rect.Bottom - rect.Top
+	paintW, paintH = w, h
 	// Minimized / zero-size clients still get WM_PAINT — do nothing useful.
 	if w < 2 || h < 2 {
 		return
@@ -3804,6 +4192,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 			u.paintWinCaption(dest, rect)
 			u.paintImageModal(dest, rect)
 			win.SelectObject(dest, oldF)
+			mark("chrome")
 			return
 		}
 		// Notes-style scoping for the Warp bar: when only bar text/caret changed,
@@ -3811,7 +4200,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 		// Shell rain freezes while we stay here — acceptable, same tradeoff as
 		// notes overlay scoping so typing does not re-blit the whole grid.
 		if u.inputOnlyDirty && !overlay && !dimModal &&
-			!u.matrixIntroActive() && !u.activeAltScreen() &&
+			!u.matrixIntroActive() && !u.shellAmbientOn() && !u.activeAltScreen() &&
 			u.memDC != 0 && dest == u.memDC && u.font != 0 &&
 			u.memW == w && u.memH == h {
 			oldF := win.SelectObject(dest, win.HGDIOBJ(u.font))
@@ -3830,14 +4219,17 @@ func (u *winUI) paint(hwnd win.HWND) {
 			if !u.chrome.OverlayOpen() {
 				u.overlayDirty = false
 			}
+			mark("chrome")
 			return
 		}
 		// Full paint path — shell is authoritative again.
 		u.inputOnlyDirty = false
+		fullPaint = true
 
 		// Void fill once; per-pane blit draws cells only.
 		// Glass: stock black (DWM color key). Chroma cells skip their fill.
 		u.fillClientBase(dest, rect)
+		mark("base")
 		padY := u.shellPadY()
 		shellBot := u.shellBottomY(rect.Bottom - rect.Top)
 
@@ -3904,6 +4296,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 			if u.shellAmbientOn() && !u.matrixIntroActive() {
 				u.paintShellAmbientOver(dest, rect, padY, shellBot)
 			}
+			mark("grid")
 			if len(layouts) > 1 {
 				u.paintPaneTitles(dest, layouts)
 			}
@@ -3959,19 +4352,23 @@ func (u *winUI) paint(hwnd win.HWND) {
 		// Image lightbox on top of everything (Grok click / shell image block).
 		u.paintImageModal(dest, rect)
 		win.SelectObject(dest, oldF)
+		mark("chrome")
 	}
 
 	if !u.ensureBackbuffer(hdc, w, h) {
 		draw(hdc)
+		mark("present")
 		return
 	}
 	draw(u.memDC)
+	u.logGlassPresentSample(u.memDC, rect)
 	if !win.BitBlt(hdc, 0, 0, w, h, u.memDC, 0, 0, win.SRCCOPY) {
 		// Fallback if BitBlt fails (stale DC after long suspend).
 		log.Warn("BitBlt failed — direct paint fallback")
 		u.releaseBackbuffer()
 		draw(hdc)
 	}
+	mark("present")
 }
 
 // configVisualEqual is true when live-previewable fields match (cancel no-op).
@@ -4100,6 +4497,7 @@ func (u *winUI) persistWindowPlacement(forceLog bool) {
 		return
 	}
 	u.cfg.Window = p
+	// Session rain suppress must never ride on this write (see suppressAmbient).
 	if err := config.Save(u.cfg); err != nil {
 		log.Warn("window placement save failed", "err", err)
 		return
@@ -4508,11 +4906,11 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 			last := grid[n-1]
 			if len(last) > 0 {
 				c := last[0]
-				if !cellBGChromaKey(c.BR, c.BG, c.BB) {
+				if !cellBGShowsGlass(c.BR, c.BG, c.BB) {
 					br, bg, bb = c.BR, c.BG, c.BB
 				} else {
 					for _, cell := range last {
-						if !cellBGChromaKey(cell.BR, cell.BG, cell.BB) {
+						if !cellBGShowsGlass(cell.BR, cell.BG, cell.BB) {
 							br, bg, bb = cell.BR, cell.BG, cell.BB
 							break
 						}
@@ -4561,7 +4959,7 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 		}
 		var bgs []bgRun
 		for x, c := range row {
-			if cellBGChromaKey(c.BR, c.BG, c.BB) {
+			if cellBGShowsGlass(c.BR, c.BG, c.BB) {
 				continue
 			}
 			if n := len(bgs); n > 0 && bgs[n-1].x1 == x-1 &&
@@ -4960,7 +5358,7 @@ func fillRect(hdc win.HDC, r win.RECT, brush win.HBRUSH) {
 // fillSolidRGB skips chroma-key near-black so rain/watermark show through
 // (GrokNight canvas 26,27,38). Real bands stay opaque GDI fills.
 func fillSolidRGB(hdc win.HDC, r win.RECT, cr, cg, cb byte) {
-	if cellBGChromaKey(cr, cg, cb) {
+	if cellBGShowsGlass(cr, cg, cb) {
 		return
 	}
 	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(cr, cg, cb)}
@@ -5557,7 +5955,7 @@ func (u *winUI) pasteAltScreenAsync(bracket bool) {
 	if imgPath, err := readClipboardImageFile(); err == nil && imgPath != "" {
 		log.Info("paste clipboard image", "path", imgPath)
 		u.pendingPasteMu.Lock()
-		u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: framePaste(imgPath, bracket), toast: "image pasted"})
+		u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{payload: framePaste(imgPath, bracket), toast: "image pasted"})
 		u.pendingPasteMu.Unlock()
 		return
 	} else if err != nil {
@@ -5569,7 +5967,7 @@ func (u *winUI) pasteAltScreenAsync(bracket bool) {
 	}
 	// Host bracketed paste only — Super+V + payload double-pasted into Grok.
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
+	u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
 	u.pendingPasteMu.Unlock()
 }
 
@@ -5737,9 +6135,17 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 		log.Warn("CreateCompatibleDC failed")
 		return false
 	}
-	u.memBmp = win.CreateCompatibleBitmap(hdc, w, h)
+	// System-memory DIB, not CreateCompatibleBitmap. A device bitmap lives in
+	// one GPU's memory; BitBlt to a window composed on the other adapter
+	// (RTX + AMD iGPU, 239 Hz + 144 Hz) can stall the UI thread in DWM and
+	// once took down the whole desktop.
+	// 24-bit sys-mem DIB (glassPresentBits): no alpha, so RGB(0,0,0)
+	// stays the DWM color key. A 32-bit BI_RGB DIB realizes alpha on
+	// BitBlt and the holes go opaque black. Never SetDIBitsToDevice a
+	// 32-bit source onto memDC.
+	u.memBmp = createSysMemBitmap(hdc, w, h)
 	if u.memBmp == 0 {
-		log.Warn("CreateCompatibleBitmap failed", "w", w, "h", h)
+		log.Warn("CreateDIBSection backbuffer failed", "w", w, "h", h)
 		win.DeleteDC(u.memDC)
 		u.memDC = 0
 		return false
@@ -5757,6 +6163,118 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	}
 	u.memW, u.memH = w, h
 	return true
+}
+
+func createSysMemBitmap(hdc win.HDC, w, h int32) win.HBITMAP {
+	if w < 1 || h < 1 {
+		return 0
+	}
+	bmi := win.BITMAPINFOHEADER{
+		BiSize:        uint32(unsafe.Sizeof(win.BITMAPINFOHEADER{})),
+		BiWidth:       w,
+		BiHeight:      -h,
+		BiPlanes:      1,
+		BiBitCount:    glassPresentBits,
+		BiCompression: win.BI_RGB,
+	}
+	var bits unsafe.Pointer
+	return win.CreateDIBSection(hdc, &bmi, dibRGBColors, &bits, 0, 0)
+}
+
+func logDisplayTopology(hwnd win.HWND) {
+	n := win.GetSystemMetrics(win.SM_CMONITORS)
+	vx := win.GetSystemMetrics(smCXVIRTUALSCREEN)
+	vy := win.GetSystemMetrics(smCYVIRTUALSCREEN)
+	primW, primH, primHz := deviceCaps(0)
+	winW, winH, winHz := deviceCaps(hwnd)
+	log.Info("display topology",
+		"monitors", n,
+		"virtual", fmt.Sprintf("%dx%d", vx, vy),
+		"primary", fmt.Sprintf("%dx%d@%dHz", primW, primH, primHz),
+		"window_dc", fmt.Sprintf("%dx%d@%dHz", winW, winH, winHz),
+	)
+}
+
+func deviceCaps(hwnd win.HWND) (w, h, hz int32) {
+	hdc := win.GetDC(hwnd)
+	if hdc == 0 {
+		return 0, 0, 0
+	}
+	defer win.ReleaseDC(hwnd, hdc)
+	return win.GetDeviceCaps(hdc, win.HORZRES),
+		win.GetDeviceCaps(hdc, win.VERTRES),
+		win.GetDeviceCaps(hdc, win.VREFRESH)
+}
+
+func (u *winUI) notePaintDuration(d time.Duration, w, h int32, full bool) {
+	if u == nil {
+		return
+	}
+	noteUIFrame()
+	n := uiPaintLogN.Add(1)
+	u.lastPaintMS.Store(d.Milliseconds())
+	// GetGuiResources every WM_PAINT is a kernel trip on the hot path.
+	// Heartbeat already samples GDI/USER; only count here when we log.
+	if frameTimingOn() || d >= slowPaintWarn || n <= 5 {
+		gdi, user := guiObjectCounts()
+		log.Info("paint",
+			"ms", d.Milliseconds(),
+			"full", full,
+			"w", w, "h", h,
+			"ambient", u.shellAmbientOn(),
+			"suppressed", u.ambientSuppressed,
+			"gdi", gdi,
+			"user", user,
+			"wndproc_depth", uiWatchDepth.Load(),
+		)
+		if gdi >= gdiObjectWarn || user >= userObjectWarn {
+			applog.Trail("gui objects high", "gdi", gdi, "user", user, "ms", d.Milliseconds())
+		}
+	}
+	if !full {
+		return
+	}
+	u.lastFullPaint = time.Now()
+	if d >= slowPaintWarn {
+		u.slowPaintN++
+	} else if d < 40*time.Millisecond {
+		u.slowPaintN = 0
+	}
+	if !u.ambientSuppressed && u.cfg.AmbientActive() && shouldDisableAmbient(d, u.slowPaintN) {
+		u.suppressAmbient(d)
+	}
+}
+
+func (u *winUI) suppressAmbient(d time.Duration) {
+	if u == nil || u.ambientSuppressed {
+		return
+	}
+	prev := u.cfg.ShellAmbient
+	next, keepSaved, toast := sessionSuppressAmbient(u.ambientSuppressed, prev)
+	if !next {
+		return
+	}
+	u.ambientSuppressed = true
+	// keepSaved must stay on u.cfg. persistWindowPlacement / Save(u.cfg)
+	// would write none if we assigned AmbientNone here.
+	if u.cfg.ShellAmbient != keepSaved {
+		u.cfg.ShellAmbient = keepSaved
+	}
+	gdi, user := guiObjectCounts()
+	log.Warn("disabled shell ambient for this session",
+		"was", prev,
+		"paint_ms", d.Milliseconds(),
+		"gdi", gdi, "user", user,
+		"wndproc_depth", uiWatchDepth.Load(),
+		"saved", u.cfg.ShellAmbient,
+		"hint", "session only — config is unchanged")
+	applog.Trail("ambient suppressed", "was", prev, "ms", d.Milliseconds(),
+		"gdi", gdi, "user", user, "depth", uiWatchDepth.Load(),
+		"saved", u.cfg.ShellAmbient)
+	applog.Sync()
+	// Never toast / PlaySound / Invalidate on the WM_PAINT stack.
+	u.postToast(toast)
+	u.markShellDirty()
 }
 
 // needsShellAnimPaint is true when the shell underlay or alt-screen caret must
@@ -6157,7 +6675,7 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 					pane: t, x: 0, w: w, barY: rect.Bottom - barH, barH: barH,
 					barCols: paneInputContentCols(w, cw), focused: true,
 				}
-				u.paintPaneInputBar(hdc, g)
+				u.paintPaneInputBar(hdc, g, rect.Right, rect.Bottom)
 			}
 		}
 		return
@@ -6166,12 +6684,12 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 		if g.barH < 1 || g.pane == nil {
 			continue
 		}
-		u.paintPaneInputBar(hdc, g)
+		u.paintPaneInputBar(hdc, g, rect.Right, rect.Bottom)
 	}
 }
 
 // paintPaneInputBar draws one pane's command line into g.barY/g.barH.
-func (u *winUI) paintPaneInputBar(hdc win.HDC, g paneGeom) {
+func (u *winUI) paintPaneInputBar(hdc win.HDC, g paneGeom, clientW, clientH int32) {
 	if hdc == 0 || g.pane == nil || g.barH < 1 {
 		return
 	}
@@ -6182,10 +6700,7 @@ func (u *winUI) paintPaneInputBar(hdc win.HDC, g paneGeom) {
 	if ch < 1 {
 		ch = cellH
 	}
-	top := g.barY
-	left := g.x
-	right := g.x + g.w
-	bot := g.barY + g.barH
+	left, top, right, bot := inputBarFlushRect(g, clientW, clientH)
 
 	// Panel fill (slightly dimmer when unfocused).
 	pr, pg, pb := chrome.PanelR, chrome.PanelG, chrome.PanelB
@@ -6341,7 +6856,7 @@ func (u *winUI) paintInputCaret(hdc win.HDC, x, y, cw, ch int32) {
 // caretAlpha is 0..1 for a smooth pulse while focused; 0 when unfocused
 // (hide caret — same convention as most terminals).
 func (u *winUI) caretAlpha() float64 {
-	if u.hwnd == 0 || win.GetForegroundWindow() != u.hwnd {
+	if u.hwnd == 0 || !u.hostFocused {
 		return 0
 	}
 	elapsed := time.Since(u.blinkStart).Seconds()
@@ -6577,8 +7092,7 @@ func (u *winUI) paintChrome(hdc win.HDC, rect win.RECT) {
 	u.paintChromeCells(hdc, rect, cells, 0, cellShift, true)
 	if u.chrome.Frame == chrome.FrameWindows {
 		u.paintBrandMark(hdc, chromeH)
-		u.paintCaffeineCup(hdc, chromeH)
-		u.paintWinCaption(hdc, rect)
+		u.paintStripTrailingIcons(hdc, rect)
 	}
 	u.chromePx = chromeH
 }

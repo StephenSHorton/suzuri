@@ -79,18 +79,24 @@ func rgbaToHBITMAP(hdc win.HDC, src image.Image) *imgBitmap {
 	if w < 1 || h < 1 {
 		return nil
 	}
-	rowBytes := (w*4 + 3) & ^3
+	// 24-bit, not 32. StretchBlt of a 32-bit DIB onto the window backbuffer
+	// marks that DIB alpha-aware: BLACK_BRUSH glass holes become opaque
+	// black and the rest of WM_PAINT crawls. Flatten coverage onto RGB.
+	rowBytes := (w*3 + 3) & ^3
 	pixels := make([]byte, rowBytes*h)
 	for y := 0; y < h; y++ {
 		dy := h - 1 - y
 		off := dy * rowBytes
 		for x := 0; x < w; x++ {
 			r, g, b8, a := src.At(b.Min.X+x, b.Min.Y+y).RGBA()
-			i := off + x*4
-			pixels[i+0] = byte(b8 >> 8)
-			pixels[i+1] = byte(g >> 8)
-			pixels[i+2] = byte(r >> 8)
-			pixels[i+3] = byte(a >> 8)
+			ia := int(a >> 8)
+			i := off + x*3
+			if ia <= 0 {
+				continue
+			}
+			pixels[i+0] = byte(int(b8>>8) * ia / 255)
+			pixels[i+1] = byte(int(g>>8) * ia / 255)
+			pixels[i+2] = byte(int(r>>8) * ia / 255)
 		}
 	}
 	var hdr bitmapInfoHeader
@@ -98,7 +104,7 @@ func rgbaToHBITMAP(hdc win.HDC, src image.Image) *imgBitmap {
 	hdr.Width = int32(w)
 	hdr.Height = int32(h)
 	hdr.Planes = 1
-	hdr.BitCount = 32
+	hdr.BitCount = 24
 	hdr.Compression = biRGB
 
 	var bits unsafe.Pointer
@@ -456,7 +462,7 @@ func (u *winUI) paintImageModal(hdc win.HDC, rect win.RECT) {
 		return
 	}
 	maxW := int(panel.Right - panel.Left)
-	maxH := int(panel.Bottom - panel.Top) - 28 // room for hint
+	maxH := int(panel.Bottom-panel.Top) - 28 // room for hint
 	dw, dh := fitPreferNative(bm.w, bm.h, maxW, maxH)
 	if dw < 1 || dh < 1 {
 		return
@@ -592,4 +598,3 @@ func frameBorder(hdc win.HDC, l, t, r, b int32, br win.HBRUSH) {
 	fillRect(hdc, win.RECT{Left: l, Top: t, Right: l + 1, Bottom: b}, br)
 	fillRect(hdc, win.RECT{Left: r - 1, Top: t, Right: r, Bottom: b}, br)
 }
-

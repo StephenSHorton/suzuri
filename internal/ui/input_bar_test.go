@@ -2,6 +2,23 @@ package ui
 
 import "testing"
 
+func TestInputBarFlushRectEatsLeftInset(t *testing.T) {
+	g := paneGeom{x: 4, w: 796, barY: 560, barH: 36}
+	l, top, r, b := inputBarFlushRect(g, 800, 600)
+	if l != 0 || r != 800 {
+		t.Fatalf("panel %d..%d want 0..800 (left glass gap)", l, r)
+	}
+	if top != 560 || b != 600 {
+		t.Fatalf("vertical %d..%d want 560..600 (flush bottom)", top, b)
+	}
+	// Mid-split pane must not steal the neighbor's edge.
+	mid := paneGeom{x: 200, w: 300, barY: 560, barH: 40}
+	l, _, r, _ = inputBarFlushRect(mid, 800, 600)
+	if l != 200 || r != 500 {
+		t.Fatalf("inner pane %d..%d", l, r)
+	}
+}
+
 func TestDeleteToLineStart(t *testing.T) {
 	var b inputBar
 	b.histIdx = -1

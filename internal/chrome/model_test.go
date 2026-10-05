@@ -686,7 +686,7 @@ func TestFrameWindowsCaptionReserve(t *testing.T) {
 	m.Frame = FrameWindows
 	m.Tabs = []Tab{{ID: 0, Title: "shell"}}
 	v := m.StripView()
-	for _, g := range []string{"—", "□", "✕", "硯"} {
+	for _, g := range []string{"—", "□", "✕", "硯", "☕", "🔔"} {
 		if strings.Contains(v, g) {
 			t.Fatalf("strip still draws %q: %q", g, v)
 		}

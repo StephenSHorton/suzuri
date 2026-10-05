@@ -4,6 +4,9 @@ import (
 	"testing"
 
 	"github.com/hinshun/vt10x"
+
+	"github.com/StephenSHorton/suzuri/internal/chrome"
+	"github.com/StephenSHorton/suzuri/internal/config"
 )
 
 func TestColorToRGBANSI(t *testing.T) {
@@ -154,6 +157,34 @@ func TestPasteChipBGPreserved(t *testing.T) {
 	c := glyphToCell(term.Cell(0, 0))
 	if c.BR != 17 || c.BG != 17 || c.BB != 17 {
 		t.Fatalf("paste chip BG must stay 17,17,17 got %d,%d,%d", c.BR, c.BG, c.BB)
+	}
+}
+
+func TestThemeVoidAndDefaultShowGlass(t *testing.T) {
+	// High-contrast void is #000 — same as the DWM color key. That is a
+	// hole (skip fill), not an opaque theme slab.
+	if !cellBGShowsGlass(0, 0, 0) {
+		t.Fatal("default VT bg")
+	}
+	if !cellBGShowsGlass(chrome.VoidR, chrome.VoidG, chrome.VoidB) {
+		t.Fatal("theme void must stay a glass hole")
+	}
+	if cellBGShowsGlass(80, 160, 255) {
+		t.Fatal("real band")
+	}
+	if cellBGShowsGlass(41, 46, 66) {
+		t.Fatal("GrokNight highlight is a real band")
+	}
+}
+
+func TestThemeVoidShowsGlassForAllThemes(t *testing.T) {
+	t.Cleanup(func() { chrome.ApplyTheme(config.ThemeHighContrast) })
+	for _, id := range config.ThemeIDs() {
+		chrome.ApplyTheme(id)
+		if !cellBGShowsGlass(chrome.VoidR, chrome.VoidG, chrome.VoidB) {
+			t.Errorf("%s void %d,%d,%d must stay a glass hole",
+				id, chrome.VoidR, chrome.VoidG, chrome.VoidB)
+		}
 	}
 }
 

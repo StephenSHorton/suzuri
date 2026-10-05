@@ -7,6 +7,18 @@ import (
 	"testing"
 )
 
+func TestRecentIOWhileWriteInFlight(t *testing.T) {
+	s := &Session{}
+	s.writeInFlight.Store(1)
+	if !s.recentIO() {
+		t.Fatal("write in flight must look hot to Resize")
+	}
+	s.writeInFlight.Store(0)
+	if s.recentIO() {
+		t.Fatal("idle session should not look hot")
+	}
+}
+
 func TestQuietPromptPowerShellUsesSpacePrompt(t *testing.T) {
 	in := `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile`
 	got := QuietPrompt(in)

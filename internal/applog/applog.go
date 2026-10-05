@@ -27,11 +27,22 @@ var (
 
 	// trail is a tiny durable breadcrumb file (synced every write) so native
 	// hard deaths that skip Go's logger still leave a last-op trail.
-	trail   *os.File
+	trail *os.File
 	// TrailPath is the breadcrumb file, if open.
 	TrailPath string
 	// CrashPath is where runtime fatal output (panic/throw) is mirrored.
 	CrashPath string
+	crash     *os.File
+
+	alivePath       string
+	previousUnclean string
+	cleanShutdown   bool
+)
+
+const (
+	maxLogBytes   = 2 << 20
+	maxTrailBytes = 512 << 10
+	maxLogBackups = 2
 )
 
 // Init opens the log file, sets the package default Charm logger, and returns
@@ -46,6 +57,7 @@ func Init() (string, error) {
 		return "", err
 	}
 	path := filepath.Join(dir, "suzuri.log")
+	rotateIfHuge(path, maxLogBytes)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		setup(os.Stderr, log.InfoLevel)
@@ -57,6 +69,7 @@ func Init() (string, error) {
 	// Durable trail + runtime crash output (best-effort; never fail Init).
 	openTrailLocked(dir)
 	openCrashOutputLocked(dir)
+	notePreviousSessionLocked(dir)
 
 	level := log.InfoLevel
 	if v := strings.TrimSpace(os.Getenv("SUZURI_LOG_LEVEL")); v != "" {
@@ -69,16 +82,19 @@ func Init() (string, error) {
 	}
 
 	// File always; stderr when launched from a console.
-	w := io.Writer(f)
+	// Warn/error lines fsync so a death a moment later still has the last WRN.
+	w := io.Writer(syncOnSevere{f})
 	if isTerminal(os.Stderr) {
-		w = io.MultiWriter(f, os.Stderr)
+		w = io.MultiWriter(syncOnSevere{f}, os.Stderr)
 	}
 	setup(w, level)
+	debug.SetTraceback("crash")
 	return path, nil
 }
 
 func openTrailLocked(dir string) {
 	tp := filepath.Join(dir, "suzuri-trail.log")
+	rotateIfHuge(tp, maxTrailBytes)
 	tf, err := os.OpenFile(tp, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
@@ -98,14 +114,67 @@ func openCrashOutputLocked(dir string) {
 		_ = cf.Close()
 		return
 	}
+	crash = cf
 	CrashPath = cp
-	// Keep the file open via trail-adjacent note — store on trail's sibling by
-	// writing a startup marker (cf is owned by runtime after SetCrashOutput
-	// but we still hold our handle for the path record).
-	_ = cf // fd duplicated; leaving open is fine for append lifecycle
+	// runtime/debug.SetCrashOutput duplicates the fd; we keep ours so
+	// WriteCrashNote / WriteRaw can append a reason when the process dies
+	// without a Go panic (native AV, stack overflow, os.Exit).
 	_, _ = fmt.Fprintf(cf, "\n--- crash-output open pid=%d t=%s ---\n",
 		os.Getpid(), time.Now().Format(time.RFC3339))
+	_, _ = fmt.Fprintf(cf, "--- SetCrashOutput captures runtime throw/fatal and unrecovered panic; not recover, os.Exit, or native AV ---\n")
 	_ = cf.Sync()
+}
+
+func rotateIfHuge(path string, limit int64) {
+	if limit < 1 {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() < limit {
+		return
+	}
+	for i := maxLogBackups; i >= 1; i-- {
+		src := path + "." + fmt.Sprint(i)
+		if i == maxLogBackups {
+			_ = os.Remove(src)
+			continue
+		}
+		_ = os.Rename(src, path+"."+fmt.Sprint(i+1))
+	}
+	_ = os.Rename(path, path+".1")
+}
+
+func notePreviousSessionLocked(dir string) {
+	alivePath = filepath.Join(dir, "suzuri-alive")
+	if b, err := os.ReadFile(alivePath); err == nil && len(b) > 0 {
+		previousUnclean = strings.TrimSpace(string(b))
+	}
+	line := formatKVLine("alive", "session-start")
+	_ = os.WriteFile(alivePath, []byte(line), 0o644)
+}
+
+// PreviousUnclean is the last heartbeat/alive line from a session that did
+// not write a clean-shutdown marker. Empty when the previous run exited cleanly.
+func PreviousUnclean() string {
+	mu.Lock()
+	defer mu.Unlock()
+	return previousUnclean
+}
+
+// MarkClean records a planned shutdown so the next launch does not report
+// "previous session ended uncleanly".
+func MarkClean() {
+	mu.Lock()
+	defer mu.Unlock()
+	cleanShutdown = true
+	if trail != nil {
+		line := formatKVLine("exit", "clean-shutdown")
+		_, _ = trail.WriteString(line)
+		_ = trail.Sync()
+	}
+	if alivePath != "" {
+		_ = os.Remove(alivePath)
+	}
 }
 
 func dataDir() (string, error) {
@@ -185,6 +254,9 @@ func Sync() {
 	if trail != nil {
 		_ = trail.Sync()
 	}
+	if crash != nil {
+		_ = crash.Sync()
+	}
 }
 
 // Trail writes a single durable breadcrumb line and fsyncs. Use immediately
@@ -214,10 +286,109 @@ func Trail(where string, kvs ...any) {
 	_ = trail.Sync()
 }
 
+func formatKVLine(kind, where string, kvs ...any) string {
+	var b strings.Builder
+	b.WriteString(time.Now().Format(time.RFC3339))
+	b.WriteString(" pid=")
+	b.WriteString(fmt.Sprint(os.Getpid()))
+	b.WriteByte(' ')
+	b.WriteString(kind)
+	if where != "" {
+		b.WriteByte(' ')
+		b.WriteString(where)
+	}
+	for i := 0; i+1 < len(kvs); i += 2 {
+		b.WriteByte(' ')
+		b.WriteString(fmt.Sprint(kvs[i]))
+		b.WriteByte('=')
+		b.WriteString(fmt.Sprint(kvs[i+1]))
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
+// WriteRaw appends bytes to the trail and crash files and fsyncs. Safe from a
+// vectored exception handler: no fmt, no logger. Empty p is a no-op.
+func WriteRaw(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	writeRawLocked(p)
+}
+
+func writeRawLocked(p []byte) {
+	if trail != nil {
+		_, _ = trail.Write(p)
+		if p[len(p)-1] != '\n' {
+			_, _ = trail.Write([]byte{'\n'})
+		}
+		_ = trail.Sync()
+	}
+	if crash != nil {
+		_, _ = crash.Write(p)
+		if p[len(p)-1] != '\n' {
+			_, _ = crash.Write([]byte{'\n'})
+		}
+		_ = crash.Sync()
+	}
+}
+
+// WriteCrashNote records a process-death reason on both the trail and the
+// crash file. Use from os.Exit wrappers, last-tab quit, and native hooks.
+func WriteCrashNote(reason string, kvs ...any) {
+	line := formatKVLine("crash", reason, kvs...)
+	mu.Lock()
+	if trail != nil {
+		_, _ = trail.WriteString(line)
+		_ = trail.Sync()
+	}
+	if crash != nil {
+		_, _ = crash.WriteString(line)
+		_ = crash.Sync()
+	}
+	if file != nil {
+		_, _ = file.WriteString(line)
+		_ = file.Sync()
+	}
+	mu.Unlock()
+	log.Error("crash note", "reason", reason)
+}
+
+// Heartbeat writes a 5s trail pulse (goroutines, heap, GDI, last paint)
+// and refreshes the alive file so an unclean death leaves resource state.
+func Heartbeat(kvs ...any) {
+	line := formatKVLine("heartbeat", "", kvs...)
+	mu.Lock()
+	if trail != nil {
+		_, _ = trail.WriteString(line)
+		_ = trail.Sync()
+	}
+	if alivePath != "" {
+		_ = os.WriteFile(alivePath, []byte(line), 0o644)
+	}
+	mu.Unlock()
+}
+
+// Exit writes a crash-trail reason and terminates. os.Exit skips defers, so
+// this is the only host path that should call it after applog.Init.
+func Exit(code int, reason string) {
+	WriteCrashNote("os.Exit", "code", code, "reason", reason)
+	log.Error("process exit", "code", code, "reason", reason)
+	MarkClean()
+	Sync()
+	Close()
+	os.Exit(code)
+}
+
 // Close flushes and closes the log file.
 func Close() {
 	mu.Lock()
 	defer mu.Unlock()
+	if cleanShutdown && alivePath != "" {
+		_ = os.Remove(alivePath)
+	}
 	if file != nil {
 		_ = file.Sync()
 		_ = file.Close()
@@ -227,6 +398,11 @@ func Close() {
 		_ = trail.Sync()
 		_ = trail.Close()
 		trail = nil
+	}
+	if crash != nil {
+		_ = crash.Sync()
+		_ = crash.Close()
+		crash = nil
 	}
 }
 
@@ -242,14 +418,33 @@ func Recover(where string, repanic bool) {
 		"err", fmt.Sprint(r),
 		"stack", string(debug.Stack()),
 	)
-	mu.Lock()
-	if file != nil {
-		_ = file.Sync()
-	}
-	mu.Unlock()
+	WriteCrashNote("recovered-panic", "where", where, "err", fmt.Sprint(r))
+	Sync()
 	if repanic {
 		panic(r)
 	}
+}
+
+// syncOnSevere fsyncs the log after a Charm warn/error line so a native
+// death immediately afterward still leaves the last warning on disk.
+type syncOnSevere struct{ f *os.File }
+
+func (s syncOnSevere) Write(p []byte) (int, error) {
+	if s.f == nil {
+		return 0, nil
+	}
+	n, err := s.f.Write(p)
+	if looksSevere(p) {
+		_ = s.f.Sync()
+	}
+	return n, err
+}
+
+func looksSevere(p []byte) bool {
+	return strings.Contains(string(p), " WRN ") ||
+		strings.Contains(string(p), " ERR ") ||
+		strings.Contains(string(p), "error=") ||
+		strings.Contains(string(p), "warn")
 }
 
 func isTerminal(f *os.File) bool {

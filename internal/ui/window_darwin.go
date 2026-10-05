@@ -41,11 +41,19 @@ func Run() error {
 		cfg = config.Default()
 	}
 	cfg = config.Normalize(cfg)
+	if safeModeRequested() {
+		log.Warn("safe mode: disabling intro and shell ambient",
+			"env", envSafeMode+" / "+envNoAmbient)
+		cfg.Intro = config.IntroNone
+		cfg.ShellAmbient = config.AmbientNone
+	}
 	setNoticeAnchor(cfg.NoticePosition, false)
+	startUIWatchdog()
 	chrome.ApplyTheme(cfg.Theme)
 	SetShellANSIMap(cfg.ShellANSIMap)
 	log.Info("ui.Run", "cols", cols, "rows", rows, "font", cfg.FontFace, "fontPx", cfg.FontSizePx,
-		"theme", cfg.Theme, "ansi", cfg.ShellANSIMap, "config", config.Path())
+		"theme", cfg.Theme, "ansi", cfg.ShellANSIMap, "ambient", cfg.ShellAmbient,
+		"safe_mode", safeModeRequested(), "config", config.Path())
 
 	ui := &macUI{
 		cols:       cols,
@@ -265,8 +273,18 @@ type macUI struct {
 	lastPasteAt time.Time
 }
 
-func (u *macUI) queueBytes(tabID int) {
-	u.enqueue(func() { u.drainAndParse(tabID) })
+func (u *macUI) queueBytes(tabID int) bool {
+	if u == nil || !u.alive.Load() {
+		return false
+	}
+	select {
+	case u.jobs <- func() { u.drainAndParse(tabID) }:
+		return true
+	default:
+		// Do not leave bytesMsg set — postBytes retries, and Update
+		// kicks ingestStalled so a full jobs queue cannot freeze PTY.
+		return false
+	}
 }
 func (u *macUI) queueClosed(tabID int) {
 	// Shell exited (e.g. user typed `exit`) — close that pane; last pane of last page quits.
@@ -662,6 +680,9 @@ func (u *macUI) loop() error {
 // --- ebiten.Game ---
 
 func (u *macUI) Update() error {
+	uiWatchEnter("mac.Update")
+	defer uiWatchLeave()
+	uiWatchExpectFrames(true)
 	defer applog.Recover("mac.Update", false)
 	if u.quit || !u.alive.Load() {
 		return ebiten.Termination
@@ -717,6 +738,11 @@ func (u *macUI) Update() error {
 		}
 	}
 drained:
+	for _, t := range u.allPanes() {
+		if t != nil && t.ingestStalled() {
+			u.drainAndParse(t.id)
+		}
+	}
 	u.drainAI()
 
 	u.drainPendingPaste()
@@ -843,13 +869,21 @@ func (u *macUI) pollTransferFileDrop() {
 }
 
 func (u *macUI) Draw(screen *ebiten.Image) {
+	uiWatchEnter("mac.Draw")
+	defer uiWatchLeave()
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("draw panic", "err", fmt.Sprint(r), "stack", string(debug.Stack()))
 			applog.Sync()
 		}
 	}()
+	started := time.Now()
 	u.paintTo(screen)
+	noteUIFrame()
+	n := uiPaintLogN.Add(1)
+	if frameTimingOn() || n <= 5 {
+		log.Info("draw", "ms", time.Since(started).Milliseconds())
+	}
 }
 
 func (u *macUI) Layout(outsideWidth, outsideHeight int) (int, int) {
@@ -2088,6 +2122,15 @@ func (u *macUI) handleKeys() {
 		return
 	}
 
+	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyF8) {
+		on := toggleFrameTiming()
+		if on {
+			u.toast("frame timing on")
+		} else {
+			u.toast("frame timing off")
+		}
+		return
+	}
 	// Ctrl+Shift+M — toggle notes (works even while notes overlay is open).
 	if ctrl && shift && inpututil.IsKeyJustPressed(ebiten.KeyM) {
 		r := u.chrome.UpdateChrome(chrome.ToggleNotesMsg{})
@@ -3951,7 +3994,7 @@ func (u *macUI) pasteAltScreenAsyncOsascript(bracket bool) {
 	if imgPath, err := readClipboardImageFileOsascript(); err == nil && imgPath != "" {
 		log.Info("paste clipboard image (osascript)", "path", imgPath)
 		u.pendingPasteMu.Lock()
-		u.pendingPaste = append(u.pendingPaste, pendingPaste{
+		u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{
 			payload: framePaste(imgPath, bracket), toast: "image pasted",
 		})
 		u.pendingPasteMu.Unlock()
@@ -3962,14 +4005,14 @@ func (u *macUI) pasteAltScreenAsyncOsascript(bracket bool) {
 	text, _ := clipboard.ReadAll()
 	if text == "" {
 		u.pendingPasteMu.Lock()
-		u.pendingPaste = append(u.pendingPaste, pendingPaste{
+		u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{
 			toast: "clipboard empty",
 		})
 		u.pendingPasteMu.Unlock()
 		return
 	}
 	u.pendingPasteMu.Lock()
-	u.pendingPaste = append(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
+	u.pendingPaste = appendPendingPaste(u.pendingPaste, pendingPaste{payload: framePaste(text, bracket)})
 	u.pendingPasteMu.Unlock()
 }
 

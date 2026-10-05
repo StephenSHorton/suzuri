@@ -85,6 +85,7 @@ func main() {
 				"err", fmt.Sprint(r),
 				"stack", string(debug.Stack()),
 			)
+			applog.WriteCrashNote("fatal panic", "err", fmt.Sprint(r))
 			applog.Close()
 			os.Exit(2)
 		}
@@ -103,13 +104,18 @@ func main() {
 			log.Info("runtime crash output", "path", applog.CrashPath)
 		}
 	}
+	ui.InstallProcessExitHooks()
+	if prev := applog.PreviousUnclean(); prev != "" {
+		log.Error("previous session ended uncleanly", "last", prev)
+		applog.WriteCrashNote("previous-unclean", "last", prev)
+	}
 
 	switch runtime.GOOS {
 	case "windows", "darwin":
 	default:
 		log.Error("unsupported OS", "goos", runtime.GOOS)
 		fmt.Fprintln(os.Stderr, "suzuri supports Windows and macOS.")
-		os.Exit(1)
+		applog.Exit(1, "unsupported OS")
 	}
 
 	// Win32/AppKit UI loops must stay on one OS thread.
@@ -144,6 +150,8 @@ func main() {
 	// SUZURI_ALLOW_MULTI=1 skips this. CLI subcommands (mcp/send/…) exit above.
 	if !ui.EnsureSingleInstance() {
 		log.Info("exiting; existing instance activated", "pid", os.Getpid())
+		applog.WriteCrashNote("single-instance", "pid", os.Getpid())
+		applog.MarkClean()
 		return
 	}
 
@@ -167,7 +175,9 @@ func main() {
 		if path != "" {
 			fmt.Fprintf(os.Stderr, "suzuri: see log %s\n", path)
 		}
-		os.Exit(1)
+		applog.Exit(1, "ui.Run failed: "+err.Error())
 	}
+	applog.WriteCrashNote("clean", "pid", os.Getpid())
+	applog.MarkClean()
 	log.Info("exiting cleanly", "pid", os.Getpid())
 }

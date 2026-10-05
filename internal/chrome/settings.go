@@ -162,7 +162,21 @@ func (m Model) SettingsLogoPreview() bool {
 	return m.SettingsOpen && m.settings.field == fieldShellLogo
 }
 
+func (s settingsState) fieldIdle(f settingsField) bool {
+	switch f {
+	case fieldGlassBlur:
+		return !config.GlassBlurControlLive(s.edit)
+	case fieldGlassRim:
+		return !config.GlassRimControlLive()
+	default:
+		return false
+	}
+}
+
 func (s *settingsState) nudge(delta int) {
+	if s.fieldIdle(s.field) {
+		return
+	}
 	switch s.field {
 	case fieldFontFace:
 		i := indexFold(s.fonts, s.edit.FontFace)
@@ -283,10 +297,16 @@ func (s settingsState) valueLabel(f settingsField) string {
 	case fieldShellLogo:
 		return formatRainOpacitySlider(s.edit.ShellLogo, rainOpacityBarCells)
 	case fieldGlassBlur:
+		if s.fieldIdle(fieldGlassBlur) {
+			return config.GlassBlurIdleHint
+		}
 		return formatScaledSlider(s.edit.GlassBlur, config.GlassBlurMax, rainOpacityBarCells, "pt")
 	case fieldGlassVeil:
 		return formatRainOpacitySlider(s.edit.GlassVeil, rainOpacityBarCells)
 	case fieldGlassRim:
+		if s.fieldIdle(fieldGlassRim) {
+			return config.GlassRimIdleHint
+		}
 		return formatRainOpacitySlider(s.edit.GlassRim, rainOpacityBarCells)
 	case fieldRainOpacity:
 		return formatRainOpacitySlider(s.edit.ShellMatrixOpacity, rainOpacityBarCells)
@@ -367,7 +387,7 @@ func (s settingsState) render(windowCols int) string {
 		label := s.fieldLabel(f)
 		val := s.valueLabel(f)
 		active := f == s.field
-		body = append(body, settingsRow(inner, labW, valW, label, val, active))
+		body = append(body, settingsRow(inner, labW, valW, label, val, active, s.fieldIdle(f)))
 	}
 
 	// One line inside the card (about 46 columns). "change" does not fit with tab.
@@ -500,9 +520,16 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		}
 	case fieldGlassBlur:
 		title = "Blur · " + fmt.Sprintf("%dpt", s.edit.GlassBlur)
-		paras = []string{
-			"How much the desktop behind empty cells is frosted, in points. 48 is the original look. 0 is sharp.",
-			"Used when Backdrop is Glass. Windows has no point radius: 0 is Mica, anything higher is Desktop Acrylic. Enter saves.",
+		if s.fieldIdle(fieldGlassBlur) {
+			title = "Blur · " + config.GlassBlurIdleHint
+			paras = []string{
+				"Windows Desktop Acrylic sets the frost. This slider has no effect until Veil is above 0 (custom acrylic), or on Windows 10 / macOS.",
+			}
+		} else {
+			paras = []string{
+				"How much the desktop behind empty cells is frosted, in points. 48 is the original look. 0 is sharp.",
+				"Used when Backdrop is Glass. Enter saves.",
+			}
 		}
 	case fieldGlassVeil:
 		title = "Veil · " + fmt.Sprintf("%d%%", s.edit.GlassVeil)
@@ -512,9 +539,16 @@ func (s settingsState) helpContent() (title string, paras []string) {
 		}
 	case fieldGlassRim:
 		title = "Rim · " + fmt.Sprintf("%d%%", s.edit.GlassRim)
-		paras = []string{
-			"Dark outline behind shell text on a glass hole. 25% is the default. 0% leaves the letter with no outline. The center logo uses the Logo slider instead.",
-			"Raise it when the desktop behind the shell is bright. Enter saves.",
+		if s.fieldIdle(fieldGlassRim) {
+			title = "Rim · " + config.GlassRimIdleHint
+			paras = []string{
+				"Rim is a Mac outline behind shell text on a glass hole. Windows GDI has no glyph mask, so this control does nothing here.",
+			}
+		} else {
+			paras = []string{
+				"Dark outline behind shell text on a glass hole. 25% is the default. 0% leaves the letter with no outline. The center logo uses the Logo slider instead.",
+				"Raise it when the desktop behind the shell is bright. Enter saves.",
+			}
 		}
 	case fieldRainOpacity:
 		title = "Intensity · " + fmt.Sprintf("%d%%", s.edit.ShellMatrixOpacity)
@@ -657,7 +691,7 @@ func (s settingsState) renderTabRow(inner int) string {
 // settingsRow is one label | value line.
 // Built as a single plain string first (fixed columns), then styled once —
 // nested Width/JoinHorizontal reflowed into staggered stacks with some fonts.
-func settingsRow(inner, labW, valW int, label, val string, active bool) string {
+func settingsRow(inner, labW, valW int, label, val string, active, idle bool) string {
 	_ = valW
 	lab := padFit(label, labW)
 	// Value starts immediately after label column.
@@ -667,8 +701,13 @@ func settingsRow(inner, labW, valW int, label, val string, active bool) string {
 		return styleDialogActive().Width(inner).MaxHeight(1).Render(plain)
 	}
 	// Dim label, bright value — style segments of the same fixed layout.
+	// Idle (no-op) rows stay muted so they do not look adjustable.
 	labPart := styleDialogLabel().Render(lab)
-	valPart := styleDialogValue().Render(padFit(val, inner-labW))
+	valStyle := styleDialogValue()
+	if idle {
+		valStyle = styleDialogHint()
+	}
+	valPart := valStyle.Render(padFit(val, inner-labW))
 	row := labPart + valPart
 	if lipgloss.Width(row) > inner {
 		return styleDialogNormalItem().Width(inner).MaxHeight(1).Render(plain)

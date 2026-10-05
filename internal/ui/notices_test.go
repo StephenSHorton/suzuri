@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -271,6 +272,48 @@ func TestCommandFinishOSC(t *testing.T) {
 	img := m.feed(time.Now(), []byte("\x1b]1337;File=inline=1:QQ==\x07"), 0)
 	if !strings.Contains(string(img.ready), "1337;File=") {
 		t.Fatalf("1337 swallowed: %q", img.ready)
+	}
+}
+
+func TestOSC99PendingAndTextCapped(t *testing.T) {
+	var m termModes
+	for i := 0; i < 20; i++ {
+		id := "job" + strconv.Itoa(i)
+		payload := []byte("\x1b]99;i=" + id + ":d=0;" + strings.Repeat("T", 500) + "\x1b\\")
+		m.feed(time.Now(), payload, 0)
+	}
+	if len(m.osc99) > maxOSC99Pending {
+		t.Fatalf("osc99 map %d", len(m.osc99))
+	}
+	for _, b := range m.osc99 {
+		if len([]rune(b.title)) > 180 {
+			t.Fatalf("title runes %d", len([]rune(b.title)))
+		}
+	}
+}
+
+func TestNoticeRenderCacheReusesPix(t *testing.T) {
+	noticeMu.Lock()
+	noticeLive = []liveNote{{
+		deskNote: deskNote{Title: "cached", Body: "card"},
+		born:     time.Now().Add(-time.Second),
+	}}
+	noticeCache = noticePixCache{}
+	noticeMu.Unlock()
+	defer func() {
+		noticeMu.Lock()
+		noticeLive = nil
+		noticeCache = noticePixCache{}
+		noticeMu.Unlock()
+	}()
+	now := time.Now()
+	pix1, _, w1, h1, _, _ := renderNotices(now)
+	pix2, _, w2, h2, _, _ := renderNotices(now)
+	if len(pix1) == 0 || w1 != w2 || h1 != h2 {
+		t.Fatalf("render size %d×%d vs %d×%d pix=%d", w1, h1, w2, h2, len(pix1))
+	}
+	if &pix1[0] != &pix2[0] {
+		t.Fatal("expected cached notice pixels on a still card")
 	}
 }
 

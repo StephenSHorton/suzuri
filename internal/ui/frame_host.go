@@ -49,19 +49,31 @@ type frameDrag struct {
 
 // Win32 WM_NCHITTEST codes. Local so hit tests do not need an HWND.
 const (
-	hitNowhere     = 0
-	hitClient      = 1
-	hitCaption     = 2
-	hitLeft        = 10
-	hitRight       = 11
-	hitTop         = 12
-	hitTopLeft     = 13
-	hitTopRight    = 14
-	hitBottom      = 15
-	hitBottomLeft  = 16
-	hitBottomRight = 17
-	frameResizePx  = 6
-	captionButtonW = 46
+	hitNowhere       = 0
+	hitClient        = 1
+	hitCaption       = 2
+	hitLeft          = 10
+	hitRight         = 11
+	hitTop           = 12
+	hitTopLeft       = 13
+	hitTopRight      = 14
+	hitBottom        = 15
+	hitBottomLeft    = 16
+	hitBottomRight   = 17
+	hitMinButton     = 8
+	hitMaxButton     = 9
+	hitClose         = 20
+	frameResizePx    = 6
+	captionButtonDIP = 46
+	captionButtonW   = captionButtonDIP // 96-DPI width
+
+	// Win32 window styles (numeric so tests do not need an HWND).
+	styleCaption     = 0x00C00000
+	styleSysmenu     = 0x00080000
+	styleThickframe  = 0x00040000
+	styleMinimizeBox = 0x00020000
+	styleMaximizeBox = 0x00010000
+	styleCaptionBtns = styleSysmenu | styleMinimizeBox | styleMaximizeBox
 )
 
 // titleStripHeightPx is the Mac rule: one text row, 50% taller than a shell cell.
@@ -86,27 +98,7 @@ func (r pixRect) empty() bool { return r.R <= r.L || r.B <= r.T }
 // winCaptionButtons is minimize, zoom/restore, close — flush to the right edge,
 // each captionButtonW wide and the full title-strip tall.
 func winCaptionButtons(clientW, stripH int32) [3]pixRect {
-	var out [3]pixRect
-	if clientW < 1 || stripH < 1 {
-		return out
-	}
-	bw := int32(captionButtonW)
-	if bw*3 > clientW {
-		bw = clientW / 3
-		if bw < 1 {
-			bw = 1
-		}
-	}
-	right := clientW
-	for i := 2; i >= 0; i-- {
-		left := right - bw
-		if left < 0 {
-			left = 0
-		}
-		out[i] = pixRect{L: left, T: 0, R: right, B: stripH}
-		right = left
-	}
-	return out
+	return winCaptionButtonsDPI(clientW, stripH, 96)
 }
 
 // titleHitQuery is a client-space hit. Buttons win over the resize band.
@@ -126,9 +118,16 @@ func hitTestTitleBar(q titleHitQuery) int {
 	if q.ClientW < 1 || q.ClientH < 1 {
 		return hitNowhere
 	}
-	for _, b := range q.Buttons {
+	for i, b := range q.Buttons {
 		if b.contains(q.X, q.Y) {
-			return hitClient
+			switch i {
+			case 0:
+				return hitMinButton
+			case 1:
+				return hitMaxButton
+			default:
+				return hitClose
+			}
 		}
 	}
 	const border = frameResizePx
@@ -163,4 +162,78 @@ func hitTestTitleBar(q titleHitQuery) int {
 		return hitCaption
 	}
 	return hitNowhere
+}
+
+// presentCaptionHit is the HT code WM_NCHITTEST actually returns.
+// DWM paints native min/max/close in any rect it believes is a caption
+// button (DwmDefWindowProc hits, or cyTopHeight=-1). Maximize stays
+// HTMAXBUTTON so Win11 Snap Layouts still appear; min/close are HTCLIENT
+// and WM_LBUTTONDOWN owns the click. Never feed those through
+// DwmDefWindowProc.
+func presentCaptionHit(hit int) int {
+	switch hit {
+	case hitMinButton, hitClose:
+		return hitClient
+	default:
+		return hit
+	}
+}
+
+// frameChromeStyle drops the bits that make DWM draw native min/max/close
+// while keeping WS_CAPTION|WS_THICKFRAME for shadow, resize, and snap.
+func frameChromeStyle(style uint32) uint32 {
+	return style &^ styleCaptionBtns
+}
+
+// frameRect is a window/client rectangle in screen pixels. Kept local so
+// the NCCALCSIZE inset math can be tested without an HWND.
+type frameRect struct {
+	Left, Top, Right, Bottom int32
+}
+
+func (r frameRect) width() int32  { return r.Right - r.Left }
+func (r frameRect) height() int32 { return r.Bottom - r.Top }
+
+// frameResizeBorder is SM_CX/YFRAME + SM_CXPADDEDBORDER — the invisible
+// Win10+ resize inset (~7px at 100% DPI).
+func frameResizeBorder(cxFrame, cyFrame, cxPadded int32) (x, y int32) {
+	x = cxFrame + cxPadded
+	y = cyFrame + cxPadded
+	if x < 1 {
+		x = 1
+	}
+	if y < 1 {
+		y = 1
+	}
+	return x, y
+}
+
+// frameClientFromWindow maps a proposed outer window rect to the custom
+// FrameWindows client rect. Top is never inset (WT recipe: the title
+// strip lives in the client). Left/right/bottom take the resize border
+// only. Zoomed windows fill the work area exactly so the hidden 7px
+// frame cannot eat height or shift Y. Do not call DefWindowProc for
+// NCCALCSIZE — it insets the caption and leaves mixed NC metrics that
+// drop ~7px on the next drag-resize.
+func frameClientFromWindow(window, work frameRect, zoomed bool, borderX, borderY int32) frameRect {
+	if zoomed {
+		return work
+	}
+	if borderX < 0 {
+		borderX = 0
+	}
+	if borderY < 0 {
+		borderY = 0
+	}
+	out := window
+	out.Left += borderX
+	out.Right -= borderX
+	out.Bottom -= borderY
+	if out.Right < out.Left {
+		out.Right = out.Left
+	}
+	if out.Bottom < out.Top {
+		out.Bottom = out.Top
+	}
+	return out
 }

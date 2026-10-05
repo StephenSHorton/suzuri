@@ -42,7 +42,8 @@ const (
 	// How long after last PTY output a tab counts as "busy" for the strip glyph.
 	tabBusyWindow = 600 * time.Millisecond
 	// Fullscreen apps (Grok, etc.) stream in bursts — keep the spinner alive
-	// longer between chunks so it doesn't freeze mid-response.
+	// longer between chunks so it doesn't freeze mid-response. Title-only
+	// leftover spinners do not use this window (they never clear).
 	tabBusyWindowAlt = 2500 * time.Millisecond
 	// Advance braille spinner every N blink ticks (40ms → ~80ms/frame).
 	tabSpinEveryNTicks = 2

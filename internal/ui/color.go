@@ -153,6 +153,17 @@ func cellBGChromaKey(r, g, b byte) bool {
 	return r < 42 && g < 42 && b < 42
 }
 
+// cellBGShowsGlass is a hole in the Windows DWM color key / Mac alpha-0
+// underlay. Default VT bg (0,0,0), GrokNight canvas, and the host theme
+// void must not be filled — Grok Build paints the whole alt-screen with
+// that canvas and an opaque slab turns the window solid black on Windows.
+func cellBGShowsGlass(r, g, b byte) bool {
+	if cellBGChromaKey(r, g, b) {
+		return true
+	}
+	return r == chrome.VoidR && g == chrome.VoidG && b == chrome.VoidB
+}
+
 // lowContrastRGB reports FG and BG that are too close to distinguish as a band.
 func lowContrastRGB(fr, fg, fb, br, bg, bb byte) bool {
 	dr := absByte(fr, br)

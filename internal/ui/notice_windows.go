@@ -52,11 +52,12 @@ type trackMouse struct {
 }
 
 var (
-	user32            = windows.NewLazySystemDLL("user32.dll")
-	procUpdateLayered = user32.NewProc("UpdateLayeredWindow")
-	procTrackMouse    = user32.NewProc("TrackMouseEvent")
-	winmm             = windows.NewLazySystemDLL("winmm.dll")
-	procPlaySound     = winmm.NewProc("PlaySoundW")
+	user32              = windows.NewLazySystemDLL("user32.dll")
+	procUpdateLayered   = user32.NewProc("UpdateLayeredWindow")
+	procTrackMouse      = user32.NewProc("TrackMouseEvent")
+	procGetDpiForWindow = user32.NewProc("GetDpiForWindow")
+	winmm               = windows.NewLazySystemDLL("winmm.dll")
+	procPlaySound       = winmm.NewProc("PlaySoundW")
 
 	noticeClassOnce sync.Once
 	noticeOwner     uint32
@@ -89,16 +90,14 @@ func presentNoticeImage(pix []byte, stride, width, height, anchor int) {
 	if err := ensureNoticeWindow(); err != nil || noticeHwnd == 0 {
 		return
 	}
-	winW := int32(width / noticeScaleDiv)
-	winH := int32(height / noticeScaleDiv)
-	if winW < 1 {
-		winW = 1
-	}
-	if winH < 1 {
-		winH = 1
+	dpi, fontPx, clientW := noticeHostMetrics()
+	winW, winH := noticePresentSize(int32(width), int32(height), dpi, fontPx, clientW)
+	inset := noticeScreenInset * dpi / 96
+	if inset < 8 {
+		inset = 8
 	}
 	left, top, right, bottom := noticeWorkArea()
-	x, y := noticeScreenOrigin(left, top, right, bottom, winW, winH, noticeScreenInset, int32(anchor))
+	x, y := noticeScreenOrigin(left, top, right, bottom, winW, winH, inset, int32(anchor))
 	sum := noticePixHash(pix, stride, width, height, anchor, x, y)
 	if noticeUp && sum == noticeLastHash && x == noticeLastX && y == noticeLastY &&
 		winW == noticeWinW && winH == noticeWinH {
@@ -150,6 +149,82 @@ func noticeScreenOrigin(left, top, right, bottom, panelW, panelH, inset, anchor 
 		y = bottom - panelH - inset
 	}
 	return x, y
+}
+
+func hwndDPI(hwnd win.HWND) int32 {
+	if hwnd != 0 && procGetDpiForWindow.Find() == nil {
+		r, _, _ := procGetDpiForWindow.Call(uintptr(hwnd))
+		if r >= 96 && r <= 384 {
+			return int32(r)
+		}
+	}
+	return 96
+}
+
+func noticeHostMetrics() (dpi, fontPx, clientW int32) {
+	dpi, fontPx = 96, 14
+	uiMu.Lock()
+	defer uiMu.Unlock()
+	for h, u := range uiMap {
+		if h == 0 || h == noticeHwnd || u == nil {
+			continue
+		}
+		dpi = hwndDPI(h)
+		if u.cfg.FontSizePx > 0 {
+			fontPx = int32(u.cfg.FontSizePx)
+		}
+		if u.width > 0 {
+			clientW = u.width
+		}
+		return dpi, fontPx, clientW
+	}
+	return dpi, fontPx, clientW
+}
+
+// noticePresentSize is the on-screen layered window in the same pixel space
+// as the host. The notice bitmap is 2× 96-DPI DIPs; we convert to the
+// monitor's DPI, then keep the card proportional to the host font and cap
+// it so a small restored window is not covered by a 2×-too-big toast.
+func noticePresentSize(bmpW, bmpH, dpi, fontPx, clientW int32) (w, h int32) {
+	if bmpW < 1 {
+		bmpW = 1
+	}
+	if bmpH < 1 {
+		bmpH = 1
+	}
+	if dpi < 96 {
+		dpi = 96
+	}
+	if fontPx < 8 {
+		fontPx = 14
+	}
+	w = bmpW * dpi / (noticeScaleDiv * 96)
+	h = bmpH * dpi / (noticeScaleDiv * 96)
+	designFont := 14 * dpi / 96
+	if designFont < 1 {
+		designFont = 14
+	}
+	if fontPx != designFont {
+		w = w * fontPx / designFont
+		h = h * fontPx / designFont
+	}
+	if clientW > 0 {
+		maxW := clientW * 36 / 100
+		if maxW < 160 {
+			maxW = 160
+		}
+		if w > maxW {
+			h = h * maxW / w
+			w = maxW
+		}
+	}
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+	return w, h
 }
 
 func noticeWorkArea() (left, top, right, bottom int32) {
@@ -226,10 +301,33 @@ func blitNotice(hwnd win.HWND, pix []byte, stride, width, height int, x, y, winW
 	}
 	defer win.DeleteDC(hdcMem)
 
-	bmi := win.BITMAPINFOHEADER{
+	srcDC := win.CreateCompatibleDC(hdcScreen)
+	if srcDC == 0 {
+		return false
+	}
+	defer win.DeleteDC(srcDC)
+	srcBmi := win.BITMAPINFOHEADER{
 		BiSize:        uint32(unsafe.Sizeof(win.BITMAPINFOHEADER{})),
 		BiWidth:       int32(width),
 		BiHeight:      -int32(height),
+		BiPlanes:      1,
+		BiBitCount:    32,
+		BiCompression: win.BI_RGB,
+	}
+	var srcBits unsafe.Pointer
+	srcDib := win.CreateDIBSection(hdcScreen, &srcBmi, dibRGBColors, &srcBits, 0, 0)
+	if srcDib == 0 || srcBits == nil {
+		return false
+	}
+	defer win.DeleteObject(win.HGDIOBJ(srcDib))
+	copy(unsafe.Slice((*byte)(srcBits), len(bgra)), bgra)
+	srcOld := win.SelectObject(srcDC, win.HGDIOBJ(srcDib))
+	defer win.SelectObject(srcDC, srcOld)
+
+	bmi := win.BITMAPINFOHEADER{
+		BiSize:        uint32(unsafe.Sizeof(win.BITMAPINFOHEADER{})),
+		BiWidth:       winW,
+		BiHeight:      -winH,
 		BiPlanes:      1,
 		BiBitCount:    32,
 		BiCompression: win.BI_RGB,
@@ -240,10 +338,12 @@ func blitNotice(hwnd win.HWND, pix []byte, stride, width, height int, x, y, winW
 		return false
 	}
 	defer win.DeleteObject(win.HGDIOBJ(dib))
-	dst := unsafe.Slice((*byte)(bits), len(bgra))
-	copy(dst, bgra)
 	old := win.SelectObject(hdcMem, win.HGDIOBJ(dib))
 	defer win.SelectObject(hdcMem, old)
+	win.SetStretchBltMode(hdcMem, win.HALFTONE)
+	if !win.StretchBlt(hdcMem, 0, 0, winW, winH, srcDC, 0, 0, int32(width), int32(height), win.SRCCOPY) {
+		return false
+	}
 
 	dstPt := noticePoint{X: x, Y: y}
 	sz := noticeSize{CX: winW, CY: winH}

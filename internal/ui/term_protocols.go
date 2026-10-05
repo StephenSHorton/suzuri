@@ -109,8 +109,13 @@ type feedResult struct {
 }
 
 const (
-	syncFlushAfter = time.Second
-	maxOSCHold     = 2 << 20
+	syncFlushAfter  = time.Second
+	maxOSCHold      = 2 << 20
+	maxSyncBuf      = 1 << 20
+	maxCapture      = 64 << 10
+	maxHeldSpans    = 256
+	maxOSC99Pending = 8
+	maxQueuedFinish = 32
 )
 
 var (
@@ -175,13 +180,19 @@ func (m *termModes) feed(now time.Time, data []byte, vtMode vt10x.ModeFlag) feed
 		if m.syncOn {
 			m.syncBuf = append(m.syncBuf, b...)
 			if m.capturing {
-				m.capture = append(m.capture, b...)
+				m.capture = capAppendBytes(m.capture, b, maxCapture)
+			}
+			// Agents can leave CSI ?2026 open and stream forever. The 1s
+			// flush only runs at the *next* feed() — cap the hold so one
+			// drain cannot pin tens of MiB on the UI thread.
+			if len(m.syncBuf) > maxSyncBuf {
+				flush()
 			}
 			return
 		}
 		out = append(out, b...)
 		if m.capturing {
-			m.capture = append(m.capture, b...)
+			m.capture = capAppendBytes(m.capture, b, maxCapture)
 		}
 	}
 	i := 0
@@ -252,6 +263,9 @@ func (m *termModes) emitSpan(sp osc8Span, res *feedResult) {
 	}
 	if m.syncOn {
 		m.heldSpans = append(m.heldSpans, sp)
+		if extra := len(m.heldSpans) - maxHeldSpans; extra > 0 {
+			m.heldSpans = append([]osc8Span(nil), m.heldSpans[extra:]...)
+		}
 		return
 	}
 	res.spans = append(res.spans, sp)
@@ -470,6 +484,9 @@ func (m *termModes) queueFinish(cmd string, exit int, hasExit bool) {
 	m.sawDone = true
 	m.lastShellMark = shellMarkDone
 	m.queuedFinish = append(m.queuedFinish, cmdFinish{cmd: cmd, exit: exit, hasExit: hasExit})
+	if extra := len(m.queuedFinish) - maxQueuedFinish; extra > 0 {
+		m.queuedFinish = append([]cmdFinish(nil), m.queuedFinish[extra:]...)
+	}
 }
 
 func (m *termModes) flushCmdFinishes(res *feedResult) {
@@ -1209,4 +1226,18 @@ func clipRunes(s string, n int) string {
 		return s
 	}
 	return string(rs[:n])
+}
+
+func capAppendBytes(dst, src []byte, max int) []byte {
+	if max <= 0 || len(src) == 0 {
+		return dst
+	}
+	if len(dst) >= max {
+		return dst
+	}
+	room := max - len(dst)
+	if len(src) > room {
+		src = src[:room]
+	}
+	return append(dst, src...)
 }

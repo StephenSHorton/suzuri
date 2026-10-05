@@ -9,6 +9,7 @@ import (
 	"github.com/lxn/win"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
+	"github.com/StephenSHorton/suzuri/internal/iconstroke"
 )
 
 func (u *winUI) releaseTitleFonts() {
@@ -117,38 +118,18 @@ func (u *winUI) paintBrandMark(hdc win.HDC, stripH int32) {
 }
 
 func (u *winUI) paintCaffeineCup(hdc win.HDC, stripH int32) {
-	if u == nil || hdc == 0 || stripH < 4 {
-		return
-	}
-	u.ensureTitleFonts(stripH)
-	if u.titleCupFont == 0 {
-		// Cell glyph stays as the visible cup when the symbol face has no ☕.
-		return
-	}
-	b := u.chrome.CaffeineBounds()
-	if b[1] <= b[0] {
-		return
-	}
-	cw := u.metricW
-	if cw < 1 {
-		cw = cellW
-	}
-	x0 := 4 + int32(b[0])*cw
-	bw := int32(b[1]-b[0]) * cw
-	if bw < 4 {
-		return
-	}
-	// Cover the lipgloss cup so only the strip-sized glyph shows.
-	paintOpaqueRGB(hdc, win.RECT{Left: x0, Top: 0, Right: x0 + bw, Bottom: stripH}, chrome.BarR, chrome.BarG, chrome.BarB)
-	fr, fg, fb := chrome.SoftR, chrome.SoftG, chrome.SoftB
-	if u.caffeine != nil && u.caffeine.Active() {
-		fr, fg, fb = chrome.PrimR, chrome.PrimG, chrome.PrimB
-	}
-	rc := win.RECT{Left: x0, Top: 2, Right: x0 + bw, Bottom: stripH - 2}
-	drawCenteredRune(hdc, u.titleCupFont, rc, '☕', fr, fg, fb)
+	// Cup is painted once in paintStripTrailingIcons from the shared stroke set.
 }
 
 func (u *winUI) paintWinCaption(hdc win.HDC, rect win.RECT) {
+	u.paintStripTrailingIcons(hdc, rect)
+}
+
+// stripIconDraws is reset at the start of each trailing-icon paint. Tests
+// and logs use it to prove bell/coffee/min/max/close each draw once.
+var stripIconDraws [5]int
+
+func (u *winUI) paintStripTrailingIcons(hdc win.HDC, rect win.RECT) {
 	if u == nil || hdc == 0 || u.chrome.Frame != chrome.FrameWindows {
 		return
 	}
@@ -164,15 +145,58 @@ func (u *winUI) paintWinCaption(hdc win.HDC, rect win.RECT) {
 	if strip < 1 {
 		return
 	}
-	btns := winCaptionButtons(clientW, strip)
+	for i := range stripIconDraws {
+		stripIconDraws[i] = 0
+	}
+	barR, barG, barB := chrome.BarR, chrome.BarG, chrome.BarB
+	fgR, fgG, fgB := chrome.TextR, chrome.TextG, chrome.TextB
+	paintChip := func(slot int, kind iconstroke.Kind, box pixRect, fr, fg, fb byte) {
+		if box.empty() {
+			return
+		}
+		wr := win.RECT{Left: box.L, Top: box.T, Right: box.R, Bottom: box.B}
+		paintOpaqueRGB(hdc, wr, barR, barG, barB)
+		s := captionIconSize(box.R-box.L, box.B-box.T)
+		cx := (box.L + box.R) / 2
+		cy := (box.T + box.B) / 2
+		paintCaptionInk(hdc, stripIconInk(kind, cx, cy, s), fr, fg, fb, barR, barG, barB)
+		stripIconDraws[slot]++
+	}
+	chipBox := func(span [2]int) pixRect {
+		if span[1] <= span[0] {
+			return pixRect{}
+		}
+		cw := u.metricW
+		if cw < 1 {
+			cw = cellW
+		}
+		x0 := 4 + int32(span[0])*cw
+		bw := int32(span[1]-span[0]) * cw
+		if bw < 4 {
+			return pixRect{}
+		}
+		return pixRect{L: x0, T: 0, R: x0 + bw, B: strip}
+	}
+	if u.chrome.BellUnread {
+		paintChip(0, iconstroke.Bell, chipBox(u.chrome.BellBounds()), chrome.PrimR, chrome.PrimG, chrome.PrimB)
+	} else {
+		paintChip(0, iconstroke.Bell, chipBox(u.chrome.BellBounds()), chrome.SoftR, chrome.SoftG, chrome.SoftB)
+	}
+	if u.caffeine != nil && u.caffeine.Active() {
+		paintChip(1, iconstroke.Coffee, chipBox(u.chrome.CaffeineBounds()), chrome.PrimR, chrome.PrimG, chrome.PrimB)
+	} else {
+		paintChip(1, iconstroke.Coffee, chipBox(u.chrome.CaffeineBounds()), chrome.SoftR, chrome.SoftG, chrome.SoftB)
+	}
 	zoomed := u.hwnd != 0 && win.IsZoomed(u.hwnd)
-	for i, b := range btns {
+	for i, b := range u.captionButtons(clientW, strip) {
 		if b.empty() {
 			continue
 		}
-		br, bg, bb := chrome.BarR, chrome.BarG, chrome.BarB
-		gr, gg, gb := chrome.TextR, chrome.TextG, chrome.TextB
-		if i == u.captionHot {
+		br, bg, bb := barR, barG, barB
+		gr, gg, gb := fgR, fgG, fgB
+		if u.captionPress && i == u.captionDown {
+			br, bg, bb = mixRGB(br, bg, bb, 0, 0, 0, 1, 4)
+		} else if i == u.captionHot {
 			if i == 2 {
 				br, bg, bb = mixRGB(br, bg, bb, 196, 48, 43, 3, 4)
 				gr, gg, gb = 255, 255, 255
@@ -182,7 +206,19 @@ func (u *winUI) paintWinCaption(hdc win.HDC, rect win.RECT) {
 		}
 		wr := win.RECT{Left: b.L, Top: b.T, Right: b.R, Bottom: b.B}
 		paintOpaqueRGB(hdc, wr, br, bg, bb)
-		paintCaptionGlyph(hdc, i, b, zoomed, gr, gg, gb, br, bg, bb)
+		k := iconstroke.Min
+		switch i {
+		case 1:
+			k = iconstroke.Max
+			if zoomed {
+				k = iconstroke.Restore
+			}
+		case 2:
+			k = iconstroke.Close
+		}
+		s := captionIconSize(b.R-b.L, b.B-b.T)
+		paintCaptionInk(hdc, stripIconInk(k, (b.L+b.R)/2, (b.T+b.B)/2, s), gr, gg, gb, br, bg, bb)
+		stripIconDraws[2+i]++
 	}
 }
 
@@ -197,7 +233,7 @@ func (u *winUI) trackCaptionHover(hwnd win.HWND, px, py int32) {
 			win.InvalidateRect(hwnd, nil, false)
 		}
 	}
-	if u.captionLeaveTrk || hwnd == 0 {
+	if hwnd == 0 || !captionShouldArmLeave(u.captionLeaveTrk, px, py) {
 		return
 	}
 	var tme win.TRACKMOUSEEVENT
@@ -206,6 +242,61 @@ func (u *winUI) trackCaptionHover(hwnd win.HWND, px, py int32) {
 	tme.HwndTrack = hwnd
 	if win.TrackMouseEvent(&tme) {
 		u.captionLeaveTrk = true
+	}
+}
+
+func (u *winUI) hitCaptionButtonScreen(lParam uintptr) int {
+	if u == nil || u.hwnd == 0 || u.chrome.Frame != chrome.FrameWindows {
+		return -1
+	}
+	pt := win.POINT{
+		X: int32(int16(lParam & 0xffff)),
+		Y: int32(int16((lParam >> 16) & 0xffff)),
+	}
+	if !win.ScreenToClient(u.hwnd, &pt) {
+		return -1
+	}
+	return u.hitCaptionButton(pt.X, pt.Y)
+}
+
+func (u *winUI) trackCaptionHoverScreen(hwnd win.HWND, lParam uintptr) {
+	if u == nil || hwnd == 0 || u.chrome.Frame != chrome.FrameWindows {
+		return
+	}
+	pt := win.POINT{
+		X: int32(int16(lParam & 0xffff)),
+		Y: int32(int16((lParam >> 16) & 0xffff)),
+	}
+	if !win.ScreenToClient(hwnd, &pt) {
+		return
+	}
+	hot := u.hitCaptionButton(pt.X, pt.Y)
+	if hot != u.captionHot {
+		u.captionHot = hot
+		win.InvalidateRect(hwnd, nil, false)
+	}
+	if !captionShouldArmNCLeave(u.captionNCLeaveTrk) {
+		return
+	}
+	var tme win.TRACKMOUSEEVENT
+	tme.CbSize = uint32(unsafe.Sizeof(tme))
+	tme.DwFlags = win.TME_LEAVE | win.TME_NONCLIENT
+	tme.HwndTrack = hwnd
+	if win.TrackMouseEvent(&tme) {
+		u.captionNCLeaveTrk = true
+	}
+}
+
+func (u *winUI) clearCaptionHover(hwnd win.HWND) {
+	if u == nil {
+		return
+	}
+	hot, trk, _, dirty := captionApplyLeave(u.captionHot, u.captionLeaveTrk)
+	u.captionHot = hot
+	u.captionPress = false
+	u.captionLeaveTrk = trk
+	if dirty && hwnd != 0 {
+		win.InvalidateRect(hwnd, nil, false)
 	}
 }
 
@@ -269,76 +360,83 @@ func paintOpaqueRects(hdc win.HDC, rects []win.RECT, cr, cg, cb byte) {
 	win.DeleteObject(win.HGDIOBJ(brush))
 }
 
-// paintCaptionGlyph draws minimize / maximize-or-restore / close, centered.
-// kind is the Windows visual order: 0 min, 1 zoom, 2 close.
+// paintCaptionGlyph draws one minimize / maximize-or-restore / close icon.
+// Same stroke and AA fringe on all three — no offset shadow copy.
 func paintCaptionGlyph(hdc win.HDC, kind int, b pixRect, zoomed bool, cr, cg, cb, br, bg, bb byte) {
-	h := b.B - b.T
-	bw := b.R - b.L
-	s := h * 2 / 5
-	if s < 10 {
-		s = 10
+	if hdc == 0 {
+		return
 	}
-	if s > h-6 {
-		s = h - 6
-	}
-	if bw > 8 && s > bw-8 {
-		s = bw - 8
-	}
-	if s < 6 {
-		s = 6
-	}
+	s := captionIconSize(b.R-b.L, b.B-b.T)
 	cx := (b.L + b.R) / 2
 	cy := (b.T + b.B) / 2
-	stroke := s / 8
-	if stroke < 1 {
-		stroke = 1
-	}
-	switch kind {
-	case 0:
-		paintOpaqueRects(hdc, []win.RECT{{
-			Left: cx - s/2, Top: cy - stroke/2, Right: cx + s/2, Bottom: cy - stroke/2 + stroke,
-		}}, cr, cg, cb)
-	case 1:
-		if zoomed {
-			back := win.RECT{Left: cx - s/5, Top: cy - s/2, Right: cx + s/2, Bottom: cy + s/5}
-			front := win.RECT{Left: cx - s/2, Top: cy - s/5, Right: cx + s/5, Bottom: cy + s/2}
-			paintOpaqueRects(hdc, outlineRects(back, stroke), cr, cg, cb)
-			paintOpaqueRGB(hdc, front, br, bg, bb)
-			paintOpaqueRects(hdc, outlineRects(front, stroke), cr, cg, cb)
-			return
-		}
-		sq := win.RECT{Left: cx - s/2, Top: cy - s/2, Right: cx + s/2, Bottom: cy + s/2}
-		paintOpaqueRects(hdc, outlineRects(sq, stroke), cr, cg, cb)
-	default:
-		paintOpaqueRects(hdc, crossRects(cx-s/2, cy-s/2, s, stroke), cr, cg, cb)
-	}
+	paintCaptionInk(hdc, captionGlyphInk(kind, zoomed, cx, cy, s), cr, cg, cb, br, bg, bb)
 }
 
-func outlineRects(r win.RECT, t int32) []win.RECT {
-	if t < 1 {
-		t = 1
+func paintCaptionInk(hdc win.HDC, ink []captionInk, cr, cg, cb, br, bg, bb byte) {
+	if hdc == 0 || len(ink) == 0 {
+		return
 	}
-	if r.Right-r.Left <= t*2 || r.Bottom-r.Top <= t*2 {
-		return []win.RECT{r}
+	// 24-bit DIB + BitBlt. Never SetPixel (per-dot GDI syscall) and never
+	// SetDIBitsToDevice a 32-bit stamp onto this DC — that marks the window
+	// backbuffer alpha-aware, so glass holes go opaque black and paints stall.
+	minX, minY, maxX, maxY, ok := inkBounds(ink)
+	if !ok {
+		return
 	}
-	return []win.RECT{
-		{Left: r.Left, Top: r.Top, Right: r.Right, Bottom: r.Top + t},
-		{Left: r.Left, Top: r.Bottom - t, Right: r.Right, Bottom: r.Bottom},
-		{Left: r.Left, Top: r.Top, Right: r.Left + t, Bottom: r.Bottom},
-		{Left: r.Right - t, Top: r.Top, Right: r.Right, Bottom: r.Bottom},
+	w := maxX - minX + 1
+	h := maxY - minY + 1
+	if w < 1 || h < 1 || w > 256 || h > 256 {
+		return
 	}
+	pix := packCaptionInkBGR24(ink, minX, minY, w, h, cr, cg, cb, br, bg, bb)
+	if len(pix) == 0 {
+		return
+	}
+	bmi := win.BITMAPINFOHEADER{
+		BiSize:        uint32(unsafe.Sizeof(win.BITMAPINFOHEADER{})),
+		BiWidth:       w,
+		BiHeight:      -h,
+		BiPlanes:      1,
+		BiBitCount:    24,
+		BiCompression: win.BI_RGB,
+	}
+	var bits unsafe.Pointer
+	hbm := win.CreateDIBSection(hdc, &bmi, dibRGBColors, &bits, 0, 0)
+	if hbm == 0 || bits == nil {
+		return
+	}
+	copy(unsafe.Slice((*byte)(bits), len(pix)), pix)
+	mem := win.CreateCompatibleDC(hdc)
+	if mem == 0 {
+		win.DeleteObject(win.HGDIOBJ(hbm))
+		return
+	}
+	old := win.SelectObject(mem, win.HGDIOBJ(hbm))
+	win.BitBlt(hdc, minX, minY, w, h, mem, 0, 0, win.SRCCOPY)
+	win.SelectObject(mem, old)
+	win.DeleteDC(mem)
+	win.DeleteObject(win.HGDIOBJ(hbm))
 }
 
-func crossRects(x, y, s, t int32) []win.RECT {
-	if t < 2 {
-		t = 2
+func (u *winUI) captionButtons(clientW, stripH int32) [3]pixRect {
+	dpi := int32(96)
+	if u != nil && u.hwnd != 0 {
+		dpi = hwndDPI(u.hwnd)
 	}
-	var out []win.RECT
-	for i := int32(0); i < s; i += t / 2 {
-		out = append(out,
-			win.RECT{Left: x + i, Top: y + i, Right: x + i + t, Bottom: y + i + t},
-			win.RECT{Left: x + s - t - i, Top: y + i, Right: x + s - i, Bottom: y + i + t},
-		)
+	return winCaptionButtonsDPI(clientW, stripH, dpi)
+}
+
+func (u *winUI) setCaptionDown(hwnd win.HWND, down int) {
+	if u == nil {
+		return
 	}
-	return out
+	press := down >= 0
+	if press == u.captionPress && down == u.captionDown {
+		return
+	}
+	u.captionDown = down
+	u.captionPress = press
+	if hwnd != 0 {
+		win.InvalidateRect(hwnd, nil, false)
+	}
 }

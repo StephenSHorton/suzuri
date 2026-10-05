@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+
+	"github.com/StephenSHorton/suzuri/internal/applog"
 )
 
 const defaultRepo = "StephenSHorton/suzuri"
@@ -226,7 +228,7 @@ func (s *Service) DownloadAndApply(info Info) error {
 	// Caller should exit the process shortly after.
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		os.Exit(0)
+		applog.Exit(0, "update relaunch")
 	}()
 	return nil
 }

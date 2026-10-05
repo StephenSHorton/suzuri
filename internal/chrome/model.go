@@ -1085,8 +1085,8 @@ func (m Model) layoutTabCards(w int) (string, [][2]int, [2]int, [2]int, [2]int, 
 
 // renderCaffeineChip is the top-right coffee control (empty dim / full bright).
 func (m Model) renderCaffeineChip() string {
-	if m.Frame == FrameMac {
-		// Painted from the coffee glyph, large enough to read. Three cells of hit area.
+	if m.Frame == FrameMac || m.Frame == FrameWindows {
+		// Host paints the cup from the shared stroke set. Blank cells are the hit area.
 		return styleGap().Render("   ")
 	}
 	// HOT BEVERAGE U+2615 — reads as a cup in mono Nerd Font faces.
@@ -1104,6 +1104,13 @@ func (m Model) renderCaffeineChip() string {
 
 // renderBellChip is the session notification control, just left of the cup.
 func (m Model) renderBellChip() string {
+	if m.Frame == FrameWindows {
+		// Host paints the bell from the shared stroke set. Extra cells if a count shows.
+		if m.BellCount > 0 {
+			return styleGap().Render("     ")
+		}
+		return styleGap().Render("   ")
+	}
 	const bell = "🔔"
 	label := bell
 	if m.BellCount > 0 {

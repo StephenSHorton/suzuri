@@ -39,6 +39,10 @@ type Session struct {
 	resizeMu sync.Mutex
 	// lastIOUnixNano is updated on successful Read/Write with n>0.
 	lastIOUnixNano atomic.Int64
+	// writeInFlight is 1 while WriteFile is inside ConPTY. lastIO is only
+	// stamped after the call returns, so a timestamp gate alone can allow
+	// ResizePseudoConsole mid-write (native kill, no Go panic).
+	writeInFlight atomic.Int32
 }
 
 // DefaultShell returns a sensible Windows shell command line.
@@ -273,6 +277,8 @@ func (s *Session) Write(p []byte) (int, error) {
 	if s == nil || s.cpty == nil {
 		return 0, fmt.Errorf("session closed")
 	}
+	s.writeInFlight.Add(1)
+	defer s.writeInFlight.Add(-1)
 	n, err := s.cpty.Write(p)
 	if n > 0 {
 		s.lastIOUnixNano.Store(time.Now().UnixNano())
@@ -284,6 +290,9 @@ func (s *Session) Write(p []byte) (int, error) {
 func (s *Session) recentIO() bool {
 	if s == nil {
 		return false
+	}
+	if s.writeInFlight.Load() > 0 {
+		return true
 	}
 	ns := s.lastIOUnixNano.Load()
 	if ns == 0 {

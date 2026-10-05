@@ -23,7 +23,34 @@ const (
 	minInputContentWidth = 8
 	// Horizontal pad inside a pane bar (left + right).
 	inputBarPadX = 8
+	// inputBarEdgeSlop is leftover shell/frame inset (old padX=4 plus a
+	// DWM hairline). The panel fill jumps that gap so glass does not
+	// show as a strip beside the Warp bar.
+	inputBarEdgeSlop = 8
 )
+
+// inputBarFlushRect is the dark panel, flush to the window when this pane
+// sits on an edge. Text still uses inputBarPadX inside the panel.
+func inputBarFlushRect(g paneGeom, clientW, clientH int32) (left, top, right, bot int32) {
+	left, top = g.x, g.barY
+	right, bot = g.x+g.w, g.barY+g.barH
+	if left > 0 && left <= inputBarEdgeSlop {
+		left = 0
+	}
+	if clientW > 0 && right < clientW && clientW-right <= inputBarEdgeSlop {
+		right = clientW
+	}
+	if clientH > 0 && bot < clientH && clientH-bot <= inputBarEdgeSlop {
+		bot = clientH
+	}
+	if right < left {
+		right = left
+	}
+	if bot < top {
+		bot = top
+	}
+	return left, top, right, bot
+}
 
 // inputBarVPads returns hairline, top content inset, and bottom inset (symmetric).
 func inputBarVPads(ch int32) (hair, topPad, botPad int32) {

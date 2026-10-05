@@ -62,7 +62,9 @@ func TestWinCaptionButtonsInsideStrip(t *testing.T) {
 func TestTitleHitCornersAndButtons(t *testing.T) {
 	if hitTopLeft != int(win.HTTOPLEFT) || hitTopRight != int(win.HTTOPRIGHT) ||
 		hitBottomLeft != int(win.HTBOTTOMLEFT) || hitBottomRight != int(win.HTBOTTOMRIGHT) ||
-		hitCaption != int(win.HTCAPTION) || hitClient != int(win.HTCLIENT) {
+		hitCaption != int(win.HTCAPTION) || hitClient != int(win.HTCLIENT) ||
+		hitMinButton != int(win.HTMINBUTTON) || hitMaxButton != int(win.HTMAXBUTTON) ||
+		hitClose != int(win.HTCLOSE) {
 		t.Fatal("hit codes drifted from Win32")
 	}
 	const w, h, strip int32 = 800, 600, 27
@@ -88,19 +90,23 @@ func TestTitleHitCornersAndButtons(t *testing.T) {
 	q.Buttons = btns
 	// Close button owns the top-right corner of the strip, including the resize band.
 	q.X, q.Y = w-2, 1
-	if got := hitTestTitleBar(q); got != hitClient {
-		t.Fatalf("close top pixel=%d want HTCLIENT", got)
+	if got := hitTestTitleBar(q); got != hitClose {
+		t.Fatalf("close top pixel=%d want HTCLOSE", got)
 	}
 	q.X, q.Y = btns[2].L+4, strip/2
-	if got := hitTestTitleBar(q); got != hitClient {
-		t.Fatalf("close center=%d want HTCLIENT", got)
+	if got := hitTestTitleBar(q); got != hitClose {
+		t.Fatalf("close center=%d want HTCLOSE", got)
 	}
 	if got := hitTestTitleBar(q); got == hitCaption {
 		t.Fatal("button pixel mapped to HTCAPTION")
 	}
+	q.X, q.Y = btns[1].L+4, strip/2
+	if got := hitTestTitleBar(q); got != hitMaxButton {
+		t.Fatalf("zoom=%d want HTMAXBUTTON", got)
+	}
 	q.X, q.Y = btns[0].L+2, strip-2
-	if got := hitTestTitleBar(q); got != hitClient {
-		t.Fatalf("min button=%d want HTCLIENT", got)
+	if got := hitTestTitleBar(q); got != hitMinButton {
+		t.Fatalf("min button=%d want HTMINBUTTON", got)
 	}
 	// Empty strip (not brand, not a control) drags.
 	q.X, q.Y = 200, 10
@@ -120,7 +126,7 @@ func TestTitleHitCornersAndButtons(t *testing.T) {
 		t.Fatalf("tab in top band=%d want HTTOP", got)
 	}
 	q.X, q.Y = w-3, 2
-	if got := hitTestTitleBar(q); got != hitClient {
-		t.Fatalf("button in top band=%d want HTCLIENT", got)
+	if got := hitTestTitleBar(q); got != hitClose {
+		t.Fatalf("button in top band=%d want HTCLOSE", got)
 	}
 }
