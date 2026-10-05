@@ -250,6 +250,7 @@ type winUI struct {
 	framePosted        atomic.Bool
 	glassRefreshPosted atomic.Bool
 	lastFullPaint      time.Time
+	lastPaintMS        atomic.Int64
 	slowPaintN         int
 	ambientSuppressed  bool
 
@@ -346,6 +347,39 @@ func (u *winUI) requestPaint() {
 	}
 	u.paintPending = true
 	win.InvalidateRect(u.hwnd, nil, false)
+}
+
+// requestPaintFromPTY invalidates after ingest. Focused: same as requestPaint.
+// Unfocused: at most one full present per unfocusedPaintGap so a grok-fork
+// build flood cannot stack 300ms GDI paints on the UI thread.
+func (u *winUI) requestPaintFromPTY() {
+	if u == nil || u.hwnd == 0 {
+		return
+	}
+	since := time.Duration(0)
+	if !u.lastFullPaint.IsZero() {
+		since = time.Since(u.lastFullPaint)
+	}
+	if !shouldInvalidateFromPTY(u.hostFocused, true, u.paintPending, since) {
+		return
+	}
+	u.requestPaint()
+}
+
+func (u *winUI) allowUnfocusedPresent() bool {
+	if u == nil {
+		return false
+	}
+	if u.hostFocused {
+		return true
+	}
+	if u.paintPending {
+		return false
+	}
+	if u.lastFullPaint.IsZero() {
+		return true
+	}
+	return time.Since(u.lastFullPaint) >= unfocusedPaintGap
 }
 
 // monitorWorkArea returns the nearest monitor's work rect (excludes taskbar).
@@ -1526,6 +1560,7 @@ func (u *winUI) loop() error {
 	}
 	go u.blinkLoop()
 	go u.frameLoop()
+	go u.heartbeatLoop()
 
 	var msg win.MSG
 	for {
@@ -1751,6 +1786,13 @@ func (u *winUI) frameLoop() {
 		if !u.cfg.AnimateUnfocused && !u.hostFocused {
 			continue
 		}
+		if !u.hostFocused && !shouldAmbientWhileUnfocused(
+			u.cfg.AnimateUnfocused, u.anyPaneConPtyBusy(), u.slowPaintN > 0) {
+			continue
+		}
+		if !u.hostFocused && !u.allowUnfocusedPresent() {
+			continue
+		}
 		if !u.wantsAmbientFrames() {
 			continue
 		}
@@ -1761,6 +1803,44 @@ func (u *winUI) frameLoop() {
 			u.framePosted.Store(false)
 		}
 	}
+}
+
+func (u *winUI) heartbeatLoop() {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if !u.alive.Load() {
+			return
+		}
+		writeUIHeartbeat(u)
+	}
+}
+
+func writeUIHeartbeat(u *winUI) {
+	if u == nil {
+		return
+	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	gdi, user := guiObjectCounts()
+	inbuf := 0
+	if t := u.activeTab(); t != nil {
+		t.inMu.Lock()
+		inbuf = len(t.inBuf)
+		t.inMu.Unlock()
+	}
+	applog.Heartbeat(
+		"goroutines", runtime.NumGoroutine(),
+		"heap_mb", ms.HeapAlloc>>20,
+		"gdi", gdi,
+		"user", user,
+		"handles", processHandleCount(),
+		"paint_ms", u.lastPaintMS.Load(),
+		"focused", u.hostFocused,
+		"inbuf", inbuf,
+		"pty_hot", u.anyPaneConPtyBusy(),
+		"slow_n", u.slowPaintN,
+	)
 }
 
 // drainAndParse runs ONLY on the UI thread for the given tab id.
@@ -1813,7 +1893,7 @@ func (u *winUI) drainAndParse(tabID int) {
 		}
 		if visible {
 			u.markShellDirty()
-			u.requestPaint()
+			u.requestPaintFromPTY()
 		}
 		return
 	}
@@ -1827,7 +1907,9 @@ func (u *winUI) drainAndParse(tabID int) {
 	} else if res.TitleChanged {
 		u.chromeDirty = true
 	}
-	if res.TitleChanged && u.activeTab() == t {
+	// SetWindowText is a SendMessage. Skip it while alt-tabbed during a
+	// grok-fork flood — the title can wait for the next focused paint.
+	if res.TitleChanged && u.activeTab() == t && u.hostFocused {
 		setWindowTitle(u.hwnd, "suzuri — "+res.Title)
 	}
 	u.tryFlushCmdQueue(t)
@@ -1835,12 +1917,14 @@ func (u *winUI) drainAndParse(tabID int) {
 		u.publishBridgeSnapshot()
 	}
 	if visible {
-		u.requestPaint()
+		u.requestPaintFromPTY()
 	}
 	if res.More {
 		t.postBytes(u)
 	}
-	driveNotices(time.Now(), u.hostFocused, true)
+	if u.hostFocused {
+		driveNotices(time.Now(), u.hostFocused, true)
+	}
 }
 
 func (u *winUI) tabByID(id int) *tab {
@@ -2432,7 +2516,9 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				if u.wantsAmbientFrames() {
 					u.markShellDirty()
 				}
-				u.requestPaint()
+				if u.allowUnfocusedPresent() {
+					u.requestPaint()
+				}
 			} else {
 				// Idle shell, no ambient: only pulse the Warp caret.
 				u.requestInputPaint()
@@ -3821,9 +3907,17 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_CLOSE:
 		log.Info("WM_CLOSE")
+		applog.WriteCrashNote("WM_CLOSE", "tabs", len(u.tabs))
+		applog.Sync()
 		// Capture placement while the HWND is still valid.
 		u.persistWindowPlacement(true)
 		win.DestroyWindow(hwnd)
+		return 0
+
+	case 0x0016: // WM_ENDSESSION
+		applog.WriteCrashNote("WM_ENDSESSION", "wparam", wParam, "lparam", lParam)
+		applog.MarkClean()
+		applog.Sync()
 		return 0
 
 	case win.WM_DESTROY:
@@ -3832,6 +3926,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.persistNotes()
 		log.Info("WM_DESTROY — tearing down", "tabs", len(u.tabs))
 		applog.WriteCrashNote("WM_DESTROY", "tabs", len(u.tabs))
+		applog.MarkClean()
 		u.alive.Store(false)
 		if u.caffeine != nil {
 			u.caffeine.Close()
@@ -6029,6 +6124,7 @@ func (u *winUI) notePaintDuration(d time.Duration, w, h int32, full bool) {
 	}
 	noteUIFrame()
 	n := uiPaintLogN.Add(1)
+	u.lastPaintMS.Store(d.Milliseconds())
 	gdi, user := guiObjectCounts()
 	if frameTimingOn() || d >= slowPaintWarn || n <= 5 || gdi >= gdiObjectWarn || user >= userObjectWarn {
 		log.Info("paint",
@@ -6075,6 +6171,7 @@ func (u *winUI) suppressAmbient(d time.Duration) {
 		"hint", "Settings → ambient none, or set SUZURI_SAFE_MODE=1")
 	applog.Trail("ambient suppressed", "was", prev, "ms", d.Milliseconds(),
 		"gdi", gdi, "user", user, "depth", uiWatchDepth.Load())
+	applog.Sync()
 	// Never toast / PlaySound / Invalidate on the WM_PAINT stack.
 	u.postToast("rain off — display was stalling the UI")
 	u.markShellDirty()

@@ -64,14 +64,42 @@ func fatalWinException(code uint32) bool {
 }
 
 func formatNativeException(code uint32) []byte {
-	const prefix = "native-exception code=0x"
-	var buf [40]byte
-	n := copy(buf[:], prefix)
-	const hexdigits = "0123456789ABCDEF"
-	for i := 7; i >= 0; i-- {
-		buf[n] = hexdigits[(code>>(i*4))&0xF]
-		n++
+	return formatExceptionDetail(code, 0, "")
+}
+
+func formatExceptionDetail(code uint32, addr uintptr, module string) []byte {
+	var buf [384]byte
+	n := copy(buf[:], "native-exception code=0x")
+	n = appendHex32(buf[:], n, code)
+	if addr != 0 {
+		n += copy(buf[n:], " addr=0x")
+		n = appendHexPtr(buf[:], n, addr)
+	}
+	if module != "" {
+		n += copy(buf[n:], " module=")
+		n += copy(buf[n:], module)
 	}
 	buf[n] = '\n'
 	return buf[:n+1]
+}
+
+func appendHex32(buf []byte, n int, v uint32) int {
+	const hexdigits = "0123456789ABCDEF"
+	for i := 7; i >= 0; i-- {
+		buf[n] = hexdigits[(v>>(i*4))&0xF]
+		n++
+	}
+	return n
+}
+
+func appendHexPtr(buf []byte, n int, v uintptr) int {
+	const hexdigits = "0123456789ABCDEF"
+	for i := 15; i >= 0; i-- {
+		if n >= len(buf) {
+			return n
+		}
+		buf[n] = hexdigits[(v>>uint(i*4))&0xF]
+		n++
+	}
+	return n
 }

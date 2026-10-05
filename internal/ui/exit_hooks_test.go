@@ -2,7 +2,10 @@
 
 package ui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGlassAllowDWMRejectsNestedAndNCActivate(t *testing.T) {
 	if ok, why := glassAllowDWM(2, wmActivate, true, false); ok || why != "nested-wndproc" {
@@ -45,5 +48,11 @@ func TestFatalWinException(t *testing.T) {
 	got := string(formatNativeException(0xC00000FD))
 	if got != "native-exception code=0xC00000FD\n" {
 		t.Fatalf("format %q", got)
+	}
+	detail := string(formatExceptionDetail(0xC0000005, 0x7FF123456789ABCD, "suzuri.exe"))
+	if !strings.Contains(detail, "code=0xC0000005") ||
+		!strings.Contains(detail, "addr=0x7FF123456789ABCD") ||
+		!strings.Contains(detail, "module=suzuri.exe") {
+		t.Fatalf("detail %q", detail)
 	}
 }

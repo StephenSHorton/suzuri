@@ -33,6 +33,16 @@ var (
 	// CrashPath is where runtime fatal output (panic/throw) is mirrored.
 	CrashPath string
 	crash     *os.File
+
+	alivePath       string
+	previousUnclean string
+	cleanShutdown   bool
+)
+
+const (
+	maxLogBytes   = 2 << 20
+	maxTrailBytes = 512 << 10
+	maxLogBackups = 2
 )
 
 // Init opens the log file, sets the package default Charm logger, and returns
@@ -47,6 +57,7 @@ func Init() (string, error) {
 		return "", err
 	}
 	path := filepath.Join(dir, "suzuri.log")
+	rotateIfHuge(path, maxLogBytes)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		setup(os.Stderr, log.InfoLevel)
@@ -58,6 +69,7 @@ func Init() (string, error) {
 	// Durable trail + runtime crash output (best-effort; never fail Init).
 	openTrailLocked(dir)
 	openCrashOutputLocked(dir)
+	notePreviousSessionLocked(dir)
 
 	level := log.InfoLevel
 	if v := strings.TrimSpace(os.Getenv("SUZURI_LOG_LEVEL")); v != "" {
@@ -80,6 +92,7 @@ func Init() (string, error) {
 
 func openTrailLocked(dir string) {
 	tp := filepath.Join(dir, "suzuri-trail.log")
+	rotateIfHuge(tp, maxTrailBytes)
 	tf, err := os.OpenFile(tp, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
@@ -107,6 +120,58 @@ func openCrashOutputLocked(dir string) {
 	_, _ = fmt.Fprintf(cf, "\n--- crash-output open pid=%d t=%s ---\n",
 		os.Getpid(), time.Now().Format(time.RFC3339))
 	_ = cf.Sync()
+}
+
+func rotateIfHuge(path string, limit int64) {
+	if limit < 1 {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() < limit {
+		return
+	}
+	for i := maxLogBackups; i >= 1; i-- {
+		src := path + "." + fmt.Sprint(i)
+		if i == maxLogBackups {
+			_ = os.Remove(src)
+			continue
+		}
+		_ = os.Rename(src, path+"."+fmt.Sprint(i+1))
+	}
+	_ = os.Rename(path, path+".1")
+}
+
+func notePreviousSessionLocked(dir string) {
+	alivePath = filepath.Join(dir, "suzuri-alive")
+	if b, err := os.ReadFile(alivePath); err == nil && len(b) > 0 {
+		previousUnclean = strings.TrimSpace(string(b))
+	}
+	line := formatKVLine("alive", "session-start")
+	_ = os.WriteFile(alivePath, []byte(line), 0o644)
+}
+
+// PreviousUnclean is the last heartbeat/alive line from a session that did
+// not write a clean-shutdown marker. Empty when the previous run exited cleanly.
+func PreviousUnclean() string {
+	mu.Lock()
+	defer mu.Unlock()
+	return previousUnclean
+}
+
+// MarkClean records a planned shutdown so the next launch does not report
+// "previous session ended uncleanly".
+func MarkClean() {
+	mu.Lock()
+	defer mu.Unlock()
+	cleanShutdown = true
+	if trail != nil {
+		line := formatKVLine("exit", "clean-shutdown")
+		_, _ = trail.WriteString(line)
+		_ = trail.Sync()
+	}
+	if alivePath != "" {
+		_ = os.Remove(alivePath)
+	}
 }
 
 func dataDir() (string, error) {
@@ -288,11 +353,27 @@ func WriteCrashNote(reason string, kvs ...any) {
 	log.Error("crash note", "reason", reason)
 }
 
+// Heartbeat writes a 5s trail pulse (goroutines, heap, GDI, last paint)
+// and refreshes the alive file so an unclean death leaves resource state.
+func Heartbeat(kvs ...any) {
+	line := formatKVLine("heartbeat", "", kvs...)
+	mu.Lock()
+	if trail != nil {
+		_, _ = trail.WriteString(line)
+		_ = trail.Sync()
+	}
+	if alivePath != "" {
+		_ = os.WriteFile(alivePath, []byte(line), 0o644)
+	}
+	mu.Unlock()
+}
+
 // Exit writes a crash-trail reason and terminates. os.Exit skips defers, so
 // this is the only host path that should call it after applog.Init.
 func Exit(code int, reason string) {
 	WriteCrashNote("os.Exit", "code", code, "reason", reason)
 	log.Error("process exit", "code", code, "reason", reason)
+	MarkClean()
 	Sync()
 	Close()
 	os.Exit(code)
@@ -302,6 +383,9 @@ func Exit(code int, reason string) {
 func Close() {
 	mu.Lock()
 	defer mu.Unlock()
+	if cleanShutdown && alivePath != "" {
+		_ = os.Remove(alivePath)
+	}
 	if file != nil {
 		_ = file.Sync()
 		_ = file.Close()

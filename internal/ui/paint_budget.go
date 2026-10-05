@@ -14,6 +14,11 @@ const (
 	slowPaintWarn      = 150 * time.Millisecond
 	slowPaintKill      = 400 * time.Millisecond
 	slowPaintKillCount = 3
+	// unfocusedPaintGap caps presents while alt-tabbed. A grok-fork build
+	// flood used to InvalidateRect on every 256KiB ingest; those full GDI
+	// paints (rain + alt-screen + glass) jumped to 150–376ms and then the
+	// host vanished with no trail.
+	unfocusedPaintGap  = 100 * time.Millisecond
 	envSafeMode        = "SUZURI_SAFE_MODE"
 	envNoAmbient       = "SUZURI_NO_AMBIENT"
 	envFrameTiming     = "SUZURI_FRAME_TIMING"
@@ -63,6 +68,31 @@ func shouldDisableAmbient(elapsed time.Duration, slowCount int) bool {
 
 func skipAmbientFrame(sinceLast time.Duration) bool {
 	return sinceLast > 0 && sinceLast < minAmbientPaintGap
+}
+
+// shouldInvalidateFromPTY is whether a PTY ingest may InvalidateRect.
+// Ingest always runs (so the child does not block on a full pipe). Paint
+// does not: an unfocused flood plus 60fps rain was the de25fe7 silent death.
+func shouldInvalidateFromPTY(focused, visible, paintPending bool, sinceLast time.Duration) bool {
+	if !visible || paintPending {
+		return false
+	}
+	if focused {
+		return true
+	}
+	return sinceLast <= 0 || sinceLast >= unfocusedPaintGap
+}
+
+// shouldAmbientWhileUnfocused is rain/settings underlay while alt-tabbed.
+// Drop it during a PTY flood or after a slow present — ingest still runs.
+func shouldAmbientWhileUnfocused(animateUnfocused, ptyHot, lastPaintSlow bool) bool {
+	if !animateUnfocused {
+		return false
+	}
+	if ptyHot || lastPaintSlow {
+		return false
+	}
+	return true
 }
 
 // ambientFramePeriod is the rain/settings underlay tick. Cap at 60 fps so a

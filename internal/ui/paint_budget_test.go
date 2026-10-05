@@ -37,6 +37,60 @@ func TestSkipAmbientFrame(t *testing.T) {
 	}
 }
 
+func TestUnfocusedPTYFloodDoesNotPaintEveryChunk(t *testing.T) {
+	// Focused: every visible ingest may invalidate (paintPending still coalesces).
+	if !shouldInvalidateFromPTY(true, true, false, time.Millisecond) {
+		t.Fatal("focused ingest should paint")
+	}
+	if shouldInvalidateFromPTY(true, true, true, time.Millisecond) {
+		t.Fatal("paintPending already coalesces")
+	}
+	if shouldInvalidateFromPTY(true, false, false, time.Millisecond) {
+		t.Fatal("hidden pane must not invalidate")
+	}
+	// Unfocused grok-fork flood: first present ok, then 10fps cap.
+	if !shouldInvalidateFromPTY(false, true, false, 0) {
+		t.Fatal("first unfocused present must run")
+	}
+	if shouldInvalidateFromPTY(false, true, false, 20*time.Millisecond) {
+		t.Fatal("20ms after a present must not start another unfocused full paint")
+	}
+	if !shouldInvalidateFromPTY(false, true, false, unfocusedPaintGap) {
+		t.Fatal("after the gap, one present is allowed")
+	}
+	paints := 0
+	since := time.Duration(0)
+	for i := 0; i < 40; i++ {
+		if shouldInvalidateFromPTY(false, true, false, since) {
+			paints++
+			since = 0
+		} else {
+			since += 17 * time.Millisecond // 60fps frame + PTY chunk
+		}
+	}
+	if paints > 8 {
+		t.Fatalf("unfocused flood painted %d times in ~680ms, want ≤8 (10fps)", paints)
+	}
+	if paints < 1 {
+		t.Fatal("unfocused flood must still present occasionally")
+	}
+}
+
+func TestAmbientDropsDuringUnfocusedFlood(t *testing.T) {
+	if shouldAmbientWhileUnfocused(false, false, false) {
+		t.Fatal("AnimateUnfocused off")
+	}
+	if !shouldAmbientWhileUnfocused(true, false, false) {
+		t.Fatal("idle unfocused rain stays on")
+	}
+	if shouldAmbientWhileUnfocused(true, true, false) {
+		t.Fatal("PTY flood must drop rain so ingest can drain")
+	}
+	if shouldAmbientWhileUnfocused(true, false, true) {
+		t.Fatal("slow present must drop rain")
+	}
+}
+
 func TestAmbientFramePeriodCapsRefresh(t *testing.T) {
 	if ambientFramePeriod(0) != time.Second/60 {
 		t.Fatal("0 Hz must fall back to 60 fps")

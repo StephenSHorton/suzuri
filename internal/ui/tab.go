@@ -572,6 +572,7 @@ func (t *tab) readLoop(u tabHost) {
 		if err != nil {
 			t.alive.Store(false)
 			log.Info("pty read ended", "tab", t.id, "err", err)
+			applog.Trail("pty read ended", "tab", t.id, "err", err)
 			t.notifyClosed(u)
 			return
 		}
@@ -602,6 +603,7 @@ func (t *tab) waitLoop(u tabHost) {
 	}
 	code, err := t.sess.Wait(context.Background())
 	log.Info("shell process exited", "tab", t.id, "code", code, "err", err)
+	applog.Trail("shell process exited", "tab", t.id, "code", code, "err", err)
 	t.alive.Store(false)
 	// Unblock a stuck Read so readLoop can exit.
 	func() {

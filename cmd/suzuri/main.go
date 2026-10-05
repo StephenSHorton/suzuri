@@ -105,6 +105,10 @@ func main() {
 		}
 	}
 	ui.InstallProcessExitHooks()
+	if prev := applog.PreviousUnclean(); prev != "" {
+		log.Error("previous session ended uncleanly", "last", prev)
+		applog.WriteCrashNote("previous-unclean", "last", prev)
+	}
 
 	switch runtime.GOOS {
 	case "windows", "darwin":
@@ -147,6 +151,7 @@ func main() {
 	if !ui.EnsureSingleInstance() {
 		log.Info("exiting; existing instance activated", "pid", os.Getpid())
 		applog.WriteCrashNote("single-instance", "pid", os.Getpid())
+		applog.MarkClean()
 		return
 	}
 
@@ -173,5 +178,6 @@ func main() {
 		applog.Exit(1, "ui.Run failed: "+err.Error())
 	}
 	applog.WriteCrashNote("clean", "pid", os.Getpid())
+	applog.MarkClean()
 	log.Info("exiting cleanly", "pid", os.Getpid())
 }
