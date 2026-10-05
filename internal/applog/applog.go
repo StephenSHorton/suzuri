@@ -27,11 +27,12 @@ var (
 
 	// trail is a tiny durable breadcrumb file (synced every write) so native
 	// hard deaths that skip Go's logger still leave a last-op trail.
-	trail   *os.File
+	trail *os.File
 	// TrailPath is the breadcrumb file, if open.
 	TrailPath string
 	// CrashPath is where runtime fatal output (panic/throw) is mirrored.
 	CrashPath string
+	crash     *os.File
 )
 
 // Init opens the log file, sets the package default Charm logger, and returns
@@ -98,11 +99,11 @@ func openCrashOutputLocked(dir string) {
 		_ = cf.Close()
 		return
 	}
+	crash = cf
 	CrashPath = cp
-	// Keep the file open via trail-adjacent note — store on trail's sibling by
-	// writing a startup marker (cf is owned by runtime after SetCrashOutput
-	// but we still hold our handle for the path record).
-	_ = cf // fd duplicated; leaving open is fine for append lifecycle
+	// runtime/debug.SetCrashOutput duplicates the fd; we keep ours so
+	// WriteCrashNote / WriteRaw can append a reason when the process dies
+	// without a Go panic (native AV, stack overflow, os.Exit).
 	_, _ = fmt.Fprintf(cf, "\n--- crash-output open pid=%d t=%s ---\n",
 		os.Getpid(), time.Now().Format(time.RFC3339))
 	_ = cf.Sync()
@@ -185,6 +186,9 @@ func Sync() {
 	if trail != nil {
 		_ = trail.Sync()
 	}
+	if crash != nil {
+		_ = crash.Sync()
+	}
 }
 
 // Trail writes a single durable breadcrumb line and fsyncs. Use immediately
@@ -214,6 +218,86 @@ func Trail(where string, kvs ...any) {
 	_ = trail.Sync()
 }
 
+func formatKVLine(kind, where string, kvs ...any) string {
+	var b strings.Builder
+	b.WriteString(time.Now().Format(time.RFC3339))
+	b.WriteString(" pid=")
+	b.WriteString(fmt.Sprint(os.Getpid()))
+	b.WriteByte(' ')
+	b.WriteString(kind)
+	if where != "" {
+		b.WriteByte(' ')
+		b.WriteString(where)
+	}
+	for i := 0; i+1 < len(kvs); i += 2 {
+		b.WriteByte(' ')
+		b.WriteString(fmt.Sprint(kvs[i]))
+		b.WriteByte('=')
+		b.WriteString(fmt.Sprint(kvs[i+1]))
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
+// WriteRaw appends bytes to the trail and crash files and fsyncs. Safe from a
+// vectored exception handler: no fmt, no logger. Empty p is a no-op.
+func WriteRaw(p []byte) {
+	if len(p) == 0 {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	writeRawLocked(p)
+}
+
+func writeRawLocked(p []byte) {
+	if trail != nil {
+		_, _ = trail.Write(p)
+		if p[len(p)-1] != '\n' {
+			_, _ = trail.Write([]byte{'\n'})
+		}
+		_ = trail.Sync()
+	}
+	if crash != nil {
+		_, _ = crash.Write(p)
+		if p[len(p)-1] != '\n' {
+			_, _ = crash.Write([]byte{'\n'})
+		}
+		_ = crash.Sync()
+	}
+}
+
+// WriteCrashNote records a process-death reason on both the trail and the
+// crash file. Use from os.Exit wrappers, last-tab quit, and native hooks.
+func WriteCrashNote(reason string, kvs ...any) {
+	line := formatKVLine("crash", reason, kvs...)
+	mu.Lock()
+	if trail != nil {
+		_, _ = trail.WriteString(line)
+		_ = trail.Sync()
+	}
+	if crash != nil {
+		_, _ = crash.WriteString(line)
+		_ = crash.Sync()
+	}
+	if file != nil {
+		_, _ = file.WriteString(line)
+		_ = file.Sync()
+	}
+	mu.Unlock()
+	log.Error("crash note", "reason", reason)
+}
+
+// Exit writes a crash-trail reason and terminates. os.Exit skips defers, so
+// this is the only host path that should call it after applog.Init.
+func Exit(code int, reason string) {
+	WriteCrashNote("os.Exit", "code", code, "reason", reason)
+	log.Error("process exit", "code", code, "reason", reason)
+	Sync()
+	Close()
+	os.Exit(code)
+}
+
 // Close flushes and closes the log file.
 func Close() {
 	mu.Lock()
@@ -227,6 +311,11 @@ func Close() {
 		_ = trail.Sync()
 		_ = trail.Close()
 		trail = nil
+	}
+	if crash != nil {
+		_ = crash.Sync()
+		_ = crash.Close()
+		crash = nil
 	}
 }
 

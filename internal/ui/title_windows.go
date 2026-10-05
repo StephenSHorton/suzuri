@@ -13,7 +13,10 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/iconstroke"
 )
 
-var procSetPixel = windows.NewLazySystemDLL("gdi32.dll").NewProc("SetPixel")
+var (
+	procSetPixel          = windows.NewLazySystemDLL("gdi32.dll").NewProc("SetPixel")
+	procSetDIBitsToDevice = windows.NewLazySystemDLL("gdi32.dll").NewProc("SetDIBitsToDevice")
+)
 
 func setCaptionPixel(hdc win.HDC, x, y int32, color win.COLORREF) {
 	if hdc == 0 {
@@ -383,9 +386,16 @@ func paintCaptionGlyph(hdc win.HDC, kind int, b pixRect, zoomed bool, cr, cg, cb
 }
 
 func paintCaptionInk(hdc win.HDC, ink []captionInk, cr, cg, cb, br, bg, bb byte) {
-	if hdc == 0 {
+	if hdc == 0 || len(ink) == 0 {
 		return
 	}
+	if paintCaptionInkDIB(hdc, ink, cr, cg, cb, br, bg, bb) {
+		return
+	}
+	paintCaptionInkPixels(hdc, ink, cr, cg, cb, br, bg, bb)
+}
+
+func paintCaptionInkPixels(hdc win.HDC, ink []captionInk, cr, cg, cb, br, bg, bb byte) {
 	for _, p := range ink {
 		if p.a == 0 {
 			continue
@@ -396,6 +406,63 @@ func paintCaptionInk(hdc win.HDC, ink []captionInk, cr, cg, cb, br, bg, bb byte)
 			mixCover(bb, cb, p.a),
 		))
 	}
+}
+
+// paintCaptionInkDIB stamps one 32-bit DIB and SetDIBitsToDevice. Per-pixel
+// SetPixel on a DWM glass surface is a syscall each (and a GDI object storm
+// when DWM starts composing the unfocused window). One blit, no new HBITMAP.
+func paintCaptionInkDIB(hdc win.HDC, ink []captionInk, cr, cg, cb, br, bg, bb byte) bool {
+	minX, minY, maxX, maxY, ok := inkBounds(ink)
+	if !ok {
+		return true
+	}
+	w := maxX - minX + 1
+	h := maxY - minY + 1
+	if w < 1 || h < 1 || w > 128 || h > 128 {
+		return false
+	}
+	if err := procSetDIBitsToDevice.Find(); err != nil {
+		return false
+	}
+	pixels := make([]uint32, int(w)*int(h))
+	bgPix := uint32(br)<<16 | uint32(bg)<<8 | uint32(bb)
+	for i := range pixels {
+		pixels[i] = bgPix
+	}
+	for _, p := range ink {
+		if p.a == 0 {
+			continue
+		}
+		x := p.x - minX
+		y := p.y - minY
+		if x < 0 || y < 0 || x >= w || y >= h {
+			continue
+		}
+		// Bottom-up DIB row 0 is the last scanline.
+		row := int(h-1-y)*int(w) + int(x)
+		pixels[row] = uint32(mixCover(br, cr, p.a))<<16 |
+			uint32(mixCover(bg, cg, p.a))<<8 |
+			uint32(mixCover(bb, cb, p.a))
+	}
+	hdr := win.BITMAPINFOHEADER{
+		BiSize:        uint32(unsafe.Sizeof(win.BITMAPINFOHEADER{})),
+		BiWidth:       w,
+		BiHeight:      h,
+		BiPlanes:      1,
+		BiBitCount:    32,
+		BiCompression: win.BI_RGB,
+	}
+	ret, _, _ := procSetDIBitsToDevice.Call(
+		uintptr(hdc),
+		uintptr(minX), uintptr(minY),
+		uintptr(w), uintptr(h),
+		0, 0,
+		0, uintptr(h),
+		uintptr(unsafe.Pointer(&pixels[0])),
+		uintptr(unsafe.Pointer(&hdr)),
+		0,
+	)
+	return ret != 0
 }
 
 func (u *winUI) captionButtons(clientW, stripH int32) [3]pixRect {

@@ -358,6 +358,7 @@ func (u *winUI) closePageAt(idx int, interactive bool) {
 			return
 		}
 		log.Info("last shell exited — quitting")
+		applog.WriteCrashNote("last-shell-exit", "tabs", len(u.tabs), "pages", len(u.pages))
 		applog.Sync()
 		u.persistWindowPlacement(true)
 		if u.hwnd != 0 {

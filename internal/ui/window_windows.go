@@ -55,6 +55,9 @@ const (
 	// wmSuzuriFrame drives shell rain/settings underlay at display pace
 	// (capped), independent of the 40ms caret blink.
 	wmSuzuriFrame = win.WM_APP + 11
+	// wmSuzuriGlassRefresh re-pushes accent on a clean loop stack after
+	// WM_ACTIVATE. Never run DwmExtend/SetAccent inside NCACTIVATE.
+	wmSuzuriGlassRefresh = win.WM_APP + 12
 )
 
 // Run opens a native Win32 window with one shell tab (more via Ctrl+Shift+T).
@@ -74,6 +77,7 @@ func Run() error {
 		cfg.ShellAmbient = config.AmbientNone
 	}
 	setNoticeAnchor(cfg.NoticePosition, false)
+	InstallProcessExitHooks()
 	startUIWatchdog()
 	chrome.ApplyTheme(cfg.Theme)
 	SetShellANSIMap(cfg.ShellANSIMap)
@@ -242,11 +246,12 @@ type winUI struct {
 	memW      int32
 	memH      int32
 
-	blinkPosted       atomic.Bool
-	framePosted       atomic.Bool
-	lastFullPaint     time.Time
-	slowPaintN        int
-	ambientSuppressed bool
+	blinkPosted        atomic.Bool
+	framePosted        atomic.Bool
+	glassRefreshPosted atomic.Bool
+	lastFullPaint      time.Time
+	slowPaintN         int
+	ambientSuppressed  bool
 
 	// notesDragging: LBUTTON held after a notes body click (drag-select text).
 	notesDragging bool
@@ -1527,11 +1532,14 @@ func (u *winUI) loop() error {
 		ret := win.GetMessage(&msg, 0, 0, 0)
 		if ret == 0 {
 			log.Info("WM_QUIT — message loop exit")
+			applog.WriteCrashNote("message-loop", "reason", "WM_QUIT")
+			applog.Sync()
 			break
 		}
 		if ret == -1 {
 			err := lastErr("GetMessage")
 			log.Error("GetMessage failed", "err", err)
+			applog.WriteCrashNote("message-loop", "reason", "GetMessage-failed", "err", err)
 			return err
 		}
 		win.TranslateMessage(&msg)
@@ -1578,6 +1586,12 @@ func wndProcMain(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	defer applog.Recover("wndproc", false)
 	uiWatchEnter(wmPhaseName(msg))
 	defer uiWatchLeave()
+	if d := uiWatchDepth.Load(); wndProcShouldAbort(d) {
+		applog.WriteCrashNote("wndproc-depth", "depth", d, "msg", fmt.Sprintf("0x%x", msg))
+		log.Error("wndproc depth abort", "depth", d, "msg", fmt.Sprintf("0x%x", msg))
+		applog.Sync()
+		return win.DefWindowProc(hwnd, msg, wParam, lParam)
+	}
 	u := uiFor(hwnd)
 	if u == nil {
 		return win.DefWindowProc(hwnd, msg, wParam, lParam)
@@ -1593,6 +1607,8 @@ func wmPhaseName(msg uint32) string {
 		return "wmSuzuriBlink"
 	case wmSuzuriFrame:
 		return "wmSuzuriFrame"
+	case wmSuzuriGlassRefresh:
+		return "wmSuzuriGlassRefresh"
 	case wmSuzuriBytes:
 		return "wmSuzuriBytes"
 	case wmSuzuriLayoutSettle:
@@ -1708,6 +1724,18 @@ func (u *winUI) displayRefreshHz() int32 {
 	}
 	_, _, hz := deviceCaps(u.hwnd)
 	return hz
+}
+
+func (u *winUI) scheduleGlassRefresh() {
+	if u == nil || u.hwnd == 0 || !u.shellGlass() {
+		return
+	}
+	if !u.glassRefreshPosted.CompareAndSwap(false, true) {
+		return
+	}
+	if win.PostMessage(u.hwnd, wmSuzuriGlassRefresh, 0, 0) == 0 {
+		u.glassRefreshPosted.Store(false)
+	}
 }
 
 func (u *winUI) frameLoop() {
@@ -2136,6 +2164,7 @@ func (u *winUI) closeTabUI(id int) {
 // Last pane of last page quits immediately (no confirm) — shell semantics.
 func (u *winUI) sessionEndedCloseTab(id int) {
 	defer applog.Recover("sessionEndedCloseTab", false)
+	applog.Trail("session ended", "tab", id, "tabs", len(u.tabs), "pages", len(u.pages))
 	u.closePaneUI(id, false)
 }
 
@@ -2293,6 +2322,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		if u.alive.Load() && !u.inSizeMove && u.wantsAmbientFrames() {
 			u.markShellDirty()
 			u.requestPaint()
+		}
+		return 0
+
+	case wmSuzuriGlassRefresh:
+		u.glassRefreshPosted.Store(false)
+		if u.alive.Load() && u.shellGlass() {
+			u.pushGlassBackdrop(true, win.WM_ACTIVATE)
 		}
 		return 0
 
@@ -2529,12 +2565,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				}
 			}
 		}
-		// Re-push acrylic on focus change. DWM drops HostBackdrop when
-		// inactive; the accent policy stays live if we keep Flags=2 on it.
-		// Do not full-repaint on deactivate — that GDI path hard-kills
-		// dual-GPU + rain.
+		// Never DwmExtend/SetAccent on this stack. Those APIs send
+		// WM_NCACTIVATE synchronously and overflow the native callback
+		// (silent death, no Go panic, no WER). Post a coalesced refresh.
 		if u.shellGlass() {
-			u.applyGlassBackdropForced()
+			u.scheduleGlassRefresh()
 		}
 		if active != win.WA_INACTIVE && u.alive.Load() {
 			win.InvalidateRect(hwnd, nil, false)
@@ -2543,10 +2578,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_NCACTIVATE:
 		// Skip native NC paint (lParam=-1) so DWM does not flash a light
-		// caption over FrameWindows. Re-apply glass without a full paint.
-		if u.shellGlass() {
-			u.applyGlassBackdropForced()
-		}
+		// caption over FrameWindows. Do not touch DWM composition here —
+		// SetAccent/DwmExtend re-enter this handler and blow the stack.
 		if u.chrome.Frame == chrome.FrameWindows {
 			return win.DefWindowProc(hwnd, msg, wParam, ^uintptr(0))
 		}
@@ -3798,6 +3831,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		u.persistWindowPlacement(true)
 		u.persistNotes()
 		log.Info("WM_DESTROY — tearing down", "tabs", len(u.tabs))
+		applog.WriteCrashNote("WM_DESTROY", "tabs", len(u.tabs))
 		u.alive.Store(false)
 		if u.caffeine != nil {
 			u.caffeine.Close()
@@ -5995,14 +6029,21 @@ func (u *winUI) notePaintDuration(d time.Duration, w, h int32, full bool) {
 	}
 	noteUIFrame()
 	n := uiPaintLogN.Add(1)
-	if frameTimingOn() || d >= slowPaintWarn || n <= 5 {
+	gdi, user := guiObjectCounts()
+	if frameTimingOn() || d >= slowPaintWarn || n <= 5 || gdi >= gdiObjectWarn || user >= userObjectWarn {
 		log.Info("paint",
 			"ms", d.Milliseconds(),
 			"full", full,
 			"w", w, "h", h,
 			"ambient", u.shellAmbientOn(),
 			"suppressed", u.ambientSuppressed,
+			"gdi", gdi,
+			"user", user,
+			"wndproc_depth", uiWatchDepth.Load(),
 		)
+	}
+	if gdi >= gdiObjectWarn || user >= userObjectWarn {
+		applog.Trail("gui objects high", "gdi", gdi, "user", user, "ms", d.Milliseconds())
 	}
 	if !full {
 		return
@@ -6025,12 +6066,17 @@ func (u *winUI) suppressAmbient(d time.Duration) {
 	prev := u.cfg.ShellAmbient
 	u.ambientSuppressed = true
 	u.cfg.ShellAmbient = config.AmbientNone
+	gdi, user := guiObjectCounts()
 	log.Warn("disabled shell ambient for this session",
 		"was", prev,
 		"paint_ms", d.Milliseconds(),
+		"gdi", gdi, "user", user,
+		"wndproc_depth", uiWatchDepth.Load(),
 		"hint", "Settings → ambient none, or set SUZURI_SAFE_MODE=1")
-	applog.Trail("ambient suppressed", "was", prev, "ms", d.Milliseconds())
-	u.toast("rain off — display was stalling the UI")
+	applog.Trail("ambient suppressed", "was", prev, "ms", d.Milliseconds(),
+		"gdi", gdi, "user", user, "depth", uiWatchDepth.Load())
+	// Never toast / PlaySound / Invalidate on the WM_PAINT stack.
+	u.postToast("rain off — display was stalling the UI")
 	u.markShellDirty()
 }
 

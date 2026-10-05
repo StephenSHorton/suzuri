@@ -4,12 +4,14 @@ package ui
 
 import (
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/charmbracelet/log"
 	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 
+	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
@@ -69,12 +71,13 @@ var (
 	dwmExtend  = windows.NewLazySystemDLL("dwmapi.dll").NewProc("DwmExtendFrameIntoClientArea")
 	setWinComp = windows.NewLazySystemDLL("user32.dll").NewProc("SetWindowCompositionAttribute")
 
-	glassMu   sync.Mutex
-	glassHw   win.HWND
-	glassOn   bool
-	glassKind int32
-	glassBlur int
-	glassVeil int
+	glassMu      sync.Mutex
+	glassHw      win.HWND
+	glassOn      bool
+	glassKind    int32
+	glassBlur    int
+	glassVeil    int
+	glassPushing atomic.Bool
 )
 
 func winBuildNumber() uint32 {
@@ -225,21 +228,21 @@ func setAccent(hwnd win.HWND, state, flags, gradient uint32) {
 // Safe to call before the window exists (no-op) and repeatedly; unchanged
 // settings do not touch DWM. Call from config apply and once the HWND is born.
 func (u *winUI) applyGlassBackdrop() {
-	u.pushGlassBackdrop(false)
+	u.pushGlassBackdrop(false, 0)
 }
 
-// applyGlassBackdropForced re-pushes the accent policy (WM_ACTIVATE /
-// WM_NCACTIVATE). Some Win11 builds drop HostBackdrop and the accent
-// when the window goes inactive; we do not InvalidateRect here — a
-// full paint on deactivate is a dual-GPU GDI hard-kill.
+// applyGlassBackdropForced is only for a *posted* refresh on a clean
+// message-loop stack (wmSuzuriGlassRefresh). Never call this from
+// WM_NCACTIVATE / WM_ACTIVATE — DwmExtend / SetAccent re-enter WndProc.
 func (u *winUI) applyGlassBackdropForced() {
-	u.pushGlassBackdrop(true)
+	u.pushGlassBackdrop(true, 0)
 }
 
-func (u *winUI) pushGlassBackdrop(force bool) {
+func (u *winUI) pushGlassBackdrop(force bool, fromMsg uint32) {
 	if u == nil || u.hwnd == 0 {
 		return
 	}
+	depth := int(uiWatchDepth.Load())
 	on := u.shellGlass()
 	kind := glassBackdropType(u.cfg)
 	blur, veil := 0, 0
@@ -247,9 +250,18 @@ func (u *winUI) pushGlassBackdrop(force bool) {
 		blur = u.cfg.GlassBlur
 		veil = u.cfg.GlassVeil
 	}
-	if !force && glassStateSame(u.hwnd, on, kind, blur, veil) {
+	same := glassStateSame(u.hwnd, on, kind, blur, veil)
+	if ok, why := glassAllowDWM(depth, fromMsg, force, same); !ok {
+		if why == "nested-wndproc" || why == "ncactivate" {
+			applog.Trail("glass skip", "reason", why, "depth", depth, "msg", fromMsg)
+		}
 		return
 	}
+	if !glassPushing.CompareAndSwap(false, true) {
+		applog.Trail("glass skip", "reason", "reentrant", "depth", depth)
+		return
+	}
+	defer glassPushing.Store(false)
 
 	applyGlassChromeColors(u.hwnd, on)
 	// Square corners — DWM can forget DONOTROUND when extend/accent change.

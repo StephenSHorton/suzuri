@@ -32,6 +32,25 @@ func TestCaptionGlyphsHaveNoShadowCopy(t *testing.T) {
 	}
 }
 
+func TestInkBoundsTightOnCoverage(t *testing.T) {
+	if _, _, _, _, ok := inkBounds(nil); ok {
+		t.Fatal("empty ink")
+	}
+	if _, _, _, _, ok := inkBounds([]captionInk{{x: 3, y: 4, a: 0}}); ok {
+		t.Fatal("zero-alpha only")
+	}
+	ink := []captionInk{
+		{x: 10, y: 20, a: 0},
+		{x: 12, y: 18, a: 255},
+		{x: 15, y: 22, a: 80},
+		{x: 11, y: 19, a: 1},
+	}
+	minX, minY, maxX, maxY, ok := inkBounds(ink)
+	if !ok || minX != 11 || minY != 18 || maxX != 15 || maxY != 22 {
+		t.Fatalf("bounds %d,%d %d,%d ok=%v", minX, minY, maxX, maxY, ok)
+	}
+}
+
 func TestCaptionButtonWidthScalesWithDPI(t *testing.T) {
 	if captionButtonWidth(96) != captionButtonDIP {
 		t.Fatalf("96dpi width %d want %d", captionButtonWidth(96), captionButtonDIP)

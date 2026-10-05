@@ -99,6 +99,35 @@ func inkFrom(src []iconstroke.Ink) []captionInk {
 	return out
 }
 
+// inkBounds is the inclusive pixel rect of non-zero coverage. Used to blit
+// one DIB instead of SetPixel-per-dot (each SetPixel is a GDI syscall).
+func inkBounds(ink []captionInk) (minX, minY, maxX, maxY int32, ok bool) {
+	ok = false
+	for _, p := range ink {
+		if p.a == 0 {
+			continue
+		}
+		if !ok {
+			minX, minY, maxX, maxY = p.x, p.y, p.x, p.y
+			ok = true
+			continue
+		}
+		if p.x < minX {
+			minX = p.x
+		}
+		if p.y < minY {
+			minY = p.y
+		}
+		if p.x > maxX {
+			maxX = p.x
+		}
+		if p.y > maxY {
+			maxY = p.y
+		}
+	}
+	return minX, minY, maxX, maxY, ok
+}
+
 func mixCover(bg, fg, a byte) byte {
 	return byte((int(bg)*(255-int(a)) + int(fg)*int(a)) / 255)
 }
