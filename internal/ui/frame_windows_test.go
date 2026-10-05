@@ -38,6 +38,14 @@ func TestFrameChromeStyleHidesDWMButtons(t *testing.T) {
 	}
 }
 
+func TestWAClickActiveMatchesWin32(t *testing.T) {
+	if waClickActive != uint32(win.WA_CLICKACTIVE) ||
+		waActive != uint32(win.WA_ACTIVE) ||
+		waInactive != uint32(win.WA_INACTIVE) {
+		t.Fatalf("activate constants drifted: %#x %#x %#x", waInactive, waActive, waClickActive)
+	}
+}
+
 func TestWindowCornersAreSquare(t *testing.T) {
 	if dwmwcpDoNotRound != 1 {
 		t.Fatalf("DWMWCP_DONOTROUND is 1, got %d", dwmwcpDoNotRound)

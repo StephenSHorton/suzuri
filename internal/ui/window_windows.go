@@ -249,10 +249,15 @@ type winUI struct {
 	blinkPosted        atomic.Bool
 	framePosted        atomic.Bool
 	glassRefreshPosted atomic.Bool
-	lastFullPaint      time.Time
-	lastPaintMS        atomic.Int64
-	slowPaintN         int
-	ambientSuppressed  bool
+	// glassRefreshDeferred: composition was requested during size/move or
+	// WA_CLICKACTIVE. Must not PostMessage then — the modal drag loop
+	// would DispatchMessage it mid-drag (c67fd3f ntdll AV). Flushed
+	// after EXITSIZEMOVE (or the next idle blink if no drag happened).
+	glassRefreshDeferred bool
+	lastFullPaint        time.Time
+	lastPaintMS          atomic.Int64
+	slowPaintN           int
+	ambientSuppressed    bool
 
 	// notesDragging: LBUTTON held after a notes body click (drag-select text).
 	notesDragging bool
@@ -1768,12 +1773,27 @@ func (u *winUI) scheduleGlassRefresh() {
 	if u == nil || u.hwnd == 0 || !u.shellGlass() {
 		return
 	}
+	// Never PostMessage during size/move — the modal drag loop will
+	// dispatch it and call DWM mid-drag (c67fd3f).
+	if !glassMayPostRefresh(u.inSizeMove) {
+		u.glassRefreshDeferred = true
+		return
+	}
 	if !u.glassRefreshPosted.CompareAndSwap(false, true) {
 		return
 	}
 	if win.PostMessage(u.hwnd, wmSuzuriGlassRefresh, 0, 0) == 0 {
 		u.glassRefreshPosted.Store(false)
+		u.glassRefreshDeferred = true
 	}
+}
+
+func (u *winUI) flushDeferredGlassRefresh() {
+	if u == nil || u.inSizeMove || !u.glassRefreshDeferred {
+		return
+	}
+	u.glassRefreshDeferred = false
+	u.scheduleGlassRefresh()
 }
 
 func (u *winUI) frameLoop() {
@@ -2406,17 +2426,25 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case wmSuzuriFrame:
 		u.framePosted.Store(false)
-		if u.alive.Load() && !u.inSizeMove && u.wantsAmbientFrames() {
-			u.markShellDirty()
-			u.requestPaint()
+		if u.alive.Load() && !u.inSizeMove {
+			u.flushDeferredGlassRefresh()
+			if u.wantsAmbientFrames() {
+				u.markShellDirty()
+				u.requestPaint()
+			}
 		}
 		return 0
 
 	case wmSuzuriGlassRefresh:
 		u.glassRefreshPosted.Store(false)
-		if u.alive.Load() && u.shellGlass() {
-			u.pushGlassBackdrop(true, win.WM_ACTIVATE)
+		if !u.alive.Load() || !u.shellGlass() {
+			return 0
 		}
+		if u.inSizeMove {
+			u.glassRefreshDeferred = true
+			return 0
+		}
+		u.pushGlassBackdrop(true, win.WM_ACTIVATE)
 		return 0
 
 	case wmSuzuriBlink:
@@ -2424,6 +2452,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Skip blink repaints during frame drag/resize — they fight WM_PAINT
 		// and amplify flicker (and GDI thrash with the neko underlay).
 		if u.alive.Load() && !u.inSizeMove {
+			u.flushDeferredGlassRefresh()
 			u.syncTermFocus()
 			// Darwin drains AI control every ebiten Update. Windows only used
 			// to drain on MCP posts, so GET /v1/layout from a pane 504'd.
@@ -2656,9 +2685,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		// Never DwmExtend/SetAccent on this stack. Those APIs send
 		// WM_NCACTIVATE synchronously and overflow the native callback
-		// (silent death, no Go panic, no WER). Post a coalesced refresh.
+		// (silent death, no Go panic, no WER). Post a coalesced refresh
+		// only when this is not a caption click (WA_CLICKACTIVE starts
+		// a drag; the posted refresh would run inside the modal loop).
 		if u.shellGlass() {
-			u.scheduleGlassRefresh()
+			if post, deferUntilExit := glassActivatePolicy(uint32(active), u.inSizeMove); post {
+				u.scheduleGlassRefresh()
+			} else if deferUntilExit {
+				u.glassRefreshDeferred = true
+			}
 		}
 		if active != win.WA_INACTIVE && u.alive.Load() {
 			win.InvalidateRect(hwnd, nil, false)
@@ -2666,6 +2701,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return 0
 
 	case win.WM_NCACTIVATE:
+		// Mid-drag: do not DefWindowProc / DwmDefWindowProc — those
+		// re-apply chrome and re-enter DWM on the size/move stack.
+		if u.inSizeMove {
+			return 1
+		}
 		// Skip native NC paint (lParam=-1) so DWM does not flash a light
 		// caption over FrameWindows. Do not touch DWM composition here —
 		// SetAccent/DwmExtend re-enter this handler and blow the stack.
@@ -2675,7 +2715,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		return win.DefWindowProc(hwnd, msg, wParam, lParam)
 
 	case win.WM_ENTERSIZEMOVE:
-		// Begin move or resize: defer ConPTY/tab resize until the gesture ends.
+		// Begin move or resize: defer ConPTY/tab resize and all DWM
+		// composition until the gesture ends.
 		u.inSizeMove = true
 		log.Debug("WM_ENTERSIZEMOVE")
 		return 0
@@ -2717,6 +2758,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Remember frame pos/size (and monitor) after the user finishes dragging.
 		u.persistWindowPlacement(false)
 		u.postLayoutSettle()
+		// Post glass — do not call DWM on the EXITSIZEMOVE stack.
+		u.flushDeferredGlassRefresh()
 		return 0
 
 	case win.WM_MOVE:

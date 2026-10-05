@@ -11,6 +11,10 @@ const (
 	wmActivate   = 0x0006
 	wmNCActivate = 0x0086
 
+	waInactive    = 0
+	waActive      = 1
+	waClickActive = 2 // WA_CLICKACTIVE — title-bar click that starts a drag
+
 	// maxWndProcDepth is well below the native callback stack. DwmExtend /
 	// SetWindowCompositionAttribute / DwmSetWindowAttribute send
 	// WM_NCACTIVATE / WM_NCCALCSIZE / WM_PAINT synchronously. Past this
@@ -22,10 +26,13 @@ const (
 )
 
 // glassAllowDWM is whether a DWM composition call may run on this stack.
-// Nested WndProc and WM_NCACTIVATE must never touch DwmExtend / SetAccent /
-// DwmSetWindowAttribute — those APIs re-enter WndProc and were the silent
-// death on de25fe7 (no Go panic, no WER, no crash file).
-func glassAllowDWM(wndProcDepth int, msg uint32, force, stateSame bool) (ok bool, why string) {
+// Nested WndProc, WM_NCACTIVATE, and size/move must never touch DwmExtend /
+// SetAccent / DwmSetWindowAttribute — those APIs re-enter WndProc. Mid-drag
+// (c67fd3f) they stalled the UI thread ~2s then AV'd in ntdll.
+func glassAllowDWM(wndProcDepth int, msg uint32, force, stateSame, inSizeMove bool) (ok bool, why string) {
+	if inSizeMove {
+		return false, "sizemove"
+	}
 	if wndProcDepth > 1 {
 		return false, "nested-wndproc"
 	}
@@ -39,6 +46,26 @@ func glassAllowDWM(wndProcDepth int, msg uint32, force, stateSame bool) (ok bool
 		return false, "unchanged"
 	}
 	return true, "apply"
+}
+
+// glassActivatePolicy is what WM_ACTIVATE should do with a glass refresh.
+// WA_CLICKACTIVE is the caption click that starts a drag — posting
+// wmSuzuriGlassRefresh then lands inside the modal size/move loop.
+// During an actual drag, never post; defer until EXITSIZEMOVE.
+func glassActivatePolicy(active uint32, inSizeMove bool) (post, deferUntilExit bool) {
+	if inSizeMove {
+		return false, true
+	}
+	if active == waClickActive {
+		return false, true
+	}
+	return true, false
+}
+
+// glassMayPostRefresh is whether a wmSuzuriGlassRefresh PostMessage is safe.
+// False during size/move — the modal drag loop would dispatch it.
+func glassMayPostRefresh(inSizeMove bool) bool {
+	return !inSizeMove
 }
 
 func wndProcShouldAbort(depth int32) bool {

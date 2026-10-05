@@ -142,6 +142,10 @@ func applyWindowChromeFrame(hwnd win.HWND) {
 		return
 	}
 	applyFrameChromeStyle(hwnd)
+	if u := uiFor(hwnd); u != nil && u.inSizeMove {
+		u.glassRefreshDeferred = true
+		return
+	}
 	dwmSetInt32(hwnd, dwmwaWindowCornerPreference, windowCornerPreference())
 	win.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
 		win.SWP_FRAMECHANGED|win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE)

@@ -313,6 +313,14 @@ func (u *winUI) pushGlassBackdrop(force bool, fromMsg uint32) {
 	if u == nil || u.hwnd == 0 {
 		return
 	}
+	// Absolute: no DWM composition API during a modal size/move.
+	// Title-bar drag posts wmSuzuriGlassRefresh from WA_CLICKACTIVE;
+	// DispatchMessage then runs this on the drag loop and AVs in ntdll.
+	if u.inSizeMove {
+		u.glassRefreshDeferred = true
+		applog.Trail("glass skip", "reason", "sizemove", "msg", fromMsg)
+		return
+	}
 	depth := int(uiWatchDepth.Load())
 	on := u.shellGlass()
 	kind := glassBackdropType(u.cfg)
@@ -322,7 +330,12 @@ func (u *winUI) pushGlassBackdrop(force bool, fromMsg uint32) {
 		veil = u.cfg.GlassVeil
 	}
 	same := glassStateSame(u.hwnd, on, kind, blur, veil)
-	if ok, why := glassAllowDWM(depth, fromMsg, force, same); !ok {
+	if ok, why := glassAllowDWM(depth, fromMsg, force, same, u.inSizeMove); !ok {
+		if why == "sizemove" {
+			u.glassRefreshDeferred = true
+			applog.Trail("glass skip", "reason", why, "depth", depth, "msg", fromMsg)
+			return
+		}
 		if why == "nested-wndproc" || why == "ncactivate" {
 			applog.Trail("glass skip", "reason", why, "depth", depth, "msg", fromMsg)
 			u.scheduleGlassRefresh()

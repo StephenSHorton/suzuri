@@ -8,20 +8,47 @@ import (
 )
 
 func TestGlassAllowDWMRejectsNestedAndNCActivate(t *testing.T) {
-	if ok, why := glassAllowDWM(2, wmActivate, true, false); ok || why != "nested-wndproc" {
+	if ok, why := glassAllowDWM(2, wmActivate, true, false, false); ok || why != "nested-wndproc" {
 		t.Fatalf("nested force apply: ok=%v why=%s", ok, why)
 	}
-	if ok, why := glassAllowDWM(1, wmNCActivate, true, false); ok || why != "ncactivate" {
+	if ok, why := glassAllowDWM(1, wmNCActivate, true, false, false); ok || why != "ncactivate" {
 		t.Fatalf("NCACTIVATE must never touch DWM: ok=%v why=%s", ok, why)
 	}
-	if ok, why := glassAllowDWM(1, wmActivate, false, true); ok || why != "unchanged" {
+	if ok, why := glassAllowDWM(1, wmActivate, true, false, true); ok || why != "sizemove" {
+		t.Fatalf("size/move must never touch DWM: ok=%v why=%s", ok, why)
+	}
+	if ok, why := glassAllowDWM(1, wmActivate, false, true, false); ok || why != "unchanged" {
 		t.Fatalf("unchanged skip: ok=%v why=%s", ok, why)
 	}
-	if ok, why := glassAllowDWM(1, wmActivate, true, true); !ok || why != "apply" {
+	if ok, why := glassAllowDWM(1, wmActivate, true, true, false); !ok || why != "apply" {
 		t.Fatalf("clean activate may force-refresh: ok=%v why=%s", ok, why)
 	}
-	if ok, why := glassAllowDWM(1, 0, false, false); !ok || why != "apply" {
+	if ok, why := glassAllowDWM(1, 0, false, false, false); !ok || why != "apply" {
 		t.Fatalf("first apply: ok=%v why=%s", ok, why)
+	}
+}
+
+func TestGlassActivatePolicyDefersClickAndDrag(t *testing.T) {
+	if post, def := glassActivatePolicy(waClickActive, false); post || !def {
+		t.Fatalf("CLICKACTIVE must defer (impending title-bar drag): post=%v defer=%v", post, def)
+	}
+	if post, def := glassActivatePolicy(waActive, true); post || !def {
+		t.Fatalf("size/move must defer: post=%v defer=%v", post, def)
+	}
+	if post, def := glassActivatePolicy(waClickActive, true); post || !def {
+		t.Fatalf("CLICKACTIVE during drag must defer: post=%v defer=%v", post, def)
+	}
+	if post, def := glassActivatePolicy(waActive, false); !post || def {
+		t.Fatalf("keyboard/alt-tab activate may post: post=%v defer=%v", post, def)
+	}
+	if post, def := glassActivatePolicy(waInactive, false); !post || def {
+		t.Fatalf("deactivate may post (unfocused glass): post=%v defer=%v", post, def)
+	}
+	if glassMayPostRefresh(true) {
+		t.Fatal("must not PostMessage glass refresh during size/move")
+	}
+	if !glassMayPostRefresh(false) {
+		t.Fatal("after EXITSIZEMOVE, a posted refresh is safe")
 	}
 }
 
