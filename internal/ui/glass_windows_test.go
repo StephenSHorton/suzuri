@@ -74,6 +74,10 @@ func TestGlassBackdropFollowsConfig(t *testing.T) {
 	if colV>>24 == 0 || colV&0x00FFFFFF != 0 {
 		t.Fatalf("veil tint must be black AABBGGRR %#x", colV)
 	}
+	_, _, colMore := glassAccentFor(22621, 60, 40)
+	if colMore>>24 <= colV>>24 {
+		t.Fatalf("accent-path blur must raise frost: %#x %#x", colV, colMore)
+	}
 
 	opaque := live
 	opaque.GlassVeil = 100

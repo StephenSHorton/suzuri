@@ -76,18 +76,19 @@ const (
 )
 
 // Glass knobs apply when Backdrop is glass. Blur is the macOS desktop blur
-// radius in points. Windows has no radius: one Flags=2 accent-acrylic
-// material for every step, frost alpha following blur (and veil). Do not
-// switch Mica/Acrylic/Tabbed (36→40 cliff) or use Flags=0 (system accent
-// orange). HostBackdrop also goes solid/light when unfocused.
-// Veil is a black wash over the holes, 0–100. Rim is the dark glyph outline
-// on those holes, 0–100.
+// radius in points. Windows 11 HostBackdrop (veil=0) has no point radius —
+// Desktop Acrylic is a single material — so the Blur slider is a no-op.
+// Win10 and Win11 with veil>0 use accent-acrylic, where frost follows blur.
+// Veil is a black wash over the holes, 0–100. Rim is the Mac glyph outline.
 const (
 	GlassBlurDefault = 48
 	GlassBlurMax     = 80
 	GlassVeilDefault = 0
 	GlassRimDefault  = 25 // light outline; a saved glass_rim value wins
 	ShellLogoDefault = 20 // quiet center mark; 100 is solid
+
+	// Win11BackdropBuild is the first build with DWMWA_SYSTEMBACKDROP_TYPE.
+	Win11BackdropBuild = 22621
 )
 
 // logoValue is the center-mark opacity. It accepts a percent, or the earlier
@@ -862,7 +863,10 @@ func BackdropLabel(id string) string {
 func BackdropDesc(id string) string {
 	switch strings.ToLower(strings.TrimSpace(id)) {
 	case BackdropGlass:
-		return "Empty and near-black cells show the desktop. Blur, Veil, and Rim on this page tune how frosted, dark, and outlined that looks. The tab strip, text, and real background colors stay solid. Rain glyphs stay on top. Fullscreen turns this off on Mac. Windows uses one live acrylic through those cells; Blur raises the frost smoothly and keeps it when the window is unfocused."
+		if runtime.GOOS == "windows" {
+			return "Empty and near-black cells show the desktop through Desktop Acrylic. Veil tints the glass. Blur is a no-op on Windows 11 until Veil is above 0 (custom acrylic) or on Windows 10. Rim is macOS only. The tab strip, text, and real cell colors stay solid."
+		}
+		return "Empty and near-black cells show the desktop. Blur, Veil, and Rim on this page tune how frosted, dark, and outlined that looks. The tab strip, text, and real background colors stay solid. Rain glyphs stay on top. Fullscreen turns this off on Mac."
 	default:
 		return "Opaque shell. Empty cells show the theme void and whatever ambient is on."
 	}

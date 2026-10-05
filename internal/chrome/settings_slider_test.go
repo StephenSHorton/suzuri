@@ -133,3 +133,64 @@ func TestSettingsTabsAndGlassSliders(t *testing.T) {
 		t.Fatalf("look row on shell tab:\n%s", view)
 	}
 }
+
+func TestWindowsHostBackdropDisablesBlurSlider(t *testing.T) {
+	config.TestingSetGlassHost(t, config.GlassHost{GOOS: "windows", WinBuild: 26100})
+	st := newSettingsState(config.Normalize(config.Config{
+		Backdrop:  config.BackdropGlass,
+		GlassBlur: 36,
+		GlassVeil: 0,
+	}))
+	st.moveTab(1)
+	for st.field != fieldGlassBlur {
+		st.moveField(1)
+	}
+	if !st.fieldIdle(fieldGlassBlur) {
+		t.Fatal("Win11 HostBackdrop blur must be idle")
+	}
+	before := st.edit.GlassBlur
+	st.nudge(1)
+	if st.edit.GlassBlur != before {
+		t.Fatalf("idle blur nudged %d → %d", before, st.edit.GlassBlur)
+	}
+	if st.valueLabel(fieldGlassBlur) != config.GlassBlurIdleHint {
+		t.Fatalf("blur value %q", st.valueLabel(fieldGlassBlur))
+	}
+	if !st.fieldIdle(fieldGlassRim) {
+		t.Fatal("rim is a no-op on Windows")
+	}
+	if st.valueLabel(fieldGlassRim) != config.GlassRimIdleHint {
+		t.Fatalf("rim value %q", st.valueLabel(fieldGlassRim))
+	}
+	view := st.render(100)
+	if !strings.Contains(view, config.GlassBlurIdleHint) {
+		t.Fatalf("hint missing:\n%s", view)
+	}
+	_, paras := st.helpContent()
+	if len(paras) == 0 || !strings.Contains(paras[0], "Windows Desktop Acrylic") {
+		t.Fatalf("help %v", paras)
+	}
+
+	st.edit.GlassVeil = 40
+	st.edit = config.Normalize(st.edit)
+	if st.fieldIdle(fieldGlassBlur) {
+		t.Fatal("veil>0 must enable blur (accent-acrylic)")
+	}
+	st.nudge(1)
+	if st.edit.GlassBlur != before+glassBlurStep {
+		t.Fatalf("live blur %d", st.edit.GlassBlur)
+	}
+}
+
+func TestMacGlassSlidersStayLive(t *testing.T) {
+	config.TestingSetGlassHost(t, config.GlassHost{GOOS: "darwin"})
+	st := newSettingsState(config.Normalize(config.Config{
+		Backdrop:  config.BackdropGlass,
+		GlassBlur: 36,
+		GlassVeil: 0,
+		GlassRim:  25,
+	}))
+	if st.fieldIdle(fieldGlassBlur) || st.fieldIdle(fieldGlassRim) {
+		t.Fatal("macOS glass sliders must stay live")
+	}
+}

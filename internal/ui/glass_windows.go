@@ -50,7 +50,7 @@ const (
 	dwmsbtMainWindow      int32 = 2 // Mica
 	dwmsbtTransientWindow int32 = 3 // Desktop Acrylic
 
-	win11BackdropBuild = 22621
+	win11BackdropBuild = config.Win11BackdropBuild
 
 	wcaAccentPolicy       = 19
 	wcaUseDarkModeColors  = 26
@@ -125,17 +125,16 @@ func glassUseAccent(build uint32, on bool, veil int) bool {
 	if !on {
 		return false
 	}
-	if veil > 0 && veil < 100 {
-		return true
-	}
-	return build < win11BackdropBuild
+	c := config.Config{Backdrop: config.BackdropGlass, GlassVeil: veil}
+	return config.WindowsGlassUsesAccent(c, build)
 }
 
 func glassAccentFor(build uint32, blur, veil int) (state, flags, color uint32) {
 	if veil > 0 && veil < 100 {
-		return accentAcrylic, accentFlagUseGradient, glassVeilABGR(veil)
+		// Accent path: frost follows blur+veil so the Blur slider is live.
+		return accentAcrylic, accentFlagUseGradient, glassAccentColor(glassFrostAlpha(blur, veil), 0, 0, 0)
 	}
-	if build < win11BackdropBuild {
+	if build > 0 && build < win11BackdropBuild {
 		return accentAcrylic, accentFlagUseGradient, glassThemeTint(glassFrostAlpha(blur, veil))
 	}
 	return accentDisabled, 0, 0
