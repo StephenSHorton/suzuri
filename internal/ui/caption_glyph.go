@@ -46,10 +46,14 @@ func winCaptionButtonsDPI(clientW, stripH, dpi int32) [3]pixRect {
 }
 
 // captionIconSize is the glyph box inside a button. Scales with strip height.
+// +25% over the old 2/5 box so the thick stroke reads like WT caption
+// glyphs (~11–13px at 96 DPI on a 27px strip). Bell/coffee/min/max/close
+// all use this same size.
 func captionIconSize(btnW, btnH int32) int32 {
 	s := btnH * 2 / 5
-	if s < 10 {
-		s = 10
+	s = (s*5 + 2) / 4 // +25%
+	if s < 11 {
+		s = 11
 	}
 	if s > btnH-6 {
 		s = btnH - 6

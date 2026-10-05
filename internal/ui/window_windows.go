@@ -6623,7 +6623,7 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 					pane: t, x: 0, w: w, barY: rect.Bottom - barH, barH: barH,
 					barCols: paneInputContentCols(w, cw), focused: true,
 				}
-				u.paintPaneInputBar(hdc, g)
+				u.paintPaneInputBar(hdc, g, rect.Right, rect.Bottom)
 			}
 		}
 		return
@@ -6632,12 +6632,12 @@ func (u *winUI) paintInputBar(hdc win.HDC, rect win.RECT) {
 		if g.barH < 1 || g.pane == nil {
 			continue
 		}
-		u.paintPaneInputBar(hdc, g)
+		u.paintPaneInputBar(hdc, g, rect.Right, rect.Bottom)
 	}
 }
 
 // paintPaneInputBar draws one pane's command line into g.barY/g.barH.
-func (u *winUI) paintPaneInputBar(hdc win.HDC, g paneGeom) {
+func (u *winUI) paintPaneInputBar(hdc win.HDC, g paneGeom, clientW, clientH int32) {
 	if hdc == 0 || g.pane == nil || g.barH < 1 {
 		return
 	}
@@ -6648,10 +6648,7 @@ func (u *winUI) paintPaneInputBar(hdc win.HDC, g paneGeom) {
 	if ch < 1 {
 		ch = cellH
 	}
-	top := g.barY
-	left := g.x
-	right := g.x + g.w
-	bot := g.barY + g.barH
+	left, top, right, bot := inputBarFlushRect(g, clientW, clientH)
 
 	// Panel fill (slightly dimmer when unfocused).
 	pr, pg, pb := chrome.PanelR, chrome.PanelG, chrome.PanelB

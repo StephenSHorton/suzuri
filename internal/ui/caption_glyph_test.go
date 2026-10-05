@@ -4,6 +4,23 @@ package ui
 
 import "testing"
 
+func TestCaptionIconSizeOpticalBump(t *testing.T) {
+	// 27px strip at 96 DPI used to be 10px (2/5). Want ~20–30% larger.
+	old := int32(27 * 2 / 5)
+	got := captionIconSize(46, 27)
+	if got < old*6/5 || got > old*7/5 {
+		t.Fatalf("icon %d vs old %d — want 20–30%% larger", got, old)
+	}
+	if got < 11 {
+		t.Fatal("100% DPI floor")
+	}
+	bell := captionIconSize(40, 27)
+	closeS := captionIconSize(46, 27)
+	if bell != closeS {
+		t.Fatalf("bell/close must share the strip size (bell=%d close=%d)", bell, closeS)
+	}
+}
+
 func TestCaptionStrokeMatchesX(t *testing.T) {
 	for _, s := range []int32{10, 12, 16, 20, 24} {
 		st := captionStrokePx(s)
