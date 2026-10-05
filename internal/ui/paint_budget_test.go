@@ -7,6 +7,26 @@ import (
 	"time"
 )
 
+func TestSessionSuppressAmbientDoesNotRewriteSaved(t *testing.T) {
+	sup, saved, toast := sessionSuppressAmbient(false, "rain")
+	if !sup {
+		t.Fatal("first stall must suppress")
+	}
+	if saved != "rain" {
+		t.Fatalf("session guard wrote %q into the saved ambient", saved)
+	}
+	if toast != sessionAmbientPausedToast() || toast == "" {
+		t.Fatalf("toast %q", toast)
+	}
+	sup, saved, toast = sessionSuppressAmbient(true, "waves")
+	if !sup || saved != "waves" || toast != "" {
+		t.Fatalf("already suppressed: %v %q %q", sup, saved, toast)
+	}
+	if sessionAmbientPausedToast() == "rain off — display was stalling the UI" {
+		t.Fatal("toast must say paused for the session, not a settings change")
+	}
+}
+
 func TestShouldDisableAmbient(t *testing.T) {
 	if shouldDisableAmbient(50*time.Millisecond, 10) {
 		t.Fatal("fast paints must keep rain")

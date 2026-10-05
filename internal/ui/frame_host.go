@@ -66,6 +66,14 @@ const (
 	frameResizePx    = 6
 	captionButtonDIP = 46
 	captionButtonW   = captionButtonDIP // 96-DPI width
+
+	// Win32 window styles (numeric so tests do not need an HWND).
+	styleCaption     = 0x00C00000
+	styleSysmenu     = 0x00080000
+	styleThickframe  = 0x00040000
+	styleMinimizeBox = 0x00020000
+	styleMaximizeBox = 0x00010000
+	styleCaptionBtns = styleSysmenu | styleMinimizeBox | styleMaximizeBox
 )
 
 // titleStripHeightPx is the Mac rule: one text row, 50% taller than a shell cell.
@@ -169,4 +177,10 @@ func presentCaptionHit(hit int) int {
 	default:
 		return hit
 	}
+}
+
+// frameChromeStyle drops the bits that make DWM draw native min/max/close
+// while keeping WS_CAPTION|WS_THICKFRAME for shadow, resize, and snap.
+func frameChromeStyle(style uint32) uint32 {
+	return style &^ styleCaptionBtns
 }

@@ -3965,6 +3965,13 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		win.PostQuitMessage(0)
 		return 0
 
+	case win.WM_SYSCOMMAND:
+		// No WS_SYSMENU — DWM will not draw caption sprites. Taskbar /
+		// Win+arrow / Alt+F4 still send these; we own min/max/restore/close.
+		if u.chrome.Frame == chrome.FrameWindows && handleFrameSysCommand(hwnd, wParam) {
+			return 0
+		}
+
 	case win.WM_NCCALCSIZE:
 		if wParam != 0 && u.chrome.Frame == chrome.FrameWindows {
 			return u.frameCalcSize(hwnd, msg, wParam, lParam)
@@ -4438,6 +4445,7 @@ func (u *winUI) persistWindowPlacement(forceLog bool) {
 		return
 	}
 	u.cfg.Window = p
+	// Session rain suppress must never ride on this write (see suppressAmbient).
 	if err := config.Save(u.cfg); err != nil {
 		log.Warn("window placement save failed", "err", err)
 		return
@@ -6190,20 +6198,30 @@ func (u *winUI) suppressAmbient(d time.Duration) {
 		return
 	}
 	prev := u.cfg.ShellAmbient
+	next, keepSaved, toast := sessionSuppressAmbient(u.ambientSuppressed, prev)
+	if !next {
+		return
+	}
 	u.ambientSuppressed = true
-	u.cfg.ShellAmbient = config.AmbientNone
+	// keepSaved must stay on u.cfg. persistWindowPlacement / Save(u.cfg)
+	// would write none if we assigned AmbientNone here.
+	if u.cfg.ShellAmbient != keepSaved {
+		u.cfg.ShellAmbient = keepSaved
+	}
 	gdi, user := guiObjectCounts()
 	log.Warn("disabled shell ambient for this session",
 		"was", prev,
 		"paint_ms", d.Milliseconds(),
 		"gdi", gdi, "user", user,
 		"wndproc_depth", uiWatchDepth.Load(),
-		"hint", "Settings → ambient none, or set SUZURI_SAFE_MODE=1")
+		"saved", u.cfg.ShellAmbient,
+		"hint", "session only — config is unchanged")
 	applog.Trail("ambient suppressed", "was", prev, "ms", d.Milliseconds(),
-		"gdi", gdi, "user", user, "depth", uiWatchDepth.Load())
+		"gdi", gdi, "user", user, "depth", uiWatchDepth.Load(),
+		"saved", u.cfg.ShellAmbient)
 	applog.Sync()
 	// Never toast / PlaySound / Invalidate on the WM_PAINT stack.
-	u.postToast("rain off — display was stalling the UI")
+	u.postToast(toast)
 	u.markShellDirty()
 }
 

@@ -66,6 +66,43 @@ func windowCornerPreference() int32 {
 	return dwmwcpDoNotRound
 }
 
+func handleFrameSysCommand(hwnd win.HWND, wParam uintptr) bool {
+	if hwnd == 0 {
+		return false
+	}
+	switch wParam & 0xFFF0 {
+	case win.SC_MINIMIZE:
+		win.ShowWindow(hwnd, win.SW_MINIMIZE)
+		return true
+	case win.SC_MAXIMIZE:
+		win.ShowWindow(hwnd, win.SW_MAXIMIZE)
+		return true
+	case win.SC_RESTORE:
+		win.ShowWindow(hwnd, win.SW_RESTORE)
+		return true
+	case win.SC_CLOSE:
+		win.PostMessage(hwnd, win.WM_CLOSE, 0, 0)
+		return true
+	default:
+		return false
+	}
+}
+
+// applyFrameChromeStyle strips WS_SYSMENU/MINIMIZEBOX/MAXIMIZEBOX so a
+// sheet-of-glass extend cannot stamp native caption sprites over ours.
+func applyFrameChromeStyle(hwnd win.HWND) bool {
+	if hwnd == 0 {
+		return false
+	}
+	style := uint32(win.GetWindowLong(hwnd, win.GWL_STYLE))
+	next := frameChromeStyle(style)
+	if next == style {
+		return false
+	}
+	win.SetWindowLong(hwnd, win.GWL_STYLE, int32(next))
+	return true
+}
+
 // applyWindowChromeFrame reapplies NCCALCSIZE after the HWND is registered
 // (CreateWindow's first calc runs before uiMap has the winUI) and forces
 // square Win11 corners. Shadow comes from the glass/extend path.
@@ -73,6 +110,7 @@ func applyWindowChromeFrame(hwnd win.HWND) {
 	if hwnd == 0 {
 		return
 	}
+	applyFrameChromeStyle(hwnd)
 	dwmSetInt32(hwnd, dwmwaWindowCornerPreference, windowCornerPreference())
 	win.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
 		win.SWP_FRAMECHANGED|win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE)

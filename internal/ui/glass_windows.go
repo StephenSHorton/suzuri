@@ -21,12 +21,12 @@ import (
 // Mac leaves chroma-key shell pixels at alpha 0 and blurs the desktop behind
 // them (CGSSetWindowBackgroundBlurRadius, reapplied every turn). This port
 // does not use a layered HWND: no UpdateLayeredWindow, no per-pixel alpha,
-// no WS_EX_LAYERED. DwmExtendFrameIntoClientArea on the sides/bottom is
-// the documented non-layered color key — client pixels that stay
-// RGB(0,0,0) show the accent acrylic. The top margin stays 0 (never -1):
-// a sheet-of-glass top is the band where DWM stamps native min/max/close
-// on top of our icons. Chroma-key cells skip their own fill; the glass
-// underlay is stock black so those cells remain the key.
+// no WS_EX_LAYERED. DwmExtendFrameIntoClientArea(-1) is the documented
+// non-layered color key — client pixels that stay RGB(0,0,0) show the
+// accent acrylic. A top margin of 0 (d2c7da8) left BLACK_BRUSH holes
+// opaque. Caption sprites are suppressed by stripping WS_SYSMENU /
+// MINIMIZEBOX / MAXIMIZEBOX, not by shrinking the extend. Chroma-key
+// cells skip their own fill; the glass underlay is stock black.
 //
 // DWM has no point radius. HostBackdrop (DWMWA_SYSTEMBACKDROP_TYPE
 // Mica / Acrylic / Tabbed) cannot vary frost continuously and goes
@@ -213,15 +213,14 @@ func extendFrame(hwnd win.HWND, m dwmMargins) {
 	_, _, _ = dwmExtend.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&m)))
 }
 
-// glassFrameMargins is the WT-style extend: sides/bottom may be a sheet of
-// glass so empty cells color-key, but the top is never -1. cyTopHeight=0
-// (or 1px when glass is off, for the shadow) leaves DWM an empty caption
-// rect so it does not stamp native min/max/close over ours.
+// glassFrameMargins is a full sheet of glass while acrylic is on so
+// BLACK_BRUSH / default-bg cells color-key through the client (including
+// the title strip). Off: 1px bottom keeps the DWM shadow.
 func glassFrameMargins(on bool) dwmMargins {
 	if on {
-		return dwmMargins{Left: -1, Right: -1, Top: 0, Bottom: -1}
+		return dwmMargins{Left: -1, Right: -1, Top: -1, Bottom: -1}
 	}
-	return dwmMargins{Top: 0, Bottom: 1}
+	return dwmMargins{Bottom: 1}
 }
 
 func setAccent(hwnd win.HWND, state, flags, gradient uint32) {
@@ -283,6 +282,9 @@ func (u *winUI) pushGlassBackdrop(force bool, fromMsg uint32) {
 	// (often light) fallback on deactivate.
 	dwmSetInt32(u.hwnd, dwmwaSystemBackdropType, dwmsbtNone)
 	extendFrame(u.hwnd, glassFrameMargins(on))
+	// Sheet-of-glass would otherwise let DWM stamp native min/max/close.
+	// Style bits, not the top margin, hide those sprites.
+	applyFrameChromeStyle(u.hwnd)
 
 	if on {
 		state, flags, color := glassCompositionAccent(winBuildNumber(), blur, veil)

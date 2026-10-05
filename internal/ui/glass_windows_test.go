@@ -109,20 +109,43 @@ func TestGlassBackdropFollowsConfig(t *testing.T) {
 	}
 }
 
-func TestGlassFrameMarginsLeaveCaptionBandEmpty(t *testing.T) {
+func TestGlassFrameMarginsAreSheetOfGlass(t *testing.T) {
 	on := glassFrameMargins(true)
-	if on.Top != 0 {
-		t.Fatalf("glass top %d must be 0 (never -1)", on.Top)
-	}
-	if on.Left != -1 || on.Right != -1 || on.Bottom != -1 {
-		t.Fatalf("glass sides/bottom should color-key: %+v", on)
+	if on.Left != -1 || on.Right != -1 || on.Top != -1 || on.Bottom != -1 {
+		t.Fatalf("glass must be sheet-of-glass for color-key: %+v", on)
 	}
 	off := glassFrameMargins(false)
-	if off.Top != 0 || off.Bottom != 1 {
-		t.Fatalf("solid margins %+v want top=0 bottom=1", off)
+	if off.Top != 0 || off.Left != 0 || off.Right != 0 || off.Bottom != 1 {
+		t.Fatalf("solid margins %+v want 1px bottom", off)
 	}
-	if off.Left != 0 || off.Right != 0 {
-		t.Fatalf("solid must not sheet-of-glass the sides: %+v", off)
+}
+
+func TestEveryGlassFrostSetting(t *testing.T) {
+	for blur := 0; blur <= config.GlassBlurMax; blur++ {
+		for _, veil := range []int{0, 36, 50, 99, 100} {
+			c := config.Normalize(config.Config{
+				Backdrop: config.BackdropGlass, GlassBlur: blur, GlassVeil: veil,
+			})
+			if glassBackdropType(c) != dwmsbtNone {
+				t.Fatalf("blur %d veil %d kind %d", blur, veil, glassBackdropType(c))
+			}
+			st, fl, col := glassAccentForBlur(c.GlassBlur, c.GlassVeil)
+			if st != accentAcrylic || fl != accentFlagUseGradient {
+				t.Fatalf("blur %d veil %d accent %d flags %d", blur, veil, st, fl)
+			}
+			if col&0x00FFFFFF != glassThemeTint(0)&0x00FFFFFF {
+				t.Fatalf("blur %d veil %d tint %#x", blur, veil, col)
+			}
+			if veil < 100 && !glassUsesColorKey(c) {
+				t.Fatalf("blur %d veil %d must color-key", blur, veil)
+			}
+			if veil >= 100 && glassUsesColorKey(c) {
+				t.Fatalf("blur %d veil 100 must be opaque", blur)
+			}
+			if m := glassFrameMargins(true); m.Top != -1 || m.Left != -1 || m.Right != -1 || m.Bottom != -1 {
+				t.Fatalf("blur %d veil %d margins %+v", blur, veil, m)
+			}
+		}
 	}
 }
 

@@ -21,6 +21,23 @@ func TestHideDWMCaptionButtonsClearsRects(t *testing.T) {
 	}
 }
 
+func TestFrameChromeStyleHidesDWMButtons(t *testing.T) {
+	if styleSysmenu != uint32(win.WS_SYSMENU) ||
+		styleMinimizeBox != uint32(win.WS_MINIMIZEBOX) ||
+		styleMaximizeBox != uint32(win.WS_MAXIMIZEBOX) ||
+		styleCaption != uint32(win.WS_CAPTION) ||
+		styleThickframe != uint32(win.WS_THICKFRAME) {
+		t.Fatal("style constants drifted from Win32")
+	}
+	got := frameChromeStyle(uint32(win.WS_OVERLAPPEDWINDOW))
+	if got&styleCaptionBtns != 0 {
+		t.Fatalf("caption-button bits still set %#x", got)
+	}
+	if got&uint32(win.WS_CAPTION) == 0 || got&uint32(win.WS_THICKFRAME) == 0 {
+		t.Fatalf("need caption+thickframe %#x", got)
+	}
+}
+
 func TestWindowCornersAreSquare(t *testing.T) {
 	if dwmwcpDoNotRound != 1 {
 		t.Fatalf("DWMWCP_DONOTROUND is 1, got %d", dwmwcpDoNotRound)

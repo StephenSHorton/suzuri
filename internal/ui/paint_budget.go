@@ -95,6 +95,19 @@ func shouldAmbientWhileUnfocused(animateUnfocused, ptyHot, lastPaintSlow bool) b
 	return true
 }
 
+// sessionSuppressAmbient is the paint-stall rain guard. keepSaved is the
+// caller's ShellAmbient unchanged — persistWindowPlacement writes u.cfg.
+func sessionSuppressAmbient(already bool, savedAmbient string) (suppress bool, keepSaved, toast string) {
+	if already {
+		return true, savedAmbient, ""
+	}
+	return true, savedAmbient, sessionAmbientPausedToast()
+}
+
+func sessionAmbientPausedToast() string {
+	return "rain paused for this session"
+}
+
 // ambientFramePeriod is the rain/settings underlay tick. Cap at 60 fps so a
 // 239 Hz desktop cannot flood GDI; floor at 30 fps so a bogus 0 Hz DC
 // still animates.

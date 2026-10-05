@@ -32,6 +32,17 @@ func TestCaptionGlyphsHaveNoShadowCopy(t *testing.T) {
 	}
 }
 
+func TestFrameChromeStyleKeepsSnapChrome(t *testing.T) {
+	const overlapped = styleCaption | styleSysmenu | styleThickframe | styleMinimizeBox | styleMaximizeBox
+	got := frameChromeStyle(overlapped)
+	if got&styleCaptionBtns != 0 {
+		t.Fatalf("DWM button bits %#x", got)
+	}
+	if got&styleCaption == 0 || got&styleThickframe == 0 {
+		t.Fatal("shadow/resize need caption+thickframe")
+	}
+}
+
 func TestPresentCaptionHitKeepsSnapMax(t *testing.T) {
 	if presentCaptionHit(hitMaxButton) != hitMaxButton {
 		t.Fatal("maximize must stay HTMAXBUTTON for Snap Layouts")
