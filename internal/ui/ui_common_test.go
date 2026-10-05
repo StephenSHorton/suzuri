@@ -42,8 +42,37 @@ func TestRestingMeansAliveAndQuiet(t *testing.T) {
 		t.Fatal("quiet pane should rest again")
 	}
 	live.titleBusy.Store(true)
-	if live.resting() {
-		t.Fatal("title spinner keeps the pane busy")
+	if !live.resting() || live.busy() {
+		t.Fatal("leftover OSC title spinner is not in-progress work")
+	}
+}
+
+func TestGrokIdleTitleSpinnerIsNotBusy(t *testing.T) {
+	var grok tab
+	grok.alive.Store(true)
+	grok.applyTitle("⠋ Grok")
+	if !grok.titleBusy.Load() {
+		t.Fatal("applyTitle should record the leftover spinner glyph")
+	}
+	if grok.busy() || !grok.resting() {
+		t.Fatal("idle Grok waiting for input must not spin")
+	}
+	grok.noteIO()
+	if !grok.busy() || grok.resting() {
+		t.Fatal("hot PTY (agent streaming) should spin")
+	}
+	grok.lastIOUnixNano.Store(time.Now().Add(-3 * time.Second).UnixNano())
+	if grok.busy() {
+		t.Fatal("quiet PTY after a leftover title spinner is idle")
+	}
+	grok.barAwaiting = true
+	if !grok.busy() {
+		t.Fatal("a running Warp-bar command should spin")
+	}
+	grok.barAwaiting = false
+	grok.foreground = true
+	if !grok.busy() {
+		t.Fatal("a foreground job should spin")
 	}
 }
 
@@ -82,8 +111,15 @@ func TestReportedAgentStateOverridesGuess(t *testing.T) {
 	if !live.setAgentState("clear") {
 		t.Fatal("clear")
 	}
-	if live.agentState() != "" || live.resting() || !live.busy() {
-		t.Fatal("clear restores the title and PTY guess")
+	if live.agentState() != "" {
+		t.Fatal("clear drops the explicit report")
+	}
+	if !live.resting() || live.busy() {
+		t.Fatal("clear with a leftover title spinner and no PTY is idle")
+	}
+	live.noteIO()
+	if !live.busy() || live.resting() {
+		t.Fatal("clear + hot PTY is the in-progress guess")
 	}
 	if live.setAgentState("waiting") {
 		t.Fatal("waiting is a workspace presence code, not a pane lifecycle")

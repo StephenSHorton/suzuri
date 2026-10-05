@@ -71,9 +71,9 @@ type tab struct {
 	closed    bool
 	// lastIOUnixNano is updated on every PTY read chunk (activity indicator).
 	lastIOUnixNano atomic.Int64
-	// titleBusy: OSC window title has a CLI spinner prefix (e.g. Grok while working).
-	// Cleared when the title is rewritten without a spinner frame.
-	// Ignored while agentReported is set — an explicit report replaces the guess.
+	// titleBusy: OSC window title has a CLI spinner prefix (e.g. Grok).
+	// Grok leaves that glyph in the title after a turn, so it must not
+	// drive the strip spinner by itself (same lesson as ConPTY resize).
 	titleBusy atomic.Bool
 	// agentReported is an explicit lifecycle from the agent in this pane
 	// (see agentUnset). 0 means fall back to the title spinner and recent PTY output.
@@ -140,7 +140,8 @@ func (t *tab) blocked() bool {
 // busy is true when this tab should show an activity spinner.
 // An explicit report wins: working shows the spinner even if the PTY is quiet,
 // and idle, done, or blocked hide it even if the title still carries a spinner.
-// With no report, the OSC title spinner or recent PTY output is the guess.
+// With no report, only a running Warp-bar command or recent PTY output
+// counts as in progress. A leftover Grok OSC title spinner is not work.
 func (t *tab) busy() bool {
 	if t == nil || !t.alive.Load() {
 		return false
@@ -151,8 +152,19 @@ func (t *tab) busy() bool {
 	case agentIdle, agentBlocked, agentDone:
 		return false
 	}
-	if t.titleBusy.Load() {
+	if t.barAwaiting || t.foreground {
 		return true
+	}
+	return t.recentPTYBusy()
+}
+
+// recentPTYBusy is true while this pane is still streaming (hot PTY).
+// Alt-screen apps (Grok) write in bursts — use the longer window so the
+// spinner does not freeze mid-response. Idle Grok waiting at a prompt
+// goes quiet and this returns false even if the title still has ⠋.
+func (t *tab) recentPTYBusy() bool {
+	if t == nil {
+		return false
 	}
 	ns := t.lastIOUnixNano.Load()
 	if ns == 0 {
@@ -309,12 +321,12 @@ func (t *tab) setUserTitle(name string) {
 	t.userTitle = strings.TrimSpace(name)
 }
 
-// applyTitle updates the auto title and busy flag from a raw OSC title.
-// Grok (and other tools) put braille spinner frames in the window title while
-// working; we strip those for the tab label but keep titleBusy for the strip.
+// applyTitle updates the auto title and records whether the OSC title
+// currently starts with a spinner frame. That flag is a hint only —
+// busy() does not treat a leftover Grok title spinner as in-progress.
 // Returns true when the *display* title changed (spinner frame ticks alone
 // do not — they used to flood the log and thrash SetWindowText every chunk).
-// When userTitle is set, OSC still updates busy/auto title but display is locked.
+// When userTitle is set, OSC still updates the auto title but display is locked.
 func (t *tab) applyTitle(raw string) bool {
 	if t == nil {
 		return false
