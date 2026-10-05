@@ -4005,6 +4005,17 @@ func (u *winUI) paint(hwnd win.HWND) {
 	started := time.Now()
 	var paintW, paintH int32
 	fullPaint := false
+	timing := frameTimingOn()
+	var stageBuf []string
+	stageLast := started
+	mark := func(name string) {
+		if !timing {
+			return
+		}
+		now := time.Now()
+		stageBuf = append(stageBuf, fmt.Sprintf("%s=%d", name, now.Sub(stageLast).Milliseconds()))
+		stageLast = now
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("paint panic",
@@ -4012,6 +4023,14 @@ func (u *winUI) paint(hwnd win.HWND) {
 				"stack", string(debug.Stack()),
 			)
 			applog.Sync()
+		}
+		if timing && len(stageBuf) > 0 {
+			log.Info("paint stages",
+				"ms", time.Since(started).Milliseconds(),
+				"full", fullPaint,
+				"w", paintW, "h", paintH,
+				"parts", strings.Join(stageBuf, " "),
+			)
 		}
 		u.notePaintDuration(time.Since(started), paintW, paintH, fullPaint)
 	}()
@@ -4119,6 +4138,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 			u.paintWinCaption(dest, rect)
 			u.paintImageModal(dest, rect)
 			win.SelectObject(dest, oldF)
+			mark("chrome")
 			return
 		}
 		// Notes-style scoping for the Warp bar: when only bar text/caret changed,
@@ -4145,6 +4165,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 			if !u.chrome.OverlayOpen() {
 				u.overlayDirty = false
 			}
+			mark("chrome")
 			return
 		}
 		// Full paint path — shell is authoritative again.
@@ -4154,6 +4175,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 		// Void fill once; per-pane blit draws cells only.
 		// Glass: stock black (DWM color key). Chroma cells skip their fill.
 		u.fillClientBase(dest, rect)
+		mark("base")
 		padY := u.shellPadY()
 		shellBot := u.shellBottomY(rect.Bottom - rect.Top)
 
@@ -4220,6 +4242,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 			if u.shellAmbientOn() && !u.matrixIntroActive() {
 				u.paintShellAmbientOver(dest, rect, padY, shellBot)
 			}
+			mark("grid")
 			if len(layouts) > 1 {
 				u.paintPaneTitles(dest, layouts)
 			}
@@ -4275,10 +4298,12 @@ func (u *winUI) paint(hwnd win.HWND) {
 		// Image lightbox on top of everything (Grok click / shell image block).
 		u.paintImageModal(dest, rect)
 		win.SelectObject(dest, oldF)
+		mark("chrome")
 	}
 
 	if !u.ensureBackbuffer(hdc, w, h) {
 		draw(hdc)
+		mark("present")
 		return
 	}
 	draw(u.memDC)
@@ -4288,6 +4313,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 		u.releaseBackbuffer()
 		draw(hdc)
 	}
+	mark("present")
 }
 
 // configVisualEqual is true when live-previewable fields match (cancel no-op).
@@ -4824,11 +4850,11 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 			last := grid[n-1]
 			if len(last) > 0 {
 				c := last[0]
-				if !cellBGChromaKey(c.BR, c.BG, c.BB) {
+				if !cellBGShowsGlass(c.BR, c.BG, c.BB) {
 					br, bg, bb = c.BR, c.BG, c.BB
 				} else {
 					for _, cell := range last {
-						if !cellBGChromaKey(cell.BR, cell.BG, cell.BB) {
+						if !cellBGShowsGlass(cell.BR, cell.BG, cell.BB) {
 							br, bg, bb = cell.BR, cell.BG, cell.BB
 							break
 						}
@@ -4877,7 +4903,7 @@ func (u *winUI) blitGridPane(hdc win.HDC, rect win.RECT, grid [][]cellPix, curX,
 		}
 		var bgs []bgRun
 		for x, c := range row {
-			if cellBGChromaKey(c.BR, c.BG, c.BB) {
+			if cellBGShowsGlass(c.BR, c.BG, c.BB) {
 				continue
 			}
 			if n := len(bgs); n > 0 && bgs[n-1].x1 == x-1 &&
@@ -5276,7 +5302,7 @@ func fillRect(hdc win.HDC, r win.RECT, brush win.HBRUSH) {
 // fillSolidRGB skips chroma-key near-black so rain/watermark show through
 // (GrokNight canvas 26,27,38). Real bands stay opaque GDI fills.
 func fillSolidRGB(hdc win.HDC, r win.RECT, cr, cg, cb byte) {
-	if cellBGChromaKey(cr, cg, cb) {
+	if cellBGShowsGlass(cr, cg, cb) {
 		return
 	}
 	lb := win.LOGBRUSH{LbStyle: win.BS_SOLID, LbColor: win.RGB(cr, cg, cb)}
@@ -6057,6 +6083,10 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	// one GPU's memory; BitBlt to a window composed on the other adapter
 	// (RTX + AMD iGPU, 239 Hz + 144 Hz) can stall the UI thread in DWM and
 	// once took down the whole desktop.
+	// Keep this DIB GDI-color-keyed (no per-pixel alpha). Never
+	// SetDIBitsToDevice / StretchBlt a 32-bit source onto memDC — that
+	// realizes alpha so RGB(0,0,0) holes go opaque black and paints jump
+	// from ~10ms to hundreds.
 	u.memBmp = createSysMemBitmap(hdc, w, h)
 	if u.memBmp == 0 {
 		log.Warn("CreateDIBSection backbuffer failed", "w", w, "h", h)
@@ -6127,8 +6157,10 @@ func (u *winUI) notePaintDuration(d time.Duration, w, h int32, full bool) {
 	noteUIFrame()
 	n := uiPaintLogN.Add(1)
 	u.lastPaintMS.Store(d.Milliseconds())
-	gdi, user := guiObjectCounts()
-	if frameTimingOn() || d >= slowPaintWarn || n <= 5 || gdi >= gdiObjectWarn || user >= userObjectWarn {
+	// GetGuiResources every WM_PAINT is a kernel trip on the hot path.
+	// Heartbeat already samples GDI/USER; only count here when we log.
+	if frameTimingOn() || d >= slowPaintWarn || n <= 5 {
+		gdi, user := guiObjectCounts()
 		log.Info("paint",
 			"ms", d.Milliseconds(),
 			"full", full,
@@ -6139,9 +6171,9 @@ func (u *winUI) notePaintDuration(d time.Duration, w, h int32, full bool) {
 			"user", user,
 			"wndproc_depth", uiWatchDepth.Load(),
 		)
-	}
-	if gdi >= gdiObjectWarn || user >= userObjectWarn {
-		applog.Trail("gui objects high", "gdi", gdi, "user", user, "ms", d.Milliseconds())
+		if gdi >= gdiObjectWarn || user >= userObjectWarn {
+			applog.Trail("gui objects high", "gdi", gdi, "user", user, "ms", d.Milliseconds())
+		}
 	}
 	if !full {
 		return
