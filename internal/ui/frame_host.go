@@ -184,3 +184,56 @@ func presentCaptionHit(hit int) int {
 func frameChromeStyle(style uint32) uint32 {
 	return style &^ styleCaptionBtns
 }
+
+// frameRect is a window/client rectangle in screen pixels. Kept local so
+// the NCCALCSIZE inset math can be tested without an HWND.
+type frameRect struct {
+	Left, Top, Right, Bottom int32
+}
+
+func (r frameRect) width() int32  { return r.Right - r.Left }
+func (r frameRect) height() int32 { return r.Bottom - r.Top }
+
+// frameResizeBorder is SM_CX/YFRAME + SM_CXPADDEDBORDER — the invisible
+// Win10+ resize inset (~7px at 100% DPI).
+func frameResizeBorder(cxFrame, cyFrame, cxPadded int32) (x, y int32) {
+	x = cxFrame + cxPadded
+	y = cyFrame + cxPadded
+	if x < 1 {
+		x = 1
+	}
+	if y < 1 {
+		y = 1
+	}
+	return x, y
+}
+
+// frameClientFromWindow maps a proposed outer window rect to the custom
+// FrameWindows client rect. Top is never inset (WT recipe: the title
+// strip lives in the client). Left/right/bottom take the resize border
+// only. Zoomed windows fill the work area exactly so the hidden 7px
+// frame cannot eat height or shift Y. Do not call DefWindowProc for
+// NCCALCSIZE — it insets the caption and leaves mixed NC metrics that
+// drop ~7px on the next drag-resize.
+func frameClientFromWindow(window, work frameRect, zoomed bool, borderX, borderY int32) frameRect {
+	if zoomed {
+		return work
+	}
+	if borderX < 0 {
+		borderX = 0
+	}
+	if borderY < 0 {
+		borderY = 0
+	}
+	out := window
+	out.Left += borderX
+	out.Right -= borderX
+	out.Bottom -= borderY
+	if out.Right < out.Left {
+		out.Right = out.Left
+	}
+	if out.Bottom < out.Top {
+		out.Bottom = out.Top
+	}
+	return out
+}

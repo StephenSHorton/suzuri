@@ -15,21 +15,52 @@ type ncCalcSizeParams struct {
 	Lppos uintptr
 }
 
-func (u *winUI) frameCalcSize(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
-	params := (*ncCalcSizeParams)(unsafe.Pointer(lParam))
-	proposed := params.Rgrc[0]
-	_ = win.DefWindowProc(hwnd, msg, wParam, lParam)
-	// Keep left/right/bottom from DefWindowProc (resize borders) and pull
-	// the client top up into the caption. Combined with cyTopHeight=0 this
-	// is the WT custom-frame recipe: no DWM caption band, our strip owns it.
-	params.Rgrc[0].Top = proposed.Top
-	if win.IsZoomed(hwnd) {
-		var mi win.MONITORINFO
-		mi.CbSize = uint32(unsafe.Sizeof(mi))
-		if win.GetMonitorInfo(win.MonitorFromWindow(hwnd, win.MONITOR_DEFAULTTONEAREST), &mi) {
-			params.Rgrc[0] = mi.RcWork
+const (
+	smCXFrame        = 32
+	smCYFrame        = 33
+	smCXPaddedBorder = 92
+)
+
+func winFrameBorderPx() (x, y int32) {
+	return frameResizeBorder(
+		win.GetSystemMetrics(smCXFrame),
+		win.GetSystemMetrics(smCYFrame),
+		win.GetSystemMetrics(smCXPaddedBorder),
+	)
+}
+
+func winWorkArea(hwnd win.HWND) frameRect {
+	var mi win.MONITORINFO
+	mi.CbSize = uint32(unsafe.Sizeof(mi))
+	if win.GetMonitorInfo(win.MonitorFromWindow(hwnd, win.MONITOR_DEFAULTTONEAREST), &mi) {
+		return frameRect{
+			Left: mi.RcWork.Left, Top: mi.RcWork.Top,
+			Right: mi.RcWork.Right, Bottom: mi.RcWork.Bottom,
 		}
 	}
+	return frameRect{}
+}
+
+func (u *winUI) frameCalcSize(hwnd win.HWND, _ uint32, wParam, lParam uintptr) uintptr {
+	// Do not call DefWindowProc. It insets the caption and leaves Windows
+	// using mixed NC metrics — the next drag-resize then drops ~7px
+	// (SM_CYFRAME + SM_CXPADDEDBORDER) or shifts Y.
+	bx, by := winFrameBorderPx()
+	zoomed := win.IsZoomed(hwnd)
+	work := frameRect{}
+	if zoomed {
+		work = winWorkArea(hwnd)
+	}
+	if wParam == 0 {
+		r := (*win.RECT)(unsafe.Pointer(lParam))
+		got := frameClientFromWindow(frameRect{r.Left, r.Top, r.Right, r.Bottom}, work, zoomed, bx, by)
+		r.Left, r.Top, r.Right, r.Bottom = got.Left, got.Top, got.Right, got.Bottom
+		return 0
+	}
+	params := (*ncCalcSizeParams)(unsafe.Pointer(lParam))
+	p := params.Rgrc[0]
+	got := frameClientFromWindow(frameRect{p.Left, p.Top, p.Right, p.Bottom}, work, zoomed, bx, by)
+	params.Rgrc[0] = win.RECT{Left: got.Left, Top: got.Top, Right: got.Right, Bottom: got.Bottom}
 	return 0
 }
 
@@ -114,10 +145,15 @@ func applyWindowChromeFrame(hwnd win.HWND) {
 	dwmSetInt32(hwnd, dwmwaWindowCornerPreference, windowCornerPreference())
 	win.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
 		win.SWP_FRAMECHANGED|win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE)
-	// FRAMECHANGED resets DwmExtend margins. Put the sheet back so
-	// BLACK_BRUSH holes color-key again.
+	// FRAMECHANGED resets DwmExtend *and* HostBackdrop. Re-apply the
+	// full classic composition (backdrop + extend + accent) — extend
+	// alone left accent/HostBackdrop stale after the style change.
 	if u := uiFor(hwnd); u != nil {
-		extendFrame(hwnd, glassFrameMargins(u.shellGlass()))
+		if int(uiWatchDepth.Load()) > 1 {
+			u.scheduleGlassRefresh()
+			return
+		}
+		u.pushGlassBackdrop(true, 0)
 	}
 }
 

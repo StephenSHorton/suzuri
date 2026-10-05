@@ -1,9 +1,24 @@
 package ui
 
 import (
+	"os"
+	"strings"
+
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
 )
+
+// glassPresentBits is the window backbuffer depth. A 32-bit BI_RGB DIB
+// picks up an alpha channel on BitBlt; RGB(0,0,0) becomes opaque black
+// and the DWM color key never fires. 24-bit is RGB-only — same format
+// as caption ink — so empty cells stay the key. Classic/charm-ui used
+// a device bitmap (no realized alpha); the sys-mem DIB stays for the
+// dual-GPU stall fix.
+const glassPresentBits = 24
+
+func glassDebugOn() bool {
+	return strings.TrimSpace(os.Getenv("SUZURI_GLASS_DEBUG")) == "1"
+}
 
 // glassAccentColor packs DWM GradientColor as AABBGGRR. Windows reads the
 // low byte as red and the next as green; AARRGGBB (or RGB/BGR swapped)

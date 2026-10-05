@@ -2706,7 +2706,12 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if w >= 2 && h >= 2 {
 				u.width, u.height = w, h
 			}
-			log.Info("WM_EXITSIZEMOVE", "w", w, "h", h)
+			var wr win.RECT
+			win.GetWindowRect(hwnd, &wr)
+			log.Info("WM_EXITSIZEMOVE",
+				"client_w", w, "client_h", h,
+				"win_x", wr.Left, "win_y", wr.Top,
+				"win_w", wr.Right-wr.Left, "win_h", wr.Bottom-wr.Top)
 			applog.Sync()
 		}
 		// Remember frame pos/size (and monitor) after the user finishes dragging.
@@ -3976,7 +3981,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 
 	case win.WM_NCCALCSIZE:
-		if wParam != 0 && u.chrome.Frame == chrome.FrameWindows {
+		if u.chrome.Frame == chrome.FrameWindows {
 			return u.frameCalcSize(hwnd, msg, wParam, lParam)
 		}
 	case 0x033F: // WM_GETTITLEBARINFOEX — hide DWM's caption-button sprites
@@ -4313,6 +4318,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 		return
 	}
 	draw(u.memDC)
+	u.logGlassPresentSample(u.memDC, rect)
 	if !win.BitBlt(hdc, 0, 0, w, h, u.memDC, 0, 0, win.SRCCOPY) {
 		// Fallback if BitBlt fails (stale DC after long suspend).
 		log.Warn("BitBlt failed — direct paint fallback")
@@ -6090,10 +6096,10 @@ func (u *winUI) ensureBackbuffer(hdc win.HDC, w, h int32) bool {
 	// one GPU's memory; BitBlt to a window composed on the other adapter
 	// (RTX + AMD iGPU, 239 Hz + 144 Hz) can stall the UI thread in DWM and
 	// once took down the whole desktop.
-	// Keep this DIB GDI-color-keyed (no per-pixel alpha). Never
-	// SetDIBitsToDevice / StretchBlt a 32-bit source onto memDC — that
-	// realizes alpha so RGB(0,0,0) holes go opaque black and paints jump
-	// from ~10ms to hundreds.
+	// 24-bit sys-mem DIB (glassPresentBits): no alpha, so RGB(0,0,0)
+	// stays the DWM color key. A 32-bit BI_RGB DIB realizes alpha on
+	// BitBlt and the holes go opaque black. Never SetDIBitsToDevice a
+	// 32-bit source onto memDC.
 	u.memBmp = createSysMemBitmap(hdc, w, h)
 	if u.memBmp == 0 {
 		log.Warn("CreateDIBSection backbuffer failed", "w", w, "h", h)
@@ -6125,7 +6131,7 @@ func createSysMemBitmap(hdc win.HDC, w, h int32) win.HBITMAP {
 		BiWidth:       w,
 		BiHeight:      -h,
 		BiPlanes:      1,
-		BiBitCount:    32,
+		BiBitCount:    glassPresentBits,
 		BiCompression: win.BI_RGB,
 	}
 	var bits unsafe.Pointer

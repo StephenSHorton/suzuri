@@ -70,6 +70,12 @@ func TestGlassFrostAlphaIsContinuous(t *testing.T) {
 	}
 }
 
+func TestGlassPresentBitsHaveNoAlpha(t *testing.T) {
+	if glassPresentBits != 24 {
+		t.Fatalf("present bits %d — 32-bit DIB realizes alpha and kills the color key", glassPresentBits)
+	}
+}
+
 func TestGlassTintRGBLiftsBlackVoid(t *testing.T) {
 	r, g, b := glassTintRGB()
 	if r == 0 && g == 0 && b == 0 {
