@@ -131,3 +131,37 @@ func inkBounds(ink []captionInk) (minX, minY, maxX, maxY int32, ok bool) {
 func mixCover(bg, fg, a byte) byte {
 	return byte((int(bg)*(255-int(a)) + int(fg)*int(a)) / 255)
 }
+
+// packCaptionInkBGR24 is a top-down 24-bit DIB (3 bytes/pixel, DWORD padded).
+// Caption stamps must stay 24-bit: a 32-bit blit onto the window backbuffer
+// realizes dest alpha and turns glass holes into opaque black.
+func packCaptionInkBGR24(ink []captionInk, minX, minY, w, h int32, cr, cg, cb, br, bg, bb byte) []byte {
+	if w < 1 || h < 1 {
+		return nil
+	}
+	rowBytes := (int(w)*3 + 3) & ^3
+	pix := make([]byte, rowBytes*int(h))
+	for y := 0; y < int(h); y++ {
+		off := y * rowBytes
+		for x := 0; x < int(w); x++ {
+			pix[off+x*3+0] = bb
+			pix[off+x*3+1] = bg
+			pix[off+x*3+2] = br
+		}
+	}
+	for _, p := range ink {
+		if p.a == 0 {
+			continue
+		}
+		x := p.x - minX
+		y := p.y - minY
+		if x < 0 || y < 0 || x >= w || y >= h {
+			continue
+		}
+		off := int(y)*rowBytes + int(x)*3
+		pix[off+0] = mixCover(bb, cb, p.a)
+		pix[off+1] = mixCover(bg, cg, p.a)
+		pix[off+2] = mixCover(br, cr, p.a)
+	}
+	return pix
+}

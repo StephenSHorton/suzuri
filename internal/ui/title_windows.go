@@ -7,22 +7,10 @@ import (
 	"unsafe"
 
 	"github.com/lxn/win"
-	"golang.org/x/sys/windows"
 
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/iconstroke"
 )
-
-var (
-	procSetPixel = windows.NewLazySystemDLL("gdi32.dll").NewProc("SetPixel")
-)
-
-func setCaptionPixel(hdc win.HDC, x, y int32, color win.COLORREF) {
-	if hdc == 0 {
-		return
-	}
-	_, _, _ = procSetPixel.Call(uintptr(hdc), uintptr(x), uintptr(y), uintptr(color))
-}
 
 func (u *winUI) releaseTitleFonts() {
 	if u == nil {
@@ -388,20 +376,46 @@ func paintCaptionInk(hdc win.HDC, ink []captionInk, cr, cg, cb, br, bg, bb byte)
 	if hdc == 0 || len(ink) == 0 {
 		return
 	}
-	// SetPixel into the sysmem DIB. Do NOT SetDIBitsToDevice a 32-bit stamp
-	// onto this DC: that marks the window backbuffer alpha-aware, so DWM
-	// color-key holes (RGB 0,0,0) become 0xFF000000 opaque black and every
-	// later FillRect/TextOut/BitBlt on the DIB is 10–80× slower.
-	for _, p := range ink {
-		if p.a == 0 {
-			continue
-		}
-		setCaptionPixel(hdc, p.x, p.y, win.RGB(
-			mixCover(br, cr, p.a),
-			mixCover(bg, cg, p.a),
-			mixCover(bb, cb, p.a),
-		))
+	// 24-bit DIB + BitBlt. Never SetPixel (per-dot GDI syscall) and never
+	// SetDIBitsToDevice a 32-bit stamp onto this DC — that marks the window
+	// backbuffer alpha-aware, so glass holes go opaque black and paints stall.
+	minX, minY, maxX, maxY, ok := inkBounds(ink)
+	if !ok {
+		return
 	}
+	w := maxX - minX + 1
+	h := maxY - minY + 1
+	if w < 1 || h < 1 || w > 256 || h > 256 {
+		return
+	}
+	pix := packCaptionInkBGR24(ink, minX, minY, w, h, cr, cg, cb, br, bg, bb)
+	if len(pix) == 0 {
+		return
+	}
+	bmi := win.BITMAPINFOHEADER{
+		BiSize:        uint32(unsafe.Sizeof(win.BITMAPINFOHEADER{})),
+		BiWidth:       w,
+		BiHeight:      -h,
+		BiPlanes:      1,
+		BiBitCount:    24,
+		BiCompression: win.BI_RGB,
+	}
+	var bits unsafe.Pointer
+	hbm := win.CreateDIBSection(hdc, &bmi, dibRGBColors, &bits, 0, 0)
+	if hbm == 0 || bits == nil {
+		return
+	}
+	copy(unsafe.Slice((*byte)(bits), len(pix)), pix)
+	mem := win.CreateCompatibleDC(hdc)
+	if mem == 0 {
+		win.DeleteObject(win.HGDIOBJ(hbm))
+		return
+	}
+	old := win.SelectObject(mem, win.HGDIOBJ(hbm))
+	win.BitBlt(hdc, minX, minY, w, h, mem, 0, 0, win.SRCCOPY)
+	win.SelectObject(mem, old)
+	win.DeleteDC(mem)
+	win.DeleteObject(win.HGDIOBJ(hbm))
 }
 
 func (u *winUI) captionButtons(clientW, stripH int32) [3]pixRect {

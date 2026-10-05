@@ -3839,8 +3839,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 
 	case win.WM_NCMOUSEMOVE:
-		// Update custom-button hover, then let DefWindowProc see HTMAXBUTTON
-		// so Win11 Snap Layouts still appear.
+		// Hover for our glyphs. Snap Layouts come from returning
+		// HTMAXBUTTON in WM_NCHITTEST, not from DwmDefWindowProc.
 		u.trackCaptionHoverScreen(hwnd, lParam)
 
 	case win.WM_LBUTTONUP:
@@ -3979,14 +3979,10 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_NCHITTEST:
 		if u.chrome.Frame == chrome.FrameWindows {
 			if hit := u.frameHitTest(hwnd, lParam); hit != 0 {
-				// Returning HTMIN/MAX/CLOSE makes DWM paint a second set of
-				// caption icons on top of ours. Clicks stay in the client so
-				// LBUTTONDOWN owns min/max/close; snap flyout is the trade.
-				switch hit {
-				case hitMinButton, hitMaxButton, hitClose:
-					return hitClient
-				}
-				return hit
+				// Do not call DwmDefWindowProc — it returns HTMIN/MAX/CLOSE
+				// in DWM's default button rects and those sprites come back.
+				// presentCaptionHit keeps HTMAXBUTTON for Snap Layouts.
+				return uintptr(presentCaptionHit(int(hit)))
 			}
 		}
 	case win.WM_QUIT:

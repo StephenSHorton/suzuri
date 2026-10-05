@@ -20,7 +20,8 @@ func (u *winUI) frameCalcSize(hwnd win.HWND, msg uint32, wParam, lParam uintptr)
 	proposed := params.Rgrc[0]
 	_ = win.DefWindowProc(hwnd, msg, wParam, lParam)
 	// Keep left/right/bottom from DefWindowProc (resize borders) and pull
-	// the client top up into the caption so DWM does not paint a native bar.
+	// the client top up into the caption. Combined with cyTopHeight=0 this
+	// is the WT custom-frame recipe: no DWM caption band, our strip owns it.
 	params.Rgrc[0].Top = proposed.Top
 	if win.IsZoomed(hwnd) {
 		var mi win.MONITORINFO

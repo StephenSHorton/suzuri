@@ -109,6 +109,23 @@ func TestGlassBackdropFollowsConfig(t *testing.T) {
 	}
 }
 
+func TestGlassFrameMarginsLeaveCaptionBandEmpty(t *testing.T) {
+	on := glassFrameMargins(true)
+	if on.Top != 0 {
+		t.Fatalf("glass top %d must be 0 (never -1)", on.Top)
+	}
+	if on.Left != -1 || on.Right != -1 || on.Bottom != -1 {
+		t.Fatalf("glass sides/bottom should color-key: %+v", on)
+	}
+	off := glassFrameMargins(false)
+	if off.Top != 0 || off.Bottom != 1 {
+		t.Fatalf("solid margins %+v want top=0 bottom=1", off)
+	}
+	if off.Left != 0 || off.Right != 0 {
+		t.Fatalf("solid must not sheet-of-glass the sides: %+v", off)
+	}
+}
+
 func TestGlassConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("LOCALAPPDATA", dir)

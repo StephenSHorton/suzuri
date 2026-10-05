@@ -155,3 +155,18 @@ func hitTestTitleBar(q titleHitQuery) int {
 	}
 	return hitNowhere
 }
+
+// presentCaptionHit is the HT code WM_NCHITTEST actually returns.
+// DWM paints native min/max/close in any rect it believes is a caption
+// button (DwmDefWindowProc hits, or cyTopHeight=-1). Maximize stays
+// HTMAXBUTTON so Win11 Snap Layouts still appear; min/close are HTCLIENT
+// and WM_LBUTTONDOWN owns the click. Never feed those through
+// DwmDefWindowProc.
+func presentCaptionHit(hit int) int {
+	switch hit {
+	case hitMinButton, hitClose:
+		return hitClient
+	default:
+		return hit
+	}
+}

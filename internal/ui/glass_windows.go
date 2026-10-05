@@ -21,10 +21,12 @@ import (
 // Mac leaves chroma-key shell pixels at alpha 0 and blurs the desktop behind
 // them (CGSSetWindowBackgroundBlurRadius, reapplied every turn). This port
 // does not use a layered HWND: no UpdateLayeredWindow, no per-pixel alpha,
-// no WS_EX_LAYERED. DwmExtendFrameIntoClientArea(-1) is the documented
-// non-layered color key — client pixels that stay RGB(0,0,0) show the
-// accent acrylic. Chroma-key cells already skip their own fill; the
-// glass underlay is stock black so those cells remain the key.
+// no WS_EX_LAYERED. DwmExtendFrameIntoClientArea on the sides/bottom is
+// the documented non-layered color key — client pixels that stay
+// RGB(0,0,0) show the accent acrylic. The top margin stays 0 (never -1):
+// a sheet-of-glass top is the band where DWM stamps native min/max/close
+// on top of our icons. Chroma-key cells skip their own fill; the glass
+// underlay is stock black so those cells remain the key.
 //
 // DWM has no point radius. HostBackdrop (DWMWA_SYSTEMBACKDROP_TYPE
 // Mica / Acrylic / Tabbed) cannot vary frost continuously and goes
@@ -211,6 +213,17 @@ func extendFrame(hwnd win.HWND, m dwmMargins) {
 	_, _, _ = dwmExtend.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&m)))
 }
 
+// glassFrameMargins is the WT-style extend: sides/bottom may be a sheet of
+// glass so empty cells color-key, but the top is never -1. cyTopHeight=0
+// (or 1px when glass is off, for the shadow) leaves DWM an empty caption
+// rect so it does not stamp native min/max/close over ours.
+func glassFrameMargins(on bool) dwmMargins {
+	if on {
+		return dwmMargins{Left: -1, Right: -1, Top: 0, Bottom: -1}
+	}
+	return dwmMargins{Top: 0, Bottom: 1}
+}
+
 func setAccent(hwnd win.HWND, state, flags, gradient uint32) {
 	if err := setWinComp.Find(); err != nil {
 		return
@@ -269,13 +282,7 @@ func (u *winUI) pushGlassBackdrop(force bool, fromMsg uint32) {
 	// Always None. A HostBackdrop type is what DWM replaces with a solid
 	// (often light) fallback on deactivate.
 	dwmSetInt32(u.hwnd, dwmwaSystemBackdropType, dwmsbtNone)
-	if on {
-		extendFrame(u.hwnd, dwmMargins{-1, -1, -1, -1})
-	} else {
-		// 1px extend keeps the DWM shadow and stops the native caption
-		// from painting over a FrameWindows client that already ate it.
-		extendFrame(u.hwnd, dwmMargins{Bottom: 1})
-	}
+	extendFrame(u.hwnd, glassFrameMargins(on))
 
 	if on {
 		state, flags, color := glassCompositionAccent(winBuildNumber(), blur, veil)

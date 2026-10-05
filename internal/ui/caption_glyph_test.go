@@ -32,6 +32,38 @@ func TestCaptionGlyphsHaveNoShadowCopy(t *testing.T) {
 	}
 }
 
+func TestPresentCaptionHitKeepsSnapMax(t *testing.T) {
+	if presentCaptionHit(hitMaxButton) != hitMaxButton {
+		t.Fatal("maximize must stay HTMAXBUTTON for Snap Layouts")
+	}
+	if presentCaptionHit(hitMinButton) != hitClient {
+		t.Fatal("min must be HTCLIENT so DWM does not own the button rect")
+	}
+	if presentCaptionHit(hitClose) != hitClient {
+		t.Fatal("close must be HTCLIENT so DWM does not own the button rect")
+	}
+	if presentCaptionHit(hitCaption) != hitCaption {
+		t.Fatal("drag strip")
+	}
+	if presentCaptionHit(hitTop) != hitTop {
+		t.Fatal("resize")
+	}
+}
+
+func TestPackCaptionInkBGR24(t *testing.T) {
+	ink := []captionInk{{x: 2, y: 1, a: 255}, {x: 3, y: 1, a: 0}}
+	pix := packCaptionInkBGR24(ink, 2, 1, 2, 1, 10, 20, 30, 1, 2, 3)
+	if len(pix) < 6 {
+		t.Fatalf("len %d", len(pix))
+	}
+	if pix[0] != 30 || pix[1] != 20 || pix[2] != 10 {
+		t.Fatalf("solid fg BGR %d %d %d", pix[0], pix[1], pix[2])
+	}
+	if pix[3] != 3 || pix[4] != 2 || pix[5] != 1 {
+		t.Fatalf("bg BGR %d %d %d", pix[3], pix[4], pix[5])
+	}
+}
+
 func TestInkBoundsTightOnCoverage(t *testing.T) {
 	if _, _, _, _, ok := inkBounds(nil); ok {
 		t.Fatal("empty ink")
