@@ -83,6 +83,44 @@ func formatExceptionDetail(code uint32, addr uintptr, module string) []byte {
 	return buf[:n+1]
 }
 
+func formatAVInfo(readWrite, fault uintptr) []byte {
+	var buf [80]byte
+	n := copy(buf[:], "av=")
+	if readWrite == 0 {
+		n += copy(buf[n:], "read")
+	} else {
+		n += copy(buf[n:], "write")
+	}
+	n += copy(buf[n:], " fault=0x")
+	n = appendHexPtr(buf[:], n, fault)
+	buf[n] = '\n'
+	return buf[:n+1]
+}
+
+func formatNativeFrames(frames []uintptr) []byte {
+	if len(frames) == 0 {
+		return nil
+	}
+	var buf [512]byte
+	n := copy(buf[:], "nstack=")
+	for i, f := range frames {
+		if f == 0 {
+			continue
+		}
+		if i > 0 && n+20 < len(buf) {
+			buf[n] = ' '
+			n++
+		}
+		if n+18 >= len(buf) {
+			break
+		}
+		n += copy(buf[n:], "0x")
+		n = appendHexPtr(buf[:], n, f)
+	}
+	buf[n] = '\n'
+	return buf[:n+1]
+}
+
 func appendHex32(buf []byte, n int, v uint32) int {
 	const hexdigits = "0123456789ABCDEF"
 	for i := 7; i >= 0; i-- {

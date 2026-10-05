@@ -82,11 +82,13 @@ func Init() (string, error) {
 	}
 
 	// File always; stderr when launched from a console.
-	w := io.Writer(f)
+	// Warn/error lines fsync so a death a moment later still has the last WRN.
+	w := io.Writer(syncOnSevere{f})
 	if isTerminal(os.Stderr) {
-		w = io.MultiWriter(f, os.Stderr)
+		w = io.MultiWriter(syncOnSevere{f}, os.Stderr)
 	}
 	setup(w, level)
+	debug.SetTraceback("crash")
 	return path, nil
 }
 
@@ -119,6 +121,7 @@ func openCrashOutputLocked(dir string) {
 	// without a Go panic (native AV, stack overflow, os.Exit).
 	_, _ = fmt.Fprintf(cf, "\n--- crash-output open pid=%d t=%s ---\n",
 		os.Getpid(), time.Now().Format(time.RFC3339))
+	_, _ = fmt.Fprintf(cf, "--- SetCrashOutput captures runtime throw/fatal and unrecovered panic; not recover, os.Exit, or native AV ---\n")
 	_ = cf.Sync()
 }
 
@@ -415,14 +418,33 @@ func Recover(where string, repanic bool) {
 		"err", fmt.Sprint(r),
 		"stack", string(debug.Stack()),
 	)
-	mu.Lock()
-	if file != nil {
-		_ = file.Sync()
-	}
-	mu.Unlock()
+	WriteCrashNote("recovered-panic", "where", where, "err", fmt.Sprint(r))
+	Sync()
 	if repanic {
 		panic(r)
 	}
+}
+
+// syncOnSevere fsyncs the log after a Charm warn/error line so a native
+// death immediately afterward still leaves the last warning on disk.
+type syncOnSevere struct{ f *os.File }
+
+func (s syncOnSevere) Write(p []byte) (int, error) {
+	if s.f == nil {
+		return 0, nil
+	}
+	n, err := s.f.Write(p)
+	if looksSevere(p) {
+		_ = s.f.Sync()
+	}
+	return n, err
+}
+
+func looksSevere(p []byte) bool {
+	return strings.Contains(string(p), " WRN ") ||
+		strings.Contains(string(p), " ERR ") ||
+		strings.Contains(string(p), "error=") ||
+		strings.Contains(string(p), "warn")
 }
 
 func isTerminal(f *os.File) bool {

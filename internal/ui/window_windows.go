@@ -3992,6 +3992,8 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 	case win.WM_QUIT:
 		// DefWindowProc path — message loop also sees GetMessage==0.
 		log.Info("WM_QUIT")
+		applog.WriteCrashNote("WM_QUIT", "wparam", wParam)
+		applog.Sync()
 		return 0
 	}
 	return win.DefWindowProc(hwnd, msg, wParam, lParam)

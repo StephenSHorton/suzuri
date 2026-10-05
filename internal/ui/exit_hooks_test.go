@@ -55,4 +55,12 @@ func TestFatalWinException(t *testing.T) {
 		!strings.Contains(detail, "module=suzuri.exe") {
 		t.Fatalf("detail %q", detail)
 	}
+	av := string(formatAVInfo(0, 0x1234))
+	if !strings.Contains(av, "av=read") || !strings.Contains(av, "fault=0x") {
+		t.Fatalf("av %q", av)
+	}
+	ns := string(formatNativeFrames([]uintptr{0x1000, 0x2000}))
+	if !strings.Contains(ns, "nstack=0x") || !strings.Contains(ns, "0000000000002000") {
+		t.Fatalf("nstack %q", ns)
+	}
 }

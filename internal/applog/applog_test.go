@@ -106,6 +106,41 @@ func TestPreviousUncleanAndHeartbeat(t *testing.T) {
 	}
 }
 
+func TestCrashOutputConfiguredForThrowAndFatal(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", dir)
+	if _, err := Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(Close)
+	if CrashPath == "" {
+		t.Fatal("SetCrashOutput must install a crash file")
+	}
+	b, err := os.ReadFile(CrashPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if !strings.Contains(s, "crash-output open") {
+		t.Fatal("startup marker")
+	}
+	if !strings.Contains(s, "throw/fatal") || !strings.Contains(s, "unrecovered panic") {
+		t.Fatalf("must document that SetCrashOutput is throw/fatal, not only panic: %s", s)
+	}
+}
+
+func TestLooksSevere(t *testing.T) {
+	if !looksSevere([]byte("2026-01-01 ERR suzuri foo")) {
+		t.Fatal("ERR")
+	}
+	if !looksSevere([]byte("2026-01-01 WRN suzuri bar")) {
+		t.Fatal("WRN")
+	}
+	if looksSevere([]byte("2026-01-01 INF suzuri ok")) {
+		t.Fatal("info must not fsync")
+	}
+}
+
 func TestFormatKVLine(t *testing.T) {
 	line := formatKVLine("crash", "os.Exit", "code", 1, "reason", "ui.Run failed")
 	if !strings.Contains(line, "crash os.Exit") || !strings.Contains(line, "code=1") {

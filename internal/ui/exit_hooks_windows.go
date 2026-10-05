@@ -23,8 +23,9 @@ var (
 	uefCallback   uintptr
 	ctrlCallback  uintptr
 
-	vehNote  [512]byte
-	vehStack [32 << 10]byte
+	vehNote   [512]byte
+	vehStack  [32 << 10]byte
+	vehFrames [16]uintptr
 )
 
 type winExceptionRecord struct {
@@ -91,12 +92,32 @@ func writeFatalException(info *winExceptionPointers) {
 	line := formatExceptionDetail(rec.ExceptionCode, rec.ExceptionAddress, mod)
 	n := copy(vehNote[:], line)
 	applog.WriteRaw(vehNote[:n])
-	// Stack overflow has almost no stack left — skip Go dump there.
+	if rec.ExceptionCode == 0xC0000005 && rec.NumberParameters >= 2 {
+		applog.WriteRaw(formatAVInfo(rec.ExceptionInformation[0], rec.ExceptionInformation[1]))
+	}
 	if rec.ExceptionCode != 0xC00000FD {
+		if frames := captureNativeFrames(); len(frames) > 0 {
+			applog.WriteRaw(formatNativeFrames(frames))
+		}
 		ns := runtime.Stack(vehStack[:], false)
 		applog.WriteRaw(vehStack[:ns])
 	}
 	applog.Sync()
+}
+
+func captureNativeFrames() []uintptr {
+	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("RtlCaptureStackBackTrace")
+	if err := proc.Find(); err != nil {
+		return nil
+	}
+	n, _, _ := proc.Call(2, 16, uintptr(unsafe.Pointer(&vehFrames[0])), 0)
+	if n == 0 {
+		return nil
+	}
+	if n > 16 {
+		n = 16
+	}
+	return vehFrames[:n]
 }
 
 func moduleAt(addr uintptr) string {
@@ -136,25 +157,27 @@ func installConsoleCtrlTrail() {
 }
 
 func enableLocalDumps() {
-	exe := filepath.Base(os.Args[0])
-	if exe == "" {
-		exe = "suzuri.exe"
-	}
 	dir := filepath.Join(config.Dir(), "CrashDumps")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
-	keyPath := `Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\` + exe
-	k, _, err := registry.CreateKey(registry.CURRENT_USER, keyPath, registry.SET_VALUE)
-	if err != nil {
-		log.Warn("WER LocalDumps key", "err", err)
-		return
+	names := []string{"suzuri.exe"}
+	if exe := filepath.Base(os.Args[0]); exe != "" && exe != "suzuri.exe" {
+		names = append(names, exe)
 	}
-	defer k.Close()
-	_ = k.SetStringValue("DumpFolder", dir)
-	_ = k.SetDWordValue("DumpType", 2) // full dump
-	_ = k.SetDWordValue("DumpCount", 5)
-	log.Info("WER LocalDumps enabled", "exe", exe, "dir", dir)
+	for _, name := range names {
+		keyPath := `Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\` + name
+		k, _, err := registry.CreateKey(registry.CURRENT_USER, keyPath, registry.SET_VALUE)
+		if err != nil {
+			log.Warn("WER LocalDumps key", "exe", name, "err", err)
+			continue
+		}
+		_ = k.SetStringValue("DumpFolder", dir)
+		_ = k.SetDWordValue("DumpType", 2) // full dump (1 = mini)
+		_ = k.SetDWordValue("DumpCount", 5)
+		_ = k.Close()
+	}
+	log.Info("WER LocalDumps enabled", "dir", dir, "keep", 5)
 }
 
 var (
