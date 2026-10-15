@@ -2,7 +2,11 @@
 
 package host
 
-import "testing"
+import (
+	"io"
+	"testing"
+	"time"
+)
 
 func TestProgramOwnsConsoleKeys(t *testing.T) {
 	const shell = 100
@@ -90,5 +94,44 @@ func TestForegroundPGIDWithoutSession(t *testing.T) {
 	s = &Session{}
 	if s.ForegroundPGID() != 0 {
 		t.Fatal("no conpty")
+	}
+}
+
+// The UI calls ForegroundPGID from paint and key paths. It must return
+// without touching the pseudoconsole and later notice a running child.
+func TestForegroundPGIDNeverBlocksAndSeesChild(t *testing.T) {
+	s, err := StartSession(`C:\Windows\System32\cmd.exe /k ping -n 30 127.0.0.1`, 80, 24, "")
+	if err != nil {
+		t.Skipf("conpty unavailable: %v", err)
+	}
+	defer s.Close()
+	go func() { _ = s.CopyOutput(io.Discard) }()
+
+	start := time.Now()
+	for range 1000 {
+		s.ForegroundPGID()
+	}
+	if d := time.Since(start); d > 50*time.Millisecond {
+		t.Fatalf("1000 calls took %v; the probe must not run inline", d)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for s.ForegroundPGID() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("child ping never reported")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if pg := s.ForegroundPGID(); pg == s.Pid() {
+		t.Fatalf("sentinel %d equals shell pid", pg)
+	}
+
+	_ = s.Close()
+	deadline = time.Now().Add(time.Second)
+	for s.ForegroundPGID() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("probe still reporting after Close")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

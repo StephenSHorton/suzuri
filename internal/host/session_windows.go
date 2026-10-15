@@ -39,6 +39,11 @@ type Session struct {
 	resizeMu sync.Mutex
 	// lastIOUnixNano is updated on successful Read/Write with n>0.
 	lastIOUnixNano atomic.Int64
+	// fgID is the cached ForegroundPGID, refreshed off the UI thread.
+	fgID   atomic.Int32
+	fgOnce sync.Once
+	// closed stops the foreground probe.
+	closed chan struct{}
 }
 
 // DefaultShell returns a sensible Windows shell command line.
@@ -152,7 +157,7 @@ func StartSession(commandLine string, cols, rows int, workDir string, extraEnv .
 	if err != nil {
 		return nil, fmt.Errorf("conpty start: %w", err)
 	}
-	return &Session{cpty: cpty}, nil
+	return &Session{cpty: cpty, closed: make(chan struct{})}, nil
 }
 
 // sessionEnv builds the ConPTY process environment: base + extra, then
@@ -355,6 +360,9 @@ func (s *Session) Close() error {
 	}
 	var err error
 	s.once.Do(func() {
+		if s.closed != nil {
+			close(s.closed)
+		}
 		s.resizeMu.Lock()
 		defer s.resizeMu.Unlock()
 		if s.cpty == nil {
