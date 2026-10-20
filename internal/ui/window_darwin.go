@@ -972,7 +972,7 @@ func (u *macUI) applyClientSize(w, h int32) {
 		if pg == nil || pg.root == nil {
 			continue
 		}
-		res := layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomID)
+		res := layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomTarget())
 		if pg == u.activePage() {
 			u.lastPaneLayout = res.leaves
 			u.lastSashes = res.sashes

@@ -114,7 +114,7 @@ func (u *winUI) computeActiveLayout() []paneGeom {
 		clientH = int32(u.rows)*ch + u.chromePx + u.inputPx
 	}
 	sx, sy, sw, sh := u.shellRect(clientW, clientH)
-	res := layoutPageZoom(p.root, sx, sy, sw, sh, cw, ch, p.focusID, p.zoomID)
+	res := layoutPageZoom(p.root, sx, sy, sw, sh, cw, ch, p.focusID, p.zoomTarget())
 	u.lastPaneLayout = res.leaves
 	u.lastSashes = res.sashes
 	u.lastShell.x, u.lastShell.y, u.lastShell.w, u.lastShell.h = res.shellX, res.shellY, res.shellW, res.shellH

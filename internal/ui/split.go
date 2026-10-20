@@ -62,8 +62,11 @@ type page struct {
 	root *splitNode
 	// focusID is the focused leaf pane id (*tab.id).
 	focusID int
-	// zoomID, when non-zero, is the pane laid out alone across the page.
-	// Other leaves stay in the tree (and keep their PTY size) until zoom ends.
+	// zoomOn means zoomID is laid out alone across the page. Other leaves
+	// stay in the tree (and keep their PTY size) until zoom ends. zoomID is
+	// only meaningful while zoomOn is set: pane ids start at 0, so 0 cannot
+	// mean "not zoomed".
+	zoomOn bool
 	zoomID int
 	// userTitle is a manual strip name for this page. When set, the chrome tab
 	// label no longer follows panes (or stickyTitle).
@@ -111,7 +114,7 @@ func (p *page) setFocus(id int) bool {
 	p.focusID = id
 	// While zoomed, focus and the filled pane stay the same so keyboard
 	// focus never lands on a leaf that is not on screen.
-	if p.zoomID != 0 {
+	if p.zoomOn {
 		p.zoomID = id
 	}
 	return true
@@ -119,7 +122,20 @@ func (p *page) setFocus(id int) bool {
 
 // zoomed reports whether this page is showing one pane and hiding the rest.
 func (p *page) zoomed() bool {
-	return p != nil && p.zoomID != 0 && p.leafCount() > 1 && findPane(p.root, p.zoomID) != nil
+	return p != nil && p.zoomOn && p.leafCount() > 1 && findPane(p.root, p.zoomID) != nil
+}
+
+// zoomTarget is the pane id to lay out alone, or -1 when not zoomed.
+func (p *page) zoomTarget() int {
+	if !p.zoomed() {
+		return -1
+	}
+	return p.zoomID
+}
+
+func (p *page) clearZoom() {
+	p.zoomOn = false
+	p.zoomID = 0
 }
 
 // toggleZoom fills the focused pane and hides the others, or restores the split.
@@ -127,7 +143,7 @@ func (p *page) zoomed() bool {
 func (p *page) toggleZoom() bool {
 	if p == nil || p.leafCount() < 2 {
 		if p != nil {
-			p.zoomID = 0
+			p.clearZoom()
 		}
 		return false
 	}
@@ -135,10 +151,11 @@ func (p *page) toggleZoom() bool {
 	if focus == nil {
 		return false
 	}
-	if p.zoomID == focus.id {
-		p.zoomID = 0
+	if p.zoomOn && p.zoomID == focus.id {
+		p.clearZoom()
 		return true
 	}
+	p.zoomOn = true
 	p.zoomID = focus.id
 	return true
 }
@@ -393,7 +410,7 @@ func (p *page) splitFocused(dir splitDir, newPane *tab) bool {
 	if ok {
 		p.focusID = newPane.id
 		// A new split is why you left a single view — show the panes.
-		p.zoomID = 0
+		p.clearZoom()
 	} else if wasSolo {
 		// Split failed — don't leave a sticky from a no-op.
 		p.stickyTitle = ""
@@ -471,8 +488,8 @@ func (p *page) removePane(id int) (closed *tab, empty bool, newFocus int) {
 	}
 	p.clearStickyTitleIfSolo()
 	// Closing the maximized pane (or the last sibling) puts the split back.
-	if p.zoomID != 0 && (p.leafCount() < 2 || findPane(p.root, p.zoomID) == nil) {
-		p.zoomID = 0
+	if p.zoomOn && (p.leafCount() < 2 || findPane(p.root, p.zoomID) == nil) {
+		p.clearZoom()
 	}
 	return removed, false, p.focusID
 }
@@ -743,10 +760,10 @@ type layoutResult struct {
 // Multi-leaf trees get a mini title row; each non-alt leaf gets its own input bar.
 // Sibling panes share a single sash (no double borders).
 func layoutPage(root *splitNode, shellX, shellY, shellW, shellH int32, cw, ch int32, focusID int) layoutResult {
-	return layoutPageZoom(root, shellX, shellY, shellW, shellH, cw, ch, focusID, 0)
+	return layoutPageZoom(root, shellX, shellY, shellW, shellH, cw, ch, focusID, -1)
 }
 
-// layoutPageZoom is layoutPage. zoomID non-zero and present among two or more
+// layoutPageZoom is layoutPage. zoomID >= 0 and present among two or more
 // leaves lays that pane out as if it were alone (no title row, no sashes).
 // Hidden leaves are left out so callers do not resize their PTYs.
 func layoutPageZoom(root *splitNode, shellX, shellY, shellW, shellH int32, cw, ch int32, focusID, zoomID int) layoutResult {
@@ -755,7 +772,7 @@ func layoutPageZoom(root *splitNode, shellX, shellY, shellW, shellH int32, cw, c
 		return res
 	}
 	leaves := collectLeaves(root)
-	if zoomID != 0 && len(leaves) > 1 && findPane(root, zoomID) != nil {
+	if zoomID >= 0 && len(leaves) > 1 && findPane(root, zoomID) != nil {
 		layoutNode(leafNode(findPane(root, zoomID)), shellX, shellY, shellW, shellH, cw, ch, focusID, 0, &res)
 		if len(res.leaves) == 1 {
 			res.leaves[0].zoomed = true
