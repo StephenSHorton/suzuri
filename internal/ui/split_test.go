@@ -479,7 +479,7 @@ func TestZoomHidesOtherPanesUntilToggle(t *testing.T) {
 	if p.toggleZoom() == false || p.zoomID != b.id || !p.zoomed() {
 		t.Fatalf("zoom id=%d zoomed=%v", p.zoomID, p.zoomed())
 	}
-	res := layoutPageZoom(p.root, 0, 0, 200, 100, 10, 20, p.focusID, p.zoomID)
+	res := layoutPageZoom(p.root, 0, 0, 200, 100, 10, 20, p.focusID, p.zoomTarget())
 	if len(res.leaves) != 1 || !res.leaves[0].zoomed || res.leaves[0].pane.id != 2 {
 		t.Fatalf("zoomed leaves=%d", len(res.leaves))
 	}
@@ -506,10 +506,10 @@ func TestZoomHidesOtherPanesUntilToggle(t *testing.T) {
 	if !strings.Contains(p.zoomBadgeLabel(), "beta") {
 		t.Fatalf("badge after cycle %q", p.zoomBadgeLabel())
 	}
-	if !p.toggleZoom() || p.zoomID != 0 || p.zoomed() {
+	if !p.toggleZoom() || p.zoomed() {
 		t.Fatal("restore")
 	}
-	res = layoutPageZoom(p.root, 0, 0, 200, 100, 10, 20, p.focusID, p.zoomID)
+	res = layoutPageZoom(p.root, 0, 0, 200, 100, 10, 20, p.focusID, p.zoomTarget())
 	if len(res.leaves) != 2 || len(res.sashes) != 1 {
 		t.Fatalf("restored leaves=%d sashes=%d", len(res.leaves), len(res.sashes))
 	}
@@ -517,18 +517,66 @@ func TestZoomHidesOtherPanesUntilToggle(t *testing.T) {
 	if !p.toggleZoom() {
 		t.Fatal("rezoom")
 	}
-	if !p.splitFocused(splitHoriz, &tab{id: 3, title: "gamma"}) || p.zoomID != 0 {
+	if !p.splitFocused(splitHoriz, &tab{id: 3, title: "gamma"}) || p.zoomed() {
 		t.Fatal("split should leave zoom")
 	}
 	p.setFocus(1)
-	if !p.toggleZoom() || p.zoomID != 1 {
+	if !p.toggleZoom() || p.zoomTarget() != 1 {
 		t.Fatal("zoom a")
 	}
-	if _, _, focus := p.removePane(1); p.zoomID != 0 || focus == 1 {
+	if _, _, focus := p.removePane(1); p.zoomed() || focus == 1 {
 		t.Fatalf("close zoomed zoom=%d focus=%d", p.zoomID, focus)
 	}
 	solo := newPage(&tab{id: 9})
 	if solo.toggleZoom() {
 		t.Fatal("solo zoom")
+	}
+}
+
+// The first pane the app opens has id 0. It must zoom like any other pane.
+func TestZoomWorksOnPaneIDZero(t *testing.T) {
+	first := &tab{id: 0, title: "first"}
+	other := &tab{id: 1, title: "other"}
+	p := newPage(first)
+	if !p.splitFocused(splitVert, other) {
+		t.Fatal("split")
+	}
+	if !p.setFocus(0) {
+		t.Fatal("focus first")
+	}
+	if !p.toggleZoom() || !p.zoomed() || p.zoomTarget() != 0 {
+		t.Fatalf("zoom pane 0: zoomed=%v target=%d", p.zoomed(), p.zoomTarget())
+	}
+	res := layoutPageZoom(p.root, 0, 0, 200, 100, 10, 20, p.focusID, p.zoomTarget())
+	if len(res.leaves) != 1 || res.leaves[0].pane.id != 0 || !res.leaves[0].zoomed {
+		t.Fatalf("zoomed leaves=%d", len(res.leaves))
+	}
+	if !strings.Contains(p.zoomBadgeLabel(), "other") {
+		t.Fatalf("badge %q", p.zoomBadgeLabel())
+	}
+	// Cycling off pane 0 and back must stay zoomed.
+	if !p.focusZoomCycle(1) || !p.zoomed() || p.zoomTarget() != 1 {
+		t.Fatalf("cycle to 1: zoomed=%v target=%d", p.zoomed(), p.zoomTarget())
+	}
+	if !p.focusZoomCycle(0) || !p.zoomed() || p.zoomTarget() != 0 {
+		t.Fatalf("cycle to 0: zoomed=%v target=%d", p.zoomed(), p.zoomTarget())
+	}
+	if !p.toggleZoom() || p.zoomed() || p.zoomTarget() != -1 {
+		t.Fatal("restore")
+	}
+	res = layoutPageZoom(p.root, 0, 0, 200, 100, 10, 20, p.focusID, p.zoomTarget())
+	if len(res.leaves) != 2 {
+		t.Fatalf("restored leaves=%d", len(res.leaves))
+	}
+	// Closing a hidden pane while zoomed on 0 ends zoom (one pane left).
+	p.toggleZoom()
+	if _, _, _ = p.removePane(1); p.zoomed() || p.zoomTarget() != -1 {
+		t.Fatal("close sibling should end zoom")
+	}
+	// A plain page literal is never zoomed, even though zoomID is 0.
+	fresh := newPage(&tab{id: 0})
+	fresh.splitFocused(splitVert, &tab{id: 5})
+	if fresh.zoomed() || fresh.zoomTarget() != -1 {
+		t.Fatal("fresh page should not be zoomed")
 	}
 }

@@ -1010,7 +1010,7 @@ func (u *winUI) maybeResizeForInput() {
 	sx, sy, sw, sh := u.shellRect(u.width, u.height)
 	need := false
 	if p := u.activePage(); p != nil && p.root != nil {
-		geoms := layoutPageZoom(p.root, sx, sy, sw, sh, cw, ch, p.focusID, p.zoomID).leaves
+		geoms := layoutPageZoom(p.root, sx, sy, sw, sh, cw, ch, p.focusID, p.zoomTarget()).leaves
 		for _, g := range geoms {
 			if g.pane != nil && (g.pane.lastCols != g.cols || g.pane.lastRows != g.rows) {
 				need = true
@@ -4159,7 +4159,7 @@ func (u *winUI) anyPaneSizeMismatch() bool {
 		if pg == nil || pg.root == nil {
 			continue
 		}
-		for _, g := range layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomID).leaves {
+		for _, g := range layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomTarget()).leaves {
 			t := g.pane
 			if t == nil || !t.alive.Load() {
 				continue
@@ -4262,7 +4262,7 @@ func (u *winUI) relayoutActivePaintOnly() {
 		return
 	}
 	sx, sy, sw, sh := u.shellRect(u.width, u.height)
-	res := layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomID)
+	res := layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomTarget())
 	u.lastPaneLayout = res.leaves
 	u.lastSashes = res.sashes
 	u.lastShell.x, u.lastShell.y = res.shellX, res.shellY
@@ -4423,7 +4423,7 @@ func (u *winUI) applyClientSize(w, h int32) {
 		if pg == nil || pg.root == nil {
 			continue
 		}
-		res := layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomID)
+		res := layoutPageZoom(pg.root, sx, sy, sw, sh, cw, ch, pg.focusID, pg.zoomTarget())
 		if pg == u.activePage() {
 			u.lastPaneLayout = res.leaves
 			u.lastSashes = res.sashes
