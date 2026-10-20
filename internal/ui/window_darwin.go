@@ -1204,6 +1204,7 @@ func (u *macUI) drainAI() {
 			pages:  &u.pages,
 			tabs:   u.tabs,
 			active: &u.active,
+			nextID: &u.nextTabID,
 			split:  u.splitActive,
 			close: func(id int) {
 				u.closePaneUI(id, false)
@@ -1379,6 +1380,16 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		u.focusPaneDir(3)
 	case chrome.ActionTogglePaneZoom:
 		u.togglePaneZoom()
+	case chrome.ActionMovePaneToTab:
+		hostMovePaneToTab(u, r.TabID)
+	case chrome.ActionMovePaneToNewTab:
+		hostMovePaneToNewTab(u)
+	case chrome.ActionMovePanePrevTab:
+		hostMovePaneAdjacent(u, -1)
+	case chrome.ActionMovePaneNextTab:
+		hostMovePaneAdjacent(u, 1)
+	case chrome.ActionMergeTabInto:
+		hostMergeTabInto(u, r.TabID)
 	case chrome.ActionNextTab:
 		u.switchTab(1)
 	case chrome.ActionPrevTab:
@@ -2241,6 +2252,24 @@ func (u *macUI) handleKeys() {
 		return
 	}
 
+	// ⌘⌥⇧+←/→: carry the focused pane to the previous/next tab (a new tab
+	// at either end). Same chord as pane focus plus Shift.
+	if alt && shift && (meta || realCtrl) {
+		// Drop the held arrow until release so it never reaches the moved
+		// pane as key-repeat on a later tick.
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
+			u.keyRep.suppressUntilRelease(ebiten.KeyArrowLeft)
+			u.keyRep.suppressUntilRelease(ebiten.KeyLeft)
+			hostMovePaneAdjacent(u, -1)
+			return
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
+			u.keyRep.suppressUntilRelease(ebiten.KeyArrowRight)
+			u.keyRep.suppressUntilRelease(ebiten.KeyRight)
+			hostMovePaneAdjacent(u, 1)
+			return
+		}
+	}
 	// ⌘⌥+arrows: focus pane (bare Option is word-jump). Ctrl+Option is a synonym.
 	// After overlay so notes/palette keep their own arrow keys.
 	if alt && !shift && (meta || realCtrl) {

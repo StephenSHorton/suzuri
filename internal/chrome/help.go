@@ -179,6 +179,12 @@ func helpSectionsRight(colW int) []helpSectionBlock {
 		focusPanes = "Alt+arrows"
 		wordJump = "Ctrl+←→"
 	}
+	// Move-pane chord: the ASCII Windows form is too wide for the key
+	// column, so the arrows move into the description there.
+	movePane, movePaneDesc := KeyCtrlAltShift("←→"), "Pane to prev/next tab"
+	if !keyFancyOn() && !isDarwin() {
+		movePane, movePaneDesc = "Ctrl+Alt+Shift", "+←→ pane to prev/next tab"
+	}
 	lineEnds := "Home / End"
 	if isDarwin() {
 		lineEnds = KeyCtrl("←→") + " · Home/End"
@@ -193,11 +199,11 @@ func helpSectionsRight(colW int) []helpSectionBlock {
 				{KeyCtrlShift("E"), "Split down"},
 				{KeyCtrlShift("Enter"), "Maximize pane"},
 				{focusPanes, "Focus pane"},
+				{movePane, movePaneDesc},
 				{wordJump, "Word jump"},
 				{lineEnds, "Line ends"},
 				{"Hold ←→ / ⌫", "Key repeat"},
-				{"F2", "Rename pane"},
-				{"Double-click", "Rename tab / pane"},
+				{"F2 · dbl-click", "Rename pane / tab"},
 				{KeyCtrl("W"), "Close pane (last → tab)"},
 			},
 		},

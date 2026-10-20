@@ -1070,6 +1070,16 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		u.focusPaneDir(2)
 	case chrome.ActionFocusPaneDown:
 		u.focusPaneDir(3)
+	case chrome.ActionMovePaneToTab:
+		hostMovePaneToTab(u, r.TabID)
+	case chrome.ActionMovePaneToNewTab:
+		hostMovePaneToNewTab(u)
+	case chrome.ActionMovePanePrevTab:
+		hostMovePaneAdjacent(u, -1)
+	case chrome.ActionMovePaneNextTab:
+		hostMovePaneAdjacent(u, 1)
+	case chrome.ActionMergeTabInto:
+		hostMergeTabInto(u, r.TabID)
 	case chrome.ActionTogglePaneZoom:
 		u.togglePaneZoom()
 	case chrome.ActionNextTab:
@@ -1818,6 +1828,7 @@ func (u *winUI) drainAI() {
 			pages:  &u.pages,
 			tabs:   u.tabs,
 			active: &u.active,
+			nextID: &u.nextTabID,
 			split:  u.splitActive,
 			close: func(id int) {
 				u.closePaneUI(id, false)
@@ -2823,6 +2834,23 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				return 0
 			case win.VK_RETURN:
 				u.togglePaneZoom()
+				return 0
+			}
+		}
+		// Ctrl+Alt+Shift+←/→: carry the focused pane to the previous/next tab
+		// (a new tab at either end).
+		// Ignore auto-repeat so holding the chord moves the pane one tab, not
+		// across the whole strip (lParam bit 30 = key was already down).
+		if ctrl && alt && shift && (wParam == win.VK_LEFT || wParam == win.VK_RIGHT) && (lParam&(1<<30)) != 0 {
+			return 0
+		}
+		if ctrl && alt && shift {
+			switch wParam {
+			case win.VK_LEFT:
+				hostMovePaneAdjacent(u, -1)
+				return 0
+			case win.VK_RIGHT:
+				hostMovePaneAdjacent(u, 1)
 				return 0
 			}
 		}
