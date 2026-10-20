@@ -2255,11 +2255,17 @@ func (u *macUI) handleKeys() {
 	// ⌘⌥⇧+←/→: carry the focused pane to the previous/next tab (a new tab
 	// at either end). Same chord as pane focus plus Shift.
 	if alt && shift && (meta || realCtrl) {
+		// Drop the held arrow until release so it never reaches the moved
+		// pane as key-repeat on a later tick.
 		if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
+			u.keyRep.suppressUntilRelease(ebiten.KeyArrowLeft)
+			u.keyRep.suppressUntilRelease(ebiten.KeyLeft)
 			hostMovePaneAdjacent(u, -1)
 			return
 		}
 		if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
+			u.keyRep.suppressUntilRelease(ebiten.KeyArrowRight)
+			u.keyRep.suppressUntilRelease(ebiten.KeyRight)
 			hostMovePaneAdjacent(u, 1)
 			return
 		}

@@ -193,3 +193,30 @@ func TestAdjacentMoveTarget(t *testing.T) {
 		t.Fatal("next of last tab is a new tab at the end")
 	}
 }
+
+func TestAIMoveToTabKeepsUsersTab(t *testing.T) {
+	// User on A=[0]; agent moves pane 2 from B=[1|2] into C=[3].
+	a := newPage(&tab{id: 0})
+	b := newPage(&tab{id: 1})
+	b.splitFocused(splitVert, &tab{id: 2})
+	c := newPage(&tab{id: 3})
+	pages := []*page{a, b, c}
+	active, next := 0, 10
+	s := aiSurface{pages: &pages, active: &active, nextID: &next}
+	if !movePaneToTab(s, 2, c.id, true) {
+		t.Fatal("move failed")
+	}
+	if pages[active] != a {
+		t.Fatalf("agent move should leave the user on A; active=%d", active)
+	}
+	if c.focusID != 2 || !sameIDs(paneIDs(c), []int{3, 2}) {
+		t.Fatalf("C=%v focus=%d", paneIDs(c), c.focusID)
+	}
+	// Extract to a new tab: fresh id, counter advanced.
+	if !movePaneToTab(s, 3, 0, false) {
+		t.Fatal("extract failed")
+	}
+	if pages[len(pages)-1].id != 10 || next != 11 {
+		t.Fatalf("new tab id=%d next=%d", pages[len(pages)-1].id, next)
+	}
+}

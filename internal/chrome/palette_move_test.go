@@ -58,3 +58,20 @@ func TestPaletteFindsMovePaneCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestPaletteFollowsTabsWhileOpen(t *testing.T) {
+	m := New(100)
+	m.Tabs = []Tab{{ID: 1, Title: "a"}, {ID: 2, Title: "b"}, {ID: 3, Title: "c"}}
+	m.Active = 0
+	m.activatePalette()
+	r := m.UpdateChrome(SyncTabsMsg{Tabs: []Tab{{ID: 1, Title: "a"}, {ID: 3, Title: "c"}}, Active: 0})
+	m = r.Model
+	for _, it := range m.palAll {
+		if it.tabID == 2 {
+			t.Fatalf("closed tab still offered: %q", it.title)
+		}
+	}
+	if !m.PaletteOpen {
+		t.Fatal("palette should stay open")
+	}
+}

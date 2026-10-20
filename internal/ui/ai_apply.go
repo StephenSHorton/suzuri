@@ -480,16 +480,28 @@ func movePaneToTab(s aiSurface, paneID, tabID int, hasTab bool) bool {
 			return false
 		}
 	}
+	var userPage *page
+	if s.active != nil && *s.active >= 0 && *s.active < len(pages) {
+		userPage = pages[*s.active]
+	}
 	newID := freshPageID(s)
 	res, ok, _ := movePaneToPage(pages, paneID, dst, -1, newID)
 	if !ok {
 		return false
 	}
 	s.setPages(res.pages)
-	if s.active != nil {
-		*s.active = res.active
-	}
 	res.pages[res.active].setFocus(res.focus)
+	if s.active != nil {
+		// An agent moving a pane into another tab must not pull the person
+		// off the tab they are using. Extracting to a new tab still shows
+		// it, as before, and so does losing the tab they were on.
+		*s.active = res.active
+		if dst != nil {
+			if i := pageIndex(res.pages, userPage); i >= 0 {
+				*s.active = i
+			}
+		}
+	}
 	if s.nextID != nil && pageWithID(res.pages, newID) != nil {
 		*s.nextID = newID + 1
 	}

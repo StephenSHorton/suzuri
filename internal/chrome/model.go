@@ -373,6 +373,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 
 	switch msg := msg.(type) {
 	case SyncTabsMsg:
+		tabsMoved := !sameTabIDs(m.Tabs, msg.Tabs) || m.Active != msg.Active
 		m.Tabs = msg.Tabs
 		m.Active = msg.Active
 		if m.Active < 0 {
@@ -380,6 +381,11 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		}
 		if m.Active >= len(m.Tabs) && len(m.Tabs) > 0 {
 			m.Active = len(m.Tabs) - 1
+		}
+		// Per-tab "move pane to" / "merge tab into" entries follow the strip
+		// while the palette is open (a tab closed or the active tab changed).
+		if m.PaletteOpen && tabsMoved {
+			m.rebuildPalette()
 		}
 	case SyncCaffeineMsg:
 		m.CaffeineOn = msg.Active
@@ -1276,4 +1282,17 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// sameTabIDs reports whether two strips list the same tabs in the same order.
+func sameTabIDs(a, b []Tab) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID {
+			return false
+		}
+	}
+	return true
 }

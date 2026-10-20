@@ -2839,6 +2839,11 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		}
 		// Ctrl+Alt+Shift+←/→: carry the focused pane to the previous/next tab
 		// (a new tab at either end).
+		// Ignore auto-repeat so holding the chord moves the pane one tab, not
+		// across the whole strip (lParam bit 30 = key was already down).
+		if ctrl && alt && shift && (wParam == win.VK_LEFT || wParam == win.VK_RIGHT) && (lParam&(1<<30)) != 0 {
+			return 0
+		}
 		if ctrl && alt && shift {
 			switch wParam {
 			case win.VK_LEFT:
