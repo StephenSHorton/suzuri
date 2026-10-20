@@ -14,6 +14,8 @@ type aiSurface struct {
 	pages  *[]*page
 	tabs   []*tab
 	active *int
+	// nextID is the host's pane/page id counter (new tabs need a fresh id).
+	nextID *int
 	split  func(splitDir)
 	close  func(paneID int)
 	newTab func()
@@ -471,50 +473,58 @@ func movePane(s aiSurface, paneID, targetID int, edge string) bool {
 }
 
 func movePaneToTab(s aiSurface, paneID, tabID int, hasTab bool) bool {
-	t := findTab(s, paneID)
-	src := pageOf(s, paneID)
-	if t == nil || src == nil {
-		return false
-	}
-	if src.leafCount() <= 1 && !hasTab {
-		return false // already its own tab
-	}
-	closed, empty, _ := src.removePane(paneID)
-	if closed == nil {
-		return false
-	}
-	if empty {
-		dropPage(s, src)
-	}
-	if !hasTab {
-		pages := append(s.pageList(), newPage(t))
-		s.setPages(pages)
-		if s.active != nil {
-			*s.active = len(pages) - 1
-		}
-		return true
-	}
+	pages := s.pageList()
 	var dst *page
-	for _, pg := range s.pageList() {
-		if pg != nil && pg.id == tabID {
-			dst = pg
-			break
+	if hasTab {
+		if dst = pageWithID(pages, tabID); dst == nil {
+			return false
 		}
 	}
-	if dst == nil {
-		s.setPages(append(s.pageList(), newPage(t)))
+	newID := freshPageID(s)
+	res, ok, _ := movePaneToPage(pages, paneID, dst, -1, newID)
+	if !ok {
 		return false
 	}
-	focus := dst.focusID
-	if !dst.dockExisting(focus, "right", t) {
-		s.setPages(append(s.pageList(), newPage(t)))
-		return false
+	s.setPages(res.pages)
+	if s.active != nil {
+		*s.active = res.active
+	}
+	res.pages[res.active].setFocus(res.focus)
+	if s.nextID != nil && pageWithID(res.pages, newID) != nil {
+		*s.nextID = newID + 1
 	}
 	return true
 }
 
+// freshPageID is an id no pane or page uses yet.
+func freshPageID(s aiSurface) int {
+	if s.nextID != nil {
+		return *s.nextID
+	}
+	id := 0
+	for _, pg := range s.pageList() {
+		if pg == nil {
+			continue
+		}
+		if pg.id >= id {
+			id = pg.id + 1
+		}
+		for _, t := range pg.leaves() {
+			if t.id >= id {
+				id = t.id + 1
+			}
+		}
+	}
+	return id
+}
+
 func dropPage(s aiSurface, pg *page) {
 	cur := s.pageList()
+	if s.active != nil {
+		if i := pageIndex(cur, pg); i >= 0 && i < *s.active {
+			*s.active--
+		}
+	}
 	out := make([]*page, 0, len(cur))
 	for _, p := range cur {
 		if p != pg {

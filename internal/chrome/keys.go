@@ -113,6 +113,20 @@ func KeyCtrlAlt(s string) string {
 	return "Ctrl+Alt+" + s
 }
 
+// KeyCtrlAltShift is Cmd+Opt+Shift on macOS, Ctrl+Alt+Shift elsewhere.
+func KeyCtrlAltShift(s string) string {
+	if isDarwin() {
+		if keyFancyOn() {
+			return "⌘⌥⇧" + s
+		}
+		return "Cmd+Opt+Shift+" + s
+	}
+	if keyFancyOn() {
+		return "⌃⎇⇧" + s
+	}
+	return "Ctrl+Alt+Shift+" + s
+}
+
 func KeyUpDown() string {
 	if keyArrowsOn() {
 		return "↑ / ↓"

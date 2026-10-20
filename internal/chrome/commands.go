@@ -1,5 +1,7 @@
 package chrome
 
+import "fmt"
+
 // Command is a palette entry backed by a host action.
 type Command struct {
 	ID       string
@@ -11,6 +13,8 @@ type Command struct {
 	ProfileName string
 	// Minutes set for ActionCaffeineFor (0 = indefinite).
 	Minutes int
+	// TabID set for ActionMovePaneToTab / ActionMergeTabInto (target Tab.ID).
+	TabID int
 }
 
 // DefaultCommands is the command registry (categories shown in descriptions).
@@ -74,8 +78,41 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		Command{ID: "focus_up", Title: "Focus pane up", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneUp},
 		Command{ID: "focus_down", Title: "Focus pane down", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneDown},
 		Command{ID: "zoom_pane", Title: "Maximize pane", Desc: KeyCtrlShift("Enter") + " · hide other panes · again to restore · Panes", Category: "Panes", Action: ActionTogglePaneZoom},
+		Command{ID: "move_pane_prev_tab", Title: "Move pane to previous tab", Desc: KeyCtrlAltShift("←") + " · new tab if first · Panes", Category: "Panes", Action: ActionMovePanePrevTab},
+		Command{ID: "move_pane_next_tab", Title: "Move pane to next tab", Desc: KeyCtrlAltShift("→") + " · new tab if last · Panes", Category: "Panes", Action: ActionMovePaneNextTab},
+		Command{ID: "move_pane_new_tab", Title: "Move pane to new tab", Desc: "Break the focused pane out into its own tab · Panes", Category: "Panes", Action: ActionMovePaneToNewTab},
 	)
 	return cmds
+}
+
+// TabMoveCommands lists one "move pane to" and one "merge tab into" entry per
+// other open tab, so typing "move" or "merge" plus a tab name finds them.
+func TabMoveCommands(tabs []Tab, active int) []Command {
+	if len(tabs) < 2 {
+		return nil
+	}
+	var moves, merges []Command
+	for i, t := range tabs {
+		if i == active {
+			continue
+		}
+		name := t.Title
+		if name == "" {
+			name = "shell"
+		}
+		label := fmt.Sprintf("%d %s", i+1, name)
+		moves = append(moves, Command{
+			ID: fmt.Sprintf("move_pane_to:%d", t.ID), Title: "Move pane to tab: " + label,
+			Desc: "Focused pane joins that tab · Panes", Category: "Panes",
+			Action: ActionMovePaneToTab, TabID: t.ID,
+		})
+		merges = append(merges, Command{
+			ID: fmt.Sprintf("merge_tab_into:%d", t.ID), Title: "Merge tab into: " + label,
+			Desc: "All panes of this tab join that tab · Tabs", Category: "Tabs",
+			Action: ActionMergeTabInto, TabID: t.ID,
+		})
+	}
+	return append(moves, merges...)
 }
 
 func equalFold(a, b string) bool {

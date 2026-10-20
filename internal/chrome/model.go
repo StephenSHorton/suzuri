@@ -260,6 +260,16 @@ const (
 	ActionTransferCopyTicket
 	// ActionOpenWorkspace opens the shared workspace panel (channels / chat).
 	ActionOpenWorkspace
+	// ActionMovePaneToTab moves the focused pane into the tab Result.TabID.
+	ActionMovePaneToTab
+	// ActionMovePaneToNewTab moves the focused pane out into a new tab.
+	ActionMovePaneToNewTab
+	// ActionMovePanePrevTab / NextTab carry the focused pane one tab over
+	// (a new tab when there is none on that side).
+	ActionMovePanePrevTab
+	ActionMovePaneNextTab
+	// ActionMergeTabInto moves every pane of the active tab into Result.TabID.
+	ActionMergeTabInto
 )
 
 // Result pairs the new model with an optional host action.
@@ -274,6 +284,10 @@ type Result struct {
 	TransferMode TransferMode  // ActionTransferStart
 	// Minutes is set for ActionCaffeineFor (0 = indefinite).
 	Minutes int
+	// TabID is the target strip tab (Tab.ID) for ActionMovePaneToTab and
+	// ActionMergeTabInto. An id, not an index, so a tab closing while the
+	// palette is open cannot redirect the move.
+	TabID int
 	// StartNotesDrag: NotesClickMsg hit the editor body — host should capture
 	// the mouse and send NotesDragMsg while the button is held.
 	StartNotesDrag bool
@@ -311,6 +325,7 @@ type paletteItem struct {
 	title, desc, profile string
 	action               HostAction
 	minutes              int // ActionCaffeineFor
+	tabID                int // ActionMovePaneToTab / ActionMergeTabInto
 }
 
 func (i paletteItem) Title() string       { return i.title }
@@ -354,6 +369,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 	var renameTarget RenameTarget
 	var startNotesDrag bool
 	var minutes int
+	var tabID int
 
 	switch msg := msg.(type) {
 	case SyncTabsMsg:
@@ -644,7 +660,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 		}
 		if m.PaletteOpen {
 			// Sync filter/nav — never tea.Cmd (Win32 key path must not block).
-			act, profileName, minutes = m.handlePaletteKey(msg)
+			act, profileName, minutes, tabID = m.handlePaletteKey(msg)
 			if act == ActionOpenSettings && m.SettingsOpen {
 				settings = m.settings.edit
 			}
@@ -664,7 +680,7 @@ func (m Model) UpdateChrome(msg tea.Msg) Result {
 				m.openTransferPrompt(TransferModeReceive, "")
 				act = ActionNone
 			}
-			return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName, Minutes: minutes}
+			return Result{Model: m, Action: act, Index: idx, Settings: settings, ProfileName: profileName, Minutes: minutes, TabID: tabID}
 		}
 		switch {
 		case key.Matches(msg, DefaultKeys.NewTab):
