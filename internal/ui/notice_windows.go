@@ -62,6 +62,7 @@ var (
 	noticeOwner     uint32
 	noticeHwnd      win.HWND
 	noticeUp        bool
+	noticeStale     bool
 	noticeTrack     bool
 	noticeWinW      int32
 	noticeWinH      int32
@@ -87,6 +88,7 @@ func presentNoticeImage(pix []byte, stride, width, height, anchor int) {
 		return
 	}
 	if err := ensureNoticeWindow(); err != nil || noticeHwnd == 0 {
+		noticeStale = true
 		return
 	}
 	winW := int32(width / noticeScaleDiv)
@@ -105,8 +107,10 @@ func presentNoticeImage(pix []byte, stride, width, height, anchor int) {
 		return
 	}
 	if !blitNotice(noticeHwnd, pix, stride, width, height, x, y, winW, winH) {
+		noticeStale = true
 		return
 	}
+	noticeStale = false
 	noticeWinW, noticeWinH = winW, winH
 	noticeBmpW, noticeBmpH = int32(width), int32(height)
 	noticeLastHash = sum
@@ -119,6 +123,7 @@ func presentNoticeImage(pix []byte, stride, width, height, anchor int) {
 
 func hideNoticePanel() {
 	noticeLastHash = 0
+	noticeStale = false
 	atomic.StoreInt32(&noticeInside, 0)
 	if noticeHwnd != 0 && noticeUp {
 		win.ShowWindow(noticeHwnd, win.SW_HIDE)
@@ -127,6 +132,21 @@ func hideNoticePanel() {
 }
 
 func noticePanelUp() bool { return noticeUp }
+
+// keepNoticePlaced runs on ticks that skip presenting an unchanged card.
+// It re-presents only when the work area moved the panel, when the last
+// present never got the panel up, or when the last present failed to blit
+// (the panel would otherwise keep an older picture).
+func keepNoticePlaced(pix []byte, stride, width, height, anchor int) {
+	if noticeUp && !noticeStale {
+		left, top, right, bottom := noticeWorkArea()
+		x, y := noticeScreenOrigin(left, top, right, bottom, noticeWinW, noticeWinH, noticeScreenInset, int32(anchor))
+		if x == noticeLastX && y == noticeLastY {
+			return
+		}
+	}
+	presentNoticeImage(pix, stride, width, height, anchor)
+}
 
 // noticeScreenOrigin is the panel's top-left in a y-down work area.
 // Anchor rows match noticeRow: 0 bottom, 1 center, 2 top.

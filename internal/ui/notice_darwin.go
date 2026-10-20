@@ -8,6 +8,7 @@ package ui
 
 void suzuri_notice_present(const void *pix, int stride, int width, int height, int anchor);
 void suzuri_notice_hide(void);
+void suzuri_notice_place(void);
 void suzuri_play_wav(const void *bytes, int len);
 void suzuri_play_wav_sync(const void *bytes, int len);
 void suzuri_pump(double seconds);
@@ -29,6 +30,12 @@ func presentNoticeImage(pix []byte, stride, width, height, anchor int) {
 		return
 	}
 	C.suzuri_notice_present(unsafe.Pointer(&pix[0]), C.int(stride), C.int(width), C.int(height), C.int(anchor))
+}
+
+// keepNoticePlaced runs on ticks that skip presenting an unchanged card.
+// It only moves the panel if the host went to another screen.
+func keepNoticePlaced(pix []byte, stride, width, height, anchor int) {
+	C.suzuri_notice_place()
 }
 
 func playWAV(b []byte) {

@@ -295,3 +295,67 @@ func TestCommandFinishHiddenWhileWatching(t *testing.T) {
 	noticeLive = nil
 	noticeMu.Unlock()
 }
+
+func TestNoticePresentsOnlyOnChange(t *testing.T) {
+	var presents, hides, keeps int
+	oldPresent, oldKeep := noticePresent, noticeKeep
+	noticePresent = func(pix []byte, stride, width, height, anchor int) {
+		if len(pix) == 0 {
+			hides++
+		} else {
+			presents++
+		}
+	}
+	noticeKeep = func(pix []byte, stride, width, height, anchor int) { keeps++ }
+	noticeShown.ok = false
+	t.Cleanup(func() {
+		noticePresent, noticeKeep = oldPresent, oldKeep
+		noticeShown.ok = false
+		noticeMu.Lock()
+		noticeLive = nil
+		noticeMu.Unlock()
+	})
+
+	born := time.Now()
+	noticeMu.Lock()
+	noticeLive = []liveNote{{deskNote: deskNote{ID: "a", Title: "build done"}, born: born, until: born.Add(time.Hour)}}
+	noticeMu.Unlock()
+
+	// Each slide frame of the entrance is presented.
+	presentNoticeFrame(noticeFrameAt(born))
+	presentNoticeFrame(noticeFrameAt(born.Add(60 * time.Millisecond)))
+	presentNoticeFrame(noticeFrameAt(born.Add(120 * time.Millisecond)))
+	if presents != 3 || keeps != 0 {
+		t.Fatalf("entrance presents=%d keeps=%d, want 3 and 0", presents, keeps)
+	}
+	// At rest the card is presented once, then left alone.
+	for i := 0; i < 60; i++ {
+		presentNoticeFrame(noticeFrameAt(born.Add(time.Second + time.Duration(i)*16*time.Millisecond)))
+	}
+	if presents != 4 || keeps != 59 || hides != 0 {
+		t.Fatalf("rest presents=%d keeps=%d hides=%d, want 4, 59, 0", presents, keeps, hides)
+	}
+	if len(noticeCards) != 1 {
+		t.Fatalf("hit cards %d, want 1", len(noticeCards))
+	}
+
+	// A text change re-presents.
+	noticeMu.Lock()
+	noticeLive[0].Body = "3 warnings"
+	noticeMu.Unlock()
+	presentNoticeFrame(noticeFrameAt(born.Add(2 * time.Second)))
+	if presents != 5 {
+		t.Fatalf("body change presents=%d, want 5", presents)
+	}
+
+	// Hide fires once, on the change to no cards.
+	noticeMu.Lock()
+	noticeLive = nil
+	noticeMu.Unlock()
+	for i := 0; i < 5; i++ {
+		presentNoticeFrame(noticeFrameAt(born.Add(3 * time.Second)))
+	}
+	if hides != 1 || len(noticeCards) != 0 {
+		t.Fatalf("hides=%d cards=%d, want 1 and 0", hides, len(noticeCards))
+	}
+}

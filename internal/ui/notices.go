@@ -518,30 +518,78 @@ func noticePanelOrigin(visX, visY, visW, visH, panelW, panelH, inset, anchor int
 	return x, y
 }
 
-func renderNotices(now time.Time) (pix []byte, stride, width, height, anchor int, cards []noticeCard) {
+// noticeFrame is everything renderNotices draws from. Equal frames render
+// identical pixels, so driveNotices skips the render and present for them.
+type noticeFrame struct {
+	anchor int
+	theme  [12]byte
+	cards  []noticeFrameCard
+	items  []liveNote
+}
+
+// noticeFrameCard is the part of a live note that drawCard reads.
+type noticeFrameCard struct {
+	title, body, icon string
+	urgency, slide    int
+}
+
+func (f noticeFrame) same(g noticeFrame) bool {
+	if f.anchor != g.anchor || f.theme != g.theme || len(f.cards) != len(g.cards) {
+		return false
+	}
+	for i := range f.cards {
+		if f.cards[i] != g.cards[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func noticeFrameAt(now time.Time) noticeFrame {
 	noticeMu.Lock()
 	items := append([]liveNote(nil), noticeLive...)
-	anchor = noticeAnchorIdx
+	anchor := noticeAnchorIdx
 	noticeMu.Unlock()
-	if len(items) == 0 {
-		return nil, 0, 0, 0, anchor, nil
+	f := noticeFrame{
+		anchor: anchor,
+		theme: [12]byte{
+			chrome.PrimR, chrome.PrimG, chrome.PrimB,
+			chrome.PanelR, chrome.PanelG, chrome.PanelB,
+			chrome.TextR, chrome.TextG, chrome.TextB,
+			chrome.SoftR, chrome.SoftG, chrome.SoftB,
+		},
+		items: items,
 	}
-	const scale = 2
-	wpx, hpx, _ := noticeStackLayout(len(items), anchor, 0)
-	img := image.NewRGBA(image.Rect(0, 0, wpx*scale, hpx*scale))
-	cards = make([]noticeCard, len(items))
+	if len(items) == 0 {
+		return f
+	}
+	f.cards = make([]noticeFrameCard, len(items))
 	for i, n := range items {
 		slide := 0
 		age := now.Sub(n.born)
 		if age < 180*time.Millisecond {
 			slide = int((1 - float64(age)/float64(180*time.Millisecond)) * noticeSlideMax)
 		}
-		_, _, slots := noticeStackLayout(len(items), anchor, slide)
+		f.cards[i] = noticeFrameCard{title: n.Title, body: n.Body, icon: n.Icon, urgency: n.Urgency, slide: slide}
+	}
+	return f
+}
+
+func renderNotices(f noticeFrame) (pix []byte, stride, width, height int, cards []noticeCard) {
+	if len(f.items) == 0 {
+		return nil, 0, 0, 0, nil
+	}
+	const scale = 2
+	wpx, hpx, _ := noticeStackLayout(len(f.items), f.anchor, 0)
+	img := image.NewRGBA(image.Rect(0, 0, wpx*scale, hpx*scale))
+	cards = make([]noticeCard, len(f.items))
+	for i, n := range f.items {
+		_, _, slots := noticeStackLayout(len(f.items), f.anchor, f.cards[i].slide)
 		x, y := slots[i].X, slots[i].Y
 		drawCard(img, scale, x, y, noticeCardW, noticeCardH, n)
 		cards[i] = noticeCard{x: x * scale, y: y * scale, w: noticeCardW * scale, h: noticeCardH * scale, index: i}
 	}
-	return img.Pix, img.Stride, img.Bounds().Dx(), img.Bounds().Dy(), anchor, cards
+	return img.Pix, img.Stride, img.Bounds().Dx(), img.Bounds().Dy(), cards
 }
 
 func drawCard(dst *image.RGBA, scale, x, y, w, h int, n liveNote) {
@@ -621,6 +669,21 @@ var revealNoticePane func(tabID int)
 
 var noticeCards []noticeCard
 
+// noticeShown is the frame last handed to the panel. ok is false while
+// the panel is hidden.
+var noticeShown struct {
+	ok                    bool
+	frame                 noticeFrame
+	pix                   []byte
+	stride, width, height int
+}
+
+// Platform hooks, swapped by tests.
+var (
+	noticePresent = presentNoticeImage
+	noticeKeep    = keepNoticePlaced
+)
+
 func driveNotices(now time.Time, focused, visible bool) {
 	pollNoticeInput()
 	if takeBellDirty() && onNoticeBell != nil {
@@ -630,11 +693,36 @@ func driveNotices(now time.Time, focused, visible bool) {
 		nn := n
 		sendNoticeClose(&nn)
 	}
-	pix, stride, width, height, anchor, cards := renderNotices(now)
-	noticeCards = cards
-	presentNoticeImage(pix, stride, width, height, anchor)
+	presentNoticeFrame(noticeFrameAt(now))
 	_ = focused
 	_ = visible
+}
+
+// presentNoticeFrame renders and presents only when the cards, slide offsets,
+// anchor or theme changed, and hides only on the change to no cards.
+// Re-presenting every tick copied a fresh bitmap into AppKit at 60 Hz.
+func presentNoticeFrame(f noticeFrame) {
+	if len(f.cards) == 0 {
+		noticeCards = nil
+		if noticeShown.ok {
+			noticeShown.ok = false
+			noticeShown.frame = noticeFrame{}
+			noticeShown.pix = nil
+			noticePresent(nil, 0, 0, 0, f.anchor)
+		}
+		return
+	}
+	s := &noticeShown
+	if s.ok && s.frame.same(f) {
+		noticeKeep(s.pix, s.stride, s.width, s.height, f.anchor)
+		return
+	}
+	pix, stride, width, height, cards := renderNotices(f)
+	noticeCards = cards
+	s.ok = true
+	s.frame = f
+	s.pix, s.stride, s.width, s.height = pix, stride, width, height
+	noticePresent(pix, stride, width, height, f.anchor)
 }
 
 func onNoticeMouse(x, y, kind int) {

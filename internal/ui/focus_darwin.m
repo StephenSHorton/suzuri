@@ -37,7 +37,7 @@ int suzuri_clipboard_png_write(const char *path) {
 		// public.png, screenshots, browser "Copy Image").
 		NSData *png = [pb dataForType:NSPasteboardTypePNG];
 		if (png == nil || [png length] < 32) {
-			NSImage *img = [[NSImage alloc] initWithPasteboard:pb];
+			NSImage *img = [[[NSImage alloc] initWithPasteboard:pb] autorelease];
 			if (img == nil) {
 				return 0;
 			}

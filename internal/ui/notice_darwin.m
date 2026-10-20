@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
+#include <os/lock.h>
 #include <stdatomic.h>
 
 // Mouse handlers must not call into Go. The notify command pumps this run
@@ -24,7 +25,12 @@ static NSMutableArray *gSounds;
 @property (nonatomic, retain) NSImage *noticeImage;
 @end
 
+// This file is built without ARC. Every alloc/copy/new needs a release.
 @implementation SuzuriNoticeView
+- (void)dealloc {
+	[_noticeImage release];
+	[super dealloc];
+}
 - (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
 - (BOOL)isOpaque { return NO; }
 - (BOOL)isFlipped { return NO; }
@@ -49,14 +55,17 @@ static NSMutableArray *gSounds;
 - (void)rightMouseDown:(NSEvent *)event { suzuri_note_click(event, self, 3); }
 - (void)updateTrackingAreas {
 	[super updateTrackingAreas];
-	for (NSTrackingArea *a in [self.trackingAreas copy]) {
+	NSArray *old = [self.trackingAreas copy];
+	for (NSTrackingArea *a in old) {
 		[self removeTrackingArea:a];
 	}
+	[old release];
 	NSTrackingArea *area = [[NSTrackingArea alloc]
 		initWithRect:self.bounds
 		options:NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect | NSTrackingCursorUpdate
 		owner:self userInfo:nil];
 	[self addTrackingArea:area];
+	[area release];
 }
 @end
 
@@ -83,6 +92,7 @@ static SuzuriNoticeView *ensurePanel(void) {
 		NSWindowCollectionBehaviorIgnoresCycle;
 	SuzuriNoticeView *view = [[SuzuriNoticeView alloc] initWithFrame:frame];
 	gPanel.contentView = view;
+	[view release];
 	return view;
 }
 
@@ -97,15 +107,19 @@ int suzuri_notice_hover(void) {
 	return atomic_load(&gHover);
 }
 
-void suzuri_notice_hide(void) {
-	dispatch_async(dispatch_get_main_queue(), ^{
-		if (gPanel != nil) {
-			[gPanel orderOut:nil];
-		}
-	});
-}
-
+// The newest frame waits here for the main queue. A later present or hide
+// replaces it, so a burst of ticks still lands on the newest state, and Go
+// can skip ticks whose card did not change. nil pixels mean hide.
+static os_unfair_lock gPendingLock = OS_UNFAIR_LOCK_INIT;
+static NSData *gPendingPix;
+static int gPendingStride;
+static int gPendingW;
+static int gPendingH;
+static int gPendingAnchor;
 static int gPresentQueued;
+static atomic_int gPlaceQueued;
+// Main queue only.
+static int gShownAnchor;
 
 // anchor matches config.NoticePositionIndex: 0 bottom-left, then bottom-center,
 // bottom-right, center-left, center, center-right, top-left, top-center, top-right.
@@ -141,59 +155,120 @@ static NSRect suzuri_notice_frame(NSRect vis, NSSize pt, int anchor) {
 	return NSMakeRect(x, y, pt.width, pt.height);
 }
 
-void suzuri_notice_present(const void *pix, int stride, int width, int height, int anchor) {
-	if (pix == NULL || width < 1 || height < 1) {
-		dispatch_async(dispatch_get_main_queue(), ^{ suzuri_notice_hide(); });
+// placePanel keeps the panel on the host's screen at its anchor. Main queue only.
+static void placePanel(SuzuriNoticeView *view, NSSize pt, int anchor) {
+	NSWindow *host = NSApp.mainWindow ?: NSApp.keyWindow;
+	NSScreen *screen = host.screen ?: NSScreen.mainScreen;
+	NSRect vis = screen.visibleFrame;
+	NSRect frame = suzuri_notice_frame(vis, pt, anchor);
+	if (!NSEqualRects(gPanel.frame, frame)) {
+		[gPanel setFrame:frame display:YES];
+		[view resetCursorRects];
+	}
+}
+
+static void suzuri_notice_apply(void) {
+	os_unfair_lock_lock(&gPendingLock);
+	NSData *copy = gPendingPix;
+	int stride = gPendingStride;
+	int width = gPendingW;
+	int height = gPendingH;
+	int anchor = gPendingAnchor;
+	gPendingPix = nil;
+	gPresentQueued = 0;
+	os_unfair_lock_unlock(&gPendingLock);
+	if (copy == nil) {
+		if (gPanel != nil) {
+			[gPanel orderOut:nil];
+		}
 		return;
 	}
+	@autoreleasepool {
+		SuzuriNoticeView *view = ensurePanel();
+		const CGFloat scale = 2.0;
+		NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+			initWithBitmapDataPlanes:NULL
+			pixelsWide:width
+			pixelsHigh:height
+			bitsPerSample:8
+			samplesPerPixel:4
+			hasAlpha:YES
+			isPlanar:NO
+			colorSpaceName:NSCalibratedRGBColorSpace
+			bitmapFormat:NSBitmapFormatAlphaNonpremultiplied
+			bytesPerRow:width * 4
+			bitsPerPixel:32];
+		const unsigned char *src = copy.bytes;
+		unsigned char *dst = rep.bitmapData;
+		for (int y = 0; y < height; y++) {
+			memcpy(dst + y * width * 4, src + y * stride, (size_t)width * 4);
+		}
+		NSSize pt = NSMakeSize(width / scale, height / scale);
+		rep.size = pt;
+		NSImage *img = [[NSImage alloc] initWithSize:pt];
+		[img addRepresentation:rep];
+		[rep release];
+		// noticeImage retains. Drop ours so the old frame frees on the next set.
+		view.noticeImage = img;
+		[img release];
+		[view setNeedsDisplay:YES];
+
+		gShownAnchor = anchor;
+		placePanel(view, pt, anchor);
+		if (!gPanel.isVisible) {
+			[gPanel orderFrontRegardless];
+		}
+	}
+	[copy release];
+}
+
+// queueNotice takes ownership of pix (nil hides).
+static void queueNotice(NSData *pix, int stride, int width, int height, int anchor) {
+	os_unfair_lock_lock(&gPendingLock);
+	[gPendingPix release];
+	gPendingPix = pix;
+	gPendingStride = stride;
+	gPendingW = width;
+	gPendingH = height;
+	gPendingAnchor = anchor;
+	int dispatch = !gPresentQueued;
+	gPresentQueued = 1;
+	os_unfair_lock_unlock(&gPendingLock);
 	// Ebiten updates off the main thread. AppKit windows must be created there.
-	if (!__sync_bool_compare_and_swap(&gPresentQueued, 0, 1)) {
+	if (dispatch) {
+		dispatch_async(dispatch_get_main_queue(), ^{ suzuri_notice_apply(); });
+	}
+}
+
+void suzuri_notice_hide(void) {
+	queueNotice(nil, 0, 0, 0, 0);
+}
+
+void suzuri_notice_present(const void *pix, int stride, int width, int height, int anchor) {
+	if (pix == NULL || width < 1 || height < 1) {
+		suzuri_notice_hide();
 		return;
 	}
 	size_t nbytes = (size_t)stride * (size_t)height;
-	NSData *copy = [[NSData alloc] initWithBytes:pix length:nbytes];
-	dispatch_async(dispatch_get_main_queue(), ^{
-		gPresentQueued = 0;
-		[copy autorelease];
-		@autoreleasepool {
-			SuzuriNoticeView *view = ensurePanel();
-			const CGFloat scale = 2.0;
-			NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
-				initWithBitmapDataPlanes:NULL
-				pixelsWide:width
-				pixelsHigh:height
-				bitsPerSample:8
-				samplesPerPixel:4
-				hasAlpha:YES
-				isPlanar:NO
-				colorSpaceName:NSCalibratedRGBColorSpace
-				bitmapFormat:NSBitmapFormatAlphaNonpremultiplied
-				bytesPerRow:width * 4
-				bitsPerPixel:32];
-			const unsigned char *src = copy.bytes;
-			unsigned char *dst = rep.bitmapData;
-			for (int y = 0; y < height; y++) {
-				memcpy(dst + y * width * 4, src + y * stride, (size_t)width * 4);
-			}
-			NSSize pt = NSMakeSize(width / scale, height / scale);
-			rep.size = pt;
-			NSImage *img = [[NSImage alloc] initWithSize:pt];
-			[img addRepresentation:rep];
-			view.noticeImage = img;
-			[view setNeedsDisplay:YES];
+	queueNotice([[NSData alloc] initWithBytes:pix length:nbytes], stride, width, height, anchor);
+}
 
-			NSWindow *host = NSApp.mainWindow ?: NSApp.keyWindow;
-			NSScreen *screen = host.screen ?: NSScreen.mainScreen;
-			NSRect vis = screen.visibleFrame;
-			NSRect frame = suzuri_notice_frame(vis, pt, anchor);
-			if (!NSEqualRects(gPanel.frame, frame)) {
-				[gPanel setFrame:frame display:YES];
-				[view resetCursorRects];
-			}
-			if (!gPanel.isVisible) {
-				[gPanel orderFrontRegardless];
-			}
+// suzuri_notice_place follows the host to another screen while the shown
+// card is unchanged. It moves the panel without redrawing it.
+void suzuri_notice_place(void) {
+	if (atomic_exchange(&gPlaceQueued, 1)) {
+		return;
+	}
+	dispatch_async(dispatch_get_main_queue(), ^{
+		atomic_store(&gPlaceQueued, 0);
+		if (gPanel == nil || !gPanel.isVisible) {
+			return;
 		}
+		SuzuriNoticeView *view = (SuzuriNoticeView *)gPanel.contentView;
+		if (view.noticeImage == nil) {
+			return;
+		}
+		placePanel(view, view.noticeImage.size, gShownAnchor);
 	});
 }
 
@@ -206,7 +281,9 @@ void suzuri_play_wav(const void *bytes, int len) {
 		[data release];
 		if (sound == nil) return;
 		if (gSounds == nil) gSounds = [[NSMutableArray alloc] init];
+		// The ring owns the sound. It frees once four newer sounds push it out.
 		[gSounds addObject:sound];
+		[sound release];
 		if (gSounds.count > 4) {
 			[gSounds removeObjectAtIndex:0];
 		}
