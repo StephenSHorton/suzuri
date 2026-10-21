@@ -633,14 +633,16 @@ func (u *macUI) loop() error {
 	})
 
 	log.Info("starting ebiten window", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
-	// Options instead of RunGame so we can keep macOS press-and-hold on.
-	// ebiten 2.9 turns it off by default, which makes a held letter key
-	// auto-repeat. That would change typing in a crash-fix bump.
 	// Passing options makes ebiten ignore SetScreenTransparent, so the
 	// transparent flag is repeated here.
+	// ApplePressAndHoldEnabled stays false (held letters auto-repeat via
+	// AppendInputChars, no accent popup). That matches ebiten 2.8, whose
+	// GLFW registered ApplePressAndHoldEnabled=NO at init; 2.9 moved that
+	// into this option. Spelled out so nobody flips it thinking the
+	// default changed.
 	err := ebiten.RunGameWithOptions(u, &ebiten.RunGameOptions{
 		ScreenTransparent:        true,
-		ApplePressAndHoldEnabled: true,
+		ApplePressAndHoldEnabled: false,
 	})
 	u.alive.Store(false)
 	if u.caffeine != nil {
