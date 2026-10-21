@@ -32,22 +32,89 @@ func TestPaneDropEdge(t *testing.T) {
 	}
 }
 
-func TestPaneDropRect(t *testing.T) {
-	g := paneGeom{x: 10, w: 101, outerY: 20, outerH: 51}
-	for _, tc := range []struct {
-		edge       string
-		x, y, w, h int32
-	}{
-		{"left", 10, 20, 50, 51},
-		{"right", 61, 20, 50, 51},
-		{"top", 10, 20, 101, 25},
-		{"bottom", 10, 46, 101, 25},
-		{"nope", 0, 0, 0, 0},
-	} {
-		x, y, w, h := paneDropRect(g, tc.edge)
-		if x != tc.x || y != tc.y || w != tc.w || h != tc.h {
-			t.Errorf("%s: got %d,%d %dx%d want %d,%d %dx%d", tc.edge, x, y, w, h, tc.x, tc.y, tc.w, tc.h)
+// landing is what the real move gives: drop on a copy, lay it out, and
+// return the moved pane's outer rect.
+func landing(t *testing.T, build func() *page, src, dst int, edge string) (x, y, w, h int32) {
+	t.Helper()
+	p := build()
+	if _, _, ok, why := movePaneBeside([]*page{p}, src, dst, edge); !ok {
+		t.Fatalf("move %d→%d %s: %s", src, dst, edge, why)
+	}
+	for _, g := range geomsOf(p) {
+		if g.pane.id == src {
+			return paneOuter(g)
 		}
+	}
+	t.Fatalf("pane %d gone", src)
+	return
+}
+
+func TestPaneDropLandingMatchesMove(t *testing.T) {
+	pageTwo := func() *page {
+		p := newPage(&tab{id: 0})
+		p.splitFocused(splitVert, &tab{id: 1})
+		return p
+	}
+	cases := []struct {
+		name     string
+		build    func() *page
+		src, dst int
+		edge     string
+	}{
+		// Target unaffected by taking the source out.
+		{"grid cross column", pageGrid, 0, 3, "right"},
+		{"vert3 middle onto first", pageVert3, 1, 0, "bottom"},
+		// Source's split collapses and the target grows before it is halved.
+		{"two panes, under sibling", pageTwo, 0, 1, "bottom"},
+		{"vert3 first under last", pageVert3, 0, 2, "bottom"},
+		{"left tall onto top right", pageLeftTall, 0, 1, "top"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := tc.build()
+			hx, hy, hw, hh, ok := paneDropLanding(p, geomsOf(p), 10, 10, tc.src, tc.dst, tc.edge)
+			if !ok {
+				t.Fatal("expected a landing rect")
+			}
+			wx, wy, ww, wh := landing(t, tc.build, tc.src, tc.dst, tc.edge)
+			if hx != wx || hy != wy || hw != ww || hh != wh {
+				t.Fatalf("preview %d,%d %dx%d, move lands at %d,%d %dx%d", hx, hy, hw, hh, wx, wy, ww, wh)
+			}
+		})
+	}
+	// Two panes side by side: 0 under 1 takes the full width at the bottom.
+	p := pageTwo()
+	_, y, w, h, _ := paneDropLanding(p, geomsOf(p), 10, 10, 0, 1, "bottom")
+	if w != 400 || y < 90 || h > 110 {
+		t.Fatalf("0 under 1: got y=%d %dx%d, want the full-width bottom half", y, w, h)
+	}
+}
+
+func TestPaneDropLandingNoOp(t *testing.T) {
+	p := newPage(&tab{id: 0})
+	p.splitFocused(splitVert, &tab{id: 1})
+	p.root.ratio = 0.3
+	// 0 already sits on 1's left.
+	if _, _, _, _, ok := paneDropLanding(p, geomsOf(p), 10, 10, 0, 1, "left"); ok {
+		t.Fatal("dropping onto the facing half of a sibling is a no-op")
+	}
+	layouts := geomsOf(p)
+	dst := layouts[1]
+	var d paneDrag
+	d.arm(0, layouts[0].x+4, layouts[0].titleY+1)
+	d.move(p, layouts, 10, 10, dst.x+2, dst.outerY+dst.outerH/2)
+	if _, _, _, _, ok := d.highlight(); ok {
+		t.Fatal("no highlight for a no-op drop")
+	}
+	if _, _, _, ok := d.release(); ok {
+		t.Fatal("a no-op drop should not move anything")
+	}
+	// The move itself leaves a resized split alone too.
+	if _, _, ok, why := movePaneBeside([]*page{p}, 0, 1, "left"); !ok {
+		t.Fatal(why)
+	}
+	if p.root.ratio != 0.3 || !sameIDs(paneIDs(p), []int{0, 1}) {
+		t.Fatalf("ratio=%v leaves=%v", p.root.ratio, paneIDs(p))
 	}
 }
 
@@ -95,7 +162,7 @@ func TestPaneDragClickIsNotADrag(t *testing.T) {
 		t.Fatal("arm should engage")
 	}
 	// Jitter inside the threshold, even over another pane's half.
-	if d.move(layouts, 10+paneDragThreshold-2, 5+2) {
+	if d.move(p, layouts, 10, 10, 10+paneDragThreshold-2, 5+2) {
 		t.Fatal("small move should not start a drag")
 	}
 	if _, _, _, ok := d.release(); ok {
@@ -113,24 +180,24 @@ func TestPaneDragDropFlow(t *testing.T) {
 	var d paneDrag
 	d.arm(src.pane.id, src.x+4, src.titleY+1)
 	// Over its own pane: dragging, but nothing to drop on.
-	if d.move(layouts, src.x+40, src.outerY+40) {
+	if d.move(p, layouts, 10, 10, src.x+40, src.outerY+40) {
 		t.Fatal("no target over the source pane; nothing to repaint")
 	}
 	if !d.active {
 		t.Fatal("past threshold should be a drag")
 	}
-	if _, _, _, _, ok := d.highlight(layouts); ok {
+	if _, _, _, _, ok := d.highlight(); ok {
 		t.Fatal("no highlight over the source pane")
 	}
 	// Over the bottom of pane 2.
-	if !d.move(layouts, dst.x+dst.w/2, dst.outerY+dst.outerH-3) {
+	if !d.move(p, layouts, 10, 10, dst.x+dst.w/2, dst.outerY+dst.outerH-3) {
 		t.Fatal("new target should ask for a repaint")
 	}
-	if d.move(layouts, dst.x+dst.w/2+1, dst.outerY+dst.outerH-3) {
+	if d.move(p, layouts, 10, 10, dst.x+dst.w/2+1, dst.outerY+dst.outerH-3) {
 		t.Fatal("same target/edge should not repaint again")
 	}
-	hx, hy, hw, hh, ok := d.highlight(layouts)
-	wx, wy, ww, wh := paneDropRect(dst, "bottom")
+	hx, hy, hw, hh, ok := d.highlight()
+	wx, wy, ww, wh := landing(t, pageVert3, src.pane.id, dst.pane.id, "bottom")
 	if !ok || hx != wx || hy != wy || hw != ww || hh != wh {
 		t.Fatalf("highlight %d,%d %dx%d want %d,%d %dx%d", hx, hy, hw, hh, wx, wy, ww, wh)
 	}
@@ -146,8 +213,8 @@ func TestPaneDragReleaseOffTargetCancels(t *testing.T) {
 	dst := layouts[1]
 	var d paneDrag
 	d.arm(0, 5, 5)
-	d.move(layouts, dst.x+3, dst.outerY+dst.outerH/2)
-	d.move(layouts, 5000, 5000) // off every pane
+	d.move(p, layouts, 10, 10, dst.x+3, dst.outerY+dst.outerH/2)
+	d.move(p, layouts, 10, 10, 5000, 5000) // off every pane
 	if _, _, _, ok := d.release(); ok {
 		t.Fatal("drop outside the panes should not move anything")
 	}

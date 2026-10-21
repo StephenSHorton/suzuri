@@ -190,6 +190,14 @@ func TestMovePaneBesideSameTab(t *testing.T) {
 			if p.stickyTitle != "work" {
 				t.Fatalf("strip title %q", p.stickyTitle)
 			}
+			if tc.name == "middle under first" {
+				// Same leaf order as before, so check that 0 and 1 are now
+				// stacked in the left column.
+				a := p.root.a
+				if a == nil || a.isLeaf() || a.dir != splitHoriz || !a.a.isLeaf() || a.a.pane.id != 0 || !a.b.isLeaf() || a.b.pane.id != 1 {
+					t.Fatal("want 0 over 1 on the left")
+				}
+			}
 		})
 	}
 }

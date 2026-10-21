@@ -22,6 +22,8 @@ type paneDrag struct {
 	active   bool
 	targetID int
 	edge     string
+	// hx..hh is where the dragged pane would land (the drop preview).
+	hx, hy, hw, hh int32
 }
 
 // engaged reports whether a title-bar press is in progress (drag or not).
@@ -33,9 +35,10 @@ func (d *paneDrag) arm(paneID int, x, y int32) {
 
 func (d *paneDrag) reset() { *d = paneDrag{targetID: -1} }
 
-// move tracks the pointer. It returns true when the drop highlight changed
-// and the host should repaint.
-func (d *paneDrag) move(layouts []paneGeom, x, y int32) bool {
+// move tracks the pointer over page p, laid out as layouts with cell size
+// cw×ch. It returns true when the drop highlight changed and the host should
+// repaint. A drop that would leave the layout as it is counts as no target.
+func (d *paneDrag) move(p *page, layouts []paneGeom, cw, ch int32, x, y int32) bool {
 	if !d.armed {
 		return false
 	}
@@ -53,7 +56,20 @@ func (d *paneDrag) move(layouts []paneGeom, x, y int32) bool {
 	if id == d.targetID && edge == d.edge {
 		return false
 	}
+	var hx, hy, hw, hh int32
+	if id >= 0 {
+		var landed bool
+		hx, hy, hw, hh, landed = paneDropLanding(p, layouts, cw, ch, d.paneID, id, edge)
+		if !landed {
+			id, edge = -1, ""
+			hx, hy, hw, hh = 0, 0, 0, 0
+		}
+	}
+	if id == d.targetID && edge == d.edge {
+		return false
+	}
 	d.targetID, d.edge = id, edge
+	d.hx, d.hy, d.hw, d.hh = hx, hy, hw, hh
 	return true
 }
 
@@ -68,17 +84,11 @@ func (d *paneDrag) release() (paneID, targetID int, edge string, ok bool) {
 }
 
 // highlight is the rect to paint as the drop preview, if any.
-func (d *paneDrag) highlight(layouts []paneGeom) (x, y, w, h int32, ok bool) {
-	if !d.active || d.targetID < 0 {
+func (d *paneDrag) highlight() (x, y, w, h int32, ok bool) {
+	if !d.active || d.targetID < 0 || d.hw < 1 || d.hh < 1 {
 		return 0, 0, 0, 0, false
 	}
-	for i := range layouts {
-		if layouts[i].pane != nil && layouts[i].pane.id == d.targetID {
-			x, y, w, h = paneDropRect(layouts[i], d.edge)
-			return x, y, w, h, w > 0 && h > 0
-		}
-	}
-	return 0, 0, 0, 0, false
+	return d.hx, d.hy, d.hw, d.hh, true
 }
 
 // hitPaneTitle returns the multi-pane mini title row under (px,py), if any.
@@ -147,20 +157,51 @@ func paneDropAt(layouts []paneGeom, srcID int, px, py int32) (targetID int, edge
 	return layouts[hi].pane.id, edge, true
 }
 
-// paneDropRect is the half of g the moved pane will take.
-func paneDropRect(g paneGeom, edge string) (x, y, w, h int32) {
-	x, y, w, h = paneOuter(g)
-	switch edge {
-	case "left":
-		return x, y, w / 2, h
-	case "right":
-		return x + w - w/2, y, w / 2, h
-	case "top":
-		return x, y, w, h / 2
-	case "bottom":
-		return x, y + h - h/2, w, h / 2
+// paneDropLanding is where pane srcID ends up if it is dropped on edge of
+// targetID in page p. It runs the real move on a copy of the tree and lays
+// the copy out in the same shell, so the preview matches the result even when
+// taking srcID out first collapses its split and grows the target. ok is
+// false when the drop would leave the layout as it is.
+func paneDropLanding(p *page, layouts []paneGeom, cw, ch int32, srcID, targetID int, edge string) (x, y, w, h int32, ok bool) {
+	if p == nil || p.root == nil || len(layouts) == 0 {
+		return 0, 0, 0, 0, false
 	}
-	return 0, 0, 0, 0
+	root, changed := simulateDockInTab(p.root, srcID, targetID, edge)
+	if !changed {
+		return 0, 0, 0, 0, false
+	}
+	// The leaves tile the shell, so their outer rects bound it.
+	sx, sy, sw, sh := paneOuter(layouts[0])
+	ex, ey := sx+sw, sy+sh
+	for _, g := range layouts[1:] {
+		gx, gy, gw, gh := paneOuter(g)
+		if gx < sx {
+			sx = gx
+		}
+		if gy < sy {
+			sy = gy
+		}
+		if gx+gw > ex {
+			ex = gx + gw
+		}
+		if gy+gh > ey {
+			ey = gy + gh
+		}
+	}
+	if cw < 1 {
+		cw = cellW
+	}
+	if ch < 1 {
+		ch = cellH
+	}
+	res := layoutPage(root, sx, sy, ex-sx, ey-sy, cw, ch, srcID)
+	for _, g := range res.leaves {
+		if g.pane != nil && g.pane.id == srcID {
+			x, y, w, h = paneOuter(g)
+			return x, y, w, h, w > 0 && h > 0
+		}
+	}
+	return 0, 0, 0, 0, false
 }
 
 // hostDropPane docks paneID on edge of targetID (both in the active tab) and

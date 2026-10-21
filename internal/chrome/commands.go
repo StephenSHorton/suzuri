@@ -25,6 +25,8 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 	splitRight := KeyCtrlShift("D") + " · Panes"
 	splitDown := KeyCtrlShift("E") + " · Panes"
 	if !isDarwin() {
+		// Windows focuses panes with Alt+arrows (Ctrl+Alt+arrows moves them).
+		focusHint = "Alt+←→↑↓ · Panes"
 		splitRight = "Alt+Shift+= · " + KeyCtrlShift("D") + " · Panes"
 		splitDown = "Alt+Shift+- · " + KeyCtrlShift("E") + " · Panes"
 	}

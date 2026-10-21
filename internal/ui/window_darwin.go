@@ -3474,7 +3474,7 @@ func (u *macUI) handleMouse() {
 	// Pane title-bar drag: track the drop target; drop on release.
 	if u.paneDrag.engaged() {
 		if pressed && !justReleased {
-			if u.paneDrag.move(u.computeActiveLayout(), int32(mx), int32(my)) {
+			if u.paneDrag.move(u.activePage(), u.computeActiveLayout(), u.metricW, u.metricH, int32(mx), int32(my)) {
 				u.markShellDirty()
 			}
 			return
@@ -4464,7 +4464,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 			}
 			u.painter.paintPaneTitles(u.fb, layouts, cw, ch)
 			u.painter.paintPaneSashes(u.fb, u.lastSashes, u.lastShell)
-			if x, y, w, h, ok := u.paneDrag.highlight(layouts); ok {
+			if x, y, w, h, ok := u.paneDrag.highlight(); ok {
 				paintPaneDropHint(u.fb, x, y, w, h)
 			}
 		} else if showGlobalInput || (len(layouts) == 1 && layouts[0].barH > 0) {

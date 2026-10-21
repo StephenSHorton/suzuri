@@ -3545,7 +3545,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			if (wParam & win.MK_LBUTTON) == 0 {
 				// Button came up where we never saw it: drop nothing.
 				u.cancelPaneDrag(hwnd, true)
-			} else if u.paneDrag.move(u.computeActiveLayout(), px, py) {
+			} else if u.paneDrag.move(u.activePage(), u.computeActiveLayout(), u.metricW, u.metricH, px, py) {
 				win.InvalidateRect(hwnd, nil, false)
 			}
 			return 0
@@ -3989,7 +3989,7 @@ func (u *winUI) paint(hwnd win.HWND) {
 			}
 			if len(layouts) > 1 {
 				u.paintPaneTitles(dest, layouts)
-				if x, y, w, h, ok := u.paneDrag.highlight(layouts); ok {
+				if x, y, w, h, ok := u.paneDrag.highlight(); ok {
 					paintPaneDropHint(dest, x, y, w, h)
 				}
 			}

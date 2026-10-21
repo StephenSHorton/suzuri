@@ -166,6 +166,45 @@ func unusedID(pages []*page) int {
 	return id
 }
 
+// cloneTree copies the split nodes of n. Panes are shared, not copied.
+func cloneTree(n *splitNode) *splitNode {
+	if n == nil {
+		return nil
+	}
+	c := *n
+	c.a, c.b = cloneTree(n.a), cloneTree(n.b)
+	return &c
+}
+
+// sameShape reports whether a and b have the same splits and pane order,
+// ignoring split ratios.
+func sameShape(a, b *splitNode) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.isLeaf() || b.isLeaf() {
+		return a.isLeaf() && b.isLeaf() && a.pane.id == b.pane.id
+	}
+	return a.dir == b.dir && sameShape(a.a, b.a) && sameShape(a.b, b.b)
+}
+
+// simulateDockInTab runs "move srcID beside targetID on edge" on a copy of
+// root (both panes in that tree) and returns the copy. changed is false when
+// the move fails or would give back the same layout, e.g. dropping a pane on
+// the half of its split sibling that already faces it.
+func simulateDockInTab(root *splitNode, srcID, targetID int, edge string) (out *splitNode, changed bool) {
+	e, ok := dockEdge(edge)
+	if !ok || srcID == targetID || findPane(root, srcID) == nil || findPane(root, targetID) == nil {
+		return nil, false
+	}
+	var removed *tab
+	tmp := &page{root: removeLeaf(cloneTree(root), srcID, &removed), focusID: targetID}
+	if removed == nil || tmp.root == nil || !tmp.dockExisting(targetID, e, removed) {
+		return nil, false
+	}
+	return tmp.root, !sameShape(tmp.root, root)
+}
+
 // movePaneBeside takes pane paneID out of wherever it is and docks it on one
 // edge of pane targetID, splitting the target in half. The two panes may be
 // in the same tab (rearranging it) or in different tabs; a tab left with no
@@ -185,6 +224,13 @@ func movePaneBeside(pages []*page, paneID, targetID int, edge string) (out []*pa
 	dst = pageHolding(pages, targetID)
 	if src == nil || dst == nil {
 		return pages, nil, false, "no such pane"
+	}
+	if src == dst {
+		if _, changed := simulateDockInTab(src.root, paneID, targetID, e); !changed {
+			// Already there: leave the tree (and any resized split) alone.
+			src.setFocus(paneID)
+			return pages, dst, true, ""
+		}
 	}
 	t := findPane(src.root, paneID)
 	// Rearranging within one tab: removing the pane can briefly leave a
