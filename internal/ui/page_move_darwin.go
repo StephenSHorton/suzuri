@@ -22,3 +22,7 @@ func (u *macUI) afterPageMove() {
 	u.syncTermFocus()
 	u.publishBridgeSnapshot()
 }
+
+func (u *macUI) activeLayout() []paneGeom {
+	return u.computeActiveLayout()
+}

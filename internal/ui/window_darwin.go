@@ -149,6 +149,8 @@ type macUI struct {
 	zoomBadge zoomBadgeGeom
 	// sashDrag is non-nil while the user is dragging a shared pane divider.
 	sashDrag *sashGeom
+	// paneDrag tracks a press on a pane's mini title bar (drag to re-dock).
+	paneDrag paneDrag
 
 	width       int32
 	height      int32
@@ -1398,6 +1400,14 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		hostMovePaneAdjacent(u, -1)
 	case chrome.ActionMovePaneNextTab:
 		hostMovePaneAdjacent(u, 1)
+	case chrome.ActionMovePaneLeft:
+		hostMovePaneDir(u, 0)
+	case chrome.ActionMovePaneRight:
+		hostMovePaneDir(u, 1)
+	case chrome.ActionMovePaneUp:
+		hostMovePaneDir(u, 2)
+	case chrome.ActionMovePaneDown:
+		hostMovePaneDir(u, 3)
 	case chrome.ActionMergeTabInto:
 		hostMergeTabInto(u, r.TabID)
 	case chrome.ActionNextTab:
@@ -2278,6 +2288,27 @@ func (u *macUI) handleKeys() {
 			u.keyRep.suppressUntilRelease(ebiten.KeyRight)
 			hostMovePaneAdjacent(u, 1)
 			return
+		}
+	}
+	// ⌘⌃+arrows: move the focused pane within its tab (swap with the pane on
+	// that side). Held arrows are dropped until release so one press is one
+	// step and nothing leaks into the moved pane.
+	if meta && realCtrl && !alt && !shift {
+		for _, k := range [...]struct {
+			arrow, alias ebiten.Key
+			dir          int
+		}{
+			{ebiten.KeyArrowLeft, ebiten.KeyLeft, 0},
+			{ebiten.KeyArrowRight, ebiten.KeyRight, 1},
+			{ebiten.KeyArrowUp, ebiten.KeyUp, 2},
+			{ebiten.KeyArrowDown, ebiten.KeyDown, 3},
+		} {
+			if inpututil.IsKeyJustPressed(k.arrow) {
+				u.keyRep.suppressUntilRelease(k.arrow)
+				u.keyRep.suppressUntilRelease(k.alias)
+				hostMovePaneDir(u, k.dir)
+				return
+			}
 		}
 	}
 	// ⌘⌥+arrows: focus pane (bare Option is word-jump). Ctrl+Option is a synonym.
@@ -3220,8 +3251,11 @@ func (u *macUI) handleMouse() {
 	// Clicks alone are not enough — hover styles need CSI < 35;c;r M reports.
 	if !u.chrome.OverlayOpen() {
 		if t := u.activeTab(); t != nil && t.altScreen() {
-			left := pressed || u.altMouseDown
-			u.maybeSendAltMouseMotion(t, mx, my, left)
+			// A title-bar press/drag is the host's; don't report it to the TUI.
+			if !u.paneDrag.engaged() {
+				left := pressed || u.altMouseDown
+				u.maybeSendAltMouseMotion(t, mx, my, left)
+			}
 		} else {
 			u.altMouseCol, u.altMouseRow = 0, 0
 			// Hard-killed TUIs leave mouse mode on; disarm so we don't inject
@@ -3277,6 +3311,12 @@ func (u *macUI) handleMouse() {
 					return
 				}
 				_ = u.focusPaneByID(g.pane.id)
+				// Title bar: arm a pane drag. A press that never travels
+				// past the threshold is just the click-to-focus above.
+				if hitPaneTitle(layouts, int32(mx), int32(my)) != nil {
+					u.paneDrag.arm(g.pane.id, int32(mx), int32(my))
+					return
+				}
 				// Fall through so a drag can still start selection on the new focus.
 			}
 		}
@@ -3428,6 +3468,23 @@ func (u *macUI) handleMouse() {
 		u.selecting = true
 		u.mouseDown = true
 		u.markShellDirty()
+		return
+	}
+
+	// Pane title-bar drag: track the drop target; drop on release.
+	if u.paneDrag.engaged() {
+		if pressed && !justReleased {
+			if u.paneDrag.move(u.activePage(), u.computeActiveLayout(), u.metricW, u.metricH, int32(mx), int32(my)) {
+				u.markShellDirty()
+			}
+			return
+		}
+		wasActive := u.paneDrag.active
+		if id, target, edge, ok := u.paneDrag.release(); ok {
+			hostDropPane(u, id, target, edge)
+		} else if wasActive {
+			u.markShellDirty() // clear the highlight
+		}
 		return
 	}
 
@@ -4407,6 +4464,9 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 			}
 			u.painter.paintPaneTitles(u.fb, layouts, cw, ch)
 			u.painter.paintPaneSashes(u.fb, u.lastSashes, u.lastShell)
+			if x, y, w, h, ok := u.paneDrag.highlight(); ok {
+				paintPaneDropHint(u.fb, x, y, w, h)
+			}
 		} else if showGlobalInput || (len(layouts) == 1 && layouts[0].barH > 0) {
 			// Single pane: paint input bar into leaf bar region (or full width).
 			g := layouts[0]
@@ -4821,7 +4881,7 @@ func (u *macUI) updateLinkHover(mx, my int) {
 			u.markShellDirty()
 		}
 	}
-	if u.chrome.OverlayOpen() || u.selecting || u.sashDrag != nil || u.notesDragging {
+	if u.chrome.OverlayOpen() || u.selecting || u.sashDrag != nil || u.paneDrag.engaged() || u.notesDragging {
 		clear()
 		return
 	}

@@ -127,6 +127,18 @@ func KeyCtrlAltShift(s string) string {
 	return "Ctrl+Alt+Shift+" + s
 }
 
+// KeyMovePane is the "move pane within its tab" chord: Cmd+Ctrl on macOS
+// (Cmd+Opt is pane focus there), Ctrl+Alt elsewhere (Alt alone is pane focus).
+func KeyMovePane(s string) string {
+	if isDarwin() {
+		if keyFancyOn() {
+			return "⌘⌃" + s
+		}
+		return "Cmd+Ctrl+" + s
+	}
+	return KeyCtrlAlt(s)
+}
+
 func KeyUpDown() string {
 	if keyArrowsOn() {
 		return "↑ / ↓"

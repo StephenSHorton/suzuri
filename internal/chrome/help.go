@@ -185,6 +185,12 @@ func helpSectionsRight(colW int) []helpSectionBlock {
 	if !keyFancyOn() && !isDarwin() {
 		movePane, movePaneDesc = "Ctrl+Alt+Shift", "+←→ pane to prev/next tab"
 	}
+	// Move-in-tab chord: same treatment when the ASCII form is too wide.
+	moveIn, moveInDesc := KeyMovePane("arrows"), "Move pane in tab"
+	if !keyFancyOn() {
+		moveIn, moveInDesc = KeyMovePane(""), "+arrows move pane in tab"
+		moveIn = strings.TrimSuffix(moveIn, "+")
+	}
 	lineEnds := "Home / End"
 	if isDarwin() {
 		lineEnds = KeyCtrl("←→") + " · Home/End"
@@ -199,10 +205,10 @@ func helpSectionsRight(colW int) []helpSectionBlock {
 				{KeyCtrlShift("E"), "Split down"},
 				{KeyCtrlShift("Enter"), "Maximize pane"},
 				{focusPanes, "Focus pane"},
+				{moveIn, moveInDesc},
 				{movePane, movePaneDesc},
 				{wordJump, "Word jump"},
 				{lineEnds, "Line ends"},
-				{"Hold ←→ / ⌫", "Key repeat"},
 				{"F2 · dbl-click", "Rename pane / tab"},
 				{KeyCtrl("W"), "Close pane (last → tab)"},
 			},

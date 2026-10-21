@@ -2,7 +2,10 @@
 
 package ui
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Moving panes between chrome tabs (pages).
 //
@@ -128,6 +131,137 @@ func movePaneToPage(pages []*page, paneID int, dst *page, insertAt int, newPageI
 	return pageMove{pages: out, active: insertAt, focus: t.id}, true, ""
 }
 
+// dockEdge normalises a dock edge name ("left", "right", "top"/"up",
+// "bottom"/"down"); ok is false for anything else.
+func dockEdge(edge string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(edge)) {
+	case "left":
+		return "left", true
+	case "right":
+		return "right", true
+	case "top", "up":
+		return "top", true
+	case "bottom", "down":
+		return "bottom", true
+	}
+	return "", false
+}
+
+// unusedID is one past every page and pane id in pages.
+func unusedID(pages []*page) int {
+	id := 0
+	for _, pg := range pages {
+		if pg == nil {
+			continue
+		}
+		if pg.id >= id {
+			id = pg.id + 1
+		}
+		for _, t := range pg.leaves() {
+			if t.id >= id {
+				id = t.id + 1
+			}
+		}
+	}
+	return id
+}
+
+// cloneTree copies the split nodes of n. Panes are shared, not copied.
+func cloneTree(n *splitNode) *splitNode {
+	if n == nil {
+		return nil
+	}
+	c := *n
+	c.a, c.b = cloneTree(n.a), cloneTree(n.b)
+	return &c
+}
+
+// sameShape reports whether a and b have the same splits and pane order,
+// ignoring split ratios.
+func sameShape(a, b *splitNode) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.isLeaf() || b.isLeaf() {
+		return a.isLeaf() && b.isLeaf() && a.pane.id == b.pane.id
+	}
+	return a.dir == b.dir && sameShape(a.a, b.a) && sameShape(a.b, b.b)
+}
+
+// simulateDockInTab runs "move srcID beside targetID on edge" on a copy of
+// root (both panes in that tree) and returns the copy. changed is false when
+// the move fails or would give back the same layout, e.g. dropping a pane on
+// the half of its split sibling that already faces it.
+func simulateDockInTab(root *splitNode, srcID, targetID int, edge string) (out *splitNode, changed bool) {
+	e, ok := dockEdge(edge)
+	if !ok || srcID == targetID || findPane(root, srcID) == nil || findPane(root, targetID) == nil {
+		return nil, false
+	}
+	var removed *tab
+	tmp := &page{root: removeLeaf(cloneTree(root), srcID, &removed), focusID: targetID}
+	if removed == nil || tmp.root == nil || !tmp.dockExisting(targetID, e, removed) {
+		return nil, false
+	}
+	return tmp.root, !sameShape(tmp.root, root)
+}
+
+// movePaneBeside takes pane paneID out of wherever it is and docks it on one
+// edge of pane targetID, splitting the target in half. The two panes may be
+// in the same tab (rearranging it) or in different tabs; a tab left with no
+// panes goes away. Focus moves to the moved pane in the target's tab.
+//
+// All checks run before anything changes, so ok false means pages are as
+// they were.
+func movePaneBeside(pages []*page, paneID, targetID int, edge string) (out []*page, dst *page, ok bool, reason string) {
+	if paneID == targetID {
+		return pages, nil, false, "same pane"
+	}
+	e, okEdge := dockEdge(edge)
+	if !okEdge {
+		return pages, nil, false, "edge must be left|right|top|bottom"
+	}
+	src := pageHolding(pages, paneID)
+	dst = pageHolding(pages, targetID)
+	if src == nil || dst == nil {
+		return pages, nil, false, "no such pane"
+	}
+	if src == dst {
+		if _, changed := simulateDockInTab(src.root, paneID, targetID, e); !changed {
+			// Already there: leave the tree (and any resized split) alone.
+			src.setFocus(paneID)
+			return pages, dst, true, ""
+		}
+	}
+	t := findPane(src.root, paneID)
+	// Rearranging within one tab: removing the pane can briefly leave a
+	// single pane, which would drop the frozen strip name and re-freeze it
+	// from whichever pane is left. Keep the name the tab already had.
+	sticky := src.stickyTitle
+	closed, empty, _ := src.removePane(paneID)
+	if closed == nil {
+		return pages, nil, false, "no such pane"
+	}
+	if !dst.dockExisting(targetID, e, t) {
+		// Unreachable: target is still a leaf of dst and edge is valid.
+		// Never lose the session: give it a tab of its own.
+		np := newPage(t)
+		np.id = unusedID(pages)
+		out = pages
+		if empty {
+			out = withoutPage(pages, src)
+		}
+		return append(out, np), np, true, ""
+	}
+	if src == dst {
+		dst.stickyTitle = sticky
+	}
+	out = pages
+	if empty {
+		out = withoutPage(pages, src)
+	}
+	return out, dst, true, ""
+}
+
 // mergePageInto moves every pane of src into dst, keeping src's split layout
 // intact as one block on the right of dst's panes. src's tab goes away; dst
 // becomes active and focus stays on the pane src had focused. src's custom
@@ -190,6 +324,8 @@ type pageMoveHost interface {
 	toast(msg string)
 	// afterPageMove re-syncs chrome, window title, layout and PTY sizes.
 	afterPageMove()
+	// activeLayout lays out the active tab and returns its visible panes.
+	activeLayout() []paneGeom
 }
 
 func applyPageMove(h pageMoveHost, res pageMove, newID int) {
@@ -294,4 +430,23 @@ func hostMergeTabInto(h pageMoveHost, tabID int) {
 		noun = "pane"
 	}
 	h.toast(fmt.Sprintf("merged %d %s into tab %d", n, noun, res.active+1))
+}
+
+// hostMovePaneDir trades the focused pane with its neighbour in direction
+// dir (0=left, 1=right, 2=up, 3=down) inside the active tab. Repeated presses
+// walk the pane around the layout; at the edge nothing happens. Focus stays on
+// the moved pane.
+func hostMovePaneDir(h pageMoveHost, dir int) {
+	_, src, focus := activeMoveSource(h)
+	if src == nil || focus == nil || src.leafCount() < 2 {
+		return
+	}
+	if src.zoomed() {
+		h.toast("pane is maximized")
+		return
+	}
+	if !src.swapNeighbor(dir, h.activeLayout()) {
+		return
+	}
+	h.afterPageMove()
 }
