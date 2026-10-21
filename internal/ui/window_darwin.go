@@ -633,7 +633,17 @@ func (u *macUI) loop() error {
 	})
 
 	log.Info("starting ebiten window", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
-	err := ebiten.RunGame(u)
+	// Passing options makes ebiten ignore SetScreenTransparent, so the
+	// transparent flag is repeated here.
+	// ApplePressAndHoldEnabled stays false (held letters auto-repeat via
+	// AppendInputChars, no accent popup). That matches ebiten 2.8, whose
+	// GLFW registered ApplePressAndHoldEnabled=NO at init; 2.9 moved that
+	// into this option. Spelled out so nobody flips it thinking the
+	// default changed.
+	err := ebiten.RunGameWithOptions(u, &ebiten.RunGameOptions{
+		ScreenTransparent:        true,
+		ApplePressAndHoldEnabled: false,
+	})
 	u.alive.Store(false)
 	if u.caffeine != nil {
 		u.caffeine.Close()
