@@ -561,18 +561,32 @@ func removeLeaf(n *splitNode, id int, removed **tab) *splitNode {
 // focusNeighbor moves focus in a cardinal direction among leaves of this page.
 // dir: 0=left, 1=right, 2=up, 3=down. Returns true if focus changed.
 func (p *page) focusNeighbor(dir int, layouts []paneGeom) bool {
-	if p == nil || len(layouts) < 2 {
+	if p == nil {
 		return false
+	}
+	id := neighborID(layouts, p.focusID, dir)
+	if id < 0 {
+		return false
+	}
+	return p.setFocus(id)
+}
+
+// neighborID is the pane next to fromID in direction dir (0=left, 1=right,
+// 2=up, 3=down), judged by laid-out leaf centers, or -1 when fromID is at
+// that edge of the layout (or not laid out).
+func neighborID(layouts []paneGeom, fromID, dir int) int {
+	if len(layouts) < 2 {
+		return -1
 	}
 	var cur *paneGeom
 	for i := range layouts {
-		if layouts[i].pane != nil && layouts[i].pane.id == p.focusID {
+		if layouts[i].pane != nil && layouts[i].pane.id == fromID {
 			cur = &layouts[i]
 			break
 		}
 	}
 	if cur == nil {
-		return false
+		return -1
 	}
 	cx, cy := paneCenter(*cur)
 
@@ -580,7 +594,7 @@ func (p *page) focusNeighbor(dir int, layouts []paneGeom) bool {
 	bestDist := int32(1 << 30)
 	for i := range layouts {
 		pl := &layouts[i]
-		if pl.pane == nil || pl.pane.id == p.focusID {
+		if pl.pane == nil || pl.pane.id == fromID {
 			continue
 		}
 		ox, oy := paneCenter(*pl)
@@ -608,10 +622,57 @@ func (p *page) focusNeighbor(dir int, layouts []paneGeom) bool {
 			bestID = pl.pane.id
 		}
 	}
-	if bestID < 0 {
+	return bestID
+}
+
+// leafOf returns the leaf node holding pane id, or nil.
+func leafOf(n *splitNode, id int) *splitNode {
+	if n == nil {
+		return nil
+	}
+	if n.isLeaf() {
+		if n.pane.id == id {
+			return n
+		}
+		return nil
+	}
+	if l := leafOf(n.a, id); l != nil {
+		return l
+	}
+	return leafOf(n.b, id)
+}
+
+// swapPanes exchanges the places of two panes in this page's tree. The tree
+// shape, split ratios, focus id, zoom and strip title are untouched, so the
+// focused pane keeps focus wherever it lands.
+func (p *page) swapPanes(a, b int) bool {
+	if p == nil || a == b {
 		return false
 	}
-	return p.setFocus(bestID)
+	la, lb := leafOf(p.root, a), leafOf(p.root, b)
+	if la == nil || lb == nil {
+		return false
+	}
+	la.pane, lb.pane = lb.pane, la.pane
+	return true
+}
+
+// swapNeighbor trades the focused pane with its neighbour in direction dir
+// (0=left, 1=right, 2=up, 3=down), so repeated calls walk it around the
+// layout. A maximized page, a solo page or the edge of the layout is a no-op.
+func (p *page) swapNeighbor(dir int, layouts []paneGeom) bool {
+	if p == nil || p.zoomed() || p.leafCount() < 2 {
+		return false
+	}
+	focus := p.focused()
+	if focus == nil {
+		return false
+	}
+	other := neighborID(layouts, focus.id, dir)
+	if other < 0 {
+		return false
+	}
+	return p.swapPanes(focus.id, other)
 }
 
 func abs32(v int32) int32 {

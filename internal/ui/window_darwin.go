@@ -1398,6 +1398,14 @@ func (u *macUI) applyChromeAction(r chrome.Result) {
 		hostMovePaneAdjacent(u, -1)
 	case chrome.ActionMovePaneNextTab:
 		hostMovePaneAdjacent(u, 1)
+	case chrome.ActionMovePaneLeft:
+		hostMovePaneDir(u, 0)
+	case chrome.ActionMovePaneRight:
+		hostMovePaneDir(u, 1)
+	case chrome.ActionMovePaneUp:
+		hostMovePaneDir(u, 2)
+	case chrome.ActionMovePaneDown:
+		hostMovePaneDir(u, 3)
 	case chrome.ActionMergeTabInto:
 		hostMergeTabInto(u, r.TabID)
 	case chrome.ActionNextTab:
@@ -2278,6 +2286,27 @@ func (u *macUI) handleKeys() {
 			u.keyRep.suppressUntilRelease(ebiten.KeyRight)
 			hostMovePaneAdjacent(u, 1)
 			return
+		}
+	}
+	// ⌘⌃+arrows: move the focused pane within its tab (swap with the pane on
+	// that side). Held arrows are dropped until release so one press is one
+	// step and nothing leaks into the moved pane.
+	if meta && realCtrl && !alt && !shift {
+		for _, k := range [...]struct {
+			arrow, alias ebiten.Key
+			dir          int
+		}{
+			{ebiten.KeyArrowLeft, ebiten.KeyLeft, 0},
+			{ebiten.KeyArrowRight, ebiten.KeyRight, 1},
+			{ebiten.KeyArrowUp, ebiten.KeyUp, 2},
+			{ebiten.KeyArrowDown, ebiten.KeyDown, 3},
+		} {
+			if inpututil.IsKeyJustPressed(k.arrow) {
+				u.keyRep.suppressUntilRelease(k.arrow)
+				u.keyRep.suppressUntilRelease(k.alias)
+				hostMovePaneDir(u, k.dir)
+				return
+			}
 		}
 	}
 	// ⌘⌥+arrows: focus pane (bare Option is word-jump). Ctrl+Option is a synonym.

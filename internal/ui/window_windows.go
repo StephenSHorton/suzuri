@@ -1078,6 +1078,14 @@ func (u *winUI) applyChromeAction(r chrome.Result) {
 		hostMovePaneAdjacent(u, -1)
 	case chrome.ActionMovePaneNextTab:
 		hostMovePaneAdjacent(u, 1)
+	case chrome.ActionMovePaneLeft:
+		hostMovePaneDir(u, 0)
+	case chrome.ActionMovePaneRight:
+		hostMovePaneDir(u, 1)
+	case chrome.ActionMovePaneUp:
+		hostMovePaneDir(u, 2)
+	case chrome.ActionMovePaneDown:
+		hostMovePaneDir(u, 3)
 	case chrome.ActionMergeTabInto:
 		hostMergeTabInto(u, r.TabID)
 	case chrome.ActionTogglePaneZoom:
@@ -2851,6 +2859,27 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				return 0
 			case win.VK_RIGHT:
 				hostMovePaneAdjacent(u, 1)
+				return 0
+			}
+		}
+		// Ctrl+Alt+arrows: move the focused pane within its tab (swap with the
+		// pane on that side). Ignore auto-repeat so a held chord is one step.
+		if ctrl && alt && !shift {
+			dir := -1
+			switch wParam {
+			case win.VK_LEFT:
+				dir = 0
+			case win.VK_RIGHT:
+				dir = 1
+			case win.VK_UP:
+				dir = 2
+			case win.VK_DOWN:
+				dir = 3
+			}
+			if dir >= 0 {
+				if (lParam & (1 << 30)) == 0 {
+					hostMovePaneDir(u, dir)
+				}
 				return 0
 			}
 		}

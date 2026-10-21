@@ -22,3 +22,7 @@ func (u *winUI) afterPageMove() {
 	}
 	u.publishBridgeSnapshot()
 }
+
+func (u *winUI) activeLayout() []paneGeom {
+	return u.computeActiveLayout()
+}

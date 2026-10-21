@@ -270,6 +270,12 @@ const (
 	ActionMovePaneNextTab
 	// ActionMergeTabInto moves every pane of the active tab into Result.TabID.
 	ActionMergeTabInto
+	// ActionMovePaneLeft / Right / Up / Down trade the focused pane with its
+	// neighbour in that direction inside the active tab.
+	ActionMovePaneLeft
+	ActionMovePaneRight
+	ActionMovePaneUp
+	ActionMovePaneDown
 )
 
 // Result pairs the new model with an optional host action.

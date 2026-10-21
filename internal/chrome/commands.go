@@ -21,6 +21,7 @@ type Command struct {
 // Shortcut labels use KeyCtrl / KeyCtrlShift so macOS shows Cmd and Windows Ctrl.
 func DefaultCommands(activeProfile string, profileNames []string) []Command {
 	focusHint := KeyCtrlAlt("←→↑↓") + " · Panes"
+	moveHint := KeyMovePane("←→↑↓") + " · swap with the neighbour · Panes"
 	splitRight := KeyCtrlShift("D") + " · Panes"
 	splitDown := KeyCtrlShift("E") + " · Panes"
 	if !isDarwin() {
@@ -77,6 +78,10 @@ func DefaultCommands(activeProfile string, profileNames []string) []Command {
 		Command{ID: "focus_right", Title: "Focus pane right", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneRight},
 		Command{ID: "focus_up", Title: "Focus pane up", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneUp},
 		Command{ID: "focus_down", Title: "Focus pane down", Desc: focusHint, Category: "Panes", Action: ActionFocusPaneDown},
+		Command{ID: "move_pane_left", Title: "Move pane left", Desc: moveHint, Category: "Panes", Action: ActionMovePaneLeft},
+		Command{ID: "move_pane_right", Title: "Move pane right", Desc: moveHint, Category: "Panes", Action: ActionMovePaneRight},
+		Command{ID: "move_pane_up", Title: "Move pane up", Desc: moveHint, Category: "Panes", Action: ActionMovePaneUp},
+		Command{ID: "move_pane_down", Title: "Move pane down", Desc: moveHint, Category: "Panes", Action: ActionMovePaneDown},
 		Command{ID: "zoom_pane", Title: "Maximize pane", Desc: KeyCtrlShift("Enter") + " · hide other panes · again to restore · Panes", Category: "Panes", Action: ActionTogglePaneZoom},
 		Command{ID: "move_pane_prev_tab", Title: "Move pane to previous tab", Desc: KeyCtrlAltShift("←") + " · new tab if first · Panes", Category: "Panes", Action: ActionMovePanePrevTab},
 		Command{ID: "move_pane_next_tab", Title: "Move pane to next tab", Desc: KeyCtrlAltShift("→") + " · new tab if last · Panes", Category: "Panes", Action: ActionMovePaneNextTab},

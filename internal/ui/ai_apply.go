@@ -444,30 +444,24 @@ func focusPane(s aiSurface, id int) bool {
 	return s.pageList()[idx].setFocus(id)
 }
 
+// movePane docks paneID on an edge of targetID (same tab or another one).
+// The person stays on the tab they were using unless it went away.
 func movePane(s aiSurface, paneID, targetID int, edge string) bool {
-	if paneID == targetID {
+	pages := s.pageList()
+	var userPage *page
+	if s.active != nil && *s.active >= 0 && *s.active < len(pages) {
+		userPage = pages[*s.active]
+	}
+	out, dst, ok, _ := movePaneBeside(pages, paneID, targetID, edge)
+	if !ok {
 		return false
 	}
-	src := pageOf(s, paneID)
-	dst := pageOf(s, targetID)
-	t := findTab(s, paneID)
-	if src == nil || dst == nil || t == nil {
-		return false
-	}
-	closed, empty, _ := src.removePane(paneID)
-	if closed == nil {
-		return false
-	}
-	if empty {
-		dropPage(s, src)
-	}
-	if !dst.dockExisting(targetID, edge, t) {
-		pages := append(s.pageList(), newPage(t))
-		s.setPages(pages)
-		if s.active != nil {
-			*s.active = len(pages) - 1
+	s.setPages(out)
+	if s.active != nil {
+		*s.active = pageIndex(out, dst)
+		if i := pageIndex(out, userPage); i >= 0 {
+			*s.active = i
 		}
-		return false
 	}
 	return true
 }
@@ -513,41 +507,5 @@ func freshPageID(s aiSurface) int {
 	if s.nextID != nil {
 		return *s.nextID
 	}
-	id := 0
-	for _, pg := range s.pageList() {
-		if pg == nil {
-			continue
-		}
-		if pg.id >= id {
-			id = pg.id + 1
-		}
-		for _, t := range pg.leaves() {
-			if t.id >= id {
-				id = t.id + 1
-			}
-		}
-	}
-	return id
-}
-
-func dropPage(s aiSurface, pg *page) {
-	cur := s.pageList()
-	if s.active != nil {
-		if i := pageIndex(cur, pg); i >= 0 && i < *s.active {
-			*s.active--
-		}
-	}
-	out := make([]*page, 0, len(cur))
-	for _, p := range cur {
-		if p != pg {
-			out = append(out, p)
-		}
-	}
-	s.setPages(out)
-	if s.active != nil && *s.active >= len(out) {
-		*s.active = len(out) - 1
-	}
-	if s.active != nil && *s.active < 0 {
-		*s.active = 0
-	}
+	return unusedID(s.pageList())
 }
