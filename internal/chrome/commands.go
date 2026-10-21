@@ -21,7 +21,7 @@ type Command struct {
 // Shortcut labels use KeyCtrl / KeyCtrlShift so macOS shows Cmd and Windows Ctrl.
 func DefaultCommands(activeProfile string, profileNames []string) []Command {
 	focusHint := KeyCtrlAlt("←→↑↓") + " · Panes"
-	moveHint := KeyMovePane("←→↑↓") + " · swap with the neighbour · Panes"
+	moveHint := KeyMovePane("←→↑↓") + " · swap with the neighbour · or drag the title bar · Panes"
 	splitRight := KeyCtrlShift("D") + " · Panes"
 	splitDown := KeyCtrlShift("E") + " · Panes"
 	if !isDarwin() {

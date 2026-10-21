@@ -27,7 +27,7 @@ Most “pretty terminals” are either:
 |------|------------|
 | **Host** | Native window (Win32 / macOS), ConPTY or POSIX PTY shells, scrollback, selection, copy/paste |
 | **Chrome** | Tabs, command palette (`Ctrl+K`), settings (`Ctrl+,`), help, themes |
-| **Panes** | Split right/down, shared sashes, per-pane Warp bars, focus with ⌘⌥+arrows (macOS) / Alt+arrows (Windows). ⌘⇧Enter (Ctrl+Shift+Enter on Windows) maximizes the focused pane and hides the others; press again to restore. A corner badge names the hidden panes. ⌘⌃+arrows (Ctrl+Alt+arrows on Windows) moves the focused pane within its tab, trading places with the pane on that side; keep pressing to walk it around the layout. ⌘⌥⇧←/→ (Ctrl+Alt+Shift+←/→ on Windows) carries the focused pane to the previous/next tab, or out into a new tab at either end. In the palette, "Move pane to tab: …", "Move pane to new tab" and "Merge tab into: …" move one pane or a whole tab's panes into another tab; the shells keep running. |
+| **Panes** | Split right/down, shared sashes, per-pane Warp bars, focus with ⌘⌥+arrows (macOS) / Alt+arrows (Windows). ⌘⇧Enter (Ctrl+Shift+Enter on Windows) maximizes the focused pane and hides the others; press again to restore. A corner badge names the hidden panes. ⌘⌃+arrows (Ctrl+Alt+arrows on Windows) moves the focused pane within its tab, trading places with the pane on that side; keep pressing to walk it around the layout. Or drag a pane by its title bar onto one side of another pane in the same tab; the highlighted half is where it lands. ⌘⌥⇧←/→ (Ctrl+Alt+Shift+←/→ on Windows) carries the focused pane to the previous/next tab, or out into a new tab at either end. In the palette, "Move pane to tab: …", "Move pane to new tab" and "Merge tab into: …" move one pane or a whole tab's panes into another tab; the shells keep running. |
 | **Input** | Warp-style bottom bar — local edit, multiline, history, echo filter |
 | **Look** | 16 themes (Inkstone, Charmtone, Nord, Dracula, Tokyo Night, …) · bundled Gohu mono · app icon · box-drawing |
 | **Polish** | Intros (matrix, ripple, ink wash, CRT) · shell ambient (rain, grain, waves, fireflies, CRT) · 猫咪 dim under settings · floating chrome |
@@ -105,6 +105,7 @@ Go 1.26+ recommended (see `go.mod`). Supported hosts: **Windows** (ConPTY) and *
 | `Ctrl+W` / `⌘W` | Close pane (last pane closes the tab; last tab confirms quit) |
 | `Ctrl+Shift+←` / `→` · `Ctrl+Shift+[` / `]` | Previous / next tab |
 | `⌘⌃`+arrows · `Ctrl+Alt`+arrows | Move focused pane within its tab (swap with the pane on that side) |
+| Drag a pane title bar | Dock the pane on the highlighted side of another pane in the tab |
 | `⌘⌥⇧←` / `→` · `Ctrl+Alt+Shift+←` / `→` | Move focused pane to previous / next tab (new tab at either end) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+1`…`9` | Jump to tab |

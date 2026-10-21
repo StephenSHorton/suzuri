@@ -1536,3 +1536,21 @@ func (p *softwarePainter) paintCRTScanlines(dst *image.RGBA, padY, shellBot int,
 		}
 	}
 }
+
+// paintPaneDropHint tints the half of a pane a dragged pane will land in,
+// with a solid rim so it reads on any theme.
+func paintPaneDropHint(dst *image.RGBA, x, y, w, h int32) {
+	if dst == nil || w < 1 || h < 1 {
+		return
+	}
+	r, g, b := chrome.PrimR, chrome.PrimG, chrome.PrimB
+	if r == 0 && g == 0 && b == 0 {
+		r, g, b = 0, 230, 118
+	}
+	fillRectRGBAOver(dst, int(x), int(y), int(w), int(h), r, g, b, 0.22)
+	const rim = 2
+	fillRectRGBA(dst, int(x), int(y), int(w), rim, r, g, b)
+	fillRectRGBA(dst, int(x), int(y+h-rim), int(w), rim, r, g, b)
+	fillRectRGBA(dst, int(x), int(y), rim, int(h), r, g, b)
+	fillRectRGBA(dst, int(x+w-rim), int(y), rim, int(h), r, g, b)
+}

@@ -167,7 +167,9 @@ type winUI struct {
 	// zoomBadge is the "ZOOM · N hidden" pill. Empty when the page is not zoomed.
 	zoomBadge zoomBadgeGeom
 	// sashDrag is non-nil while the user is dragging a shared pane divider.
-	sashDrag  *sashGeom
+	sashDrag *sashGeom
+	// paneDrag tracks a press on a pane's mini title bar (drag to re-dock).
+	paneDrag  paneDrag
 	nextTabID int
 	chrome    chrome.Model // Charm UI: tabs, status, palette
 
@@ -2170,20 +2172,6 @@ func (u *winUI) hitCaffeine(px int32) bool {
 	return cellX >= b[0] && cellX < b[1]
 }
 
-// hitPaneTitleBar returns the multi-pane mini-title row under (px,py), if any.
-func (u *winUI) hitPaneTitleBar(px, py int32, layouts []paneGeom) *paneGeom {
-	for i := range layouts {
-		g := &layouts[i]
-		if g.titleH < 1 || g.pane == nil {
-			continue
-		}
-		if px >= g.x && px < g.x+g.w && py >= g.titleY && py < g.titleY+g.titleH {
-			return g
-		}
-	}
-	return nil
-}
-
 func (u *winUI) pixelToChromeCol(px int32) int {
 	cw := u.metricW
 	if cw < 1 {
@@ -3282,7 +3270,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			return 0
 		}
 		layouts := u.computeActiveLayout()
-		if g := u.hitPaneTitleBar(px, py, layouts); g != nil && g.pane != nil {
+		if g := hitPaneTitle(layouts, px, py); g != nil && g.pane != nil {
 			_ = u.focusPaneByID(g.pane.id)
 			u.openRenameUI(chrome.RenameTargetPane)
 			return 0
@@ -3291,6 +3279,7 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 
 	case win.WM_LBUTTONDOWN:
 		u.focus()
+		u.paneDrag.reset()
 		px := int32(win.LOWORD(uint32(lParam)))
 		py := int32(win.HIWORD(uint32(lParam)))
 		// Image modal: any click closes (simple lightbox).
@@ -3474,6 +3463,15 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 				win.InvalidateRect(hwnd, nil, false)
 				// Fall through so a drag can still start selection on the new focus.
 			}
+			// Title bar: arm a pane drag. A press that never travels past
+			// the threshold is just the click-to-focus above, and a second
+			// click still arrives as WM_LBUTTONDBLCLK (rename pane).
+			if hitPaneTitle(layouts, px, py) != nil {
+				u.paneDrag.arm(g.pane.id, px, py)
+				u.selecting = false
+				win.SetCapture(hwnd)
+				return 0
+			}
 		}
 		tab := u.activeTab()
 		if tab == nil {
@@ -3540,6 +3538,17 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 		// Link hover (hand cursor + primary tint) when not dragging.
 		if u.sashDrag == nil && !u.selecting && !u.notesDragging {
 			u.updateLinkHover(px, py)
+		}
+		// Pane title-bar drag: track the drop target (paint only, no
+		// relayout or ConPTY resize until the drop).
+		if u.paneDrag.engaged() {
+			if (wParam & win.MK_LBUTTON) == 0 {
+				// Button came up where we never saw it: drop nothing.
+				u.cancelPaneDrag(hwnd, true)
+			} else if u.paneDrag.move(u.computeActiveLayout(), px, py) {
+				win.InvalidateRect(hwnd, nil, false)
+			}
+			return 0
 		}
 		// Alt-screen: SGR motion for Grok button hover (1003) / drag (1002).
 		if tab := u.activeTab(); tab != nil && tab.altScreen() && !u.chrome.OverlayOpen() {
@@ -3617,7 +3626,24 @@ func (u *winUI) handle(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintpt
 			win.InvalidateRect(hwnd, nil, false)
 		}
 
+	case win.WM_CAPTURECHANGED:
+		// Another window took the mouse mid-drag (alt-tab, a dialog).
+		if u.paneDrag.engaged() && win.HWND(lParam) != hwnd {
+			u.cancelPaneDrag(hwnd, false)
+		}
+
 	case win.WM_LBUTTONUP:
+		if u.paneDrag.engaged() {
+			wasActive := u.paneDrag.active
+			id, target, edge, ok := u.paneDrag.release()
+			win.ReleaseCapture()
+			if ok {
+				hostDropPane(u, id, target, edge)
+			} else if wasActive {
+				win.InvalidateRect(hwnd, nil, false) // clear the highlight
+			}
+			return 0
+		}
 		if u.sashDrag != nil {
 			u.sashDrag = nil
 			win.ReleaseCapture()
@@ -3963,6 +3989,9 @@ func (u *winUI) paint(hwnd win.HWND) {
 			}
 			if len(layouts) > 1 {
 				u.paintPaneTitles(dest, layouts)
+				if x, y, w, h, ok := u.paneDrag.highlight(layouts); ok {
+					paintPaneDropHint(dest, x, y, w, h)
+				}
 			}
 			if u.matrixIntroActive() {
 				func() {
@@ -5014,6 +5043,42 @@ func fillRect(hdc win.HDC, r win.RECT, brush win.HBRUSH) {
 	_, _, _ = procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&r)), uintptr(brush))
 }
 
+// cancelPaneDrag abandons a title-bar press without moving anything.
+// releaseCapture is false when the capture is already gone.
+func (u *winUI) cancelPaneDrag(hwnd win.HWND, releaseCapture bool) {
+	wasActive := u.paneDrag.active
+	u.paneDrag.reset()
+	if releaseCapture {
+		win.ReleaseCapture()
+	}
+	if wasActive {
+		win.InvalidateRect(hwnd, nil, false)
+	}
+}
+
+// paintPaneDropHint outlines the half of a pane a dragged pane will land in.
+// GDI has no cheap alpha fill here, so it is a thick rim plus a thin inner
+// line in the primary colour.
+func paintPaneDropHint(hdc win.HDC, x, y, w, h int32) {
+	if w < 1 || h < 1 {
+		return
+	}
+	r, g, b := chrome.PrimR, chrome.PrimG, chrome.PrimB
+	if r == 0 && g == 0 && b == 0 {
+		r, g, b = 0, 230, 118
+	}
+	edge := func(rim, inset int32) {
+		fillSolidRGB(hdc, win.RECT{Left: x + inset, Top: y + inset, Right: x + w - inset, Bottom: y + inset + rim}, r, g, b)
+		fillSolidRGB(hdc, win.RECT{Left: x + inset, Top: y + h - inset - rim, Right: x + w - inset, Bottom: y + h - inset}, r, g, b)
+		fillSolidRGB(hdc, win.RECT{Left: x + inset, Top: y + inset, Right: x + inset + rim, Bottom: y + h - inset}, r, g, b)
+		fillSolidRGB(hdc, win.RECT{Left: x + w - inset - rim, Top: y + inset, Right: x + w - inset, Bottom: y + h - inset}, r, g, b)
+	}
+	edge(3, 0)
+	if w > 16 && h > 16 {
+		edge(1, 6)
+	}
+}
+
 // fillSolidRGB skips chroma-key near-black so rain/watermark show through
 // (GrokNight canvas 26,27,38). Real bands stay opaque GDI fills.
 func fillSolidRGB(hdc win.HDC, r win.RECT, cr, cg, cb byte) {
@@ -5391,7 +5456,7 @@ func (u *winUI) updateLinkHover(px, py int32) {
 			u.requestPaint()
 		}
 	}
-	if u.chrome.OverlayOpen() || u.selecting || u.sashDrag != nil || u.notesDragging {
+	if u.chrome.OverlayOpen() || u.selecting || u.sashDrag != nil || u.paneDrag.engaged() || u.notesDragging {
 		clear()
 		return
 	}
