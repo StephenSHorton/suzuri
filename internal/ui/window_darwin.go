@@ -478,7 +478,7 @@ func (u *macUI) markInputDirty() {
 		return
 	}
 	u.requestPaint()
-	if u.chromeDirty || u.chrome.OverlayOpen() {
+	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
 		u.inputOnlyDirty = false
 		return
 	}
@@ -4125,9 +4125,9 @@ func (u *macUI) paintInputOnlyFB(tab *tab, w, h int) (rows []rowSpan, ok bool) {
 	if u == nil || !u.inputOnlyDirty || u.painter == nil || u.fb == nil {
 		return nil, false
 	}
-	// overlayDirty alone is stale once the card is shut (ensureOverlayCells
-	// only clears it while one is open), so it must not block the bar path.
-	if u.chromeDirty || u.chrome.OverlayOpen() {
+	// overlayDirty means the last frame may still show a card that just
+	// shut; ensureOverlayCells clears it once a full frame has dropped it.
+	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
 		return nil, false
 	}
 	// Intro / dim modals need a full composite. Shell rain freezes while we

@@ -63,7 +63,7 @@ func TestSendBarPayloadAltScreenProgram(t *testing.T) {
 }
 
 // An inline program (foreground child, no alt screen) without paste mode
-// still gets text and Enter apart. tryFlushCmdQueue reaches this.
+// still gets text and Enter apart (macOS MCP submits reach this).
 func TestSendBarPayloadInlineProgramUnbracketed(t *testing.T) {
 	pane := newSubmitTestTab()
 	pane.forceChild = true
