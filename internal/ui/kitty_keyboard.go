@@ -22,9 +22,57 @@ const kittyStackMax = 16
 
 // kittyKeyboard tracks the progressive-enhancement flags the app requested.
 // Without this, Shift+Enter collapses to plain Enter (legacy C0 table).
+//
+// The spec keeps separate flags and stacks for the main and alternate
+// screens. flags/stack are the live screen's; main holds the main screen's
+// while the alt screen is up.
 type kittyKeyboard struct {
 	flags int
 	stack []int
+	onAlt bool
+	main  struct {
+		flags int
+		stack []int
+	}
+	// scan carries consumeHostQueries across PTY reads.
+	scan hostScan
+}
+
+// hostScan is the host-query scanner's state between reads.
+type hostScan struct {
+	// str is the introducer of the string body we are inside
+	// (']' OSC, 'P' DCS, '_' APC, '^' PM, 'X' SOS), or 0.
+	str byte
+	// tail is an escape cut off at the end of the last read (a lone ESC or
+	// an unfinished CSI), scanned again with the next read.
+	tail []byte
+}
+
+// hostScanTailMax bounds a held unfinished CSI; longer ones are dropped.
+const hostScanTailMax = 32
+
+// setAltScreen switches to the other screen's flags (CSI ? 1049/1047/47 h/l).
+func (k *kittyKeyboard) setAltScreen(on bool) {
+	if k == nil || k.onAlt == on {
+		return
+	}
+	k.onAlt = on
+	if on {
+		k.main.flags, k.main.stack = k.flags, k.stack
+		k.flags, k.stack = 0, nil
+		return
+	}
+	k.flags, k.stack = k.main.flags, k.main.stack
+	k.main.flags, k.main.stack = 0, nil
+}
+
+// reset drops every flag and stack on both screens (RIS).
+func (k *kittyKeyboard) reset() {
+	if k == nil {
+		return
+	}
+	scan := k.scan
+	*k = kittyKeyboard{scan: scan}
 }
 
 // active is true when the app has enabled disambiguation or full key reporting.
@@ -147,18 +195,45 @@ func encodeEnter(kk *kittyKeyboard, shift, alt, ctrl, super bool) []byte {
 // consumeHostQueries scans app→terminal bytes for Kitty keyboard protocol
 // management and primary/secondary DA. Returns replies to write back to the PTY.
 // Data is left intact for the VT parser (unknown sequences are ignored there).
+//
+// OSC/DCS/APC/PM/SOS bodies are skipped, so an ESC c or CSI inside one (tmux
+// passthrough, a title) is not acted on. An escape cut by the read boundary
+// is held and finished with the next read.
 func (k *kittyKeyboard) consumeHostQueries(data []byte) []byte {
 	if k == nil || len(data) == 0 {
 		return nil
 	}
+	if len(k.scan.tail) > 0 {
+		data = append(k.scan.tail, data...)
+		k.scan.tail = nil
+	}
 	var out []byte
 	i := 0
 	for i < len(data) {
+		if k.scan.str != 0 {
+			i = k.skipStringBody(data, i)
+			continue
+		}
 		if data[i] != 0x1b {
 			i++
 			continue
 		}
-		if i+1 >= len(data) || data[i+1] != '[' {
+		if i+1 >= len(data) {
+			k.scan.tail = []byte{0x1b}
+			break
+		}
+		switch c := data[i+1]; c {
+		case 'c':
+			// RIS: full reset, keyboard state included.
+			k.reset()
+			i += 2
+			continue
+		case ']', 'P', '_', '^', 'X':
+			k.scan.str = c
+			i += 2
+			continue
+		case '[':
+		default:
 			i++
 			continue
 		}
@@ -168,6 +243,9 @@ func (k *kittyKeyboard) consumeHostQueries(data []byte) []byte {
 			j++
 		}
 		if j >= len(data) {
+			if len(data)-i <= hostScanTailMax {
+				k.scan.tail = append([]byte(nil), data[i:]...)
+			}
 			break
 		}
 		body := string(data[i+2 : j])
@@ -183,9 +261,49 @@ func (k *kittyKeyboard) consumeHostQueries(data []byte) []byte {
 			if reply := handleDeviceAttrs(body); len(reply) > 0 {
 				out = append(out, reply...)
 			}
+		case 'h', 'l':
+			if altScreenModes(body) {
+				k.setAltScreen(final == 'h')
+			}
 		}
 	}
 	return out
+}
+
+// skipStringBody advances past string-body bytes from i and returns where
+// scanning resumes. ST (ESC \), BEL for OSC, and CAN/SUB end the body.
+// ESC ESC is body data (tmux doubles a passthrough's ESCs). Any other ESC
+// aborts the body and is scanned as an escape, as a VT parser would.
+func (k *kittyKeyboard) skipStringBody(data []byte, i int) int {
+	for i < len(data) {
+		switch data[i] {
+		case 0x07:
+			if k.scan.str == ']' {
+				k.scan.str = 0
+				return i + 1
+			}
+		case 0x18, 0x1a:
+			k.scan.str = 0
+			return i + 1
+		case 0x1b:
+			if i+1 >= len(data) {
+				k.scan.tail = []byte{0x1b}
+				return len(data)
+			}
+			switch data[i+1] {
+			case '\\':
+				k.scan.str = 0
+				return i + 2
+			case 0x1b:
+				i += 2
+				continue
+			}
+			k.scan.str = 0
+			return i
+		}
+		i++
+	}
+	return i
 }
 
 // handleKittyU processes CSI body + 'u' (progressive enhancement).
@@ -232,6 +350,21 @@ func (k *kittyKeyboard) handleKittyU(body string) []byte {
 	default:
 		return nil
 	}
+}
+
+// altScreenModes is true when a DEC private set/reset body names an
+// alternate-screen mode (47, 1047, 1049).
+func altScreenModes(body string) bool {
+	if !strings.HasPrefix(body, "?") {
+		return false
+	}
+	for _, p := range strings.Split(body[1:], ";") {
+		switch strings.TrimSpace(p) {
+		case "47", "1047", "1049":
+			return true
+		}
+	}
+	return false
 }
 
 func parseFlagsMode(s string) (flags, mode int) {

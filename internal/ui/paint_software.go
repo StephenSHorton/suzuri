@@ -30,6 +30,9 @@ type softwarePainter struct {
 	ascent   int
 	sizePx   float64
 	faceName string
+	// curUnder is the shell caret cell from the last full frame, so the
+	// frame gate can step the pulse without re-rastering the window.
+	curUnder cursorUnder
 }
 
 // newSoftwarePainter builds a painter for the settings face name + size.
@@ -185,6 +188,8 @@ type paintOpts struct {
 	// ProgKind is ConEmu OSC 9;4: 0 off, 1 value, 2 error, 3 indeterminate, 4 paused.
 	ProgKind int
 	ProgPct  int
+	// Now places the indeterminate progress chunk (zero: wall clock).
+	Now time.Time
 	// Scrollback-attached images (primary buffer only; alt-screen leaves empty).
 	Images []visImage
 }
@@ -196,6 +201,7 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 	}
 	w, h := dst.Bounds().Dx(), dst.Bounds().Dy()
 	p.glassRim = o.GlassRim
+	p.curUnder = cursorUnder{}
 	if o.Glass {
 		// Straight alpha 0. Present with CompositeModeCopy so these holes
 		// reach the transparent Metal layer instead of leaving the last frame.
@@ -255,35 +261,26 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 			if px >= shellRight {
 				break
 			}
-			br, bg, bb := cell.BR, cell.BG, cell.BB
 			if o.CurVis && o.ShellCursor == 0 && x == o.CurX && y == o.CurY {
-				a := o.CurAlpha
-				if o.ShellCursorSteady {
-					a = 1
+				if len(o.Images) == 0 && yShift == 0 {
+					p.noteCursorUnder(dst, px, py, shellRight, cell, 0, o.Glass)
 				}
-				if a < 0.15 {
-					a = 0.15
-				}
-				if a > 1 {
-					a = 1
-				}
-				br = blendByte(br, cell.FR, a)
-				bg = blendByte(bg, cell.FG, a)
-				bb = blendByte(bb, cell.FB, a)
+				p.paintCursorCell(dst, px, py, cell, 0, o.CurAlpha, o.ShellCursorSteady, o.Glass)
+				continue
 			}
-			paintCellBackground(dst, px, py, cw, ch, br, bg, bb)
-			p.paintCellInk(dst, px, py, cell, o.Glass && cellBGChromaKey(br, bg, bb))
+			paintCellBackground(dst, px, py, cw, ch, cell.BR, cell.BG, cell.BB)
+			p.paintCellInk(dst, px, py, cell, o.Glass && cellBGChromaKey(cell.BR, cell.BG, cell.BB))
 		}
 	}
 	if o.CurVis && o.ShellCursor != 0 && o.CurY >= 0 && o.CurX >= 0 {
-		a := o.CurAlpha
-		if o.ShellCursorSteady {
-			a = 1
+		px, py := padX+o.CurX*cw, padY+o.CurY*ch-yShift
+		if len(o.Images) == 0 && yShift == 0 {
+			p.noteCursorUnder(dst, px, py, shellRight, cellPix{}, o.ShellCursor, o.Glass)
 		}
-		p.paintInputCaret(dst, padX+o.CurX*cw, padY+o.CurY*ch-yShift, o.ShellCursor, a)
+		p.paintCursorCell(dst, px, py, cellPix{}, o.ShellCursor, o.CurAlpha, o.ShellCursorSteady, o.Glass)
 	}
 	if o.ProgKind != 0 {
-		p.paintProgress(dst, padX, padY, shellRight-padX, o.ProgKind, o.ProgPct)
+		p.paintProgress(dst, padX, padY, shellRight-padX, o.ProgKind, o.ProgPct, o.Now)
 	}
 
 	// Scrollbar on the right edge of the shell band (not Charm — host paint).
@@ -354,20 +351,7 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		}
 	}
 
-	// Chrome strip — bar fill first so empty cells show theme bar, not void.
-	chromeH := 0
-	if len(o.Chrome) > 0 {
-		extra := o.TitleExtra
-		if extra < 0 {
-			extra = 0
-		}
-		chromeH = len(o.Chrome)*ch + extra
-		fillRectRGBA(dst, 0, 0, w, chromeH, chrome.BarR, chrome.BarG, chrome.BarB)
-		paintCellStrip(p, dst, o.Chrome[:1], padX, extra/2, true, false, false)
-		if len(o.Chrome) > 1 {
-			paintCellStrip(p, dst, o.Chrome[1:], padX, ch+extra, true, false, false)
-		}
-	}
+	p.paintChromeStrip(dst, o.Chrome, o.TitleExtra)
 
 	// Themed Warp input bar.
 	if o.ShowInput {
@@ -390,6 +374,26 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		}
 		paintCellStrip(p, dst, o.Overlay, 0, oy, false /* bar */, o.SolidPanel, o.SolidInterior)
 	}
+}
+
+// paintChromeStrip draws the tab strip at the top of dst and returns its
+// pixel height. Bar fill first so empty cells show theme bar, not void.
+func (p *softwarePainter) paintChromeStrip(dst *image.RGBA, cells [][]cellPix, extra int) int {
+	if len(cells) == 0 {
+		return 0
+	}
+	const padX = 4
+	ch := p.cellH
+	if extra < 0 {
+		extra = 0
+	}
+	chromeH := len(cells)*ch + extra
+	fillRectRGBA(dst, 0, 0, dst.Bounds().Dx(), chromeH, chrome.BarR, chrome.BarG, chrome.BarB)
+	paintCellStrip(p, dst, cells[:1], padX, extra/2, true, false, false)
+	if len(cells) > 1 {
+		paintCellStrip(p, dst, cells[1:], padX, ch+extra, true, false, false)
+	}
+	return chromeH
 }
 
 func (p *softwarePainter) paintInputBar(dst *image.RGBA, o paintOpts, shellBot, clientH int) {
@@ -762,7 +766,7 @@ func (p *softwarePainter) drawGlyph(dst *image.RGBA, px, py int, r rune, fr, fg,
 // paintPaneGrid draws a VT cell grid into a pane's content rect.
 // Does not stamp a solid black card — shell band / always-on rain already
 // filled the field (Windows blitGrid: default black BG leaves rain visible).
-func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64, curStyle int, curSteady bool, progKind, progPct int, glass bool) {
+func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g paneGeom, curX, curY int, curVis bool, curAlpha float64, curStyle int, curSteady bool, glass bool) {
 	if dst == nil || p == nil || g.w < 1 || g.h < 1 {
 		return
 	}
@@ -785,43 +789,91 @@ func (p *softwarePainter) paintPaneGrid(dst *image.RGBA, grid [][]cellPix, g pan
 			if px >= shellRight {
 				break
 			}
-			br, bg, bb := cell.BR, cell.BG, cell.BB
 			if curVis && curStyle == 0 && x == curX && y == curY {
-				a := curAlpha
-				if curSteady {
-					a = 1
-				}
-				if a < 0.15 {
-					a = 0.15
-				}
-				if a > 1 {
-					a = 1
-				}
-				br = blendByte(br, cell.FR, a)
-				bg = blendByte(bg, cell.FG, a)
-				bb = blendByte(bb, cell.FB, a)
+				p.noteCursorUnder(dst, px, py, shellRight, cell, 0, glass)
+				p.paintCursorCell(dst, px, py, cell, 0, curAlpha, curSteady, glass)
+				continue
 			}
-			paintCellBackground(dst, px, py, cw, ch, br, bg, bb)
-			p.paintCellInk(dst, px, py, cell, glass && cellBGChromaKey(br, bg, bb))
+			paintCellBackground(dst, px, py, cw, ch, cell.BR, cell.BG, cell.BB)
+			p.paintCellInk(dst, px, py, cell, glass && cellBGChromaKey(cell.BR, cell.BG, cell.BB))
 		}
 	}
 	if curVis && curStyle != 0 {
-		a := curAlpha
-		if curSteady {
-			a = 1
-		}
-		p.paintInputCaret(dst, int(g.x)+padX+curX*cw, int(g.y)+curY*ch, curStyle, a)
-	}
-	if progKind != 0 {
-		p.paintProgress(dst, int(g.x), int(g.y), int(g.w), progKind, progPct)
+		px, py := int(g.x)+padX+curX*cw, int(g.y)+curY*ch
+		p.noteCursorUnder(dst, px, py, shellRight, cellPix{}, curStyle, glass)
+		p.paintCursorCell(dst, px, py, cellPix{}, curStyle, curAlpha, curSteady, glass)
 	}
 }
 
-func (p *softwarePainter) paintProgress(dst *image.RGBA, x, y, w, kind, pct int) {
+// paintCursorCell draws the shell caret at a cell: block style re-tints
+// that cell's background toward its ink, other styles draw a bar or
+// underline over it.
+func (p *softwarePainter) paintCursorCell(dst *image.RGBA, px, py int, cell cellPix, style int, alpha float64, steady, glass bool) {
+	a := alpha
+	if steady {
+		a = 1
+	}
+	if style != 0 {
+		p.paintInputCaret(dst, px, py, style, a)
+		return
+	}
+	if a < 0.15 {
+		a = 0.15
+	}
+	if a > 1 {
+		a = 1
+	}
+	br := blendByte(cell.BR, cell.FR, a)
+	bg := blendByte(cell.BG, cell.FG, a)
+	bb := blendByte(cell.BB, cell.FB, a)
+	paintCellBackground(dst, px, py, p.cellW, p.cellH, br, bg, bb)
+	p.paintCellInk(dst, px, py, cell, glass && cellBGChromaKey(br, bg, bb))
+}
+
+// cursorUnder is the caret cell as the last full frame left it before the
+// caret was drawn. A pulse step restores those pixels and redraws only the
+// caret (paint_gate_darwin.go).
+type cursorUnder struct {
+	ok     bool
+	under  savedRect
+	cell   cellPix
+	px, py int
+	style  int
+	glass  bool
+}
+
+// noteCursorUnder saves the caret cell before it is drawn. A cell that
+// crosses right (scrollbar, neighbor pane) is not saved: a restore would
+// erase whatever paints there later.
+func (p *softwarePainter) noteCursorUnder(dst *image.RGBA, px, py, right int, cell cellPix, style int, glass bool) {
+	p.curUnder = cursorUnder{}
+	r := image.Rect(px, py, px+p.cellW, py+p.cellH)
+	if r.Max.X > right || !r.In(dst.Bounds()) {
+		return
+	}
+	p.curUnder = cursorUnder{ok: true, under: saveRect(dst, r), cell: cell, px: px, py: py, style: style, glass: glass}
+}
+
+// progressStep paces the indeterminate OSC 9;4;3 bar: the same slide speed
+// as one pixel per 12ms, in 12 jumps a second instead of one per vsync.
+const progressStep = time.Second / 12
+
+// progressBarH is the OSC 9;4 bar's height at the top of a pane.
+const progressBarH = 3
+
+// progressPhase is the indeterminate chunk's clock for now.
+func progressPhase(now time.Time) time.Time {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return now.Truncate(progressStep)
+}
+
+func (p *softwarePainter) paintProgress(dst *image.RGBA, x, y, w, kind, pct int, now time.Time) {
 	if p == nil || dst == nil || w < 2 || kind == 0 {
 		return
 	}
-	h := 3
+	h := progressBarH
 	r, g, b := byte(90), byte(160), byte(255)
 	switch kind {
 	case 2:
@@ -839,7 +891,7 @@ func (p *softwarePainter) paintProgress(dst *image.RGBA, x, y, w, kind, pct int)
 		if span < 1 {
 			span = 1
 		}
-		x += int(time.Now().UnixMilli()/12) % span
+		x += int(progressPhase(now).UnixMilli()/12) % span
 		w = chunk
 		pct = 100
 	case 4:

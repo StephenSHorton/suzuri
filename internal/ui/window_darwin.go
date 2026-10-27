@@ -167,6 +167,7 @@ type macUI struct {
 
 	blinkStart    time.Time
 	stripDots     string // last dots frame painted into a background tab
+	spinBusy      bool   // a page was busy last tick (going idle is a clock, not an event)
 	alive         atomic.Bool
 	ready         atomic.Bool
 	lastBackspace time.Time
@@ -199,6 +200,8 @@ type macUI struct {
 
 	// Key repeat for held arrows / backspace in the Warp bar and notes.
 	keyRep *keyRepeat
+	// tickKeys holds program-bound Enter until this tick's runes are sent.
+	tickKeys tickKeys
 
 	// Chrome paint cache.
 	chromeDirty  bool
@@ -210,6 +213,19 @@ type macUI struct {
 	// inputOnlyDirty: Warp bar text/caret changed but shell cells did not.
 	// When shell matrix rain is off, Draw can re-paint only the bar(s).
 	inputOnlyDirty bool
+	// Frame gate (paint_gate_darwin.go): Draw re-blits the last texture
+	// unless a paint was requested, something animates, or the caret steps.
+	paintPending             bool
+	lastPaintAt              time.Time
+	paintCaretStep           int
+	paintMouseX, paintMouseY int
+	paintFocused             bool
+	paintKeys                []ebiten.Key
+	paintChars               []rune
+	paintProgAt              time.Time   // progressPhase of the last drawn progress chunk
+	progUnders               []progUnder // pixels under each progress bar, last full frame
+	// jobOffscreen: the running job only touched panes off the active page.
+	jobOffscreen bool
 	// progOwns is the last programOwnsKeys result, so a foreground-group
 	// change resizes the shell once instead of every frame.
 	progOwns bool
@@ -445,12 +461,14 @@ func (u *macUI) markChromeDirty() {
 	u.chromeDirty = true
 	u.overlayDirty = true
 	u.inputOnlyDirty = false
+	u.requestPaint()
 }
 
 // markShellDirty forces a full shell repaint (PTY output, scroll, resize).
 func (u *macUI) markShellDirty() {
 	if u != nil {
 		u.inputOnlyDirty = false
+		u.requestPaint()
 	}
 }
 
@@ -459,6 +477,7 @@ func (u *macUI) markInputDirty() {
 	if u == nil {
 		return
 	}
+	u.requestPaint()
 	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
 		u.inputOnlyDirty = false
 		return
@@ -697,10 +716,9 @@ func (u *macUI) Update() error {
 	for {
 		select {
 		case fn := <-u.jobs:
-			if fn != nil {
-				fn()
-			}
+			u.runJob(fn)
 		case job := <-u.mcpJobs:
+			u.requestPaint()
 			if job.notes {
 				res := runNotesOnChrome(&u.chrome, job.notesReq)
 				if u.chrome.NotesOpen {
@@ -766,8 +784,9 @@ drained:
 		}
 	}
 	for _, t := range u.allPanes() {
-		if t != nil {
+		if t != nil && t.resizePending {
 			t.flushPendingResize()
+			u.requestPaint()
 		}
 	}
 	if t := u.activeTab(); t != nil {
@@ -784,8 +803,10 @@ drained:
 	u.pasteMonitorOnce.Do(installPasteMonitor)
 	// Fresh each tick: a latch no paste path consumed this tick is dropped.
 	u.nativePasteChord = takeNativePasteChord()
+	u.noteInputForPaint()
 	u.handleKeys()
 	u.handleTextInput()
+	u.tickKeys.flush(u.sendKey)
 	// File drops: only consume when Send-file prompt is open (see AcceptsFileDrop).
 	u.pollTransferFileDrop()
 	u.refreshBackgroundTabSpinner()
@@ -804,7 +825,9 @@ func (u *macUI) refreshBackgroundTabSpinner() {
 		return
 	}
 	u.stripDots = frame
-	if !u.anyPageBusy() && !u.chromeShowsBusy() {
+	busy, wasBusy := u.anyPageBusy(), u.spinBusy
+	u.spinBusy = busy
+	if !busy && !wasBusy && !u.chromeShowsBusy() {
 		return
 	}
 	u.syncChrome()
@@ -930,6 +953,7 @@ func (u *macUI) applyClientSize(w, h int32) {
 		return
 	}
 	u.width, u.height = w, h
+	u.requestPaint()
 	cw, ch := u.metricW, u.metricH
 	if cw < 1 {
 		cw = cellW
@@ -1080,11 +1104,17 @@ func (u *macUI) drainAndParse(tabID int) {
 			}
 		},
 	})
+	// A pane on another page (or hidden by zoom) can only change the strip:
+	// its busy mark or its page's title. Don't re-raster the visible page.
+	onScreen := u.paneOnScreen(t)
+	if res.Action == ptyNone || !onScreen {
+		u.jobOffscreen = true
+	}
 	if res.Action == ptyNone {
 		return
 	}
 	if res.Action == ptyQuiet {
-		if res.Dirty {
+		if res.Dirty && onScreen {
 			u.markShellDirty()
 		}
 		if res.More {
@@ -1097,7 +1127,11 @@ func (u *macUI) drainAndParse(tabID int) {
 	}
 	u.tryFlushCmdQueue(t)
 	u.publishBridgeSnapshot()
-	u.markShellDirty()
+	if onScreen {
+		u.markShellDirty()
+	} else {
+		u.syncChrome()
+	}
 	if res.More {
 		t.postBytes(u)
 	}
@@ -1195,10 +1229,7 @@ func (u *macUI) submitOnUIThread(tabID int, line string, done chan error) {
 	if isClearCommand(payload) {
 		t.sb.pinHere()
 	}
-	if strings.Contains(payload, "\n") {
-		payload = strings.ReplaceAll(payload, "\n", "\r")
-	}
-	t.sendKey([]byte(payload + "\r"))
+	t.sendSubmit(payload)
 	t.sb.stickBottom()
 	u.publishBridgeSnapshot()
 }
@@ -1212,6 +1243,7 @@ func (u *macUI) drainAI() {
 		if !ok {
 			return
 		}
+		u.requestPaint()
 		applyAIJob(aiSurface{
 			pages:  &u.pages,
 			tabs:   u.tabs,
@@ -2496,6 +2528,13 @@ func (u *macUI) handleKeys() {
 				continue
 			}
 			if b := ptyKeyFromEbiten(tab.term, &tab.kitty, key, realCtrl, shift, opt, super); len(b) > 0 {
+				// Enter waits for this tick's typed text (handleTextInput
+				// runs after us). A slow frame can carry "abc" and Enter
+				// together; sending Enter first submits a short line.
+				if key == ebiten.KeyEnter {
+					u.tickKeys.hold(b)
+					continue
+				}
 				// Prefer focused-pane write when splits (sendKey uses active).
 				if t := u.activeTab(); t != nil {
 					t.sendKey(b)
@@ -2849,9 +2888,12 @@ var specialKeys = []ebiten.Key{
 	ebiten.KeyF7, ebiten.KeyF8, ebiten.KeyF9, ebiten.KeyF10, ebiten.KeyF11, ebiten.KeyF12,
 }
 
+// tickInputChars is this tick's typed runes (tests stub it).
+var tickInputChars = ebiten.AppendInputChars
+
 func (u *macUI) handleTextInput() {
 	// Printable runes from the OS IME / keyboard.
-	chars := ebiten.AppendInputChars(nil)
+	chars := tickInputChars(nil)
 	if len(chars) == 0 {
 		return
 	}
@@ -3165,6 +3207,17 @@ func (u *macUI) handleMouse() {
 		u.quit = true
 		return
 	}
+	mx, my := ebiten.CursorPosition()
+	justPressed := inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft)
+	// Drags follow held, not ebiten.IsMouseButtonPressed (see leftHeld), and
+	// end in the deferred release so no return below, the press branch
+	// included, can skip it.
+	held := leftHeld(inpututil.MouseButtonPressDuration(ebiten.MouseButtonLeft))
+	defer func() {
+		if !held {
+			u.releaseLeftGestures(mx, my)
+		}
+	}()
 	_, wheelY := ebiten.Wheel()
 	if wheelY != 0 {
 		// Workspace owns the wheel while open — do not scroll the shell/Grok under it.
@@ -3221,17 +3274,9 @@ func (u *macUI) handleMouse() {
 		}
 	}
 
-	mx, my := ebiten.CursorPosition()
-	pressed := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
-	justPressed := inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft)
-	if u.frameDrag.on {
-		if pressed && !justPressed {
-			u.dragFrame()
-		} else if !pressed {
-			u.frameDrag.on = false
-		}
+	if u.frameDrag.on && held && !justPressed {
+		u.dragFrame()
 	}
-	justReleased := inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonLeft)
 	rightUp := inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonRight)
 
 	// Right-click paste (Windows muscle memory). Never fire under chrome overlays
@@ -3253,7 +3298,7 @@ func (u *macUI) handleMouse() {
 		if t := u.activeTab(); t != nil && t.altScreen() {
 			// A title-bar press/drag is the host's; don't report it to the TUI.
 			if !u.paneDrag.engaged() {
-				left := pressed || u.altMouseDown
+				left := held || u.altMouseDown
 				u.maybeSendAltMouseMotion(t, mx, my, left)
 			}
 		} else {
@@ -3471,38 +3516,31 @@ func (u *macUI) handleMouse() {
 		return
 	}
 
-	// Pane title-bar drag: track the drop target; drop on release.
+	// Releases (pane drop, sash, notes, alt-screen, selection) happen in
+	// releaseLeftGestures, deferred above.
+
+	// Pane title-bar drag: track the drop target.
 	if u.paneDrag.engaged() {
-		if pressed && !justReleased {
+		if held {
 			if u.paneDrag.move(u.activePage(), u.computeActiveLayout(), u.metricW, u.metricH, int32(mx), int32(my)) {
 				u.markShellDirty()
 			}
-			return
-		}
-		wasActive := u.paneDrag.active
-		if id, target, edge, ok := u.paneDrag.release(); ok {
-			hostDropPane(u, id, target, edge)
-		} else if wasActive {
-			u.markShellDirty() // clear the highlight
 		}
 		return
 	}
 
 	// Sash drag.
-	if pressed && u.sashDrag != nil {
-		applySashDrag(*u.sashDrag, int32(mx), int32(my))
-		u.computeActiveLayout()
-		u.applyClientSize(u.width, u.height)
-		return
-	}
-	if justReleased && u.sashDrag != nil {
-		u.sashDrag = nil
-		u.applyClientSize(u.width, u.height)
+	if u.sashDrag != nil {
+		if held {
+			applySashDrag(*u.sashDrag, int32(mx), int32(my))
+			u.computeActiveLayout()
+			u.applyClientSize(u.width, u.height)
+		}
 		return
 	}
 
 	// Notes drag-select.
-	if pressed && u.notesDragging && u.chrome.NotesOpen {
+	if held && u.notesDragging && u.chrome.NotesOpen {
 		if cellX, cellY, ok := u.overlayCellAt(int32(mx), int32(my)); ok {
 			r := u.chrome.UpdateChrome(chrome.NotesDragMsg{
 				CellX: cellX, CellY: cellY, Cols: u.cols,
@@ -3512,29 +3550,14 @@ func (u *macUI) handleMouse() {
 			u.overlayCells = nil
 		}
 	}
-	if justReleased && u.notesDragging {
-		u.notesDragging = false
-		u.persistNotesIfDirty()
-	}
-	// Alt-screen mouse release (SGR …m).
-	if justReleased && u.altMouseDown {
-		u.altMouseDown = false
-		if t := u.activeTab(); t != nil && t.altScreen() {
-			u.sendAltMouse(t, mx, my, false)
-		}
-	}
 
-	if pressed && u.selecting {
+	if held && u.selecting {
 		tab := u.activeTab()
 		if tab != nil {
 			x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
 			absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
 			tab.sel.x1, tab.sel.y1 = x, absY
 		}
-	}
-	if justReleased && u.selecting {
-		u.selecting = false
-		u.mouseDown = false
 	}
 }
 
@@ -4094,27 +4117,30 @@ func (u *macUI) drainPendingPaste() {
 
 // --- paint ---
 
-// tryPaintInputOnly re-paints only Warp bars over the previous frame when the
-// shell grid is unchanged (notes-style scoping). Returns true if a full paint
-// was skipped. Stays in this mode until markShellDirty / markChromeDirty.
-func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool {
-	if u == nil || !u.inputOnlyDirty || u.painter == nil || u.fb == nil || u.tex == nil {
-		return false
+// paintInputOnlyFB re-paints only Warp bars over the previous frame when the
+// shell grid is unchanged (notes-style scoping), and returns the bar rows.
+// ok is false when a full paint is needed. Stays in this mode until
+// markShellDirty / markChromeDirty.
+func (u *macUI) paintInputOnlyFB(tab *tab, w, h int) (rows []rowSpan, ok bool) {
+	if u == nil || !u.inputOnlyDirty || u.painter == nil || u.fb == nil {
+		return nil, false
 	}
+	// overlayDirty means the last frame may still show a card that just
+	// shut; ensureOverlayCells clears it once a full frame has dropped it.
 	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
-		return false
+		return nil, false
 	}
 	// Intro / dim modals need a full composite. Shell rain freezes while we
 	// stay in bar-only mode (same tradeoff as notes overlay scoping) — worth
 	// it so typing doesn't re-rasterize a huge idle grid every keystroke.
 	if u.matrixIntroActive() || u.dimShellModal() {
-		return false
+		return nil, false
 	}
 	if tab == nil || tab.altScreen() {
-		return false
+		return nil, false
 	}
 	if u.fb.Bounds().Dx() != w || u.fb.Bounds().Dy() != h {
-		return false
+		return nil, false
 	}
 	layouts := u.computeActiveLayout()
 	if len(layouts) == 0 {
@@ -4126,12 +4152,13 @@ func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool
 	}
 	// Bar hidden (foreground program): a bar-only frame would keep the old strip.
 	if u.inputBarPixelHeight() < 1 {
-		return false
+		return nil, false
 	}
 	// Re-draw each leaf bar (caret alpha updates here too).
 	for _, g := range layouts {
 		if g.barH > 0 {
 			u.paintPaneInputIntoFB(g)
+			rows = append(rows, rowSpan{int(g.barY), int(g.barY + g.barH)})
 		}
 	}
 	// Single-pane fallback if layout omitted barH.
@@ -4148,11 +4175,10 @@ func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool
 		g.barCols = u.inputContentCols()
 		if g.barH > 0 {
 			u.paintPaneInputIntoFB(g)
+			rows = append(rows, rowSpan{int(g.barY), int(g.barY + g.barH)})
 		}
 	}
-	u.tex.WritePixels(u.fb.Pix)
-	presentFB(screen, u.tex)
-	return true
+	return rows, true
 }
 
 func (u *macUI) paintTo(screen *ebiten.Image) {
@@ -4169,12 +4195,36 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		u.fb = image.NewRGBA(image.Rect(0, 0, w, h))
 		u.tex = ebiten.NewImage(w, h)
 		u.inputOnlyDirty = false
+		u.requestPaint()
 	}
+	full, rows := u.renderFrame(tab, w, h, time.Now())
+	if full {
+		u.tex.WritePixels(u.fb.Pix)
+	} else {
+		u.uploadRows(rows)
+	}
+	presentFB(screen, u.tex)
+}
+
+// renderFrame paints this vsync into u.fb. full means the whole buffer
+// changed; otherwise only rows changed (none: re-present the last texture).
+// It touches no ebiten image, so tests can drive it with a real painter.
+func (u *macUI) renderFrame(tab *tab, w, h int, now time.Time) (full bool, rows []rowSpan) {
+	need := u.frameNeed(now)
+	if need == frameSkip {
+		return false, nil
+	}
+	if need != frameFull {
+		if rows, ok := u.paintPartial(tab, need, now); ok {
+			return false, rows
+		}
+	}
+	u.notePainted(now)
 
 	// Notes-style scoping for the Warp bar: when only bar text/caret changed
 	// and shell matrix rain is not animating, re-paint bars over the last frame.
-	if u.tryPaintInputOnly(screen, tab, w, h) {
-		return
+	if rows, ok := u.paintInputOnlyFB(tab, w, h); ok {
+		return false, rows
 	}
 
 	u.ensureChromeCells()
@@ -4217,7 +4267,6 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	var shellRain []rainCell
 	crtIntensity := 0.0
 	introStyle := config.Normalize(u.cfg).Intro
-	now := time.Now()
 	cwPx, chPx := cw, ch
 	col := u.themeAmbientColors()
 	if u.chrome.SettingsOpen {
@@ -4357,7 +4406,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if u.hoverLinkOK {
 		applyLinkHoverTint(focusGrid, u.hoverLink)
 	}
-	curAlpha := u.caretAlpha()
+	curAlpha := u.caretAlphaAt(now.Sub(u.blinkStart))
 
 	// Scrollbar for focused pane only (hide on alt-screen / overlays).
 	liveRows := liveExtent(tab.term)
@@ -4417,8 +4466,14 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	shellCur, shellSteady := tab.modes.shellCursor(int(u.cfg.Cursor))
 	opts.ShellCursor = shellCur
 	opts.ShellCursorSteady = shellSteady
-	opts.ProgKind = tab.modes.progress.kind
-	opts.ProgPct = tab.modes.progress.pct
+	// Progress bars paint last (paintProgressBars) so a slide step can
+	// redraw them alone. A single pane under a floating card keeps the old
+	// order: the card must cover the bar.
+	if len(layouts) <= 1 && len(overlay) > 0 {
+		opts.ProgKind = tab.modes.progress.kind
+		opts.ProgPct = tab.modes.progress.pct
+		opts.Now = now
+	}
 	opts.InputPrompt = inOpts.prompt
 	opts.InputLines = inOpts.lines
 	opts.InputCaretRow = inOpts.caretRow
@@ -4442,6 +4497,10 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 
 	u.painter.paintFrame(u.fb, opts)
+	if len(layouts) > 1 {
+		// paintFrame has no shell grid here; the focused leaf saves the caret.
+		u.painter.curUnder = cursorUnder{}
+	}
 	u.paintMacLights(u.fb)
 	u.paintBrandMark(u.fb)
 	u.paintCaffeineCup(u.fb)
@@ -4498,6 +4557,11 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	} else {
 		u.zoomBadge = zoomBadgeGeom{}
 	}
+	u.progUnders = u.progUnders[:0]
+	if !dimModal && opts.ProgKind == 0 {
+		u.paintProgressBars(layouts, padY, now)
+	}
+	u.keepCursorUnder(layouts, tab)
 
 	// Re-paint overlay on top of pane content (paintFrame already drew it once
 	// before multi-pane grids; draw again so cards float above shells).
@@ -4515,9 +4579,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if u.modalImage != nil {
 		u.paintImageModal(u.fb)
 	}
-
-	u.tex.WritePixels(u.fb.Pix)
-	presentFB(screen, u.tex)
+	return true, nil
 }
 
 // paintLogoPreview draws the center 硯 under the settings card while the
@@ -4718,7 +4780,7 @@ func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
 	}
 	curX, curY, curVis := t.gridCursor(viewRows, g.focused)
 	shellCur, shellSteady := t.modes.shellCursor(int(u.cfg.Cursor))
-	u.painter.paintPaneGrid(u.fb, grid, g, curX, curY, curVis, curAlpha, shellCur, shellSteady, t.modes.progress.kind, t.modes.progress.pct, u.shellGlass())
+	u.painter.paintPaneGrid(u.fb, grid, g, curX, curY, curVis, curAlpha, shellCur, shellSteady, u.shellGlass())
 	if !t.altScreen() {
 		vis := t.sb.visibleImages(t.term, viewRows)
 		u.painter.paintPaneImages(u.fb, vis, g)
@@ -4795,10 +4857,16 @@ func (u *macUI) inputBarPaint() inputBarPaint {
 }
 
 func (u *macUI) caretAlpha() float64 {
-	// Soft pulse while focused; ebiten windows are typically focused when receiving ticks.
-	elapsed := time.Since(u.blinkStart).Seconds()
+	return u.caretAlphaAt(time.Since(u.blinkStart))
+}
+
+// caretAlphaAt is the soft pulse, held flat within each caretStep so the
+// frame gate only repaints when the caret actually changes.
+func (u *macUI) caretAlphaAt(elapsed time.Duration) float64 {
+	step := cursorBlinkPeriod / caretSteps
+	t := (time.Duration(caretStep(elapsed)) * step).Seconds()
 	period := cursorBlinkPeriod.Seconds()
-	return 0.35 + 0.65*(0.5+0.5*math.Sin(2*math.Pi*elapsed/period))
+	return 0.35 + 0.65*(0.5+0.5*math.Sin(2*math.Pi*t/period))
 }
 
 func (u *macUI) ensureChromeCells() {
@@ -4813,6 +4881,9 @@ func (u *macUI) ensureChromeCells() {
 
 func (u *macUI) ensureOverlayCells() [][]cellPix {
 	if !u.chrome.OverlayOpen() {
+		// Nothing to render; the next card to open renders fresh.
+		u.overlayDirty = false
+		u.overlayCells = nil
 		return nil
 	}
 	if !u.overlayDirty && u.overlayCells != nil {

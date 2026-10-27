@@ -41,12 +41,24 @@ func sendBarPayload(t *tab, payload string) {
 	if t == nil {
 		return
 	}
-	if strings.Contains(payload, "\n") {
-		payload = strings.ReplaceAll(payload, "\n", "\r")
-	}
-	t.sendKey([]byte(payload + "\r"))
+	t.sendSubmit(payload)
 	t.markBarCommandSent()
 	t.sb.stickBottom()
+}
+
+// sendSubmit writes a submitted line (Warp bar, MCP) to the PTY.
+// The shell gets line + CR in one write. A program that owns the terminal
+// (alt screen or foreground child) gets the text, a writer gap, then Enter;
+// the text is bracketed only when that program has DECSET 2004 on.
+func (t *tab) sendSubmit(payload string) {
+	program := t.altScreen() || t.childOwnsTTY()
+	bracket := program && t.modes.bracketPaste
+	for i, b := range submitWrites(payload, program, bracket) {
+		if i > 0 {
+			t.sendGap()
+		}
+		t.sendKey(b)
+	}
 }
 
 // submitBarLine is the shared Warp-bar Enter path (macOS + Windows).
