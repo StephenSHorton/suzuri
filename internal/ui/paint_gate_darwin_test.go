@@ -119,12 +119,12 @@ func TestStripSpinnerRepaintsOnlyTheStrip(t *testing.T) {
 	if got := u.frameNeed(t0.Add(paintHeartbeat)); got != frameFull {
 		t.Fatalf("heartbeat during spinner: frameNeed=%d, want frameFull", got)
 	}
-	// Split pages also spin pane-title marks inside the shell.
+	// Split pages also spin pane-title marks; those are row-scoped too.
 	pg := newPage(u.tabs[0])
 	pg.splitFocused(splitVert, &tab{id: 2, sb: newScrollback()})
 	u.pages = []*page{pg}
-	if got := u.frameNeed(t0.Add(vsync)); got != frameFull {
-		t.Fatalf("spinner tick on a split page: frameNeed=%d, want frameFull", got)
+	if got := u.frameNeed(t0.Add(vsync)); got != frameChrome {
+		t.Fatalf("spinner tick on a split page: frameNeed=%d, want frameChrome", got)
 	}
 }
 

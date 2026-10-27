@@ -167,6 +167,7 @@ type macUI struct {
 
 	blinkStart    time.Time
 	stripDots     string // last dots frame painted into a background tab
+	spinBusy      bool   // a page was busy last tick (going idle is a clock, not an event)
 	alive         atomic.Bool
 	ready         atomic.Bool
 	lastBackspace time.Time
@@ -221,6 +222,10 @@ type macUI struct {
 	paintFocused             bool
 	paintKeys                []ebiten.Key
 	paintChars               []rune
+	paintProgAt              time.Time   // progressPhase of the last drawn progress chunk
+	progUnders               []progUnder // pixels under each progress bar, last full frame
+	// jobOffscreen: the running job only touched panes off the active page.
+	jobOffscreen bool
 	// progOwns is the last programOwnsKeys result, so a foreground-group
 	// change resizes the shell once instead of every frame.
 	progOwns bool
@@ -473,7 +478,7 @@ func (u *macUI) markInputDirty() {
 		return
 	}
 	u.requestPaint()
-	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
+	if u.chromeDirty || u.chrome.OverlayOpen() {
 		u.inputOnlyDirty = false
 		return
 	}
@@ -711,11 +716,7 @@ func (u *macUI) Update() error {
 	for {
 		select {
 		case fn := <-u.jobs:
-			// PTY drains, toasts and posted UI work all arrive here.
-			u.requestPaint()
-			if fn != nil {
-				fn()
-			}
+			u.runJob(fn)
 		case job := <-u.mcpJobs:
 			u.requestPaint()
 			if job.notes {
@@ -824,7 +825,9 @@ func (u *macUI) refreshBackgroundTabSpinner() {
 		return
 	}
 	u.stripDots = frame
-	if !u.anyPageBusy() && !u.chromeShowsBusy() {
+	busy, wasBusy := u.anyPageBusy(), u.spinBusy
+	u.spinBusy = busy
+	if !busy && !wasBusy && !u.chromeShowsBusy() {
 		return
 	}
 	u.syncChrome()
@@ -1101,11 +1104,17 @@ func (u *macUI) drainAndParse(tabID int) {
 			}
 		},
 	})
+	// A pane on another page (or hidden by zoom) can only change the strip:
+	// its busy mark or its page's title. Don't re-raster the visible page.
+	onScreen := u.paneOnScreen(t)
+	if res.Action == ptyNone || !onScreen {
+		u.jobOffscreen = true
+	}
 	if res.Action == ptyNone {
 		return
 	}
 	if res.Action == ptyQuiet {
-		if res.Dirty {
+		if res.Dirty && onScreen {
 			u.markShellDirty()
 		}
 		if res.More {
@@ -1118,7 +1127,11 @@ func (u *macUI) drainAndParse(tabID int) {
 	}
 	u.tryFlushCmdQueue(t)
 	u.publishBridgeSnapshot()
-	u.markShellDirty()
+	if onScreen {
+		u.markShellDirty()
+	} else {
+		u.syncChrome()
+	}
 	if res.More {
 		t.postBytes(u)
 	}
@@ -4104,27 +4117,30 @@ func (u *macUI) drainPendingPaste() {
 
 // --- paint ---
 
-// tryPaintInputOnly re-paints only Warp bars over the previous frame when the
-// shell grid is unchanged (notes-style scoping). Returns true if a full paint
-// was skipped. Stays in this mode until markShellDirty / markChromeDirty.
-func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool {
-	if u == nil || !u.inputOnlyDirty || u.painter == nil || u.fb == nil || u.tex == nil {
-		return false
+// paintInputOnlyFB re-paints only Warp bars over the previous frame when the
+// shell grid is unchanged (notes-style scoping), and returns the bar rows.
+// ok is false when a full paint is needed. Stays in this mode until
+// markShellDirty / markChromeDirty.
+func (u *macUI) paintInputOnlyFB(tab *tab, w, h int) (rows []rowSpan, ok bool) {
+	if u == nil || !u.inputOnlyDirty || u.painter == nil || u.fb == nil {
+		return nil, false
 	}
-	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
-		return false
+	// overlayDirty alone is stale once the card is shut (ensureOverlayCells
+	// only clears it while one is open), so it must not block the bar path.
+	if u.chromeDirty || u.chrome.OverlayOpen() {
+		return nil, false
 	}
 	// Intro / dim modals need a full composite. Shell rain freezes while we
 	// stay in bar-only mode (same tradeoff as notes overlay scoping) — worth
 	// it so typing doesn't re-rasterize a huge idle grid every keystroke.
 	if u.matrixIntroActive() || u.dimShellModal() {
-		return false
+		return nil, false
 	}
 	if tab == nil || tab.altScreen() {
-		return false
+		return nil, false
 	}
 	if u.fb.Bounds().Dx() != w || u.fb.Bounds().Dy() != h {
-		return false
+		return nil, false
 	}
 	layouts := u.computeActiveLayout()
 	if len(layouts) == 0 {
@@ -4136,12 +4152,13 @@ func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool
 	}
 	// Bar hidden (foreground program): a bar-only frame would keep the old strip.
 	if u.inputBarPixelHeight() < 1 {
-		return false
+		return nil, false
 	}
 	// Re-draw each leaf bar (caret alpha updates here too).
 	for _, g := range layouts {
 		if g.barH > 0 {
 			u.paintPaneInputIntoFB(g)
+			rows = append(rows, rowSpan{int(g.barY), int(g.barY + g.barH)})
 		}
 	}
 	// Single-pane fallback if layout omitted barH.
@@ -4158,11 +4175,10 @@ func (u *macUI) tryPaintInputOnly(screen *ebiten.Image, tab *tab, w, h int) bool
 		g.barCols = u.inputContentCols()
 		if g.barH > 0 {
 			u.paintPaneInputIntoFB(g)
+			rows = append(rows, rowSpan{int(g.barY), int(g.barY + g.barH)})
 		}
 	}
-	u.tex.WritePixels(u.fb.Pix)
-	presentFB(screen, u.tex)
-	return true
+	return rows, true
 }
 
 func (u *macUI) paintTo(screen *ebiten.Image) {
@@ -4181,36 +4197,34 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		u.inputOnlyDirty = false
 		u.requestPaint()
 	}
-	// Nothing changed since the last frame: re-present it instead of
-	// re-rastering and re-uploading the whole window.
-	now := time.Now()
-	switch u.frameNeed(now) {
-	case frameSkip:
-		presentFB(screen, u.tex)
-		return
-	case frameChrome:
-		if u.tryPaintChromeOnly(screen, w, h) {
-			return
-		}
-	case frameCaret:
-		// Warp bar caret pulse: repaint the bar(s), not the grid.
-		if u.inputBarPixelHeight() > 0 {
-			sticky := u.inputOnlyDirty
-			u.inputOnlyDirty = true
-			ok := u.tryPaintInputOnly(screen, tab, w, h)
-			u.inputOnlyDirty = sticky
-			if ok {
-				u.paintCaretStep = caretStep(now.Sub(u.blinkStart))
-				return
-			}
+	full, rows := u.renderFrame(tab, w, h, time.Now())
+	if full {
+		u.tex.WritePixels(u.fb.Pix)
+	} else {
+		u.uploadRows(rows)
+	}
+	presentFB(screen, u.tex)
+}
+
+// renderFrame paints this vsync into u.fb. full means the whole buffer
+// changed; otherwise only rows changed (none: re-present the last texture).
+// It touches no ebiten image, so tests can drive it with a real painter.
+func (u *macUI) renderFrame(tab *tab, w, h int, now time.Time) (full bool, rows []rowSpan) {
+	need := u.frameNeed(now)
+	if need == frameSkip {
+		return false, nil
+	}
+	if need != frameFull {
+		if rows, ok := u.paintPartial(tab, need, now); ok {
+			return false, rows
 		}
 	}
 	u.notePainted(now)
 
 	// Notes-style scoping for the Warp bar: when only bar text/caret changed
 	// and shell matrix rain is not animating, re-paint bars over the last frame.
-	if u.tryPaintInputOnly(screen, tab, w, h) {
-		return
+	if rows, ok := u.paintInputOnlyFB(tab, w, h); ok {
+		return false, rows
 	}
 
 	u.ensureChromeCells()
@@ -4392,7 +4406,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if u.hoverLinkOK {
 		applyLinkHoverTint(focusGrid, u.hoverLink)
 	}
-	curAlpha := u.caretAlpha()
+	curAlpha := u.caretAlphaAt(now.Sub(u.blinkStart))
 
 	// Scrollbar for focused pane only (hide on alt-screen / overlays).
 	liveRows := liveExtent(tab.term)
@@ -4452,8 +4466,14 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	shellCur, shellSteady := tab.modes.shellCursor(int(u.cfg.Cursor))
 	opts.ShellCursor = shellCur
 	opts.ShellCursorSteady = shellSteady
-	opts.ProgKind = tab.modes.progress.kind
-	opts.ProgPct = tab.modes.progress.pct
+	// Progress bars paint last (paintProgressBars) so a slide step can
+	// redraw them alone. A single pane under a floating card keeps the old
+	// order: the card must cover the bar.
+	if len(layouts) <= 1 && len(overlay) > 0 {
+		opts.ProgKind = tab.modes.progress.kind
+		opts.ProgPct = tab.modes.progress.pct
+		opts.Now = now
+	}
 	opts.InputPrompt = inOpts.prompt
 	opts.InputLines = inOpts.lines
 	opts.InputCaretRow = inOpts.caretRow
@@ -4477,6 +4497,10 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	}
 
 	u.painter.paintFrame(u.fb, opts)
+	if len(layouts) > 1 {
+		// paintFrame has no shell grid here; the focused leaf saves the caret.
+		u.painter.curUnder = cursorUnder{}
+	}
 	u.paintMacLights(u.fb)
 	u.paintBrandMark(u.fb)
 	u.paintCaffeineCup(u.fb)
@@ -4533,6 +4557,11 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	} else {
 		u.zoomBadge = zoomBadgeGeom{}
 	}
+	u.progUnders = u.progUnders[:0]
+	if !dimModal && opts.ProgKind == 0 {
+		u.paintProgressBars(layouts, padY, now)
+	}
+	u.keepCursorUnder(layouts, tab)
 
 	// Re-paint overlay on top of pane content (paintFrame already drew it once
 	// before multi-pane grids; draw again so cards float above shells).
@@ -4550,9 +4579,7 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	if u.modalImage != nil {
 		u.paintImageModal(u.fb)
 	}
-
-	u.tex.WritePixels(u.fb.Pix)
-	presentFB(screen, u.tex)
+	return true, nil
 }
 
 // paintLogoPreview draws the center 硯 under the settings card while the
@@ -4753,7 +4780,7 @@ func (u *macUI) paintPaneIntoFB(g paneGeom, curAlpha float64) {
 	}
 	curX, curY, curVis := t.gridCursor(viewRows, g.focused)
 	shellCur, shellSteady := t.modes.shellCursor(int(u.cfg.Cursor))
-	u.painter.paintPaneGrid(u.fb, grid, g, curX, curY, curVis, curAlpha, shellCur, shellSteady, t.modes.progress.kind, t.modes.progress.pct, u.shellGlass())
+	u.painter.paintPaneGrid(u.fb, grid, g, curX, curY, curVis, curAlpha, shellCur, shellSteady, u.shellGlass())
 	if !t.altScreen() {
 		vis := t.sb.visibleImages(t.term, viewRows)
 		u.painter.paintPaneImages(u.fb, vis, g)
@@ -4854,6 +4881,9 @@ func (u *macUI) ensureChromeCells() {
 
 func (u *macUI) ensureOverlayCells() [][]cellPix {
 	if !u.chrome.OverlayOpen() {
+		// Nothing to render; the next card to open renders fresh.
+		u.overlayDirty = false
+		u.overlayCells = nil
 		return nil
 	}
 	if !u.overlayDirty && u.overlayCells != nil {
