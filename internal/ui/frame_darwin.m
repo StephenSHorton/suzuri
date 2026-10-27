@@ -537,8 +537,6 @@ int suzuri_in_fullscreen(void) { return atomic_load(&gInFullscreen); }
 
 int suzuri_take_close(void) { return atomic_exchange(&gRequestClose, 0); }
 
-int suzuri_left_mouse_down(void) { return ([NSEvent pressedMouseButtons] & 1) ? 1 : 0; }
-
 void suzuri_screen_cursor(int *x, int *y) {
 	NSPoint p = [NSEvent mouseLocation];
 	NSArray<NSScreen *> *screens = [NSScreen screens];

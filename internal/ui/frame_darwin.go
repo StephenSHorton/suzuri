@@ -14,7 +14,6 @@ void suzuri_toggle_fullscreen_main(void);
 int suzuri_hover_light(void);
 int suzuri_in_fullscreen(void);
 int suzuri_take_close(void);
-int suzuri_left_mouse_down(void);
 */
 import "C"
 
@@ -53,10 +52,6 @@ func hoveredTrafficLight() int { return int(C.suzuri_hover_light()) }
 func frameInFullscreen() bool { return C.suzuri_in_fullscreen() != 0 }
 
 func takeFrameClose() bool { return C.suzuri_take_close() != 0 }
-
-// nativeLeftDown is the window server's left-button state, which a mouse-up
-// AppKit never handed to the GLFW view cannot leave stuck.
-func nativeLeftDown() bool { return C.suzuri_left_mouse_down() != 0 }
 
 func screenCursor() (x, y int) {
 	var sx, sy C.int

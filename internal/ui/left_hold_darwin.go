@@ -11,12 +11,8 @@ package ui
 // handleMouse sees justPressed, justReleased and pressed all at once.
 // pressDur (inpututil.MouseButtonPressDuration) is 0 once a release follows
 // the last press, and stays >0 for a release-then-press double click.
-//
-// nativeDown is the window server's state. ebiten's state is built only from
-// the mouseDown/mouseUp the GLFW view receives, so a mouse-up that never
-// reached it would otherwise keep the button "pressed" until the next click.
-func leftHeld(pressDur int, nativeDown bool) bool {
-	return pressDur > 0 && nativeDown
+func leftHeld(pressDur int) bool {
+	return pressDur > 0
 }
 
 // releaseLeftGestures ends everything a held left button keeps alive. It runs

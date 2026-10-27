@@ -3199,7 +3199,7 @@ func (u *macUI) handleMouse() {
 	// Drags follow held, not ebiten.IsMouseButtonPressed (see leftHeld), and
 	// end in the deferred release so no return below, the press branch
 	// included, can skip it.
-	held := leftHeld(inpututil.MouseButtonPressDuration(ebiten.MouseButtonLeft), nativeLeftDown())
+	held := leftHeld(inpututil.MouseButtonPressDuration(ebiten.MouseButtonLeft))
 	defer func() {
 		if !held {
 			u.releaseLeftGestures(mx, my)

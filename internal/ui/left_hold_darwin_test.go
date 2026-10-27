@@ -9,27 +9,23 @@ func TestLeftHeld(t *testing.T) {
 		name string
 		// pressed is what ebiten.IsMouseButtonPressed reports for the tick;
 		// handleMouse used to keep drags alive on it.
-		pressed    bool
-		pressDur   int
-		nativeDown bool
-		want       bool
+		pressed  bool
+		pressDur int
+		want     bool
 	}{
-		// Slow frame: press and release polled in one tick. ebiten still
-		// says pressed (just pressed), but the button is already up.
-		{"whole click in one tick", true, 0, false, false},
-		{"whole click, native lagging", true, 0, true, false},
-		// Mouse-up never reached the GLFW view: ebiten is stuck pressed.
-		{"missed mouse-up", true, 42, false, false},
-		{"held", true, 3, true, true},
-		{"press tick of a real drag", true, 1, true, true},
+		// Slow frame or trackpad tap: press and release polled in one tick.
+		// ebiten still says pressed (just pressed), but the button is up.
+		{"whole click in one tick", true, 0, false},
+		{"held", true, 3, true},
+		{"press tick of a real drag", true, 1, true},
 		// Fast double click: release then press in one tick; still down.
-		{"release then press in one tick", true, 1, true, true},
-		{"up", false, 0, false, false},
+		{"release then press in one tick", true, 1, true},
+		{"up", false, 0, false},
 	}
 	for _, c := range cases {
-		if got := leftHeld(c.pressDur, c.nativeDown); got != c.want {
-			t.Errorf("%s: leftHeld(%d, %v) = %v, want %v (ebiten pressed=%v)",
-				c.name, c.pressDur, c.nativeDown, got, c.want, c.pressed)
+		if got := leftHeld(c.pressDur); got != c.want {
+			t.Errorf("%s: leftHeld(%d) = %v, want %v (ebiten pressed=%v)",
+				c.name, c.pressDur, got, c.want, c.pressed)
 		}
 	}
 }
