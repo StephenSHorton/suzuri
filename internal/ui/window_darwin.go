@@ -212,6 +212,15 @@ type macUI struct {
 	// inputOnlyDirty: Warp bar text/caret changed but shell cells did not.
 	// When shell matrix rain is off, Draw can re-paint only the bar(s).
 	inputOnlyDirty bool
+	// Frame gate (paint_gate_darwin.go): Draw re-blits the last texture
+	// unless a paint was requested, something animates, or the caret steps.
+	paintPending             bool
+	lastPaintAt              time.Time
+	paintCaretStep           int
+	paintMouseX, paintMouseY int
+	paintFocused             bool
+	paintKeys                []ebiten.Key
+	paintChars               []rune
 	// progOwns is the last programOwnsKeys result, so a foreground-group
 	// change resizes the shell once instead of every frame.
 	progOwns bool
@@ -447,12 +456,14 @@ func (u *macUI) markChromeDirty() {
 	u.chromeDirty = true
 	u.overlayDirty = true
 	u.inputOnlyDirty = false
+	u.requestPaint()
 }
 
 // markShellDirty forces a full shell repaint (PTY output, scroll, resize).
 func (u *macUI) markShellDirty() {
 	if u != nil {
 		u.inputOnlyDirty = false
+		u.requestPaint()
 	}
 }
 
@@ -461,6 +472,7 @@ func (u *macUI) markInputDirty() {
 	if u == nil {
 		return
 	}
+	u.requestPaint()
 	if u.chromeDirty || u.overlayDirty || u.chrome.OverlayOpen() {
 		u.inputOnlyDirty = false
 		return
@@ -699,10 +711,13 @@ func (u *macUI) Update() error {
 	for {
 		select {
 		case fn := <-u.jobs:
+			// PTY drains, toasts and posted UI work all arrive here.
+			u.requestPaint()
 			if fn != nil {
 				fn()
 			}
 		case job := <-u.mcpJobs:
+			u.requestPaint()
 			if job.notes {
 				res := runNotesOnChrome(&u.chrome, job.notesReq)
 				if u.chrome.NotesOpen {
@@ -768,8 +783,9 @@ drained:
 		}
 	}
 	for _, t := range u.allPanes() {
-		if t != nil {
+		if t != nil && t.resizePending {
 			t.flushPendingResize()
+			u.requestPaint()
 		}
 	}
 	if t := u.activeTab(); t != nil {
@@ -786,6 +802,7 @@ drained:
 	u.pasteMonitorOnce.Do(installPasteMonitor)
 	// Fresh each tick: a latch no paste path consumed this tick is dropped.
 	u.nativePasteChord = takeNativePasteChord()
+	u.noteInputForPaint()
 	u.handleKeys()
 	u.handleTextInput()
 	u.tickKeys.flush(u.sendKey)
@@ -933,6 +950,7 @@ func (u *macUI) applyClientSize(w, h int32) {
 		return
 	}
 	u.width, u.height = w, h
+	u.requestPaint()
 	cw, ch := u.metricW, u.metricH
 	if cw < 1 {
 		cw = cellW
@@ -1215,6 +1233,7 @@ func (u *macUI) drainAI() {
 		if !ok {
 			return
 		}
+		u.requestPaint()
 		applyAIJob(aiSurface{
 			pages:  &u.pages,
 			tabs:   u.tabs,
@@ -4179,7 +4198,33 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 		u.fb = image.NewRGBA(image.Rect(0, 0, w, h))
 		u.tex = ebiten.NewImage(w, h)
 		u.inputOnlyDirty = false
+		u.requestPaint()
 	}
+	// Nothing changed since the last frame: re-present it instead of
+	// re-rastering and re-uploading the whole window.
+	now := time.Now()
+	switch u.frameNeed(now) {
+	case frameSkip:
+		presentFB(screen, u.tex)
+		return
+	case frameChrome:
+		if u.tryPaintChromeOnly(screen, w, h) {
+			return
+		}
+	case frameCaret:
+		// Warp bar caret pulse: repaint the bar(s), not the grid.
+		if u.inputBarPixelHeight() > 0 {
+			sticky := u.inputOnlyDirty
+			u.inputOnlyDirty = true
+			ok := u.tryPaintInputOnly(screen, tab, w, h)
+			u.inputOnlyDirty = sticky
+			if ok {
+				u.paintCaretStep = caretStep(now.Sub(u.blinkStart))
+				return
+			}
+		}
+	}
+	u.notePainted(now)
 
 	// Notes-style scoping for the Warp bar: when only bar text/caret changed
 	// and shell matrix rain is not animating, re-paint bars over the last frame.
@@ -4227,7 +4272,6 @@ func (u *macUI) paintTo(screen *ebiten.Image) {
 	var shellRain []rainCell
 	crtIntensity := 0.0
 	introStyle := config.Normalize(u.cfg).Intro
-	now := time.Now()
 	cwPx, chPx := cw, ch
 	col := u.themeAmbientColors()
 	if u.chrome.SettingsOpen {
@@ -4805,10 +4849,16 @@ func (u *macUI) inputBarPaint() inputBarPaint {
 }
 
 func (u *macUI) caretAlpha() float64 {
-	// Soft pulse while focused; ebiten windows are typically focused when receiving ticks.
-	elapsed := time.Since(u.blinkStart).Seconds()
+	return u.caretAlphaAt(time.Since(u.blinkStart))
+}
+
+// caretAlphaAt is the soft pulse, held flat within each caretStep so the
+// frame gate only repaints when the caret actually changes.
+func (u *macUI) caretAlphaAt(elapsed time.Duration) float64 {
+	step := cursorBlinkPeriod / caretSteps
+	t := (time.Duration(caretStep(elapsed)) * step).Seconds()
 	period := cursorBlinkPeriod.Seconds()
-	return 0.35 + 0.65*(0.5+0.5*math.Sin(2*math.Pi*elapsed/period))
+	return 0.35 + 0.65*(0.5+0.5*math.Sin(2*math.Pi*t/period))
 }
 
 func (u *macUI) ensureChromeCells() {

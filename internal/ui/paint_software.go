@@ -354,20 +354,7 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		}
 	}
 
-	// Chrome strip — bar fill first so empty cells show theme bar, not void.
-	chromeH := 0
-	if len(o.Chrome) > 0 {
-		extra := o.TitleExtra
-		if extra < 0 {
-			extra = 0
-		}
-		chromeH = len(o.Chrome)*ch + extra
-		fillRectRGBA(dst, 0, 0, w, chromeH, chrome.BarR, chrome.BarG, chrome.BarB)
-		paintCellStrip(p, dst, o.Chrome[:1], padX, extra/2, true, false, false)
-		if len(o.Chrome) > 1 {
-			paintCellStrip(p, dst, o.Chrome[1:], padX, ch+extra, true, false, false)
-		}
-	}
+	p.paintChromeStrip(dst, o.Chrome, o.TitleExtra)
 
 	// Themed Warp input bar.
 	if o.ShowInput {
@@ -390,6 +377,26 @@ func (p *softwarePainter) paintFrame(dst *image.RGBA, o paintOpts) {
 		}
 		paintCellStrip(p, dst, o.Overlay, 0, oy, false /* bar */, o.SolidPanel, o.SolidInterior)
 	}
+}
+
+// paintChromeStrip draws the tab strip at the top of dst and returns its
+// pixel height. Bar fill first so empty cells show theme bar, not void.
+func (p *softwarePainter) paintChromeStrip(dst *image.RGBA, cells [][]cellPix, extra int) int {
+	if len(cells) == 0 {
+		return 0
+	}
+	const padX = 4
+	ch := p.cellH
+	if extra < 0 {
+		extra = 0
+	}
+	chromeH := len(cells)*ch + extra
+	fillRectRGBA(dst, 0, 0, dst.Bounds().Dx(), chromeH, chrome.BarR, chrome.BarG, chrome.BarB)
+	paintCellStrip(p, dst, cells[:1], padX, extra/2, true, false, false)
+	if len(cells) > 1 {
+		paintCellStrip(p, dst, cells[1:], padX, ch+extra, true, false, false)
+	}
+	return chromeH
 }
 
 func (p *softwarePainter) paintInputBar(dst *image.RGBA, o paintOpts, shellBot, clientH int) {
