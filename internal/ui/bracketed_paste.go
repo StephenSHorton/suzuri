@@ -24,6 +24,21 @@ func framePaste(text string, bracket bool) []byte {
 	return []byte(text)
 }
 
+// submitWrites is the PTY writes for a submitted line (Warp bar / MCP).
+//
+// The shell gets one write: line + CR. A foreground program gets the text
+// and Enter as two writes, the text bracketed when it enabled DECSET 2004.
+// Claude Code's input reader keeps a CR inside a read of 64+ bytes as
+// typed text, so "long line\r" in one write lands as a draft with a
+// trailing newline and is never submitted.
+func submitWrites(payload string, program, bracket bool) [][]byte {
+	if !program {
+		payload = strings.ReplaceAll(payload, "\n", "\r")
+		return [][]byte{[]byte(payload + "\r")}
+	}
+	return [][]byte{framePaste(payload, bracket), {'\r'}}
+}
+
 // pendingPaste is an async alt-screen paste result drained on the UI thread.
 type pendingPaste struct {
 	payload      []byte

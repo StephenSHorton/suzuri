@@ -89,3 +89,22 @@ func TestEncodeMouseMotionSGR(t *testing.T) {
 		t.Fatalf("1002 drag: %q", encodeMouseMotion(term2, 1, 1, true))
 	}
 }
+
+// Update runs handleKeys before handleTextInput. When one slow frame carries
+// typed runes and Enter, the PTY must still see the text first.
+func TestTickKeysEnterFollowsTypedText(t *testing.T) {
+	var got []byte
+	send := func(b []byte) { got = append(got, b...) }
+	var q tickKeys
+	q.hold([]byte{'\r'}) // handleKeys: Enter pressed this frame
+	send([]byte("abc"))  // handleTextInput: runes typed before it
+	q.flush(send)
+	if string(got) != "abc\r" {
+		t.Fatalf("pty saw %q want %q", got, "abc\r")
+	}
+	got = nil
+	q.flush(send)
+	if len(got) != 0 {
+		t.Fatalf("flush resent %q", got)
+	}
+}

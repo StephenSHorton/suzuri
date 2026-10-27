@@ -199,6 +199,8 @@ type macUI struct {
 
 	// Key repeat for held arrows / backspace in the Warp bar and notes.
 	keyRep *keyRepeat
+	// tickKeys holds program-bound Enter until this tick's runes are sent.
+	tickKeys tickKeys
 
 	// Chrome paint cache.
 	chromeDirty  bool
@@ -786,6 +788,7 @@ drained:
 	u.nativePasteChord = takeNativePasteChord()
 	u.handleKeys()
 	u.handleTextInput()
+	u.tickKeys.flush(u.sendKey)
 	// File drops: only consume when Send-file prompt is open (see AcceptsFileDrop).
 	u.pollTransferFileDrop()
 	u.refreshBackgroundTabSpinner()
@@ -1195,10 +1198,10 @@ func (u *macUI) submitOnUIThread(tabID int, line string, done chan error) {
 	if isClearCommand(payload) {
 		t.sb.pinHere()
 	}
-	if strings.Contains(payload, "\n") {
-		payload = strings.ReplaceAll(payload, "\n", "\r")
+	program := t.altScreen() || t.childOwnsTTY()
+	for _, b := range submitWrites(payload, program, t.modes.bracketPaste) {
+		t.sendKey(b)
 	}
-	t.sendKey([]byte(payload + "\r"))
 	t.sb.stickBottom()
 	u.publishBridgeSnapshot()
 }
@@ -2496,6 +2499,13 @@ func (u *macUI) handleKeys() {
 				continue
 			}
 			if b := ptyKeyFromEbiten(tab.term, &tab.kitty, key, realCtrl, shift, opt, super); len(b) > 0 {
+				// Enter waits for this tick's typed text (handleTextInput
+				// runs after us). A slow frame can carry "abc" and Enter
+				// together; sending Enter first submits a short line.
+				if key == ebiten.KeyEnter {
+					u.tickKeys.hold(b)
+					continue
+				}
 				// Prefer focused-pane write when splits (sendKey uses active).
 				if t := u.activeTab(); t != nil {
 					t.sendKey(b)

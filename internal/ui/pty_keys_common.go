@@ -35,6 +35,25 @@ func encodeArrow(kk *kittyKeyboard, dir byte, appCursor, shift, alt, ctrl, super
 	return []byte(fmt.Sprintf("\x1b[1;%d%c", mods, dir))
 }
 
+// tickKeys orders one Update tick's key writes against its typed text.
+// Update reads keys before runes, so Enter pressed after "abc" in the same
+// (slow) frame would reach the PTY first and submit a short line. hold keeps
+// such a key until flush, which runs after the frame's runes are sent.
+type tickKeys struct {
+	held [][]byte
+}
+
+func (q *tickKeys) hold(b []byte) {
+	q.held = append(q.held, append([]byte(nil), b...))
+}
+
+func (q *tickKeys) flush(send func([]byte)) {
+	for _, b := range q.held {
+		send(b)
+	}
+	q.held = nil
+}
+
 // encodeMouseButton builds an xterm mouse report for button press/release.
 // btn: 0=left, 1=middle, 2=right. col/row are 1-based.
 // press=false emits SGR release (…m).

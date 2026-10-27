@@ -22,9 +22,41 @@ const kittyStackMax = 16
 
 // kittyKeyboard tracks the progressive-enhancement flags the app requested.
 // Without this, Shift+Enter collapses to plain Enter (legacy C0 table).
+//
+// The spec keeps separate flags and stacks for the main and alternate
+// screens. flags/stack are the live screen's; main holds the main screen's
+// while the alt screen is up.
 type kittyKeyboard struct {
 	flags int
 	stack []int
+	onAlt bool
+	main  struct {
+		flags int
+		stack []int
+	}
+}
+
+// setAltScreen switches to the other screen's flags (CSI ? 1049/1047/47 h/l).
+func (k *kittyKeyboard) setAltScreen(on bool) {
+	if k == nil || k.onAlt == on {
+		return
+	}
+	k.onAlt = on
+	if on {
+		k.main.flags, k.main.stack = k.flags, k.stack
+		k.flags, k.stack = 0, nil
+		return
+	}
+	k.flags, k.stack = k.main.flags, k.main.stack
+	k.main.flags, k.main.stack = 0, nil
+}
+
+// reset drops every flag and stack on both screens (RIS).
+func (k *kittyKeyboard) reset() {
+	if k == nil {
+		return
+	}
+	*k = kittyKeyboard{}
 }
 
 // active is true when the app has enabled disambiguation or full key reporting.
@@ -158,6 +190,12 @@ func (k *kittyKeyboard) consumeHostQueries(data []byte) []byte {
 			i++
 			continue
 		}
+		if i+1 < len(data) && data[i+1] == 'c' {
+			// RIS: full reset, keyboard state included.
+			k.reset()
+			i += 2
+			continue
+		}
 		if i+1 >= len(data) || data[i+1] != '[' {
 			i++
 			continue
@@ -182,6 +220,10 @@ func (k *kittyKeyboard) consumeHostQueries(data []byte) []byte {
 		case 'c':
 			if reply := handleDeviceAttrs(body); len(reply) > 0 {
 				out = append(out, reply...)
+			}
+		case 'h', 'l':
+			if altScreenModes(body) {
+				k.setAltScreen(final == 'h')
 			}
 		}
 	}
@@ -232,6 +274,21 @@ func (k *kittyKeyboard) handleKittyU(body string) []byte {
 	default:
 		return nil
 	}
+}
+
+// altScreenModes is true when a DEC private set/reset body names an
+// alternate-screen mode (47, 1047, 1049).
+func altScreenModes(body string) bool {
+	if !strings.HasPrefix(body, "?") {
+		return false
+	}
+	for _, p := range strings.Split(body[1:], ";") {
+		switch strings.TrimSpace(p) {
+		case "47", "1047", "1049":
+			return true
+		}
+	}
+	return false
 }
 
 func parseFlagsMode(s string) (flags, mode int) {
