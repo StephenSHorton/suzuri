@@ -3194,6 +3194,17 @@ func (u *macUI) handleMouse() {
 		u.quit = true
 		return
 	}
+	mx, my := ebiten.CursorPosition()
+	justPressed := inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft)
+	// Drags follow held, not ebiten.IsMouseButtonPressed (see leftHeld), and
+	// end in the deferred release so no return below, the press branch
+	// included, can skip it.
+	held := leftHeld(inpututil.MouseButtonPressDuration(ebiten.MouseButtonLeft), nativeLeftDown())
+	defer func() {
+		if !held {
+			u.releaseLeftGestures(mx, my)
+		}
+	}()
 	_, wheelY := ebiten.Wheel()
 	if wheelY != 0 {
 		// Workspace owns the wheel while open — do not scroll the shell/Grok under it.
@@ -3250,17 +3261,9 @@ func (u *macUI) handleMouse() {
 		}
 	}
 
-	mx, my := ebiten.CursorPosition()
-	pressed := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
-	justPressed := inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft)
-	if u.frameDrag.on {
-		if pressed && !justPressed {
-			u.dragFrame()
-		} else if !pressed {
-			u.frameDrag.on = false
-		}
+	if u.frameDrag.on && held && !justPressed {
+		u.dragFrame()
 	}
-	justReleased := inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonLeft)
 	rightUp := inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonRight)
 
 	// Right-click paste (Windows muscle memory). Never fire under chrome overlays
@@ -3282,7 +3285,7 @@ func (u *macUI) handleMouse() {
 		if t := u.activeTab(); t != nil && t.altScreen() {
 			// A title-bar press/drag is the host's; don't report it to the TUI.
 			if !u.paneDrag.engaged() {
-				left := pressed || u.altMouseDown
+				left := held || u.altMouseDown
 				u.maybeSendAltMouseMotion(t, mx, my, left)
 			}
 		} else {
@@ -3500,38 +3503,31 @@ func (u *macUI) handleMouse() {
 		return
 	}
 
-	// Pane title-bar drag: track the drop target; drop on release.
+	// Releases (pane drop, sash, notes, alt-screen, selection) happen in
+	// releaseLeftGestures, deferred above.
+
+	// Pane title-bar drag: track the drop target.
 	if u.paneDrag.engaged() {
-		if pressed && !justReleased {
+		if held {
 			if u.paneDrag.move(u.activePage(), u.computeActiveLayout(), u.metricW, u.metricH, int32(mx), int32(my)) {
 				u.markShellDirty()
 			}
-			return
-		}
-		wasActive := u.paneDrag.active
-		if id, target, edge, ok := u.paneDrag.release(); ok {
-			hostDropPane(u, id, target, edge)
-		} else if wasActive {
-			u.markShellDirty() // clear the highlight
 		}
 		return
 	}
 
 	// Sash drag.
-	if pressed && u.sashDrag != nil {
-		applySashDrag(*u.sashDrag, int32(mx), int32(my))
-		u.computeActiveLayout()
-		u.applyClientSize(u.width, u.height)
-		return
-	}
-	if justReleased && u.sashDrag != nil {
-		u.sashDrag = nil
-		u.applyClientSize(u.width, u.height)
+	if u.sashDrag != nil {
+		if held {
+			applySashDrag(*u.sashDrag, int32(mx), int32(my))
+			u.computeActiveLayout()
+			u.applyClientSize(u.width, u.height)
+		}
 		return
 	}
 
 	// Notes drag-select.
-	if pressed && u.notesDragging && u.chrome.NotesOpen {
+	if held && u.notesDragging && u.chrome.NotesOpen {
 		if cellX, cellY, ok := u.overlayCellAt(int32(mx), int32(my)); ok {
 			r := u.chrome.UpdateChrome(chrome.NotesDragMsg{
 				CellX: cellX, CellY: cellY, Cols: u.cols,
@@ -3541,29 +3537,14 @@ func (u *macUI) handleMouse() {
 			u.overlayCells = nil
 		}
 	}
-	if justReleased && u.notesDragging {
-		u.notesDragging = false
-		u.persistNotesIfDirty()
-	}
-	// Alt-screen mouse release (SGR …m).
-	if justReleased && u.altMouseDown {
-		u.altMouseDown = false
-		if t := u.activeTab(); t != nil && t.altScreen() {
-			u.sendAltMouse(t, mx, my, false)
-		}
-	}
 
-	if pressed && u.selecting {
+	if held && u.selecting {
 		tab := u.activeTab()
 		if tab != nil {
 			x, y, viewRows := u.pixelToCellInPane(int32(mx), int32(my), tab)
 			absY := tab.sb.absLine(y, viewRows, liveExtent(tab.term))
 			tab.sel.x1, tab.sel.y1 = x, absY
 		}
-	}
-	if justReleased && u.selecting {
-		u.selecting = false
-		u.mouseDown = false
 	}
 }
 
