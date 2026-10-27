@@ -135,7 +135,7 @@ func (t *tab) ingestPTY(data []byte, h ptyHooks) ptyResult {
 	}
 	t.modes.observe(before, snapshotScreenText(t.term), spans)
 	if t.sb != nil {
-		t.sb.savedErased = bytes.Contains(data, []byte("\x1b[3J"))
+		t.sb.savedErased = appWipe(data)
 		t.sb.noteScreen(t.term)
 		if t.sb.atBottom() {
 			t.sb.stickBottom()
@@ -171,6 +171,29 @@ func (t *tab) ingestPTY(data []byte, h ptyHooks) ptyResult {
 	res.Dirty = true
 	res.More = t.inputWaiting()
 	return res
+}
+
+// appWipe is true for an inline app wiping its own UI before a redraw, as
+// Claude Code does on a width change or row shrink: CSI r CSI 2J CSI 3J CSI H,
+// then a new scroll region. The scroll region is what tells it apart from
+// clear(1), which also sends CSI 3J but whose screen belongs in history.
+func appWipe(data []byte) bool {
+	if !bytes.Contains(data, []byte("\x1b[3J")) {
+		return false
+	}
+	for i := 0; i+2 < len(data); i++ {
+		if data[i] != 0x1b || data[i+1] != '[' {
+			continue
+		}
+		j := i + 2
+		for j < len(data) && (data[j] >= '0' && data[j] <= '9' || data[j] == ';') {
+			j++
+		}
+		if j < len(data) && data[j] == 'r' {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *tab) inputWaiting() bool {

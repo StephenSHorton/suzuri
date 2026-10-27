@@ -157,12 +157,18 @@ func TestClaudeResizeWipeDoesNotStrandFooter(t *testing.T) {
 }
 
 func TestShellClearKeepsScreenInHistory(t *testing.T) {
-	// zsh Ctrl+L sends only CSI H CSI 2J: what was on screen stays reachable.
-	term := vt10x.New(vt10x.WithSize(40, 6))
-	tb := &tab{term: term, sb: newScrollback()}
-	tb.ingestPTY([]byte("$ make\r\nbuild ok\r\n$ "), ptyHooks{})
-	tb.ingestPTY([]byte("\x1b[H\x1b[2J"), ptyHooks{})
-	if !historyHas(tb.sb, "build ok") {
-		t.Fatalf("clear without CSI 3J should keep the screen: %+v", tb.sb.lines)
+	// What was on screen stays reachable after a shell clear, CSI 3J or not.
+	for _, c := range []struct{ name, seq string }{
+		{"zsh Ctrl+L", "\x1b[H\x1b[2J"},
+		{"macOS clear", "\x1b[3J\x1b[H\x1b[2J"},
+		{"Linux clear", "\x1b[H\x1b[2J\x1b[3J"},
+	} {
+		term := vt10x.New(vt10x.WithSize(40, 6))
+		tb := &tab{term: term, sb: newScrollback()}
+		tb.ingestPTY([]byte("$ make\r\nbuild ok\r\n$ "), ptyHooks{})
+		tb.ingestPTY([]byte(c.seq), ptyHooks{})
+		if !historyHas(tb.sb, "build ok") {
+			t.Errorf("%s should keep the screen in history: %+v", c.name, tb.sb.lines)
+		}
 	}
 }
