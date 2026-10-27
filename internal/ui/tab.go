@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strconv"
@@ -502,8 +503,18 @@ func (t *tab) startWorkers(u tabHost) {
 }
 
 func (t *tab) writeLoop() {
+	t.drainWrites(t.sess)
+}
+
+// drainWrites is the PTY writer. A nil item (sendGap) sleeps for
+// submitEnterGap, so the next write cannot share a read with the last one.
+func (t *tab) drainWrites(w io.Writer) {
 	for b := range t.writeCh {
-		if _, err := t.sess.Write(b); err != nil {
+		if b == nil {
+			ptyGapSleep(submitEnterGap)
+			continue
+		}
+		if _, err := w.Write(b); err != nil {
 			log.Warn("pty write failed", "tab", t.id, "err", err)
 			return
 		}
@@ -517,6 +528,18 @@ func (t *tab) sendKey(b []byte) {
 	p := append([]byte(nil), b...)
 	select {
 	case t.writeCh <- p:
+	default:
+	}
+}
+
+// sendGap queues a pause in the PTY writer, in order with the keys around
+// it. The UI thread does not wait.
+func (t *tab) sendGap() {
+	if !t.alive.Load() {
+		return
+	}
+	select {
+	case t.writeCh <- nil:
 	default:
 	}
 }

@@ -39,6 +39,10 @@ func encodeArrow(kk *kittyKeyboard, dir byte, appCursor, shift, alt, ctrl, super
 // Update reads keys before runes, so Enter pressed after "abc" in the same
 // (slow) frame would reach the PTY first and submit a short line. hold keeps
 // such a key until flush, which runs after the frame's runes are sent.
+//
+// This is partial. Ebiten gives no order between a tick's runes and its key
+// presses, so a held Enter always goes after every rune of that tick, even
+// one typed after it ("ab", Enter, "c" in one frame sends "abc\r").
 type tickKeys struct {
 	held [][]byte
 }

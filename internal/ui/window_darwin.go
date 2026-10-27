@@ -1229,10 +1229,7 @@ func (u *macUI) submitOnUIThread(tabID int, line string, done chan error) {
 	if isClearCommand(payload) {
 		t.sb.pinHere()
 	}
-	program := t.altScreen() || t.childOwnsTTY()
-	for _, b := range submitWrites(payload, program, t.modes.bracketPaste) {
-		t.sendKey(b)
-	}
+	t.sendSubmit(payload)
 	t.sb.stickBottom()
 	u.publishBridgeSnapshot()
 }
@@ -2891,9 +2888,12 @@ var specialKeys = []ebiten.Key{
 	ebiten.KeyF7, ebiten.KeyF8, ebiten.KeyF9, ebiten.KeyF10, ebiten.KeyF11, ebiten.KeyF12,
 }
 
+// tickInputChars is this tick's typed runes (tests stub it).
+var tickInputChars = ebiten.AppendInputChars
+
 func (u *macUI) handleTextInput() {
 	// Printable runes from the OS IME / keyboard.
-	chars := ebiten.AppendInputChars(nil)
+	chars := tickInputChars(nil)
 	if len(chars) == 0 {
 		return
 	}
