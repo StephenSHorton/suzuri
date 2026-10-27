@@ -57,6 +57,10 @@ type scrollback struct {
 	// capture for a few frames. Spam-submit otherwise double-ingests the same
 	// lines (commitLive + false multi-line scrollAmount) and the history thrashs.
 	skipNoteCapture int
+	// savedErased: the bytes behind the next noteScreen carried CSI 3J (erase
+	// saved lines). A clear that comes with it is an app wiping its own UI
+	// before a redraw, so the old screen is not promoted to history.
+	savedErased bool
 }
 
 func newScrollback() *scrollback {
@@ -186,6 +190,8 @@ func snapshotLiveText(term vt10x.Terminal) []string {
 
 func (s *scrollback) noteScreen(term vt10x.Terminal) {
 	cur := snapshotScreenText(term)
+	erased := s.savedErased
+	s.savedErased = false
 	if s.skipNoteCapture > 0 {
 		s.skipNoteCapture--
 		s.prev = cur
@@ -194,9 +200,12 @@ func (s *scrollback) noteScreen(term vt10x.Terminal) {
 	if len(s.prev) == len(cur) && len(cur) > 1 {
 		// Full clear (clear / Clear-Host): previous live content becomes history
 		// and pin stick-bottom so pre-clear history stays above (scroll up).
+		// With CSI 3J (Claude Code inline on every width change or row
+		// shrink) the old screen is the app's live UI, not history: keeping
+		// it strands the input box and status line mid-transcript.
 		if screenWasCleared(s.prev, cur) {
 			for _, line := range s.prev {
-				if strings.TrimSpace(line) != "" {
+				if !erased && strings.TrimSpace(line) != "" {
 					s.push(line)
 				}
 			}

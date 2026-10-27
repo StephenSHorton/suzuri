@@ -2,7 +2,11 @@
 
 package ui
 
-import "github.com/charmbracelet/log"
+import (
+	"bytes"
+
+	"github.com/charmbracelet/log"
+)
 
 // How far ingestPTY got. Hosts use this to decide paint and bridge work
 // without reimplementing the byte pipeline.
@@ -131,6 +135,7 @@ func (t *tab) ingestPTY(data []byte, h ptyHooks) ptyResult {
 	}
 	t.modes.observe(before, snapshotScreenText(t.term), spans)
 	if t.sb != nil {
+		t.sb.savedErased = bytes.Contains(data, []byte("\x1b[3J"))
 		t.sb.noteScreen(t.term)
 		if t.sb.atBottom() {
 			t.sb.stickBottom()
