@@ -1,6 +1,5 @@
 # suzuri（硯）
 
-[![CI](https://github.com/StephenSHorton/suzuri/actions/workflows/ci.yml/badge.svg)](https://github.com/StephenSHorton/suzuri/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-00e676.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/StephenSHorton/suzuri?color=0a5c32)](https://github.com/StephenSHorton/suzuri/releases/latest)
 
@@ -173,11 +172,24 @@ Native window  →  key/mouse
 
 Design notes: [`docs/crush-inspired-plan.md`](docs/crush-inspired-plan.md).
 
-## Releases & CI
+## Checks (run locally - no CI)
+
+There is no CI on PRs or pushes (saves GitHub Actions minutes). Before opening or merging a PR, or pushing to `main`, run these locally on your OS and make sure they pass (the release builds both Windows and macOS, so check the other OS too when you touch platform code):
+
+```bash
+go test ./...
+cargo test --manifest-path libs/transfer/Cargo.toml --workspace
+cargo build --release --manifest-path libs/transfer/Cargo.toml -p hato-cli
+# Windows
+go build -ldflags "-H windowsgui -s -w" -o suzuri.exe ./cmd/suzuri
+# macOS
+go build -o suzuri ./cmd/suzuri
+```
+
+## Releases
 
 | Workflow | Purpose |
 |----------|---------|
-| **CI** | `go test` + build on Windows and macOS |
 | **Release** | Tag `v*.*.*` → windows-amd64 + darwin-arm64 assets + `SHA256SUMS` |
 | **Pages** | Deploys `docs/site` to GitHub Pages |
 
