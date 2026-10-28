@@ -19,6 +19,6 @@ Code that implements suzuri features but is **not** the Go host. One folder per 
 
 - [ ] Create `libs/<name>/` with language-native project files
 - [ ] Document how the host invokes it
-- [ ] Wire CI test + release package
+- [ ] Add its test command to the README "Checks (run locally - no CI)" list + wire the release package
 - [ ] Resolve path next to `suzuri` (or `SUZURI_*_BIN`)
 - [ ] User-facing docs under `docs/` and README feature table if needed
