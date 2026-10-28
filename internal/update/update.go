@@ -96,6 +96,14 @@ func (s *Service) Check() (*Info, error) {
 	}
 
 	asset, sumsURL := pickReleaseAsset(rel.Assets)
+	// Inside a macOS .app, take the whole signed bundle so the Developer ID
+	// seal (and the permission grants tied to it) survive the update.
+	if runningAppBundle() != "" {
+		asset = pickAppZipAsset(rel.Assets)
+		if asset.URL == "" {
+			return nil, fmt.Errorf("release %s has no signed .app.zip for this Mac", rel.TagName)
+		}
+	}
 	if asset.URL == "" {
 		return nil, fmt.Errorf("release %s has no asset for this platform", rel.TagName)
 	}
@@ -147,6 +155,10 @@ func (s *Service) DownloadAndApply(info Info) error {
 			_ = os.Remove(dst)
 			return fmt.Errorf("checksum mismatch: got %s want %s", got, info.SHA256)
 		}
+	}
+
+	if app := runningAppBundle(); app != "" {
+		return s.applyAppBundle(dst, app, info.Version, &committed)
 	}
 
 	var newExe string
@@ -231,6 +243,34 @@ func (s *Service) DownloadAndApply(info Info) error {
 	return nil
 }
 
+// applyAppBundle installs a downloaded .app.zip over the running app and
+// relaunches it.
+func (s *Service) applyAppBundle(zipPath, app, version string, committed *bool) error {
+	if !strings.HasSuffix(strings.ToLower(zipPath), ".app.zip") {
+		return fmt.Errorf("update asset %s is not a signed .app.zip", filepath.Base(zipPath))
+	}
+	if err := installAppBundle(zipPath, app); err != nil {
+		return err
+	}
+	_ = os.Remove(zipPath)
+	exe := filepath.Join(app, "Contents", "MacOS", "suzuri")
+	cmd := exec.Command(exe)
+	cmd.Dir = filepath.Dir(exe)
+	if err := cmd.Start(); err != nil {
+		if rerr := rollbackAppBundle(app); rerr != nil {
+			log.Error("update: could not restore previous app", "app", app, "err", rerr)
+		}
+		return fmt.Errorf("relaunch: %w", err)
+	}
+	*committed = true
+	log.Info("update: relaunched", "version", version, "path", exe)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		os.Exit(0)
+	}()
+	return nil
+}
+
 func transferSiblingName() string {
 	if runtime.GOOS == "windows" {
 		return "suzuri-transfer.exe"
@@ -262,6 +302,7 @@ func installSibling(src, dst string) error {
 
 // CleanupOldBinary removes a leftover .old sibling left by a previous update.
 func CleanupOldBinary() {
+	cleanupOldAppBundle()
 	self, err := os.Executable()
 	if err != nil {
 		return
