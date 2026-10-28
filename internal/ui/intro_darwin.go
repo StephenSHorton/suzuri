@@ -550,25 +550,50 @@ func (p *softwarePainter) paintShellWatermark(dst *image.RGBA, padY, shellBot in
 			}
 		}
 	}
+	// On glass the band already holds the veil, so blend over it. Writing
+	// pixels outright replaced the veil with a thinner alpha, and the mark
+	// became a window onto the bright desktop behind the blur.
+	// Mark the mark and its 1px rim first so each pixel is drawn once.
+	const (
+		cellNone = iota
+		cellRim
+		cellInk
+	)
+	gw, gh := destW+2, destH+2
+	grid := make([]byte, gw*gh)
 	eachInk(func(px, py int) {
-		setRGBA(dst, px-1, py, 0, 0, 0, ab)
-		setRGBA(dst, px+1, py, 0, 0, 0, ab)
-		setRGBA(dst, px, py-1, 0, 0, 0, ab)
-		setRGBA(dst, px, py+1, 0, 0, 0, ab)
-	})
-	eachInk(func(px, py int) {
-		if glass {
-			// The framebuffer is premultiplied. Full primary with a small
-			// alpha is drawn almost solid, so 5% looked like 95%.
-			setRGBA(dst, px, py,
-				byte(int(chrome.PrimR)*int(ab)/255),
-				byte(int(chrome.PrimG)*int(ab)/255),
-				byte(int(chrome.PrimB)*int(ab)/255),
-				ab)
-			return
+		gx, gy := px-dx+1, py-dy+1
+		grid[gy*gw+gx] = cellInk
+		for _, n := range [4]int{gy*gw + gx - 1, gy*gw + gx + 1, (gy-1)*gw + gx, (gy+1)*gw + gx} {
+			if grid[n] == cellNone {
+				grid[n] = cellRim
+			}
 		}
-		setRGB(dst, px, py, fr, fg, fb)
 	})
+	pr := byte(int(chrome.PrimR) * int(ab) / 255)
+	pg := byte(int(chrome.PrimG) * int(ab) / 255)
+	pb := byte(int(chrome.PrimB) * int(ab) / 255)
+	for gy := 0; gy < gh; gy++ {
+		for gx := 0; gx < gw; gx++ {
+			px, py := dx+gx-1, dy+gy-1
+			switch grid[gy*gw+gx] {
+			case cellRim:
+				if glass {
+					overPremul(dst, px, py, 0, 0, 0, ab)
+				} else {
+					setRGBA(dst, px, py, 0, 0, 0, ab)
+				}
+			case cellInk:
+				if glass {
+					// The framebuffer is premultiplied, so the color is
+					// scaled by alpha before it is blended.
+					overPremul(dst, px, py, pr, pg, pb, ab)
+				} else {
+					setRGB(dst, px, py, fr, fg, fb)
+				}
+			}
+		}
+	}
 }
 
 // paintDimNekoField draws a faint 猫咪 underlay (settings / overlay texture).

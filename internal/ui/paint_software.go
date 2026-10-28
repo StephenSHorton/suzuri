@@ -1514,6 +1514,20 @@ func overPix(dst *image.RGBA, x, y int, r, g, b, a byte) {
 	dst.Pix[i+3] = byte(outA)
 }
 
+// overPremul draws a premultiplied color over a premultiplied pixel.
+// r, g, b must already be scaled by a.
+func overPremul(dst *image.RGBA, x, y int, r, g, b, a byte) {
+	if dst == nil || !image.Pt(x, y).In(dst.Bounds()) {
+		return
+	}
+	i := dst.PixOffset(x, y)
+	ia := 255 - uint32(a)
+	dst.Pix[i+0] = byte(uint32(r) + uint32(dst.Pix[i+0])*ia/255)
+	dst.Pix[i+1] = byte(uint32(g) + uint32(dst.Pix[i+1])*ia/255)
+	dst.Pix[i+2] = byte(uint32(b) + uint32(dst.Pix[i+2])*ia/255)
+	dst.Pix[i+3] = byte(uint32(a) + uint32(dst.Pix[i+3])*ia/255)
+}
+
 func setRGB(dst *image.RGBA, x, y int, r, g, b byte) {
 	setRGBA(dst, x, y, r, g, b, 255)
 }
