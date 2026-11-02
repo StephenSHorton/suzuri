@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+
+	"github.com/StephenSHorton/suzuri/internal/crashcapture"
 )
 
 // HealMacAppBundle repairs .app installs broken by older portable-zip updates
@@ -103,6 +105,7 @@ func HealMacAppBundle(version string) {
 	log.Info("update: heal relaunch started; exiting old process")
 	go func() {
 		time.Sleep(150 * time.Millisecond)
+		crashcapture.MarkCleanExit()
 		os.Exit(0)
 	}()
 	time.Sleep(2 * time.Second)

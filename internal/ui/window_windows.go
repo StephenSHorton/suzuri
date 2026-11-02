@@ -1509,6 +1509,7 @@ func (u *winUI) loop() error {
 	}
 	// Startup update check: toast "checking…" then confirm before any install.
 	scheduleStartupUpdateCheck(u.postToast, u.postUpdateOffer)
+	showStartupCrashNotice()
 
 	if u.showSplash {
 		r := u.chrome.UpdateChrome(chrome.OpenSplashMsg{})

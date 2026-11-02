@@ -10,6 +10,8 @@ import (
 
 	"github.com/StephenSHorton/suzuri/internal/applog"
 	"github.com/StephenSHorton/suzuri/internal/chromehost"
+	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/crashcapture"
 	"github.com/StephenSHorton/suzuri/internal/guest"
 	"github.com/StephenSHorton/suzuri/internal/mcpsrv"
 	"github.com/StephenSHorton/suzuri/internal/transfer"
@@ -104,6 +106,10 @@ func main() {
 		}
 	}
 
+	// Windows: native faults go to WER (LocalDumps) instead of Go's exit(2).
+	// Dev builds elsewhere use GOTRACEBACK=crash. See docs/crash-dumps.md.
+	crashcapture.SetupTraceback(version)
+
 	switch runtime.GOOS {
 	case "windows", "darwin":
 	default:
@@ -147,6 +153,22 @@ func main() {
 		return
 	}
 
+	// A run marker left by a process that is gone means it crashed: record
+	// its exit code (from the WER dump) and say so once the window is up.
+	if crashes := crashcapture.Collect(config.Dir()); len(crashes) > 0 {
+		for _, c := range crashes {
+			log.Warn("previous run ended without a clean exit",
+				"pid", c.PID, "version", c.Version, "started", c.Started,
+				"exit", c.ExitCode(), "ntstatus", c.Status(), "dump", c.DumpPath)
+		}
+		ui.SetStartupCrashNotice(crashcapture.Notice(crashes[0], applog.FilePath()))
+	}
+	if err := crashcapture.Begin(config.Dir(), version); err != nil {
+		log.Warn("crash marker", "err", err)
+	}
+	defer crashcapture.MarkCleanExit()
+	crashcapture.ArmDevCrash(version)
+
 	// Updater is wired for UI-driven checks (startup toast + confirm before install).
 	// Never silent-apply: host offers a modal; user must confirm restart.
 	upd := update.New("StephenSHorton/suzuri", version)
@@ -162,6 +184,7 @@ func main() {
 	)
 
 	if err := ui.Run(); err != nil {
+		crashcapture.MarkCleanExit() // reported here; not a crash
 		log.Error("ui.Run failed", "err", err)
 		fmt.Fprintf(os.Stderr, "suzuri: %v\n", err)
 		if path != "" {

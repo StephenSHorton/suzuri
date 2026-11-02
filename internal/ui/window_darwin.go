@@ -652,6 +652,7 @@ func (u *macUI) loop() error {
 	scheduleStartupUpdateCheck(nil, func(ver string) {
 		offerUpdateNotice(ver, u.postToast)
 	})
+	showStartupCrashNotice()
 
 	log.Info("starting ebiten window", "w", w, "h", h, "cols", u.cols, "rows", u.rows)
 	// Passing options makes ebiten ignore SetScreenTransparent, so the

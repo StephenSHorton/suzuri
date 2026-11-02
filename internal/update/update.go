@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/log"
+
+	"github.com/StephenSHorton/suzuri/internal/crashcapture"
 )
 
 const defaultRepo = "StephenSHorton/suzuri"
@@ -238,6 +240,7 @@ func (s *Service) DownloadAndApply(info Info) error {
 	// Caller should exit the process shortly after.
 	go func() {
 		time.Sleep(200 * time.Millisecond)
+		crashcapture.MarkCleanExit()
 		os.Exit(0)
 	}()
 	return nil
@@ -266,6 +269,7 @@ func (s *Service) applyAppBundle(zipPath, app, version string, committed *bool) 
 	log.Info("update: relaunched", "version", version, "path", exe)
 	go func() {
 		time.Sleep(200 * time.Millisecond)
+		crashcapture.MarkCleanExit()
 		os.Exit(0)
 	}()
 	return nil
