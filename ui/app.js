@@ -397,9 +397,12 @@ async function grid(n) {
   return first
 }
 
+// In-app latency: key event (e.timeStamp) to the end of the paint that
+// follows it, oak's definition (#255), samples over 250 ms dropped. With the
+// internal probe the UI types "x"/Backspace itself every 100 ms (no OS input
+// path); with the external probe real keys come from outside.
 async function bench(boot, target) {
-  const warm = 10_000
-  await new Promise((r) => setTimeout(r, warm))
+  await new Promise((r) => setTimeout(r, 15_000))
   lat.probe.length = 0
   lat.samples.length = 0
   const t0 = performance.now()
@@ -409,7 +412,7 @@ async function bench(boot, target) {
   await new Promise((resolve) => {
     const iv = setInterval(() => {
       if (performance.now() - t0 > boot.bench_secs * 1000) { clearInterval(iv); resolve(); return }
-      // Alternate a char and its erase so the line never grows.
+      if (boot.bench_probe !== "internal") return
       const data = i++ % 2 ? "\x7f" : "x"
       const now = performance.now()
       if (!target.pendingProbe) target.pendingProbe = now
@@ -419,17 +422,19 @@ async function bench(boot, target) {
   const secs = (performance.now() - t0) / 1000
   const st = await invoke("stats")
   const sum = (a, k) => a.reduce((x, s) => x + s[k], 0)
-  const p = lat.probe
+  const summarize = (p) => ({
+    n: p.length,
+    p50: pct(p, 50), p90: pct(p, 90), p99: pct(p, 99), max: Math.max(0, ...p),
+    over16: p.filter((x) => x > 16).length, over100: p.filter((x) => x > 100).length,
+  })
   const report = {
     app: "rust-suzuri",
     platform: boot.platform,
+    probe: boot.bench_probe,
     panes: st.length,
     secs: Math.round(secs),
-    probe: {
-      n: p.length,
-      p50: pct(p, 50), p90: pct(p, 90), p99: pct(p, 99), max: Math.max(0, ...p),
-      over16: p.filter((x) => x > 16).length, over100: p.filter((x) => x > 100).length,
-    },
+    internal_probe_ms: summarize(lat.probe),
+    key_event_ms: summarize(lat.samples),
     pty_mb_s: (sum(st, "bytes_in") - sum(statsStart, "bytes_in")) / 1e6 / secs,
     feed_ms_per_s: (sum(st, "feed_ms") - sum(statsStart, "feed_ms")) / secs,
     snapshot_ms_per_s: (sum(st, "snapshot_ms") - sum(statsStart, "snapshot_ms")) / secs,

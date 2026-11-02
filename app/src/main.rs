@@ -52,7 +52,7 @@ fn pane_open(
 ) -> Result<u32, String> {
     let id = panes.next.fetch_add(1, Ordering::Relaxed) + 1;
     let command = command.or_else(|| {
-        std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| s.split_whitespace().map(String::from).collect())
+        std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s))
     });
     let panes_ref = Arc::clone(&panes);
     let sink: Sink = Arc::new(move |o| {
@@ -67,10 +67,42 @@ fn pane_open(
             }
         };
     });
-    let cfg = PaneConfig { cols, rows, command, ..Default::default() };
+    let cwd = std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty());
+    let cfg = PaneConfig { cols, rows, command, cwd, ..Default::default() };
     let pane = Pane::spawn(cfg, sink).map_err(|e| e.to_string())?;
     panes.map.lock().insert(id, Arc::new(pane));
     Ok(id)
+}
+
+/// Split a command line on spaces, keeping "double-quoted parts" together
+/// (Windows paths with spaces).
+fn split_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut any = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                any = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any {
+                    out.push(std::mem::take(&mut cur));
+                    any = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                any = true;
+            }
+        }
+    }
+    if any {
+        out.push(cur);
+    }
+    out
 }
 
 #[tauri::command]
@@ -158,6 +190,10 @@ struct Boot {
     bench: bool,
     /// Seconds the probe runs before it reports.
     bench_secs: u32,
+    /// "internal": the UI types into the focused pane itself; "external"
+    /// (RSZ_BENCH_PROBE=external): something outside sends real keys and
+    /// the UI only measures (Windows: the bench script's SendInput).
+    bench_probe: String,
     platform: &'static str,
     /// RSZ_TRACE: the UI logs key events too.
     trace: bool,
@@ -170,6 +206,7 @@ fn boot() -> Boot {
         panes: n("RSZ_PANES", 1).clamp(1, 16),
         bench: std::env::var("RSZ_BENCH").is_ok_and(|v| v == "1"),
         bench_secs: n("RSZ_BENCH_SECS", 60),
+        bench_probe: std::env::var("RSZ_BENCH_PROBE").unwrap_or_else(|_| "internal".into()),
         platform: std::env::consts::OS,
         trace: std::env::var_os("RSZ_TRACE").is_some(),
     }
@@ -192,6 +229,15 @@ fn bench_report(app: tauri::AppHandle, report: serde_json::Value, exit: bool) {
 #[tauri::command]
 fn ui_log(line: String) {
     eprintln!("ui: {line}");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn split_args_keeps_quotes() {
+        assert_eq!(super::split_args(r#""C:\Program Files\x.exe" --a "b c""#), vec![r"C:\Program Files\x.exe", "--a", "b c"]);
+        assert_eq!(super::split_args("claude"), vec!["claude"]);
+    }
 }
 
 fn main() {
