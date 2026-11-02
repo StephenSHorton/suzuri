@@ -40,11 +40,27 @@ let tree = null
 const byId = new Map()
 const early = new Map() // frames that beat pane_open's reply, by pane id
 
-// RSZ_TRANSPORT=ws: every pane's frames on one socket, [u32 pane id][frame].
+// Flow control: tell the pane its frames up to lastSeq are painted, so it
+// may send the next (one frame in flight per pane).
+let frameSock = null
+function ackFrame(p) {
+  if (!p.id) return
+  if (frameSock && frameSock.readyState === 1) {
+    const b = new DataView(new ArrayBuffer(8))
+    b.setUint32(0, p.id, true)
+    b.setUint32(4, p.lastSeq >>> 0, true)
+    frameSock.send(b.buffer)
+  } else {
+    invoke("pane_ack", { id: p.id, seq: p.lastSeq >>> 0 })
+  }
+}
+
+// The frame socket: every pane's frames on one socket, [u32 pane id][frame].
 function connectFrames(spec) {
   const [port, token] = spec.split("/")
   const sock = new WebSocket(`ws://127.0.0.1:${port}/?t=${token}`)
   sock.binaryType = "arraybuffer"
+  frameSock = sock
   sock.onmessage = (e) => {
     const id = new DataView(e.data).getUint32(0, true)
     const p = byId.get(id)
@@ -139,6 +155,7 @@ class PaneView {
     this.queue.length = 0
     paint.applyMs += performance.now() - t
     this.modes = h.modes
+    this.lastSeq = h.seq
     const { cw, ch } = cellMetrics()
     const cs = this.cursor.style
     this.cursor.hidden = h.shape === 0
@@ -197,6 +214,7 @@ function scheduleFrame() {
     frameScheduled = false
     for (const p of allPanes()) {
       if (!p.flush()) continue
+      ackFrame(p)
       const now = performance.now()
       if (p.pendingInput) {
         const d = now - p.pendingInput

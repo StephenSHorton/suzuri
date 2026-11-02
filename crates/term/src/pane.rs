@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::{Condvar, Mutex};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -85,6 +85,13 @@ struct Wake {
     force_full: bool,
     input_at: Option<Instant>,
     stop: bool,
+    /// Flow control: the last frame sent, when, and the last the UI says it
+    /// painted. At most one frame is in flight per pane; damage piles up in
+    /// the engine meanwhile, so a slow UI gets fewer, larger frames instead
+    /// of a growing queue.
+    sent: u32,
+    sent_at: Instant,
+    acked: u32,
 }
 
 struct Shared {
@@ -163,7 +170,7 @@ impl Pane {
 
         let shared = Arc::new(Shared {
             engine: Mutex::new(Box::new(Alacritty::new(cfg.cols, cfg.rows, cfg.scrollback))),
-            wake: Mutex::new(Wake { dirty: true, force_full: true, input_at: None, stop: false }),
+            wake: Mutex::new(Wake { dirty: true, force_full: true, input_at: None, stop: false, sent: 0, sent_at: Instant::now(), acked: 0 }),
             cv: Condvar::new(),
             resize_slot: Mutex::new(None),
             focused: AtomicBool::new(false),
@@ -172,6 +179,9 @@ impl Pane {
         });
         let (tx, rx) = unbounded::<Cmd>();
         let mut threads = Vec::new();
+        // Running before the reader starts: a terminal query that arrives at
+        // once (ConPTY's cursor-position request on start) must get its reply.
+        *shared.state.lock() = State::Running;
 
         // Reader: feed the engine, answer queries through the actor.
         {
@@ -192,14 +202,14 @@ impl Pane {
         {
             let shared = shared.clone();
             let sink = sink.clone();
-            threads.push(thread("rsz-frame", move || frame_loop(shared, sink)));
+            let tx = tx.clone();
+            threads.push(thread("rsz-frame", move || frame_loop(shared, sink, tx)));
         }
         // Actor.
         {
             let shared = shared.clone();
             threads.push(thread("rsz-actor", move || actor_loop(rx, pair.master, writer, killer, shared, sink, (cfg.cols, cfg.rows))));
         }
-        *shared.state.lock() = State::Running;
         Ok(Pane { tx, shared, threads: Mutex::new(threads) })
     }
 
@@ -219,6 +229,11 @@ impl Pane {
     pub fn scroll(&self, delta: i32) {
         self.shared.engine.lock().scroll(delta);
         self.shared.kick(|w| w.dirty = true);
+    }
+
+    /// The UI painted frames up to `seq` (flow control).
+    pub fn ack(&self, seq: u32) {
+        self.shared.kick(|w| w.acked = w.acked.max(seq));
     }
 
     pub fn set_focused(&self, focused: bool) {
@@ -304,19 +319,31 @@ fn dispatch(events: &mut Vec<EngineEvent>, tx: &Sender<Cmd>, sink: &Sink) {
     }
 }
 
-fn frame_loop(shared: Arc<Shared>, sink: Sink) {
+/// How long a frame may stay unacknowledged before the next one goes anyway
+/// (a UI that never acks, or one not listening yet).
+const ACK_TIMEOUT: Duration = Duration::from_millis(250);
+
+fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
     let mut last = Instant::now() - Duration::from_secs(1);
     let mut seq = 0u32;
     let mut events = Vec::new();
-    let (dummy_tx, _dummy_rx) = bounded::<Cmd>(0);
     loop {
         let (force_full, input) = {
             let mut w = shared.wake.lock();
-            while !w.dirty && !w.stop {
-                shared.cv.wait(&mut w);
-            }
-            if w.stop {
-                return;
+            loop {
+                if w.stop {
+                    return;
+                }
+                let ack_deadline = w.sent_at + ACK_TIMEOUT;
+                let waiting_ack = w.acked < w.sent && Instant::now() < ack_deadline;
+                if w.dirty && !waiting_ack {
+                    break;
+                }
+                if waiting_ack {
+                    shared.cv.wait_until(&mut w, ack_deadline);
+                } else {
+                    shared.cv.wait(&mut w);
+                }
             }
             let input = w.input_at.is_some();
             (w.force_full, input)
@@ -356,11 +383,18 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink) {
             seq = seq.wrapping_add(1);
             eng.snapshot(&mut out, seq, force_full)
         };
-        dispatch(&mut events, &dummy_tx, &sink);
+        // Replies produced when a timed-out sync block is applied (DA, CPR)
+        // go to the actor like any other.
+        dispatch(&mut events, &tx, &sink);
         if sent {
             shared.stats.snapshot_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
             shared.stats.frames.fetch_add(1, Ordering::Relaxed);
             shared.stats.frame_bytes.fetch_add(out.len() as u64, Ordering::Relaxed);
+            {
+                let mut w = shared.wake.lock();
+                w.sent = seq;
+                w.sent_at = Instant::now();
+            }
             sink(Out::Frame(out));
         }
         last = Instant::now();
@@ -553,6 +587,27 @@ mod tests {
         pane.close();
         let seen = wait_exit(&rx);
         assert_eq!(seen.iter().filter(|m| m.starts_with("exit")).count(), 1, "{seen:?}");
+        pane.join();
+    }
+
+    /// A query inside a DEC 2026 block that never closes: the block times
+    /// out, the frame thread applies it, and the reply must still reach the
+    /// program (it used to block the frame thread forever).
+    #[test]
+    fn reply_from_timed_out_sync_block() {
+        let script = "stty raw -echo; printf '\\033[?2026hq\\033[6n'; IFS= read -r -d R x; printf '\\033[?2026l\\r\\ngot reply\\r\\n'; sleep 5";
+        let (pane, rx) = run(&["/bin/bash", "-c", script]);
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while !pane.screen_text().contains("got reply") && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(pane.screen_text().contains("got reply"), "{}", pane.screen_text());
+        // And the frame thread is still alive: frames keep coming.
+        while rx.try_recv().is_ok() {}
+        pane.write(b"x".to_vec());
+        assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok());
+        pane.close();
+        wait_exit(&rx);
         pane.join();
     }
 

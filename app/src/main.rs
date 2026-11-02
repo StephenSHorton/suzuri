@@ -139,6 +139,15 @@ fn pane_scroll(panes: State<'_, Arc<Panes>>, id: u32, delta: i32) {
     }
 }
 
+/// The UI painted this pane's frames up to `seq` (Channel transport; the
+/// socket carries its own acks).
+#[tauri::command]
+fn pane_ack(panes: State<'_, Arc<Panes>>, id: u32, seq: u32) {
+    if let Some(p) = panes.get(id) {
+        p.ack(seq);
+    }
+}
+
 #[tauri::command]
 fn pane_focus(panes: State<'_, Arc<Panes>>, id: u32, focused: bool) {
     if let Some(p) = panes.get(id) {
@@ -208,7 +217,7 @@ struct Boot {
     /// the UI only measures (Windows: the bench script's SendInput).
     bench_probe: String,
     platform: &'static str,
-    /// The frame socket (RSZ_TRANSPORT=ws): "port/token", or empty.
+    /// The frame socket: "port/token", or empty with RSZ_TRANSPORT=channel.
     ws: String,
     /// RSZ_TRACE: the UI logs key events too.
     trace: bool,
@@ -257,8 +266,16 @@ mod tests {
 }
 
 fn main() {
-    let bus = (std::env::var("RSZ_TRANSPORT").as_deref() == Ok("ws")).then(|| ws::FrameBus::start().expect("frame socket"));
+    // Acks from the socket find their pane through this once it exists.
+    static PANES: std::sync::OnceLock<Arc<Panes>> = std::sync::OnceLock::new();
+    let on_ack: Arc<dyn Fn(u32, u32) + Send + Sync> = Arc::new(|id, seq| {
+        if let Some(p) = PANES.get().and_then(|ps| ps.get(id)) {
+            p.ack(seq);
+        }
+    });
+    let bus = (std::env::var("RSZ_TRANSPORT").as_deref() != Ok("channel")).then(|| ws::FrameBus::start(on_ack).expect("frame socket"));
     let panes = Arc::new(Panes { bus, ..Default::default() });
+    let _ = PANES.set(Arc::clone(&panes));
     tauri::Builder::default()
         .manage(panes)
         .invoke_handler(tauri::generate_handler![
@@ -267,6 +284,7 @@ fn main() {
             pane_resize,
             pane_scroll,
             pane_focus,
+            pane_ack,
             pane_redraw,
             pane_close,
             stats,
