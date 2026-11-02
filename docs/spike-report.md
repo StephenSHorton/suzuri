@@ -239,7 +239,12 @@ First run, main @ b28fa7e:
       2026 block went nowhere, so the frame thread blocked and the program
       waited forever. A regression test now covers it.
     - No flow control. Every frame was an eval on WebView2's UI thread.
-  - The rerun is pending.
+  - Rerun on 3ce10a1: all 8 Claude panes drew within 20 s, and moving the
+    window to 1400×900 relaid them out. It also held with the PC at 100%
+    CPU (f06a673). With `RSZ_TRANSPORT=channel` only 4 of 8 drew and the
+    layout didn't follow, so the socket transport is needed on Windows,
+    not just the deadlock fix (screenshots `rsz2-claude8-ws.png` and
+    `rsz2-claude8-channel.png` are on card #255).
 - **Bench, 8 fakeagent panes, real SendInput keys.** Both apps are timed
   in-app, from key event to paint (oak's definition):
 
@@ -255,10 +260,62 @@ Caveats for that run:
 - In Go's screenshot, text from the right-hand columns draws across pane
   borders.
 
+**Latency after the fixes.** The ack flow control and the socket first
+cost about 7 ms at p50 (p50 about 12 / p99 about 18). Two causes, both fixed:
+- The key's echo frame waited for the previous frame's paint ack. Fixed in
+  7480288: for 100 ms after a key, frames skip the ack limit and pacing.
+- The socket loop waited with 2 ms timeouts, which Windows rounds up to its
+  15.6 ms tick. Fixed in f06a673: blocking reads on their own thread, with
+  no short timeouts.
+
+On f06a673, quiet PC, interleaved 40 s runs, in-app key_event_ms:
+
+| build | p50 ms | p90 ms | p99 ms | max ms | over 16 ms |
+|---|---|---|---|---|---|
+| f06a673, WebSocket (default) | 5.9–6.3 | 9.6–9.8 | 11.6–12.3 | 13.9 | 0 |
+| f06a673, Tauri Channel | 4.4–4.5 | 7.6–7.7 | 8.3–8.4 | 8.8 | 0 |
+| b28fa7e (first run) | 4.7–5.2 | 7.6–7.7 | 8.5–8.6 | 10.6 | 0 |
+
+The socket is still about 1.5 ms (p50) to 3.5 ms (p99) behind the Channel.
+That is the loopback hop. It stays the default because the Channel starves
+8 Claude panes. Memory on the rerun: 262 MB private / 419 MB working set.
+Go suzuri rerun with the committed script (`scripts/windows/bench-go.ps1`):
+p99 30–45 ms in the windows under keys, with one 201 ms window at the start.
+
 Replay corpus on the PC: 73.5 MB/s feed, 33.9 MB/s feed+snapshot overall,
 and claude-stream at 141 MB/s. The screens match the goldens as on the Mac.
 
 ## Recommendation
 
-(Finished after the Windows run, since suzuri's real pain is ConPTY on
-Windows.)
+**Continue rust-suzuri** as suzuri's successor (renamed to suzuri later),
+and stop putting performance work into Go suzuri beyond fixes users need
+before the switch.
+
+Why:
+- **Latency.** On the Mac, on-screen p99 is 33 ms against 53 ms. On
+  Windows, in-app p99 is about 12 ms against 30–45 ms, with no spikes over
+  16 ms. Go suzuri had 142 ms and 201 ms windows.
+- **CPU.** About half of Go's on the Mac and about a ninth on Windows
+  (5.4 s vs 47 s over a run).
+- **Parsing.** 135–400 MB/s against Go's 4 MB/s, 30–100× faster. That is
+  where Claude Code's bursts land.
+- **Windows.** The deadlock and the transport starvation that 8 Claude panes
+  exposed are fixed and covered by tests, and the app survived 645-resize
+  churn. ConPTY comes from portable-pty, the same code WezTerm ships.
+- **Architecture.** The #246 goals (a session actor, an off-thread VT,
+  damage-based paint) are the baseline here, not a retrofit.
+
+Against it:
+- **Memory.** WebView2 and WebKit cost about 260–275 MB private on Windows
+  against Go's 67 MB. On the Mac it's lower idle (136 vs 452 MB) but higher
+  under load (600–750 vs about 520 MB). Turning scrollback off saves about
+  100 MB. If that matters, the fix is the native wgpu renderer described
+  above, at the same core.
+- **Parity.** 6–8 weeks of product work, as listed above. Go suzuri stays
+  the daily driver until then.
+
+Next steps, if you agree:
+1. Selection, copy and mouse, then tabs and settings: what daily use needs.
+2. Swap in libghostty-vt when its API settles (about 3× the feed speed).
+3. Port features over from Go one card at a time, and close or retarget the
+   #246 performance cards.
