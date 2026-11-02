@@ -273,6 +273,7 @@ function closePane(pane) {
 
 function setFocus(p) {
   if (!p) return
+  if (window.rszTrace) log("focus", p.id, allPanes().indexOf(p))
   const prev = focused
   focused = p
   for (const q of allPanes()) q.el.classList.toggle("focused", q === p)
@@ -325,6 +326,7 @@ function appShortcut(e) {
 }
 
 input.addEventListener("keydown", (e) => {
+  if (window.rszTrace) log("key", e.key, e.code, e.metaKey, e.ctrlKey, e.altKey, e.isComposing)
   if (e.isComposing) return
   if (appShortcut(e)) { e.preventDefault(); return }
   if (!focused) return
@@ -380,6 +382,9 @@ async function updateHud() {
 async function grid(n) {
   // Columns first, then rows: 8 panes = 4 x 2.
   const first = await split("h")
+  // Let the first pane's program start before the rest (the bench's quiet
+  // probe pane is whichever fakeagent starts first).
+  await new Promise((r) => setTimeout(r, 500))
   const cols = Math.min(n, n >= 4 ? Math.ceil(n / 2) : n)
   const colPanes = [first]
   for (let i = 1; i < cols; i++) colPanes.push(await split("h", colPanes[i - 1]))
@@ -438,6 +443,7 @@ async function bench(boot, target) {
 async function start() {
   await document.fonts.load(`14px "Gohu"`).catch(() => {})
   const boot = await invoke("boot")
+  window.rszTrace = boot.trace
   const first = boot.panes > 1 ? await grid(boot.panes) : await split("h")
   if (boot.bench) bench(boot, first)
 }

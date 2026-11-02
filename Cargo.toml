@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/term", "app"]
+members = ["crates/term", "app", "tools/fakeagent"]
 
 [workspace.package]
 version = "0.1.0"

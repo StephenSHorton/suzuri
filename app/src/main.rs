@@ -159,6 +159,8 @@ struct Boot {
     /// Seconds the probe runs before it reports.
     bench_secs: u32,
     platform: &'static str,
+    /// RSZ_TRACE: the UI logs key events too.
+    trace: bool,
 }
 
 #[tauri::command]
@@ -169,6 +171,7 @@ fn boot() -> Boot {
         bench: std::env::var("RSZ_BENCH").is_ok_and(|v| v == "1"),
         bench_secs: n("RSZ_BENCH_SECS", 60),
         platform: std::env::consts::OS,
+        trace: std::env::var_os("RSZ_TRACE").is_some(),
     }
 }
 

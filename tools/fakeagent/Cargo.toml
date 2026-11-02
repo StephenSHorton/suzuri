@@ -1,0 +1,10 @@
+[package]
+name = "fakeagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "A synthetic Claude-Code-like pane for benches (marble's #251 design)"
+
+[dependencies]
+crossterm = "0.29"

@@ -394,6 +394,9 @@ fn actor_loop(
                 }
                 let Some(w) = writer.as_mut() else { continue };
                 shared.stats.writes.fetch_add(1, Ordering::Relaxed);
+                if trace() {
+                    eprintln!("rsz: write {:?}", String::from_utf8_lossy(&bytes[..bytes.len().min(80)]));
+                }
                 // Chunked so a close waits at most one chunk behind a paste.
                 let mut failed = false;
                 for chunk in bytes.chunks(WRITE_CHUNK) {

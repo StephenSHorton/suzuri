@@ -11,3 +11,16 @@ alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
 crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[features]
+# Link libghostty-vt for the engine bench (examples/replay_ghostty.rs).
+# Build it in a ghostty checkout with `zig build -Demit-lib-vt
+# -Doptimize=ReleaseFast` and point GHOSTTY_VT_LIB at its zig-out/lib.
+ghostty = []
+
+[[example]]
+name = "replay_ghostty"
+required-features = ["ghostty"]
