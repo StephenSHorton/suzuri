@@ -220,11 +220,43 @@ behind. On Go suzuri, the #246 cards fix the same Windows problems: a
 session actor, an off-thread VT, damage-based paint. Its baseline ingest is
 47× slower, and its paint floor sits behind ebiten's 60 Hz tick.
 
-## Windows 11
+## Windows 11 (kestrel, the PC: Ryzen 9850X3D, RTX 5080)
 
-kestrel's run on the PC (step s6 on #255) fills this in: the build, 8
-Claude panes, ConPTY churn, and the same 8-pane bench against Go suzuri's
-#247 telemetry line, in-app on both sides.
+First run, main @ b28fa7e:
+
+- **Build.** `cargo build --release -p rust-suzuri -p fakeagent` worked the
+  first time, in 1m28s.
+- **Smoke test: passed.** In PowerShell 5.1: typing, arrows, Ctrl+C,
+  split right and down, Alt+arrow focus, close, and wheel scrollback.
+- **Churn: no crash.** 8 streaming panes for 4 minutes. 645 window
+  resizes (900–1800 × 600–1100) mixed with splits, closes and focus moves.
+  The app's working set was 58.7 MB at the end.
+- **8 Claude Code panes: failed.**
+  - Panes stayed blank. 2 panes worked.
+  - With 8 panes, the layout didn't follow a window resize.
+  - Two causes were found and fixed in 3ce10a1:
+    - A frame-thread deadlock. Replies to queries inside a timed-out DEC
+      2026 block went nowhere, so the frame thread blocked and the program
+      waited forever. A regression test now covers it.
+    - No flow control. Every frame was an eval on WebView2's UI thread.
+  - The rerun is pending.
+- **Bench, 8 fakeagent panes, real SendInput keys.** Both apps are timed
+  in-app, from key event to paint (oak's definition):
+
+| | Go suzuri (oak/hang-watchdog, dev build) | rust-suzuri (b28fa7e, Channel) |
+|---|---|---|
+| input p99 | 31.4–32.9 ms (one 10 s window 142.6 ms) | 8.6 ms (p50 4.5, max 8.8, n=330) |
+| CPU over the ~50 s run | 47 s | 5.4 s |
+| memory | 67 MB private / 47 MB working set | 274 MB private / 448 MB working set (app + 7 WebView2 processes) |
+
+Caveats for that run:
+- Go's 8 panes were an uneven layout, and all 8 streamed, about 2.5 MB per
+  10 s. rust-suzuri had one quiet probe pane, about 1.6 MB per 10 s.
+- In Go's screenshot, text from the right-hand columns draws across pane
+  borders.
+
+Replay corpus on the PC: 73.5 MB/s feed, 33.9 MB/s feed+snapshot overall,
+and claude-stream at 141 MB/s. The screens match the goldens as on the Mac.
 
 ## Recommendation
 
