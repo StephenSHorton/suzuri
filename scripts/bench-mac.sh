@@ -37,7 +37,7 @@ BEFORE=$(webkit_pids)
 
 case "$APP" in
 rsz)
-  RSZ_TRACE=1 RSZ_PANES=8 RSZ_CMD="$WRAP" "$R/target/release/rust-suzuri" > "$OUT/app.log" 2>&1 &
+  RSZ_BENCH_OUT="$OUT/inapp.json" RSZ_TRACE=1 RSZ_PANES=8 RSZ_CMD="$WRAP" "$R/target/release/rust-suzuri" > "$OUT/app.log" 2>&1 &
   PID=$!
   sleep 4
   ;;
@@ -63,15 +63,20 @@ EOF
   PID=$!
   sleep 4
   # Balanced splits so the 8 panes come out equal (suzuri halves the
-  # focused pane): 2 columns, then 4, then each column split down.
+  # focused pane and focuses the new one): 2 columns, then 4, then split
+  # each column down from right to left (only "left" moves: from a bottom
+  # half the pane to the left is still full height, so the move is
+  # unambiguous), and finally up to the first pane, the quiet probe pane.
   KEY_D=2; KEY_E=14; LEFT=123; RIGHT=124; UP=126
-  s() { "$K" "$PID" key "$@"; sleep 0.8; }
-  s $KEY_D cmd shift          # A | B (focus B)
-  s $LEFT cmd alt; s $KEY_D cmd shift      # A | A2 | B (focus A2)
-  s $RIGHT cmd alt; s $KEY_D cmd shift     # ... | B | B2 (focus B2)
-  for _ in 1 2 3; do s $KEY_E cmd shift; s $UP cmd alt; s $LEFT cmd alt; done
-  s $KEY_E cmd shift
-  s $UP cmd alt
+  s() { "$K" "$PID" key "$@"; sleep 1.2; }
+  s $KEY_D cmd shift                      # A | B (focus B)
+  s $LEFT cmd alt; s $KEY_D cmd shift     # A | A2 | B (focus A2)
+  s $RIGHT cmd alt; s $KEY_D cmd shift    # A | A2 | B | B2 (focus B2)
+  s $KEY_E cmd shift; s $LEFT cmd alt
+  s $KEY_E cmd shift; s $LEFT cmd alt
+  s $KEY_E cmd shift; s $LEFT cmd alt
+  s $KEY_E cmd shift; s $UP cmd alt
+  W0=$("$TOOLS/winid" "$PID"); screencapture -x -o -l "$W0" "$OUT/layout.png" || true
   ;;
 *) echo "rsz or suzuri"; exit 2 ;;
 esac
@@ -103,6 +108,11 @@ T0=$(date +%s)
 SAMPLER=$!
 "$TOOLS/latprobe" "$PID" "$SAMPLES" 100 "$OUT/probe.json" 2> "$OUT/probe.err" > /dev/null || true
 kill "$SAMPLER" 2>/dev/null || true
+# With RSZ_BENCH=1 the app measures the same keys itself and reports when
+# its window ends (in-app vs pixel calibration); give it time to finish.
+if [ "${RSZ_BENCH:-}" = 1 ]; then
+  for _ in $(seq 1 30); do kill -0 "$PID" 2>/dev/null || break; sleep 1; done
+fi
 T1=$(date +%s)
 CPU1=$(cpu_secs)
 MEM1=$(footprint_mb)

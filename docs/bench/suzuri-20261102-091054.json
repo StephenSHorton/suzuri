@@ -1,0 +1,24 @@
+{
+  "app": "suzuri",
+  "panes": 8,
+  "probe_ms": {
+    "key_tiles": 110,
+    "max": 55.68179166666666,
+    "mean": 48.63264500000004,
+    "n": 300,
+    "p50": 48.52558333333334,
+    "p90": 51.215916666666665,
+    "p99": 52.80970833333333,
+    "timeouts": 0
+  },
+  "footprint_mb_samples": {
+    "n": 11,
+    "min": 519.6,
+    "median": 522.3,
+    "max": 524.0
+  },
+  "footprint_mb_start": 521.6,
+  "footprint_mb_end": 522.3,
+  "cpu_cores_avg": 0.355,
+  "secs": 52
+}

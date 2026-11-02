@@ -78,7 +78,10 @@ fn pane_open(
         };
     });
     let cwd = std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty());
-    let cfg = PaneConfig { cols, rows, command, cwd, ..Default::default() };
+    let mut cfg = PaneConfig { cols, rows, command, cwd, ..Default::default() };
+    if let Some(n) = std::env::var("RSZ_SCROLLBACK").ok().and_then(|v| v.parse().ok()) {
+        cfg.scrollback = n;
+    }
     let pane = Pane::spawn(cfg, sink).map_err(|e| e.to_string())?;
     panes.map.lock().insert(id, Arc::new(pane));
     Ok(id)
