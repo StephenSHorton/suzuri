@@ -7,10 +7,12 @@
 //! Channel.
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use tungstenite::Message;
+use tungstenite::protocol::Role;
+use tungstenite::{Message, WebSocket};
 use tungstenite::handshake::server::{Request, Response};
 
 pub struct FrameBus {
@@ -41,8 +43,6 @@ impl FrameBus {
 fn serve(listener: TcpListener, rx: Receiver<Vec<u8>>, want: String, on_ack: Arc<dyn Fn(u32, u32) + Send + Sync>) {
     for stream in listener.incoming().flatten() {
         let _ = stream.set_nodelay(true);
-        // Short reads so one thread can both send frames and take acks.
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(2)));
         let check = |req: &Request, resp: Response| {
             if req.uri().to_string() == want {
                 Ok(resp)
@@ -51,36 +51,46 @@ fn serve(listener: TcpListener, rx: Receiver<Vec<u8>>, want: String, on_ack: Arc
             }
         };
         let Ok(mut ws) = tungstenite::accept_hdr(stream, check) else { continue };
-        // One window, one socket: serve it until it goes away.
-        'conn: loop {
-            match rx.recv_timeout(Duration::from_millis(2)) {
+        // Acks are read on their own thread with plain blocking reads: no
+        // short timeouts anywhere, because on Windows those round up to the
+        // ~15.6 ms system tick and a frame waited out one (+7 ms p50).
+        let Ok(read_half) = ws.get_ref().try_clone() else { continue };
+        let closed = Arc::new(AtomicBool::new(false));
+        {
+            let closed = closed.clone();
+            let on_ack = on_ack.clone();
+            let mut reader = WebSocket::from_raw_socket(read_half, Role::Server, None);
+            let _ = std::thread::Builder::new().name("rsz-ws-acks".into()).spawn(move || {
+                loop {
+                    match reader.read() {
+                        Ok(Message::Binary(b)) if b.len() == 8 => {
+                            let id = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                            let seq = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+                            on_ack(id, seq);
+                        }
+                        Ok(Message::Close(_)) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                closed.store(true, Ordering::Relaxed);
+            });
+        }
+        // One window, one socket: frames go out as soon as they're queued
+        // (recv wakes on send; the timeout only notices a closed socket).
+        loop {
+            match rx.recv_timeout(Duration::from_millis(250)) {
                 Ok(msg) => {
                     if ws.send(Message::Binary(msg.into())).is_err() {
-                        break 'conn;
-                    }
-                    // Send whatever else is queued before reading.
-                    while let Ok(msg) = rx.try_recv() {
-                        if ws.send(Message::Binary(msg.into())).is_err() {
-                            break 'conn;
-                        }
+                        break;
                     }
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 Err(_) => return,
             }
-            loop {
-                match ws.read() {
-                    Ok(Message::Binary(b)) if b.len() == 8 => {
-                        let id = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                        let seq = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
-                        on_ack(id, seq);
-                    }
-                    Ok(Message::Close(_)) => break 'conn,
-                    Ok(_) => {}
-                    Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
-                    Err(_) => break 'conn,
-                }
+            if closed.load(Ordering::Relaxed) {
+                break;
             }
         }
+        let _ = ws.get_ref().shutdown(std::net::Shutdown::Both);
     }
 }
