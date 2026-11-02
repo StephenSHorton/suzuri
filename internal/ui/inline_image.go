@@ -5,10 +5,12 @@ package ui
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,7 +25,29 @@ const (
 	maxTabImages     = 8
 	maxImageFileBytes = 12 << 20 // 12 MiB decode cap
 	maxImageEdgePx   = 2048      // downscale longer edge before paint cache
+	// maxImageDecodePixels caps the pixel count a header may declare before
+	// we decode it: a few MiB of PNG can claim 20000x20000 and allocate
+	// gigabytes (decompression bomb via Kitty APC or iTerm OSC 1337).
+	maxImageDecodePixels = 1 << 25 // ~33.5 MP, 128 MiB as RGBA
 )
+
+// errImageTooLarge is returned when an image header declares more pixels
+// than maxImageDecodePixels.
+var errImageTooLarge = errors.New("image dimensions exceed decode cap")
+
+// decodeImageCapped decodes data after checking the header's declared size.
+func decodeImageCapped(data []byte) (image.Image, error) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Width < 1 || cfg.Height < 1 ||
+		int64(cfg.Width)*int64(cfg.Height) > maxImageDecodePixels {
+		return nil, errImageTooLarge
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	return img, err
+}
 
 // tabImage is a decoded image shown in the shell viewport (not a VT cell).
 type tabImage struct {
@@ -460,7 +484,14 @@ func loadImageFile(path string) (*tabImage, error) {
 	if stat != nil && stat.Size() > maxImageFileBytes {
 		return nil, os.ErrInvalid
 	}
-	img, _, err := image.Decode(f)
+	data, err := io.ReadAll(io.LimitReader(f, maxImageFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxImageFileBytes {
+		return nil, os.ErrInvalid
+	}
+	img, err := decodeImageCapped(data)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +502,7 @@ func loadImageBytes(name string, data []byte) (*tabImage, error) {
 	if len(data) == 0 || len(data) > maxImageFileBytes {
 		return nil, os.ErrInvalid
 	}
-	img, _, err := image.Decode(bytes.NewReader(data))
+	img, err := decodeImageCapped(data)
 	if err != nil {
 		return nil, err
 	}
