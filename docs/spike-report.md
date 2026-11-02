@@ -75,10 +75,14 @@ This is an external pixel probe, used identically for both apps.
 | rust-suzuri, Tauri Channel | 4 | 25.4–32.6 | 32.4–35.5 | 35.3–40.9 | 50.3 | 0.20 |
 | rust-suzuri, WebSocket frames | 2 | 30.5–30.6 | 32.7–33.1 | 33.3–33.4 | 33.5 | 0.18 |
 | rust-suzuri, scrollback off | 1 | 25.0 | 31.9 | 33.3 | 33.6 | 0.20 |
+| rust-suzuri f06a673 (final: socket, ack flow control, key bypass) | 2 | 30.0–31.2 | 32.9–34.4 | 33.3–36.5 | 37.1 | n/a* |
 
 - rust-suzuri's p50 drifted between runs, 25 to 33 ms, with the machine's
   other load. Suzuri's didn't, about 49 ms every time.
 - Channel against WebSocket is within that drift on latency.
+- \*The final runs also had the app time itself (RSZ_BENCH=1). It quits
+  after its window, so the CPU figure for those runs isn't comparable.
+  In-app p50 was 10 ms in both runs. p99 was 17 and 19 ms.
 - Three earlier suzuri runs had an uneven layout (the key sequence put
   three panes in one column). They gave the same numbers (p99 52–56 ms) and
   aren't in the table.
@@ -274,10 +278,13 @@ On f06a673, quiet PC, interleaved 40 s runs, in-app key_event_ms:
 |---|---|---|---|---|---|
 | f06a673, WebSocket (default) | 5.9–6.3 | 9.6–9.8 | 11.6–12.3 | 13.9 | 0 |
 | f06a673, Tauri Channel | 4.4–4.5 | 7.6–7.7 | 8.3–8.4 | 8.8 | 0 |
-| b28fa7e (first run) | 4.7–5.2 | 7.6–7.7 | 8.5–8.6 | 10.6 | 0 |
+| b28fa7e (old build, same session) | 4.7–5.2 | 7.6–7.7 | 8.5–8.6 | 10.6 | 0 |
 
 The socket is still about 1.5 ms (p50) to 3.5 ms (p99) behind the Channel.
-That is the loopback hop. It stays the default because the Channel starves
+That is the loopback hop. The UI also paints in requestAnimationFrame,
+so a frame waits up to one display refresh after it arrives. That is the
+remaining floor. Painting straight from onmessage wouldn't reach the
+screen any sooner. It stays the default because the Channel starves
 8 Claude panes. Memory on the rerun: 262 MB private / 419 MB working set.
 Go suzuri rerun with the committed script (`scripts/windows/bench-go.ps1`):
 p99 30–45 ms in the windows under keys, with one 201 ms window at the start.
@@ -300,8 +307,9 @@ Why:
 - **Parsing.** 135–400 MB/s against Go's 4 MB/s, 30–100× faster. That is
   where Claude Code's bursts land.
 - **Windows.** The deadlock and the transport starvation that 8 Claude panes
-  exposed are fixed and covered by tests, and the app survived 645-resize
-  churn. ConPTY comes from portable-pty, the same code WezTerm ships.
+  exposed are fixed. The deadlock has a regression test. The transport fix
+  was confirmed by kestrel's 8-Claude rerun, including under full CPU
+  load. The app survived 645-resize churn. ConPTY comes from portable-pty, the same code WezTerm ships.
 - **Architecture.** The #246 goals (a session actor, an off-thread VT,
   damage-based paint) are the baseline here, not a retrofit.
 
