@@ -323,6 +323,11 @@ fn dispatch(events: &mut Vec<EngineEvent>, tx: &Sender<Cmd>, sink: &Sink) {
 /// (a UI that never acks, or one not listening yet).
 const ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// For this long after a key, the pane's frames skip both the pacing and the
+/// one-in-flight ack limit, so an echo never waits on the previous frame's
+/// paint round trip (it cost a frame, +7 ms p50, on Windows).
+const INPUT_WINDOW: Duration = Duration::from_millis(100);
+
 fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
     let mut last = Instant::now() - Duration::from_secs(1);
     let mut seq = 0u32;
@@ -335,7 +340,8 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
                     return;
                 }
                 let ack_deadline = w.sent_at + ACK_TIMEOUT;
-                let waiting_ack = w.acked < w.sent && Instant::now() < ack_deadline;
+                let urgent = w.input_at.is_some_and(|t| t.elapsed() < INPUT_WINDOW);
+                let waiting_ack = !urgent && w.acked < w.sent && Instant::now() < ack_deadline;
                 if w.dirty && !waiting_ack {
                     break;
                 }
@@ -345,7 +351,7 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
                     shared.cv.wait(&mut w);
                 }
             }
-            let input = w.input_at.is_some();
+            let input = w.input_at.is_some_and(|t| t.elapsed() < INPUT_WINDOW);
             (w.force_full, input)
         };
         // Pace: let output accumulate unless the user is waiting on an echo.
@@ -378,7 +384,6 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
                 let mut w = shared.wake.lock();
                 w.dirty = false;
                 w.force_full = false;
-                w.input_at = None;
             }
             seq = seq.wrapping_add(1);
             eng.snapshot(&mut out, seq, force_full)
