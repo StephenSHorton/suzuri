@@ -150,6 +150,10 @@ type Config struct {
 	// AnimateUnfocused keeps the paint clock running when another app has focus
 	// (matrix rain, tab spinner, caret). Off freezes chrome animation in background.
 	AnimateUnfocused bool
+	// ConPtyActor selects the Windows ConPTY session actor (one goroutine per
+	// pane owns every native console call). nil = the build default (off until
+	// the stability soak passes). SUZURI_CONPTY_ACTOR overrides it.
+	ConPtyActor *bool
 	// Backdrop is what shows through empty and near-black shell cells
 	// (solid | glass). Glass is a Mac blur; Windows uses DWM Mica/Acrylic.
 	Backdrop string
@@ -213,6 +217,7 @@ type fileDTO struct {
 	ShellMatrixPtr        *bool           `json:"shell_matrix,omitempty"`
 	ShellMatrixOpacityPtr *int            `json:"shell_matrix_opacity,omitempty"`
 	AnimateUnfocusedPtr   *bool           `json:"animate_unfocused,omitempty"`
+	ConPtyActorPtr        *bool           `json:"conpty_actor,omitempty"`
 	NoticePosition        string          `json:"notice_position,omitempty"`
 	Window                WindowPlacement `json:"window,omitempty"`
 }
@@ -913,6 +918,7 @@ func fromDTO(d fileDTO) Config {
 		Backdrop:       d.Backdrop,
 		NoticePosition: d.NoticePosition,
 		Window:         d.Window,
+		ConPtyActor:    d.ConPtyActorPtr,
 	}
 	dflt := Default()
 	if d.ShellMatrixPtr != nil {
@@ -983,6 +989,7 @@ func toDTO(c Config) fileDTO {
 		ShellMatrixPtr:        &sm,
 		ShellMatrixOpacityPtr: &op,
 		AnimateUnfocusedPtr:   &au,
+		ConPtyActorPtr:        c.ConPtyActor,
 		NoticePosition:        c.NoticePosition,
 		Window:                c.Window,
 	}

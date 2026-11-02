@@ -25,6 +25,7 @@ import (
 	"github.com/StephenSHorton/suzuri/internal/caffeine"
 	"github.com/StephenSHorton/suzuri/internal/chrome"
 	"github.com/StephenSHorton/suzuri/internal/config"
+	"github.com/StephenSHorton/suzuri/internal/host"
 )
 
 const (
@@ -64,6 +65,9 @@ func Run() error {
 		cfg = config.Default()
 	}
 	cfg = config.Normalize(cfg)
+	if cfg.ConPtyActor != nil {
+		host.SetSessionActor(*cfg.ConPtyActor)
+	}
 	setNoticeAnchor(cfg.NoticePosition, false)
 	chrome.ApplyTheme(cfg.Theme)
 	SetShellANSIMap(cfg.ShellANSIMap)

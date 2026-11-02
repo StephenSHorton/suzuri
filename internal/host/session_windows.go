@@ -29,8 +29,16 @@ const nativeResizeGap = 400 * time.Millisecond
 var lastNativeResizeUnix atomic.Int64
 
 // Session is a live shell attached to a Windows ConPTY.
+//
+// Two implementations sit behind the same methods. The legacy one (cpty)
+// calls the conpty library from whichever goroutine calls in, serialized only
+// by resizeMu and the timing gates. With the session actor on (pc and act set;
+// SetSessionActor / SUZURI_CONPTY_ACTOR), one goroutine per pane owns every
+// native call (session_actor.go).
 type Session struct {
 	cpty *conpty.ConPty
+	pc   *conPTY
+	act  *sessionActor
 	once sync.Once
 	// resizeMu serializes ResizePseudoConsole and ClosePseudoConsole.
 	// Concurrent Resize while I/O is in flight has hard-crashed the host
@@ -153,11 +161,36 @@ func StartSession(commandLine string, cols, rows int, workDir string, extraEnv .
 		conpty.ConPtyWorkDir(wd),
 		conpty.ConPtyEnv(env),
 	}
+	if useSessionActor() {
+		return startActorSession(commandLine, cols, rows, wd, env)
+	}
 	cpty, err := conpty.Start(commandLine, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("conpty start: %w", err)
 	}
 	return &Session{cpty: cpty, closed: make(chan struct{})}, nil
+}
+
+// startActorSession starts the shell on a pseudoconsole owned by a session
+// actor. No CreatePseudoConsole flags yet: RESIZE_QUIRK and WIN32_INPUT_MODE
+// change what the console paints on resize and how keys are encoded, and the
+// VT and key paths here expect neither.
+func startActorSession(commandLine string, cols, rows int, wd string, env []string) (*Session, error) {
+	pc, err := startConPTY(commandLine, cols, rows, wd, env, 0)
+	if err != nil {
+		return nil, fmt.Errorf("conpty start: %w", err)
+	}
+	s := &Session{pc: pc, closed: make(chan struct{})}
+	a := newSessionActor(pc, cols, rows)
+	a.resizeDenied = func() (bool, string) {
+		return NativeResizeDenied(s.recentIO(), lastNativeResizeUnix.Load(), time.Now().UnixNano(), nativeResizeGap.Nanoseconds())
+	}
+	a.noteResize = func() { lastNativeResizeUnix.Store(time.Now().UnixNano()) }
+	s.act = a
+	a.start()
+	go pc.waitProcess(a)
+	applog.Trail("session.actor start", "pid", pc.pid, "cols", cols, "rows", rows)
+	return s, nil
 }
 
 // sessionEnv builds the ConPTY process environment: base + extra, then
@@ -263,6 +296,16 @@ func mustWd() string {
 
 // Read implements io.Reader (PTY → host).
 func (s *Session) Read(p []byte) (int, error) {
+	if s != nil && s.act != nil {
+		n, err := s.pc.read(p)
+		if n > 0 {
+			s.lastIOUnixNano.Store(time.Now().UnixNano())
+		}
+		if err != nil {
+			s.act.ReaderEnded()
+		}
+		return n, err
+	}
 	if s == nil || s.cpty == nil {
 		return 0, io.EOF
 	}
@@ -275,6 +318,13 @@ func (s *Session) Read(p []byte) (int, error) {
 
 // Write implements io.Writer (host → PTY).
 func (s *Session) Write(p []byte) (int, error) {
+	if s != nil && s.act != nil {
+		n, err := s.act.Write(p)
+		if n > 0 {
+			s.lastIOUnixNano.Store(time.Now().UnixNano())
+		}
+		return n, err
+	}
 	if s == nil || s.cpty == nil {
 		return 0, fmt.Errorf("session closed")
 	}
@@ -314,6 +364,12 @@ func (s *Session) Resize(cols, rows int) error {
 	if rows > 32767 {
 		rows = 32767
 	}
+	if s.act != nil {
+		// Latest wins: the actor applies the newest size once the gate
+		// allows it, so the caller never has to retry.
+		s.act.Resize(cols, rows)
+		return nil
+	}
 	s.resizeMu.Lock()
 	defer s.resizeMu.Unlock()
 	if s.cpty == nil {
@@ -338,6 +394,9 @@ func (s *Session) Resize(cols, rows int) error {
 
 // Pid of the attached console process.
 func (s *Session) Pid() int {
+	if s != nil && s.pc != nil {
+		return int(s.pc.pid)
+	}
 	if s == nil || s.cpty == nil {
 		return 0
 	}
@@ -346,6 +405,14 @@ func (s *Session) Pid() int {
 
 // Wait blocks until the process exits.
 func (s *Session) Wait(ctx context.Context) (uint32, error) {
+	if s != nil && s.act != nil {
+		select {
+		case <-s.act.Exited():
+			return s.act.ExitCode(), nil
+		case <-ctx.Done():
+			return 259, fmt.Errorf("wait canceled: %v", ctx.Err()) // STILL_ACTIVE
+		}
+	}
 	if s == nil || s.cpty == nil {
 		return 0, fmt.Errorf("session closed")
 	}
@@ -356,6 +423,13 @@ func (s *Session) Wait(ctx context.Context) (uint32, error) {
 // Holds resizeMu so an in-flight Resize cannot race ClosePseudoConsole.
 func (s *Session) Close() error {
 	if s == nil {
+		return nil
+	}
+	if s.act != nil {
+		// Off the caller's thread: the actor runs the close sequence and
+		// Closed fires once when it is done.
+		s.once.Do(func() { close(s.closed) })
+		s.act.Close()
 		return nil
 	}
 	var err error
@@ -372,6 +446,16 @@ func (s *Session) Close() error {
 		s.cpty = nil
 	})
 	return err
+}
+
+// Closed is closed once the session has fully shut down. With the session
+// actor that is after the whole close sequence; on the legacy path it is when
+// Close starts.
+func (s *Session) Closed() <-chan struct{} {
+	if s.act != nil {
+		return s.act.Closed()
+	}
+	return s.closed
 }
 
 // CopyOutput continuously reads the PTY into w until EOF/error.
