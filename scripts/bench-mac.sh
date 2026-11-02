@@ -98,7 +98,11 @@ osascript -e "tell application \"System Events\" to set frontmost of (first proc
 MEM0=$(footprint_mb)
 CPU0=$(cpu_secs)
 T0=$(date +%s)
+# Memory every 5 s while the probe runs (the webview's heap swings with GC).
+( while :; do footprint_mb >> "$OUT/mem.txt"; echo >> "$OUT/mem.txt"; sleep 5; done ) &
+SAMPLER=$!
 "$TOOLS/latprobe" "$PID" "$SAMPLES" 100 "$OUT/probe.json" 2> "$OUT/probe.err" > /dev/null || true
+kill "$SAMPLER" 2>/dev/null || true
 T1=$(date +%s)
 CPU1=$(cpu_secs)
 MEM1=$(footprint_mb)
@@ -112,7 +116,9 @@ import json, sys
 out, app, m0, m1, c0, c1, t0, t1 = sys.argv[1:]
 probe = json.load(open(f"{out}/probe.json")) if __import__("os").path.exists(f"{out}/probe.json") else {}
 secs = max(1, int(t1) - int(t0))
+mem = sorted(float(x) for x in open(f"{out}/mem.txt").read().split() if x.strip())
 s = {"app": app, "panes": 8, "probe_ms": probe,
+     "footprint_mb_samples": {"n": len(mem), "min": mem[0] if mem else 0, "median": mem[len(mem)//2] if mem else 0, "max": mem[-1] if mem else 0},
      "footprint_mb_start": float(m0), "footprint_mb_end": float(m1),
      "cpu_cores_avg": round((float(c1) - float(c0)) / secs, 3), "secs": secs}
 json.dump(s, open(f"{out}/summary.json", "w"), indent=2)

@@ -37,6 +37,25 @@ const paint = { frames: 0, bytes: 0, applyMs: 0 }
 
 let focused = null
 let tree = null
+const byId = new Map()
+const early = new Map() // frames that beat pane_open's reply, by pane id
+
+// RSZ_TRANSPORT=ws: every pane's frames on one socket, [u32 pane id][frame].
+function connectFrames(spec) {
+  const [port, token] = spec.split("/")
+  const sock = new WebSocket(`ws://127.0.0.1:${port}/?t=${token}`)
+  sock.binaryType = "arraybuffer"
+  sock.onmessage = (e) => {
+    const id = new DataView(e.data).getUint32(0, true)
+    const p = byId.get(id)
+    if (p) p.enqueue(e.data, 4)
+    else {
+      if (!early.has(id)) early.set(id, [])
+      early.get(id).push([e.data, 4])
+    }
+  }
+  sock.onerror = () => log("frame socket error")
+}
 
 class PaneView {
   constructor() {
@@ -76,6 +95,9 @@ class PaneView {
     ch.onmessage = (m) => this.onMessage(m)
     this.size = [cols, rows]
     this.id = await invoke("pane_open", { cols, rows, command: null, onFrame: ch })
+    byId.set(this.id, this)
+    for (const [buf, off] of early.get(this.id) || []) this.enqueue(buf, off)
+    early.delete(this.id)
     invoke("pane_focus", { id: this.id, focused: focused === this })
   }
 
@@ -98,8 +120,9 @@ class PaneView {
     }
   }
 
-  enqueue(buf) {
-    this.queue.push(buf)
+  // A frame is [buffer, byte offset of the frame in it].
+  enqueue(buf, off = 0) {
+    this.queue.push([buf, off])
     scheduleFrame()
   }
 
@@ -108,9 +131,9 @@ class PaneView {
     if (!this.queue.length) return false
     const t = performance.now()
     let h
-    for (const buf of this.queue) {
-      h = this.screen.apply(buf)
-      paint.bytes += buf.byteLength
+    for (const [buf, off] of this.queue) {
+      h = this.screen.apply(buf, off)
+      paint.bytes += buf.byteLength - off
       paint.frames++
     }
     this.queue.length = 0
@@ -449,6 +472,7 @@ async function start() {
   await document.fonts.load(`14px "Gohu"`).catch(() => {})
   const boot = await invoke("boot")
   window.rszTrace = boot.trace
+  if (boot.ws) connectFrames(boot.ws)
   const first = boot.panes > 1 ? await grid(boot.panes) : await split("h")
   if (boot.bench) bench(boot, first)
 }

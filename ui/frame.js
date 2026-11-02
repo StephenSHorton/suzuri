@@ -66,9 +66,9 @@ export class Screen {
     return true
   }
 
-  // Paint one frame (an ArrayBuffer). Returns its header.
-  apply(buf) {
-    const dv = new DataView(buf)
+  // Paint one frame (an ArrayBuffer, from byte `off`). Returns its header.
+  apply(buf, off = 0) {
+    const dv = new DataView(buf, off)
     const h = decodeHeader(dv)
     this.setSize(h.cols, h.rows)
     const { cw, ch, base } = cellMetrics()

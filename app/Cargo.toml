@@ -19,3 +19,5 @@ tauri = { workspace = true, features = ["macos-private-api"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
+tungstenite = "0.30.0"
+crossbeam-channel = { workspace = true }

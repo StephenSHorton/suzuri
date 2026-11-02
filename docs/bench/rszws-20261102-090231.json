@@ -1,0 +1,24 @@
+{
+  "app": "rsz",
+  "panes": 8,
+  "probe_ms": {
+    "key_tiles": 25,
+    "max": 33.39483333333333,
+    "mean": 28.262181111111108,
+    "n": 300,
+    "p50": 30.62708333333333,
+    "p90": 32.7335,
+    "p99": 33.324083333333334,
+    "timeouts": 0
+  },
+  "footprint_mb_samples": {
+    "n": 9,
+    "min": 515.6,
+    "median": 656.3,
+    "max": 739.7
+  },
+  "footprint_mb_start": 513.5,
+  "footprint_mb_end": 740.8,
+  "cpu_cores_avg": 0.181,
+  "secs": 45
+}

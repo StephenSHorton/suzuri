@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::Mutex;
+
+mod ws;
 use rsz_term::{Out, Pane, PaneConfig, Sink};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -17,6 +19,8 @@ use tauri::State;
 struct Panes {
     next: AtomicU32,
     map: Mutex<HashMap<u32, Arc<Pane>>>,
+    /// Set when RSZ_TRANSPORT=ws: frames go over the socket, not the Channel.
+    bus: Option<ws::FrameBus>,
 }
 
 impl Panes {
@@ -57,7 +61,13 @@ fn pane_open(
     let panes_ref = Arc::clone(&panes);
     let sink: Sink = Arc::new(move |o| {
         let _ = match o {
-            Out::Frame(b) => on_frame.send(InvokeResponseBody::Raw(b)),
+            Out::Frame(b) => match &panes_ref.bus {
+                Some(bus) => {
+                    bus.send(id, b);
+                    Ok(())
+                }
+                None => on_frame.send(InvokeResponseBody::Raw(b)),
+            },
             Out::Title(t) => on_frame.send(json(&Msg::Title { title: &t })),
             Out::Bell => on_frame.send(json(&Msg::Bell)),
             Out::Clipboard(s) => on_frame.send(json(&Msg::Clipboard { text: &s })),
@@ -195,12 +205,14 @@ struct Boot {
     /// the UI only measures (Windows: the bench script's SendInput).
     bench_probe: String,
     platform: &'static str,
+    /// The frame socket (RSZ_TRANSPORT=ws): "port/token", or empty.
+    ws: String,
     /// RSZ_TRACE: the UI logs key events too.
     trace: bool,
 }
 
 #[tauri::command]
-fn boot() -> Boot {
+fn boot(panes: State<'_, Arc<Panes>>) -> Boot {
     let n = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     Boot {
         panes: n("RSZ_PANES", 1).clamp(1, 16),
@@ -208,6 +220,7 @@ fn boot() -> Boot {
         bench_secs: n("RSZ_BENCH_SECS", 60),
         bench_probe: std::env::var("RSZ_BENCH_PROBE").unwrap_or_else(|_| "internal".into()),
         platform: std::env::consts::OS,
+        ws: panes.bus.as_ref().map(|b| format!("{}/{}", b.port, b.token)).unwrap_or_default(),
         trace: std::env::var_os("RSZ_TRACE").is_some(),
     }
 }
@@ -241,7 +254,8 @@ mod tests {
 }
 
 fn main() {
-    let panes = Arc::new(Panes::default());
+    let bus = (std::env::var("RSZ_TRANSPORT").as_deref() == Ok("ws")).then(|| ws::FrameBus::start().expect("frame socket"));
+    let panes = Arc::new(Panes { bus, ..Default::default() });
     tauri::Builder::default()
         .manage(panes)
         .invoke_handler(tauri::generate_handler![
