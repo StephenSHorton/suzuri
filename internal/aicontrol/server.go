@@ -50,10 +50,13 @@ Endpoints:
   GET  /tools         JSON tools + argument schemas
   GET  /v1/layout     windows, tabs, pane trees, titles, cwd, tail text
   GET  /v1/panes/:id  one pane (more scrollback)
+  GET  /v1/stats      process counters (goroutines, heap, GDI/USER handles);
+                      answered off the UI thread
   POST /v1/call       {"tool":"<name>","args":{...}}
 
 Tools (POST /v1/call):
   layout                         snapshot
+  ping                           no-op on the UI thread (round-trip probe)
   pane        {pane_id, lines?}  content
   split       {pane_id?, axis: "right"|"down"}
   focus       {pane_id}
@@ -219,6 +222,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 401, map[string]any{"error": "unauthorized"})
 		return
 	}
+	if method == "GET" && path == "/v1/stats" {
+		// Answered on the HTTP goroutine, not the UI thread, so it still
+		// works while the UI is hung.
+		writeJSON(w, 200, ProcessStats())
+		return
+	}
 	var job Job
 	job.Reply = make(chan Reply, 1)
 	switch {
@@ -310,6 +319,7 @@ func toolsJSON() map[string]any {
 	return map[string]any{
 		"tools": []map[string]any{
 			{"name": "layout", "args": map[string]any{}, "doc": "Snapshot windows, tabs, pane trees, titles, cwd, tail text."},
+			{"name": "ping", "args": map[string]any{}, "doc": "No-op answered on the UI thread; time it to measure UI-thread service latency."},
 			{"name": "pane", "args": map[string]any{"pane_id": "u64", "lines": "u32?"}, "doc": "One pane including more scrollback."},
 			{"name": "split", "args": map[string]any{"pane_id": "u64?", "axis": "right|down"}, "doc": "Split a pane (default: focused)."},
 			{"name": "focus", "args": map[string]any{"pane_id": "u64"}, "doc": "Focus a pane."},

@@ -52,6 +52,9 @@ type Session struct {
 // Nerd-Font glyphs). QuietPrompt strips the in-band PS/cmd prompt so the
 // Warp-style bottom bar is the only command line the user types into.
 func DefaultShell() string {
+	if s := strings.TrimSpace(os.Getenv(EnvShell)); s != "" {
+		return s
+	}
 	if ps, err := exec.LookPath("pwsh.exe"); err == nil {
 		return QuietPrompt(ps + " -NoLogo -NoProfile")
 	}

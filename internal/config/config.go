@@ -267,7 +267,14 @@ func DefaultProfiles() []Profile {
 }
 
 // Dir is the suzuri config/data directory for this OS.
+//
+// SUZURI_CONFIG_DIR overrides it (chrome host and guest already pass it; the
+// stress harness uses it to run an isolated instance that cannot touch the
+// user's config, workspace or ai.json discovery).
 func Dir() string {
+	if d := strings.TrimSpace(os.Getenv("SUZURI_CONFIG_DIR")); d != "" {
+		return d
+	}
 	// Windows portable layout prefers LOCALAPPDATA when set.
 	if base := os.Getenv("LOCALAPPDATA"); base != "" {
 		return filepath.Join(base, "suzuri")

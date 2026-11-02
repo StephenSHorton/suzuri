@@ -31,6 +31,9 @@ type Session struct {
 
 // DefaultShell returns $SHELL or a sensible interactive shell path.
 func DefaultShell() string {
+	if s := strings.TrimSpace(os.Getenv(EnvShell)); s != "" {
+		return s
+	}
 	if s := strings.TrimSpace(os.Getenv("SHELL")); s != "" {
 		return QuietPrompt(s)
 	}

@@ -157,6 +157,14 @@ func applyAICall(s aiSurface, tool string, args map[string]any) (map[string]any,
 	switch tool {
 	case "layout":
 		return layoutJSON(s), 200, ""
+	case "ping":
+		n := 0
+		for _, pg := range s.pageList() {
+			if pg != nil {
+				n += len(pg.leaves())
+			}
+		}
+		return map[string]any{"pong": true, "panes": n}, 200, ""
 	case "pane":
 		id, ok := aicontrol.ArgUint(args, "pane_id")
 		if !ok {
