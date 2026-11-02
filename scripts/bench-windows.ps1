@@ -43,7 +43,8 @@ function Tree-Memory($rootId) {
   }
 }
 $m0 = Tree-Memory $p.Id
-& (Join-Path $PSScriptRoot "sendkeys.ps1") -Seconds ($Seconds + 2)
+# guardkeys only presses keys while rust-suzuri is in front, and stops otherwise.
+& (Join-Path $PSScriptRoot "windows\guardkeys.ps1") -Seconds ($Seconds + 2) -FocusFirst
 $m1 = Tree-Memory $p.Id
 Start-Sleep -Seconds 3
 @{ memory_start = $m0; memory_end = $m1 } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $Out "memory.json")
