@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>suzuri</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="bar" data-tauri-drag-region>
+  <span class="mark" data-tauri-drag-region>硯 suzuri</span>
+  <span id="title" data-tauri-drag-region></span>
+  <span class="spacer" data-tauri-drag-region></span>
+  <button id="split-right" title="Split right (⌘D / Ctrl+Shift+D)">⎸⎹</button>
+  <button id="split-down" title="Split down (⌘⇧D / Ctrl+Shift+E)">☰</button>
+  <button id="close-pane" title="Close pane (⌘W / Ctrl+Shift+W)">✕</button>
+</header>
+<main id="root"></main>
+<div id="hud" hidden></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

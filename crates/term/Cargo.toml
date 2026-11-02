@@ -1,0 +1,13 @@
+[package]
+name = "rsz-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "rust-suzuri terminal core: per-pane PTY actor, VT engine, damage frames"
+
+[dependencies]
+alacritty_terminal = { workspace = true }
+portable-pty = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }

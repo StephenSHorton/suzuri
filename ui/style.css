@@ -1,0 +1,78 @@
+/* suzuri's Inkstone theme (internal/chrome/theme.go): real UI, no ASCII chrome. */
+@font-face {
+  font-family: "Gohu";
+  src: url("fonts/GohuFontuni14NerdFontMono-Regular.ttf") format("truetype");
+}
+:root {
+  --void: #0c0c10;
+  --bar: #141418;
+  --panel: #1c1c22;
+  --primary: #b8a0c8;
+  --secondary: #9a9ab0;
+  --text: #e8e6e3;
+  --soft: #b0aea8;
+  --dim: #787870;
+  --mute: #484848;
+  --sel: #2a2430;
+  --match: #c8b0d8;
+  --gap: 6px;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; height: 100%; overflow: hidden;
+  background: var(--void); color: var(--text);
+  font: 12px/1.4 -apple-system, "Segoe UI", system-ui, sans-serif;
+  user-select: none; -webkit-user-select: none;
+}
+#bar {
+  height: 34px; display: flex; align-items: center; gap: 10px;
+  padding: 0 10px 0 84px; /* room for macOS traffic lights */
+  background: var(--bar); border-bottom: 1px solid #22222a;
+}
+body.win #bar { padding-left: 12px; }
+.mark { color: var(--primary); font-weight: 600; letter-spacing: .04em; }
+#title { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.spacer { flex: 1; align-self: stretch; }
+#bar button {
+  background: transparent; border: 1px solid transparent; color: var(--secondary);
+  border-radius: 6px; height: 24px; min-width: 28px; font-size: 12px; cursor: pointer;
+}
+#bar button:hover { background: var(--panel); border-color: #2c2c34; color: var(--text); }
+#root { position: absolute; inset: 34px 0 0 0; padding: var(--gap); display: flex; }
+.split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; gap: var(--gap); }
+.split.v { flex-direction: column; }
+.pane {
+  position: relative; flex: 1 1 0; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  background: var(--void); border: 1px solid #24242c; border-radius: 8px; overflow: hidden;
+}
+.pane.focused { border-color: var(--primary); box-shadow: 0 0 0 1px rgba(184,160,200,.25); }
+.pane .head {
+  height: 22px; flex: none; display: flex; align-items: center; padding: 0 8px; gap: 6px;
+  background: var(--panel); color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden;
+}
+.pane.focused .head { color: var(--soft); }
+.pane .head .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--mute); flex: none; }
+.pane.focused .head .dot { background: var(--primary); }
+.pane .head .exited { color: #c07070; }
+.pane .body { position: relative; flex: 1; min-height: 0; padding: 4px 6px; outline: none; cursor: text; }
+.pane canvas { position: absolute; left: 6px; top: 4px; image-rendering: pixelated; }
+.pane .cursor {
+  position: absolute; pointer-events: none; background: var(--primary); opacity: .85;
+  mix-blend-mode: difference;
+}
+.pane .cursor.underline { height: 2px !important; margin-top: calc(var(--ch) - 2px); }
+.pane .cursor.beam { width: 2px !important; }
+.pane .cursor.hollow { background: transparent; border: 1px solid var(--primary); mix-blend-mode: normal; }
+.pane:not(.focused) .cursor { opacity: .35; }
+.pane .scrolled {
+  position: absolute; right: 10px; top: 6px; padding: 1px 6px; border-radius: 4px;
+  background: var(--sel); color: var(--match); font-size: 10px;
+}
+.split > .sash { display: none; }
+#hud {
+  position: fixed; right: 10px; bottom: 10px; padding: 6px 10px; border-radius: 6px;
+  background: rgba(20,20,24,.92); border: 1px solid #2c2c34; color: var(--soft);
+  font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre;
+}
