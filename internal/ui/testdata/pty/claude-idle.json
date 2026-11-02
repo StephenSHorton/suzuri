@@ -1,0 +1,1 @@
+{"name":"claude-idle","command":"claude --setting-sources project,local --model haiku (idle at the prompt)","cols":100,"rows":30,"chunks":[13,6,24,16,20,1024,328,21]}
