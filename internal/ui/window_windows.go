@@ -79,6 +79,7 @@ func Run() error {
 		caffeine:    caffeine.New(),
 		hostFocused: true,
 		captionHot:  -1,
+		tel:         newUITelemetry(),
 	}
 	// Caffeine on by default so long sessions don't sleep under the user.
 	if ui.caffeine != nil {
@@ -312,6 +313,9 @@ type winUI struct {
 	bridge  *bridge.Host
 	mcpJobs chan mcpJob
 	ai      *aicontrol.Server
+
+	// tel feeds the hang watchdog and the telemetry line (watchdog_windows.go).
+	tel *uiTelemetry
 }
 
 // requestPaint marks the client dirty at most once until the next WM_PAINT.
@@ -1518,6 +1522,7 @@ func (u *winUI) loop() error {
 		win.InvalidateRect(hwnd, nil, false)
 	}
 	go u.blinkLoop()
+	u.startWatchdog()
 
 	var msg win.MSG
 	for {
@@ -1576,7 +1581,7 @@ func wndProcMain(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 	if u == nil {
 		return win.DefWindowProc(hwnd, msg, wParam, lParam)
 	}
-	return u.handle(hwnd, msg, wParam, lParam)
+	return u.dispatchWithTelemetry(hwnd, msg, wParam, lParam)
 }
 
 func postBytes(u *winUI, tabID int) {

@@ -66,6 +66,9 @@ type tab struct {
 
 	alive    atomic.Bool
 	bytesMsg atomic.Bool
+	// tel counts PTY bytes queued and drained for the telemetry line and the
+	// hang watchdog (telemetry.go).
+	tel paneCounters
 	// closedMsg ensures we only PostMessage session-ended once (read EOF and
 	// Wait can both fire; UI close must be idempotent).
 	closedMsg atomic.Bool
@@ -496,6 +499,7 @@ func (t *tab) setCwd(path string) {
 }
 
 func (t *tab) startWorkers(u tabHost) {
+	registerPaneTelemetry(t.id, &t.tel)
 	go t.writeLoop()
 	go t.readLoop(u)
 	// ConPTY Read often does not return when the shell exits; Wait is reliable.
@@ -585,6 +589,7 @@ func (t *tab) readLoop(u tabHost) {
 			if len(t.ptyTail) > maxPtyTail {
 				t.ptyTail = append([]byte(nil), t.ptyTail[len(t.ptyTail)-maxPtyTail:]...)
 			}
+			t.tel.queued.Store(int64(len(t.inBuf)))
 			t.inMu.Unlock()
 			t.postBytes(u)
 		}
@@ -656,7 +661,9 @@ func (t *tab) takeInput() []byte {
 	t.inMu.Lock()
 	data := t.inBuf
 	t.inBuf = nil
+	t.tel.queued.Store(0)
 	t.inMu.Unlock()
+	t.tel.ingested.Add(int64(len(data)))
 	t.bytesMsg.Store(false)
 	return data
 }
@@ -676,6 +683,7 @@ func (t *tab) close() {
 	}
 	t.closed = true
 	t.alive.Store(false)
+	unregisterPaneTelemetry(t.id)
 	// Unblock writer
 	func() {
 		defer func() { _ = recover() }()
