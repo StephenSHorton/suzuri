@@ -52,7 +52,7 @@ enum Msg<'a> {
     Exit { code: Option<u32> },
     /// The input bar's view of the shell (#285).
     #[serde(rename = "shell")]
-    Shell { integrated: bool, cwd: &'a str, program: bool },
+    Shell { integrated: bool, cwd: &'a str, program: bool, prompts: u64 },
     #[serde(rename = "done")]
     CommandDone { exit: Option<i32>, command: &'a str },
 }
@@ -91,7 +91,7 @@ fn pane_open(
             }
             Out::Bell => on_frame.send(json(&Msg::Bell)),
             Out::Clipboard(s) => on_frame.send(json(&Msg::Clipboard { text: &s })),
-            Out::Shell(st) => on_frame.send(json(&Msg::Shell { integrated: st.integrated, cwd: &st.cwd, program: st.program })),
+            Out::Shell(st) => on_frame.send(json(&Msg::Shell { integrated: st.integrated, cwd: &st.cwd, program: st.program, prompts: st.prompts })),
             Out::CommandDone { exit, command } => on_frame.send(json(&Msg::CommandDone { exit, command: &command })),
             Out::Exit(code) => {
                 panes_ref.map.lock().remove(&id);
@@ -257,6 +257,8 @@ struct Boot {
     ws: String,
     /// RSZ_TRACE: the UI logs key events too.
     trace: bool,
+    /// The home directory, shown as ~ in the input bar's cwd line.
+    home: String,
 }
 
 #[tauri::command]
@@ -270,6 +272,7 @@ fn boot(panes: State<'_, Arc<Panes>>) -> Boot {
         platform: std::env::consts::OS,
         ws: panes.bus.as_ref().map(|b| format!("{}/{}", b.port, b.token)).unwrap_or_default(),
         trace: std::env::var_os("RSZ_TRACE").is_some(),
+        home: std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
     }
 }
 

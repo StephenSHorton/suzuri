@@ -52,6 +52,9 @@ pub struct ShellStatus {
     /// A program other than the shell owns the keyboard: between a command's
     /// start mark and the next prompt, or while one holds the terminal.
     pub program: bool,
+    /// Prompts seen so far. It counts up at every prompt, so the UI can tell
+    /// "the prompt is back" even when nothing else changed.
+    pub prompts: u64,
 }
 
 /// The shell state as the reader and the probe see it; `status()` is what
@@ -64,12 +67,13 @@ struct ShellState {
     started: bool,
     /// The foreground probe's last answer.
     child: bool,
+    prompts: u64,
     sent: Option<ShellStatus>,
 }
 
 impl ShellState {
     fn status(&self) -> ShellStatus {
-        ShellStatus { integrated: self.integrated, cwd: self.cwd.clone(), program: self.started || self.child }
+        ShellStatus { integrated: self.integrated, cwd: self.cwd.clone(), program: self.started || self.child, prompts: self.prompts }
     }
 
     /// The status to send, if it changed since the last one sent.
@@ -419,6 +423,7 @@ fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink) {
                 ShellEvent::Cwd(cwd) => {
                     sh.integrated = true;
                     sh.started = false;
+                    sh.prompts += 1;
                     sh.cwd = cwd;
                 }
                 ShellEvent::Done { exit, command } => {

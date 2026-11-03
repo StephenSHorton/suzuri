@@ -6,6 +6,7 @@ import { clipboardImage, saveClipboardImage } from "./paste_image.js"
 import { extraShortcut } from "./extras.js"
 import { isOpen as panelOpen } from "./panel.js"
 import "./aicontrol.js"
+import { InputBar, PROMPT, barKey, displayPath } from "./bar.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -39,6 +40,7 @@ function pct(arr, p) {
 }
 const paint = { frames: 0, bytes: 0, applyMs: 0 }
 
+let home = ""
 let focused = null
 let tree = null
 const byId = new Map()
@@ -93,7 +95,18 @@ class PaneView {
     this.scrolled.className = "scrolled"
     this.scrolled.hidden = true
     this.body.append(this.canvas, this.cursor, this.scrolled)
-    this.el.append(this.head, this.body)
+    // The input bar (#285): the shell's command line, under the screen.
+    this.barEl = document.createElement("div")
+    this.barEl.className = "inbar"
+    this.barEl.hidden = true
+    this.barEl.innerHTML = `<div class="cwd"></div><div class="lines"></div><div class="caret"></div>`
+    this.el.append(this.head, this.body, this.barEl)
+    this.bar = new InputBar()
+    // The shell as the pane reports it; see ShellStatus in crates/term.
+    this.shell = { integrated: false, cwd: "", program: false, prompts: 0 }
+    // Set on Enter until the next prompt: the command owns the keys from
+    // the moment it is sent, before the shell's start mark arrives.
+    this.awaiting = -1
     this.screen = new Screen(this.canvas)
     this.queue = []
     this.modes = 0
@@ -138,7 +151,83 @@ class PaneView {
       setTimeout(() => closePane(this), 600)
     } else if (msg.t === "clip") {
       navigator.clipboard?.writeText(msg.text).catch(() => {})
+    } else if (msg.t === "shell") {
+      this.shell = msg
+      if (this.awaiting >= 0 && msg.prompts > this.awaiting) this.awaiting = -1
+      this.renderBar()
     }
+  }
+
+  // The bar has the keys: a shell with the hooks, at its prompt, on the
+  // main screen. A full-screen app, a running command (Claude Code, ssh, a
+  // build) or a shell without hooks gets the keys directly.
+  barActive() {
+    return this.shell.integrated && !this.shell.program && this.awaiting < 0 && !(this.modes & M_ALT_SCREEN) && !this.exited
+  }
+
+  barCols() {
+    const { cw } = cellMetrics()
+    const w = this.el.clientWidth - 2 * BAR_PAD_X
+    return Math.max(8, Math.floor(w / cw) - [...PROMPT].length)
+  }
+
+  renderBar() {
+    const on = this.barActive()
+    if (this.barEl.hidden === on) this.barEl.hidden = !on
+    this.cursor.style.visibility = on ? "hidden" : ""
+    if (!on) return
+    const { cw, ch } = cellMetrics()
+    const cwd = displayPath(this.shell.cwd, home)
+    const cwdEl = this.barEl.querySelector(".cwd")
+    cwdEl.textContent = cwd
+    cwdEl.hidden = !cwd
+    const v = this.bar.visible(this.barCols())
+    const lines = this.barEl.querySelector(".lines")
+    lines.style.setProperty("--ch", `${ch}px`)
+    lines.replaceChildren(
+      ...v.lines.map((text, i) => {
+        const d = document.createElement("div")
+        d.className = "row"
+        const p = document.createElement("span")
+        p.className = "prompt"
+        p.textContent = i === 0 ? PROMPT : " ".repeat([...PROMPT].length)
+        d.append(p, text)
+        return d
+      }),
+    )
+    const caret = this.barEl.querySelector(".caret")
+    caret.style.left = `${BAR_PAD_X + ([...PROMPT].length + v.col) * cw}px`
+    caret.style.top = `${lines.offsetTop + v.row * ch}px`
+    caret.style.width = `${cw}px`
+    caret.style.height = `${ch}px`
+    caret.classList.toggle("dim", focused !== this)
+  }
+
+  // A key while the bar has the keys. True when it was the bar's.
+  barKeydown(e) {
+    const r = barKey(this.bar, e, { isMac, cols: this.barCols() })
+    if (r === null) {
+      // Plain typing: the key's character (Option's composed one on macOS).
+      const ctl = e.ctrlKey || (isMac && e.metaKey)
+      if (ctl || [...e.key].length !== 1) return false
+      this.bar.insert(e.key)
+    } else if (r.kind === "submit") {
+      this.submit(r.line)
+    } else if (r.kind === "pty") {
+      this.send(r.data)
+    } else if (r.kind === "scroll") {
+      invoke("pane_scroll", { id: this.id, delta: Math.round(r.pages * this.size[1]) })
+    }
+    this.renderBar()
+    return true
+  }
+
+  // Enter in the bar: the line and CR in one write. A non-empty line hands
+  // the keys to the command until the shell's next prompt.
+  submit(line) {
+    if (line.trim() === "") return this.send("\r")
+    this.awaiting = this.shell.prompts
+    this.send(line + "\r")
   }
 
   // A frame is [buffer, byte offset of the frame in it].
@@ -159,8 +248,10 @@ class PaneView {
     }
     this.queue.length = 0
     paint.applyMs += performance.now() - t
+    const altFlip = (this.modes ^ h.modes) & M_ALT_SCREEN
     this.modes = h.modes
     this.lastSeq = h.seq
+    if (altFlip) this.renderBar()
     const { cw, ch } = cellMetrics()
     const cs = this.cursor.style
     this.cursor.hidden = h.shape === 0
@@ -176,6 +267,7 @@ class PaneView {
   }
 
   fit() {
+    if (!this.barEl.hidden) this.renderBar()
     const { cw, ch } = cellMetrics()
     const w = this.body.clientWidth - 12
     const hgt = this.body.clientHeight - 8
@@ -209,6 +301,9 @@ class PaneView {
     invoke("pane_scroll", { id: this.id, delta: -lines })
   }
 }
+
+// Horizontal padding inside the input bar (matches .inbar in style.css).
+const BAR_PAD_X = 8
 
 // ---- frames: everything queued is painted in one animation frame.
 let frameScheduled = false
@@ -323,6 +418,8 @@ function setFocus(p) {
   const prev = focused
   focused = p
   for (const q of allPanes()) q.el.classList.toggle("focused", q === p)
+  if (prev && prev !== p) prev.renderBar()
+  p.renderBar()
   titleEl.textContent = p.title
   input.focus()
   if (prev && prev !== p && prev.id) {
@@ -376,6 +473,10 @@ input.addEventListener("keydown", (e) => {
   if (e.isComposing) return
   if (appShortcut(e) || extraShortcut(e, isMac)) { e.preventDefault(); return }
   if (!focused) return
+  if (focused.barActive()) {
+    if (focused.barKeydown(e)) e.preventDefault()
+    return
+  }
   const data = encodeKey(e, focused.modes, isMac)
   if (data == null) return
   e.preventDefault()
@@ -385,14 +486,20 @@ input.addEventListener("keydown", (e) => {
 input.addEventListener("input", (e) => {
   const v = input.value
   input.value = ""
-  if (v && focused && !e.isComposing) focused.send(v)
+  if (!v || !focused || e.isComposing) return
+  if (focused.barActive()) focused.bar.insert(v), focused.renderBar()
+  else focused.send(v)
 })
 input.addEventListener("compositionend", () => {
   const v = input.value
   input.value = ""
-  if (v && focused) focused.send(v)
+  if (!v || !focused) return
+  if (focused.barActive()) focused.bar.insert(v), focused.renderBar()
+  else focused.send(v)
 })
 function pasteText(pane, text) {
+  // At the prompt, a paste goes into the input bar (newlines kept).
+  if (pane.barActive()) return pane.bar.insert(text.replace(/\r\n?/g, "\n")), pane.renderBar()
   const body = text.replace(/\r?\n/g, "\r")
   pane.send(pane.modes & M_BRACKETED_PASTE ? `\x1b[200~${body}\x1b[201~` : body)
 }
@@ -512,6 +619,7 @@ async function start() {
   await document.fonts.load(`14px "Gohu"`).catch(() => {})
   const boot = await invoke("boot")
   window.rszTrace = boot.trace
+  home = boot.home
   if (boot.ws) connectFrames(boot.ws)
   const first = boot.panes > 1 ? await grid(boot.panes) : await split("h")
   if (boot.bench) bench(boot, first)
