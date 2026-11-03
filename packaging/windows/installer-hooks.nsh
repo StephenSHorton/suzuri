@@ -92,7 +92,7 @@ FunctionEnd
 ; Software\suzuri, and leaves $LOCALAPPDATA\suzuri. Here suzuri.exe has
 ; just been replaced, Uninstall.exe is Tauri's uninstall.exe now (same name
 ; on NTFS), the key has just been rewritten by Tauri, and suzuri-transfer.exe
-; stays: this app runs it (and ships its own over it when bundled).
+; has been overwritten by this app's own (bundle.externalBin).
 !macro NSIS_HOOK_POSTINSTALL
   DeleteRegValue HKCU "${SUZURI_UNINSTKEY}" "GoUninstallString"
   ${If} $SuzuriGoDir != ""
