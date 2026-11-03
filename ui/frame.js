@@ -173,7 +173,7 @@ export class Screen {
         }
         if (attrs & A_SELECTED) {
           ctx.fillStyle = SELECTION
-          ctx.fillRect(x0, top, n * cw, ch)
+          ctx.fillRect(rx, top, n * cw, ch)
         }
         if (!(attrs & A_HIDDEN)) {
           // Bold on Windows: a bold face, as GDI picks; the bundled Gohu has
