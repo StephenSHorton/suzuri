@@ -78,15 +78,18 @@ On the PC: Rust, `cargo install tauri-cli --version '^2'`, `gh auth login`.
 The version comes from the command line as a config overlay. Nothing in the
 repo needs bumping.
 
-## Local update test (Mac)
+## Local update tests
 
-```sh
-echo '{"plugins":{"updater":{"dangerousInsecureTransportProtocol":true}}}' > /tmp/insecure.json
-for v in 0.1.0 0.1.1; do
-  RSZ_TAURI_CONFIG=/tmp/insecure.json scripts/release/publish.sh $v \
-    --mac-only --no-notarize --no-upload --feed-base http://127.0.0.1:8787
-done
-(cd dist/0.1.1 && python3 -m http.server 8787 --bind 127.0.0.1 &)
-mkdir -p /tmp/rsz && tar -xzf dist/0.1.0/*.app.tar.gz -C /tmp/rsz
-RSZ_UPDATE_URL=http://127.0.0.1:8787/latest.json /tmp/rsz/rust-suzuri.app/Contents/MacOS/rust-suzuri
-```
+These scripts build two versions, serve the newer one's feed on 127.0.0.1, start
+the older one with `RSZ_UPDATE_AUTO=1`, and check that it updated itself. They
+use a throwaway updater key and allow an http feed through a config overlay, so
+the real key isn't needed and nothing is published.
+
+- Mac: `scripts/release/test-update-mac.sh [old] [new]`
+- PC: `powershell -File scripts\release\test-update-windows.ps1 [-Old 0.1.0] [-New 0.1.1] [-Keep]`.
+  It installs silently per user, checks that `conpty.dll` and
+  `OpenConsole.exe` are next to the exe, and uninstalls at the end
+  unless `-Keep` is given.
+
+The updater refuses to run from a path that goes through a symlink (on macOS,
+`/var` is one). Installs in /Applications are fine.
