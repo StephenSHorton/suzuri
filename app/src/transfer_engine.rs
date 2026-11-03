@@ -385,9 +385,23 @@ fn kill_pid(pid: u32) {
         thread::sleep(Duration::from_millis(150));
         let _ = send_signal(pid, 9);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid; // cancel relies on Drop / explicit kill_child on worker
+        // The worker sits in a blocking stdout read: end the engine (and any
+        // children) so the read returns. Without this, cancel never finished
+        // on Windows and suzuri-transfer.exe kept running (#286, kestrel).
+        let mut cmd = Command::new("taskkill");
+        crate::sidecar::no_window(&mut cmd);
+        let _ = cmd
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
     }
 }
 
