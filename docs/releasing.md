@@ -24,7 +24,7 @@ local feeds (below). At the move:
 | Platform | First install | Update payload |
 |---|---|---|
 | macOS (Apple silicon) | `rust-suzuri_<v>_aarch64.dmg`: signed with Developer ID, notarized and stapled | `rust-suzuri_<v>_aarch64.app.tar.gz` (the stapled app) |
-| Windows x64 | `rust-suzuri_<v>_x64-setup.exe`: NSIS installer, per user (no admin), installs to `%LOCALAPPDATA%\Programs` | the same setup.exe, run passively by the updater |
+| Windows x64 | `rust-suzuri_<v>_x64-setup.exe`: NSIS installer, per user (no admin), installs to `%LOCALAPPDATA%\<product name>` (Tauri's per-user default; Go suzuri uses `%LOCALAPPDATA%\Programs\suzuri`, so the two don't collide before the move) | the same setup.exe, run passively by the updater |
 
 The Windows install puts OpenConsole's `conpty.dll` and `OpenConsole.exe` next
 to `rust-suzuri.exe`. portable-pty loads that `conpty.dll` before the system
