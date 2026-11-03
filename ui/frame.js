@@ -113,9 +113,9 @@ export class Screen {
   // pixel ratio (a worker has no window to ask).
   constructor(canvas, dpr = 1) {
     this.canvas = canvas
-    // Opaque on macOS only: on Windows an opaque canvas gets ClearType
-    // colour fringes, and Go suzuri draws greyscale text there.
-    this.ctx = canvas.getContext("2d", { alpha: !IS_MAC })
+    // Opaque: text gets ClearType on Windows, as Go's GDI text does (box,
+    // block and shade glyphs are filled rects, crisp in both).
+    this.ctx = canvas.getContext("2d", { alpha: false })
     this.cols = 0
     this.rows = 0
     this.dpr = 0
