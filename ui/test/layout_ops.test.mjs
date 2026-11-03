@@ -57,3 +57,16 @@ test("grow, shrink, equalize, rotate, swap sides", () => {
   assert.equal(t.ratio.toFixed(2), "0.30")
   assert.equal(L.equalize({ pane: "Z" }, "Z"), false)
 })
+
+test("drop edge and no-op drops", () => {
+  const r = { x: 0, y: 0, w: 100, h: 100 }
+  assert.equal(L.dropEdge(r, 5, 50), "left")
+  assert.equal(L.dropEdge(r, 95, 40), "right")
+  assert.equal(L.dropEdge(r, 50, 2), "top")
+  assert.equal(L.dropEdge(r, 50, 98), "bottom")
+  const t = { dir: "h", a: { pane: "A" }, b: { pane: "B" } }
+  assert.equal(L.dropChanges(t, "A", "B", "left"), false) // A is already left of B
+  assert.equal(L.dropChanges(t, "A", "B", "right"), true)
+  assert.equal(L.dropChanges(t, "A", "B", "top"), true)
+  assert.equal(shape(t), "h(A,B)") // untouched
+})

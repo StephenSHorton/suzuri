@@ -128,3 +128,32 @@ export function neighbor(rects, from, dx, dy) {
   }
   return best
 }
+
+// Dragging a pane's title onto another pane (Go's pane_drag.go): the edge of
+// rect ({x, y, w, h}) nearest the pointer, by which axis it is further off
+// centre along.
+export function dropEdge(rect, px, py) {
+  if (rect.w < 1 || rect.h < 1) return ""
+  const fx = (px - rect.x + 0.5) / rect.w - 0.5
+  const fy = (py - rect.y + 0.5) / rect.h - 0.5
+  if (Math.abs(fx) >= Math.abs(fy)) return fx < 0 ? "left" : "right"
+  return fy < 0 ? "top" : "bottom"
+}
+
+export function cloneTree(n) {
+  if (!n) return n
+  return n.pane ? { ...n } : { ...n, a: cloneTree(n.a), b: cloneTree(n.b) }
+}
+
+export function sameShape(a, b) {
+  if (!a || !b) return a === b
+  if (a.pane || b.pane) return a.pane === b.pane
+  return a.dir === b.dir && sameShape(a.a, b.a) && sameShape(a.b, b.b)
+}
+
+// Whether dropping pane on target's edge would change the layout (Go hides
+// the drop highlight, and ignores the drop, when it wouldn't).
+export function dropChanges(tree, pane, target, edge) {
+  const out = dockBeside(cloneTree(tree), pane, target, edge)
+  return !!out && !sameShape(out, tree)
+}

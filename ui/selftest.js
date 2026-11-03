@@ -187,6 +187,32 @@ export async function run(name, { invoke, log, first }) {
     await sleep(400)
     say("preedit after commit:", pre.hidden)
     say("committed to:", pane.barActive() ? "bar " + JSON.stringify(pane.barEl.querySelector(".lines").textContent) : JSON.stringify((await lines()).find((l) => l.includes("日本"))))
+  } else if (name === "panedrag") {
+    // #293: drag pane 1's title onto pane 2's bottom half (pane_drag.js).
+    const shape = (n) => (n.pane ? String(n.pane.id) : `${n.dir}(${shape(n.a)},${shape(n.b)})`)
+    const second = await window.rszHost.split("h", pane)
+    await sleep(500)
+    say("before:", shape(window.rszHost.tree()))
+    const h = pane.head.getBoundingClientRect(), r = second.el.getBoundingClientRect()
+    const from = { clientX: h.left + 40, clientY: h.top + h.height / 2 }
+    const to = { clientX: r.left + r.width / 2, clientY: r.top + r.height * 0.9 }
+    fire(pane.head, "mousedown", { ...from, button: 0, buttons: 1 })
+    for (let i = 1; i <= 10; i++) {
+      fire(window, "mousemove", { clientX: from.clientX + (to.clientX - from.clientX) * i / 10, clientY: from.clientY + (to.clientY - from.clientY) * i / 10, buttons: 1 })
+      await sleep(20)
+    }
+    say("screenshot: drop hint")
+    await sleep(1500)
+    fire(window, "mouseup", { ...to, button: 0 })
+    await sleep(400)
+    say("after:", shape(window.rszHost.tree()), "focused:", window.rszHost.focused().id)
+    // A drop that changes nothing (back onto pane 2's top, where pane 2 already is above it) is ignored.
+    const h2 = second.head.getBoundingClientRect(), r1 = pane.el.getBoundingClientRect()
+    fire(second.head, "mousedown", { clientX: h2.left + 40, clientY: h2.top + 5, button: 0, buttons: 1 })
+    fire(window, "mousemove", { clientX: r1.left + r1.width / 2, clientY: r1.top + 8, buttons: 1 })
+    fire(window, "mouseup", { clientX: r1.left + r1.width / 2, clientY: r1.top + 8, button: 0 })
+    await sleep(300)
+    say("no-op drop:", shape(window.rszHost.tree()))
   }
   say("done", name)
 }
