@@ -3182,6 +3182,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tiny_http",
  "tungstenite",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

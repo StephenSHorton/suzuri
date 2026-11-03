@@ -107,9 +107,9 @@ pub struct Protocols {
     skipping: bool,
     osc99: Vec<(String, Osc99Buf)>,
     kitty_open: Option<KittyOpen>,
-    /// Scan printed text for image paths (Go's findImagePathsInText). Off by
-    /// default: Go suzuri 0.9.167 shows nothing for them on the Mac, and on
-    /// it every `ls` or `find` that prints image paths would add images.
+    /// Scan printed text for image paths (Go's findImagePathsInText). On
+    /// Windows only, as Go suzuri 0.9.167 does it: kestrel's PC check showed
+    /// Go drawing a printed path there and nothing for it on the Mac.
     pub scan_paths: bool,
 }
 
@@ -138,7 +138,7 @@ enum Seq {
 
 impl Protocols {
     pub fn new() -> Self {
-        Self::default()
+        Self { scan_paths: cfg!(windows), ..Default::default() }
     }
 
     pub fn feed(&mut self, input: &[u8], sink: &mut impl ProtoSink) {

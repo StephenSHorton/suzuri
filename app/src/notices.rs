@@ -323,7 +323,7 @@ impl Notices {
             place(&app, &panel, cards.len(), anchor);
             let _ = panel.emit_to(PANEL, "notices", PanelState { cards, anchor, sound });
             if !panel.is_visible().unwrap_or(false) {
-                let _ = panel.show();
+                show_inactive(&panel);
             }
         });
         let unread = self.inner.lock().unread;
@@ -392,6 +392,32 @@ fn panel(app: &AppHandle) -> Option<tauri::WebviewWindow> {
         .inner_size(CARD_W + 2.0 * MARGIN, CARD_H + 2.0 * MARGIN)
         .build()
         .ok()
+}
+
+/// Show the panel without taking the foreground from whatever has it.
+/// On Windows show() activates the window (kestrel saw typed keys go to the
+/// panel), so do what Go's notice_windows.go does: WS_EX_NOACTIVATE and a
+/// show that doesn't activate.
+fn show_inactive(panel: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongPtrW, SW_SHOWNOACTIVATE, SetWindowLongPtrW, ShowWindow, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        };
+        if let Ok(h) = panel.hwnd() {
+            let hwnd = h.0 as HWND;
+            // SAFETY: a live window handle from Tauri, on the main thread.
+            unsafe {
+                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST) as isize);
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            return;
+        }
+    }
+    let _ = panel.show();
 }
 
 // Go noticePanelOrigin: the stack sits at the anchor, inset from the screen

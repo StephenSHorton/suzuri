@@ -623,6 +623,14 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
         };
         if trace() {
             eprintln!("rsz: read {n} {:?}", String::from_utf8_lossy(&buf[..n.min(200)]));
+            // #288: do image and notice sequences reach the reader (ConPTY
+            // may drop or rewrite them)?
+            for (name, pat) in [("osc1337", &b"\x1b]1337;"[..]), ("osc7879", b"\x1b]7879;"), ("osc9", b"\x1b]9;"), ("osc777", b"\x1b]777;"), ("osc99", b"\x1b]99;"), ("apcG", b"\x1b_G")] {
+                let hits = buf[..n].windows(pat.len()).filter(|w| *w == pat).count();
+                if hits > 0 {
+                    eprintln!("rsz: read has {hits} x {name}");
+                }
+            }
         }
         let t = Instant::now();
         clean.clear();
