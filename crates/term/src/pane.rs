@@ -349,6 +349,11 @@ impl Pane {
     /// Where a new pane split from this one should start: the shell's last
     /// report, else the shell process's cwd from the OS (macOS, Linux).
     pub fn cwd(&self) -> Option<String> {
+        // The input bar's hooks report the cwd at every prompt (OSC 7878).
+        let hooked = self.shared.shell.lock().cwd.clone();
+        if !hooked.is_empty() {
+            return Some(hooked);
+        }
         if let Some(c) = self.reported_cwd.lock().clone() {
             return Some(c);
         }
