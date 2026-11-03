@@ -1,0 +1,8 @@
+/* Notes (#294), inside sparrow's .rsz-panel. */
+.notes-list { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 2px; outline: none; min-height: 0; }
+.notes-row { display: flex; justify-content: space-between; gap: 12px; text-align: left; border-color: transparent !important; }
+.notes-row.on { color: var(--text) !important; background: var(--sel) !important; }
+.notes-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notes-when { color: var(--mute); font-size: 11px; flex: none; }
+.rsz-panel .notes-title { font-weight: 600; }
+.rsz-panel .notes-body { flex: 1; min-height: 0; line-height: 1.45; font-family: "Gohu", ui-monospace, Menlo, Consolas, monospace; }

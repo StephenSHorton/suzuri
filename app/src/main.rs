@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 
 mod bridge;
 mod caffeine;
+mod notes;
 mod paste;
 mod config;
 mod mcp_client;
@@ -687,7 +688,9 @@ fn main() {
             caffeine::caffeine_off,
             caffeine::caffeine_toggle,
             caffeine::caffeine_status,
-            appearance
+            appearance,
+            notes::notes_load,
+            notes::notes_save
         ])
         .build(tauri::generate_context!())
         .expect("build rust-suzuri")

@@ -373,7 +373,7 @@ fn reply_text(req: Request, text: &str) {
     let _ = req.respond(Response::from_string(text).with_header(ct));
 }
 
-fn rfc3339_now() -> String {
+pub fn rfc3339_now() -> String {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil-from-days (Howard Hinnant)
