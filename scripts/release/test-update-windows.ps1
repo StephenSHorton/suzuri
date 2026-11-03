@@ -66,7 +66,12 @@ try {
   Write-Host "==> conpty.dll and OpenConsole.exe are next to rust-suzuri.exe"
 
   $env:RSZ_UPDATE_AUTO = "1"; $env:RSZ_UPDATE_URL = "http://127.0.0.1:$Port/latest.json"
+  # Its own config dir, so the test app never takes over a running suzuri's
+  # bridge.json / ai.json (the install location doesn't come from this).
+  $realLocal = $env:LOCALAPPDATA
+  $env:LOCALAPPDATA = Join-Path $T "cfg"; New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
   Start-Process (Join-Path $dir "rust-suzuri.exe") -RedirectStandardError (Join-Path $T "app.err") | Out-Null
+  $env:LOCALAPPDATA = $realLocal
   Remove-Item Env:RSZ_UPDATE_AUTO, Env:RSZ_UPDATE_URL
   for ($i = 0; $i -lt 120; $i++) { if ((Installed).DisplayVersion -eq $New) { break }; Start-Sleep 1 }
   Start-Sleep 5
