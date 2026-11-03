@@ -290,6 +290,16 @@ mod tests {
     }
 
     #[test]
+    fn conpty_repaint_from_home() {
+        // kestrel's PC trace (#296): the echo inside a repaint from CSI H.
+        let (out, armed) = run("echo hi", &[b"\x1b[?25l\x1b[H \x1b[93mecho \x1b[37mhi\x1b[K\x1b[m\r\nhi\x1b[K\r\n"]);
+        assert!(!has(&out, b"echo"), "{:?}", String::from_utf8_lossy(&out));
+        assert!(has(&out, b"\x1b[H"));
+        assert!(has(&out, b"hi\x1b[K\r\n"));
+        assert!(!armed);
+    }
+
+    #[test]
     fn zsh_echo_then_output() {
         let (out, _) = run("echo hi", &[b"echo hi\r\n", b"hi\r\n"]);
         assert_eq!(out, b"\r\nhi\r\n");

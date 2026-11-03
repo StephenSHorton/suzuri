@@ -667,8 +667,9 @@ fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink) {
             match m {
                 ShellEvent::Start => sh.started = true,
                 ShellEvent::Cwd(cwd) => {
-                    // The prompt is back: any echo still expected never came.
-                    shared.echo.lock().disarm();
+                    // The echo filter stays armed: ConPTY passes these marks on
+                    // before it paints the echo itself. Its byte budget, or the
+                    // next submit, ends it.
                     sh.integrated = true;
                     sh.started = false;
                     sh.prompts += 1;
