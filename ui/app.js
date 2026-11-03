@@ -73,7 +73,7 @@ const early = new Map() // frames that beat pane_open's reply, by pane id
 // benches it was no faster on the Mac or Windows and cost 65-100 MB more
 // (a second JS heap and its canvases), so it stays opt-in.
 let worker = null
-const FONT = ["Gohu", "fonts/GohuFontuni14NerdFontMono-Regular.ttf"]
+const FONT = ["Gohu", "view/fonts/GohuFontuni14NerdFontMono-Regular.ttf"]
 
 // Flow control: tell the pane its frames up to lastSeq are painted, so it
 // may send the next (one frame in flight per pane).

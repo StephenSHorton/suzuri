@@ -183,7 +183,7 @@ impl Alacritty {
         let size = Size { cols: cols.max(2) as usize, rows: rows.max(1) as usize };
         let pending = Listener::default();
         // Kitty keyboard on: the engine keeps the flag stacks (per screen) and
-        // answers CSI ? u; the UI's encoder (ui/kitty.js) reads the flags
+        // answers CSI ? u; the UI's encoder (ui/view/kitty.js) reads the flags
         // from the frame's mode word.
         let config = Config {
             scrolling_history: scrollback,

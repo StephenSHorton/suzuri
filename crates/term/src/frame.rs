@@ -1,6 +1,6 @@
 //! The binary frame a pane sends to the UI: a header plus the dirty rows,
 //! each as runs of cells sharing colours and attributes. Little endian.
-//! The UI decodes it in ui/frame.js; keep the two in step.
+//! The UI decodes it in ui/view/frame.js; keep the two in step.
 //!
 //! header (32 bytes):
 //!   u8 'F', u8 flags (1 = full), u16 cols, u16 rows, u16 cursor_x,

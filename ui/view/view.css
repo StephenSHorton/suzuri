@@ -1,0 +1,33 @@
+/* suzuri-view: the view's look. Colours come from custom properties so the
+   app can theme it; padding is set by mount() as --rsz-pad-x/--rsz-pad-y. */
+/* The bundled Gohu (fonts/COPYING-LICENSE), DEFAULT_STYLE's first family. */
+@font-face {
+  font-family: "Gohu";
+  src: url("fonts/GohuFontuni14NerdFontMono-Regular.ttf") format("truetype");
+}
+.rsz-view { cursor: text; outline: none; }
+.rsz-view canvas { image-rendering: pixelated; }
+.rsz-view .cursor { background: var(--rsz-cursor, #c8c8d0); opacity: .85; mix-blend-mode: difference; }
+.rsz-view .cursor.underline { height: 2px !important; margin-top: calc(var(--ch) - 2px); }
+.rsz-view .cursor.beam { width: 2px !important; }
+.rsz-view .cursor.hollow { background: transparent; border: 1px solid var(--rsz-cursor, #c8c8d0); mix-blend-mode: normal; }
+.rsz-view .scrolled {
+  position: absolute; right: 10px; top: 6px; padding: 1px 6px; border-radius: 4px;
+  background: var(--rsz-badge-bg, rgba(184, 160, 200, .25)); color: var(--rsz-badge, #e8e0f0); font-size: 10px;
+}
+.rsz-view .rsz-error {
+  position: absolute; left: var(--rsz-pad-x); right: var(--rsz-pad-x); bottom: var(--rsz-pad-y);
+  padding: 4px 8px; border-radius: 4px; background: rgba(160, 60, 60, .85); color: #fff; font-size: 12px;
+}
+.rsz-view.on-link { cursor: pointer; }
+.rsz-view .link-hover { position: absolute; pointer-events: none; border-bottom: 1px solid var(--rsz-link, #b8a0c8); background: rgba(184, 160, 200, .12); }
+.rsz-view .preedit { z-index: 5; color: var(--rsz-preedit, #e8e8ec); background: var(--rsz-preedit-bg, #16161c); border-bottom: 1px solid var(--rsz-link, #b8a0c8); }
+.rsz-view .imgs { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.rsz-view .imgs .img { position: absolute; left: 0; top: 0; image-rendering: auto; }
+.rsz-view .imgs .img.inline { pointer-events: auto; cursor: zoom-in; border-radius: 3px; }
+.img-modal {
+  position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px; background: rgba(8, 8, 12, .86); cursor: zoom-out;
+}
+.img-modal canvas { border-radius: 6px; box-shadow: 0 8px 40px rgba(0, 0, 0, .6); }
+.img-modal .cap { color: #ccc; font-size: 12px; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

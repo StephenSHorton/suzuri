@@ -11,16 +11,19 @@
 //   {t: "drop", id}              the pane closed
 //   {t: "dpr", dpr}              the window moved to another screen
 //   {t: "frame", id, buf}        a frame from a Tauri Channel (no socket)
-//   {t: "style", void, selection, font}  theme and font (frame.js styleState)
+//   {t: "style", void, selection, font}  theme and font (frame.js styleState),
+//                                applied to every Screen (style is per Screen)
 // worker -> UI:
 //   {t: "painted", at, panes: [{id, seq, cols, rows, cx, cy, shape, modes,
 //     offset, history, frames, bytes}], ms}
 //     `at` is when painting ended, in ms since the epoch (performance
 //     timeOrigin + now), so the UI can set it against its own key times.
 //   {t: "ready"} once the font is loaded and frames can be painted.
-import { Screen, resetMetrics, applyStyle } from "./frame.js"
+import { Screen } from "./view/frame.js"
+import { styleFields } from "./frame.js"
 
 const screens = new Map() // pane id -> Screen
+let style // the UI's theme and font as Screen fields, once it sends them
 const early = new Map() // frames for panes the UI hasn't sent yet
 let sock = null
 let dpr = 1
@@ -97,7 +100,8 @@ onmessage = async (e) => {
           const ff = new FontFace(m.font[0], `url(${m.font[1]})`)
           self.fonts.add(ff)
           await ff.load()
-          resetMetrics() // measured with the fallback font if asked before
+          // Measured with the fallback font if asked before.
+          for (const s of screens.values()) s.resetMetrics()
         } catch (err) {
           postMessage({ t: "log", line: "worker font: " + err })
         }
@@ -108,7 +112,9 @@ onmessage = async (e) => {
       break
     }
     case "pane": {
-      screens.set(m.id, new Screen(m.canvas, dpr))
+      const s = new Screen(m.canvas, dpr)
+      if (style) s.setStyle(style)
+      screens.set(m.id, s)
       const q = early.get(m.id)
       early.delete(m.id)
       if (q) paint(q)
@@ -128,7 +134,8 @@ onmessage = async (e) => {
     case "style":
       // New metrics resize each canvas at its next frame; the UI asks the
       // panes for full frames after a font change.
-      applyStyle(m)
+      style = styleFields(m)
+      for (const s of screens.values()) s.setStyle(style)
       break
   }
 }

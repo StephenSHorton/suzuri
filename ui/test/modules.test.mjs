@@ -13,9 +13,12 @@ const decl = /^(?:export\s+)?(?:async\s+)?(?:function\*?|class|const|let|var)\s+
 
 test("no top-level name is declared twice in a ui module", () => {
   const dups = []
-  for (const f of readdirSync(ui).filter((f) => f.endsWith(".js"))) {
+  // ui/ and the view package (ui/view/).
+  const files = [ui, join(ui, "view")].flatMap((d) => readdirSync(d).filter((f) => f.endsWith(".js")).map((f) => join(d, f)))
+  for (const path of files) {
+    const f = path.slice(ui.length + 1)
     const seen = new Map()
-    readFileSync(join(ui, f), "utf8").split("\n").forEach((line, i) => {
+    readFileSync(path, "utf8").split("\n").forEach((line, i) => {
       const m = decl.exec(line)
       if (!m) return
       if (seen.has(m[1])) dups.push(`${f}:${i + 1} ${m[1]} (first at ${seen.get(m[1])})`)

@@ -38,7 +38,7 @@ from history, and Tab / Shift+Tab walk the matches. Dim ghost text after the
 caret shows the newest history line you've started, else the first path
 match; → at the end of the line takes it.
 
-Tests: `cargo test` and `node --test 'ui/*.test.mjs' 'ui/test/*.test.mjs'`.
+Tests: `cargo test` and `node --test 'ui/*.test.mjs' 'ui/test/*.test.mjs' 'ui/view/test/*.test.mjs'`.
 The frame fixtures in `testdata/frames` are written by `rsz-term`'s encoder
 and decoded by `ui/test/frame.test.mjs`; after a wire format change,
 regenerate them with `SUZURI_REGEN_FIXTURES=1 cargo test -p rsz-term --test

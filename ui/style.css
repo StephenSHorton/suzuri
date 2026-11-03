@@ -2,7 +2,7 @@
    appearance.js sets them from the active theme. Inkstone until it loads. */
 @font-face {
   font-family: "Gohu";
-  src: url("fonts/GohuFontuni14NerdFontMono-Regular.ttf") format("truetype");
+  src: url("view/fonts/GohuFontuni14NerdFontMono-Regular.ttf") format("truetype");
 }
 :root {
   --void: #0c0c10;

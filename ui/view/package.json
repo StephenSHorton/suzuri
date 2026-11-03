@@ -1,0 +1,20 @@
+{
+  "name": "suzuri-view",
+  "version": "0.1.0",
+  "description": "suzuri's terminal view: paints rsz-term frames and turns input into bytes, with no Tauri.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "default": "./index.js" },
+    "./view.css": "./view.css",
+    "./frame.js": { "types": "./frame.d.ts", "default": "./frame.js" },
+    "./keys.js": { "types": "./keys.d.ts", "default": "./keys.js" },
+    "./kitty.js": { "types": "./kitty.d.ts", "default": "./kitty.js" },
+    "./fonts/*": "./fonts/*",
+    "./package.json": "./package.json"
+  },
+  "files": ["*.js", "*.d.ts", "view.css", "fonts", "README.md"],
+  "sideEffects": ["./view.css"]
+}
