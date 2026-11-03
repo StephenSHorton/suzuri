@@ -66,11 +66,12 @@ let focused = null // the active tab's focused pane
 const byId = new Map()
 const early = new Map() // frames that beat pane_open's reply, by pane id
 
-// Painting: by default every pane's canvas is handed to the paint worker
+// Painting: the UI thread paints each pane's frames in requestAnimationFrame
+// (default). RSZ_PAINT=worker hands every canvas to the paint worker
 // (paint-worker.js) as an OffscreenCanvas, and the worker owns the frame
-// socket: it paints frames as they arrive and acks them itself. RSZ_PAINT=main,
-// or a webview without OffscreenCanvas, paints here in requestAnimationFrame
-// as before.
+// socket: it paints frames as they arrive and acks them itself. On #289's
+// benches it was no faster on the Mac or Windows and cost 65-100 MB more
+// (a second JS heap and its canvases), so it stays opt-in.
 let worker = null
 const FONT = ["Gohu", "fonts/GohuFontuni14NerdFontMono-Regular.ttf"]
 
@@ -1349,7 +1350,7 @@ async function start() {
   window.rszTrace = boot.trace
   home = boot.home
   const canWorker = typeof OffscreenCanvas !== "undefined" && "transferControlToOffscreen" in HTMLCanvasElement.prototype
-  if (boot.paint !== "main" && canWorker) await startWorker(boot)
+  if (boot.paint === "worker" && canWorker) await startWorker(boot)
   else if (boot.ws) connectFrames(boot.ws)
   log("paint:", worker ? "worker" : "main", "transport:", boot.ws ? "socket" : "channel")
   settingsCfg = await invoke("config_get").catch(() => null)
