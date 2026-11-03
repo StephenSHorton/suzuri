@@ -28,6 +28,10 @@ pub struct EchoFilter {
     esc_buf: Vec<u8>,
     /// An incomplete UTF-8 sequence carried to the next feed.
     utf8: Vec<u8>,
+    /// A cursor move came inside a partial match: the shell may be
+    /// redrawing the line (PSReadLine under OpenConsole paints the command
+    /// frame by frame, `CSI 1;2H` + a growing prefix each time).
+    rewound: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
@@ -155,6 +159,7 @@ impl EchoFilter {
 
     fn char_bytes(&mut self, bytes: &[u8], out: &mut Vec<u8>) {
         let c = std::str::from_utf8(bytes).ok().and_then(|s| s.chars().next());
+        let rewound = std::mem::take(&mut self.rewound);
         if c.is_some() && c == self.want.get(self.pos).copied() {
             self.pos += 1;
             self.held.extend_from_slice(bytes);
@@ -162,6 +167,15 @@ impl EchoFilter {
                 self.to_newline = true;
                 self.pos = 0;
             }
+            return;
+        }
+        // A redraw from the start after a cursor move: the frame held so far
+        // was a prefix of the echo, so it goes too; the shell paints the
+        // next frame over the same cells.
+        if rewound && self.pos > 0 && c.is_some() && c == self.want.first().copied() {
+            self.held.clear();
+            self.pos = 1;
+            self.held.extend_from_slice(bytes);
             return;
         }
         if self.pos > 0 || !self.held.is_empty() {
@@ -220,6 +234,9 @@ impl EchoFilter {
         } else {
             // Inside a match, or a colour that may open the echo (its reset
             // would go with the echo's tail): held.
+            if self.pos > 0 && is_cursor_move(&seq) {
+                self.rewound = true;
+            }
             self.held.extend_from_slice(&seq);
         }
     }
@@ -245,6 +262,11 @@ impl EchoFilter {
             (Esc::None, _) => Esc::None,
         };
     }
+}
+
+/// `CSI row;col H` / `f`, or `CSI col G`: an absolute cursor move.
+fn is_cursor_move(seq: &[u8]) -> bool {
+    seq.starts_with(b"\x1b[") && matches!(seq.last(), Some(b'H' | b'f' | b'G')) && !seq[2..seq.len() - 1].contains(&b'?')
 }
 
 /// `ESC [ n C`: how many columns it moves right.
@@ -321,6 +343,30 @@ mod tests {
         assert!(has(&out, b"\x1b[H"));
         assert!(has(&out, b"hi\x1b[K\r\n"));
         assert!(!armed);
+    }
+
+    #[test]
+    fn psreadline_redraws_frame_by_frame() {
+        // kestrel's PC trace with the bundled OpenConsole (#296): PSReadLine
+        // repaints the line at an absolute position, one growing prefix per
+        // frame, then the whole command and its newline.
+        let mut t: Vec<u8> = Vec::new();
+        for n in 2..="echo hi".len() {
+            t.extend_from_slice(b"\x1b[?25l\x1b[1;2H\x1b[93m");
+            t.extend_from_slice(&b"echo hi"[..n]);
+            t.extend_from_slice(format!("\x1b[39;49m\x1b[0m\x1b[1;{}H\x1b[?25h", n + 2).as_bytes());
+        }
+        t.extend_from_slice(b"\r\nhi\r\n");
+        for cut in [0, 7, 30, t.len() / 2, t.len() - 5] {
+            let (out, armed) = run("echo hi", &[&t[..cut], &t[cut..]]);
+            let s = String::from_utf8_lossy(&out);
+            assert!(!has(&out, b"ec"), "cut {cut}: {s:?}");
+            assert!(has(&out, b"hi\r\n"), "cut {cut}: {s:?}");
+            assert!(!armed, "cut {cut}");
+        }
+        // Text that only starts like the command, after a move, still shows.
+        let (out, _) = run("echo hi", &[b"ec\x1b[1;1Hzz\r\n"]);
+        assert!(has(&out, b"ec") && has(&out, b"zz"));
     }
 
     #[test]
