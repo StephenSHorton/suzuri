@@ -1,7 +1,7 @@
 //! Where Go suzuri keeps its files, and where its helper binaries live.
 //!
-//! suzuri shares Go suzuri's config dir (bridge.json, notes, workspace,
-//! transfer identity) so `suzuri mcp` and the other helpers work unchanged.
+//! suzuri shares Go suzuri's config dir (bridge.json, notes, transfer
+//! identity). Its one helper, suzuri-transfer, ships in the bundle (#330).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -68,7 +68,7 @@ pub fn install_dirs() -> Vec<PathBuf> {
 
 /// Find a helper binary: `env` override, then [`install_dirs`], then PATH.
 /// This app's own executable never counts: it is named `suzuri` too, and
-/// does not serve Go's subcommands (`suzuri mcp` would open a window).
+/// does not serve Go's helper subcommands.
 pub fn find(env: &str, names: &[&str]) -> Option<PathBuf> {
     if let Ok(p) = std::env::var(env) {
         let p = PathBuf::from(p.trim());

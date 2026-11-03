@@ -1,5 +1,6 @@
 //! The agent bridge (#286): the same loopback HTTP endpoints Go suzuri's GUI
-//! serves, so Go's `suzuri mcp` (the stdio MCP server agents spawn) and the
+//! serves, so Go's `suzuri mcp` (the stdio MCP server agents spawn; this app
+//! has none since #330) and the
 //! curl-based AI control API work against suzuri unchanged.
 //!
 //! - MCP bridge: `{config}/bridge.json` {pid,url,token}; GET /v1/status,

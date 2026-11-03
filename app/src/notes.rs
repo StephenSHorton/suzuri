@@ -1,5 +1,5 @@
 //! Notes (#294): Go suzuri's notes bank, the same notes.json in Go suzuri's
-//! config dir, so both apps and `suzuri mcp` see one set of notes.
+//! config dir, so Go suzuri and this app see one set of notes.
 //!
 //! The format is Go's NotesBank: {"active_id", "notes": [{id, title?, body,
 //! updated}]}. Loading repairs it as Go's normalizeNotesBank does; saving

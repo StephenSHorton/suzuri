@@ -16,11 +16,9 @@ mod notify;
 mod complete;
 mod paste;
 mod config;
-mod mcp_client;
 mod sidecar;
 mod transfer;
 mod transfer_engine;
-mod workspace;
 mod window;
 mod notices;
 mod update;
@@ -764,11 +762,21 @@ mod tests {
     }
 }
 
+/// Go suzuri subcommands this app does not serve (#330).
+const GO_ONLY_SUBCOMMANDS: &[&str] = &["mcp", "workspace-sync", "guest", "chrome"];
+
 fn main() {
     let ctx = tauri::generate_context!();
     let args: Vec<String> = std::env::args().collect();
     if notify::wants(&args) {
         std::process::exit(notify::run(&args[2..], ctx));
+    }
+    // Go suzuri's other subcommands aren't served here (#330: the workspace
+    // and its `suzuri mcp` server were dropped). Say so and exit instead of
+    // opening a window for a caller that expects a stdio tool.
+    if let Some(sub) = args.get(1).filter(|a| GO_ONLY_SUBCOMMANDS.contains(&a.as_str())) {
+        eprintln!("suzuri {sub}: not available in this version of suzuri");
+        std::process::exit(2);
     }
     // Panes must not inherit the control API of the suzuri this was started
     // from (a dev build run inside Go suzuri): drop those variables first,
@@ -829,7 +837,6 @@ fn main() {
         .manage(update::Pending::default())
         .manage(caffeine::Caffeine::new())
         .manage(Arc::new(transfer::Transfers::default()))
-        .manage(Arc::new(mcp_client::McpClient::default()))
         .invoke_handler(tauri::generate_handler![
             pane_open,
             pane_write,
@@ -870,8 +877,6 @@ fn main() {
             transfer::transfer_receive,
             transfer::transfer_cancel,
             transfer::transfer_info,
-            workspace::workspace_call,
-            workspace::workspace_me,
             bridge::aicontrol_reply,
             complete::complete_list,
             bridge::pane_text,

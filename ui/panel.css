@@ -1,4 +1,4 @@
-/* #286 panels: transfer and workspace. Uses style.css's tokens. */
+/* #286 panels: transfer. Uses style.css's tokens. */
 .rsz-panel {
   position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
   width: min(520px, calc(100vw - 32px)); z-index: 50;
