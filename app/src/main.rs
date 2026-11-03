@@ -225,6 +225,32 @@ fn split_args(s: &str) -> Vec<String> {
     out
 }
 
+/// Enter in the input bar (#296): a command block and the line, or a place
+/// in the queue while the shell is busy. Returns {kind: "sent" | "blank" |
+/// "queued", n: queue length}.
+#[tauri::command]
+fn pane_submit(panes: State<'_, Arc<Panes>>, id: u32, line: String) -> serde_json::Value {
+    let Some(p) = panes.get(id) else { return serde_json::Value::Null };
+    match p.submit(&line) {
+        rsz_term::Submit::Sent => serde_json::json!({ "kind": "sent", "n": 0 }),
+        rsz_term::Submit::Blank => serde_json::json!({ "kind": "blank", "n": 0 }),
+        rsz_term::Submit::Queued(n) => serde_json::json!({ "kind": "queued", "n": n }),
+    }
+}
+
+/// Run the pane's next queued line if the shell is idle: how many are left,
+/// or null when nothing ran (busy, or the queue is empty).
+#[tauri::command]
+fn pane_queue_flush(panes: State<'_, Arc<Panes>>, id: u32) -> Option<usize> {
+    panes.get(id)?.flush_queue()
+}
+
+/// Drop the pane's queued lines; how many there were.
+#[tauri::command]
+fn pane_queue_clear(panes: State<'_, Arc<Panes>>, id: u32) -> usize {
+    panes.get(id).map_or(0, |p| p.clear_queue())
+}
+
 #[tauri::command]
 fn pane_write(panes: State<'_, Arc<Panes>>, id: u32, data: String) {
     if let Some(p) = panes.get(id) {
@@ -792,6 +818,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             pane_open,
             pane_write,
+            pane_submit,
+            pane_queue_flush,
+            pane_queue_clear,
             pane_resize,
             pane_scroll,
             pane_focus,

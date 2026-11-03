@@ -295,12 +295,53 @@ class PaneView {
     this.renderBar()
   }
 
-  // Enter in the bar: the line and CR in one write. A non-empty line hands
-  // the keys to the command until the shell's next prompt.
-  submit(line) {
-    if (line.trim() === "") return this.send("\r")
-    this.awaiting = this.shell.prompts
-    this.send(line + "\r")
+  // Enter in the bar (#296): the core draws the command block, hides the
+  // shell's echo and sends the line, or queues it while the shell is busy
+  // ("queued · N"). A sent line hands the keys to the command until the
+  // shell's next prompt.
+  async submit(line) {
+    if (line.trim() !== "") this.awaiting = this.shell.prompts
+    if (!this.pendingInput) this.pendingInput = performance.now()
+    const r = await invoke("pane_submit", { id: this.id, line }).catch((err) => (log("submit", String(err)), null))
+    if (r?.kind === "queued") {
+      this.awaiting = -1
+      this.queued = r.n
+      toast(`queued · ${r.n}`)
+      this.renderBar()
+      this.pollQueue()
+    } else if (r?.kind !== "sent") {
+      this.awaiting = -1
+      this.renderBar()
+    }
+  }
+
+  // Queued lines run one at a time once the shell is idle again (back at
+  // its prompt and quiet for a moment).
+  pollQueue() {
+    if (this.queueTimer || !this.queued) return
+    this.queueTimer = setInterval(async () => {
+      if (this.exited) return this.stopQueue()
+      const left = await invoke("pane_queue_flush", { id: this.id }).catch(() => null)
+      if (left == null) return
+      this.awaiting = this.shell.prompts
+      this.queued = left
+      toast(left ? `ran queued · ${left} left` : "ran queued")
+      this.renderBar()
+      if (!left) this.stopQueue()
+    }, 300)
+  }
+  stopQueue() {
+    clearInterval(this.queueTimer)
+    this.queueTimer = 0
+  }
+
+  // Ctrl+C while a command runs also drops the queue (Go suzuri).
+  async clearQueue() {
+    if (!this.queued) return
+    const n = await invoke("pane_queue_clear", { id: this.id }).catch(() => 0)
+    this.queued = 0
+    this.stopQueue()
+    if (n) toast(`cleared ${n} queued`)
   }
 
   label() { return this.titleOverride || this.title }
@@ -1007,6 +1048,7 @@ input.addEventListener("keydown", (e) => {
   }
   const data = encodeKey(e, focused.modes, isMac)
   if (data == null) return
+  if (data === "\x03") focused.clearQueue()
   e.preventDefault()
   focused.send(data, e.timeStamp || performance.now())
 })

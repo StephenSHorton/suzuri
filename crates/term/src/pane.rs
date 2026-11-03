@@ -26,6 +26,9 @@ use crate::engine::{Alacritty, Engine, EngineEvent, Link, SelectKind};
 use crate::fg::Probe;
 use crate::input::MouseEvent;
 use crate::shell::{self, OscFilter, ShellEvent};
+use crate::block;
+use crate::palette;
+use crate::echo::EchoFilter;
 use crate::images::{self, Changes, ImageData, Images, MARK_REACH, Placement};
 use crate::protocols::{Kitty, KittyPlace, Notice, ProtoEvent, ProtoSink, Protocols};
 
@@ -86,6 +89,9 @@ struct ShellState {
     child: bool,
     prompts: u64,
     sent: Option<ShellStatus>,
+    /// A bar line was sent at this prompt count: the command owns the pane
+    /// until a later prompt.
+    awaiting: Option<u64>,
 }
 
 impl ShellState {
@@ -184,6 +190,10 @@ struct Shared {
     /// The UI's cell size in pixels, w << 16 | h (Go's default 9 x 18).
     cell_px: AtomicU32,
     cwd: Option<std::path::PathBuf>,
+    /// Hides the shell's echo of a bar line (#296).
+    echo: Mutex<EchoFilter>,
+    /// When the PTY last produced output.
+    last_io: Mutex<Instant>,
 }
 
 impl Shared {
@@ -202,7 +212,26 @@ pub struct Pane {
     pid: Option<u32>,
     /// The cwd the shell last reported (OSC 7 / 7878), if any.
     reported_cwd: Mutex<Option<String>>,
+    /// The shell's program (before suzuri's bootstrap), for the cd alias.
+    shell_prog: String,
+    /// Bar lines waiting for the shell to be idle: (display, payload).
+    queue: Mutex<std::collections::VecDeque<(String, String)>>,
 }
+
+/// What a bar submit did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Submit {
+    /// A blank line: Enter went to the shell.
+    Blank,
+    Sent,
+    /// Held until the shell is idle; the queue's length.
+    Queued(usize),
+}
+
+/// How long the shell must be quiet before a queued line runs, and the
+/// most lines a pane holds (Go suzuri's cmdQueueIdle, cmdQueueMax).
+pub const QUEUE_IDLE: Duration = Duration::from_millis(900);
+const QUEUE_MAX: usize = 32;
 
 /// Frame pacing: a focused pane may send at ~120 Hz, an unfocused one at
 /// ~30 Hz. Input skips the wait (input-first).
@@ -235,6 +264,7 @@ impl Pane {
         let size = PtySize { rows: cfg.rows, cols: cfg.cols, pixel_width: 0, pixel_height: 0 };
         let pair = native_pty_system().openpty(size).map_err(|e| io(e.into()))?;
         let mut argv = cfg.command.clone().unwrap_or_else(default_shell);
+        let shell_prog = argv.first().cloned().unwrap_or_default();
         // The input bar's shell hooks, for the user's own shell only.
         let mut boot_env = Vec::new();
         let mut temp_dir = None;
@@ -288,6 +318,8 @@ impl Pane {
             images: Mutex::new(Images::default()),
             cell_px: AtomicU32::new(9 << 16 | 18),
             cwd: cfg.cwd.clone().map(Into::into).or_else(|| home_dir().map(Into::into)),
+            echo: Mutex::new(EchoFilter::default()),
+            last_io: Mutex::new(Instant::now()),
         });
         let (tx, rx) = unbounded::<Cmd>();
         let mut threads = Vec::new();
@@ -331,7 +363,92 @@ impl Pane {
             let shared = shared.clone();
             threads.push(thread("rsz-actor", move || actor_loop(rx, pair.master, writer, killer, shared, sink, (cfg.cols, cfg.rows))));
         }
-        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None) })
+        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default() })
+    }
+
+    /// Enter in the input bar (#296, Go suzuri's submitBarLine): the bare-cd
+    /// alias, then either a command block plus the line, or a place in the
+    /// queue while the shell is busy.
+    pub fn submit(&self, line: &str) -> Submit {
+        let (display, payload) = block::expand(line, &self.shell_prog);
+        if display.trim().is_empty() && payload.trim().is_empty() {
+            self.write(b"\r".to_vec());
+            return Submit::Blank;
+        }
+        let mut q = self.queue.lock();
+        if !q.is_empty() || self.busy() {
+            q.push_back((display, payload));
+            while q.len() > QUEUE_MAX {
+                q.pop_front();
+            }
+            return Submit::Queued(q.len());
+        }
+        drop(q);
+        self.send_block(&display, &payload);
+        Submit::Sent
+    }
+
+    /// Run the next queued line if the shell is idle. Returns how many are
+    /// left after it, or None when nothing ran.
+    pub fn flush_queue(&self) -> Option<usize> {
+        let mut q = self.queue.lock();
+        if q.is_empty() || self.busy() {
+            return None;
+        }
+        let (display, payload) = q.pop_front()?;
+        let left = q.len();
+        drop(q);
+        self.send_block(&display, &payload);
+        Some(left)
+    }
+
+    /// Drop the queued lines (Ctrl+C while a command runs). Returns how many.
+    pub fn clear_queue(&self) -> usize {
+        std::mem::take(&mut *self.queue.lock()).len()
+    }
+
+    pub fn queue_len(&self) -> usize {
+        self.queue.lock().len()
+    }
+
+    /// A command owns the pane: one sent from the bar and not yet back at a
+    /// prompt, one the shell marked as started, a foreground child, or
+    /// output that hasn't been quiet for QUEUE_IDLE.
+    fn busy(&self) -> bool {
+        let sh = self.shared.shell.lock();
+        if sh.awaiting.is_some_and(|n| sh.prompts <= n) || sh.started || sh.child {
+            return true;
+        }
+        drop(sh);
+        self.shared.last_io.lock().elapsed() < QUEUE_IDLE
+    }
+
+    fn send_block(&self, display: &str, payload: &str) {
+        let cwd = {
+            let mut sh = self.shared.shell.lock();
+            sh.awaiting = Some(sh.prompts);
+            sh.cwd.clone()
+        };
+        {
+            let mut eng = self.shared.engine.lock();
+            eng.scroll(i32::MIN);
+            let (cols, _) = eng.size();
+            let (cx, cy) = eng.cursor();
+            // The screen's row above the cursor; the top of the screen
+            // counts as blank.
+            let text = eng.screen_text();
+            let row = |y: u16| text.lines().nth(y as usize).unwrap_or("").trim().is_empty();
+            let line_blank = cx == 0 || row(cy);
+            let above_blank = cy == 0 || row(cy - 1);
+            let home = home_dir().unwrap_or_default();
+            let bytes = block::block_bytes(display, &cwd, &home, cols, line_blank, above_blank, palette::active().theme.chrome.primary);
+            let mut events = Vec::new();
+            eng.feed(&bytes, &mut events);
+        }
+        self.shared.echo.lock().arm(payload);
+        let mut line = payload.replace("\r\n", "\n").replace('\n', "\r").into_bytes();
+        line.push(b'\r');
+        self.write(line);
     }
 
     /// Input from the user: snaps the view back to the bottom.
@@ -511,6 +628,15 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
         if !marks.is_empty() {
             shell_marks(&mut marks, &shared, &sink);
         }
+        *shared.last_io.lock() = Instant::now();
+        // The shell's echo of a bar line goes (#296): the block shows it.
+        {
+            let mut echo = shared.echo.lock();
+            if echo.active() {
+                let raw = std::mem::take(&mut clean);
+                echo.feed(&raw, &mut clean);
+            }
+        }
         // Then #288's protocols (notices, images) on what is left, ahead of
         // the engine.
         let outs = {
@@ -539,6 +665,8 @@ fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink) {
             match m {
                 ShellEvent::Start => sh.started = true,
                 ShellEvent::Cwd(cwd) => {
+                    // The prompt is back: any echo still expected never came.
+                    shared.echo.lock().disarm();
                     sh.integrated = true;
                     sh.started = false;
                     sh.prompts += 1;

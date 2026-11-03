@@ -166,6 +166,23 @@ export async function run(name, { invoke, log, first }) {
     say("screenshot: composing")
     await sleep(3500)
     say("bar text:", JSON.stringify(pane.barEl.querySelector(".lines").textContent))
+  } else if (name === "blocks") {
+    // #296: bar lines become blocks, the shell's echo is hidden, a line
+    // sent while the shell is busy waits in the queue.
+    await sleep(1500)
+    say("bar active:", pane.barActive())
+    await pane.submit("echo one")
+    await sleep(1200)
+    await pane.submit("sleep 1; echo two")
+    await sleep(100)
+    await pane.submit("echo three")
+    say("queued:", pane.queued)
+    await sleep(4000)
+    await pane.submit("cd")
+    await sleep(1200)
+    say("screen:", JSON.stringify((await screen()).split("\n").filter((l) => l.trim())))
+    say("screenshot: blocks")
+    await sleep(2500)
   } else if (name === "ime") {
     // The textarea follows the cursor so the candidate window opens there.
     await type("clear; echo ime test\r")
