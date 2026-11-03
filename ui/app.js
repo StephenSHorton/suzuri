@@ -855,6 +855,24 @@ window.rszHost = {
   tabs: () => tabs, activeTab: () => activeTab, openTab, showTab, movePaneToTab,
 }
 
+// Go suzuri's AI-control tab tools (internal/aicontrol/server.go).
+window.rszRegisterTool?.("new_tab", async () => {
+  const p = await openTab()
+  return [200, { ok: true, tab_id: p.tab.id, pane_id: p.id }]
+})
+window.rszRegisterTool?.("move_to_tab", async (a) => {
+  const p = everyPane().find((x) => x.id === Number(a.pane_id))
+  if (!p) return [404, { error: `no pane ${a.pane_id}` }]
+  let to = tabs.length // no tab_id: extract to a new tab
+  if (a.tab_id != null) {
+    to = tabs.findIndex((t) => t.id === Number(a.tab_id))
+    if (to < 0) return [404, { error: `no tab ${a.tab_id}` }]
+  }
+  if (to === tabs.length && allPanes(p.tab.tree).length === 1) return [400, { error: "the pane is already alone in its tab" }]
+  movePaneToTab(p, to)
+  return [200, { ok: true, pane_id: p.id, tab_id: p.tab.id }]
+})
+
 document.getElementById("new-tab").onclick = () => openTab()
 document.getElementById("split-right").onclick = () => split("h")
 document.getElementById("split-down").onclick = () => split("v")

@@ -372,7 +372,9 @@ fn tools() -> Value {
         { "name": "close", "args": { "pane_id": "int?" } },
         { "name": "rename", "args": { "pane_id": "int", "title": "string" } },
         { "name": "report_agent", "args": { "pane_id": "int", "state": "idle|working|blocked|done|clear" } },
-    ], "not_yet": ["move", "move_to_tab", "rotate", "swap", "grow", "shrink", "equalize", "new_tab"] })
+        { "name": "new_tab", "args": {} },
+        { "name": "move_to_tab", "args": { "pane_id": "int", "tab_id": "int?" } },
+    ], "not_yet": ["move", "rotate", "swap", "grow", "shrink", "equalize"] })
 }
 
 const HELP: &str = "# Suzuri AI control (rust-suzuri)
@@ -392,9 +394,9 @@ Discovery: $SUZURI_CONTROL_URL (in every pane), $SUZURI=1, $SUZURI_PANE_ID,
 
 Tools: layout; pane {pane_id, lines?}; split {pane_id?, axis: right|down};
 focus {pane_id}; close {pane_id?}; rename {pane_id, title};
-report_agent {pane_id, state: idle|working|blocked|done|clear}.
-Not yet in rust-suzuri: move, move_to_tab, rotate, swap, grow, shrink,
-equalize, new_tab.
+report_agent {pane_id, state: idle|working|blocked|done|clear};
+new_tab; move_to_tab {pane_id, tab_id?} (no tab_id: its own new tab).
+Not yet in rust-suzuri: move, rotate, swap, grow, shrink, equalize.
 ";
 
 #[cfg(test)]

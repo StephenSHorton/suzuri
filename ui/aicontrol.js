@@ -30,11 +30,16 @@ async function treeOf(node) {
   return { split: node.dir === "h" ? "right" : "down", a: await treeOf(node.a), b: await treeOf(node.b) }
 }
 
+// Every tab (#283), with its own tree and focused pane.
 async function layout() {
-  const f = host().focused()
-  return {
-    windows: [{ id: 1, tabs: [{ id: 1, title: f?.title || "", active: true, focused_pane: f?.id ?? 0, tree: await treeOf(host().tree()) }] }],
-  }
+  const tabs = await Promise.all(host().tabs().map(async (t) => ({
+    id: t.id,
+    title: t.name || t.focused?.titleOverride || t.focused?.title || "",
+    active: t === host().activeTab(),
+    focused_pane: t.focused?.id ?? 0,
+    tree: await treeOf(t.tree),
+  })))
+  return { windows: [{ id: 1, tabs }] }
 }
 
 function setTitle(p) {
