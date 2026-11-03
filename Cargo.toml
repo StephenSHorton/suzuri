@@ -20,3 +20,9 @@ parking_lot = "0.12"
 
 [profile.release]
 debug = 1
+
+# portable-pty 0.9.0 with ConPTY passthrough mode on Windows (#288): ConPTY
+# otherwise repaints the screen from its own copy and paints over inline
+# images and command blocks. See vendor/portable-pty/src/win/psuedocon.rs.
+[patch.crates-io]
+portable-pty = { path = "vendor/portable-pty" }
