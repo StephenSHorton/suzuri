@@ -446,6 +446,9 @@ impl Pane {
             // echo would have been there, and its newline still follows.
             let on_line = lines.pop().unwrap_or_default();
             eng.insert_block(&lines, &on_line, keep);
+            if trace() {
+                eprintln!("rsz: block cy={cy} above={} keep={keep} spacer={spacer} rows={} cursor after={:?}", lines.len(), eng.size().1, eng.cursor());
+            }
         }
         self.shared.echo.lock().arm(payload);
         let mut line = payload.replace("\r\n", "\n").replace('\n', "\r").into_bytes();
@@ -1029,7 +1032,14 @@ fn actor_loop(
                 if let Some(m) = master.as_ref() {
                     // Engine first, so output produced for the new size lands
                     // on a grid of that size.
-                    shared.engine.lock().resize(size.0, size.1);
+                    {
+                        let mut eng = shared.engine.lock();
+                        let before = (eng.size(), eng.cursor());
+                        eng.resize(size.0, size.1);
+                        if trace() {
+                            eprintln!("rsz: resize {:?} -> {:?}, cursor {:?} -> {:?}", before.0, size, before.1, eng.cursor());
+                        }
+                    }
                     if m.resize(PtySize { rows: size.1, cols: size.0, pixel_width: 0, pixel_height: 0 }).is_ok() {
                         applied = size;
                         shared.stats.resizes_applied.fetch_add(1, Ordering::Relaxed);
