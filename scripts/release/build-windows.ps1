@@ -48,10 +48,10 @@ Copy-Item $setup.FullName (Join-Path $dist $name) -Force
 Write-Host "==> $dist\$name"
 
 if ($NoUpload) { return }
-$tag = "rust-v$Version"
+$tag = "v$Version"
 gh release view $tag -R $Repo *> $null
 if ($LASTEXITCODE -ne 0) {
-  gh release create $tag -R $Repo --draft --prerelease --target main --title "rust-suzuri $Version" --notes "rust-suzuri $Version"
+  gh release create $tag -R $Repo --draft --target main --title "suzuri $Version" --notes "suzuri $Version"
   if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 }
 gh release upload $tag (Join-Path $dist $name) -R $Repo --clobber

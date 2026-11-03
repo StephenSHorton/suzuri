@@ -6,19 +6,18 @@ a draft release.
 
 ## Where releases go
 
-To the public `StephenSHorton/suzuri` repo, which rust-suzuri will take over.
-Until then its releases stay out of Go suzuri's way:
+This repo is moving into `StephenSHorton/suzuri` and replaces Go suzuri there,
+so the release setup is aimed at that repo: normal `v<version>` tags, and
+the update feed at
+`https://github.com/StephenSHorton/suzuri/releases/latest/download/latest.json`
+(`plugins.updater.endpoints` in `app/tauri.conf.json`).
 
-- They are **prereleases** tagged `rust-v<version>`. Go suzuri's updater reads
-  `releases/latest`, which skips prereleases. A `v*` tag would also start Go
-  suzuri's release workflow.
-- The app's update feed is `latest.json` on the moving prerelease
-  `rust-latest`:
-  `https://github.com/StephenSHorton/suzuri/releases/download/rust-latest/latest.json`
-  (`plugins.updater.endpoints` in `app/tauri.conf.json`).
-
-At the takeover, point the endpoint at `releases/latest/download/latest.json`
-and publish full releases.
+Nothing is published before the move. Until then updates are tested from
+local feeds (below). At the move:
+- the first release's version must be above Go suzuri's last one (0.9.x);
+- Go suzuri's `release.yml` goes away, since these scripts replace it;
+- Go suzuri installs don't read `latest.json`, so moving them over is part
+  of the takeover.
 
 ## What ships
 
@@ -43,7 +42,7 @@ suzuri does. Every download is checked against the updater public key in
 `tauri.conf.json` (`packaging/updater.pub`), and a bad signature is refused.
 Debug builds don't check.
 
-The matching private key is `~/.tauri/rust-suzuri-updater.key` on the Mac, with
+The matching private key is `~/.tauri/suzuri-updater.key` on the Mac, with
 a backup in `~/Backups/tauri-keys/`. It has no password. Without it no build
 can update existing installs, so keep the backup. Only the Mac signs:
 the PC's installer is signed by `publish.sh`.
@@ -57,7 +56,7 @@ without asking).
    (`security find-identity -v -p codesigning`).
 2. Notary credentials as a keychain profile, using an app-specific password
    from https://account.apple.com:
-   `xcrun notarytool store-credentials rust-suzuri-notary --apple-id <apple id> --team-id GP6632G333`
+   `xcrun notarytool store-credentials suzuri-notary --apple-id <apple id> --team-id GP6632G333`
 3. `cargo install tauri-cli --version '^2'`, and `gh auth login`.
 
 On the PC: Rust, `cargo install tauri-cli --version '^2'`, `gh auth login`.
@@ -65,14 +64,13 @@ On the PC: Rust, `cargo install tauri-cli --version '^2'`, `gh auth login`.
 ## Cutting a release
 
 1. PC: `powershell -File scripts\release\build-windows.ps1 -Version 0.2.0`
-   builds the installer and uploads it to the draft prerelease `rust-v0.2.0`.
+   builds the installer and uploads it to the draft release `v0.2.0`.
 2. Mac: `scripts/release/publish.sh 0.2.0 --notes "what changed"`
    - builds and signs the app (hardened runtime, `packaging/macos/entitlements.plist`)
    - notarizes and staples the app, then the DMG
    - signs the macOS tarball and the Windows installer with the updater key
-   - writes `latest.json` and `SHA256SUMS`, uploads, publishes the prerelease,
-     and replaces `latest.json` on `rust-latest` (last, so clients only ever
-     see a complete release)
+   - writes `latest.json` and `SHA256SUMS`, uploads, and publishes it as the latest release (clients
+     see it only once it is complete)
 
 `--mac-only` skips Windows. `--no-upload` stops after building into
 `dist/<version>`. `--no-notarize` and `--feed-base URL` are for local tests.

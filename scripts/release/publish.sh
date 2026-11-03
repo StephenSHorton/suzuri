@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds, signs and notarizes the macOS release, signs the Windows installer
+# Builds, signs and notarizes the macOS release of suzuri (the Rust + Tauri
+# app; this repo moves into StephenSHorton/suzuri), signs the Windows installer
 # the PC uploaded (scripts/release/build-windows.ps1), writes the updater feed
 # (latest.json) and publishes the GitHub release. Local only, no CI.
 #
@@ -15,10 +16,10 @@
 # Needs on the Mac:
 #   - the "Developer ID Application" identity in the login keychain
 #   - notary credentials saved as a keychain profile (RSZ_NOTARY_PROFILE,
-#     default rust-suzuri-notary):
-#       xcrun notarytool store-credentials rust-suzuri-notary \
+#     default suzuri-notary):
+#       xcrun notarytool store-credentials suzuri-notary \
 #         --apple-id <apple id> --team-id GP6632G333
-#   - the updater key (RSZ_UPDATER_KEY, default ~/.tauri/rust-suzuri-updater.key;
+#   - the updater key (RSZ_UPDATER_KEY, default ~/.tauri/suzuri-updater.key;
 #     public half in packaging/updater.pub and tauri.conf.json)
 #   - gh logged in, cargo-tauri
 #
@@ -46,10 +47,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO="${RSZ_RELEASE_REPO:-StephenSHorton/suzuri}"
-PROFILE="${RSZ_NOTARY_PROFILE:-rust-suzuri-notary}"
-KEY="${RSZ_UPDATER_KEY:-$HOME/.tauri/rust-suzuri-updater.key}"
-TAG="rust-v$VERSION"
-FEED_TAG="rust-latest"
+PROFILE="${RSZ_NOTARY_PROFILE:-suzuri-notary}"
+KEY="${RSZ_UPDATER_KEY:-$HOME/.tauri/suzuri-updater.key}"
+TAG="v$VERSION"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DIST="$ROOT/dist/$VERSION"
 [[ -n "$FEED_BASE" ]] || FEED_BASE="https://github.com/$REPO/releases/download/$TAG"
@@ -143,22 +143,12 @@ ls -l "$DIST"
 
 [[ $UPLOAD == 1 ]] || { echo "==> built in $DIST (not uploaded)"; exit 0; }
 
-# 7. Publish. Until rust-suzuri replaces Go suzuri in its repo, its releases
-# stay out of Go suzuri's way: prereleases (Go suzuri's updater reads the
-# latest full release) tagged rust-v* (a v* tag starts Go suzuri's release
-# workflow). The app's feed is latest.json on the moving rust-latest
-# prerelease, replaced last so clients only see a complete release.
+# 7. Publish: upload to the (draft) release, then make it the latest. The
+# app's feed is releases/latest/download/latest.json, so clients see the new
+# version only once the release is complete and published.
 if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-  gh release create "$TAG" -R "$REPO" --draft --prerelease --target main \
-    --title "rust-suzuri $VERSION" --notes "$NOTES"
+  gh release create "$TAG" -R "$REPO" --draft --target main --title "suzuri $VERSION" --notes "$NOTES"
 fi
 gh release upload "$TAG" -R "$REPO" --clobber "$DIST"/*
-gh release edit "$TAG" -R "$REPO" --draft=false --prerelease --latest=false --notes "$NOTES"
-if ! gh release view "$FEED_TAG" -R "$REPO" >/dev/null 2>&1; then
-  gh release create "$FEED_TAG" -R "$REPO" --prerelease --latest=false --target main \
-    --title "rust-suzuri update feed" \
-    --notes "latest.json for rust-suzuri's updater. Releases: the rust-v* prereleases."
-fi
-gh release upload "$FEED_TAG" -R "$REPO" --clobber "$DIST/latest.json"
+gh release edit "$TAG" -R "$REPO" --draft=false --latest --notes "$NOTES"
 echo "==> published https://github.com/$REPO/releases/tag/$TAG"
-echo "==> feed https://github.com/$REPO/releases/download/$FEED_TAG/latest.json"
