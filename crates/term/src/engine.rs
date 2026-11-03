@@ -141,6 +141,8 @@ pub struct Alacritty {
     /// A selection was painted in the last frame (its rows need repainting
     /// once it goes, even if the engine dropped it on its own).
     sel_shown: bool,
+    /// The theme colours resolve against, refreshed per feed and snapshot.
+    pal: palette::Active,
 }
 
 impl Alacritty {
@@ -157,10 +159,11 @@ impl Alacritty {
             ..Config::default()
         };
         let term = Term::new(config.clone(), &size, pending.clone());
-        Self { term, parser: Processor::new(), pending, size, full_next: true, row_scratch: Vec::new(), config, sel_shown: false }
+        Self { term, parser: Processor::new(), pending, size, full_next: true, row_scratch: Vec::new(), config, sel_shown: false, pal: palette::active() }
     }
 
     fn drain(&mut self, events: &mut Vec<EngineEvent>) {
+        self.pal = palette::active();
         let mut q = self.pending.0.lock();
         for ev in q.drain(..) {
             match ev {
@@ -192,9 +195,9 @@ impl Alacritty {
             return (c.r, c.g, c.b);
         }
         match i {
-            0..=255 => palette::xterm256(i as u8),
-            _ if i == NamedColor::Background as usize => palette::VOID,
-            _ => palette::TEXT,
+            0..=255 => palette::xterm256(&self.pal.ansi16, i as u8),
+            _ if i == NamedColor::Background as usize => self.pal.theme.chrome.void,
+            _ => self.pal.theme.chrome.text,
         }
     }
 
@@ -234,7 +237,7 @@ impl Alacritty {
                         if idx >= dim_base && idx < dim_base + 8 {
                             pack(self.resolve_index(idx - dim_base))
                         } else {
-                            pack(palette::TEXT)
+                            pack(self.pal.theme.chrome.text)
                         }
                     }
                 }
@@ -260,13 +263,36 @@ impl Alacritty {
             let cell = &self.term.grid()[line][Column(x)];
             let flags = cell.flags;
             let bold = flags.contains(Flags::BOLD);
+            // Go suzuri's paint rules (internal/ui/color.go glyphToCell).
+            let pack = |(r, g, b): palette::Rgb| (r as u32) << 16 | (g as u32) << 8 | b as u32;
+            let unpack = |v: u32| ((v >> 16) as u8, (v >> 8) as u8, v as u8);
+            let c = &self.pal.theme.chrome;
+            let term_bg = pack(palette::term_bg(c));
             let mut fg = self.rgb(cell.fg, bold, false);
             let mut bg = self.rgb(cell.bg, false, true);
+            if bold {
+                fg = pack(palette::brighten_bold(unpack(fg)));
+            }
             if flags.contains(Flags::INVERSE) {
-                let pack = |(r, g, b): palette::Rgb| (r as u32) << 16 | (g as u32) << 8 | b as u32;
-                let nbg = fg;
-                fg = if bg == frame::DEFAULT_BG { pack(palette::VOID) } else { bg };
-                bg = nbg;
+                let default_rev = matches!(cell.fg, Color::Named(NamedColor::Foreground)) && bg == frame::DEFAULT_BG;
+                // Swap, then keep the field visible on a dark host: the
+                // default pair becomes panel + text, a near-black or
+                // low-contrast field becomes the panel.
+                let (mut f, mut b) = (if bg == frame::DEFAULT_BG { term_bg } else { bg }, fg);
+                if default_rev {
+                    (f, b) = (pack(c.text), pack(c.panel));
+                } else if palette::near_black(unpack(b)) {
+                    b = pack(c.panel);
+                    if palette::near_black(unpack(f)) {
+                        f = pack(c.text);
+                    }
+                } else if palette::low_contrast(unpack(f), unpack(b)) {
+                    (f, b) = (pack(c.text), pack(c.panel));
+                }
+                (fg, bg) = (f, b);
+            }
+            if bg != frame::DEFAULT_BG && palette::bg_shows_through(unpack(bg), c) {
+                bg = frame::DEFAULT_BG;
             }
             let mut attrs = 0u16;
             if bold {
@@ -319,6 +345,12 @@ impl Engine for Alacritty {
 
     fn snapshot(&mut self, out: &mut Vec<u8>, seq: u32, force_full: bool) -> bool {
         out.clear();
+        let pal = palette::active();
+        // A theme switch repaints every row in the new colours.
+        if !std::ptr::eq(pal.theme, self.pal.theme) || pal.map != self.pal.map {
+            self.full_next = true;
+        }
+        self.pal = pal;
         // While a selection shows, every frame is full: the engine moves
         // the selection with scrolling output without marking damage.
         let sel = self.term.selection.as_ref().and_then(|s| s.to_range(&self.term));

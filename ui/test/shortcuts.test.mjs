@@ -73,3 +73,15 @@ test("palette filter: every word, any order, case-insensitive", () => {
   assert.deepEqual(filterCommands(items, "panes split").map((i) => i.title), ["Split right"])
   assert.equal(filterCommands(items, "zzz").length, 0)
 })
+
+test("font zoom: Cmd/Ctrl + - 0, as Go suzuri (#284)", () => {
+  for (const [mac, mod] of [[true, { metaKey: true }], [false, { ctrlKey: true }]]) {
+    assert.equal(id(key("=", mod, "Equal"), mac), "zoom_in")
+    assert.equal(id(key("+", { ...mod, shiftKey: true }, "Equal"), mac), "zoom_in")
+    assert.equal(id(key("-", mod, "Minus"), mac), "zoom_out")
+    assert.equal(id(key("0", mod, "Digit0"), mac), "zoom_reset")
+  }
+  // Windows Terminal's split chords stay splits.
+  assert.equal(id(key("+", { altKey: true, shiftKey: true }, "Equal"), false), "split_right")
+  assert.equal(id(key("_", { altKey: true, shiftKey: true }, "Minus"), false), "split_down")
+})

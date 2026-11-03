@@ -37,6 +37,25 @@ pub const THEMES: &[&str] = &[
     "ocean",
     "amber",
 ];
+/// Go's MonoFontFaces: the settings list, bundled face first.
+pub fn mono_font_faces() -> Vec<&'static str> {
+    if cfg!(target_os = "macos") {
+        vec![FONT_FACE_DEFAULT, "Menlo", "SF Mono", "Monaco", "JetBrains Mono", "Fira Code", "Source Code Pro", "Courier New"]
+    } else {
+        vec![
+            FONT_FACE_DEFAULT,
+            "Cascadia Mono",
+            "Cascadia Code",
+            "Consolas",
+            "Lucida Console",
+            "Courier New",
+            "JetBrains Mono",
+            "Fira Code",
+            "Source Code Pro",
+        ]
+    }
+}
+
 pub const CURSORS: &[&str] = &["block", "underline", "bar"];
 pub const ANSI_MAPS: &[&str] = &["none", "soft", "full"];
 

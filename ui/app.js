@@ -13,6 +13,7 @@ import { shortcut, chordLabel } from "./shortcuts.js"
 import { Palette } from "./palette.js"
 import { Settings, announce } from "./settings.js"
 import { installPointer } from "./pointer.js"
+import { loadAppearance, zoom } from "./appearance.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -763,6 +764,9 @@ const ACTIONS = {
   settings: () => openSettings(),
   hud: () => toggleHud(),
   new_window: () => invoke("new_window").catch((err) => log("new window failed", String(err))),
+  zoom_in: () => zoom(1),
+  zoom_out: () => zoom(-1),
+  zoom_reset: () => zoom(0),
 }
 
 function run(id, arg) {
@@ -812,6 +816,7 @@ function commandList() {
     if (t === activeTab) return
     list.push({ id: "merge_tab_into", arg: t.id, category: "Tabs", title: `Merge tab into: ${i + 1} ${tabLabel(t)}` })
   })
+  list.push(c("zoom_in", "Zoom in", "Appearance"), c("zoom_out", "Zoom out", "Appearance"), c("zoom_reset", "Reset zoom", "Appearance"))
   list.push(c("hud", "Stats HUD", "Help"))
   for (const x of extraCommands) list.push({ ...x, extra: true })
   return list
@@ -1107,8 +1112,19 @@ async function bench(boot, target) {
   await invoke("bench_report", { report, exit: true })
 }
 
+// After a font change: every pane refits to the new cell size; a theme
+// change alone needs only a repaint (Rust sends full frames itself).
+function relayout(font = true) {
+  if (!font) return
+  for (const p of everyPane()) {
+    p.screen.setSize(p.screen.cols, p.screen.rows)
+    p.fit()
+    if (p.id) invoke("pane_redraw", { id: p.id })
+  }
+}
+
 async function start() {
-  await document.fonts.load(`14px "Gohu"`).catch(() => {})
+  await loadAppearance(relayout).catch((e) => log("appearance", String(e)))
   const boot = await invoke("boot")
   window.rszTrace = boot.trace
   home = boot.home

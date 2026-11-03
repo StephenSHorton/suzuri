@@ -238,6 +238,7 @@ fn config_set(panes: State<'_, Arc<Panes>>, patch: serde_json::Value) -> Result<
     for p in panes.map.lock().values() {
         p.set_default_cursor(shape);
     }
+    apply_theme(&v, Some(&panes));
     Ok(v)
 }
 
@@ -252,6 +253,7 @@ fn config_meta() -> serde_json::Value {
         "font_min": config::FONT_SIZE_MIN,
         "font_max": config::FONT_SIZE_MAX,
         "font_default": config::FONT_SIZE_DEFAULT,
+        "fonts": config::mono_font_faces(),
     })
 }
 
@@ -511,6 +513,70 @@ fn bench_report(app: tauri::AppHandle, report: serde_json::Value, exit: bool) {
     }
 }
 
+// ---- appearance: Go suzuri's themes, ANSI map and font settings.
+
+/// Set the palette from the settings' theme and ANSI map; with panes, every
+/// pane repaints in the new colours.
+fn apply_theme(cfg: &serde_json::Value, panes: Option<&Panes>) {
+    let s = |k: &str| cfg.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let map = rsz_term::palette::AnsiMap::parse(&s("shell_ansi_map")).unwrap_or(rsz_term::palette::AnsiMap::Soft);
+    let before = rsz_term::palette::active();
+    let now = rsz_term::palette::set_active(&s("theme"), map);
+    if let Some(panes) = panes {
+        if !std::ptr::eq(before.theme, now.theme) || before.map != now.map {
+            for p in panes.map.lock().values() {
+                p.redraw();
+            }
+        }
+    }
+}
+
+fn hex((r, g, b): rsz_term::palette::Rgb) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+#[derive(Serialize)]
+struct ThemeOut {
+    id: &'static str,
+    label: &'static str,
+    /// Chrome roles, as CSS colours.
+    chrome: HashMap<&'static str, String>,
+}
+
+fn theme_out(t: &rsz_term::palette::ThemeSpec) -> ThemeOut {
+    let c = &t.chrome;
+    let chrome = HashMap::from([
+        ("void", hex(c.void)),
+        ("bar", hex(c.bar)),
+        ("panel", hex(c.panel)),
+        ("primary", hex(c.primary)),
+        ("secondary", hex(c.secondary)),
+        ("on-primary", hex(c.on_primary)),
+        ("text", hex(c.text)),
+        ("soft", hex(c.soft)),
+        ("dim", hex(c.dim)),
+        ("mute", hex(c.mute)),
+        ("sel", hex(c.sel)),
+        ("match", hex(c.match_)),
+        ("cyan", hex(c.cyan)),
+        ("border", hex(c.border)),
+        ("dim-matte", hex(c.dim_matte)),
+        ("term-bg", hex(rsz_term::palette::term_bg(c))),
+    ]);
+    ThemeOut { id: t.id, label: t.label, chrome }
+}
+
+/// The theme catalogue (chrome roles as CSS colours) for ui/appearance.js;
+/// the chosen theme and font come from config_get.
+#[tauri::command]
+fn appearance() -> serde_json::Value {
+    serde_json::json!({
+        "themes": rsz_term::palette::THEMES.iter().map(theme_out).collect::<Vec<_>>(),
+        "default_font_face": config::FONT_FACE_DEFAULT,
+        "default_font_size_px": config::FONT_SIZE_DEFAULT,
+    })
+}
+
 /// UI log line (errors, dev traces) to stderr.
 #[tauri::command]
 fn ui_log(line: String) {
@@ -544,6 +610,7 @@ fn main() {
     let bus = (std::env::var("RSZ_TRANSPORT").as_deref() != Ok("channel")).then(|| ws::FrameBus::start(on_ack).expect("frame socket"));
     let panes = Arc::new(Panes { bus, ..Default::default() });
     let _ = PANES.set(Arc::clone(&panes));
+    apply_theme(&config::load(), None);
     // The agent bridge (bridge.json + AI control); the app runs without it.
     let bridge = match bridge::Bridge::start(Arc::clone(&panes)) {
         Ok(b) => Some(b),
@@ -619,7 +686,8 @@ fn main() {
             caffeine::caffeine_on,
             caffeine::caffeine_off,
             caffeine::caffeine_toggle,
-            caffeine::caffeine_status
+            caffeine::caffeine_status,
+            appearance
         ])
         .build(tauri::generate_context!())
         .expect("build rust-suzuri")

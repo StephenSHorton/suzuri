@@ -38,6 +38,13 @@ export function shortcut(e, isMac) {
     if (code === "Minus" || k === "_" || k === "-") return r("split_down")
   }
 
+  // Font zoom (Go: Ctrl/⌘ + - 0); "+" may come shifted.
+  if (mod && !alt) {
+    if (code === "Equal" || k === "=" || k === "+") return r("zoom_in")
+    if (!shift && (code === "Minus" || k === "-")) return r("zoom_out")
+    if (!shift && (code === "Digit0" || k === "0")) return r("zoom_reset")
+  }
+
   const modShift = isMac ? modOrCtrl && shift : ctrl && shift
   if (modShift && !alt) {
     if (k === "t") return r("new_tab")
@@ -94,6 +101,9 @@ export function chordLabel(id, isMac) {
     palette: m + "K · " + m + "P",
     settings: m + ",",
     hud: ms + "H",
+    zoom_in: m + "+",
+    zoom_out: m + "-",
+    zoom_reset: m + "0",
   }
   return L[id] || ""
 }

@@ -1,4 +1,5 @@
-/* suzuri's Inkstone theme (internal/chrome/theme.go): real UI, no ASCII chrome. */
+/* Chrome colours are Go suzuri's theme roles (internal/chrome/theme.go);
+   appearance.js sets them from the active theme. Inkstone until it loads. */
 @font-face {
   font-family: "Gohu";
   src: url("fonts/GohuFontuni14NerdFontMono-Regular.ttf") format("truetype");
@@ -15,6 +16,12 @@
   --mute: #484848;
   --sel: #2a2430;
   --match: #c8b0d8;
+  --on-primary: #0c0c10;
+  --border: #b8a0c8;
+  --cyan: #7a9a9a;
+  --dim-matte: #08080a;
+  --term-bg: #0c0c10;
+  --hair: color-mix(in srgb, var(--text) 9%, var(--void));
   --gap: 6px;
   color-scheme: dark;
 }
@@ -28,43 +35,43 @@ html, body {
 #bar {
   height: 34px; display: flex; align-items: center; gap: 10px;
   padding: 0 10px 0 84px; /* room for macOS traffic lights */
-  background: var(--bar); border-bottom: 1px solid #22222a;
+  background: var(--bar); border-bottom: 1px solid var(--hair);
 }
 body.win #bar { padding-left: 12px; }
-.mark { color: var(--primary); font-weight: 600; letter-spacing: .04em; }
+.mark { color: var(--border); font-weight: 600; letter-spacing: .04em; }
 #title { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .spacer { flex: 1; align-self: stretch; }
 #bar button {
   background: transparent; border: 1px solid transparent; color: var(--secondary);
   border-radius: 6px; height: 24px; min-width: 28px; font-size: 12px; cursor: pointer;
 }
-#bar button:hover { background: var(--panel); border-color: #2c2c34; color: var(--text); }
+#bar button:hover { background: var(--panel); border-color: var(--hair); color: var(--text); }
 #root { position: absolute; inset: 34px 0 0 0; padding: var(--gap); display: flex; }
 .split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; gap: var(--gap); }
 .split.v { flex-direction: column; }
 .pane {
   position: relative; flex: 1 1 0; min-width: 0; min-height: 0;
   display: flex; flex-direction: column;
-  background: var(--void); border: 1px solid #24242c; border-radius: 8px; overflow: hidden;
+  background: var(--term-bg); border: 1px solid var(--hair); border-radius: 8px; overflow: hidden;
 }
-.pane.focused { border-color: var(--primary); box-shadow: 0 0 0 1px rgba(184,160,200,.25); }
+.pane.focused { border-color: var(--border); box-shadow: 0 0 0 1px color-mix(in srgb, var(--border) 25%, transparent); }
 .pane .head {
   height: 22px; flex: none; display: flex; align-items: center; padding: 0 8px; gap: 6px;
   background: var(--panel); color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden;
 }
 .pane.focused .head { color: var(--soft); }
 .pane .head .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--mute); flex: none; }
-.pane.focused .head .dot { background: var(--primary); }
-.pane .head .exited { color: #c07070; }
+.pane.focused .head .dot { background: var(--border); }
+.pane .head .exited { color: var(--secondary); }
 .pane .body { position: relative; flex: 1; min-height: 0; padding: 4px 6px; outline: none; cursor: text; }
 .pane canvas { position: absolute; left: 6px; top: 4px; image-rendering: pixelated; }
 .pane .cursor {
-  position: absolute; pointer-events: none; background: var(--primary); opacity: .85;
+  position: absolute; pointer-events: none; background: var(--border); opacity: .85;
   mix-blend-mode: difference;
 }
 .pane .cursor.underline { height: 2px !important; margin-top: calc(var(--ch) - 2px); }
 .pane .cursor.beam { width: 2px !important; }
-.pane .cursor.hollow { background: transparent; border: 1px solid var(--primary); mix-blend-mode: normal; }
+.pane .cursor.hollow { background: transparent; border: 1px solid var(--border); mix-blend-mode: normal; }
 .pane:not(.focused) .cursor { opacity: .35; }
 .pane .scrolled {
   position: absolute; right: 10px; top: 6px; padding: 1px 6px; border-radius: 4px;
@@ -84,7 +91,7 @@ body.win #bar { padding-left: 12px; }
 .pane .inbar .caret.dim { opacity: .3; }
 #hud {
   position: fixed; right: 10px; bottom: 10px; padding: 6px 10px; border-radius: 6px;
-  background: rgba(20,20,24,.92); border: 1px solid #2c2c34; color: var(--soft);
+  background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--hair); color: var(--soft);
   font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre;
 }
 
@@ -97,7 +104,7 @@ body.win #bar { padding-left: 12px; }
   color: var(--dim); cursor: default; white-space: nowrap; flex: 0 1 auto;
 }
 .tab:hover { background: var(--panel); color: var(--soft); }
-.tab.active { background: var(--panel); border-color: #2c2c34; color: var(--text); box-shadow: inset 0 -2px 0 var(--primary); }
+.tab.active { background: var(--panel); border-color: var(--hair); color: var(--text); box-shadow: inset 0 -2px 0 var(--primary); }
 .tab .num { color: var(--mute); font-size: 10px; }
 .tab.active .num { color: var(--primary); }
 .tab .name { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
@@ -108,7 +115,7 @@ body.win #bar { padding-left: 12px; }
   font-size: 13px; line-height: 1; cursor: pointer; padding: 0; visibility: hidden;
 }
 .tab:hover .x, .tab.active .x { visibility: visible; }
-.tab .x:hover { background: #2c2c34; color: var(--text); }
+.tab .x:hover { background: var(--hair); color: var(--text); }
 #bar .mark { font-size: 15px; }
 #root > .tab-root { flex: 1; display: flex; min-width: 0; min-height: 0; }
 #root > .tab-root[hidden] { display: none; }
@@ -122,11 +129,11 @@ input.rename {
 .overlay[hidden] { display: none; }
 .overlay .card {
   margin-top: 72px; width: min(620px, calc(100vw - 32px)); background: var(--panel);
-  border: 1px solid #2c2c34; border-radius: 10px; box-shadow: 0 16px 48px rgba(0,0,0,.55); overflow: hidden;
+  border: 1px solid var(--hair); border-radius: 10px; box-shadow: 0 16px 48px rgba(0,0,0,.55); overflow: hidden;
 }
 .palette .filter {
   width: 100%; font: 13px/1 inherit; font-family: inherit; color: var(--text); background: var(--bar);
-  border: 0; border-bottom: 1px solid #2c2c34; padding: 12px 14px; outline: none;
+  border: 0; border-bottom: 1px solid var(--hair); padding: 12px 14px; outline: none;
 }
 .palette .filter::placeholder { color: var(--mute); }
 .palette .list { max-height: calc(12 * 30px); overflow-y: auto; padding: 4px; }
@@ -139,14 +146,14 @@ input.rename {
 .palette .empty { color: var(--mute); padding: 10px 14px; }
 
 .settings .card { width: min(640px, calc(100vw - 32px)); }
-.settings .top { display: flex; align-items: center; gap: 16px; padding: 12px 14px; background: var(--bar); border-bottom: 1px solid #2c2c34; }
+.settings .top { display: flex; align-items: center; gap: 16px; padding: 12px 14px; background: var(--bar); border-bottom: 1px solid var(--hair); }
 .settings .top b { color: var(--primary); font-weight: 600; }
 .settings nav { display: flex; gap: 4px; }
 .settings nav button, .settings .foot button, .settings .add, .settings .del {
-  font: inherit; color: var(--secondary); background: transparent; border: 1px solid #2c2c34; border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  font: inherit; color: var(--secondary); background: transparent; border: 1px solid var(--hair); border-radius: 6px; padding: 4px 10px; cursor: pointer;
 }
 .settings nav button.on { color: var(--text); background: var(--sel); border-color: var(--primary); }
-.settings button:hover:not(:disabled) { color: var(--text); background: #26262e; }
+.settings button:hover:not(:disabled) { color: var(--text); background: var(--sel); }
 .settings button:disabled { opacity: .35; cursor: default; }
 .settings .page { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
 .settings label { display: flex; align-items: center; gap: 12px; }
@@ -156,7 +163,7 @@ input.rename {
 .settings .page > label.cur > span:first-child { color: var(--text); }
 .settings .foot .keys { color: var(--mute); font-size: 11px; white-space: nowrap; }
 .settings select, .settings .prow input {
-  font: inherit; color: var(--text); background: var(--void); border: 1px solid #2c2c34; border-radius: 6px; padding: 4px 8px; outline: none;
+  font: inherit; color: var(--text); background: var(--void); border: 1px solid var(--hair); border-radius: 6px; padding: 4px 8px; outline: none;
 }
 .settings select { flex: 1; }
 .settings select:focus, .settings .prow input:focus, .settings input[type=range]:focus { border-color: var(--primary); }
@@ -169,7 +176,7 @@ input.rename {
 .settings .prow { display: grid; grid-template-columns: 1fr 1.6fr 1.2fr auto; gap: 6px; }
 .settings .prow input { min-width: 0; }
 .settings .add { align-self: flex-start; }
-.settings .foot { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid #2c2c34; }
+.settings .foot { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--hair); }
 .settings .foot .status { flex: 1; min-width: 0; text-align: right; color: var(--mute); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .settings .foot .ok { color: var(--text); border-color: var(--primary); }
 /* Links under the pointer (pointer.js): underlined, with a hand. */
