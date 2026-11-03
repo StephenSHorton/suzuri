@@ -13,3 +13,11 @@ export function extraShortcut(e, isMac) {
   if (k === "l") return openWorkspace(), true
   return false
 }
+
+// Palette entries (#283's palette). app.js defines window.rsz after its
+// imports (this file) have run, so register on the next tick.
+setTimeout(() => window.rsz?.addCommands([
+  { id: "transfer_send", title: "Send file (ticket)…", category: "Transfer", hint: "⌘⇧S / Ctrl+Shift+S", run: () => promptSend() },
+  { id: "transfer_receive", title: "Receive ticket…", category: "Transfer", hint: "⌘⇧R / Ctrl+Shift+R", run: () => promptReceive() },
+  { id: "workspace_open", title: "Workspace", category: "Workspace", hint: "⌘⇧L / Ctrl+Shift+L", run: () => openWorkspace() },
+]))
