@@ -24,8 +24,11 @@ use winapi::um::winnt::HANDLE;
 
 pub type HPCON = HANDLE;
 
+#[allow(dead_code)]
 pub const PSUEDOCONSOLE_INHERIT_CURSOR: DWORD = 0x1;
+#[allow(dead_code)]
 pub const PSEUDOCONSOLE_RESIZE_QUIRK: DWORD = 0x2;
+#[allow(dead_code)]
 pub const PSEUDOCONSOLE_WIN32_INPUT_MODE: DWORD = 0x4;
 #[allow(dead_code)]
 pub const PSEUDOCONSOLE_PASSTHROUGH_MODE: DWORD = 0x8;
@@ -53,11 +56,14 @@ fn load_conpty() -> ConPtyFuncs {
     // alongside the application.  We check for this after checking for kernel
     // support so that we don't try to proceed and do something crazy.
     if let Ok(sideloaded) = ConPtyFuncs::open(Path::new("conpty.dll")) {
+        SIDELOADED.store(true, std::sync::atomic::Ordering::Relaxed);
         sideloaded
     } else {
         kernel
     }
 }
+
+static SIDELOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 lazy_static! {
     static ref CONPTY: ConPtyFuncs = load_conpty();
@@ -79,23 +85,40 @@ impl Drop for PsuedoCon {
 impl PsuedoCon {
     pub fn new(size: COORD, input: FileDescriptor, output: FileDescriptor) -> Result<Self, Error> {
         let mut con: HPCON = INVALID_HANDLE_VALUE;
-        let base = PSUEDOCONSOLE_INHERIT_CURSOR | PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE;
-        // rust-suzuri (#288): passthrough mode, so ConPTY forwards the
-        // program's VT as it is (inline images, Kitty graphics, notices)
-        // instead of repainting the screen from its own copy. Off with
-        // RSZ_CONPTY_PASSTHROUGH=0; a Windows that refuses the flag gets the
-        // old mode.
-        let passthrough = std::env::var("RSZ_CONPTY_PASSTHROUGH").map_or(true, |v| v != "0");
+        // rust-suzuri (#288): Go suzuri's flags, 0. portable-pty's
+        // defaults (INHERIT_CURSOR | RESIZE_QUIRK | WIN32_INPUT_MODE) broke
+        // the bundled OpenConsole: with WIN32_INPUT_MODE a raw 0x03 is a
+        // character, not Ctrl+C, and INHERIT_CURSOR's ESC[6n start put
+        // ConPTY's rows one off from ours. RSZ_CONPTY_FLAGS=<n> (0x.. or
+        // decimal) overrides them for A/B runs.
+        let base = std::env::var("RSZ_CONPTY_FLAGS")
+            .ok()
+            .and_then(|v| {
+                let v = v.trim();
+                match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                    Some(hex) => DWORD::from_str_radix(hex, 16).ok(),
+                    None => v.parse::<DWORD>().ok(),
+                }
+            })
+            .unwrap_or(0);
+        // Passthrough mode is opt-in (RSZ_CONPTY_PASSTHROUGH=1): it changed
+        // nothing on the inbox conhost or OpenConsole 1.25, so it stays off
+        // rather than switch on untested under a later Windows. A Windows
+        // that refuses the flag gets the base flags.
+        let passthrough = std::env::var("RSZ_CONPTY_PASSTHROUGH").map_or(false, |v| v == "1");
         let create = |flags: DWORD, con: &mut HPCON| unsafe {
             (CONPTY.CreatePseudoConsole)(size, input.as_raw_handle() as _, output.as_raw_handle() as _, flags, con)
         };
-        let mut result = if passthrough { create(base | PSEUDOCONSOLE_PASSTHROUGH_MODE, &mut con) } else { create(base, &mut con) };
+        let mut flags = if passthrough { base | PSEUDOCONSOLE_PASSTHROUGH_MODE } else { base };
+        let mut result = create(flags, &mut con);
         if passthrough && result != S_OK {
             con = INVALID_HANDLE_VALUE;
-            result = create(base, &mut con);
+            flags = base;
+            result = create(flags, &mut con);
         }
         if std::env::var_os("RSZ_TRACE").is_some() {
-            eprintln!("rsz: conpty passthrough={} hr={result:#x}", passthrough && result == S_OK);
+            let dll = if SIDELOADED.load(std::sync::atomic::Ordering::Relaxed) { "conpty.dll" } else { "kernel32" };
+            eprintln!("rsz: conpty {dll} flags={flags:#x} hr={result:#x}");
         }
         ensure!(
             result == S_OK,
