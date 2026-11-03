@@ -10,7 +10,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Flags, Hyperlink};
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb as ARgb, StdSyncHandler};
 use parking_lot::Mutex;
@@ -88,7 +88,25 @@ pub trait Engine: Send {
     /// The cursor shape used until a program sets one (DECSCUSR): 1 block,
     /// 2 underline, 3 beam (the Settings cursor).
     fn set_default_cursor(&mut self, _shape: u8) {}
+
+    // Image anchors (card #288). An engine without them shows no images.
+    /// The cursor: (column, screen row).
+    fn cursor(&self) -> (u16, u16) {
+        (0, 0)
+    }
+    /// Tag the cell under the cursor with an image mark that moves with the
+    /// text (scrolling, history, clears).
+    fn mark_cursor(&mut self, _tag: u32) {}
+    /// The marks on screen rows, and up to `above` rows above the view:
+    /// (tag, row relative to the view's top, may be negative; column).
+    fn marks(&self, _above: usize) -> Vec<(u32, i32, u16)> {
+        Vec::new()
+    }
 }
+
+/// The hyperlink URI an image mark uses ([`Engine::mark_cursor`]). Link
+/// handling must skip it.
+pub const MARK_URI: &str = "rsz-img:";
 
 fn cursor_shape(shape: u8) -> CursorShape {
     match shape {
@@ -546,7 +564,8 @@ impl Engine for Alacritty {
         let row = p.line.0 + grid.display_offset() as i32;
         let row = row as u16;
         // An OSC 8 hyperlink: the run of cells carrying the same link.
-        if let Some(h) = grid[p].hyperlink() {
+        // (An image mark, #288, is not a link.)
+        if let Some(h) = grid[p].hyperlink().filter(|h| !h.uri().starts_with(MARK_URI)) {
             let same = |x: usize| grid[p.line][Column(x)].hyperlink().as_ref() == Some(&h);
             let mut x0 = p.column.0;
             while x0 > 0 && same(x0 - 1) {
@@ -582,6 +601,33 @@ impl Engine for Alacritty {
 
     fn paste_bytes(&self, text: &str) -> Vec<u8> {
         input::paste_bytes(text, self.term.mode().contains(TermMode::BRACKETED_PASTE))
+    }
+
+    fn cursor(&self) -> (u16, u16) {
+        let p = self.term.grid().cursor.point;
+        (p.column.0 as u16, p.line.0.max(0) as u16)
+    }
+
+    fn mark_cursor(&mut self, tag: u32) {
+        let p = self.term.grid().cursor.point;
+        let link = Hyperlink::new(Some(format!("rsz-img-{tag}")), format!("{MARK_URI}{tag}"));
+        self.term.grid_mut()[p.line][p.column].set_hyperlink(Some(link));
+    }
+
+    fn marks(&self, above: usize) -> Vec<(u32, i32, u16)> {
+        let grid = self.term.grid();
+        let offset = grid.display_offset() as i32;
+        let top = -(above.min(grid.history_size().saturating_sub(offset as usize)) as i32);
+        let mut out = Vec::new();
+        for y in top..self.size.rows as i32 {
+            let row = &grid[Line(y - offset)];
+            for x in 0..self.size.cols {
+                if let Some(tag) = row[Column(x)].hyperlink().and_then(|h| h.uri().strip_prefix(MARK_URI).and_then(|t| t.parse().ok())) {
+                    out.push((tag, y, x as u16));
+                }
+            }
+        }
+        out
     }
 
     fn alt_screen(&self) -> bool {

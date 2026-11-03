@@ -16,6 +16,7 @@ import { Settings, announce } from "./settings.js"
 import { installPointer } from "./pointer.js"
 import { loadAppearance, zoom } from "./appearance.js"
 import { complete, ghostSuffix, DirCache, PENDING } from "./complete.js"
+import { PaneImages, closeLarge } from "./images.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -135,6 +136,7 @@ class PaneView {
     // the moment it is sent, before the shell's start mark arrives.
     this.awaiting = -1
     this.screen = new Screen(this.canvas)
+    this.images = new PaneImages(this.body)
     this.queue = []
     this.modes = 0
     this.title = "shell"
@@ -162,6 +164,7 @@ class PaneView {
     byId.set(this.id, this)
     for (const [buf, off] of early.get(this.id) || []) this.enqueue(buf, off)
     early.delete(this.id)
+    this.sendCell()
     invoke("pane_focus", { id: this.id, focused: focused === this })
   }
 
@@ -184,6 +187,17 @@ class PaneView {
       this.shell = msg
       if (this.awaiting >= 0 && msg.prompts > this.awaiting) this.awaiting = -1
       this.renderBar()
+    } else if (msg.t === "img") {
+      this.images.add(msg)
+    } else if (msg.t === "imgdrop") {
+      this.images.drop(msg.ids)
+    } else if (msg.t === "imgpos") {
+      // With the frame it goes with, if that frame is still queued.
+      if (this.queue.length) this.pendingPlace = msg.list
+      else this.images.place(msg.list)
+    } else if (msg.t === "progress") {
+      this.el.dataset.progress = msg.state ? String(msg.state) : ""
+      this.el.style.setProperty("--progress", `${msg.percent}%`)
     }
   }
 
@@ -312,6 +326,10 @@ class PaneView {
       paint.frames++
     }
     this.queue.length = 0
+    if (this.pendingPlace) {
+      this.images.place(this.pendingPlace)
+      this.pendingPlace = null
+    }
     paint.applyMs += performance.now() - t
     const altFlip = (this.modes ^ h.modes) & M_ALT_SCREEN
     this.modes = h.modes
@@ -333,8 +351,18 @@ class PaneView {
     return true
   }
 
+  // Inline images are sized in cells on the Rust side (card #288).
+  sendCell() {
+    const { cw, ch } = cellMetrics()
+    if (cw === this.cell?.[0] && ch === this.cell?.[1]) return
+    this.cell = [cw, ch]
+    this.images.setCell(cw, ch)
+    if (this.id) invoke("pane_cell_px", { id: this.id, w: Math.round(cw), h: Math.round(ch) })
+  }
+
   fit() {
     if (!this.barEl.hidden) this.renderBar()
+    this.sendCell()
     const { cw, ch } = cellMetrics()
     const w = this.body.clientWidth - 12
     const hgt = this.body.clientHeight - 8
@@ -521,6 +549,7 @@ function closePane(pane) {
   if (!pane.exited && pane.id) invoke("pane_close", { id: pane.id })
   pane.exited = true
   pane.ro.disconnect()
+  pane.images.destroy()
   const tab = pane.tab
   if (!detachPane(pane)) return
   if (!tab.tree) {
@@ -967,6 +996,7 @@ input.addEventListener("keydown", (e) => {
   if (window.rszTrace) log("key", e.key, e.code, e.metaKey, e.ctrlKey, e.altKey, e.isComposing)
   if (e.isComposing) return
   if (clipShortcut(e)) { e.preventDefault(); return }
+  if (e.key === "Escape" && closeLarge()) { e.preventDefault(); return }
   const sc = shortcut(e, isMac)
   if (sc) { e.preventDefault(); run(sc.id, sc.arg); return }
   if (extraShortcut(e, isMac)) { e.preventDefault(); return }
@@ -1180,3 +1210,10 @@ async function start() {
   }
 }
 start()
+
+// A click on a notice card brings the window up on the pane that asked
+// (card #288; the window itself is raised on the Rust side).
+window.__TAURI__.event.listen("notice-focus", (e) => {
+  const p = byId.get(e.payload)
+  if (p) setFocus(p)
+})

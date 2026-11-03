@@ -14,7 +14,7 @@
 
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,8 @@ use crate::engine::{Alacritty, Engine, EngineEvent, Link, SelectKind};
 use crate::fg::Probe;
 use crate::input::MouseEvent;
 use crate::shell::{self, OscFilter, ShellEvent};
+use crate::images::{self, Changes, ImageData, Images, MARK_REACH, Placement};
+use crate::protocols::{Kitty, KittyPlace, Notice, ProtoEvent, ProtoSink, Protocols};
 
 /// What a pane sends to its owner.
 pub enum Out {
@@ -39,6 +41,20 @@ pub enum Out {
     CommandDone { exit: Option<i32>, command: String },
     /// The pane is closed; sent once. The exit code if the shell reported one.
     Exit(Option<u32>),
+    // Card #288: notices and images.
+    Notice(Notice),
+    /// OSC 99 p=close.
+    NoticeClose(String),
+    /// OSC 99 p=alive: answer with Pane::reply(protocols::alive_reply(..)).
+    NoticeAlive(String),
+    /// ConEmu OSC 9;4.
+    Progress { state: u8, percent: u8 },
+    /// An image's bytes, sent once before any placement shows it.
+    ImageData(ImageData),
+    /// Images the UI can forget.
+    ImageDrop(Vec<u32>),
+    /// Every image on screen now (sent when it changes, after the frame).
+    Placements(Vec<Placement>),
 }
 
 /// What the input bar needs to know about the shell.
@@ -164,6 +180,10 @@ struct Shared {
     state: Mutex<State>,
     stats: Stats,
     shell: Mutex<ShellState>,
+    images: Mutex<Images>,
+    /// The UI's cell size in pixels, w << 16 | h (Go's default 9 x 18).
+    cell_px: AtomicU32,
+    cwd: Option<std::path::PathBuf>,
 }
 
 impl Shared {
@@ -265,6 +285,9 @@ impl Pane {
             state: Mutex::new(State::Starting),
             stats: Stats::default(),
             shell: Mutex::new(ShellState::default()),
+            images: Mutex::new(Images::default()),
+            cell_px: AtomicU32::new(9 << 16 | 18),
+            cwd: cfg.cwd.clone().map(Into::into).or_else(|| home_dir().map(Into::into)),
         });
         let (tx, rx) = unbounded::<Cmd>();
         let mut threads = Vec::new();
@@ -332,6 +355,17 @@ impl Pane {
     /// The UI painted frames up to `seq` (flow control).
     pub fn ack(&self, seq: u32) {
         self.shared.kick(|w| w.acked = w.acked.max(seq));
+    }
+
+    /// Bytes for the program that are not typing (answers to its queries):
+    /// the view stays where it is.
+    pub fn reply(&self, bytes: Vec<u8>) {
+        let _ = self.tx.send(Cmd::Write(bytes));
+    }
+
+    /// The UI's cell size in pixels, for sizing inline images.
+    pub fn set_cell_px(&self, w: u16, h: u16) {
+        self.shared.cell_px.store((w.max(1) as u32) << 16 | h.max(1) as u32, Ordering::Relaxed);
     }
 
     pub fn set_focused(&self, focused: bool) {
@@ -462,6 +496,7 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
     let mut osc = OscFilter::default();
     let mut clean = Vec::with_capacity(buf.len());
     let mut marks = Vec::new();
+    let mut protocols = Protocols::new();
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -476,7 +511,17 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
         if !marks.is_empty() {
             shell_marks(&mut marks, &shared, &sink);
         }
-        shared.engine.lock().feed(&clean, &mut events);
+        // Then #288's protocols (notices, images) on what is left, ahead of
+        // the engine.
+        let outs = {
+            let mut eng = shared.engine.lock();
+            let mut f = Feeder { eng: &mut **eng, events: &mut events, shared: &shared, outs: Vec::new() };
+            protocols.feed(&clean, &mut f);
+            f.outs
+        };
+        for o in outs {
+            sink(o);
+        }
         shared.stats.feed_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         shared.stats.bytes_in.fetch_add(n as u64, Ordering::Relaxed);
         dispatch(&mut events, &tx, &sink);
@@ -543,6 +588,148 @@ fn trace() -> bool {
     *T.get_or_init(|| std::env::var_os("RSZ_TRACE").is_some())
 }
 
+/// Takes the protocol filter's output on the reader thread, engine locked:
+/// text goes to the engine, and images are placed against its cursor at
+/// their point in the stream.
+struct Feeder<'a> {
+    eng: &'a mut dyn Engine,
+    events: &'a mut Vec<EngineEvent>,
+    shared: &'a Shared,
+    outs: Vec<Out>,
+}
+
+impl ProtoSink for Feeder<'_> {
+    fn text(&mut self, bytes: &[u8]) {
+        self.eng.feed(bytes, self.events);
+    }
+
+    fn event(&mut self, ev: ProtoEvent) {
+        match ev {
+            ProtoEvent::Notice(n) => self.outs.push(Out::Notice(n)),
+            ProtoEvent::CloseNotice(id) => self.outs.push(Out::NoticeClose(id)),
+            ProtoEvent::AliveQuery(id) => self.outs.push(Out::NoticeAlive(id)),
+            ProtoEvent::Reply(b) => self.events.push(EngineEvent::PtyWrite(b)),
+            ProtoEvent::Progress { state, percent } => self.outs.push(Out::Progress { state, percent }),
+            ProtoEvent::InlineImage { name, data } => self.inline(name, None, data),
+            ProtoEvent::ImagePath(r) => {
+                if self.eng.alt_screen() {
+                    return;
+                }
+                let home = home_dir().map(std::path::PathBuf::from);
+                // The cwd the shell hooks report (#285), else where it started.
+                let hooked = self.shared.shell.lock().cwd.clone();
+                let cwd = if hooked.is_empty() { self.shared.cwd.clone() } else { Some(hooked.into()) };
+                let Some(path) = images::resolve_path(cwd.as_deref(), home.as_deref(), &r) else { return };
+                let Some(data) = images::read_image(&path) else { return };
+                let p = path.to_string_lossy().into_owned();
+                self.inline(p.clone(), Some(p), data);
+            }
+            ProtoEvent::Kitty(k) => self.kitty(k),
+        }
+    }
+}
+
+impl Feeder<'_> {
+    /// Images go where the text has got to: apply a synchronized update
+    /// that is still being held first.
+    fn settle(&mut self) {
+        if self.eng.sync_deadline().is_some() {
+            self.eng.stop_sync(self.events);
+        }
+    }
+
+    fn cell(&self) -> (u32, u32) {
+        let v = self.shared.cell_px.load(Ordering::Relaxed);
+        (v >> 16, v & 0xffff)
+    }
+
+    // Go tab.ingestImages: main screen only, under the output so far, as a
+    // block of rows and a caption row.
+    fn inline(&mut self, name: String, path: Option<String>, data: Vec<u8>) {
+        if self.eng.alt_screen() {
+            return;
+        }
+        let Some(px) = images::pixel_size(&data) else { return };
+        self.settle();
+        if self.eng.cursor().0 > 0 {
+            self.eng.feed(b"\r\n", self.events);
+        }
+        let (cols, rows) = images::inline_cells(px, self.cell(), self.eng.size().0 as u32);
+        let mut ch = Changes::default();
+        let id = {
+            let mut im = self.shared.images.lock();
+            let tag = im.tag();
+            self.eng.mark_cursor(tag);
+            im.add_inline(path.as_deref().unwrap_or(&name), tag, cols, rows, &mut ch)
+        };
+        let mut block = b"\r\n".repeat(rows as usize);
+        let label: String = name.chars().filter(|c| !c.is_control()).take(200).collect();
+        block.extend_from_slice(format!("\x1b[2m{label}\x1b[22m\r\n").as_bytes());
+        self.eng.feed(&block, self.events);
+        self.send(ch);
+        self.outs.push(Out::ImageData(ImageData {
+            id,
+            name,
+            path,
+            format: 100,
+            width: px.0,
+            height: px.1,
+            compressed: false,
+            data,
+        }));
+        self.shared.kick(|w| w.dirty = true);
+    }
+
+    fn kitty(&mut self, k: Kitty) {
+        let mut ch = Changes::default();
+        match k {
+            Kitty::Image { id: kid, format, width, height, compressed, data, place } => {
+                let id = self.shared.images.lock().kitty_image(kid, width, height, &mut ch);
+                self.send(ch);
+                self.outs.push(Out::ImageData(ImageData {
+                    id,
+                    name: format!("kitty {kid}"),
+                    path: None,
+                    format,
+                    width,
+                    height,
+                    compressed,
+                    data,
+                }));
+                if let Some(p) = place {
+                    self.place(kid, p);
+                }
+            }
+            Kitty::Place { id, place } => self.place(id, place),
+            Kitty::Delete { id } => {
+                self.shared.images.lock().kitty_delete(id, &mut ch);
+                self.send(ch);
+            }
+        }
+        self.shared.kick(|w| w.dirty = true);
+    }
+
+    // Go places Kitty images at the cursor and leaves the cursor alone.
+    fn place(&mut self, kid: u32, place: KittyPlace) {
+        self.settle();
+        let alt = self.eng.alt_screen();
+        let cell = self.eng.cursor();
+        let mut im = self.shared.images.lock();
+        let mark = (!alt).then(|| {
+            let tag = im.tag();
+            self.eng.mark_cursor(tag);
+            tag
+        });
+        im.kitty_place(kid, place, mark, cell);
+    }
+
+    fn send(&mut self, ch: Changes) {
+        if !ch.dropped.is_empty() {
+            self.outs.push(Out::ImageDrop(ch.dropped));
+        }
+    }
+}
+
 fn dispatch(events: &mut Vec<EngineEvent>, tx: &Sender<Cmd>, sink: &Sink) {
     for ev in events.drain(..) {
         match ev {
@@ -570,6 +757,7 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
     let mut seq = 0u32;
     let mut events = Vec::new();
     loop {
+        let placements;
         let (force_full, input) = {
             let mut w = shared.wake.lock();
             loop {
@@ -623,7 +811,11 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
                 w.force_full = false;
             }
             seq = seq.wrapping_add(1);
-            eng.snapshot(&mut out, seq, force_full)
+            let sent = eng.snapshot(&mut out, seq, force_full);
+            let mut im = shared.images.lock();
+            let marks = if im.is_empty() { Vec::new() } else { eng.marks(MARK_REACH) };
+            placements = im.placements(&marks, eng.alt_screen());
+            sent
         };
         // Replies produced when a timed-out sync block is applied (DA, CPR)
         // go to the actor like any other.
@@ -638,6 +830,9 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
                 w.sent_at = Instant::now();
             }
             sink(Out::Frame(out));
+        }
+        if let Some(p) = placements {
+            sink(Out::Placements(p));
         }
         last = Instant::now();
     }
@@ -778,6 +973,9 @@ mod tests {
                 Out::Frame(_) => "frame".to_string(),
                 Out::Exit(c) => format!("exit {c:?}"),
                 Out::Title(t) => format!("title {t}"),
+                Out::Notice(n) => format!("notice {}|{}", n.title, n.body),
+                Out::ImageData(d) => format!("image {} {} {}x{}", d.id, d.name, d.width, d.height),
+                Out::Placements(p) => format!("placed {:?}", p.iter().map(|p| (p.image, p.row, p.col, p.cols, p.rows)).collect::<Vec<_>>()),
                 _ => return,
             };
             let _ = tx.lock().send(msg);
@@ -865,6 +1063,36 @@ mod tests {
         pane.close();
         std::thread::sleep(Duration::from_millis(200));
         assert!(rx.try_iter().all(|m| !m.starts_with("exit")));
+    }
+
+    /// A PNG header is enough: the pane only reads the size.
+    fn png_b64(w: u32, h: u32) -> String {
+        use base64::Engine as _;
+        let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        b.extend_from_slice(&w.to_be_bytes());
+        b.extend_from_slice(&h.to_be_bytes());
+        b.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        base64::engine::general_purpose::STANDARD.encode(b)
+    }
+
+    #[test]
+    fn notice_and_inline_image() {
+        // 90 x 36 px at the default 9 x 18 cell: 10 columns, 2 rows, then a
+        // caption row, under "hi".
+        let script = format!(
+            "printf 'hi\\033]777;notify;Done;tests pass\\007\\033]1337;File=name=Y2F0LnBuZw==;inline=1:{}\\007after\\n'; sleep 1",
+            png_b64(90, 36)
+        );
+        let (pane, rx) = run(&["/bin/sh", "-c", &script]);
+        let seen = wait_exit(&rx);
+        assert!(seen.contains(&"notice Done|tests pass".to_string()), "{seen:?}");
+        assert!(seen.iter().any(|m| m.starts_with("image 2 cat.png 90x36")), "{seen:?}");
+        // The mark sits at row 1 (under "hi"), column 0.
+        assert!(seen.iter().any(|m| m == "placed [(2, 1, 0, 10, 2)]"), "{seen:?}");
+        let text = pane.screen_text();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(&lines[..5], &["hi", "", "", "cat.png", "after"], "{text}");
+        pane.join();
     }
 
     #[test]

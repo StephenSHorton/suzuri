@@ -21,6 +21,7 @@ mod transfer;
 mod transfer_engine;
 mod workspace;
 mod window;
+mod notices;
 mod ws;
 use rsz_term::{Link, MouseEvent, MouseKind, Out, Pane, PaneConfig, SelectKind, Sink};
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,16 @@ enum Msg<'a> {
     Shell { integrated: bool, cwd: &'a str, program: bool, prompts: u64 },
     #[serde(rename = "done")]
     CommandDone { exit: Option<i32>, command: &'a str },
+    // Card #288. An image's bytes (base64), once, before it is placed.
+    #[serde(rename = "img")]
+    Image { id: u32, name: &'a str, path: Option<&'a str>, format: u32, w: u32, h: u32, z: bool, data: String },
+    #[serde(rename = "imgdrop")]
+    ImageDrop { ids: &'a [u32] },
+    /// Images on screen: [image, row, col, cols, rows, z, inline, crop x, y, w, h].
+    #[serde(rename = "imgpos")]
+    Placements { list: Vec<[i64; 11]> },
+    #[serde(rename = "progress")]
+    Progress { state: u8, percent: u8 },
 }
 
 fn json(m: &Msg) -> InvokeResponseBody {
@@ -70,6 +81,8 @@ fn json(m: &Msg) -> InvokeResponseBody {
 fn pane_open(
     panes: State<'_, Arc<Panes>>,
     bridge: State<'_, Option<Arc<bridge::Bridge>>>,
+    notes: State<'_, notices::Notices>,
+    app: tauri::AppHandle,
     cols: u16,
     rows: u16,
     command: Option<Vec<String>>,
@@ -86,6 +99,7 @@ fn pane_open(
         .or_else(|| std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s)))
         .or(prof_cmd);
     let panes_ref = Arc::clone(&panes);
+    let notes = notes.inner().clone();
     let sink: Sink = Arc::new(move |o| {
         let _ = match o {
             Out::Frame(b) => match &panes_ref.bus {
@@ -114,6 +128,46 @@ fn pane_open(
                 panes_ref.map.lock().remove(&id);
                 panes_ref.titles.lock().remove(&id);
                 on_frame.send(json(&Msg::Exit { code }))
+            }
+            Out::Notice(n) => {
+                notice_effects(&app, notes.post(Some(id), n));
+                Ok(())
+            }
+            Out::NoticeClose(nid) => {
+                notes.close(id, &nid);
+                Ok(())
+            }
+            Out::NoticeAlive(nid) => {
+                if let Some(p) = panes_ref.get(id) {
+                    p.reply(notes.alive_reply(id, &nid));
+                }
+                Ok(())
+            }
+            Out::Progress { state, percent } => on_frame.send(json(&Msg::Progress { state, percent })),
+            Out::ImageData(d) => {
+                use base64::Engine as _;
+                let data = base64::engine::general_purpose::STANDARD.encode(&d.data);
+                on_frame.send(json(&Msg::Image {
+                    id: d.id,
+                    name: &d.name,
+                    path: d.path.as_deref(),
+                    format: d.format,
+                    w: d.width,
+                    h: d.height,
+                    z: d.compressed,
+                    data,
+                }))
+            }
+            Out::ImageDrop(ids) => on_frame.send(json(&Msg::ImageDrop { ids: &ids })),
+            Out::Placements(list) => {
+                let list = list
+                    .iter()
+                    .map(|p| {
+                        let (cx, cy, cw, ch) = p.crop;
+                        [p.image as i64, p.row as i64, p.col as i64, p.cols as i64, p.rows as i64, p.z as i64, p.inline as i64, cx as i64, cy as i64, cw as i64, ch as i64]
+                    })
+                    .collect();
+                on_frame.send(json(&Msg::Placements { list }))
             }
         };
     });
@@ -214,6 +268,77 @@ fn pane_focus(panes: State<'_, Arc<Panes>>, id: u32, focused: bool) {
 fn pane_redraw(panes: State<'_, Arc<Panes>>, id: u32) {
     if let Some(p) = panes.get(id) {
         p.redraw();
+    }
+}
+
+/// The UI's cell size in pixels (inline images are sized in cells).
+#[tauri::command]
+fn pane_cell_px(panes: State<'_, Arc<Panes>>, id: u32, w: u16, h: u16) {
+    if let Some(p) = panes.get(id) {
+        p.set_cell_px(w, h);
+    }
+}
+
+// Card #288: the notice panel (ui/notice.html) and the history.
+#[tauri::command]
+fn notice_click(app: tauri::AppHandle, notes: State<'_, notices::Notices>, key: u64) {
+    notice_effects(&app, notes.activate(key));
+}
+
+#[tauri::command]
+fn notice_dismiss(app: tauri::AppHandle, notes: State<'_, notices::Notices>, key: u64) {
+    notice_effects(&app, notes.dismiss(key));
+}
+
+#[tauri::command]
+fn notice_hover(notes: State<'_, notices::Notices>, hover: bool) {
+    notes.set_hover(hover);
+}
+
+#[tauri::command]
+fn notice_anchor(notes: State<'_, notices::Notices>, anchor: String) {
+    notes.set_anchor(&anchor);
+}
+
+#[derive(Serialize)]
+struct NoticeHistory {
+    items: Vec<notices::Played>,
+    unread: usize,
+}
+
+#[tauri::command]
+fn notice_history(notes: State<'_, notices::Notices>) -> NoticeHistory {
+    let (items, unread) = notes.history();
+    NoticeHistory { items, unread }
+}
+
+#[tauri::command]
+fn notice_read(notes: State<'_, notices::Notices>) {
+    notes.mark_read();
+}
+
+/// Carry out what a notice click or close asks: write back to the pane, or
+/// bring the window up on the pane.
+pub fn notice_effects(app: &tauri::AppHandle, effects: Vec<notices::Effect>) {
+    use tauri::{Emitter, Manager};
+    for e in effects {
+        match e {
+            notices::Effect::Reply(pane, bytes) => {
+                if let Some(p) = app.try_state::<Arc<Panes>>().and_then(|ps| ps.get(pane)) {
+                    p.reply(bytes);
+                }
+            }
+            notices::Effect::Focus(pane) => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.unminimize();
+                    let _ = w.set_focus();
+                }
+                if let Some(pane) = pane {
+                    let _ = app.emit_to("main", "notice-focus", pane);
+                }
+            }
+        }
     }
 }
 
@@ -631,6 +756,7 @@ fn main() {
     }
     builder
         .setup(move |app| {
+            app.manage(notices::Notices::new(app.handle().clone()));
             caffeine::install(app.handle(), &app.state::<Arc<caffeine::Caffeine>>());
             if let Some(b) = &bridge_setup {
                 b.attach(app.handle().clone());
@@ -668,6 +794,13 @@ fn main() {
             pane_link,
             open_url,
             debug_pane,
+            pane_cell_px,
+            notice_click,
+            notice_dismiss,
+            notice_hover,
+            notice_anchor,
+            notice_history,
+            notice_read,
             stats,
             config_get,
             config_set,

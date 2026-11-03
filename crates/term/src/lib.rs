@@ -6,6 +6,7 @@ pub mod engine;
 pub mod fg;
 pub mod frame;
 pub mod input;
+pub mod images;
 pub mod palette;
 pub mod pane;
 pub mod shell;
