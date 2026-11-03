@@ -96,6 +96,11 @@ pub trait Engine: Send {
     /// The cursor shape used until a program sets one (DECSCUSR): 1 block,
     /// 2 underline, 3 beam (the Settings cursor).
     fn set_default_cursor(&mut self, _shape: u8) {}
+    /// Growing taller adds blank rows under the screen and leaves the
+    /// cursor where it is, instead of bringing history lines back down.
+    /// Windows' ConPTY grows that way and then draws by absolute row, so
+    /// our rows must stay where its rows are (#296).
+    fn set_grow_at_bottom(&mut self, _on: bool) {}
 
     // Image anchors (card #288). An engine without them shows no images.
     /// The cursor: (column, screen row).
@@ -169,6 +174,8 @@ pub struct Alacritty {
     sel_shown: bool,
     /// The theme colours resolve against, refreshed per feed and snapshot.
     pal: palette::Active,
+    /// See Engine::set_grow_at_bottom.
+    grow_at_bottom: bool,
 }
 
 impl Alacritty {
@@ -185,7 +192,7 @@ impl Alacritty {
             ..Config::default()
         };
         let term = Term::new(config.clone(), &size, pending.clone());
-        Self { term, parser: Processor::new(), pending, size, full_next: true, row_scratch: Vec::new(), config, sel_shown: false, pal: palette::active() }
+        Self { term, parser: Processor::new(), pending, size, full_next: true, row_scratch: Vec::new(), config, sel_shown: false, pal: palette::active(), grow_at_bottom: false }
     }
 
     fn drain(&mut self, events: &mut Vec<EngineEvent>) {
@@ -404,9 +411,25 @@ impl Engine for Alacritty {
         if size.cols == self.size.cols && size.rows == self.size.rows {
             return;
         }
+        let grew = size.rows > self.size.rows;
+        let before = self.term.grid().cursor.point.line.0;
         self.size = size;
         self.term.resize(size);
+        // The engine fills new rows from the history and moves the cursor
+        // down with them; give those lines back to the history.
+        if self.grow_at_bottom && grew && !self.term.mode().contains(TermMode::ALT_SCREEN) {
+            let pulled = self.term.grid().cursor.point.line.0 - before;
+            if pulled > 0 {
+                let rows = size.rows as i32;
+                self.term.grid_mut().scroll_up(&(Line(0)..Line(rows)), pulled as usize);
+                self.term.grid_mut().cursor.point.line -= pulled;
+            }
+        }
         self.full_next = true;
+    }
+
+    fn set_grow_at_bottom(&mut self, on: bool) {
+        self.grow_at_bottom = on;
     }
 
     fn snapshot(&mut self, out: &mut Vec<u8>, seq: u32, force_full: bool) -> bool {
@@ -721,6 +744,41 @@ mod tests {
         assert_eq!(e.screen_text(), "hello\nwörld 硯\n");
         e.feed(b"\x1b[6n", &mut ev);
         assert_eq!(ev, vec![EngineEvent::PtyWrite(b"\x1b[2;9R".to_vec())]);
+    }
+
+    #[test]
+    fn grow_at_bottom_keeps_the_cursor_row() {
+        // #296 on Windows: the bar hides while a command runs and the pane
+        // grows 42 -> 45; ConPTY keeps its cursor row, so ours must too.
+        let w = (1u8, 1u8, 1u8);
+        for at_bottom in [false, true] {
+            let mut e = Alacritty::new(20, 4, 100);
+            e.set_grow_at_bottom(at_bottom);
+            let mut ev = Vec::new();
+            e.feed(b"\x1b[H\x1b[2J ", &mut ev);
+            e.insert_block(&[("rule".into(), w)], &("hdr".into(), w), false);
+            e.resize(20, 7);
+            e.feed(b"\x1b[6n", &mut ev);
+            // Without it the engine brings the rule (and the line above)
+            // back down and the cursor with them.
+            let want: &[u8] = if at_bottom { b"\x1b[1;2R" } else { b"\x1b[3;2R" };
+            assert_eq!(ev, vec![EngineEvent::PtyWrite(want.to_vec())], "at_bottom {at_bottom}");
+            if at_bottom {
+                assert_eq!(e.screen_text().lines().next(), Some("hdr"));
+                assert_eq!(e.history_tail(1), vec!["rule".to_string()]);
+            }
+            // Shrinking and growing back from the bottom row: ConPTY scrolls
+            // on the shrink and adds blank rows on the grow.
+            let mut e = Alacritty::new(20, 6, 100);
+            e.set_grow_at_bottom(at_bottom);
+            e.feed(b"a\r\nb\r\nc\r\nd\r\ne\r\nf", &mut ev);
+            e.resize(20, 3);
+            e.resize(20, 6);
+            ev.clear();
+            e.feed(b"\x1b[6n", &mut ev);
+            let want: &[u8] = if at_bottom { b"\x1b[3;2R" } else { b"\x1b[6;2R" };
+            assert_eq!(ev, vec![EngineEvent::PtyWrite(want.to_vec())], "at_bottom {at_bottom}");
+        }
     }
 
     #[test]

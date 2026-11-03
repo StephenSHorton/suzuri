@@ -306,6 +306,7 @@ impl Pane {
                 if cfg.cursor != 1 {
                     e.set_default_cursor(cfg.cursor);
                 }
+                e.set_grow_at_bottom(cfg!(windows));
                 e
             }),
             wake: Mutex::new(Wake { dirty: true, force_full: true, input_at: None, stop: false, sent: 0, sent_at: Instant::now(), acked: 0 }),
