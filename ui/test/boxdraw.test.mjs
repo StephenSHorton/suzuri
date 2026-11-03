@@ -36,3 +36,12 @@ test("shades are Go's checkerboards; other text is left to the font", () => {
   assert.equal(drawCellGlyph(rec(), 0x2571, 0, 0, 8, 16), false) // ╱ not in Go's set
   assert.ok(drawCellGlyph(rec(), 0xe0b0, 0, 0, 8, 16)) // powerline wedge
 })
+
+test("Windows cells come from Go's GDI numbers (#284 probe)", async () => {
+  const { gdiCell } = await import("../frame.js")
+  assert.deepEqual(gdiCell("Cascadia Mono", 14), [8, 19, 15])
+  assert.deepEqual(gdiCell("Courier New", 14), [8, 18, 13])
+  assert.deepEqual(gdiCell("GohuFont uni14 Nerd Font Mono", 22), [13, 25, 19])
+  assert.equal(gdiCell("JetBrains Mono", 14), null) // not on the probe PC: canvas metrics
+  assert.equal(gdiCell("Consolas", 40), null)
+})

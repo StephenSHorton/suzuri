@@ -4,6 +4,7 @@
 // thread when the webview has no OffscreenCanvas, so it touches no DOM.
 
 import { drawCellGlyph } from "./boxdraw.js"
+import { GDI_CELLS, GDI_MIN_PX } from "./gdi_cells.js"
 export const DEFAULT_BG = 0x01000000
 const A_BOLD = 1, A_ITALIC = 2, A_UNDERLINE = 4, A_STRIKE = 8, A_DIM = 16, A_HIDDEN = 32, A_SELECTED = 64
 export const M_APP_CURSOR = 1, M_BRACKETED_PASTE = 2, M_ALT_SCREEN = 4, M_FOCUS = 8,
@@ -76,7 +77,16 @@ export function cellMetrics() {
   if (asc + desc > ch) asc = ch - desc
   const runs = BUNDLED && Math.abs(adv - cw) < 0.01
   metrics = { cw, ch, base: asc, runs }
+  // Windows: Go sizes cells with GDI (cell from "M"'s extent and TEXTMETRIC
+  // height, baseline at its ascent); use those numbers where we have them.
+  const gdi = IS_MAC ? null : gdiCell(FACE, FONT_PX)
+  if (gdi) metrics = { cw: gdi[0], ch: gdi[1], base: gdi[2], runs: BUNDLED && Math.abs(adv - gdi[0]) < 0.01 }
   return metrics
+}
+
+export function gdiCell(face, px) {
+  const t = GDI_CELLS[(face || "").toLowerCase()]
+  return t ? t[px - GDI_MIN_PX] || null : null
 }
 export function resetMetrics() { metrics = null }
 
