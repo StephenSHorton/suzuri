@@ -176,7 +176,13 @@ export class Screen {
           ctx.fillRect(x0, top, n * cw, ch)
         }
         if (!(attrs & A_HIDDEN)) {
-          ctx.font = `${attrs & A_ITALIC ? "italic " : ""}${attrs & A_BOLD && BOLD_FACE ? "bold " : ""}${FONT_PX}px ${FAMILY}`
+          // Bold on Windows: a bold face, as GDI picks; the bundled Gohu has
+          // none, and GDI emboldens it with a crisp 1px double strike, so do
+          // the same instead of the canvas's smeared synthetic bold.
+          const wantBold = attrs & A_BOLD && BOLD_FACE
+          const strike = wantBold && BUNDLED
+          ctx.font = `${attrs & A_ITALIC ? "italic " : ""}${wantBold && !strike ? "bold " : ""}${FONT_PX}px ${FAMILY}`
+          const text = strike ? (t, x, y) => { ctx.fillText(t, x, y); ctx.fillText(t, x + 1, y) } : (t, x, y) => ctx.fillText(t, x, y)
           ctx.fillStyle = hex(fg)
           // ASCII stretches go out as one string; anything else per cell so
           // fallback glyphs can't push the grid out of line.
@@ -188,13 +194,13 @@ export class Screen {
               s += String.fromCharCode(cp)
               continue
             }
-            if (s) { ctx.fillText(s, sx * cw, top + base); s = "" }
+            if (s) { text(s, sx * cw, top + base); s = "" }
             if (cp === 0 || cp === 0x20) continue
             // Box drawing, blocks and wedges: drawn into the cell, as Go does.
             if (cp >= 0x2500 && drawCellGlyph(ctx, cp, (col + i) * cw, top, cw, ch)) continue
-            ctx.fillText(String.fromCodePoint(cp), (col + i) * cw, top + base)
+            text(String.fromCodePoint(cp), (col + i) * cw, top + base)
           }
-          if (s && s.trim()) ctx.fillText(s, sx * cw, top + base)
+          if (s && s.trim()) text(s, sx * cw, top + base)
           if (attrs & (A_UNDERLINE | A_STRIKE)) {
             const ly = attrs & A_UNDERLINE ? top + ch - 2 : top + ch / 2
             ctx.fillRect(rx, ly, n * cw, 1)
