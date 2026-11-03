@@ -32,6 +32,12 @@ bar or interrupts. The bar steps aside for full-screen apps and for any
 running program (Claude Code, ssh, a REPL) and returns at the next prompt.
 `RSZ_NO_BAR=1` keeps the shell's own prompt.
 
+Completion (#295, Go's complete.go): Tab completes the token from the file
+system (in the shell's cwd, ~, absolute and drive paths) or the whole line
+from history, and Tab / Shift+Tab walk the matches. Dim ghost text after the
+caret shows the newest history line you've started, else the first path
+match; → at the end of the line takes it.
+
 Tests: `cargo test` and `node --test 'ui/*.test.mjs'`.
 
 Dev knobs: `RSZ_CMD` (pane command instead of the shell), `RSZ_PANES`,

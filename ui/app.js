@@ -14,6 +14,7 @@ import { Palette } from "./palette.js"
 import { Settings, announce } from "./settings.js"
 import { installPointer } from "./pointer.js"
 import { loadAppearance, zoom } from "./appearance.js"
+import { complete, ghostSuffix, DirCache, PENDING } from "./complete.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -121,6 +122,12 @@ class PaneView {
     this.barEl.innerHTML = `<div class="cwd"></div><div class="lines"></div><div class="caret"></div>`
     this.el.append(this.head, this.body, this.barEl)
     this.bar = new InputBar()
+    // Directory listings for Tab and the ghost text (#295), from the shell's cwd.
+    this.dirs = new DirCache({
+      sep: PATH_SEP,
+      fetch: (dir, cwd) => invoke("complete_list", { cwd, dir }),
+      onLoad: () => this.renderBar(),
+    })
     // The shell as the pane reports it; see ShellStatus in crates/term.
     this.shell = { integrated: false, cwd: "", program: false, prompts: 0 }
     // Set on Enter until the next prompt: the command owns the keys from
@@ -203,6 +210,8 @@ class PaneView {
     cwdEl.textContent = cwd
     cwdEl.hidden = !cwd
     const v = this.bar.visible(this.barCols())
+    // The ghost text (#295): dim, after the caret, in the focused pane only.
+    const ghost = focused === this ? ghostSuffix(this.bar, this.completionFs()) : ""
     const lines = this.barEl.querySelector(".lines")
     lines.style.setProperty("--ch", `${ch}px`)
     lines.replaceChildren(
@@ -213,6 +222,12 @@ class PaneView {
         p.className = "prompt"
         p.textContent = i === 0 ? PROMPT : " ".repeat([...PROMPT].length)
         d.append(p, text)
+        if (ghost && i === v.row) {
+          const g = document.createElement("span")
+          g.className = "ghost"
+          g.textContent = ghost
+          d.append(g)
+        }
         return d
       }),
     )
@@ -227,7 +242,7 @@ class PaneView {
 
   // A key while the bar has the keys. True when it was the bar's.
   barKeydown(e) {
-    const r = barKey(this.bar, e, { isMac, cols: this.barCols() })
+    const r = barKey(this.bar, e, { isMac, cols: this.barCols(), fs: this.completionFs() })
     if (r === null) {
       // Plain typing: the key's character (Option's composed one on macOS).
       const ctl = e.ctrlKey || (isMac && e.metaKey)
@@ -237,11 +252,32 @@ class PaneView {
       this.submit(r.line)
     } else if (r.kind === "pty") {
       this.send(r.data)
+    } else if (r.kind === "complete") {
+      this.tabComplete(r.reverse)
     } else if (r.kind === "scroll") {
       invoke("pane_scroll", { id: this.id, delta: Math.round(r.pages * this.size[1]) })
     }
     this.renderBar()
     return true
+  }
+
+  // The completion file system: listings from the shell's cwd.
+  completionFs() {
+    this.dirs.cwd = this.shell.cwd
+    return this.dirs
+  }
+
+  // Tab / Shift+Tab. A directory not listed yet is fetched first; the Tab
+  // applies once it is, unless the bar changed meanwhile.
+  async tabComplete(reverse) {
+    for (let tries = 0; tries < 3; tries++) {
+      const before = this.bar.text()
+      const r = complete(this.bar, this.completionFs(), reverse)
+      if (r !== PENDING) break
+      await this.dirs.settled()
+      if (this.bar.text() !== before || !this.barActive()) return
+    }
+    this.renderBar()
   }
 
   // Enter in the bar: the line and CR in one write. A non-empty line hands
@@ -332,6 +368,9 @@ class PaneView {
     invoke("pane_scroll", { id: this.id, delta: -lines })
   }
 }
+
+// The separator a completed directory gets when its token has none.
+const PATH_SEP = navigator.platform.startsWith("Win") ? "\\" : "/"
 
 // Horizontal padding inside the input bar (matches .inbar in style.css).
 const BAR_PAD_X = 8

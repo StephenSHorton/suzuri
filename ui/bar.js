@@ -7,6 +7,8 @@
 // (0..length). Explicit "\n" is a line break (Shift+Enter); long lines
 // soft-wrap at the bar's width.
 
+import { acceptGhost } from "./complete.js"
+
 export const PROMPT = "❯ "
 export const MAX_HISTORY = 200
 export const MAX_VISUAL_ROWS = 8
@@ -20,6 +22,7 @@ export class InputBar {
     this.history = []
     this.histIdx = -1 // -1: editing the live line
     this.draft = ""
+    this.comp = null // the Tab cycle (complete.js); any other edit or move ends it
   }
 
   text() {
@@ -27,6 +30,7 @@ export class InputBar {
   }
 
   clear() {
+    this.comp = null
     this.runes = []
     this.cursor = 0
     this.histIdx = -1
@@ -47,6 +51,7 @@ export class InputBar {
   // Typed or pasted text. CR is dropped, tabs become two spaces (Tab is
   // completion, #295), other control characters are dropped, "\n" is kept.
   insert(s) {
+    this.comp = null
     const clean = []
     for (const c of s) {
       if (c === "\r") continue
@@ -66,6 +71,7 @@ export class InputBar {
   }
 
   backspace() {
+    this.comp = null
     this.leaveHistory()
     if (this.cursor <= 0) return
     this.runes.splice(this.cursor - 1, 1)
@@ -73,16 +79,19 @@ export class InputBar {
   }
 
   deleteForward() {
+    this.comp = null
     this.leaveHistory()
     if (this.cursor >= this.runes.length) return
     this.runes.splice(this.cursor, 1)
   }
 
   moveLeft() {
+    this.comp = null
     if (this.cursor > 0) this.cursor--
   }
 
   moveRight() {
+    this.comp = null
     if (this.cursor < this.runes.length) this.cursor++
   }
 
@@ -100,14 +109,17 @@ export class InputBar {
   }
 
   moveWordLeft() {
+    this.comp = null
     this.cursor = this.wordBoundary(this.cursor, -1)
   }
 
   moveWordRight() {
+    this.comp = null
     this.cursor = this.wordBoundary(this.cursor, 1)
   }
 
   deleteWordLeft() {
+    this.comp = null
     this.leaveHistory()
     if (this.cursor <= 0) return
     const start = this.wordBoundary(this.cursor, -1)
@@ -116,6 +128,7 @@ export class InputBar {
   }
 
   deleteWordRight() {
+    this.comp = null
     this.leaveHistory()
     if (this.cursor >= this.runes.length) return
     const end = this.wordBoundary(this.cursor, 1)
@@ -124,26 +137,31 @@ export class InputBar {
 
   // Home/End: the current logical line (between "\n"s), not the buffer.
   moveHome() {
+    this.comp = null
     let i = this.cursor
     while (i > 0 && this.runes[i - 1] !== "\n") i--
     this.cursor = i
   }
 
   moveEnd() {
+    this.comp = null
     let i = this.cursor
     while (i < this.runes.length && this.runes[i] !== "\n") i++
     this.cursor = i
   }
 
   moveDocHome() {
+    this.comp = null
     this.cursor = 0
   }
 
   moveDocEnd() {
+    this.comp = null
     this.cursor = this.runes.length
   }
 
   historyUp() {
+    this.comp = null
     if (!this.history.length) return
     if (this.histIdx < 0) {
       this.draft = this.text()
@@ -155,6 +173,7 @@ export class InputBar {
   }
 
   historyDown() {
+    this.comp = null
     if (this.histIdx < 0) return
     if (this.histIdx + 1 >= this.history.length) {
       this.histIdx = -1
@@ -280,10 +299,12 @@ export class InputBar {
 //   { kind: "submit", line }      Enter: send the line
 //   { kind: "pty", data }         bytes for the PTY (Ctrl+C on an empty bar…)
 //   { kind: "scroll", pages }     PageUp/PageDown: scroll the pane
+//   { kind: "complete", reverse } Tab / Shift+Tab: complete (complete.js)
 //   { kind: "none" }              consumed, nothing to do
 //   null                          not a bar key: the app handles it
 // Text itself arrives through the input event (insert), not here.
-export function barKey(bar, e, { isMac, cols }) {
+export function barKey(bar, e, opts) {
+  const { isMac, cols } = opts
   const meta = isMac && e.metaKey
   const ctrl = e.ctrlKey && !e.metaKey
   const alt = e.altKey
@@ -323,7 +344,8 @@ export function barKey(bar, e, { isMac, cols }) {
     case "ArrowRight":
       if (meta && !alt) bar.moveEnd()
       else if (wordMod) bar.moveWordRight()
-      else bar.moveRight()
+      // At the end of the line → takes the ghost text (#295).
+      else if (!(opts.fs && bar.cursor >= bar.runes.length && !shift && acceptGhost(bar, opts.fs))) bar.moveRight()
       return { kind: "edit" }
     case "Home":
       if (meta || ctrl) bar.moveDocHome()
@@ -341,7 +363,10 @@ export function barKey(bar, e, { isMac, cols }) {
       bar.clear()
       return { kind: "edit" }
     case "Tab":
-      return { kind: "none" } // completion is #295; never move focus
+      // Completion (complete.js), async in the app: a directory may need
+      // fetching. Never moves focus.
+      if (meta || ctrl || alt) return { kind: "none" }
+      return { kind: "complete", reverse: shift }
   }
   if (ctrl && !alt && !shift && e.key.length === 1) {
     const k = e.key.toLowerCase()
@@ -364,6 +389,7 @@ export function barKey(bar, e, { isMac, cols }) {
       bar.moveHome()
       bar.runes.splice(bar.cursor, end - bar.cursor)
       bar.leaveHistory()
+      bar.comp = null
       return { kind: "edit" }
     }
     if (k === "k") {
@@ -372,6 +398,7 @@ export function barKey(bar, e, { isMac, cols }) {
       bar.runes.splice(start, bar.cursor - start)
       bar.cursor = start
       bar.leaveHistory()
+      bar.comp = null
       return { kind: "edit" }
     }
     if (k === "w") return bar.deleteWordLeft(), { kind: "edit" }

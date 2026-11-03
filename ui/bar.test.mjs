@@ -148,7 +148,7 @@ test("Ctrl+U/K/A/E/W edit the line", () => {
 test("keys the bar does not own are left to the app", () => {
   assert.equal(key(bar(""), "d", { metaKey: true }), null)
   assert.equal(key(bar(""), "x"), null)
-  assert.deepEqual(key(bar(""), "Tab"), { kind: "none" })
+  assert.deepEqual(key(bar(""), "Tab"), { kind: "complete", reverse: false })
   assert.deepEqual(key(bar(""), "PageUp"), { kind: "scroll", pages: 0.5 })
 })
 

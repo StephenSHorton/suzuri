@@ -87,6 +87,7 @@ body.win #bar { padding-left: 12px; }
 .pane .inbar .cwd { color: var(--dim); font-size: 12px; line-height: 16px; margin-bottom: 2px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .pane .inbar .lines .row { height: var(--ch); line-height: var(--ch); white-space: pre; }
 .pane .inbar .prompt { color: var(--primary); }
+.pane .inbar .ghost { color: var(--dim); }
 .pane .inbar .caret { position: absolute; background: var(--primary); opacity: .85; mix-blend-mode: difference; pointer-events: none; }
 .pane .inbar .caret.dim { opacity: .3; }
 #hud {

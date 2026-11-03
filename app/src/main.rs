@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 mod bridge;
 mod caffeine;
 mod notes;
+mod complete;
 mod paste;
 mod config;
 mod mcp_client;
@@ -682,6 +683,7 @@ fn main() {
             workspace::workspace_call,
             workspace::workspace_me,
             bridge::aicontrol_reply,
+            complete::complete_list,
             bridge::pane_text,
             window::new_window,
             caffeine::caffeine_on,
