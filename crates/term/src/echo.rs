@@ -85,6 +85,11 @@ impl EchoFilter {
             self.seen += 1;
             if self.seen > GIVE_UP {
                 self.release(out);
+                // An escape half read when we give up goes on too: a long
+                // OSC (an OSC 1337 image, #288) is exactly what crosses
+                // GIVE_UP, and losing its start printed it as text.
+                out.append(&mut self.esc_buf);
+                self.esc = Esc::None;
                 self.disarm();
                 out.extend_from_slice(&input[i..]);
                 return;
@@ -175,7 +180,9 @@ impl EchoFilter {
         if self.to_newline {
             // Colours of the echo go; a mode change (zsh's bracketed-paste
             // off, a cursor show) must still reach the engine.
-            if !seq.ends_with(b"m") && !seq.starts_with(b"\x1b]") {
+            // OSCs other than a title (images and notices, #288) pass.
+            let title = [b"\x1b]0;".as_slice(), b"\x1b]1;", b"\x1b]2;"].iter().any(|p| seq.starts_with(p));
+            if !seq.ends_with(b"m") && !title {
                 out.extend_from_slice(&seq);
             }
             return;
@@ -376,5 +383,58 @@ mod tests {
         let (out, armed) = run("never", &[&noise]);
         assert_eq!(out.len(), noise.len());
         assert!(!armed);
+    }
+}
+
+/// #288: a long OSC (an inline image) reaches the engine whole whether it
+/// comes before, with or after the echo, and with or without a newline.
+#[cfg(test)]
+mod osc288 {
+    use super::*;
+    fn osc(n: usize) -> Vec<u8> {
+        let mut v = b"\x1b]1337;File=inline=1:".to_vec();
+        v.extend(std::iter::repeat(b'A').take(n));
+        v.push(0x07);
+        v
+    }
+    fn run(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let mut f = EchoFilter::default();
+        f.arm("py -3 show.py inline");
+        let mut out = Vec::new();
+        for c in chunks {
+            if f.active() { f.feed(c, &mut out) } else { out.extend_from_slice(c) }
+        }
+        out
+    }
+    fn has(out: &[u8], big: &[u8]) -> bool { out.windows(big.len()).any(|w| w == big) }
+    #[test]
+    fn after_echo() {
+        let big = osc(30000);
+        let out = run(&[b"py -3 show.py inline\r\nlabel:\r\n".to_vec(), big.clone(), b"\r\n".to_vec()]);
+        assert!(has(&out, &big));
+    }
+    #[test]
+    fn same_chunk() {
+        let big = osc(30000);
+        let mut c = b"py -3 show.py inline\r\nlabel:\r\n".to_vec();
+        c.extend(&big);
+        let out = run(&[c]);
+        assert!(has(&out, &big));
+    }
+    #[test]
+    fn before_echo_seen() {
+        let big = osc(30000);
+        let mut c = b"\x1b[?25l".to_vec();
+        c.extend(&big);
+        let out = run(&[c, b"py -3 show.py inline\r\n".to_vec()]);
+        assert!(has(&out, &big));
+    }
+    #[test]
+    fn echo_without_lf() {
+        let big = osc(30000);
+        let mut c = b"py -3 show.py inline\x1b[2;1Hlabel:\x1b[3;1H".to_vec();
+        c.extend(&big);
+        let out = run(&[c]);
+        assert!(has(&out, &big));
     }
 }
