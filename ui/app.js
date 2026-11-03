@@ -6,6 +6,8 @@ import { clipboardImage, saveClipboardImage } from "./paste_image.js"
 import { extraShortcut } from "./extras.js"
 import { isOpen as panelOpen } from "./panel.js"
 import "./aicontrol.js"
+import "./layout_tools.js"
+import { neighbor, swapPanes } from "./layout_ops.js"
 import { InputBar, PROMPT, barKey, displayPath } from "./bar.js"
 import { shortcut, chordLabel } from "./shortcuts.js"
 import { Palette } from "./palette.js"
@@ -394,8 +396,11 @@ function render(tab = activeTab) {
     // repeated splits come out equal instead of halving.
     const span = (n) => (n.pane || n.dir !== node.dir ? 1 : span(n.a) + span(n.b))
     const a = build(node.a), b = build(node.b)
-    a.style.flex = `${span(node.a)} 1 0`
-    b.style.flex = `${span(node.b)} 1 0`
+    // A ratio (set by grow/shrink/equalize, ui/layout_ops.js) wins.
+    const wa = node.ratio != null ? node.ratio : span(node.a)
+    const wb = node.ratio != null ? 1 - node.ratio : span(node.b)
+    a.style.flex = `${wa} 1 0`
+    b.style.flex = `${wb} 1 0`
     d.append(a, b)
     return d
   }
@@ -679,6 +684,24 @@ function setFocus(p, force = false) {
   }
 }
 
+// After a layout op (ui/layout_ops.js): rebuild the DOM, keep focus, refit.
+function relayout() {
+  render()
+  if (focused) setFocus(focused)
+  for (const p of allPanes()) p.fit()
+}
+
+// Trades the focused pane with its neighbour in (dx, dy) (Go's move_pane_*).
+function movePane(dx, dy) {
+  if (!focused || activeTab.zoomed) return
+  const rects = allPanes().map((p) => {
+    const r = p.el.getBoundingClientRect()
+    return { pane: p, x: r.left, y: r.top, w: r.width, h: r.height }
+  })
+  const other = neighbor(rects, focused, dx, dy)
+  if (other && swapPanes(activeTab.tree, focused, other)) relayout()
+}
+
 function moveFocus(dx, dy) {
   if (!focused || activeTab.zoomed) return
   const r = focused.el.getBoundingClientRect()
@@ -726,6 +749,10 @@ const ACTIONS = {
   focus_right: () => moveFocus(1, 0),
   focus_up: () => moveFocus(0, -1),
   focus_down: () => moveFocus(0, 1),
+  move_pane_left: () => movePane(-1, 0),
+  move_pane_right: () => movePane(1, 0),
+  move_pane_up: () => movePane(0, -1),
+  move_pane_down: () => movePane(0, 1),
   move_pane_prev_tab: () => movePaneToTab(focused, tabs.indexOf(activeTab) - 1),
   move_pane_next_tab: () => movePaneToTab(focused, tabs.indexOf(activeTab) + 1),
   move_pane_new_tab: () => movePaneToTab(focused, tabs.length),
@@ -768,6 +795,10 @@ function commandList() {
     c("focus_right", "Focus pane right", "Panes"),
     c("focus_up", "Focus pane up", "Panes"),
     c("focus_down", "Focus pane down", "Panes"),
+    c("move_pane_left", "Move pane left", "Panes"),
+    c("move_pane_right", "Move pane right", "Panes"),
+    c("move_pane_up", "Move pane up", "Panes"),
+    c("move_pane_down", "Move pane down", "Panes"),
     c("zoom_pane", "Maximize pane", "Panes"),
     c("move_pane_prev_tab", "Move pane to previous tab", "Panes"),
     c("move_pane_next_tab", "Move pane to next tab", "Panes"),
@@ -963,7 +994,7 @@ window.rszHost = {
   tree: () => activeTab?.tree,
   focused: () => focused,
   allPanes: () => everyPane(),
-  split, closePane, setFocus,
+  split, closePane, setFocus, relayout,
   tabs: () => tabs, activeTab: () => activeTab, openTab, showTab, movePaneToTab,
 }
 

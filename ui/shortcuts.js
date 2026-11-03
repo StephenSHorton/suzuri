@@ -24,6 +24,10 @@ export function shortcut(e, isMac) {
   // Move the focused pane to the previous/next tab: ⌘⌥⇧←/→, Ctrl+Alt+Shift+←/→.
   if (mod && alt && shift && (arrow === "left" || arrow === "right")) return r(arrow === "left" ? "move_pane_prev_tab" : "move_pane_next_tab")
 
+  // Move the focused pane (swap with its neighbour): ⌘⌃+arrows, Ctrl+Alt+arrows.
+  if (isMac && meta && ctrl && !alt && !shift && arrow) return r("move_pane_" + arrow)
+  if (!isMac && ctrl && alt && !shift && !meta && arrow) return r("move_pane_" + arrow)
+
   // Pane focus: ⌘⌥+arrows on macOS, Alt+arrows on Windows.
   if (isMac && meta && alt && !shift && arrow) return r("focus_" + arrow)
   if (!isMac && alt && !ctrl && !shift && arrow) return r("focus_" + arrow)
@@ -80,6 +84,10 @@ export function chordLabel(id, isMac) {
     focus_right: isMac ? "⌘⌥→" : "Alt+→",
     focus_up: isMac ? "⌘⌥↑" : "Alt+↑",
     focus_down: isMac ? "⌘⌥↓" : "Alt+↓",
+    move_pane_left: isMac ? "⌘⌃←" : "Ctrl+Alt+←",
+    move_pane_right: isMac ? "⌘⌃→" : "Ctrl+Alt+→",
+    move_pane_up: isMac ? "⌘⌃↑" : "Ctrl+Alt+↑",
+    move_pane_down: isMac ? "⌘⌃↓" : "Ctrl+Alt+↓",
     move_pane_prev_tab: mas + "←",
     move_pane_next_tab: mas + "→",
     rename_pane: "F2",

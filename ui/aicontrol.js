@@ -31,7 +31,7 @@ async function treeOf(node) {
 }
 
 // Every tab (#283), with its own tree and focused pane.
-async function layout() {
+export async function layout() {
   const tabs = await Promise.all(host().tabs().map(async (t) => ({
     id: t.id,
     title: t.name || t.focused?.titleOverride || t.focused?.title || "",
