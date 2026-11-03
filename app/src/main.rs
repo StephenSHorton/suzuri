@@ -240,6 +240,7 @@ fn pane_submit(panes: State<'_, Arc<Panes>>, id: u32, line: String) -> serde_jso
         rsz_term::Submit::Sent => serde_json::json!({ "kind": "sent", "n": 0 }),
         rsz_term::Submit::Blank => serde_json::json!({ "kind": "blank", "n": 0 }),
         rsz_term::Submit::Queued(n) => serde_json::json!({ "kind": "queued", "n": n }),
+        rsz_term::Submit::Busy => serde_json::json!({ "kind": "busy", "n": 0 }),
     }
 }
 

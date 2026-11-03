@@ -26,7 +26,7 @@ globalThis.OffscreenCanvas = class {
   constructor(w, h) { this.width = w; this.height = h; this.ctx = recorder() }
   getContext() { return this.ctx }
 }
-const { Screen, DEFAULT_BG } = await import("../frame.js")
+const { Screen, DEFAULT_BG, FORMAT_VERSION } = await import("../frame.js")
 
 const CW = 8, CH = 15, BASE = 11
 const SELECTION = "rgba(184, 160, 200, 0.38)"
@@ -50,8 +50,8 @@ test("a full frame decodes to its header, text, colours and selection", () => {
   const { s, ops } = screen()
   const h = s.apply(load("full.bin"))
   assert.deepEqual(
-    { full: h.full, cols: h.cols, rows: h.rows, cx: h.cx, cy: h.cy, shape: h.shape, seq: h.seq, nrows: h.nrows, history: h.history },
-    { full: true, cols: 10, rows: 3, cx: 2, cy: 1, shape: 3, seq: 7, nrows: 3, history: 4 },
+    { version: h.version, full: h.full, cols: h.cols, rows: h.rows, cx: h.cx, cy: h.cy, shape: h.shape, seq: h.seq, nrows: h.nrows, history: h.history },
+    { version: FORMAT_VERSION, full: true, cols: 10, rows: 3, cx: 2, cy: 1, shape: 3, seq: 7, nrows: 3, history: 4 },
   )
   assert.equal(s.cols, 10)
   assert.equal(s.rows, 3)
@@ -85,4 +85,12 @@ test("a partial frame repaints only its dirty columns", () => {
   assert.deepEqual(cleared.r, [4 * CW, CH, 3 * CW, CH])
   assert.deepEqual(texts(ops), [["xyz", 4 * CW, CH + BASE]])
   assert.match(ops.find((o) => o.op === "text").font, /^italic /)
+})
+
+test("a frame in another format version is refused, not drawn", () => {
+  const { s, ops } = screen()
+  const buf = load("full.bin")
+  new Uint8Array(buf)[11] = FORMAT_VERSION + 1
+  assert.throws(() => s.apply(buf), new RegExp(`terminal format v${FORMAT_VERSION + 1}, this app knows v${FORMAT_VERSION}`))
+  assert.equal(ops.filter((o) => o.op === "text").length, 0)
 })

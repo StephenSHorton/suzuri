@@ -5,7 +5,7 @@
 //! header (32 bytes):
 //!   u8 'F', u8 flags (1 = full), u16 cols, u16 rows, u16 cursor_x,
 //!   u16 cursor_y, u8 cursor_shape (0 hidden, 1 block, 2 underline, 3 beam,
-//!   4 hollow), u8 0, u32 modes, u32 display_offset, u32 history, u32 seq,
+//!   4 hollow), u8 version (FORMAT_VERSION), u32 modes, u32 display_offset, u32 history, u32 seq,
 //!   u16 nrows, u16 0
 //! row: u16 y, u16 nruns, u16 x0, u16 x1, then runs. Columns [x0, x1) are
 //!      the row's dirty range: the UI clears just those and the runs cover
@@ -14,6 +14,10 @@
 //!      codepoints (0 = right half of a wide glyph)
 
 pub const MAGIC: u8 = b'F';
+/// The wire format's version, header byte 11. Bump it on any change to the
+/// layout below, together with FORMAT_VERSION in ui/view: a decoder in
+/// another app refuses a version it doesn't know instead of drawing garbage.
+pub const FORMAT_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 32;
 /// bg value meaning "the theme background": the UI leaves it unpainted.
 pub const DEFAULT_BG: u32 = 0x0100_0000;
@@ -77,7 +81,7 @@ pub fn encode_header(out: &mut Vec<u8>, h: &FrameHeader) {
     out.extend_from_slice(&h.cursor_x.to_le_bytes());
     out.extend_from_slice(&h.cursor_y.to_le_bytes());
     out.push(h.cursor_shape);
-    out.push(0);
+    out.push(FORMAT_VERSION);
     out.extend_from_slice(&h.modes.to_le_bytes());
     out.extend_from_slice(&h.display_offset.to_le_bytes());
     out.extend_from_slice(&h.history.to_le_bytes());
@@ -87,7 +91,7 @@ pub fn encode_header(out: &mut Vec<u8>, h: &FrameHeader) {
 }
 
 pub fn decode_header(b: &[u8]) -> Option<FrameHeader> {
-    if b.len() < HEADER_LEN || b[0] != MAGIC {
+    if b.len() < HEADER_LEN || b[0] != MAGIC || b[11] != FORMAT_VERSION {
         return None;
     }
     let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
@@ -164,7 +168,10 @@ mod tests {
         let mut out = Vec::new();
         encode_header(&mut out, &h);
         assert_eq!(out.len(), HEADER_LEN);
+        assert_eq!(out[11], FORMAT_VERSION);
         assert_eq!(decode_header(&out), Some(h));
+        out[11] = FORMAT_VERSION + 1;
+        assert_eq!(decode_header(&out), None, "another version is refused");
     }
 
     #[test]

@@ -38,7 +38,25 @@ from history, and Tab / Shift+Tab walk the matches. Dim ghost text after the
 caret shows the newest history line you've started, else the first path
 match; → at the end of the line takes it.
 
-Tests: `cargo test` and `node --test 'ui/*.test.mjs'`.
+Tests: `cargo test` and `node --test 'ui/*.test.mjs' 'ui/test/*.test.mjs'`.
+The frame fixtures in `testdata/frames` are written by `rsz-term`'s encoder
+and decoded by `ui/test/frame.test.mjs`; after a wire format change,
+regenerate them with `SUZURI_REGEN_FIXTURES=1 cargo test -p rsz-term --test
+frame_fixtures` and bump `FORMAT_VERSION` on both sides.
+
+Embedding `rsz-term` in another app (Irori's inline terminals): depend on
+the crate by git tag or rev, and add the same ConPTY patch to your own
+workspace, since a `[patch]` only applies to the workspace that declares it:
+
+```toml
+[patch.crates-io]
+portable-pty = { git = "<this repo's URL>", rev = "<the same rev as rsz-term>" }
+```
+
+Cargo finds it in `vendor/portable-pty`. Without it, Windows panes use stock
+portable-pty, whose flags misbehave under the bundled OpenConsole. Set
+`PaneConfig.term_program` to your app's name, and `keep_prompt` when you
+have no input bar.
 
 Releases and auto-update: see [docs/releasing.md](docs/releasing.md).
 
