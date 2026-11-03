@@ -478,8 +478,13 @@ function closePane(pane) {
 }
 
 // ---- tabs
+// A new tab starts in its profile's folder (else home), not the active
+// pane's cwd, and a profile other than Default names the tab: Go suzuri's
+// splitOptsFromProfile.
 async function openTab(profile) {
   const t = newTab(activeTab ? tabs.indexOf(activeTab) + 1 : tabs.length)
+  const pname = profile || settingsCfg?.active_profile || ""
+  if (pname && pname.toLowerCase() !== "default") t.name = pname
   showTab(t)
   return split("h", null, { tab: t, profile })
 }
