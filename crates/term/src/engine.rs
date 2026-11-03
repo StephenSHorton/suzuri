@@ -40,6 +40,9 @@ pub trait Engine: Send {
     fn stop_sync(&mut self, events: &mut Vec<EngineEvent>);
     /// The visible screen as text, trailing blanks trimmed (goldens).
     fn screen_text(&self) -> String;
+    /// The last `lines` scrollback lines above the screen, oldest first,
+    /// trailing blanks trimmed (the AI control plane's `tail`).
+    fn history_tail(&self, lines: usize) -> Vec<String>;
     fn size(&self) -> (u16, u16);
 }
 
@@ -353,6 +356,25 @@ impl Engine for Alacritty {
         s
     }
 
+    fn history_tail(&self, lines: usize) -> Vec<String> {
+        let grid = self.term.grid();
+        let n = lines.min(grid.history_size());
+        let mut out = Vec::with_capacity(n);
+        for i in (1..=n).rev() {
+            let row = &grid[Line(-(i as i32))];
+            let mut line = String::new();
+            for x in 0..self.size.cols {
+                let cell = &row[Column(x)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                line.push(cell.c);
+            }
+            out.push(line.trim_end().to_string());
+        }
+        out
+    }
+
     fn size(&self) -> (u16, u16) {
         (self.size.cols as u16, self.size.rows as u16)
     }
@@ -370,6 +392,17 @@ mod tests {
         assert_eq!(e.screen_text(), "hello\nwörld 硯\n");
         e.feed(b"\x1b[6n", &mut ev);
         assert_eq!(ev, vec![EngineEvent::PtyWrite(b"\x1b[2;9R".to_vec())]);
+    }
+
+    #[test]
+    fn history_tail_is_oldest_first_and_capped() {
+        let mut e = Alacritty::new(10, 2, 100);
+        let mut ev = Vec::new();
+        e.feed(b"one\r\ntwo\r\nthree\r\nfour  \r\nfive", &mut ev);
+        assert_eq!(e.screen_text(), "four\nfive\n");
+        assert_eq!(e.history_tail(2), vec!["two".to_string(), "three".to_string()]);
+        assert_eq!(e.history_tail(50), vec!["one".to_string(), "two".to_string(), "three".to_string()]);
+        assert!(Alacritty::new(10, 2, 100).history_tail(5).is_empty());
     }
 
     fn kitty_flags(e: &mut Alacritty) -> u32 {

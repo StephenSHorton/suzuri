@@ -372,6 +372,11 @@ impl Pane {
         self.shared.engine.lock().screen_text()
     }
 
+    /// The last `lines` scrollback lines above the screen, oldest first.
+    pub fn history_tail(&self, lines: usize) -> Vec<String> {
+        self.shared.engine.lock().history_tail(lines)
+    }
+
     /// Wait for every thread to finish (after Exit was sent).
     pub fn join(&self) {
         for t in self.threads.lock().drain(..) {

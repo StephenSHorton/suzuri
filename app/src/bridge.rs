@@ -232,7 +232,7 @@ impl Bridge {
                     "live_lines": live,
                     "viewport": viewport,
                     "blocks": [],
-                    "history_tail": [],
+                    "history_tail": p.history_tail(12),
                     "pty_tail": "",
                 }))
             })
@@ -305,9 +305,14 @@ pub fn aicontrol_reply(bridge: State<'_, Arc<Bridge>>, id: u64, status: u16, bod
 /// A pane's text for the AI control `pane` tool: the last `lines` lines.
 #[tauri::command]
 pub fn pane_text(panes: State<'_, Arc<Panes>>, id: u32, lines: Option<usize>) -> Option<String> {
-    let text = panes.get(id)?.screen_text();
-    let all: Vec<&str> = text.lines().collect();
-    let n = lines.unwrap_or(all.len()).min(all.len());
+    let p = panes.get(id)?;
+    let text = p.screen_text();
+    let screen: Vec<&str> = text.lines().collect();
+    let n = lines.unwrap_or(screen.len());
+    // Like Go's pane tool: past the screen, the tail reaches into scrollback.
+    let history = p.history_tail(n.saturating_sub(screen.len()));
+    let all: Vec<&str> = history.iter().map(String::as_str).chain(screen.iter().copied()).collect();
+    let n = n.min(all.len());
     Some(all[all.len() - n..].join("\n"))
 }
 
