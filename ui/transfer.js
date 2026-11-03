@@ -24,10 +24,17 @@ function showProgress(mode) {
     const bar = h("progress", { max: "1", value: "0" })
     bar.hidden = true
     const ticketRow = h("div", { class: "rsz-row" })
-    const cancel = h("button", { onclick: () => (view?.finished ? closePanel() : invoke("transfer_cancel").then(closePanel)) }, "Cancel")
+    const cancel = h("button", { onclick: closePanel }, "Cancel")
     body.append(status, bar, ticketRow, h("div", { class: "rsz-row end" }, cancel))
     view = { status, bar, ticketRow, cancel }
-  }, { onClose: () => (view = null) })
+  }, {
+    // Like Go suzuri: closing the transfer panel (Esc, ✕, Cancel) stops a
+    // transfer that is still running.
+    onClose: () => {
+      if (view && !view.finished) invoke("transfer_cancel")
+      view = null
+    },
+  })
 }
 
 async function start(mode, value) {
