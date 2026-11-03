@@ -240,8 +240,9 @@ impl Bridge {
             })
             .collect();
         let first = tabs.first();
-        let cols = first.and_then(|t| t["viewport"].as_array()).and_then(|v| v.iter().filter_map(Value::as_str).map(|l| l.chars().count()).max()).unwrap_or(0);
-        let rows = first.and_then(|t| t["viewport"].as_array()).map(|v| v.len()).unwrap_or(0);
+        // Go reports the active tab's grid size.
+        let (cols, rows) = self.panes.sizes.lock().get(&self.active()).copied().unwrap_or((0, 0));
+        let _ = first;
         json!({
             "pid": std::process::id(),
             "updated_at": rfc3339_now(),

@@ -27,6 +27,8 @@ function showProgress(mode) {
     const cancel = h("button", { onclick: closePanel }, "Cancel")
     body.append(status, bar, ticketRow, h("div", { class: "rsz-row end" }, cancel))
     view = { status, bar, ticketRow, cancel }
+    // Keep focus in the panel so Esc reaches it (and cancels) while sending.
+    setTimeout(() => cancel.focus(), 0)
   }, {
     // Like Go suzuri: closing the transfer panel (Esc, ✕, Cancel) stops a
     // transfer that is still running.
@@ -51,7 +53,10 @@ export async function promptSend(initial = "") {
   openPanel("Send a file or folder", (body) => {
     const field = h("input", { type: "text", placeholder: "Path to a file or folder", value: initial })
     const go = h("button", { class: "primary", onclick: () => field.value.trim() && start("send", field.value.trim()) }, "Send")
-    field.onkeydown = (e) => e.key === "Enter" && go.onclick()
+    field.onkeydown = (e) => {
+      // Block body: returning false from an on* handler cancels the key.
+      if (e.key === "Enter") go.onclick()
+    }
     body.append(field, h("div", { class: "rsz-row end" }, go))
     if (!info.engine) body.append(h("div", { class: "rsz-status err" }, "suzuri-transfer was not found. Install Go suzuri or set SUZURI_TRANSFER_BIN."))
     body.append(h("div", { class: "rsz-hint" }, "Or drop a file on the window."))
@@ -63,7 +68,10 @@ export async function promptReceive() {
   openPanel("Receive", (body) => {
     const field = h("input", { type: "text", placeholder: "Paste a ticket" })
     const go = h("button", { class: "primary", onclick: () => field.value.trim() && start("receive", field.value.trim()) }, "Receive")
-    field.onkeydown = (e) => e.key === "Enter" && go.onclick()
+    field.onkeydown = (e) => {
+      // Block body: returning false from an on* handler cancels the key.
+      if (e.key === "Enter") go.onclick()
+    }
     body.append(field, h("div", { class: "rsz-row end" }, go), h("div", { class: "rsz-hint" }, `Saves to ${info.receive_dir}`))
     if (!info.engine) body.append(h("div", { class: "rsz-status err" }, "suzuri-transfer was not found. Install Go suzuri or set SUZURI_TRANSFER_BIN."))
   })

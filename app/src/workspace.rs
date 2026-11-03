@@ -30,16 +30,42 @@ pub async fn workspace_call(mcp: State<'_, Arc<McpClient>>, tool: String, args: 
 /// session id, so reopening the panel rejoins as the same member.
 #[tauri::command]
 pub fn workspace_me() -> Value {
-    let name = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "you".into());
-    json!({ "name": name, "session_id": format!("rust-suzuri-human-{name}") })
+    let name = human_name(
+        std::env::var("USER").ok(),
+        std::env::var("USERNAME").ok(),
+        std::env::var("USERDOMAIN").ok(),
+        cfg!(windows),
+    );
+    // `short` lets the panel also find a member joined under the bare name.
+    let short = name.rsplit('\\').next().unwrap_or(&name).to_string();
+    json!({ "name": name, "short": short, "session_id": format!("rust-suzuri-human-{name}") })
+}
+
+/// Go suzuri's `localHumanName`: `user.Current().Username`, which on Windows
+/// is `DOMAIN\user` (e.g. `DESKTOP-STEPHEN\4step`) and on Unix the login.
+fn human_name(user: Option<String>, username: Option<String>, domain: Option<String>, windows: bool) -> String {
+    let nonempty = |v: Option<String>| v.filter(|s| !s.is_empty());
+    if windows {
+        if let Some(u) = nonempty(username) {
+            return match nonempty(domain) {
+                Some(d) => format!("{d}\\{u}"),
+                None => u,
+            };
+        }
+    }
+    nonempty(user).unwrap_or_else(|| "you".into())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn human_name_matches_go() {
+        let s = |x: &str| Some(x.to_string());
+        assert_eq!(super::human_name(None, s("4step"), s("DESKTOP-STEPHEN"), true), "DESKTOP-STEPHEN\\4step");
+        assert_eq!(super::human_name(s("stephenhorton"), None, None, false), "stephenhorton");
+        assert_eq!(super::human_name(None, None, None, false), "you");
+    }
+
     #[test]
     fn only_workspace_tools() {
         assert!(super::allowed("workspace_post"));

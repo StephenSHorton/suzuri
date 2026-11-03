@@ -11,6 +11,8 @@
 .rsz-panel button:hover { color: var(--text); border-color: #3a3a44; }
 .rsz-panel button.primary { color: var(--void); background: var(--primary); border-color: var(--primary); }
 .rsz-panel-body { padding: 12px; display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+/* body has user-select:none; WebKit then refuses typing into <input>. */
+.rsz-panel input, .rsz-panel textarea { user-select: text; -webkit-user-select: text; }
 .rsz-panel input[type=text], .rsz-panel textarea {
   width: 100%; box-sizing: border-box; background: var(--void); color: var(--text);
   border: 1px solid #2c2c34; border-radius: 6px; padding: 6px 8px; font: inherit; resize: none;

@@ -35,6 +35,8 @@ pub(crate) struct Panes {
     pub(crate) map: Mutex<HashMap<u32, Arc<Pane>>>,
     /// Last OSC title per pane, and the focused pane (for the agent bridge).
     pub(crate) titles: Mutex<HashMap<u32, String>>,
+    /// Last size per pane (cols, rows), for the bridge snapshot.
+    pub(crate) sizes: Mutex<HashMap<u32, (u16, u16)>>,
     pub(crate) focused: AtomicU32,
     /// Set when RSZ_TRANSPORT=ws: frames go over the socket, not the Channel.
     bus: Option<ws::FrameBus>,
@@ -128,6 +130,7 @@ fn pane_open(
             Out::Exit(code) => {
                 panes_ref.map.lock().remove(&id);
                 panes_ref.titles.lock().remove(&id);
+                panes_ref.sizes.lock().remove(&id);
                 on_frame.send(json(&Msg::Exit { code }))
             }
             Out::Notice(n) => {
@@ -182,6 +185,7 @@ fn pane_open(
     // RSZ_NO_BAR=1: the plain shell with its own prompt, no input bar.
     let plain_shell = std::env::var_os("RSZ_NO_BAR").is_some();
     let cursor = config::cursor_code(&settings);
+    panes.sizes.lock().insert(id, (cols, rows));
     let mut cfg = PaneConfig { cols, rows, command, cwd, plain_shell, cursor, ..Default::default() };
     if let Some(b) = bridge.as_ref() {
         cfg.env.extend(b.pane_env(id));
@@ -261,6 +265,7 @@ fn pane_write(panes: State<'_, Arc<Panes>>, id: u32, data: String) {
 #[tauri::command]
 fn pane_resize(panes: State<'_, Arc<Panes>>, id: u32, cols: u16, rows: u16) {
     if let Some(p) = panes.get(id) {
+        panes.sizes.lock().insert(id, (cols, rows));
         p.resize(cols, rows);
     }
 }
@@ -877,10 +882,13 @@ fn main() {
         ])
         .build(ctx)
         .expect("build rust-suzuri")
-        .run(move |_, ev| {
+        .run(move |app, ev| {
             if let tauri::RunEvent::Exit = ev {
                 if let Some(b) = &bridge_exit {
                     b.stop();
+                }
+                if let Some(tr) = app.try_state::<Arc<transfer::Transfers>>() {
+                    transfer::stop_all(&tr);
                 }
             }
         });

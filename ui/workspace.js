@@ -19,7 +19,8 @@ function fmtTime(ts) {
 async function whoAmI() {
   const me = await invoke("workspace_me")
   const r = await call("workspace_members")
-  const mine = (r.members || []).find((m) => m.kind === "human" && m.name === me.name)
+  const humans = (r.members || []).filter((m) => m.kind === "human")
+  const mine = humans.find((m) => m.name === me.name) || humans.find((m) => m.name === me.short)
   if (mine) return { id: mine.id, name: me.name }
   const j = await call("workspace_join", { name: me.name, kind: "human", session_id: me.session_id })
   return { id: j.member_id || j.member?.id, name: me.name }

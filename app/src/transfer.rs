@@ -116,6 +116,13 @@ pub struct TransferInfo {
     receive_dir: String,
 }
 
+/// Stop any running transfer (app exit): the engine must not outlive us.
+pub fn stop_all(tr: &Transfers) {
+    if let Some((_, job)) = tr.job.lock().take() {
+        job.cancel();
+    }
+}
+
 /// Where the engine is (None: not found) and where receives land.
 #[tauri::command]
 pub fn transfer_info() -> TransferInfo {
