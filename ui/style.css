@@ -198,7 +198,6 @@ input.rename {
   padding: 4px 12px; border-radius: 6px; background: rgba(20,20,24,.92);
   border: 1px solid #2c2c34; color: var(--soft); font-size: 11px;
 }
-<<<<<<< HEAD
 /* Inline images and Kitty graphics over the text (card #288, ui/images.js). */
 .pane .imgs { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .pane .imgs .img { position: absolute; left: 0; top: 0; image-rendering: auto; }
@@ -215,9 +214,9 @@ input.rename {
 .pane[data-progress="2"] .head { background-image: linear-gradient(#c07070, #c07070); }
 .pane[data-progress="3"] .head { background-size: 100% 2px; }
 .pane[data-progress="4"] .head { background-image: linear-gradient(#c8a860, #c8a860); }
-=======
 #update {
-  position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+  /* Under the title bar, clear of the input bar at the bottom. */
+  position: fixed; left: 50%; top: 44px; transform: translateX(-50%);
   display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 12px;
   border-radius: 8px; background: var(--panel); border: 1px solid #2c2c34;
   color: var(--soft); box-shadow: 0 6px 24px rgba(0,0,0,.45); z-index: 10;
@@ -230,4 +229,3 @@ input.rename {
 #update button.go { border-color: var(--primary); color: var(--primary); }
 #update button.later { border-color: transparent; color: var(--dim); padding: 0 6px; }
 #update button:disabled { opacity: .6; cursor: default; }
->>>>>>> 646d77f (Release: Tauri updater, signed macOS app/dmg, Windows NSIS with conpty, local release scripts)
