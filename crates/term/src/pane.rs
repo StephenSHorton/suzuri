@@ -433,17 +433,19 @@ impl Pane {
             let mut eng = self.shared.engine.lock();
             eng.scroll(i32::MIN);
             let (cols, _) = eng.size();
-            let (cx, cy) = eng.cursor();
-            // The screen's row above the cursor; the top of the screen
-            // counts as blank.
+            let (_, cy) = eng.cursor();
             let text = eng.screen_text();
             let row = |y: u16| text.lines().nth(y as usize).unwrap_or("").trim().is_empty();
-            let line_blank = cx == 0 || row(cy);
-            let above_blank = cy == 0 || row(cy - 1);
+            // A line of output the cursor sits after (no newline) stays; a
+            // blank line above is the spacer already.
+            let keep = !row(cy);
+            let spacer = !(cy == 0 || if keep { false } else { row(cy - 1) });
             let home = home_dir().unwrap_or_default();
-            let bytes = block::block_bytes(display, &cwd, &home, cols, line_blank, above_blank, palette::active().theme.chrome.primary);
-            let mut events = Vec::new();
-            eng.feed(&bytes, &mut events);
+            let mut lines = block::block_lines(display, &cwd, &home, cols, spacer, palette::active().theme.chrome.primary);
+            // The command's last line goes on the cursor's row: the shell's
+            // echo would have been there, and its newline still follows.
+            let on_line = lines.pop().unwrap_or_default();
+            eng.insert_block(&lines, &on_line, keep);
         }
         self.shared.echo.lock().arm(payload);
         let mut line = payload.replace("\r\n", "\n").replace('\n', "\r").into_bytes();

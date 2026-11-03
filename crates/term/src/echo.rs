@@ -24,6 +24,8 @@ pub struct EchoFilter {
     /// mismatch.
     held: Vec<u8>,
     esc: Esc,
+    /// The escape sequence being read.
+    esc_buf: Vec<u8>,
     /// An incomplete UTF-8 sequence carried to the next feed.
     utf8: Vec<u8>,
 }
@@ -88,31 +90,42 @@ impl EchoFilter {
                 return;
             }
             let b = input[i];
-            // Escapes: before the match starts they pass (a `clear` wipe
-            // must reach the screen); inside it they are held with it.
+            // Escapes: read whole, then decide. Before the match starts they
+            // pass (a `clear` wipe must reach the screen); inside it they are
+            // held with it, and ConPTY's cursor-forward (CSI n C), which it
+            // sends for runs of blanks, counts as that many spaces.
             if self.esc != Esc::None || b == 0x1b {
                 self.step_esc(b);
-                if self.pos == 0 && !self.to_newline {
-                    out.push(b);
-                } else if !self.to_newline {
-                    self.held.push(b);
+                self.esc_buf.push(b);
+                i += 1;
+                if self.esc == Esc::None {
+                    let seq = std::mem::take(&mut self.esc_buf);
+                    self.escape_done(seq, out);
+                }
+                continue;
+            }
+            if self.to_newline {
+                // The echo's text goes; its line break stays, so the cursor
+                // moves down as the shell (and ConPTY) believe it did.
+                if b == b'\n' {
+                    self.held.clear();
+                    self.armed = false;
+                    out.extend_from_slice(b"\r\n");
                 }
                 i += 1;
                 continue;
             }
-            if self.to_newline {
-                if b == b'\n' {
-                    self.held.clear();
-                    self.armed = false;
-                }
+            // Backspace inside a match takes back a character (zsh echoes
+            // the first one, backs over it, then writes the line).
+            if b == 0x08 && self.pos > 0 {
+                self.pos -= 1;
+                self.held.push(b);
                 i += 1;
                 continue;
             }
             // CR, LF and other controls end a partial match.
             if b < 0x20 {
-                if self.pos > 0 {
-                    self.release(out);
-                }
+                self.release(out);
                 out.push(b);
                 i += 1;
                 continue;
@@ -146,7 +159,7 @@ impl EchoFilter {
             }
             return;
         }
-        if self.pos > 0 {
+        if self.pos > 0 || !self.held.is_empty() {
             self.release(out);
             // The mismatching character may start the echo itself.
             if c.is_some() && c == self.want.first().copied() {
@@ -156,6 +169,43 @@ impl EchoFilter {
             }
         }
         out.extend_from_slice(bytes);
+    }
+
+    fn escape_done(&mut self, seq: Vec<u8>, out: &mut Vec<u8>) {
+        if self.to_newline {
+            // Colours of the echo go; a mode change (zsh's bracketed-paste
+            // off, a cursor show) must still reach the engine.
+            if !seq.ends_with(b"m") && !seq.starts_with(b"\x1b]") {
+                out.extend_from_slice(&seq);
+            }
+            return;
+        }
+        if let Some(n) = cursor_forward(&seq) {
+            let end = self.pos + n;
+            if end <= self.want.len() && self.want[self.pos..end].iter().all(|&c| c == ' ') && (self.pos > 0 || n < self.want.len()) {
+                if self.pos == 0 && self.want[0] != ' ' {
+                    out.append(&mut self.held);
+                    out.extend_from_slice(&seq);
+                    return;
+                }
+                self.pos = end;
+                self.held.extend_from_slice(&seq);
+                if self.pos == self.want.len() {
+                    self.to_newline = true;
+                    self.pos = 0;
+                }
+                return;
+            }
+        }
+        if self.pos == 0 && !seq.ends_with(b"m") {
+            // Not ours: anything held before it goes first, in order.
+            out.append(&mut self.held);
+            out.extend_from_slice(&seq);
+        } else {
+            // Inside a match, or a colour that may open the echo (its reset
+            // would go with the echo's tail): held.
+            self.held.extend_from_slice(&seq);
+        }
     }
 
     /// A partial match wasn't the echo: give its bytes back.
@@ -179,6 +229,15 @@ impl EchoFilter {
             (Esc::None, _) => Esc::None,
         };
     }
+}
+
+/// `ESC [ n C`: how many columns it moves right.
+fn cursor_forward(seq: &[u8]) -> Option<usize> {
+    let body = seq.strip_prefix(b"\x1b[")?.strip_suffix(b"C")?;
+    if body.is_empty() {
+        return Some(1);
+    }
+    std::str::from_utf8(body).ok()?.parse().ok()
 }
 
 fn utf8_len(b: u8) -> usize {
@@ -218,9 +277,27 @@ mod tests {
     }
 
     #[test]
+    fn conpty_cursor_forward_counts_as_spaces() {
+        // ConPTY sends the blank in "echo hi" as CSI C between colour runs.
+        let (out, armed) = run("echo hi", &[b"\x1b[93mecho\x1b[C\x1b[37mhi\x1b[m\r\nhi\r\n"]);
+        assert_eq!(out, b"\r\nhi\r\n", "{:?}", String::from_utf8_lossy(&out));
+        assert!(!armed);
+        let (out, _) = run("a   b", &[b"a\x1b[3Cb\r\nout\r\n"]);
+        assert_eq!(out, b"\r\nout\r\n");
+        // Before a match, a cursor move is just passed on.
+        let (out, _) = run("x", &[b"\x1b[5Cy\r\n"]);
+        assert_eq!(out, b"\x1b[5Cy\r\n");
+    }
+
+    #[test]
     fn zsh_echo_then_output() {
         let (out, _) = run("echo hi", &[b"echo hi\r\n", b"hi\r\n"]);
-        assert_eq!(out, b"hi\r\n");
+        assert_eq!(out, b"\r\nhi\r\n");
+        // zle: the first character, a backspace over it, the line, then
+        // bracketed paste off, which must still reach the engine.
+        let (out, armed) = run("echo one", &[b"e\x08ec", b"ho one\x1b[?2004l\r\r\n", b"one\r\n"]);
+        assert_eq!(out, b"\x1b[?2004l\r\none\r\n", "{:?}", String::from_utf8_lossy(&out));
+        assert!(!armed);
     }
 
     #[test]
@@ -272,7 +349,7 @@ mod tests {
         whole.extend_from_slice(b"\r\n\xe7\xa1\xaf\r\n");
         for cut in 0..whole.len() {
             let (out, _) = run("echo 硯", &[&whole[..cut], &whole[cut..]]);
-            assert_eq!(out, "硯\r\n".as_bytes(), "cut {cut}");
+            assert_eq!(out, "\r\n硯\r\n".as_bytes(), "cut {cut}");
         }
     }
 

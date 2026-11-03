@@ -10,7 +10,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
-use alacritty_terminal::term::cell::{Flags, Hyperlink};
+use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb as ARgb, StdSyncHandler};
 use parking_lot::Mutex;
@@ -67,6 +67,14 @@ pub trait Engine: Send {
     /// trailing blanks trimmed (the AI control plane's `tail`).
     fn history_tail(&self, lines: usize) -> Vec<String>;
     fn size(&self) -> (u16, u16);
+
+    /// Draw #296's command block: `above` goes just above the cursor's
+    /// line (what is on screen scrolls up into the history to make room) and
+    /// `on_line` replaces the cursor's line, so the cursor stays on the row
+    /// the shell, and ConPTY, which repaints by absolute row, expect. With
+    /// `keep_cursor_line`, the cursor's line moves up with the rest instead
+    /// of being replaced.
+    fn insert_block(&mut self, _above: &[(String, palette::Rgb)], _on_line: &(String, palette::Rgb), _keep_cursor_line: bool) {}
 
     /// Start a selection at a cell of the visible screen; `right` is true
     /// when the pointer is in the cell's right half. The anchor stays on its
@@ -270,6 +278,38 @@ impl Alacritty {
         let col = (col as usize).min(self.size.cols - 1);
         let row = (row as usize).min(self.size.rows - 1) as i32;
         Point::new(Line(row - offset), Column(col))
+    }
+
+    /// Replace a grid line (negative: history) with coloured text.
+    fn write_line(&mut self, line: Line, (text, rgb): &(String, palette::Rgb)) {
+        use unicode_width::UnicodeWidthChar;
+        let cols = self.size.cols;
+        let grid = self.term.grid_mut();
+        if line.0 < -(grid.history_size() as i32) {
+            return;
+        }
+        for x in 0..cols {
+            grid[line][Column(x)] = Cell::default();
+        }
+        let fg = Color::Spec(ARgb { r: rgb.0, g: rgb.1, b: rgb.2 });
+        let mut x = 0;
+        for ch in text.chars() {
+            let w = ch.width().unwrap_or(0);
+            if w == 0 {
+                continue;
+            }
+            if x + w > cols {
+                break;
+            }
+            let cell = &mut grid[line][Column(x)];
+            cell.c = ch;
+            cell.fg = fg;
+            if w == 2 {
+                cell.flags.insert(Flags::WIDE_CHAR);
+                grid[line][Column(x + 1)].flags.insert(Flags::WIDE_CHAR_SPACER);
+            }
+            x += w;
+        }
     }
 
     fn encode_row(&mut self, y: usize, out: &mut Vec<u8>, sel: Option<&SelectionRange>) {
@@ -514,6 +554,23 @@ impl Engine for Alacritty {
     fn set_default_cursor(&mut self, shape: u8) {
         self.config.default_cursor_style = CursorStyle { shape: cursor_shape(shape), blinking: false };
         self.term.set_options(self.config.clone());
+        self.full_next = true;
+    }
+
+    fn insert_block(&mut self, above: &[(String, palette::Rgb)], on_line: &(String, palette::Rgb), keep_cursor_line: bool) {
+        self.term.scroll_display(Scroll::Bottom);
+        self.term.selection = None;
+        let rows = self.size.rows as i32;
+        let k = above.len() as i32;
+        let shift = k + keep_cursor_line as i32;
+        let cy = self.term.grid().cursor.point.line.0;
+        if shift > 0 {
+            self.term.grid_mut().scroll_up(&(Line(0)..Line(rows)), shift as usize);
+        }
+        for (i, l) in above.iter().enumerate() {
+            self.write_line(Line(cy - k + i as i32), l);
+        }
+        self.write_line(Line(cy), on_line);
         self.full_next = true;
     }
 

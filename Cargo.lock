@@ -3160,6 +3160,7 @@ dependencies = [
  "portable-pty",
  "regex",
  "serde_json",
+ "unicode-width",
  "windows-sys 0.59.0",
 ]
 

@@ -2,10 +2,12 @@
 //! the scrollback (internal/ui/scrollback.go pushBlock) and the bare-cd
 //! alias (cwd.go expandBarSubmit).
 //!
-//! The block is written into the grid like any output, so it scrolls,
-//! selects and copies with the rest: a blank line, a rule across the pane in
-//! a soft primary, then `<cwd> ❯ <command>` in the primary (continuation
-//! lines indented under the command).
+//! The block goes into the grid just above the cursor's line (the engine
+//! scrolls what is there up into the history), so it scrolls, selects and
+//! copies with the rest while the cursor stays on the row the shell (and
+//! ConPTY, which repaints by absolute row) expects: a blank line, a rule
+//! across the pane in a soft primary, then `<cwd> ❯ <command>` in the
+//! primary (continuation lines indented under the command).
 
 use crate::palette::Rgb;
 
@@ -60,30 +62,16 @@ fn truncate(s: &str, n: usize) -> String {
     out
 }
 
-fn sgr(c: Rgb) -> String {
-    format!("\x1b[0;38;2;{};{};{}m", c.0, c.1, c.2)
-}
-
-/// The bytes that draw a block for `display`, given the pane's width,
-/// whether the cursor's line is blank and whether a blank line already sits
-/// above it (then no spacer is added).
-pub fn block_bytes(display: &str, cwd: &str, home: &str, cols: u16, at_line_start: bool, blank_above: bool, primary: Rgb) -> Vec<u8> {
+/// The block's lines with their colours: an optional spacer, the rule, then
+/// the command (continuation lines indented under it).
+pub fn block_lines(display: &str, cwd: &str, home: &str, cols: u16, spacer: bool, primary: Rgb) -> Vec<(String, Rgb)> {
     let cols = cols.max(12) as usize;
     let rule = (primary.0 / 2 + 40, primary.1 / 2 + 40, primary.2 / 2 + 40);
-    let mut s = String::new();
-    if at_line_start {
-        // On a blank line (zsh's prompt leaves one space): it is the spacer,
-        // or the rule's line when a blank one is already above.
-        s.push('\r');
-        if !blank_above {
-            s.push_str("\r\n");
-        }
-    } else {
-        s.push_str("\r\n\r\n");
+    let mut out = Vec::new();
+    if spacer {
+        out.push((String::new(), primary));
     }
-    s.push_str(&sgr(rule));
-    s.push_str(&"─".repeat(cols));
-    s.push_str("\x1b[0m\r\n");
+    out.push(("─".repeat(cols), rule));
     let path = display_path(cwd, home);
     let indent = " ".repeat(PROMPT.chars().count());
     for (i, part) in display.replace("\r\n", "\n").split('\n').enumerate() {
@@ -96,11 +84,9 @@ pub fn block_bytes(display: &str, cwd: &str, home: &str, cols: u16, at_line_star
             let budget = (cols.saturating_sub(used + 1)).clamp(6, cols / 2);
             format!("{} {PROMPT}{part}", truncate(&path, budget))
         };
-        s.push_str(&sgr(primary));
-        s.push_str(&truncate_end(&line, cols));
-        s.push_str("\x1b[0m\r\n");
+        out.push((truncate_end(&line, cols), primary));
     }
-    s.into_bytes()
+    out
 }
 
 fn truncate_end(s: &str, n: usize) -> String {
@@ -130,42 +116,21 @@ mod tests {
 
     #[test]
     fn block_draws_rule_and_command() {
-        let b = String::from_utf8(block_bytes("echo hi", "/h/u/src", "/h/u", 20, true, false, (200, 100, 50))).unwrap();
-        let plain: String = strip_sgr(&b);
-        assert_eq!(plain, format!("\r\r\n{}\r\n~/src ❯ echo hi\r\n", "─".repeat(20)));
-        assert!(b.contains("38;2;200;100;50m~/src"));
-        assert!(b.contains("38;2;140;90;65m─"));
-        // Not at a line start: a newline first.
-        let b = block_bytes("x", "", "", 20, false, false, (0, 0, 0));
-        assert!(strip_sgr(std::str::from_utf8(&b).unwrap()).starts_with("\r\n\r\n─"));
-        // A blank line already above the cursor is the spacer.
-        let b = block_bytes("x", "", "", 20, true, true, (0, 0, 0));
-        assert!(strip_sgr(std::str::from_utf8(&b).unwrap()).starts_with("\r─"));
+        let l = block_lines("echo hi", "/h/u/src", "/h/u", 20, true, (200, 100, 50));
+        assert_eq!(l, vec![
+            (String::new(), (200, 100, 50)),
+            ("─".repeat(20), (140, 90, 65)),
+            ("~/src ❯ echo hi".to_string(), (200, 100, 50)),
+        ]);
+        // A blank line already above: no spacer.
+        assert_eq!(block_lines("x", "", "", 20, false, (0, 0, 0)).len(), 2);
     }
 
     #[test]
     fn multi_line_and_long_path() {
-        let b = String::from_utf8(block_bytes("a\nb", "/very/long/path/to/somewhere/deep", "", 24, true, false, (1, 2, 3))).unwrap();
-        let lines: Vec<String> = strip_sgr(&b).split("\r\n").map(String::from).collect();
+        let l = block_lines("a\nb", "/very/long/path/to/somewhere/deep", "", 24, false, (1, 2, 3));
         // Path budget is at most half the width; the end of the path stays.
-        assert_eq!(lines[2], "…ewhere/deep ❯ a");
-        assert_eq!(lines[3], "  b");
-    }
-
-    fn strip_sgr(s: &str) -> String {
-        let mut out = String::new();
-        let mut it = s.chars().peekable();
-        while let Some(c) = it.next() {
-            if c == '\x1b' {
-                for d in it.by_ref() {
-                    if d == 'm' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            out.push(c);
-        }
-        out
+        assert_eq!(l[1].0, "…ewhere/deep ❯ a");
+        assert_eq!(l[2].0, "  b");
     }
 }
