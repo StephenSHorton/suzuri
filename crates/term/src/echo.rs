@@ -32,6 +32,16 @@ pub struct EchoFilter {
     /// redrawing the line (PSReadLine under OpenConsole paints the command
     /// frame by frame, `CSI 1;2H` + a growing prefix each time).
     rewound: bool,
+    /// The last absolute cursor move (row, column), and whether no text
+    /// came after it yet.
+    last_cup: Option<(u32, u32)>,
+    cup_fresh: bool,
+    /// Where the echo starts on screen, when a cursor move put it there:
+    /// a later move into the echo's cells says which character the shell
+    /// redraws from (PSReadLine repaints a token, or the whole line).
+    origin: Option<(u32, u32)>,
+    /// The shell moved back into the echo: what is held is its own redraw.
+    redraw: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq)]
@@ -160,6 +170,10 @@ impl EchoFilter {
     fn char_bytes(&mut self, bytes: &[u8], out: &mut Vec<u8>) {
         let c = std::str::from_utf8(bytes).ok().and_then(|s| s.chars().next());
         let rewound = std::mem::take(&mut self.rewound);
+        let fresh = std::mem::take(&mut self.cup_fresh);
+        if self.pos == 0 && c.is_some() && c == self.want.first().copied() && fresh {
+            self.origin = self.last_cup;
+        }
         if c.is_some() && c == self.want.get(self.pos).copied() {
             self.pos += 1;
             self.held.extend_from_slice(bytes);
@@ -178,6 +192,20 @@ impl EchoFilter {
             self.held.extend_from_slice(bytes);
             return;
         }
+        // Inside a redraw a stray character drops the frame rather than
+        // printing a half-painted echo.
+        if self.redraw && self.pos > 0 {
+            self.held.clear();
+            self.pos = 0;
+            self.redraw = false;
+            if c.is_some() && c == self.want.first().copied() {
+                self.pos = 1;
+                self.held.extend_from_slice(bytes);
+                return;
+            }
+            out.extend_from_slice(bytes);
+            return;
+        }
         if self.pos > 0 || !self.held.is_empty() {
             self.release(out);
             // The mismatching character may start the echo itself.
@@ -191,6 +219,29 @@ impl EchoFilter {
     }
 
     fn escape_done(&mut self, seq: Vec<u8>, out: &mut Vec<u8>) {
+        if let Some((r, c)) = cup(&seq) {
+            // A move back into the echo's cells: the shell redraws from
+            // there. Held (or dropped after the match), never shown.
+            if let Some((or, oc)) = self.origin {
+                if r == or && c >= oc && ((c - oc) as usize) <= self.want.len() && (self.pos > 0 || self.to_newline) {
+                    let at = (c - oc) as usize;
+                    self.redraw = true;
+                    self.cup_fresh = false;
+                    if self.to_newline && at == self.want.len() {
+                        return;
+                    }
+                    if self.to_newline {
+                        self.to_newline = false;
+                        self.held.clear();
+                    }
+                    self.pos = at;
+                    self.held.extend_from_slice(&seq);
+                    return;
+                }
+            }
+            self.last_cup = Some((r, c));
+            self.cup_fresh = true;
+        }
         if self.to_newline {
             // ConPTY may end the echo's line with a cursor move instead of a
             // newline: the move ends it, and goes on, so nothing after it is
@@ -262,6 +313,23 @@ impl EchoFilter {
             (Esc::None, _) => Esc::None,
         };
     }
+}
+
+/// `CSI row;col H` / `f`: (row, column), 1-based.
+fn cup(seq: &[u8]) -> Option<(u32, u32)> {
+    let body = seq.strip_prefix(b"\x1b[")?;
+    let body = body.strip_suffix(b"H").or_else(|| body.strip_suffix(b"f"))?;
+    let body = std::str::from_utf8(body).ok()?;
+    let mut it = body.split(';');
+    let n = |s: Option<&str>| -> Option<u32> {
+        match s {
+            None | Some("") => Some(1),
+            Some(v) => v.parse().ok(),
+        }
+    };
+    let r = n(it.next())?;
+    let c = n(it.next())?;
+    Some((r.max(1), c.max(1)))
 }
 
 /// `CSI row;col H` / `f`, or `CSI col G`: an absolute cursor move.
@@ -367,6 +435,38 @@ mod tests {
         // Text that only starts like the command, after a move, still shows.
         let (out, _) = run("echo hi", &[b"ec\x1b[1;1Hzz\r\n"]);
         assert!(has(&out, b"ec") && has(&out, b"zz"));
+    }
+
+    #[test]
+    fn psreadline_redraws_a_token() {
+        // kestrel's run after a resize (#296): PSReadLine repaints from the
+        // argument's column, not from the line's start. A frame held when
+        // that happens must not be printed (it left "echo aft" on the header).
+        let f = |col: u32, text: &str, end: u32| {
+            format!("\x1b[?25l\x1b[9;{col}H\x1b[93m{text}\x1b[39;49m\x1b[0m\x1b[9;{end}H\x1b[?25h").into_bytes()
+        };
+        let mut t = Vec::new();
+        t.extend(f(2, "e", 3));
+        t.extend(f(2, "echo af", 9));
+        t.extend(f(7, "aft", 10));
+        t.extend(f(7, "after-small", 18));
+        t.extend(f(2, "echo after-small", 18));
+        t.extend_from_slice(b"\x1b[9;18H\r\nafter-small\r\n");
+        for cut in 0..t.len() {
+            let (out, armed) = run("echo after-small", &[&t[..cut], &t[cut..]]);
+            let s = String::from_utf8_lossy(&out);
+            assert!(!has(&out, b"echo") && !has(&out, b"aft\x1b"), "cut {cut}: {s:?}");
+            assert!(has(&out, b"\r\nafter-small\r\n"), "cut {cut}: {s:?}");
+            assert!(!armed, "cut {cut}");
+        }
+        // One character at a time from the token's column.
+        let mut t = f(2, "echo a", 8);
+        t.extend(f(8, "f", 9));
+        t.extend(f(9, "t", 10));
+        t.extend_from_slice(b"\r\nok\r\n");
+        let (out, _) = run("echo aft", &[&t]);
+        assert!(!has(&out, b"echo"), "{:?}", String::from_utf8_lossy(&out));
+        assert!(has(&out, b"ok"));
     }
 
     #[test]
