@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>suzuri</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="panel.css">
+<link rel="stylesheet" href="notes.css">
+</head>
+<body>
+<header id="bar" data-tauri-drag-region>
+  <span class="mark" data-tauri-drag-region>硯</span>
+  <nav id="tabs"></nav>
+  <button id="new-tab" title="New tab (⌘T / Ctrl+Shift+T)">+</button>
+  <span class="spacer" data-tauri-drag-region></span>
+  <button id="split-right" title="Split right (⌘D / Ctrl+Shift+D)">⎸⎹</button>
+  <button id="split-down" title="Split down (⌘⇧E / Ctrl+Shift+E)">☰</button>
+  <button id="open-palette" title="Command palette (⌘K / Ctrl+K)">⌘</button>
+  <button id="open-settings" title="Settings (⌘, / Ctrl+,)">⚙</button>
+</header>
+<main id="root"></main>
+<div id="overlays"></div>
+<div id="hud" hidden></div>
+<div id="toast" hidden></div>
+<script type="module" src="app.js"></script>
+<script type="module" src="caffeine.js"></script>
+<script type="module" src="notes.js"></script>
+<script type="module" src="update.js"></script>
+</body>
+</html>

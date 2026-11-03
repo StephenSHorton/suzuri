@@ -1,0 +1,31 @@
+{
+  "app": "rust-suzuri",
+  "feed_ms_per_s": 1.3816707246634377,
+  "frame_mb_s": 0.09075247700715332,
+  "frames_per_s": 106.12253965432976,
+  "internal_probe_ms": {
+    "max": 0,
+    "n": 0,
+    "over100": 0,
+    "over16": 0,
+    "p50": 0,
+    "p90": 0,
+    "p99": 0
+  },
+  "key_event_ms": {
+    "max": 19.000000000007276,
+    "n": 206,
+    "over100": 0,
+    "over16": 46,
+    "p50": 9,
+    "p90": 18,
+    "p99": 19
+  },
+  "paint_ms_per_s": 10.219042964409658,
+  "panes": 8,
+  "platform": "macos",
+  "probe": "external",
+  "pty_mb_s": 0.11880048429377528,
+  "secs": 45,
+  "snapshot_ms_per_s": 0.3150082863109254
+}

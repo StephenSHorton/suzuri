@@ -1,0 +1,56 @@
+{
+  "app": "rsz",
+  "panes": 8,
+  "probe_ms": {
+    "key_tiles": 25,
+    "max": 33.4505,
+    "mean": 28.882904506437775,
+    "n": 233,
+    "p50": 29.965708333333332,
+    "p90": 32.871125,
+    "p99": 33.32429166666667,
+    "timeouts": 67
+  },
+  "footprint_mb_samples": {
+    "n": 16,
+    "min": 0.0,
+    "median": 531.2,
+    "max": 712.4
+  },
+  "footprint_mb_start": 531.2,
+  "footprint_mb_end": 0.0,
+  "cpu_cores_avg": -0.051,
+  "secs": 77,
+  "inapp": {
+    "app": "rust-suzuri",
+    "feed_ms_per_s": 1.5591333416614617,
+    "frame_mb_s": 0.09266598376014992,
+    "frames_per_s": 107.632729544035,
+    "internal_probe_ms": {
+      "max": 0,
+      "n": 0,
+      "over100": 0,
+      "over16": 0,
+      "p50": 0,
+      "p90": 0,
+      "p99": 0
+    },
+    "key_event_ms": {
+      "max": 20.999999999992724,
+      "n": 239,
+      "over100": 0,
+      "over16": 181,
+      "p50": 17.000000000007276,
+      "p90": 19,
+      "p99": 19.000000000007276
+    },
+    "paint_ms_per_s": 12.367270455966883,
+    "panes": 8,
+    "platform": "macos",
+    "probe": "external",
+    "pty_mb_s": 0.13697936289818863,
+    "secs": 40,
+    "snapshot_ms_per_s": 0.3316411992504684
+  },
+  "build": "f06a673"
+}

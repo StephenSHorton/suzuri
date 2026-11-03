@@ -1,58 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the bundle's Info.plist by Tauri. Same usage strings as Go
+     suzuri: macOS attributes a child tool's access to the terminal app. -->
 <plist version="1.0">
 <dict>
-	<key>CFBundleDevelopmentRegion</key>
-	<string>en</string>
-	<key>CFBundleDisplayName</key>
-	<string>suzuri</string>
-	<key>CFBundleExecutable</key>
-	<string>suzuri</string>
-	<key>CFBundleIconFile</key>
-	<string>suzuri</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.stephenshorton.suzuri</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>CFBundleName</key>
-	<string>suzuri</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>CFBundleShortVersionString</key>
-	<string>VERSION_PLACEHOLDER</string>
-	<key>CFBundleVersion</key>
-	<string>VERSION_PLACEHOLDER</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>12.0</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSHumanReadableCopyright</key>
-	<string>MIT © Stephen S. Horton</string>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
-	<!-- TCC folder prompts: explain why the terminal may touch protected dirs.
-	     Note: macOS only *remembers* grants across rebuilds when the app is
-	     signed with a stable certificate identity (Team ID). Ad-hoc/linker
-	     signatures change CDHash every update and re-prompt. -->
 	<key>NSDocumentsFolderUsageDescription</key>
-	<string>suzuri needs access when your shell or tools (for example Grok) read or write files in Documents.</string>
+	<string>suzuri needs access when your shell or tools read or write files in Documents.</string>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>suzuri needs access when your shell or tools (for example Grok) read or write files on the Desktop.</string>
+	<string>suzuri needs access when your shell or tools read or write files on the Desktop.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
-	<string>suzuri needs access when your shell or tools (for example Grok) read or write files in Downloads.</string>
+	<string>suzuri needs access when your shell or tools read or write files in Downloads.</string>
 	<key>NSRemovableVolumesUsageDescription</key>
 	<string>suzuri needs access when your shell or tools work with files on removable volumes.</string>
 	<key>NSNetworkVolumesUsageDescription</key>
 	<string>suzuri needs access when your shell or tools work with files on network volumes.</string>
-	<!-- TCC microphone: child tools (e.g. Grok /voice) open CoreAudio; macOS
-	     attributes the grant to this host terminal. Required for a prompt under
-	     Hardened Runtime — without it, capture is often silent denial. -->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>suzuri needs microphone access when tools like Grok use voice dictation.</string>
-	<!-- Apple Events / Automation: suzuri runs osascript for clipboard image
-	     paste (and child tools may use AppleScript). Hardened Runtime needs the
-	     matching automation.apple-events entitlement. -->
+	<string>suzuri needs microphone access when tools use voice dictation.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>suzuri uses AppleScript for clipboard image paste and when tools need Automation.</string>
+	<string>suzuri uses AppleScript when tools need Automation.</string>
 </dict>
 </plist>
