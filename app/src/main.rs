@@ -23,6 +23,7 @@ mod transfer_engine;
 mod workspace;
 mod window;
 mod notices;
+mod update;
 mod ws;
 use rsz_term::{Link, MouseEvent, MouseKind, Out, Pane, PaneConfig, SelectKind, Sink};
 use serde::{Deserialize, Serialize};
@@ -804,8 +805,10 @@ fn main() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| window::focus_main(app)));
     }
     builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             app.manage(notices::Notices::new(app.handle().clone()));
+            update::start(app.handle());
             caffeine::install(app.handle(), &app.state::<Arc<caffeine::Caffeine>>());
             if let Some(b) = &bridge_setup {
                 b.attach(app.handle().clone());
@@ -823,6 +826,7 @@ fn main() {
         })
         .manage(bridge)
         .manage(panes)
+        .manage(update::Pending::default())
         .manage(caffeine::Caffeine::new())
         .manage(Arc::new(transfer::Transfers::default()))
         .manage(Arc::new(mcp_client::McpClient::default()))
@@ -878,7 +882,9 @@ fn main() {
             caffeine::caffeine_status,
             appearance,
             notes::notes_load,
-            notes::notes_save
+            notes::notes_save,
+            update::update_check,
+            update::update_install
         ])
         .build(ctx)
         .expect("build rust-suzuri")

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the bundle's Info.plist by Tauri. Same usage strings as Go
+     suzuri: macOS attributes a child tool's access to the terminal app. -->
+<plist version="1.0">
+<dict>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>suzuri needs access when your shell or tools read or write files in Documents.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>suzuri needs access when your shell or tools read or write files on the Desktop.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>suzuri needs access when your shell or tools read or write files in Downloads.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>suzuri needs access when your shell or tools work with files on removable volumes.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>suzuri needs access when your shell or tools work with files on network volumes.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>suzuri needs microphone access when tools use voice dictation.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>suzuri uses AppleScript when tools need Automation.</string>
+</dict>
+</plist>

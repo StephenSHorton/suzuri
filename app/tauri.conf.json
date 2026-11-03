@@ -29,7 +29,40 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "nsis"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "targets": [
+      "app",
+      "dmg",
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": true,
+      "entitlements": "../packaging/macos/entitlements.plist",
+      "infoPlist": "../packaging/macos/Info.plist"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEExRjkzMEUwNkMwMjFCRjQKUldUMEd3SnM0REQ1b2RzckE4RGRadXJyRFB3LzBCVVNic1JEc1RFSmRiZHJTUnNNT3lEQ2RPdWwK",
+      "endpoints": [
+        "https://github.com/StephenSHorton/suzuri/releases/download/rust-latest/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened Runtime entitlements for Developer ID + notarization.
+  Terminal host needs network (PTY tools, transfer, updates) and some
+  flexibility for dynamic code paths. Copied from Go suzuri so child tools
+  get the same permissions.
+  Audio input: child tools (e.g. Grok /voice) open CoreAudio; TCC attributes
+  the grant to this app. Without device.audio-input, Hardened Runtime silently
+  denies mic access and never shows a prompt.
+  Apple Events: host osascript (clipboard image paste) and child Automation;
+  matches Warp's automation.apple-events entitlement.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>

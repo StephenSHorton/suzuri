@@ -2,3 +2,6 @@
 /app/gen
 .DS_Store
 /bench/out
+packaging/windows/conpty/
+dist/
+/target-main
