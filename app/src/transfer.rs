@@ -124,3 +124,55 @@ pub fn transfer_info() -> TransferInfo {
         receive_dir: engine::default_receive_dir().display().to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::transfer_engine::{EngineMode, find_transfer_bin, spawn_engine};
+    use std::time::{Duration, Instant};
+
+    /// Live round trip through the real engine: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn send_then_receive_round_trip() {
+        assert!(find_transfer_bin().is_some(), "suzuri-transfer not found");
+        let dir = std::env::temp_dir().join(format!("rsz-transfer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("probe.txt");
+        std::fs::write(&file, b"rust-suzuri transfer probe\n").unwrap();
+        // Receives land in HOME/Downloads: point HOME at the temp dir.
+        unsafe { std::env::set_var("HOME", &dir) };
+        std::fs::create_dir_all(dir.join("Downloads")).unwrap();
+        unsafe { std::env::set_var("HATO_CONFIG_DIR", dir.join("cfg-send")) };
+        let send = spawn_engine(EngineMode::Send, file.to_str().unwrap()).unwrap();
+        let start = Instant::now();
+        let ticket = loop {
+            assert!(start.elapsed() < Duration::from_secs(30), "no ticket");
+            if let Some(u) = send.try_recv() {
+                assert!(u.ok, "send failed: {:?}", u.message);
+                if let Some(t) = u.ticket {
+                    break t;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        unsafe { std::env::set_var("HATO_CONFIG_DIR", dir.join("cfg-recv")) };
+        let recv = spawn_engine(EngineMode::Receive, &ticket).unwrap();
+        let start = Instant::now();
+        loop {
+            assert!(start.elapsed() < Duration::from_secs(60), "receive did not finish");
+            if let Some(u) = recv.try_recv() {
+                eprintln!("recv: {} {:?} {:?}/{:?}", u.phase, u.message, u.done, u.total);
+                if u.finished {
+                    assert!(u.ok, "receive failed: {:?}", u.message);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let got = std::fs::read_to_string(dir.join("Downloads/probe.txt")).unwrap();
+        assert_eq!(got, "rust-suzuri transfer probe\n");
+        send.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

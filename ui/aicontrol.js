@@ -85,6 +85,12 @@ const tools = {
   },
 }
 
+// Other cards add their tools here (move/swap: #293, new_tab/move_to_tab: #283).
+export function registerTool(name, fn) {
+  tools[name] = fn
+}
+window.rszRegisterTool = registerTool
+
 listen("aicontrol", async ({ payload: { id, tool, args } }) => {
   let status = 200
   let body
