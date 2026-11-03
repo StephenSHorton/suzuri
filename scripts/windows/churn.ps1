@@ -1,4 +1,4 @@
-﻿# rust-suzuri smoke test and churn on Windows. Keys only ever go to the app's
+﻿# suzuri smoke test and churn on Windows. Keys only ever go to the app's
 # window: every press first checks the foreground and stops if it can't get it.
 #
 #   .\scripts\windows\churn.ps1 -Shot smoke.png                 # 1 shell pane: typing, arrows, Ctrl+C, splits, focus, close, wheel
@@ -34,7 +34,7 @@ public static class W3 {
 if ($Cmd) { $env:RSZ_CMD = $Cmd } else { Remove-Item Env:RSZ_CMD -ErrorAction SilentlyContinue }
 $env:RSZ_PANES = if ($Panes -gt 0) { "$Panes" } elseif ($Cmd) { "8" } else { "1" }
 Remove-Item Env:RSZ_BENCH -ErrorAction SilentlyContinue
-$p = Start-Process -FilePath (Join-Path $R "target\release\rust-suzuri.exe") -PassThru
+$p = Start-Process -FilePath (Join-Path $R "target\release\suzuri.exe") -PassThru
 Start-Sleep -Seconds 4
 $p.Refresh(); $script:h = $p.MainWindowHandle; $script:tp = $p.Id
 function TypeText([string]$t) {

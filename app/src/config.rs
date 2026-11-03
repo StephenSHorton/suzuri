@@ -1,13 +1,13 @@
 //! Settings: one JSON file, the same keys as Go suzuri's config.json
 //! (internal/config/config.go), so a user's settings carry over.
 //!
-//! The file lives in rust-suzuri's own folder under the OS config dir
-//! (Windows %LOCALAPPDATA%\rust-suzuri, macOS ~/Library/Application
-//! Support/rust-suzuri, Linux ~/.config/rust-suzuri). On first run it is
-//! copied from Go suzuri's config.json when that exists. Keys this app does
-//! not use yet (intro, ambient, glass, window...) are kept as they are, so
-//! nothing is lost on save. RSZ_CONFIG_DIR overrides the folder (tests,
-//! screenshots).
+//! The file is Go suzuri's own config.json, in the same folder under the OS
+//! config dir (Windows %LOCALAPPDATA%\suzuri, macOS ~/Library/Application
+//! Support/suzuri, Linux ~/.config/suzuri), so both apps read and write one
+//! file. Keys this app does not use yet (intro, ambient, glass, window...)
+//! are kept as they are, so nothing is lost on save. RSZ_CONFIG_DIR
+//! overrides the folder (tests, screenshots); there, Go's file is looked
+//! for in a go-suzuri subfolder and copied on first run.
 
 use std::path::{Path, PathBuf};
 
@@ -87,10 +87,14 @@ fn dir_named(name: &str) -> PathBuf {
 }
 
 pub fn path() -> PathBuf {
-    dir_named("rust-suzuri").join("config.json")
+    if let Some(d) = std::env::var_os("RSZ_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return PathBuf::from(d).join("config.json");
+    }
+    dir_named("suzuri").join("config.json")
 }
 
-/// Go suzuri's config.json, imported on first run.
+/// Go suzuri's config.json, imported on first run. Outside RSZ_CONFIG_DIR
+/// this is [`path`] itself, so there is nothing to import.
 pub fn go_path() -> PathBuf {
     dir_named("suzuri").join("config.json")
 }
@@ -196,7 +200,7 @@ pub fn normalize(v: Value) -> Value {
     Value::Object(m)
 }
 
-/// Read the settings, importing Go suzuri's on first run. A missing or
+/// Read the settings, importing Go suzuri's on first run (RSZ_CONFIG_DIR). A missing or
 /// broken file gives the defaults (a broken one is left on disk as is).
 pub fn load() -> Value {
     load_from(&path(), &go_path())

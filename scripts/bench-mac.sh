@@ -1,10 +1,10 @@
 #!/bin/sh
-# Same-machine bench on macOS: rust-suzuri vs Go suzuri with 8 streaming
+# Same-machine bench on macOS: Rust suzuri vs Go suzuri with 8 streaming
 # panes (fakeagent) and the same external latency probe.
 #
 #   scripts/bench-mac.sh rsz|suzuri [samples]
 #
-# Needs: a release build (cargo build --release -p rust-suzuri -p fakeagent),
+# Needs: a release build (cargo build --release -p suzuri -p fakeagent),
 # a suzuri binary in $SUZURI_BIN (go build -o ... ./cmd/suzuri), and the
 # Accessibility + Screen Recording permissions for the terminal running it.
 # The app window is brought to the front for the run (an occluded webview or
@@ -37,7 +37,7 @@ BEFORE=$(webkit_pids)
 
 case "$APP" in
 rsz)
-  RSZ_BENCH_OUT="$OUT/inapp.json" RSZ_TRACE=1 RSZ_PANES=8 RSZ_CMD="$WRAP" "$R/target/release/rust-suzuri" > "$OUT/app.log" 2>&1 &
+  RSZ_BENCH_OUT="$OUT/inapp.json" RSZ_TRACE=1 RSZ_PANES=8 RSZ_CMD="$WRAP" "$R/target/release/suzuri" > "$OUT/app.log" 2>&1 &
   PID=$!
   sleep 4
   ;;
@@ -45,7 +45,7 @@ suzuri)
   BIN=${SUZURI_BIN:?set SUZURI_BIN to a suzuri binary}
   # A private HOME: suzuri's config, logs and the shells' rc files stay
   # out of the real ones. The look is the user's, minus the animated
-  # ambient and intro (rust-suzuri has neither).
+  # ambient and intro (suzuri has neither).
   H="$OUT/home"
   mkdir -p "$H/Library/Application Support/suzuri"
   python3 - "$H" "$WRAP" <<'EOF'

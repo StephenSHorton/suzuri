@@ -38,7 +38,7 @@ pub fn workspace_me() -> Value {
     );
     // `short` lets the panel also find a member joined under the bare name.
     let short = name.rsplit('\\').next().unwrap_or(&name).to_string();
-    json!({ "name": name, "short": short, "session_id": format!("rust-suzuri-human-{name}") })
+    json!({ "name": name, "short": short, "session_id": format!("suzuri-human-{name}") })
 }
 
 /// Go suzuri's `localHumanName`: `user.Current().Username`, which on Windows

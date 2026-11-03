@@ -1,9 +1,9 @@
-# rust-suzuri on Windows 11: 8 streaming fakeagent panes, real keys from
+# suzuri on Windows 11: 8 streaming fakeagent panes, real keys from
 # sendkeys.ps1, the app's own key-event-to-paint latency (oak's definition,
 # the same one Go suzuri's telemetry line uses), plus memory of the app and
 # its WebView2 processes.
 #
-#   cargo build --release -p rust-suzuri -p fakeagent
+#   cargo build --release -p suzuri -p fakeagent
 #   .\scripts\bench-windows.ps1 [-Seconds 40]
 #
 # Keep the window in front for the whole run: sendkeys.ps1 types into the
@@ -22,7 +22,7 @@ $env:RSZ_BENCH = "1"
 $env:RSZ_BENCH_PROBE = "external"
 $env:RSZ_BENCH_SECS = "$Seconds"
 $env:RSZ_BENCH_OUT = Join-Path $Out "report.json"
-$p = Start-Process -FilePath (Join-Path $R "target\release\rust-suzuri.exe") -PassThru
+$p = Start-Process -FilePath (Join-Path $R "target\release\suzuri.exe") -PassThru
 # The app warms up for 15 s before it starts measuring.
 Start-Sleep -Seconds 14
 
@@ -34,7 +34,7 @@ function Tree-Memory($rootId) {
     $ids += $more
   } while ($more)
   # The app plus WebView2; shells and fakeagent are the panes' own cost.
-  $procs = Get-Process -Id $ids -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -in @("rust-suzuri", "msedgewebview2") }
+  $procs = Get-Process -Id $ids -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -in @("suzuri", "msedgewebview2") }
   [pscustomobject]@{
     private_mb = [math]::Round(($procs | Measure-Object PrivateMemorySize64 -Sum).Sum / 1MB, 1)
     working_set_mb = [math]::Round(($procs | Measure-Object WorkingSet64 -Sum).Sum / 1MB, 1)
@@ -43,7 +43,7 @@ function Tree-Memory($rootId) {
   }
 }
 $m0 = Tree-Memory $p.Id
-# guardkeys only presses keys while rust-suzuri is in front, and stops otherwise.
+# guardkeys only presses keys while suzuri is in front, and stops otherwise.
 & (Join-Path $PSScriptRoot "windows\guardkeys.ps1") -Seconds ($Seconds + 2) -FocusFirst
 $m1 = Tree-Memory $p.Id
 Start-Sleep -Seconds 3

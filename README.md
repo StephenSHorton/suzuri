@@ -1,4 +1,4 @@
-# rust-suzuri
+# suzuri
 
 A spike of suzuri's successor: the terminal core rebuilt in Rust with a Tauri
 UI. It keeps suzuri's look (Inkstone theme, Gohu font) but the chrome is real
@@ -16,8 +16,8 @@ shells, VT, rendering, input, resize, scrollback.
 ## Run
 
 ```sh
-cargo run -p rust-suzuri            # one pane
-RSZ_PANES=8 cargo run -p rust-suzuri # 8 panes, 4 x 2
+cargo run -p suzuri            # one pane
+RSZ_PANES=8 cargo run -p suzuri # 8 panes, 4 x 2
 ```
 
 Keys (macOS / Windows): split right ⌘D / Ctrl+Shift+D, split down ⌘⇧D /

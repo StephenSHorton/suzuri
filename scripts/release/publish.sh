@@ -33,7 +33,7 @@ VERSION="${1:-}"
   exit 2
 }
 shift
-NOTES="rust-suzuri $VERSION"
+NOTES="suzuri $VERSION"
 MAC_ONLY=0 NOTARIZE=1 UPLOAD=1 FEED_BASE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -57,7 +57,7 @@ DIST="$ROOT/dist/$VERSION"
 IDENTITY="${APPLE_SIGNING_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}"
 [[ -n "$IDENTITY" ]] || { echo "error: no Developer ID Application identity in the keychain" >&2; exit 1; }
 [[ -f "$KEY" ]] || { echo "error: updater key not found: $KEY" >&2; exit 1; }
-echo "==> rust-suzuri $VERSION, signing as: $IDENTITY"
+echo "==> suzuri $VERSION, signing as: $IDENTITY"
 
 rm -rf "$DIST" && mkdir -p "$DIST"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rsz-release.XXXXXX")"
@@ -79,12 +79,12 @@ cat >"$WORK/overlay.json" <<EOF
 {"version": "$VERSION", "bundle": {"createUpdaterArtifacts": false}}
 EOF
 (cd "$ROOT/app" && APPLE_SIGNING_IDENTITY="$IDENTITY" cargo tauri build --bundles app --config "$WORK/overlay.json" ${RSZ_TAURI_CONFIG:+--config "$RSZ_TAURI_CONFIG"})
-APP="$ROOT/target/release/bundle/macos/rust-suzuri.app"
+APP="$ROOT/target/release/bundle/macos/suzuri.app"
 codesign --verify --deep --strict "$APP"
 BUILT="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 [[ "$BUILT" == "$VERSION" ]] || { echo "error: built $BUILT, wanted $VERSION" >&2; exit 1; }
-ditto "$APP" "$WORK/rust-suzuri.app"
-APP="$WORK/rust-suzuri.app"
+ditto "$APP" "$WORK/suzuri.app"
+APP="$WORK/suzuri.app"
 
 # 2. Notarize and staple the app.
 if [[ $NOTARIZE == 1 ]]; then
@@ -95,9 +95,9 @@ if [[ $NOTARIZE == 1 ]]; then
 fi
 
 # 3. DMG for first installs (drag to Applications), signed and notarized.
-DMG="$DIST/rust-suzuri_${VERSION}_aarch64.dmg"
-mkdir -p "$WORK/dmg" && ditto "$APP" "$WORK/dmg/rust-suzuri.app" && ln -s /Applications "$WORK/dmg/Applications"
-hdiutil create -quiet -volname "rust-suzuri $VERSION" -srcfolder "$WORK/dmg" -fs HFS+ -format UDZO "$DMG"
+DMG="$DIST/suzuri_${VERSION}_aarch64.dmg"
+mkdir -p "$WORK/dmg" && ditto "$APP" "$WORK/dmg/suzuri.app" && ln -s /Applications "$WORK/dmg/Applications"
+hdiutil create -quiet -volname "suzuri $VERSION" -srcfolder "$WORK/dmg" -fs HFS+ -format UDZO "$DMG"
 codesign --sign "$IDENTITY" --timestamp "$DMG"
 if [[ $NOTARIZE == 1 ]]; then
   notarize "$DMG"
@@ -105,12 +105,12 @@ if [[ $NOTARIZE == 1 ]]; then
 fi
 
 # 4. Updater payload: the stapled app as .tar.gz, signed with the updater key.
-MAC_TGZ="rust-suzuri_${VERSION}_aarch64.app.tar.gz"
-COPYFILE_DISABLE=1 tar -czf "$DIST/$MAC_TGZ" -C "$WORK" rust-suzuri.app
+MAC_TGZ="suzuri_${VERSION}_aarch64.app.tar.gz"
+COPYFILE_DISABLE=1 tar -czf "$DIST/$MAC_TGZ" -C "$WORK" suzuri.app
 MAC_SIG="$(sign_update "$DIST/$MAC_TGZ")"
 
 # 5. Windows installer from the draft release (built on the PC).
-WIN_EXE="rust-suzuri_${VERSION}_x64-setup.exe"
+WIN_EXE="suzuri_${VERSION}_x64-setup.exe"
 WIN_SIG=""
 if [[ $MAC_ONLY == 0 ]]; then
   if [[ -f "$ROOT/dist/win/$WIN_EXE" ]]; then

@@ -170,7 +170,7 @@ pub fn bootstrap(argv: &[String]) -> Option<Bootstrap> {
         "zsh" => {
             let dir = temp_dir("rsz-zdot")?;
             std::fs::write(dir.join(".zshrc"), ZSHRC).ok()?;
-            std::fs::write(dir.join(".zshenv"), "# rust-suzuri\n").ok()?;
+            std::fs::write(dir.join(".zshenv"), "# suzuri\n").ok()?;
             let user = std::env::var("ZDOTDIR").ok().filter(|s| !s.is_empty()).or_else(home).unwrap_or_default();
             Some(Bootstrap {
                 argv: argv.to_vec(),
@@ -214,7 +214,7 @@ fn temp_dir(prefix: &str) -> Option<PathBuf> {
 
 /// zsh: load the user's own files from their ZDOTDIR, then blank the prompt
 /// from a precmd hook that runs last, so themes cannot repaint one.
-const ZSHRC: &str = r#"# rust-suzuri bootstrap: the input bar owns the command line.
+const ZSHRC: &str = r#"# suzuri bootstrap: the input bar owns the command line.
 _rsz_home=${RSZ_USER_ZDOTDIR:-$HOME}
 ZDOTDIR=$_rsz_home
 [[ -f "$_rsz_home/.zshenv" ]] && source "$_rsz_home/.zshenv"
@@ -252,7 +252,7 @@ precmd_functions+=(_rsz_precmd)
 preexec_functions+=(_rsz_preexec)
 "#;
 
-const BASHRC: &str = r#"# rust-suzuri bootstrap: the input bar owns the command line.
+const BASHRC: &str = r#"# suzuri bootstrap: the input bar owns the command line.
 # The shell was asked for as a login shell; --rcfile needs -i instead, so
 # load the login files here. ~/.bash_profile conventionally sources ~/.bashrc.
 if [[ -f "$HOME/.bash_profile" ]]; then source "$HOME/.bash_profile"

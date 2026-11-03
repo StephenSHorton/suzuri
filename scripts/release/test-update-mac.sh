@@ -29,18 +29,18 @@ done
 
 (cd "$ROOT/dist/$NEW" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >"$T/http.log" 2>&1) & SRV=$!
 mkdir -p "$T/inst" && tar -xzf "$ROOT/dist/$OLD/"*.app.tar.gz -C "$T/inst"
-APP="$T/inst/rust-suzuri.app"
+APP="$T/inst/suzuri.app"
 ver() { /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist"; }
 echo "==> installed $(ver), feed offers $NEW"
 # LOCALAPPDATA: its own config dir, so the test app never takes over a
 # running suzuri's bridge.json / ai.json.
 mkdir -p "$T/cfg"
-LOCALAPPDATA="$T/cfg" RSZ_UPDATE_AUTO=1 RSZ_UPDATE_URL="http://127.0.0.1:$PORT/latest.json" "$APP/Contents/MacOS/rust-suzuri" >"$T/app.log" 2>&1 &
+LOCALAPPDATA="$T/cfg" RSZ_UPDATE_AUTO=1 RSZ_UPDATE_URL="http://127.0.0.1:$PORT/latest.json" "$APP/Contents/MacOS/suzuri" >"$T/app.log" 2>&1 &
 for _ in $(seq 60); do [[ "$(ver)" == "$NEW" ]] && break; sleep 1; done
 sleep 3
-ps eww -p "$(pgrep -f "$APP/Contents/MacOS/rust-suzuri" | head -1)" | tr " " "\n" | grep -E "LOCALAPPDATA|RSZ_UPDATE" || echo "restarted app: env not inherited"
+ps eww -p "$(pgrep -f "$APP/Contents/MacOS/suzuri" | head -1)" | tr " " "\n" | grep -E "LOCALAPPDATA|RSZ_UPDATE" || echo "restarted app: env not inherited"
 cat "$T/app.log"
 codesign --verify --deep --strict "$APP"
 [[ "$(ver)" == "$NEW" ]] || { echo "FAIL: still $(ver)"; exit 1; }
-pgrep -f "$APP/Contents/MacOS/rust-suzuri" >/dev/null || { echo "FAIL: app did not restart"; exit 1; }
+pgrep -f "$APP/Contents/MacOS/suzuri" >/dev/null || { echo "FAIL: app did not restart"; exit 1; }
 echo "PASS: $OLD updated itself to $NEW, signature valid, app restarted"

@@ -1,4 +1,4 @@
-# Releasing rust-suzuri
+# Releasing suzuri
 
 Releases are cut on our machines with local scripts, not CI. The Mac builds
 and publishes; the PC builds the Windows installer and hands it over through
@@ -23,11 +23,11 @@ local feeds (below). At the move:
 
 | Platform | First install | Update payload |
 |---|---|---|
-| macOS (Apple silicon) | `rust-suzuri_<v>_aarch64.dmg`: signed with Developer ID, notarized and stapled | `rust-suzuri_<v>_aarch64.app.tar.gz` (the stapled app) |
-| Windows x64 | `rust-suzuri_<v>_x64-setup.exe`: NSIS installer, per user (no admin), installs to `%LOCALAPPDATA%\<product name>` (Tauri's per-user default; Go suzuri uses `%LOCALAPPDATA%\Programs\suzuri`, so the two don't collide before the move) | the same setup.exe, run passively by the updater |
+| macOS (Apple silicon) | `suzuri_<v>_aarch64.dmg`: signed with Developer ID, notarized and stapled | `suzuri_<v>_aarch64.app.tar.gz` (the stapled app) |
+| Windows x64 | `suzuri_<v>_x64-setup.exe`: NSIS installer, per user (no admin), installs to `%LOCALAPPDATA%\<product name>` (Tauri's per-user default; Go suzuri uses `%LOCALAPPDATA%\Programs\suzuri`, so the two don't collide before the move) | the same setup.exe, run passively by the updater |
 
 The Windows install puts OpenConsole's `conpty.dll` and `OpenConsole.exe` next
-to `rust-suzuri.exe`. portable-pty loads that `conpty.dll` before the system
+to `suzuri.exe`. portable-pty loads that `conpty.dll` before the system
 one. They come from Microsoft's `Microsoft.Windows.Console.ConPTY` NuGet package
 (MIT), pinned by version and hash in `scripts/release/conpty.ps1`. Go suzuri
 doesn't use MSIX or the Store, so neither does this. The Windows installer is

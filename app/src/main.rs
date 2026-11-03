@@ -1,4 +1,4 @@
-// rust-suzuri: the Tauri shell around rsz-term. The webview is the UI: it
+// suzuri: the Tauri shell around rsz-term. The webview is the UI: it
 // lays out panes, encodes keys and paints frames. Each pane's frames reach
 // it as raw bytes over its own Channel, never as JSON events.
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
@@ -887,7 +887,7 @@ fn main() {
             update::update_install
         ])
         .build(ctx)
-        .expect("build rust-suzuri")
+        .expect("build suzuri")
         .run(move |app, ev| {
             if let tauri::RunEvent::Exit = ev {
                 if let Some(b) = &bridge_exit {

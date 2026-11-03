@@ -586,7 +586,7 @@ pub fn active() -> Active {
     if let Some(a) = *ACTIVE.read() {
         return a;
     }
-    // Inkstone, full map: what rust-suzuri painted before themes.
+    // Inkstone, full map: what suzuri painted before themes.
     let t = theme(DEFAULT_THEME);
     Active { theme: t, map: AnsiMap::Full, ansi16: t.ansi16() }
 }

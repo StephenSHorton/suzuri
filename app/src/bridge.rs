@@ -1,6 +1,6 @@
 //! The agent bridge (#286): the same loopback HTTP endpoints Go suzuri's GUI
 //! serves, so Go's `suzuri mcp` (the stdio MCP server agents spawn) and the
-//! curl-based AI control API work against rust-suzuri unchanged.
+//! curl-based AI control API work against suzuri unchanged.
 //!
 //! - MCP bridge: `{config}/bridge.json` {pid,url,token}; GET /v1/status,
 //!   /v1/snapshot, /v1/diag, /v1/logs; POST /v1/submit. /v1/notes and
@@ -13,7 +13,7 @@
 //!   commands go to it as `aicontrol` events and come back via
 //!   `aicontrol_reply`.
 //!
-//! Go suzuri and rust-suzuri both write bridge.json and ai.json: run one at a
+//! Go suzuri and suzuri both write bridge.json and ai.json: run one at a
 //! time.
 
 use std::collections::HashMap;
@@ -167,7 +167,7 @@ impl Bridge {
             (Method::Get, "/tools") => (200, tools()),
             (Method::Get, "/v1/status") => (200, self.status()),
             (Method::Get, "/v1/snapshot" | "/v1/diag") => (200, self.snapshot()),
-            (Method::Get, "/v1/logs") => (200, json!({ "ok": false, "path": "", "lines": [], "count": 0, "error": "rust-suzuri has no app log file yet; it logs to stderr" })),
+            (Method::Get, "/v1/logs") => (200, json!({ "ok": false, "path": "", "lines": [], "count": 0, "error": "suzuri has no app log file yet; it logs to stderr" })),
             (Method::Post, "/v1/submit") => self.submit(&body),
             (Method::Get, "/v1/layout") => self.ui("layout", json!({})),
             (Method::Get, p) if p.starts_with("/v1/panes/") => {
@@ -183,7 +183,7 @@ impl Bridge {
                 Err(e) => (400, json!({ "error": format!("bad json: {e}") })),
             },
             // notes and workspace: 404 so `suzuri mcp` uses Go's store on disk.
-            _ => (404, json!({ "error": format!("{path} is not served by rust-suzuri") })),
+            _ => (404, json!({ "error": format!("{path} is not served by suzuri") })),
         };
         reply(req, status, out)
     }
@@ -206,11 +206,11 @@ impl Bridge {
             "tabs": self.pane_ids().len(),
             "active_tab": self.active(),
             "bridge": self.url,
-            "message": "rust-suzuri: each pane is reported as a tab",
+            "message": "suzuri: each pane is reported as a tab",
         })
     }
 
-    /// Go's Snapshot, one "tab" per pane until rust-suzuri has tabs (#283).
+    /// Go's Snapshot, one "tab" per pane until suzuri has tabs (#283).
     fn snapshot(&self) -> Value {
         let titles = self.panes.titles.lock().clone();
         let tabs: Vec<Value> = self
@@ -344,7 +344,7 @@ fn off_reason(env: Option<&str>, dev: bool) -> Option<String> {
 pub const INHERITED: [&str; 4] = ["SUZURI", "SUZURI_CONTROL_URL", "SUZURI_CONTROL_TOKEN", "SUZURI_PANE_ID"];
 
 /// The URL in an existing bridge.json, if something still listens there
-/// (Go suzuri or another rust-suzuri). A stale file from a crash is ignored.
+/// (Go suzuri or another suzuri). A stale file from a crash is ignored.
 fn live_owner(path: &PathBuf) -> Option<String> {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     if v.get("pid").and_then(Value::as_u64) == Some(std::process::id() as u64) {
@@ -404,7 +404,7 @@ fn tools() -> Value {
     ], "not_yet": ["move", "rotate", "swap", "grow", "shrink", "equalize"] })
 }
 
-const HELP: &str = "# Suzuri AI control (rust-suzuri)
+const HELP: &str = "# Suzuri AI control
 
 Loopback HTTP for this window. Not MCP. Prefer curl.
 
@@ -423,7 +423,7 @@ Tools: layout; pane {pane_id, lines?}; split {pane_id?, axis: right|down};
 focus {pane_id}; close {pane_id?}; rename {pane_id, title};
 report_agent {pane_id, state: idle|working|blocked|done|clear};
 new_tab; move_to_tab {pane_id, tab_id?} (no tab_id: its own new tab).
-Not yet in rust-suzuri: move, rotate, swap, grow, shrink, equalize.
+Not yet in suzuri: move, rotate, swap, grow, shrink, equalize.
 ";
 
 #[cfg(test)]

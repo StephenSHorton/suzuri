@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the notice and image sequences rust-suzuri and Go suzuri both take
+"""Print the notice and image sequences suzuri and Go suzuri both take
 (card #288), so the two can be compared side by side. Run it in the terminal
 under test:
 

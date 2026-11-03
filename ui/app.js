@@ -1,4 +1,4 @@
-// rust-suzuri UI: split layout, focus, input and painting. The terminal
+// suzuri UI: split layout, focus, input and painting. The terminal
 // state lives in Rust; this only lays out panes and paints their frames.
 import { Screen, cellMetrics, cssSize, onStyle, styleState, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_FOCUS } from "./frame.js"
 import { encodeKey } from "./keys.js"
@@ -991,7 +991,7 @@ function run(id, arg) {
   ACTIONS[id]?.(arg)
 }
 
-// Go suzuri's DefaultCommands + TabMoveCommands, for what rust-suzuri has.
+// Go suzuri's DefaultCommands + TabMoveCommands, for what suzuri has.
 function commandList() {
   const c = (id, title, category, arg) => ({ id, title, category, arg, hint: chordLabel(id, isMac) })
   const list = [
@@ -1314,7 +1314,7 @@ async function bench(boot, target) {
     over16: p.filter((x) => x > 16).length, over100: p.filter((x) => x > 100).length,
   })
   const report = {
-    app: "rust-suzuri",
+    app: "suzuri",
     platform: boot.platform,
     probe: boot.bench_probe,
     panes: st.length,

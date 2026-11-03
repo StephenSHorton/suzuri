@@ -284,7 +284,7 @@ impl Pane {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "rust-suzuri");
+        cmd.env("TERM_PROGRAM", "suzuri");
         for (k, v) in boot_env.iter().chain(&cfg.env) {
             cmd.env(k, v);
         }

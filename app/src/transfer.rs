@@ -146,7 +146,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("probe.txt");
-        std::fs::write(&file, b"rust-suzuri transfer probe\n").unwrap();
+        std::fs::write(&file, b"suzuri transfer probe\n").unwrap();
         // Receives land in HOME/Downloads: point HOME at the temp dir.
         unsafe { std::env::set_var("HOME", &dir) };
         std::fs::create_dir_all(dir.join("Downloads")).unwrap();
@@ -178,7 +178,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         let got = std::fs::read_to_string(dir.join("Downloads/probe.txt")).unwrap();
-        assert_eq!(got, "rust-suzuri transfer probe\n");
+        assert_eq!(got, "suzuri transfer probe\n");
         send.cancel();
         let _ = std::fs::remove_dir_all(&dir);
     }

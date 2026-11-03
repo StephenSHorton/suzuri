@@ -1,4 +1,4 @@
-# rust-suzuri spike: report
+# Rust suzuri spike: report
 
 Irori card #255. The question: is a terminal core rebuilt in Rust with a
 Tauri UI worth continuing, or should Go suzuri keep being upgraded (#246)?
@@ -72,12 +72,12 @@ This is an external pixel probe, used identically for both apps.
 | app | runs | p50 ms | p90 ms | p99 ms | max ms | CPU cores (app + helpers) |
 |---|---|---|---|---|---|---|
 | Go suzuri (main @ 100b8a5) | 2 | 48.5–49.4 | 51.2–52.0 | 52.8–53.9 | 57.8 | 0.35 |
-| rust-suzuri, Tauri Channel | 4 | 25.4–32.6 | 32.4–35.5 | 35.3–40.9 | 50.3 | 0.20 |
-| rust-suzuri, WebSocket frames | 2 | 30.5–30.6 | 32.7–33.1 | 33.3–33.4 | 33.5 | 0.18 |
-| rust-suzuri, scrollback off | 1 | 25.0 | 31.9 | 33.3 | 33.6 | 0.20 |
-| rust-suzuri f06a673 (final: socket, ack flow control, key bypass) | 2 | 30.0–31.2 | 32.9–34.4 | 33.3–36.5 | 37.1 | n/a* |
+| Rust suzuri, Tauri Channel | 4 | 25.4–32.6 | 32.4–35.5 | 35.3–40.9 | 50.3 | 0.20 |
+| Rust suzuri, WebSocket frames | 2 | 30.5–30.6 | 32.7–33.1 | 33.3–33.4 | 33.5 | 0.18 |
+| Rust suzuri, scrollback off | 1 | 25.0 | 31.9 | 33.3 | 33.6 | 0.20 |
+| Rust suzuri f06a673 (final: socket, ack flow control, key bypass) | 2 | 30.0–31.2 | 32.9–34.4 | 33.3–36.5 | 37.1 | n/a* |
 
-- rust-suzuri's p50 drifted between runs, 25 to 33 ms, with the machine's
+- Rust suzuri's p50 drifted between runs, 25 to 33 ms, with the machine's
   other load. Suzuri's didn't, about 49 ms every time.
 - Channel against WebSocket is within that drift on latency.
 - \*The final runs also had the app time itself (RSZ_BENCH=1). It quits
@@ -88,7 +88,7 @@ This is an external pixel probe, used identically for both apps.
   aren't in the table.
 - One pane, before the release build: suzuri p50 44 ms / p99 58 ms.
 
-**In-app vs on-screen.** In one run rust-suzuri also timed the same keys
+**In-app vs on-screen.** In one run Rust suzuri also timed the same keys
 itself, from the key event's timestamp to the end of the paint after it.
 That is oak's definition, used by Go suzuri's #247 telemetry line.
 - In-app it read p50 9 ms / p99 19 ms. On screen the same run read p50
@@ -100,7 +100,7 @@ That is oak's definition, used by Go suzuri's #247 telemetry line.
 
 ### Memory (footprint: the app plus its own helper processes)
 
-| | Go suzuri | rust-suzuri |
+| | Go suzuri | Rust suzuri |
 |---|---|---|
 | 1 idle pane | 452 MB | 136 MB (app 41, WebKit WebContent 75, GPU 16, network 4) |
 | 8 streaming, Channel, 10k-line scrollback | 518–524 MB, flat | median 650–750, range 526–848 MB |
@@ -108,7 +108,7 @@ That is oak's definition, used by Go suzuri's #247 telemetry line.
 | 8 streaming, scrollback off | — | median 609, range 504–701 MB |
 
 Sampled every 5 s through each run.
-- **The webview heap.** rust-suzuri's swing is the webview's heap.
+- **The webview heap.** Rust suzuri's swing is the webview's heap.
   WebContent climbs while frames stream (one sample was 1 GB), then drops
   back to about 200 MB when WebKit reclaims it. footprint showed 895 MB of
   WebKit malloc "reclaimable".
@@ -120,7 +120,7 @@ Sampled every 5 s through each run.
   these pane sizes. Suzuri keeps no scrollback through its ingest at all:
   reed found on #249 that scrolled-off lines never reach history. Its flat
   number isn't like for like.
-- **Idle cost.** Idle, rust-suzuri is a third of suzuri. Suzuri's ebiten
+- **Idle cost.** Idle, Rust suzuri is a third of Go suzuri. Go suzuri's ebiten
   window holds about 300 MB of graphics memory.
 
 ### VT engines on the #249 replay corpus
@@ -205,7 +205,7 @@ beats Go suzuri by 15–20 ms.
 
 ## What continuing costs
 
-rust-suzuri has the terminal and none of the product around it. Go suzuri's
+Rust suzuri has the terminal and none of the product around it. Go suzuri's
 features that would have to be rebuilt:
 
 | feature | rough size |
@@ -228,7 +228,7 @@ session actor, an off-thread VT, damage-based paint. Its baseline ingest is
 
 First run, main @ b28fa7e:
 
-- **Build.** `cargo build --release -p rust-suzuri -p fakeagent` worked the
+- **Build.** `cargo build --release -p suzuri -p fakeagent` worked the
   first time, in 1m28s.
 - **Smoke test: passed.** In PowerShell 5.1: typing, arrows, Ctrl+C,
   split right and down, Alt+arrow focus, close, and wheel scrollback.
@@ -252,7 +252,7 @@ First run, main @ b28fa7e:
 - **Bench, 8 fakeagent panes, real SendInput keys.** Both apps are timed
   in-app, from key event to paint (oak's definition):
 
-| | Go suzuri (oak/hang-watchdog, dev build) | rust-suzuri (b28fa7e, Channel) |
+| | Go suzuri (oak/hang-watchdog, dev build) | Rust suzuri (b28fa7e, Channel) |
 |---|---|---|
 | input p99 | 31.4–32.9 ms (one 10 s window 142.6 ms) | 8.6 ms (p50 4.5, max 8.8, n=330) |
 | CPU over the ~50 s run | 47 s | 5.4 s |
@@ -260,7 +260,7 @@ First run, main @ b28fa7e:
 
 Caveats for that run:
 - Go's 8 panes were an uneven layout, and all 8 streamed, about 2.5 MB per
-  10 s. rust-suzuri had one quiet probe pane, about 1.6 MB per 10 s.
+  10 s. Rust suzuri had one quiet probe pane, about 1.6 MB per 10 s.
 - In Go's screenshot, text from the right-hand columns draws across pane
   borders.
 
@@ -294,7 +294,7 @@ and claude-stream at 141 MB/s. The screens match the goldens as on the Mac.
 
 ## Recommendation
 
-**Continue rust-suzuri** as suzuri's successor (renamed to suzuri later),
+**Continue Rust suzuri** as suzuri's successor (renamed to suzuri later),
 and stop putting performance work into Go suzuri beyond fixes users need
 before the switch.
 

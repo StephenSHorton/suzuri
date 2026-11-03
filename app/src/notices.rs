@@ -331,7 +331,7 @@ impl Notices {
     }
 }
 
-/// The corner Go suzuri's config picks (notice_position), until rust-suzuri
+/// The corner Go suzuri's config picks (notice_position), until suzuri
 /// has settings of its own (#283 calls notice_anchor then).
 fn go_anchor() -> Option<String> {
     #[cfg(target_os = "macos")]

@@ -4,7 +4,7 @@ param(
   [int]$Seconds = 40,
   [int]$IntervalMs = 100,
   [int]$HoldMs = 40,
-  [string[]]$TargetNames = @("rust-suzuri"),
+  [string[]]$TargetNames = @("suzuri"),
   [switch]$FocusFirst
 )
 Add-Type -TypeDefinition @"

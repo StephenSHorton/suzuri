@@ -101,7 +101,7 @@ listen("aicontrol", async ({ payload: { id, tool, args } }) => {
   let body
   try {
     const fn = tools[tool]
-    if (!fn) [status, body] = [501, { error: `${tool || "(none)"} is not in rust-suzuri yet; GET /tools lists what is` }]
+    if (!fn) [status, body] = [501, { error: `${tool || "(none)"} is not in suzuri yet; GET /tools lists what is` }]
     else [status, body] = await fn(args || {})
   } catch (e) {
     ;[status, body] = [500, { error: String(e) }]

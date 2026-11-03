@@ -6,7 +6,7 @@
 #   powershell -File scripts\release\build-windows.ps1 -Version 0.1.1 [-NoUpload]
 #
 # Needs: Rust, cargo-tauri (cargo install tauri-cli --version ^2), gh (logged
-# in) unless -NoUpload. Output: dist\<version>\rust-suzuri_<version>_x64-setup.exe
+# in) unless -NoUpload. Output: dist\<version>\suzuri_<version>_x64-setup.exe
 param(
   [Parameter(Mandatory = $true)][string]$Version,
   [string]$Repo = $(if ($env:RSZ_RELEASE_REPO) { $env:RSZ_RELEASE_REPO } else { "StephenSHorton/suzuri" }),
@@ -48,7 +48,7 @@ $setup = Get-ChildItem "target\release\bundle\nsis\*_${Version}_x64-setup.exe" |
 if (-not $setup) { throw "no setup.exe for $Version under target\release\bundle\nsis" }
 $dist = Join-Path $root "dist\$Version"
 New-Item -ItemType Directory -Force $dist | Out-Null
-$name = "rust-suzuri_${Version}_x64-setup.exe"
+$name = "suzuri_${Version}_x64-setup.exe"
 Copy-Item $setup.FullName (Join-Path $dist $name) -Force
 Write-Host "==> $dist\$name"
 

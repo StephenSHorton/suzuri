@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "rust-suzuri",
-  "mainBinaryName": "rust-suzuri",
+  "productName": "suzuri",
+  "mainBinaryName": "suzuri",
   "version": "0.1.0",
-  "identifier": "com.stephenshorton.rust-suzuri",
+  "identifier": "com.stephenshorton.suzuri",
   "build": {
     "frontendDist": "../ui"
   },

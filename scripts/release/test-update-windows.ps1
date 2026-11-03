@@ -11,8 +11,8 @@ $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 # One run at a time: a second run would uninstall and kill the first one's app.
 $busy = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($busy -or (Get-Process rust-suzuri -ErrorAction SilentlyContinue)) {
-  throw "port $Port is in use or rust-suzuri is running: another update test may be going; stop it first"
+if ($busy -or (Get-Process suzuri -ErrorAction SilentlyContinue)) {
+  throw "port $Port is in use or suzuri is running: another update test may be going; stop it first"
 }
 $T = Join-Path ([IO.Path]::GetTempPath()) ("rsz-uptest-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force $T | Out-Null
@@ -35,7 +35,7 @@ foreach ($v in @($Old, $New)) {
   & (Join-Path $PSScriptRoot "build-windows.ps1") -Version $v -NoUpload -ExtraConfig $overlayFile
 }
 $dist = Join-Path $root "dist\$New"
-$newExe = "rust-suzuri_${New}_x64-setup.exe"
+$newExe = "suzuri_${New}_x64-setup.exe"
 # "--password=" passes an empty password (PowerShell 5 drops a bare "").
 cargo tauri signer sign -f $key "--password=" (Join-Path $dist $newExe) | Out-Null
 if (-not (Test-Path (Join-Path $dist "$newExe.sig"))) { throw "signer sign failed" }
@@ -65,40 +65,40 @@ Start-Sleep 2
 
 function Installed {
   Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
-    Where-Object { $_.DisplayName -eq "rust-suzuri" } | Select-Object -First 1
+    Where-Object { $_.DisplayName -eq "suzuri" } | Select-Object -First 1
 }
 $result = "FAIL"
 try {
-  $p = Start-Process (Join-Path $root "dist\$Old\rust-suzuri_${Old}_x64-setup.exe") -ArgumentList "/S" -PassThru -Wait
+  $p = Start-Process (Join-Path $root "dist\$Old\suzuri_${Old}_x64-setup.exe") -ArgumentList "/S" -PassThru -Wait
   $inst = Installed
   if (-not $inst) { throw "install of $Old not found in the registry" }
   $dir = $inst.InstallLocation.Trim('"')
   Write-Host "==> installed $($inst.DisplayVersion) at $dir, feed offers $New"
-  foreach ($f in "rust-suzuri.exe", "conpty.dll", "OpenConsole.exe") {
+  foreach ($f in "suzuri.exe", "conpty.dll", "OpenConsole.exe") {
     if (-not (Test-Path (Join-Path $dir $f))) { throw "missing $f in $dir" }
   }
-  Write-Host "==> conpty.dll and OpenConsole.exe are next to rust-suzuri.exe"
+  Write-Host "==> conpty.dll and OpenConsole.exe are next to suzuri.exe"
 
   $env:RSZ_UPDATE_AUTO = "1"; $env:RSZ_UPDATE_URL = "http://127.0.0.1:$Port/latest.json"
   # Its own config dir, so the test app never takes over a running suzuri's
   # bridge.json / ai.json (the install location doesn't come from this).
   $realLocal = $env:LOCALAPPDATA
   $env:LOCALAPPDATA = Join-Path $T "cfg"; New-Item -ItemType Directory -Force $env:LOCALAPPDATA | Out-Null
-  Start-Process (Join-Path $dir "rust-suzuri.exe") -RedirectStandardError (Join-Path $T "app.err") | Out-Null
+  Start-Process (Join-Path $dir "suzuri.exe") -RedirectStandardError (Join-Path $T "app.err") | Out-Null
   $env:LOCALAPPDATA = $realLocal
   Remove-Item Env:RSZ_UPDATE_AUTO, Env:RSZ_UPDATE_URL
   for ($i = 0; $i -lt 120; $i++) { if ((Installed).DisplayVersion -eq $New) { break }; Start-Sleep 1 }
   Start-Sleep 5
   Get-Content (Join-Path $T "app.err") -ErrorAction SilentlyContinue
   $now = (Installed).DisplayVersion
-  $exeVer = (Get-Item (Join-Path $dir "rust-suzuri.exe")).VersionInfo.ProductVersion
+  $exeVer = (Get-Item (Join-Path $dir "suzuri.exe")).VersionInfo.ProductVersion
   Write-Host "==> registry version $now, exe version $exeVer"
   if ($now -eq $New -and $exeVer -like "$New*") { $result = "PASS: $Old updated itself to $New" }
   else { $result = "FAIL: still $now / $exeVer" }
 } finally {
   Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
   if (-not $Keep) {
-    Get-Process rust-suzuri -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process suzuri -ErrorAction SilentlyContinue | Stop-Process -Force
     $inst = Installed
     if ($inst) { Start-Process $inst.UninstallString.Trim('"') -ArgumentList "/S" -Wait }
   }

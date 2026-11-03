@@ -1,7 +1,7 @@
 //! New window and the Windows single instance (Go suzuri's new_window.go
 //! and single_instance_windows.go).
 //!
-//! A new window is a second rust-suzuri process, as in Go: each process has
+//! A new window is a second suzuri process, as in Go: each process has
 //! one window, one frame socket and its own panes. On Windows a plain second
 //! launch focuses the running window instead of opening another
 //! (tauri-plugin-single-instance); a new-window launch sets RSZ_NEW_WINDOW
@@ -17,7 +17,7 @@ pub fn wants_single_instance(new_window: Option<&str>, allow_multi: Option<&str>
     cfg!(windows) && new_window.is_none_or(|v| v.is_empty()) && allow_multi != Some("1")
 }
 
-/// Starts another rust-suzuri process, which opens its own window.
+/// Starts another suzuri process, which opens its own window.
 #[tauri::command]
 pub fn new_window() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;

@@ -85,7 +85,7 @@ impl Drop for PsuedoCon {
 impl PsuedoCon {
     pub fn new(size: COORD, input: FileDescriptor, output: FileDescriptor) -> Result<Self, Error> {
         let mut con: HPCON = INVALID_HANDLE_VALUE;
-        // rust-suzuri (#288): Go suzuri's flags, 0. portable-pty's
+        // suzuri (#288): Go suzuri's flags, 0. portable-pty's
         // defaults (INHERIT_CURSOR | RESIZE_QUIRK | WIN32_INPUT_MODE) broke
         // the bundled OpenConsole: with WIN32_INPUT_MODE a raw 0x03 is a
         // character, not Ctrl+C, and INHERIT_CURSOR's ESC[6n start put

@@ -1,6 +1,6 @@
 //! A small MCP (JSON-RPC over stdio) client for Go suzuri's `suzuri mcp`.
 //!
-//! rust-suzuri's workspace panel reads and writes the shared workspace through
+//! suzuri's workspace panel reads and writes the shared workspace through
 //! the same Go store the agents use, so the files never drift between two
 //! implementations. One long-lived child; calls are serialized by id.
 
@@ -80,7 +80,7 @@ impl McpClient {
             json!({
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": { "name": "rust-suzuri", "version": env!("CARGO_PKG_VERSION") }
+                "clientInfo": { "name": "suzuri", "version": env!("CARGO_PKG_VERSION") }
             }),
         )?;
         p.notify("notifications/initialized")?;

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "rust-suzuri terminal core: per-pane PTY actor, VT engine, damage frames"
+description = "suzuri terminal core: per-pane PTY actor, VT engine, damage frames"
 
 [dependencies]
 alacritty_terminal = { workspace = true }

@@ -1,4 +1,4 @@
-//! `rust-suzuri notify` (Go suzuri's `suzuri notify`, internal/ui/notify_cli.go):
+//! `suzuri notify` (Go suzuri's `suzuri notify`, internal/ui/notify_cli.go):
 //! play the editor notification sounds, or show the notice cards a terminal
 //! program would get, without opening a terminal window.
 //!

@@ -1,7 +1,7 @@
 # Fetches OpenConsole's conpty.dll + OpenConsole.exe (Microsoft's
 # Microsoft.Windows.Console.ConPTY NuGet package, MIT) into
 # packaging/windows/conpty/. The NSIS installer puts both next to
-# rust-suzuri.exe, and portable-pty loads that conpty.dll before the
+# suzuri.exe, and portable-pty loads that conpty.dll before the
 # system one. The package hash is pinned: bump both together.
 param([string]$Arch = "x64")
 $ErrorActionPreference = "Stop"

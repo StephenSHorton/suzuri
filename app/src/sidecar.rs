@@ -1,6 +1,6 @@
 //! Where Go suzuri keeps its files, and where its helper binaries live.
 //!
-//! rust-suzuri shares Go suzuri's config dir (bridge.json, notes, workspace,
+//! suzuri shares Go suzuri's config dir (bridge.json, notes, workspace,
 //! transfer identity) so `suzuri mcp` and the other helpers work unchanged.
 
 use std::path::PathBuf;
@@ -67,6 +67,8 @@ pub fn install_dirs() -> Vec<PathBuf> {
 }
 
 /// Find a helper binary: `env` override, then [`install_dirs`], then PATH.
+/// This app's own executable never counts: it is named `suzuri` too, and
+/// does not serve Go's subcommands (`suzuri mcp` would open a window).
 pub fn find(env: &str, names: &[&str]) -> Option<PathBuf> {
     if let Ok(p) = std::env::var(env) {
         let p = PathBuf::from(p.trim());
@@ -74,19 +76,14 @@ pub fn find(env: &str, names: &[&str]) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    for dir in install_dirs() {
+    let me = std::env::current_exe().ok().map(|e| e.canonicalize().unwrap_or(e));
+    let usable = |c: &PathBuf| c.is_file() && me.as_ref() != Some(&c.canonicalize().unwrap_or_else(|_| c.clone()));
+    let path = std::env::var_os("PATH");
+    let dirs = install_dirs().into_iter().chain(path.iter().flat_map(std::env::split_paths));
+    for dir in dirs {
         for n in names {
             let c = dir.join(exe_name(n));
-            if c.is_file() {
-                return Some(c);
-            }
-        }
-    }
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        for n in names {
-            let c = dir.join(exe_name(n));
-            if c.is_file() {
+            if usable(&c) {
                 return Some(c);
             }
         }
