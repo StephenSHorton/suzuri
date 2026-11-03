@@ -4,7 +4,7 @@
 // and the wheel come back out as host calls. No Tauri, no page globals:
 // every listener, timer and observer it adds is its own and unmount()
 // removes them. Types: index.d.ts.
-import { Screen, DEFAULT_STYLE, FORMAT_VERSION, fontStyle, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_FOCUS } from "./frame.js"
+import { Screen, DEFAULT_STYLE, FORMAT_VERSION, fontStyle, measureCell, cssSize, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_FOCUS } from "./frame.js"
 import { encodeKey } from "./keys.js"
 import { installPointer } from "./pointer.js"
 import { PaneImages } from "./images.js"
@@ -54,19 +54,71 @@ function releaseFace(doc, key) {
 
 const PASTE_DEBOUNCE_MS = 280 // one key press can arrive as a keydown and a menu action
 
+// Copy and paste chords (Go suzuri's): ⌘C/⌘V on macOS; elsewhere
+// Ctrl+Shift+C/V, Ctrl+Insert, Shift+Insert, Ctrl+V, and Ctrl+C when there
+// is a selection (otherwise it stays ^C). "copy-or-interrupt" is that
+// Ctrl+C: it copies, and sends ^C when there turned out to be nothing to copy.
+export function clipShortcut(e, isMac, hasSelection) {
+  const k = (e.key || "").toLowerCase()
+  if (e.altKey) return null
+  if (isMac) {
+    if (!e.metaKey || e.ctrlKey || e.shiftKey) return null
+    if (k === "c") return "copy"
+    if (k === "v") return "paste"
+    return null
+  }
+  if (e.metaKey) return null
+  if (e.ctrlKey && e.shiftKey && k === "c") return "copy"
+  if (e.ctrlKey && e.shiftKey && k === "v") return "paste"
+  if (e.ctrlKey && !e.shiftKey && e.key === "Insert") return "copy"
+  if (e.shiftKey && !e.ctrlKey && e.key === "Insert") return "paste"
+  if (e.ctrlKey && !e.shiftKey && k === "v") return "paste"
+  if (e.ctrlKey && !e.shiftKey && k === "c" && hasSelection) return "copy-or-interrupt"
+  return null
+}
+
+// What a view measures with when its host paints (opts.paint "external"):
+// a Screen's style and cell metrics with no canvas context, so the host can
+// still transfer the canvas to a worker.
+class Measure {
+  constructor(doc, style) {
+    this.doc = doc
+    this.style = { ...DEFAULT_STYLE, ...style }
+    this.cell = null
+  }
+  setStyle(st) { Screen.prototype.setStyle.call(this, st) }
+  cellMetrics() { return this.cell || (this.cell = measureCell(this.style, this.doc)) }
+  resetMetrics() { this.cell = null }
+  fontSpec() { return `${this.style.px}px ${this.style.family}` }
+}
+
 export function mount(el, host, opts = {}) {
   const doc = el.ownerDocument
   const win = doc.defaultView || globalThis
   const isMac = opts.isMac ?? (win.navigator?.platform || "").startsWith("Mac")
   const [padX, padY] = opts.padding || [6, 4]
+  const external = opts.paint === "external"
+  const reportFocus = opts.reportFocus ?? true
+  const caret = opts.caret || null
+  // Whether the host has a terminal behind the view yet (opts.ready); until
+  // then the pointer takes no press, selection or link hover.
+  const hostReady = opts.ready || (() => true)
+  // Frames the host holds and has not handed over yet (opts.framesPending):
+  // an imgpos waits for the next paint while there are any.
+  const framesPending = opts.framesPending || (() => false)
+  // Paste chords are debounced here unless the host debounces its own
+  // clipboard paste (opts.debouncePaste false).
+  const debouncePaste = opts.debouncePaste ?? true
   let readOnly = !!opts.readOnly
   let alive = true
 
   // ---- DOM: body > canvas, cursor, scrolled badge, error, textarea, preedit
-  // (the pointer adds .link-hover, the images their .imgs layer).
+  // (the pointer adds .link-hover, the images their .imgs layer). The body's
+  // size and clipping are the stylesheet's (view.css), so an app's own
+  // layout (suzuri's .pane .body) decides them.
   const make = (tag, cls) => { const d = doc.createElement(tag); if (cls) d.className = cls; return d }
   const body = make("div", "rsz-view body")
-  Object.assign(body.style, { position: "relative", width: "100%", height: "100%", overflow: "hidden", boxSizing: "border-box" })
+  body.style.position = "relative"
   body.style.setProperty("--rsz-pad-x", `${padX}px`)
   body.style.setProperty("--rsz-pad-y", `${padY}px`)
   const canvas = make("canvas")
@@ -88,13 +140,23 @@ export function mount(el, host, opts = {}) {
     position: "absolute", left: "0", top: "0", width: "1px", height: "16px", padding: "0", border: "0",
     opacity: "0", resize: "none", overflow: "hidden", zIndex: "-1", pointerEvents: "none",
   })
-  const preedit = make("div", "preedit")
+  const preedit = make("div", "preedit rsz-preedit")
   preedit.hidden = true
   Object.assign(preedit.style, { position: "absolute", pointerEvents: "none", whiteSpace: "pre" })
-  body.append(canvas, cursor, scrolled, error, input, preedit)
+  body.append(canvas, cursor, scrolled, error, input)
   el.append(body)
 
-  const screen = new Screen(canvas, win.devicePixelRatio || 1, DEFAULT_STYLE)
+  // With a caret element (opts.caret) the textarea and preedit sit on its
+  // client rect, in viewport coordinates, so it may lie outside the view;
+  // the preedit then goes on the document's body when a composition starts,
+  // above every view (as suzuri's one preedit was).
+  if (caret) input.style.position = preedit.style.position = "fixed"
+  const preeditHome = caret ? doc.body : body
+  if (!caret) body.append(preedit)
+
+  const screen = opts.screen
+    ? opts.screen(canvas)
+    : external ? new Measure(doc, DEFAULT_STYLE) : new Screen(canvas, win.devicePixelRatio || 1, DEFAULT_STYLE)
   const metrics = () => screen.cellMetrics()
   const images = new PaneImages(body, { padding: [padX, padY] })
 
@@ -115,7 +177,7 @@ export function mount(el, host, opts = {}) {
   const disposePointer = installPointer(pane, {
     isMac,
     metrics,
-    live: () => alive,
+    live: () => alive && hostReady(),
     focus: () => view.focus(),
     paste: () => paste(),
     select: (op, c) => { if (can()) host.select(op, c.col, c.row, c.right) },
@@ -137,18 +199,28 @@ export function mount(el, host, opts = {}) {
   function paintQueued() {
     raf = 0
     if (!alive || !queue.length) return
+    const t = now()
+    const frames = queue.length
     let h
+    let bytes = 0
     try {
-      for (const [buf, off] of queue) h = screen.apply(buf, off)
+      for (const [buf, off] of queue) {
+        h = screen.apply(buf, off)
+        bytes += buf.byteLength - off
+      }
     } catch (err) {
       queue.length = 0
       return showError(String(err.message || err))
     }
+    // Paint time is the applies alone, not the DOM work that follows them.
+    const stats = { frames, bytes, ms: now() - t }
     queue.length = 0
     hideError()
     afterPaint(h)
     host.ack(h.seq >>> 0)
+    host.onPaint?.(h, stats)
   }
+  const now = () => win.performance?.now?.() ?? Date.now()
 
   function showError(text) {
     error.textContent = text
@@ -162,6 +234,7 @@ export function mount(el, host, opts = {}) {
   }
 
   // DOM that follows a painted frame: modes, cursor, the scrolled badge.
+  // The caller then acks the frame and calls the host's onPaint.
   function afterPaint(h) {
     pane.modes = h.modes
     if (pendingPlace) {
@@ -183,8 +256,23 @@ export function mount(el, host, opts = {}) {
     placeInput()
   }
 
-  // The textarea and the IME preedit sit on the terminal's cursor.
+  // The textarea and the IME preedit sit on the terminal's cursor, or on the
+  // host's caret element. That one is read from layout, so only while the
+  // textarea has focus or a composition shows.
   function placeInput() {
+    if (!alive) return
+    if (caret) {
+      if (doc.activeElement !== input && preedit.hidden) return
+      const c = (caret() || cursor).getBoundingClientRect()
+      input.style.left = `${c.left}px`
+      input.style.top = `${c.top}px`
+      input.style.height = `${c.height || metrics().ch}px`
+      if (!preedit.hidden) {
+        preedit.style.left = input.style.left
+        preedit.style.top = input.style.top
+      }
+      return
+    }
     const { ch } = metrics()
     input.style.left = cursor.style.left || `${padX}px`
     input.style.top = cursor.style.top || `${padY}px`
@@ -224,56 +312,54 @@ export function mount(el, host, opts = {}) {
     if (!can()) return false
     return host.copy()
   }
+  // Committed text (IME, dead keys): the host's textFilter may take it.
+  function text(v) {
+    if (!canSend()) return
+    if (host.textFilter?.(v)) return
+    host.write(v)
+  }
   let lastPaste = 0
   function paste() {
     if (!canSend()) return
     const now = win.performance?.now?.() ?? Date.now()
-    if (now - lastPaste < PASTE_DEBOUNCE_MS) return
-    lastPaste = now
+    if (debouncePaste) {
+      if (now - lastPaste < PASTE_DEBOUNCE_MS) return
+      lastPaste = now
+    }
     host.paste(null)
   }
-  // Copy and paste chords (Go suzuri's): ⌘C/⌘V on macOS; elsewhere
-  // Ctrl+Shift+C/V, Ctrl+Insert, Shift+Insert, Ctrl+V, and Ctrl+C when
-  // there is a selection (otherwise it stays ^C).
-  function clipShortcut(e) {
-    const k = (e.key || "").toLowerCase()
-    if (e.altKey) return false
-    if (isMac) {
-      if (!e.metaKey || e.ctrlKey || e.shiftKey) return false
-      if (k === "c") return copy(), true
-      if (k === "v") return paste(), true
-      return false
-    }
-    if (e.metaKey) return false
-    if (e.ctrlKey && e.shiftKey && k === "c") return copy(), true
-    if (e.ctrlKey && e.shiftKey && k === "v") return paste(), true
-    if (e.ctrlKey && !e.shiftKey && e.key === "Insert") return copy(), true
-    if (e.shiftKey && !e.ctrlKey && e.key === "Insert") return paste(), true
-    if (e.ctrlKey && !e.shiftKey && k === "v") return paste(), true
-    if (e.ctrlKey && !e.shiftKey && k === "c" && pane.hasSelection) {
-      copy().then((had) => { if (!had) write("\x03") })
-      return true
-    }
-    return false
-  }
-  on(input, "keydown", (e) => {
-    if (e.isComposing) return
+  // A key for this view: its textarea's keydown, or one the host hands over
+  // (view.key) while the keyboard sits elsewhere.
+  function keydown(e) {
+    if (!alive || e.isComposing) return
     if (host.keyFilter?.(e)) return
-    if (clipShortcut(e)) { e.preventDefault(); return }
+    const clip = clipShortcut(e, isMac, pane.hasSelection)
+    if (clip) {
+      e.preventDefault()
+      if (clip === "paste") paste()
+      else if (clip === "copy") copy()
+      else copy().then((had) => { if (!had) write("\x03") })
+      return
+    }
     if (e.key === "Escape" && images.closeLarge()) { e.preventDefault(); return }
-    if (!canSend()) return
+    // An encodable key is the terminal's even after the exit, when nothing
+    // is sent: no browser default, such as Tab moving focus. (A read-only
+    // view leaves keys to the page.)
+    if (!can()) return
     const data = encodeKey(e, pane.modes, isMac)
     if (data == null) return
     e.preventDefault()
     write(data)
-  })
+  }
+  on(input, "keydown", keydown)
   // Text that arrives without a usable keydown (IME commit, dead keys).
   on(input, "input", (e) => {
     const v = input.value
     input.value = ""
-    if (v && !e.isComposing) write(v)
+    if (v && !e.isComposing) text(v)
   })
   on(input, "compositionstart", () => {
+    if (!preeditHome.contains(preedit)) preeditHome.append(preedit)
     preedit.hidden = false
     placeInput()
   })
@@ -284,25 +370,33 @@ export function mount(el, host, opts = {}) {
   on(input, "compositionend", () => {
     preedit.hidden = true
     preedit.textContent = ""
+    if (caret) preedit.remove() // one on the page at a time
     const v = input.value
     input.value = ""
-    if (v) write(v)
+    if (v) text(v)
   })
   on(input, "paste", (e) => {
     e.preventDefault()
-    const text = e.clipboardData?.getData("text/plain")
-    if (text && canSend()) host.paste(text)
+    if (!canSend()) return
+    const cd = e.clipboardData
+    if (cd && host.pasteFilter?.(cd)) return
+    const t = cd?.getData("text/plain")
+    if (t) host.paste(t)
   })
-  on(input, "focus", () => {
-    if (!alive) return
-    host.focus(true)
-    if (pane.modes & M_FOCUS) write("\x1b[I")
-  })
-  on(input, "blur", () => {
-    if (!alive) return
-    host.focus(false)
-    if (pane.modes & M_FOCUS) write("\x1b[O")
-  })
+  // Focus reports follow the textarea's focus, unless the host reports
+  // focus itself (opts.reportFocus false, as suzuri does for its panes).
+  if (reportFocus) {
+    on(input, "focus", () => {
+      if (!alive) return
+      host.focus(true)
+      if (pane.modes & M_FOCUS) write("\x1b[I")
+    })
+    on(input, "blur", () => {
+      if (!alive) return
+      host.focus(false)
+      if (pane.modes & M_FOCUS) write("\x1b[O")
+    })
+  }
 
   // ---- the wheel: to the app when it reports the mouse, arrow keys on the
   // alt screen when it asked for them, else the history.
@@ -317,8 +411,11 @@ export function mount(el, host, opts = {}) {
     if (pane.wheelToApp?.(e, lines)) return
     if (pane.modes & M_ALT_SCREEN) {
       if (pane.modes & M_ALT_SCROLL) {
-        const seq = (pane.modes & M_APP_CURSOR ? "\x1bO" : "\x1b[") + (lines < 0 ? "A" : "B")
-        write(seq.repeat(Math.abs(lines)))
+        const seq = ((pane.modes & M_APP_CURSOR ? "\x1bO" : "\x1b[") + (lines < 0 ? "A" : "B")).repeat(Math.abs(lines))
+        // host.wheelKeys, when the host has it, takes them as they are
+        // (suzuri: straight to the PTY, not timed as typed input).
+        if (host.wheelKeys) host.wheelKeys(seq)
+        else write(seq)
       }
       return
     }
@@ -338,11 +435,31 @@ export function mount(el, host, opts = {}) {
     host.redraw()
   }
 
+  // A frame the host painted (opts.paint "external"): the canvas's CSS size
+  // follows its grid and cells here, since the host's canvas has no style.
+  let css = null
+  function paintedOutside(h) {
+    const m = metrics()
+    if (!css || css[0] !== h.cols || css[1] !== h.rows || css[2] !== m) {
+      css = [h.cols, h.rows, m]
+      cssSize(canvas, h.cols, h.rows, m)
+    }
+    hideError()
+    afterPaint(h)
+    host.ack(h.seq >>> 0)
+    host.onPaint?.(h)
+  }
+
   const view = {
     feed(frame, off = 0) {
       if (!alive) return
+      if (external) throw new Error(`feed: this view's host paints (paint: "external"); call painted(header)`)
       const buf = toBuffer(frame)
-      if (buf.byteLength - off < 32) return
+      if (buf.byteLength - off < 32) {
+        // Refused, not acked, as a frame in another version is.
+        queue.length = 0
+        return showError(`terminal frame of ${Math.max(0, buf.byteLength - off)} bytes, shorter than its 32-byte header`)
+      }
       const version = new DataView(buf, off).getUint8(11)
       if (version !== FORMAT_VERSION) {
         // Refused, not acked: the host sends nothing more until a view that
@@ -367,7 +484,8 @@ export function mount(el, host, opts = {}) {
         case "imgdrop": images.drop(msg.ids); break
         case "imgpos":
           // With the frame it goes with, if that frame is still queued.
-          if (queue.length) pendingPlace = msg.list
+          // (Queued here, or still held by the host.)
+          if (queue.length || framesPending()) pendingPlace = msg.list
           else images.place(msg.list)
           break
         case "progress":
@@ -416,7 +534,21 @@ export function mount(el, host, opts = {}) {
     },
 
     focus() {
-      if (alive) input.focus({ preventScroll: true })
+      if (!alive) return
+      input.focus({ preventScroll: true })
+      placeInput()
+    },
+
+    fit() { fit() },
+
+    key(e) { keydown(e) },
+
+    placeInput() { placeInput() },
+
+    painted(h) {
+      if (!alive) return
+      if (!external) throw new Error(`painted: only for a view whose host paints (paint: "external")`)
+      paintedOutside(h)
     },
 
     unmount() {
@@ -431,15 +563,20 @@ export function mount(el, host, opts = {}) {
       disposePointer()
       for (const [t, type, fn, o] of listeners) t.removeEventListener(type, fn, o)
       listeners.length = 0
-      images.closeLarge()
+      // A large image this view opened stays up, as suzuri's did when its
+      // pane closed: a click on it (or the app) closes it.
       images.destroy()
       if (faceKey) releaseFace(doc, faceKey)
       faceKey = null
       body.remove()
-      if (hadFocus) host.focus(false)
+      preedit.remove()
+      if (hadFocus && reportFocus) host.focus(false)
     },
 
     title: "",
+    get modes() { return pane.modes },
+    get hasSelection() { return pane.hasSelection },
+    canvas,
   }
 
   placeInput()

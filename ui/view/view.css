@@ -5,7 +5,7 @@
   font-family: "Gohu";
   src: url("fonts/GohuFontuni14NerdFontMono-Regular.ttf") format("truetype");
 }
-.rsz-view { cursor: text; outline: none; }
+.rsz-view { width: 100%; height: 100%; box-sizing: border-box; overflow: hidden; cursor: text; outline: none; }
 .rsz-view canvas { image-rendering: pixelated; }
 .rsz-view .cursor { background: var(--rsz-cursor, #c8c8d0); opacity: .85; mix-blend-mode: difference; }
 .rsz-view .cursor.underline { height: 2px !important; margin-top: calc(var(--ch) - 2px); }
@@ -21,7 +21,7 @@
 }
 .rsz-view.on-link { cursor: pointer; }
 .rsz-view .link-hover { position: absolute; pointer-events: none; border-bottom: 1px solid var(--rsz-link, #b8a0c8); background: rgba(184, 160, 200, .12); }
-.rsz-view .preedit { z-index: 5; color: var(--rsz-preedit, #e8e8ec); background: var(--rsz-preedit-bg, #16161c); border-bottom: 1px solid var(--rsz-link, #b8a0c8); }
+.rsz-view .preedit, .rsz-preedit { z-index: 5; color: var(--rsz-preedit, #e8e8ec); background: var(--rsz-preedit-bg, #16161c); border-bottom: 1px solid var(--rsz-link, #b8a0c8); }
 .rsz-view .imgs { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .rsz-view .imgs .img { position: absolute; left: 0; top: 0; image-rendering: auto; }
 .rsz-view .imgs .img.inline { pointer-events: auto; cursor: zoom-in; border-radius: 3px; }

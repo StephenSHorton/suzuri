@@ -2,7 +2,7 @@
 
 suzuri's terminal view as a package. It paints `rsz-term` frames on a canvas and turns keys, IME text, paste, the mouse and the wheel into calls on a `host` object. It has no Tauri code: each app wires the host to its own IPC.
 
-It is plain ESM with hand-written types (`index.d.ts`) and no dependencies. Its version is the same as the `rsz-term` crate's, and both move in one suzuri tag. `feed` checks the frame format version (header byte 11). A frame in another version is refused and the view shows "terminal format vN, this app knows vM". That frame is not acked.
+It is plain ESM with hand-written types (`index.d.ts`) and no dependencies. Its version is the same as the `rsz-term` crate's, and both move in one suzuri tag. `feed` checks the frame's length (at least its 32-byte header) and format version (header byte 11). A frame too short or in another version is refused, the view shows why (for a version, "terminal format vN, this app knows vM"), and that frame is not acked.
 
 ## Embedding
 
@@ -39,11 +39,37 @@ view.focus()
 view.unmount()
 ```
 
-Every view has its own style, cell metrics, textarea, image layer and image modal, so two terminals on one page can differ. `unmount()` removes every listener, animation frame and observer the view added.
+Every view has its own style, cell metrics, textarea, image layer and image modal, so two terminals on one page can differ. `unmount()` removes every listener, animation frame and observer the view added; a large image the view opened stays up until it is clicked.
 
 `setReadOnly(true)` stops writes, pastes, mouse reports, scrolling, selection and copy from reaching the host. After an `exit` message the view stops writes and pastes only: the history can still be scrolled, selected (a drag already under way) and copied, as in suzuri. A new press on an exited terminal is ignored.
 
-An error (a frame in another format version, or a frame that fails to paint) shows in the view until the next frame paints or `setStyle` is called. When the view is unmounted while it has focus, it calls `host.focus(false)`.
+### Hooks for an app with its own chrome
+
+suzuri itself mounts every pane this way (`ui/app.js`, `ui/pane_input.js`), with a few more hooks, all optional:
+
+- `host.keyFilter(e)`, `host.textFilter(text)`, `host.pasteFilter(clipboard)`: the app's shortcuts, IME text and paste events go to the app first; `true` means it took them. suzuri's input bar takes keys and text at a prompt, and an image pasted on the alt screen becomes a file path. A keyFilter that wants the view's copy/paste chords to stay the view's can ask `clipShortcut(e, isMac, view.hasSelection)`.
+- `host.wheelKeys(data)`: the arrow keys the wheel sends on an alt screen that asked for them (default: `write`); suzuri sends them straight to the PTY, untimed.
+- `host.onPaint(header, stats)`: after each paint and its ack (suzuri re-renders its input bar when the alt screen flips, and counts paint stats and input latency).
+- `mount(el, host, { reportFocus: false })`: the textarea's focus and blur report nothing; the app reports which pane is focused itself.
+- `mount(el, host, { ready: () => bool })`: while false the pointer ignores the mouse (no press, selection, mouse report or link hover); suzuri's panes are not ready until `pane_open` has answered.
+- `mount(el, host, { caret: () => element })`: the IME textarea and preedit sit on that element (suzuri: the input bar's caret at a prompt), placed in viewport coordinates. `view.placeInput()` places them again after the element moved.
+- `mount(el, host, { screen: (canvas) => screen })`: the Screen that paints and measures (suzuri's follow its one window style). `view.fit()` refits after a font change made that way.
+- `mount(el, host, { paint: "external" })`: the app paints, e.g. in a worker after `view.canvas.transferControlToOffscreen()`. The view makes no canvas context, `feed` throws, and the app calls `view.painted(header)` for each painted frame (cursor, badge, the canvas's CSS size, `ack`, then `onPaint`).
+- `mount(el, host, { framesPending: () => bool })`: while true an `imgpos` waits for the next painted frame instead of placing now (suzuri: a worker pane's frames wait until `pane_open` answers).
+- `mount(el, host, { debouncePaste: false })`: every paste chord calls `host.paste(null)`; the host debounces its own clipboard paste (suzuri's one 280 ms debounce also covers the macOS Edit menu). Default: chords within 280 ms are one paste.
+- `view.key(e)`: a keydown that landed elsewhere (suzuri: the page itself focused while a pane is) handled as the textarea's would be: `keyFilter`, the clipboard chords, the encoder.
+- `view.modes` (the last frame's mode bits) and `view.hasSelection`.
+
+An error (a frame shorter than its 32-byte header, a frame in another format version, or a frame that fails to paint) shows in the view until the next frame paints or `setStyle` is called. When the view is unmounted while it has focus, it calls `host.focus(false)`.
+
+## Differences from suzuri 0.10 behaviour
+
+suzuri 0.10 had one hidden textarea and one paint loop for every pane in `ui/app.js`. Running each pane through its own view changes these, by design:
+
+- **One IME textarea per view.** Each pane has its own textarea, so the keyboard moves between textareas when the focused pane changes, and an IME composition under way ends when focus moves to another pane or the pane's element is re-parented (a split, close, move or maximize rebuilds the layout). suzuri 0.10's single textarea never moved, so a composition survived those.
+- **One `requestAnimationFrame` per view.** Each view schedules its own animation frame for its queued frames, instead of one shared loop painting every pane. Panes still paint in the same browser frame, each acking its own frames as before.
+- **Bad frames show an error.** A frame shorter than its 32-byte header, or in another format version, is dropped with everything queued behind it, shown in the view's `.rsz-error` banner, and not acked. In suzuri 0.10 the decoder threw on a version mismatch inside the paint loop (logged, no banner, the queue not dropped), and a short frame was not checked at all.
+- **`pane_cell_px` on open.** When `pane_open` answers, a new pane sends its cell pixels (`pane_cell_px`), and `pane_resize` too if the view's fit came out other than the size it opened at, because the view measured and fit before the pane had an id.
 
 ## Files
 

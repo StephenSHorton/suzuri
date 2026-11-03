@@ -181,11 +181,16 @@ input.rename {
 .settings .foot { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--hair); }
 .settings .foot .status { flex: 1; min-width: 0; text-align: right; color: var(--mute); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .settings .foot .ok { color: var(--text); border-color: var(--primary); }
-/* Links under the pointer (pointer.js): underlined, with a hand. */
+/* Links under the pointer (ui/view/pointer.js): underlined, with a hand. */
 .pane .body.on-link { cursor: pointer; }
 .pane .link-hover {
   position: absolute; pointer-events: none;
   border-bottom: 1px solid var(--primary); background: rgba(184,160,200,.12);
+}
+/* A frame the view couldn't paint (ui/view: another format version, or shorter than its header). */
+.pane .rsz-error {
+  position: absolute; left: 6px; right: 6px; bottom: 4px; padding: 4px 8px; border-radius: 4px;
+  background: rgba(160, 60, 60, .85); color: #fff; font-size: 12px;
 }
 /* IME: the text being composed, drawn over the cursor until it commits. */
 .preedit {

@@ -1,7 +1,12 @@
 // rust-suzuri UI: split layout, focus, input and painting. The terminal
 // state lives in Rust; this only lays out panes and paints their frames.
-import { Screen, cellMetrics, cssSize, onStyle, styleState, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_FOCUS } from "./frame.js"
-import { encodeKey } from "./keys.js"
+// Each pane's terminal is a TermView from the view package (ui/view: the
+// canvas, keys, IME, paste, the pointer and the wheel); this wires each one
+// to the pane_* commands through its TermHost, and keeps the tabs, splits,
+// input bar, settings, HUD and the paint worker.
+import { Screen, cellMetrics, fontSpec, onStyle, styleState, M_ALT_SCREEN, M_FOCUS } from "./frame.js"
+import { mount } from "./view/index.js"
+import { keyFilter, pageKeys, textFilter, pasteFilter, pasteText, writeFrom } from "./pane_input.js"
 import { clipboardImage, saveClipboardImage } from "./paste_image.js"
 import { extraShortcut } from "./extras.js"
 import { isOpen as panelOpen } from "./panel.js"
@@ -13,10 +18,9 @@ import { InputBar, PROMPT, barKey, displayPath } from "./bar.js"
 import { shortcut, chordLabel } from "./shortcuts.js"
 import { Palette } from "./palette.js"
 import { Settings, announce } from "./settings.js"
-import { installPointer } from "./pointer.js"
 import { loadAppearance, zoom } from "./appearance.js"
 import { complete, ghostSuffix, DirCache, PENDING } from "./complete.js"
-import { PaneImages, closeLarge } from "./images.js"
+import { closeLarge } from "./images.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -30,19 +34,10 @@ const root = document.getElementById("root")
 const strip = document.getElementById("tabs")
 const hud = document.getElementById("hud")
 
-// One hidden textarea holds keyboard focus for every pane, so paste and IME
-// events have somewhere to land.
-const input = document.createElement("textarea")
-input.setAttribute("autocapitalize", "off")
-input.setAttribute("autocomplete", "off")
-input.spellcheck = false
-// It sits on the cursor (placeInput) so IME candidate windows open there;
-// transparent text and caret keep it invisible.
-Object.assign(input.style, {
-  position: "fixed", left: "0", top: "0", width: "1px", height: "16px", padding: "0", border: "0",
-  opacity: "0", resize: "none", overflow: "hidden", zIndex: "-1", pointerEvents: "none",
-})
-document.body.appendChild(input)
+// Each pane's view has its own hidden textarea; the focused pane's holds
+// the keyboard (paste and IME events land there). With no pane focused the
+// page keeps the keys, and pageKeys (below) still runs the app shortcuts.
+const focusInput = () => focused?.view.focus()
 
 // ---- latency: oldest unpainted input -> end of the frame that paints it.
 // Samples over 250 ms are dropped (oak's definition on #255, shared with
@@ -66,7 +61,7 @@ let focused = null // the active tab's focused pane
 const byId = new Map()
 const early = new Map() // frames that beat pane_open's reply, by pane id
 
-// Painting: the UI thread paints each pane's frames in requestAnimationFrame
+// Painting: each pane's view paints its frames in requestAnimationFrame
 // (default). RSZ_PAINT=worker hands every canvas to the paint worker
 // (paint-worker.js) as an OffscreenCanvas, and the worker owns the frame
 // socket: it paints frames as they arrive and acks them itself. On #289's
@@ -74,24 +69,26 @@ const early = new Map() // frames that beat pane_open's reply, by pane id
 // (a second JS heap and its canvases), so it stays opt-in.
 let worker = null
 const FONT = ["Gohu", "view/fonts/GohuFontuni14NerdFontMono-Regular.ttf"]
+// With the worker, a view only measures: the window's cells (frame.js).
+const WINDOW_CELLS = { cellMetrics, fontSpec, setStyle() {}, resetMetrics() {} }
 
-// Flow control: tell the pane its frames up to lastSeq are painted, so it
-// may send the next (one frame in flight per pane).
+// Flow control: tell the pane its frames up to seq are painted, so it may
+// send the next (one frame in flight per pane).
 let frameSock = null
-function ackFrame(p) {
+function ackFrame(p, seq) {
   if (!p.id) return
   if (worker) {
     // The worker acks socket frames itself; Channel frames ack here.
-    if (!frameSock) invoke("pane_ack", { id: p.id, seq: p.lastSeq >>> 0 })
+    if (!frameSock) invoke("pane_ack", { id: p.id, seq: seq >>> 0 })
     return
   }
   if (frameSock && frameSock.readyState === 1) {
     const b = new DataView(new ArrayBuffer(8))
     b.setUint32(0, p.id, true)
-    b.setUint32(4, p.lastSeq >>> 0, true)
+    b.setUint32(4, seq >>> 0, true)
     frameSock.send(b.buffer)
   } else {
-    invoke("pane_ack", { id: p.id, seq: p.lastSeq >>> 0 })
+    invoke("pane_ack", { id: p.id, seq: seq >>> 0 })
   }
 }
 
@@ -162,6 +159,56 @@ function onPainted(m) {
   }
 }
 
+// A pane's TermHost: the view's calls as pane_* commands. Nothing reaches
+// the core before pane_open has answered (the pane has no id until then).
+function paneHost(p) {
+  return {
+    write: writeFrom(p),
+    // null: ⌘V / Ctrl+V / right-click, the clipboard as the core reads it.
+    paste: (text) => (text == null ? paste(p) : pasteText(p, text, invoke)),
+    // p.size is what the core has: pane_open's size, then each change.
+    // Before pane_open answers the view's fit waits in p.fitSize.
+    resize: (cols, rows) => {
+      if (!p.id) return void (p.fitSize = [cols, rows])
+      if (cols === p.size[0] && rows === p.size[1]) return
+      p.size = [cols, rows]
+      invoke("pane_resize", { id: p.id, cols, rows })
+    },
+    // Inline images are sized in cells on the Rust side (card #288). Before
+    // pane_open answers it waits in p.cell, and open() sends it.
+    cellPx: (w, h) => {
+      p.cell = [w, h]
+      if (p.id) invoke("pane_cell_px", { id: p.id, w, h })
+    },
+    scroll: (delta) => { if (p.id) invoke("pane_scroll", { id: p.id, delta }) },
+    // The wheel's arrow keys on an alt screen: straight to the PTY, not
+    // timed as typed input.
+    wheelKeys: (data) => invoke("pane_write", { id: p.id, data }),
+    ack: (seq) => ackFrame(p, seq),
+    redraw: () => { if (p.id) invoke("pane_redraw", { id: p.id }) },
+    focus: () => {}, // setFocus reports the focused pane (mount's reportFocus: false)
+    select: (op, col, row, right) => { if (p.id) invoke("pane_select", { id: p.id, op, col, row, right }) },
+    copy: () => copy(p),
+    mouse: (ev) => { if (p.id) invoke("pane_mouse", { id: p.id, ev }) },
+    link: (col, row) => (p.id ? invoke("pane_link", { id: p.id, col, row }) : Promise.resolve(null)),
+    // rszDryOpen: the selftest's hook (selftest.js), so a test click opens nothing.
+    openUrl: (url) => {
+      if (window.rszDryOpen) window.rszDryOpen(url)
+      else invoke("open_url", { url }).catch((err) => console.warn(err))
+    },
+    keyFilter: keyFilter(p, {
+      isMac, shortcut, extraShortcut, closeLarge,
+      run: (id, arg) => run(id, arg),
+      now: () => performance.now(),
+      copyOrInterrupt,
+    }),
+    textFilter: textFilter(p),
+    pasteFilter: pasteFilter(p, { invoke, log, clipboardImage, saveClipboardImage }),
+    onMessage: (msg) => p.onMessage(msg),
+    onPaint: (h, stats) => p.onPaint(h, stats),
+  }
+}
+
 class PaneView {
   constructor(tab) {
     this.tab = tab
@@ -171,21 +218,12 @@ class PaneView {
     this.head = document.createElement("div")
     this.head.className = "head"
     this.head.innerHTML = `<span class="dot"></span><span class="t">shell</span>`
-    this.body = document.createElement("div")
-    this.body.className = "body"
-    this.canvas = document.createElement("canvas")
-    this.cursor = document.createElement("div")
-    this.cursor.className = "cursor"
-    this.scrolled = document.createElement("div")
-    this.scrolled.className = "scrolled"
-    this.scrolled.hidden = true
-    this.body.append(this.canvas, this.cursor, this.scrolled)
+    this.el.append(this.head)
     // The input bar (#285): the shell's command line, under the screen.
     this.barEl = document.createElement("div")
     this.barEl.className = "inbar"
     this.barEl.hidden = true
     this.barEl.innerHTML = `<div class="cwd"></div><div class="lines"></div><div class="caret"></div>`
-    this.el.append(this.head, this.body, this.barEl)
     this.bar = new InputBar()
     // Directory listings for Tab and the ghost text (#295), from the shell's cwd.
     this.dirs = new DirCache({
@@ -198,30 +236,61 @@ class PaneView {
     // Set on Enter until the next prompt: the command owns the keys from
     // the moment it is sent, before the shell's start mark arrives.
     this.awaiting = -1
-    this.screen = worker ? null : new Screen(this.canvas, window.devicePixelRatio || 1)
-    this.images = new PaneImages(this.body)
-    this.queue = []
-    this.modes = 0
+    this.screen = null // the view's Screen (main-thread painting)
+    this.queue = [] // the worker's frames that came before pane_open answered
+    this.lastModes = 0
     this.title = "shell"
     this.id = 0
-    this.size = [0, 0]
+    this.size = [0, 0] // the core's (pane_open's, then each pane_resize)
+    this.fitSize = null // the view's fit before pane_open answered
+    this.cell = null // the view's cell pixels (pane_cell_px)
+    this.disposed = false
     this.pendingInput = 0 // timestamp of the oldest unpainted input
     this.pendingProbe = 0
+    this.keyTime = 0 // the key event whose bytes the view is writing (pane_input.js)
     this.exited = false
-    this.wheel = 0
-    this.el.addEventListener("mousedown", () => setFocus(this))
+    // The terminal: canvas, cursor, IME textarea, pointer, wheel, images.
+    // Its textarea sits on the input bar's caret at a prompt.
+    this.view = mount(this.el, paneHost(this), {
+      isMac,
+      reportFocus: false,
+      // The pointer acts only once pane_open has answered (the pane has an id).
+      ready: () => !!this.id,
+      caret: () => (this.barActive() ? this.barEl.querySelector(".caret") : this.cursor),
+      paint: worker ? "external" : "view",
+      // A worker pane's frames wait in this.queue until pane_open answers;
+      // an imgpos waits with them.
+      framesPending: () => this.queue.length > 0,
+      // paste() below debounces every clipboard paste, the view's chords too.
+      debouncePaste: false,
+      screen: worker ? () => WINDOW_CELLS : (c) => (this.screen = new Screen(c, window.devicePixelRatio || 1)),
+    })
+    this.el.append(this.barEl)
+    this.body = this.el.querySelector(".rsz-view")
+    this.canvas = this.view.canvas
+    this.cursor = this.body.querySelector(".cursor")
+    this.input = this.body.querySelector("textarea")
+    // A press focuses the pane before the pointer acts on it (capture runs
+    // ahead of the view's own listeners). Not inside the pane-rename box in
+    // the head: focusing the pane would blur it and end the rename.
+    this.el.addEventListener("mousedown", (e) => {
+      if (e.target.closest?.("input.rename")) return
+      setFocus(this)
+    }, true)
     this.head.addEventListener("dblclick", () => renamePane(this))
-    this.body.addEventListener("wheel", (e) => this.onWheel(e), { passive: true })
-    installPointer(this, { invoke, isMac, focus: setFocus, paste: () => paste() })
-    this.ro = new ResizeObserver(() => this.fit())
+    // The view refits itself; the bar follows the width.
+    this.ro = new ResizeObserver(() => { if (!this.barEl.hidden) this.renderBar() })
     this.ro.observe(this.body)
   }
+
+  // The last painted frame's modes (the view's).
+  get modes() { return this.view ? this.view.modes : 0 }
 
   // from: the pane this one splits from; the new shell starts in its cwd.
   // profile: a Settings profile's shell and folder (new tabs).
   async open(cols, rows, from = null, profile = null) {
     const ch = new Channel()
-    ch.onmessage = (m) => this.onMessage(m)
+    ch.onmessage = (m) => this.onChannel(m)
     this.size = [cols, rows]
     this.id = await invoke("pane_open", { cols, rows, command: null, from, profile, onFrame: ch })
     byId.set(this.id, this)
@@ -233,16 +302,32 @@ class PaneView {
     }
     for (const [buf, off] of early.get(this.id) || []) this.enqueue(buf, off)
     early.delete(this.id)
-    this.sendCell()
+    // The view measured before the pane had an id: its cell size, and a fit
+    // that came out other than the size it opened at.
+    if (this.cell) invoke("pane_cell_px", { id: this.id, w: this.cell[0], h: this.cell[1] })
+    const fs = this.fitSize
+    this.fitSize = null
+    if (fs && (fs[0] !== cols || fs[1] !== rows)) {
+      this.size = fs
+      invoke("pane_resize", { id: this.id, cols: fs[0], rows: fs[1] })
+    }
     invoke("pane_focus", { id: this.id, focused: focused === this })
   }
 
-  onMessage(m) {
+  // The pane's Channel: frames and messages.
+  onChannel(m) {
     if (firstMsg) { firstMsg = false; log("first msg", Object.prototype.toString.call(m), m?.byteLength ?? m?.length) }
     if (m instanceof ArrayBuffer) return this.enqueue(m)
     if (ArrayBuffer.isView(m)) return this.enqueue(m.buffer.slice(m.byteOffset, m.byteOffset + m.byteLength))
     if (Array.isArray(m)) return this.enqueue(new Uint8Array(m).buffer)
-    const msg = typeof m === "string" ? JSON.parse(m) : m
+    // The view takes title, exit, img, imgdrop, imgpos and progress, then
+    // hands every message to onMessage. A closed pane's view is gone, but
+    // what the core still sends (an OSC 52 copy, title, shell) is handled.
+    if (this.disposed) return this.onMessage(typeof m === "string" ? JSON.parse(m) : m)
+    this.view.message(m)
+  }
+
+  onMessage(msg) {
     if (msg.t === "title") {
       this.title = msg.title || "shell"
       this.showTitle()
@@ -256,14 +341,6 @@ class PaneView {
       this.shell = msg
       if (this.awaiting >= 0 && msg.prompts > this.awaiting) this.awaiting = -1
       this.renderBar()
-    } else if (msg.t === "img") {
-      this.images.add(msg)
-    } else if (msg.t === "imgdrop") {
-      this.images.drop(msg.ids)
-    } else if (msg.t === "imgpos") {
-      // With the frame it goes with, if that frame is still queued.
-      if (this.queue.length) this.pendingPlace = msg.list
-      else this.images.place(msg.list)
     } else if (msg.t === "progress") {
       this.el.dataset.progress = msg.state ? String(msg.state) : ""
       this.el.style.setProperty("--progress", `${msg.percent}%`)
@@ -321,7 +398,7 @@ class PaneView {
     caret.style.width = `${cw}px`
     caret.style.height = `${ch}px`
     caret.classList.toggle("dim", focused !== this)
-    if (focused === this) placeInput()
+    if (focused === this) this.view.placeInput()
   }
 
   // A key while the bar has the keys. True when it was the bar's.
@@ -433,88 +510,36 @@ class PaneView {
       worker.postMessage({ t: "frame", id: this.id, buf: b }, [b])
       return
     }
-    this.queue.push([buf, off])
-    scheduleFrame()
+    // The view paints it on the next animation frame, then acks it.
+    this.view.feed(buf, off)
   }
 
   // The worker painted this pane up to header h, at `now` (this thread's
-  // clock): move the cursor and chrome, ack, and time pending input.
+  // clock): the view moves the cursor and chrome and acks; time pending input.
   painted(h, now) {
-    if (h.cols !== this.cssCols || h.rows !== this.cssRows) {
-      this.cssCols = h.cols; this.cssRows = h.rows
-      cssSize(this.canvas, h.cols, h.rows)
-    }
-    this.afterPaint(h)
-    ackFrame(this)
+    this.view.painted(h)
     // The worker's paint reaches the screen with the next composite: time
     // input to this thread's next animation frame, the same point the
     // main-thread painter measures to (and never earlier than the pixels).
     if (this.pendingInput || this.pendingProbe) requestAnimationFrame(() => settleLatency(this, performance.now()))
   }
 
-  // Apply queued frames; returns true if something was painted.
-  flush() {
-    if (!this.queue.length) return false
-    const t = performance.now()
-    let h
-    for (const [buf, off] of this.queue) {
-      h = this.screen.apply(buf, off)
-      paint.bytes += buf.byteLength - off
-      paint.frames++
-    }
-    this.queue.length = 0
-    paint.applyMs += performance.now() - t
-    this.afterPaint(h)
-    return true
-  }
-
-  // DOM that follows a painted frame: modes, cursor, the scrolled badge.
-  afterPaint(h) {
-    const altFlip = (this.modes ^ h.modes) & M_ALT_SCREEN
-    this.modes = h.modes
-    this.lastSeq = h.seq
-    // Images placed for this frame go up with it (#288).
-    if (this.pendingPlace) {
-      this.images.place(this.pendingPlace)
-      this.pendingPlace = null
-    }
+  // After the view followed a painted frame, before its ack. stats: the
+  // view painted it (main thread), so it counts here and closes latency.
+  onPaint(h, stats) {
+    const altFlip = (this.lastModes ^ h.modes) & M_ALT_SCREEN
+    this.lastModes = h.modes
     if (altFlip) this.renderBar()
-    const { cw, ch } = cellMetrics()
-    const cs = this.cursor.style
-    this.cursor.hidden = h.shape === 0
-    this.cursor.className = "cursor " + (["", "", "underline", "beam", "hollow"][h.shape] || "")
-    cs.left = `${6 + h.cx * cw}px`
-    cs.top = `${4 + h.cy * ch}px`
-    cs.width = `${cw}px`
-    cs.height = `${ch}px`
-    cs.setProperty("--ch", `${ch}px`)
-    this.scrolled.hidden = h.offset === 0
-    if (h.offset) this.scrolled.textContent = `↑ ${h.offset} / ${h.history}`
-    this.onFrame?.()
-    if (focused === this) placeInput()
-  }
-
-  // Inline images are sized in cells on the Rust side (card #288).
-  sendCell() {
-    const { cw, ch } = cellMetrics()
-    if (cw === this.cell?.[0] && ch === this.cell?.[1]) return
-    this.cell = [cw, ch]
-    this.images.setCell(cw, ch)
-    if (this.id) invoke("pane_cell_px", { id: this.id, w: Math.round(cw), h: Math.round(ch) })
+    if (!stats) return
+    paint.frames += stats.frames
+    paint.bytes += stats.bytes
+    paint.applyMs += stats.ms
+    settleLatency(this, performance.now())
   }
 
   fit() {
     if (!this.barEl.hidden) this.renderBar()
-    this.sendCell()
-    const { cw, ch } = cellMetrics()
-    const w = this.body.clientWidth - 12
-    const hgt = this.body.clientHeight - 8
-    if (w <= 0 || hgt <= 0) return
-    const cols = Math.max(2, Math.floor(w / cw))
-    const rows = Math.max(1, Math.floor(hgt / ch))
-    if (cols === this.size[0] && rows === this.size[1]) return
-    this.size = [cols, rows]
-    if (this.id) invoke("pane_resize", { id: this.id, cols, rows })
+    this.view.fit()
   }
 
   send(data, t0) {
@@ -523,21 +548,11 @@ class PaneView {
     invoke("pane_write", { id: this.id, data })
   }
 
-  onWheel(e) {
-    const { ch } = cellMetrics()
-    this.wheel += e.deltaY / ch
-    const lines = Math.trunc(this.wheel)
-    if (!lines) return
-    this.wheel -= lines
-    if (this.wheelToApp?.(e, lines)) return
-    if (this.modes & M_ALT_SCREEN) {
-      if (this.modes & M_ALT_SCROLL) {
-        const seq = (this.modes & M_APP_CURSOR ? "\x1bO" : "\x1b[") + (lines < 0 ? "A" : "B")
-        invoke("pane_write", { id: this.id, data: seq.repeat(Math.abs(lines)) })
-      }
-      return
-    }
-    invoke("pane_scroll", { id: this.id, delta: -lines })
+  // The pane is gone: its view lets go of its DOM, listeners and frames.
+  dispose() {
+    this.disposed = true
+    this.ro.disconnect()
+    this.view.unmount()
   }
 }
 
@@ -546,21 +561,6 @@ const PATH_SEP = navigator.platform.startsWith("Win") ? "\\" : "/"
 
 // Horizontal padding inside the input bar (matches .inbar in style.css).
 const BAR_PAD_X = 8
-
-// ---- frames: everything queued is painted in one animation frame.
-let frameScheduled = false
-function scheduleFrame() {
-  if (frameScheduled) return
-  frameScheduled = true
-  requestAnimationFrame(() => {
-    frameScheduled = false
-    for (const p of everyPane()) {
-      if (!p.flush()) continue
-      ackFrame(p)
-      settleLatency(p, performance.now())
-    }
-  })
-}
 
 // A paint of pane p ended at `now`: that closes its pending input samples.
 function settleLatency(p, now) {
@@ -620,10 +620,15 @@ function render(tab = activeTab) {
     d.append(a, b)
     return d
   }
+  // Moving the panes' elements (build() puts them in new split boxes) takes
+  // the focus off a pane's textarea; it goes back after (the one textarea
+  // suzuri had never moved). Read before build() moves anything.
+  const had = document.activeElement
   // Maximized: only that pane shows; the others stay alive, detached.
   const top = tab.zoomed ? tab.zoomed.el : tab.tree ? build(tab.tree) : ""
   if (tab.zoomed) tab.zoomed.el.style.flex = "1 1 0"
   tab.el.replaceChildren(top)
+  if (had && had !== document.activeElement && had.isConnected && had.closest?.(".rsz-view")) had.focus({ preventScroll: true })
   tab.el.classList.toggle("zoomed", !!tab.zoomed)
   renderStrip()
 }
@@ -695,8 +700,7 @@ function closePane(pane) {
   if (!pane) return
   if (!pane.exited && pane.id) invoke("pane_close", { id: pane.id })
   pane.exited = true
-  pane.ro.disconnect()
-  pane.images.destroy()
+  pane.dispose()
   if (worker && pane.id) worker.postMessage({ t: "drop", id: pane.id })
   const tab = pane.tab
   if (!detachPane(pane)) return
@@ -742,7 +746,7 @@ function closeTab(t = activeTab) {
   for (const p of allPanes(t.tree)) {
     if (!p.exited && p.id) invoke("pane_close", { id: p.id })
     p.exited = true
-    p.ro.disconnect()
+    p.dispose()
   }
   t.tree = null
   if (tabs.length === 1) {
@@ -821,7 +825,7 @@ function editInline(host, value, done) {
     if (finished) return
     finished = true
     done(keep ? box.value.trim() : null)
-    input.focus()
+    focusInput()
   }
   box.addEventListener("keydown", (e) => {
     e.stopPropagation()
@@ -890,8 +894,7 @@ function setFocus(p, force = false) {
   if (prev && prev !== p) prev.renderBar()
   p.renderBar()
   renderStrip()
-  input.focus()
-  placeInput()
+  p.view.focus()
   if (prev && prev !== p && prev.id && !prev.exited) {
     invoke("pane_focus", { id: prev.id, focused: false })
     if (prev.modes & M_FOCUS) invoke("pane_write", { id: prev.id, data: "\x1b[O" })
@@ -943,8 +946,8 @@ function moveFocus(dx, dy) {
 // ---- commands: what the palette lists and the shortcuts run.
 let settingsCfg = null // the saved settings, for the profile entries
 const overlays = document.getElementById("overlays")
-const palette = new Palette(overlays, () => input.focus())
-const settings = new Settings(overlays, () => input.focus())
+const palette = new Palette(overlays, () => focusInput())
+const settings = new Settings(overlays, () => focusInput())
 const overlayOpen = () => palette.isOpen || settings.isOpen
 
 // Other parts add palette entries here: {id, title, category, hint?, run()}.
@@ -1051,43 +1054,38 @@ function openSettings() {
 
 window.addEventListener("rsz:config", (e) => { settingsCfg = e.detail })
 
-// ---- keys
-// ---- keys
-// Copy and paste chords (Go suzuri's): ⌘C/⌘V on macOS (also via the Edit
-// menu); on Windows Ctrl+Shift+C/V, Ctrl+Insert, Shift+Insert, Ctrl+V, and
-// Ctrl+C when there is a selection (otherwise it stays ^C).
-function clipShortcut(e) {
-  const k = (e.key || "").toLowerCase()
-  if (e.altKey) return false
-  if (isMac) {
-    if (!e.metaKey || e.ctrlKey || e.shiftKey) return false
-    if (k === "c") return copy(), true
-    if (k === "v") return paste(), true
-    return false
-  }
-  if (e.metaKey) return false
-  if (e.ctrlKey && e.shiftKey && k === "c") return copy(), true
-  if (e.ctrlKey && e.shiftKey && k === "v") return paste(), true
-  if (e.ctrlKey && !e.shiftKey && e.key === "Insert") return copy(), true
-  if (e.shiftKey && !e.ctrlKey && e.key === "Insert") return paste(), true
-  if (e.ctrlKey && !e.shiftKey && k === "v") return paste(), true
-  if (e.ctrlKey && !e.shiftKey && k === "c" && focused?.hasSelection) {
-    copy().then((had) => { if (!had) focused?.send("\x03") })
-    return true
-  }
-  return false
+// ---- keys: each pane's view takes its keys, IME and pastes (ui/view),
+// after suzuri's own (pane_input.js: shortcuts, the input bar).
+document.addEventListener("keydown", (e) => {
+  if (window.rszTrace && e.target?.closest?.(".rsz-view")) log("key", e.key, e.code, e.metaKey, e.ctrlKey, e.altKey, e.isComposing)
+}, true)
+
+// Ctrl+C with a selection: copy, and ^C to the pane focused by then when
+// there was nothing to copy (no key time: a ^C that is not a key's).
+function copyOrInterrupt() {
+  copy().then((had) => { if (!had) focused?.send("\x03") })
 }
 
-async function copy() {
-  if (!focused?.id) return false
-  const had = await invoke("pane_copy", { id: focused.id }).catch((err) => (log("copy", String(err)), false))
+// Keys with no pane's textarea focused (pane_input.js pageKeys).
+document.addEventListener("keydown", pageKeys({
+  isMac, page: [document.body, document.documentElement, null],
+  blocked: () => overlayOpen() || panelOpen(),
+  pane: () => (focused && !focused.disposed ? focused : null),
+  hasSelection: () => !!focused?.view.hasSelection,
+  clip: (kind) => (kind === "paste" ? paste() : kind === "copy" ? copy() : copyOrInterrupt()),
+  closeLarge, shortcut, extraShortcut,
+  run: (id, arg) => run(id, arg),
+}))
+
+async function copy(pane = focused) {
+  if (!pane?.id) return false
+  const had = await invoke("pane_copy", { id: pane.id }).catch((err) => (log("copy", String(err)), false))
   if (had) toast("copied")
   return had
 }
 let lastPaste = 0
-// ⌘V / Ctrl+V / right-click: the clipboard into the focused pane.
-async function paste() {
-  const pane = focused
+// ⌘V / Ctrl+V / right-click / the Edit menu: the clipboard into the pane.
+async function paste(pane = focused) {
   if (!pane?.id || pane.exited) return
   // One key press can arrive as both a keydown and a menu action (Go
   // suzuri debounces the same way).
@@ -1097,7 +1095,7 @@ async function paste() {
   try {
     // At the prompt the bar takes the text; otherwise the core reads the
     // clipboard itself (an image on the alt screen becomes a file path).
-    if (pane.barActive()) return pasteText(pane, await invoke("clipboard_text"))
+    if (pane.barActive()) return pasteText(pane, await invoke("clipboard_text"), invoke)
     if (!pane.pendingInput) pane.pendingInput = performance.now()
     await invoke("pane_paste", { id: pane.id, text: null })
   } catch (err) {
@@ -1113,104 +1111,18 @@ function toast(text) {
   toastTimer = setTimeout(() => (t.hidden = true), 900)
 }
 
-// ---- IME: the hidden textarea sits on the focused pane's cursor, so the
-// candidate window opens there; the text being composed shows inline.
-const preedit = document.createElement("div")
-preedit.className = "preedit"
-preedit.hidden = true
-function placeInput() {
-  if (!focused) return
-  // At the prompt the caret is the input bar's; otherwise the terminal's.
-  const at = focused.barActive() ? focused.barEl.querySelector(".caret") : focused.cursor
-  const c = at.getBoundingClientRect()
-  input.style.left = `${c.left}px`
-  input.style.top = `${c.top}px`
-  input.style.height = `${c.height || cellMetrics().ch}px`
-  if (!preedit.hidden) {
-    preedit.style.left = `${c.left}px`
-    preedit.style.top = `${c.top}px`
-  }
-}
-input.addEventListener("compositionstart", () => {
-  document.body.append(preedit)
-  preedit.hidden = false
-  placeInput()
-})
-input.addEventListener("compositionupdate", (e) => {
-  preedit.textContent = e.data
-  placeInput()
-})
-input.addEventListener("keydown", (e) => {
-  if (window.rszTrace) log("key", e.key, e.code, e.metaKey, e.ctrlKey, e.altKey, e.isComposing)
-  if (e.isComposing) return
-  if (clipShortcut(e)) { e.preventDefault(); return }
-  if (e.key === "Escape" && closeLarge()) { e.preventDefault(); return }
-  const sc = shortcut(e, isMac)
-  if (sc) { e.preventDefault(); run(sc.id, sc.arg); return }
-  if (extraShortcut(e, isMac)) { e.preventDefault(); return }
-  if (!focused) return
-  if (focused.barActive()) {
-    if (focused.barKeydown(e)) e.preventDefault()
-    return
-  }
-  const data = encodeKey(e, focused.modes, isMac)
-  if (data == null) return
-  if (data === "\x03") focused.clearQueue()
-  e.preventDefault()
-  focused.send(data, e.timeStamp || performance.now())
-})
-// Text that arrives without a usable keydown (IME commit, dead keys).
-input.addEventListener("input", (e) => {
-  const v = input.value
-  input.value = ""
-  if (!v || !focused || e.isComposing) return
-  if (focused.barActive()) focused.bar.insert(v), focused.renderBar()
-  else focused.send(v)
-})
-input.addEventListener("compositionend", () => {
-  preedit.hidden = true
-  preedit.textContent = ""
-  const v = input.value
-  input.value = ""
-  if (!v || !focused) return
-  if (focused.barActive()) focused.bar.insert(v), focused.renderBar()
-  else focused.send(v)
-})
 // macOS: the Edit menu's Copy and Paste are ours (app/src/main.rs
 // install_menu): copy the pane's selection, paste through the core.
 window.__TAURI__.event.listen("rsz-copy", () => copy())
 window.__TAURI__.event.listen("rsz-paste", () => paste())
-function pasteText(pane, text) {
-  // At the prompt, a paste goes into the input bar (newlines kept).
-  if (pane.barActive()) return pane.bar.insert(text.replace(/\r\n?/g, "\n")), pane.renderBar()
-  // Otherwise the core frames it (bracketed paste when the app asked).
-  invoke("pane_paste", { id: pane.id, text })
-}
-input.addEventListener("paste", (e) => {
-  e.preventDefault()
-  if (!focused) return
-  const pane = focused
-  const text = e.clipboardData?.getData("text/plain")
-  // A full-screen app (Claude Code, Grok) gets a pasted image as a file
-  // path it can attach, ahead of any text (ui/paste_image.js).
-  const image = pane.modes & M_ALT_SCREEN ? clipboardImage(e.clipboardData) : null
-  if (image) {
-    saveClipboardImage(image).then(
-      (path) => pasteText(pane, path),
-      (err) => { log("image paste failed", String(err)); if (text) pasteText(pane, text) },
-    )
-    return
-  }
-  if (text) pasteText(pane, text)
-})
 // Clicks give the keyboard back to the terminal, except inside an overlay,
 // a panel (#286) or a rename box.
 document.addEventListener("mousedown", (e) => {
   if (overlayOpen() || e.target.closest?.("input.rename")) return
-  setTimeout(() => panelOpen() || input.focus(), 0)
+  setTimeout(() => panelOpen() || focusInput(), 0)
 })
-window.addEventListener("focus", () => { if (!overlayOpen() && !panelOpen()) input.focus() })
-window.addEventListener("rsz-panel-closed", () => input.focus())
+window.addEventListener("focus", () => { if (!overlayOpen() && !panelOpen()) focusInput() })
+window.addEventListener("rsz-panel-closed", () => focusInput())
 
 // For #286's AI control (ui/aicontrol.js): the active tab's tree, every
 // pane in every tab, and the commands.
@@ -1337,8 +1249,9 @@ async function bench(boot, target) {
 function refitFont(font = true) {
   if (!font) return
   for (const p of everyPane()) {
+    // Main thread: the canvas resizes now. Worker: its CSS size follows at
+    // the next paint (the view sees the new cells).
     if (p.screen) p.screen.setSize(p.screen.cols, p.screen.rows)
-    else p.cssCols = 0 // the canvas's CSS size follows at the next paint
     p.fit()
     if (p.id) invoke("pane_redraw", { id: p.id })
   }

@@ -5,145 +5,10 @@
 // listener, frame or observer behind; two views keep their own metrics.
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { page, recordingHost, load, key, liveListeners, viewBody, textarea, canvasOf } from "./stub.mjs"
 
-// ---- the stub: elements, a document, a window, a 2D context that records.
-// Text is round(px * 4/7) wide per char, ascent round(px * .8), descent
-// round(px * .2): 14px makes 8x15 cells, as in ui/test/frame.test.mjs.
-const glyphW = (font) => Math.round(Number(/(\d+)px/.exec(font)?.[1] || 14) * 4 / 7)
-function recorder() {
-  const ops = []
-  const ctx = {
-    ops, fillStyle: "#000", font: "14px x", textBaseline: "",
-    setTransform() {},
-    fillRect(x, y, w, h) { ops.push({ op: "rect", style: ctx.fillStyle, r: [x, y, w, h] }) },
-    fillText(t, x, y) { ops.push({ op: "text", t, at: [x, y] }) },
-    drawImage() {},
-    measureText(s) {
-      const px = Number(/(\d+)px/.exec(ctx.font)?.[1] || 14)
-      return { width: s.length * glyphW(ctx.font), fontBoundingBoxAscent: Math.round(px * 0.8), fontBoundingBoxDescent: Math.round(px * 0.2) }
-    },
-  }
-  return ctx
-}
-globalThis.OffscreenCanvas = class {
-  constructor(w, h) { this.width = w; this.height = h; this.ctx = recorder() }
-  getContext() { return this.ctx }
-}
-
-let live = 0 // listeners added and not removed, over every stub target
-class Target {
-  constructor() { this.ls = [] }
-  addEventListener(type, fn, o) { this.ls.push({ type, fn, o }); live++ }
-  removeEventListener(type, fn) {
-    const i = this.ls.findIndex((l) => l.type === type && l.fn === fn)
-    if (i >= 0) { this.ls.splice(i, 1); live-- }
-  }
-  dispatch(type, ev = {}) {
-    const e = { type, target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true }, ...ev }
-    for (const l of [...this.ls]) if (l.type === type) l.fn(e)
-    return e
-  }
-}
-class Style {
-  setProperty(k, v) { this[k] = v }
-}
-class El extends Target {
-  constructor(doc, tag) {
-    super()
-    this.ownerDocument = doc
-    this.tagName = tag.toUpperCase()
-    this.nodeType = 1
-    this.style = new Style()
-    this.children = []
-    this.parent = null
-    this.dataset = {}
-    this.hidden = false
-    this.className = ""
-    this.textContent = ""
-    this.value = ""
-    this.attrs = {}
-    // classList over className, as the DOM keeps them.
-    const get = () => new Set(this.className.split(" ").filter(Boolean))
-    const set = (cls) => { this.className = [...cls].join(" ") }
-    this.classList = {
-      add: (c) => set(get().add(c)), contains: (c) => get().has(c),
-      remove: (c) => { const s = get(); s.delete(c); set(s) },
-      toggle: (c, on) => ((on ?? !get().has(c)) ? this.classList.add(c) : this.classList.remove(c)),
-    }
-    this.clientWidth = 800
-    this.clientHeight = 400
-    if (tag === "canvas") { this.width = 0; this.height = 0; this.ctx = recorder() }
-  }
-  getContext() { return this.ctx }
-  setAttribute(k, v) { this.attrs[k] = v }
-  append(...cs) { for (const c of cs) { c.remove(); c.parent = this; this.children.push(c) } }
-  remove() {
-    if (!this.parent) return
-    this.parent.children.splice(this.parent.children.indexOf(this), 1)
-    this.parent = null
-  }
-  get isConnected() { let n = this; while (n.parent) n = n.parent; return n === this.ownerDocument.body }
-  contains(n) { for (; n; n = n.parent) if (n === this) return true; return false }
-  focus() { this.ownerDocument.activeElement = this; this.dispatch("focus") }
-  getBoundingClientRect() { return { left: 0, top: 0, width: this.clientWidth, height: this.clientHeight } }
-  querySelector() { return null }
-}
-
-function page() {
-  const win = new Target()
-  const doc = new Target()
-  doc.defaultView = win
-  doc.createElement = (tag) => new El(doc, tag)
-  doc.body = new El(doc, "body")
-  doc.querySelector = () => null
-  const frames = new Map()
-  let nextFrame = 1
-  const observers = []
-  Object.assign(win, {
-    devicePixelRatio: 1,
-    navigator: { platform: "Win32" },
-    performance: { now: () => 0 },
-    requestAnimationFrame(fn) { const id = nextFrame++; frames.set(id, fn); return id },
-    cancelAnimationFrame(id) { frames.delete(id) },
-    ResizeObserver: class {
-      constructor(fn) { this.fn = fn; this.els = new Set(); observers.push(this) }
-      observe(el) { this.els.add(el) }
-      disconnect() { this.els.clear() }
-    },
-  })
-  // Run the pending animation frames.
-  const tick = () => { const fs = [...frames.values()]; frames.clear(); for (const f of fs) f(0) }
-  const el = doc.createElement("div")
-  doc.body.append(el)
-  return { win, doc, el, frames, observers, tick }
-}
-
-function recordingHost(extra = {}) {
-  const calls = []
-  const rec = (name) => (...a) => { calls.push([name, ...a]) }
-  return {
-    calls,
-    of: (name) => calls.filter((c) => c[0] === name).map((c) => c.slice(1)),
-    write: rec("write"), paste: rec("paste"), resize: rec("resize"), cellPx: rec("cellPx"),
-    scroll: rec("scroll"), ack: rec("ack"), redraw: rec("redraw"), focus: rec("focus"),
-    select: rec("select"), mouse: rec("mouse"), openUrl: rec("openUrl"),
-    copy: async () => { calls.push(["copy"]); return false },
-    link: async () => null,
-    ...extra,
-  }
-}
-
-const load = (name) => {
-  const b = readFileSync(new URL(`../../../testdata/frames/${name}`, import.meta.url))
-  return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)
-}
-const key = (o) => ({ key: "", code: "", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, isComposing: false, ...o })
-
-const { mount, FORMAT_VERSION } = await import("../index.js")
-const viewBody = (el) => el.children[0]
-const textarea = (el) => viewBody(el).children.find((c) => c.tagName === "TEXTAREA")
-const canvasOf = (el) => viewBody(el).children.find((c) => c.tagName === "CANVAS")
+const { mount, FORMAT_VERSION, clipShortcut } = await import("../index.js")
+const { M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_FOCUS } = await import("../frame.js")
 
 test("mount builds the pane and sizes the terminal to it", () => {
   const p = page()
@@ -251,16 +116,16 @@ test("the wheel scrolls the history in whole lines", () => {
 })
 
 test("unmount leaves no listener, animation frame or observer behind", () => {
-  const before = live
+  const before = liveListeners()
   const p = page()
   const host = recordingHost()
   const v = mount(p.el, host)
-  assert.ok(live > before, "the view listens")
+  assert.ok(liveListeners() > before, "the view listens")
   assert.ok(p.win.ls.length > 0, "the pointer listens on the window")
   v.feed(load("full.bin"))
   assert.equal(p.frames.size, 1)
   v.unmount()
-  assert.equal(live, before, "every listener removed")
+  assert.equal(liveListeners(), before, "every listener removed")
   assert.equal(p.win.ls.length, 0)
   assert.equal(p.doc.ls.length, 0)
   assert.equal(p.frames.size, 0, "the pending animation frame cancelled")
@@ -423,4 +288,479 @@ test("an image decode still running at unmount closes its bitmap", async () => {
   } finally {
     globalThis.createImageBitmap = saved
   }
+})
+
+// ---- the per-pane controller moved out of suzuri's app.js (Stage B of #375)
+
+// full.bin with other modes (header bytes 12..15).
+function withModes(modes) {
+  const buf = load("full.bin")
+  new DataView(buf).setUint32(12, modes, true)
+  return buf
+}
+
+test("keys become the bytes the shell expects, on host.write", () => {
+  const p = page()
+  const host = recordingHost()
+  const v = mount(p.el, host, { isMac: false })
+  const ta = textarea(p.el)
+  const cases = [
+    [{ key: "a", code: "KeyA" }, "a"],
+    [{ key: "Enter", code: "Enter" }, "\r"],
+    [{ key: "Backspace", code: "Backspace" }, "\x7f"],
+    [{ key: "Tab", code: "Tab" }, "\t"],
+    [{ key: "Escape", code: "Escape" }, "\x1b"],
+    [{ key: "ArrowUp", code: "ArrowUp" }, "\x1b[A"],
+    [{ key: "ArrowLeft", code: "ArrowLeft", ctrlKey: true }, "\x1b[1;5D"],
+    [{ key: "Delete", code: "Delete" }, "\x1b[3~"],
+    [{ key: "F1", code: "F1" }, "\x1bOP"],
+    [{ key: "b", code: "KeyB", altKey: true }, "\x1bb"],
+    [{ key: "c", code: "KeyC", ctrlKey: true }, "\x03"], // no selection: ^C
+  ]
+  for (const [k, bytes] of cases) {
+    const e = ta.dispatch("keydown", key(k))
+    assert.deepEqual(host.of("write").at(-1), [bytes], k.key)
+    assert.equal(e.defaultPrevented, true, k.key)
+  }
+  // A lone modifier is no key; a composing key is the IME's.
+  const n = host.of("write").length
+  ta.dispatch("keydown", key({ key: "Shift", code: "ShiftLeft", shiftKey: true }))
+  ta.dispatch("keydown", key({ key: "a", code: "KeyA", isComposing: true }))
+  assert.equal(host.of("write").length, n)
+  // The app's cursor-key mode follows the last frame.
+  v.feed(withModes(M_APP_CURSOR))
+  p.tick()
+  assert.equal(v.modes, M_APP_CURSOR)
+  ta.dispatch("keydown", key({ key: "ArrowUp", code: "ArrowUp" }))
+  assert.deepEqual(host.of("write").at(-1), ["\x1bOA"])
+  v.unmount()
+})
+
+test("IME: the preedit shows while composing, and the committed text is written once", () => {
+  const p = page()
+  const host = recordingHost()
+  const v = mount(p.el, host)
+  const ta = textarea(p.el)
+  const pre = viewBody(p.el).children.find((c) => c.classList.contains("preedit"))
+  ta.dispatch("compositionstart", { data: "" })
+  assert.equal(pre.hidden, false)
+  ta.dispatch("compositionupdate", { data: "にほ" })
+  assert.equal(pre.textContent, "にほ")
+  // Input while composing waits for the commit.
+  ta.value = "にほ"
+  ta.dispatch("input", { isComposing: true })
+  assert.deepEqual(host.of("write"), [])
+  ta.value = "日本"
+  ta.dispatch("compositionend", { data: "日本" })
+  assert.equal(pre.hidden, true)
+  assert.equal(pre.textContent, "")
+  assert.deepEqual(host.of("write"), [["日本"]])
+  assert.equal(ta.value, "")
+  v.unmount()
+})
+
+test("textFilter takes committed text before host.write", () => {
+  const p = page()
+  const took = []
+  const host = recordingHost({ textFilter: (t) => (took.push(t), t !== "pass") })
+  const v = mount(p.el, host)
+  const ta = textarea(p.el)
+  ta.value = "日本"
+  ta.dispatch("compositionend", {})
+  ta.value = "pass"
+  ta.dispatch("input", {})
+  assert.deepEqual(took, ["日本", "pass"])
+  assert.deepEqual(host.of("write"), [["pass"]])
+  v.unmount()
+})
+
+test("paste: chords ask the host to read the clipboard (debounced); paste events hand over their text", () => {
+  const p = page()
+  let t = 1000
+  p.win.performance.now = () => t
+  const host = recordingHost()
+  const v = mount(p.el, host, { isMac: false })
+  const ta = textarea(p.el)
+  for (const k of [{ key: "v", code: "KeyV", ctrlKey: true }, { key: "V", code: "KeyV", ctrlKey: true, shiftKey: true }, { key: "Insert", code: "Insert", shiftKey: true }]) {
+    t += 1000
+    const e = ta.dispatch("keydown", key(k))
+    assert.equal(e.defaultPrevented, true)
+  }
+  assert.deepEqual(host.of("paste"), [[null], [null], [null]])
+  // A second press inside 280 ms (a keydown and a menu action) is one paste.
+  t += 100
+  ta.dispatch("keydown", key({ key: "v", code: "KeyV", ctrlKey: true }))
+  assert.equal(host.of("paste").length, 3)
+  ta.dispatch("paste", { clipboardData: { getData: (type) => (type === "text/plain" ? "hi\nthere" : "") } })
+  assert.deepEqual(host.of("paste").at(-1), ["hi\nthere"])
+  assert.deepEqual(host.of("write"), [], "nothing typed")
+  // macOS: ⌘V; Ctrl+V is ^V there.
+  const q = page()
+  q.win.performance.now = () => 5000
+  const mac = recordingHost()
+  const w = mount(q.el, mac, { isMac: true })
+  textarea(q.el).dispatch("keydown", key({ key: "v", code: "KeyV", metaKey: true }))
+  textarea(q.el).dispatch("keydown", key({ key: "v", code: "KeyV", ctrlKey: true }))
+  assert.deepEqual(mac.of("paste"), [[null]])
+  assert.deepEqual(mac.of("write"), [["\x16"]])
+  v.unmount()
+  w.unmount()
+})
+
+test("pasteFilter sees the clipboard first; true keeps its text from host.paste", () => {
+  const p = page()
+  const seen = []
+  const host = recordingHost({ pasteFilter: (cd) => (seen.push(cd.getData("text/plain")), cd.image === true) })
+  const v = mount(p.el, host)
+  const ta = textarea(p.el)
+  ta.dispatch("paste", { clipboardData: { image: true, getData: () => "" } })
+  ta.dispatch("paste", { clipboardData: { getData: () => "text" } })
+  assert.deepEqual(seen, ["", "text"])
+  assert.deepEqual(host.of("paste"), [["text"]])
+  v.unmount()
+})
+
+test("copy: Ctrl+Shift+C copies; Ctrl+C copies only with a selection, and is ^C when nothing was copied", async () => {
+  const p = page()
+  let had = false
+  const host = recordingHost({ copy: async () => { host.calls.push(["copy"]); return had } })
+  const v = mount(p.el, host, { isMac: false })
+  const ta = textarea(p.el)
+  ta.dispatch("keydown", key({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }))
+  ta.dispatch("keydown", key({ key: "Insert", code: "Insert", ctrlKey: true }))
+  await new Promise((r) => setImmediate(r))
+  assert.equal(host.of("copy").length, 2)
+  assert.deepEqual(host.of("write"), [])
+  // Select a word with the pointer, then Ctrl+C: a copy; nothing copied -> ^C.
+  viewBody(p.el).dispatch("mousedown", { button: 0, detail: 2, clientX: 20, clientY: 10 })
+  assert.deepEqual(host.of("select"), [["word", 2, 0, true]])
+  assert.equal(v.hasSelection, true)
+  ta.dispatch("keydown", key({ key: "c", code: "KeyC", ctrlKey: true }))
+  await new Promise((r) => setImmediate(r))
+  assert.equal(host.of("copy").length, 3)
+  assert.deepEqual(host.of("write"), [["\x03"]])
+  had = true
+  ta.dispatch("keydown", key({ key: "c", code: "KeyC", ctrlKey: true }))
+  await new Promise((r) => setImmediate(r))
+  assert.equal(host.of("copy").length, 4)
+  assert.deepEqual(host.of("write"), [["\x03"]])
+  v.unmount()
+})
+
+test("ready false: the pointer takes no press until the host has a terminal", () => {
+  const p = page()
+  const host = recordingHost()
+  let ready = false
+  const v = mount(p.el, host, { isMac: false, ready: () => ready })
+  const body = viewBody(p.el)
+  const e = body.dispatch("mousedown", { button: 0, detail: 2, clientX: 20, clientY: 10 })
+  assert.equal(e.defaultPrevented, false)
+  assert.deepEqual(host.of("select"), [])
+  assert.equal(v.hasSelection, false)
+  assert.notEqual(p.el.ownerDocument.activeElement, textarea(p.el))
+  ready = true
+  body.dispatch("mousedown", { button: 0, detail: 2, clientX: 20, clientY: 10 })
+  assert.deepEqual(host.of("select"), [["word", 2, 0, true]])
+  assert.equal(v.hasSelection, true)
+  v.unmount()
+})
+
+test("clipShortcut classifies the clipboard chords per platform", () => {
+  assert.equal(clipShortcut(key({ key: "c", ctrlKey: true, shiftKey: true }), false, false), "copy")
+  assert.equal(clipShortcut(key({ key: "v", ctrlKey: true }), false, false), "paste")
+  assert.equal(clipShortcut(key({ key: "c", ctrlKey: true }), false, false), null)
+  assert.equal(clipShortcut(key({ key: "c", ctrlKey: true }), false, true), "copy-or-interrupt")
+  assert.equal(clipShortcut(key({ key: "c", ctrlKey: true, altKey: true }), false, true), null)
+  assert.equal(clipShortcut(key({ key: "c", metaKey: true }), true, false), "copy")
+  assert.equal(clipShortcut(key({ key: "v", metaKey: true, shiftKey: true }), true, false), null)
+  assert.equal(clipShortcut(key({ key: "v", ctrlKey: true }), true, false), null)
+})
+
+test("keyFilter goes before the clipboard chords and the encoder; true leaves the event alone", () => {
+  const p = page()
+  p.win.performance.now = () => 10_000
+  const host = recordingHost({ keyFilter: (e) => e.ctrlKey && e.shiftKey })
+  const v = mount(p.el, host, { isMac: false })
+  const ta = textarea(p.el)
+  const e = ta.dispatch("keydown", key({ key: "V", code: "KeyV", ctrlKey: true, shiftKey: true }))
+  assert.equal(e.defaultPrevented, false)
+  assert.deepEqual(host.of("paste"), [])
+  ta.dispatch("keydown", key({ key: "v", code: "KeyV", ctrlKey: true }))
+  assert.deepEqual(host.of("paste"), [[null]])
+  ta.dispatch("keydown", key({ key: "x", code: "KeyX" }))
+  assert.deepEqual(host.of("write"), [["x"]])
+  v.unmount()
+})
+
+test("the wheel: history lines to host.scroll, arrow keys on an alt screen that asked for them", () => {
+  const p = page()
+  const host = recordingHost()
+  const v = mount(p.el, host)
+  const body = viewBody(p.el)
+  body.dispatch("wheel", { deltaY: -10 }) // under a 15px line: kept
+  assert.deepEqual(host.of("scroll"), [])
+  body.dispatch("wheel", { deltaY: -20 }) // 30px now: two lines up
+  body.dispatch("wheel", { deltaY: 45 })
+  assert.deepEqual(host.of("scroll"), [[2], [-3]])
+  v.feed(withModes(M_ALT_SCREEN))
+  p.tick()
+  body.dispatch("wheel", { deltaY: -30 })
+  assert.deepEqual(host.of("write"), [], "an alt screen that didn't ask gets nothing")
+  v.feed(withModes(M_ALT_SCREEN | M_ALT_SCROLL | M_APP_CURSOR))
+  p.tick()
+  body.dispatch("wheel", { deltaY: -30 })
+  body.dispatch("wheel", { deltaY: 15 })
+  assert.deepEqual(host.of("write"), [["\x1bOA\x1bOA"], ["\x1bOB"]])
+  assert.equal(host.of("scroll").length, 2)
+  v.unmount()
+})
+
+test("wheelKeys takes the wheel's arrow keys when the host has it, after an exit too", () => {
+  const p = page()
+  const keys = []
+  const host = recordingHost({ wheelKeys: (d) => keys.push(d) })
+  const v = mount(p.el, host)
+  v.feed(withModes(M_ALT_SCREEN | M_ALT_SCROLL))
+  p.tick()
+  viewBody(p.el).dispatch("wheel", { deltaY: -30 })
+  v.message({ t: "exit", code: 0 })
+  viewBody(p.el).dispatch("wheel", { deltaY: 15 })
+  assert.deepEqual(keys, ["\x1b[A\x1b[A", "\x1b[B"])
+  assert.deepEqual(host.of("write"), [])
+  v.setReadOnly(true)
+  viewBody(p.el).dispatch("wheel", { deltaY: 15 })
+  assert.equal(keys.length, 2, "read-only sends nothing")
+  v.unmount()
+})
+
+test("an exited terminal still keeps its encodable keys from the browser", () => {
+  const p = page()
+  const host = recordingHost()
+  const v = mount(p.el, host)
+  v.message({ t: "exit", code: 0 })
+  const tab = textarea(p.el).dispatch("keydown", key({ key: "Tab", code: "Tab" }))
+  assert.equal(tab.defaultPrevented, true, "Tab does not move the focus")
+  const shift = textarea(p.el).dispatch("keydown", key({ key: "Shift", code: "ShiftLeft", shiftKey: true }))
+  assert.equal(shift.defaultPrevented, false)
+  assert.deepEqual(host.of("write"), [])
+  v.unmount()
+})
+
+test("onPaint follows each painted frame with its header and stats, after the ack", () => {
+  const p = page()
+  const order = []
+  const host = recordingHost({
+    onPaint: (h, stats) => order.push(["paint", h.seq, stats]),
+    ack: (seq) => order.push(["ack", seq]),
+  })
+  const v = mount(p.el, host)
+  const full = load("full.bin"), part = load("partial.bin")
+  v.feed(full)
+  v.feed(part)
+  p.tick()
+  assert.equal(order.length, 2)
+  assert.deepEqual(order[0], ["ack", 8])
+  assert.deepEqual(order[1].slice(0, 2), ["paint", 8])
+  assert.equal(order[1][2].frames, 2)
+  assert.equal(order[1][2].bytes, full.byteLength + part.byteLength)
+  v.unmount()
+})
+
+test("reportFocus false: focus and blur reach neither host.focus nor the PTY", () => {
+  const p = page()
+  const host = recordingHost()
+  const v = mount(p.el, host, { reportFocus: false })
+  v.feed(withModes(M_FOCUS))
+  p.tick()
+  v.focus()
+  textarea(p.el).dispatch("blur")
+  v.unmount()
+  assert.deepEqual(host.of("focus"), [])
+  assert.deepEqual(host.of("write"), [])
+  // The default reports both.
+  const q = page()
+  const h2 = recordingHost()
+  const w = mount(q.el, h2)
+  w.feed(withModes(M_FOCUS))
+  q.tick()
+  w.focus()
+  textarea(q.el).dispatch("blur")
+  assert.deepEqual(h2.of("focus"), [[true], [false]])
+  assert.deepEqual(h2.of("write"), [["\x1b[I"], ["\x1b[O"]])
+  w.unmount()
+})
+
+test("caret: the textarea and preedit sit on the host's element, in viewport coordinates, while focused", () => {
+  const p = page()
+  const at = p.doc.createElement("div")
+  at.getBoundingClientRect = () => ({ left: 120, top: 300, width: 8, height: 15 })
+  const v = mount(p.el, recordingHost(), { caret: () => at })
+  const ta = textarea(p.el)
+  assert.ok(!viewBody(p.el).children.some((c) => c.classList.contains("preedit")), "the preedit waits for a composition")
+  assert.equal(ta.style.position, "fixed")
+  assert.equal(ta.style.left, "0", "not placed while unfocused")
+  v.focus()
+  assert.deepEqual([ta.style.left, ta.style.top, ta.style.height], ["120px", "300px", "15px"])
+  at.getBoundingClientRect = () => ({ left: 128, top: 300, width: 8, height: 15 })
+  v.placeInput()
+  assert.equal(ta.style.left, "128px")
+  ta.dispatch("compositionstart", {})
+  // On the document's body, above every view, as suzuri's one preedit was.
+  const pre = p.doc.body.children.find((c) => c.classList.contains("preedit"))
+  assert.ok(pre)
+  assert.deepEqual([pre.style.position, pre.style.left, pre.style.top], ["fixed", "128px", "300px"])
+  ta.dispatch("compositionend", {})
+  assert.equal(pre.parent, null, "the commit takes it off the page")
+  ta.dispatch("compositionstart", {})
+  assert.equal(pre.parent, p.doc.body)
+  v.unmount()
+  assert.equal(pre.parent, null, "so does unmount")
+})
+
+test("paint external: no canvas context, feed refused, painted() follows the header and acks", () => {
+  const p = page()
+  const orig = p.doc.createElement
+  let contexts = 0
+  p.doc.createElement = (tag) => {
+    const el = orig(tag)
+    if (tag === "canvas") el.getContext = () => { contexts++; return el.ctx }
+    return el
+  }
+  const host = recordingHost({ onPaint: (h, stats) => host.calls.push(["onPaint", h.seq, stats]) })
+  const v = mount(p.el, host, { paint: "external" })
+  assert.equal(contexts, 0, "the canvas can still be transferred")
+  assert.equal(v.canvas, canvasOf(p.el))
+  assert.throws(() => v.feed(load("full.bin")))
+  const h = { seq: 5, cols: 10, rows: 3, cx: 2, cy: 1, shape: 1, modes: M_ALT_SCREEN, offset: 4, history: 90 }
+  v.painted(h)
+  assert.deepEqual(host.of("ack"), [[5]])
+  assert.deepEqual(host.of("onPaint"), [[5, undefined]])
+  assert.equal(v.modes, M_ALT_SCREEN)
+  assert.equal(v.canvas.style.width, `${10 * 8}px`)
+  assert.equal(v.canvas.style.height, `${3 * 15}px`)
+  const body = viewBody(p.el)
+  const cursor = body.children.find((c) => c.className.startsWith("cursor"))
+  assert.equal(cursor.style.left, `${6 + 2 * 8}px`)
+  const scrolled = body.children.find((c) => c.className === "scrolled")
+  assert.equal(scrolled.hidden, false)
+  assert.equal(scrolled.textContent, "↑ 4 / 90")
+  v.unmount()
+})
+
+test("screen: the host's Screen measures and paints the view", () => {
+  const p = page()
+  let made = null
+  const host = recordingHost()
+  const v = mount(p.el, host, {
+    screen: (canvas) => (made = {
+      canvas,
+      cellMetrics: () => ({ cw: 10, ch: 20, base: 16, runs: false }),
+      setStyle() {}, resetMetrics() {}, fontSpec: () => "20px x",
+      apply: () => ({ seq: 9, cols: 4, rows: 2, cx: 1, cy: 1, shape: 1, modes: 0, offset: 0, history: 0 }),
+    }),
+  })
+  assert.equal(made.canvas, canvasOf(p.el))
+  assert.deepEqual(host.of("cellPx"), [[10, 20]])
+  v.feed(load("full.bin"))
+  p.tick()
+  assert.deepEqual(host.of("ack"), [[9]])
+  v.unmount()
+})
+
+// ---- behaviour that must stay as suzuri's app.js had it (Stage B review)
+
+test("paint time is the frame applies alone, not the DOM work after them", async () => {
+  const { Screen } = await import("../frame.js")
+  const p = page()
+  let clock = 0
+  p.win.performance.now = () => clock
+  const stats = []
+  const host = recordingHost({ onPaint: (h, s) => stats.push(s) })
+  const caretEl = p.doc.createElement("div")
+  const v = mount(p.el, host, {
+    // Each apply takes 5 ms; placing the textarea on the caret (afterPaint) 50.
+    screen: (c) => {
+      const s = new Screen(c, 1)
+      const apply = s.apply.bind(s)
+      s.apply = (...a) => { clock += 5; return apply(...a) }
+      return s
+    },
+    caret: () => { clock += 50; return caretEl },
+  })
+  v.focus()
+  v.feed(load("full.bin"))
+  v.feed(load("partial.bin"))
+  p.tick()
+  assert.equal(stats.length, 1)
+  assert.equal(stats[0].ms, 10, "two applies, no afterPaint time")
+  v.unmount()
+})
+
+test("a frame shorter than its header is refused and shown, not acked", () => {
+  const p = page()
+  const host = recordingHost()
+  const v = mount(p.el, host)
+  v.feed(new Uint8Array(10))
+  p.tick()
+  assert.deepEqual(host.of("ack"), [])
+  assert.equal(p.frames.size, 0, "nothing queued")
+  const err = viewBody(p.el).children.find((c) => c.className === "rsz-error")
+  assert.equal(err.hidden, false)
+  assert.match(err.textContent, /10 bytes/)
+  // The next good frame paints, acks and clears it.
+  v.feed(load("full.bin"))
+  p.tick()
+  assert.deepEqual(host.of("ack"), [[7]])
+  assert.equal(err.hidden, true)
+  v.unmount()
+})
+
+test("debouncePaste false: every paste chord reaches the host, which debounces it itself", () => {
+  const p = page()
+  p.win.performance.now = () => 1000
+  const host = recordingHost()
+  const v = mount(p.el, host, { isMac: false, debouncePaste: false })
+  const ta = textarea(p.el)
+  ta.dispatch("keydown", key({ key: "v", code: "KeyV", ctrlKey: true }))
+  ta.dispatch("keydown", key({ key: "v", code: "KeyV", ctrlKey: true }))
+  assert.deepEqual(host.of("paste"), [[null], [null]], "same instant, both handed over")
+  v.unmount()
+})
+
+test("framesPending: an imgpos waits for the next painted frame while the host holds frames", async () => {
+  const p = page()
+  const saved = globalThis.createImageBitmap
+  globalThis.createImageBitmap = async () => ({ width: 4, height: 4, close() {} })
+  try {
+    let held = true
+    const host = recordingHost()
+    const v = mount(p.el, host, { paint: "external", framesPending: () => held })
+    const layer = viewBody(p.el).children.find((c) => c.className === "imgs")
+    v.message({ t: "img", id: 1, format: 100, data: btoa("png") })
+    await new Promise((r) => setTimeout(r, 0))
+    v.message({ t: "imgpos", list: [[1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0]] })
+    assert.equal(layer.children.length, 0, "not before its frame")
+    held = false
+    v.painted({ seq: 1, cols: 10, rows: 3, cx: 0, cy: 0, shape: 1, modes: 0, offset: 0, history: 0 })
+    assert.equal(layer.children.length, 1, "placed with the frame")
+    // Nothing held: placed at once.
+    v.message({ t: "imgpos", list: [] })
+    assert.equal(layer.children.length, 0)
+    v.unmount()
+  } finally {
+    globalThis.createImageBitmap = saved
+  }
+})
+
+test("view.key handles a keydown that landed elsewhere as its textarea's", () => {
+  const p = page()
+  const host = recordingHost()
+  const v = mount(p.el, host)
+  const e = { target: p.doc.body, defaultPrevented: false, preventDefault() { this.defaultPrevented = true }, ...key({ key: "a", code: "KeyA" }) }
+  v.key(e)
+  assert.equal(e.defaultPrevented, true)
+  assert.deepEqual(host.of("write"), [["a"]])
+  v.unmount()
+  v.key({ ...e })
+  assert.deepEqual(host.of("write"), [["a"]], "nothing after unmount")
 })

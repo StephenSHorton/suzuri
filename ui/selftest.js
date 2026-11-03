@@ -155,7 +155,7 @@ export async function run(name, { invoke, log, first }) {
     await sleep(2500)
     say("bar text:", JSON.stringify(pane.barEl.querySelector(".lines").textContent))
     const caret = pane.barEl.querySelector(".caret").getBoundingClientRect()
-    const i = document.querySelector("textarea").getBoundingClientRect()
+    const i = pane.input.getBoundingClientRect()
     say("textarea at bar caret:", Math.round(i.left - caret.left), Math.round(i.top - caret.top))
   } else if (name === "imereal") {
     // The runner switches to a real Japanese IME and types "nihon", Space,
@@ -186,7 +186,7 @@ export async function run(name, { invoke, log, first }) {
   } else if (name === "ime") {
     // The textarea follows the cursor so the candidate window opens there.
     await type("clear; echo ime test\r")
-    const input = document.querySelector("textarea")
+    const input = pane.input
     // At the prompt the caret is the input bar's.
     const c = (pane.barActive() ? pane.barEl.querySelector(".caret") : pane.cursor).getBoundingClientRect()
     const i = input.getBoundingClientRect()
