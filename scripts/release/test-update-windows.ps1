@@ -46,17 +46,22 @@ $feed = @{ version = $New; notes = "local test"; pub_date = (Get-Date).ToUnivers
   ConvertTo-Json -Depth 6
 [IO.File]::WriteAllText((Join-Path $dist "latest.json"), $feed, $utf8)
 
-# Feed server: a background job serving dist\$New.
-$srv = Start-Job -ArgumentList $dist, $Port -ScriptBlock {
-  param($dir, $port)
-  $l = [Net.HttpListener]::new(); $l.Prefixes.Add("http://127.0.0.1:$port/"); $l.Start()
-  while ($true) {
-    $c = $l.GetContext(); $f = Join-Path $dir ($c.Request.Url.AbsolutePath.TrimStart("/"))
-    if (Test-Path $f -PathType Leaf) { $b = [IO.File]::ReadAllBytes($f); $c.Response.ContentLength64 = $b.Length; $c.Response.OutputStream.Write($b, 0, $b.Length) }
-    else { $c.Response.StatusCode = 404 }
-    $c.Response.Close()
-  }
+# Feed server: a hidden PowerShell process serving dist\$New. A process, not a
+# job: a job blocked in GetContext() never stops, a process can be killed.
+$serve = Join-Path $T "serve.ps1"
+[IO.File]::WriteAllText($serve, @'
+param($dir, $port)
+$l = [Net.HttpListener]::new(); $l.Prefixes.Add("http://127.0.0.1:$port/"); $l.Start()
+while ($true) {
+  $c = $l.GetContext(); $f = Join-Path $dir ($c.Request.Url.AbsolutePath.TrimStart("/"))
+  if (Test-Path $f -PathType Leaf) { $b = [IO.File]::ReadAllBytes($f); $c.Response.ContentLength64 = $b.Length; $c.Response.OutputStream.Write($b, 0, $b.Length) }
+  else { $c.Response.StatusCode = 404 }
+  $c.Response.Close()
 }
+'@, $utf8)
+$srv = Start-Process powershell -WindowStyle Hidden -PassThru -ArgumentList @(
+  "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $serve, "-dir", $dist, "-port", $Port)
+Start-Sleep 2
 
 function Installed {
   Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
@@ -91,7 +96,7 @@ try {
   if ($now -eq $New -and $exeVer -like "$New*") { $result = "PASS: $Old updated itself to $New" }
   else { $result = "FAIL: still $now / $exeVer" }
 } finally {
-  Stop-Job $srv; Remove-Job $srv
+  Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
   if (-not $Keep) {
     Get-Process rust-suzuri -ErrorAction SilentlyContinue | Stop-Process -Force
     $inst = Installed
