@@ -3,6 +3,7 @@
 // the paint worker (paint-worker.js) on an OffscreenCanvas, or on the main
 // thread when the webview has no OffscreenCanvas, so it touches no DOM.
 
+import { drawCellGlyph } from "./boxdraw.js"
 export const DEFAULT_BG = 0x01000000
 const A_BOLD = 1, A_ITALIC = 2, A_UNDERLINE = 4, A_STRIKE = 8, A_DIM = 16, A_HIDDEN = 32, A_SELECTED = 64
 export const M_APP_CURSOR = 1, M_BRACKETED_PASTE = 2, M_ALT_SCREEN = 4, M_FOCUS = 8,
@@ -20,13 +21,13 @@ let FAMILY = `"Gohu", ui-monospace, Menlo, Consolas, monospace`
 export function setVoid(css) { VOID = css; styled() }
 // Go suzuri draws bold with a bold face on Windows (GDI) and with the same
 // face on macOS (brighter ink only, from Rust).
-let BOLD_FACE = !navigator.platform.startsWith("Mac")
+const IS_MAC = (globalThis.navigator?.platform || "").startsWith("Mac")
+const BOLD_FACE = !IS_MAC
 let BUNDLED = true
 export function setFont(family, px, bundled = false, face = "") {
   FAMILY = family
   BUNDLED = bundled
-  const isMac = navigator.platform.startsWith("Mac")
-  EM = isMac ? GO_EM[bundled ? "gohu" : face.toLowerCase()] || null : null
+  EM = IS_MAC ? GO_EM[bundled ? "gohu" : face.toLowerCase()] || null : null
   FONT_PX = px
   FACE = face
   metrics = null
@@ -102,7 +103,9 @@ export class Screen {
   // pixel ratio (a worker has no window to ask).
   constructor(canvas, dpr = 1) {
     this.canvas = canvas
-    this.ctx = canvas.getContext("2d", { alpha: false })
+    // Opaque on macOS only: on Windows an opaque canvas gets ClearType
+    // colour fringes, and Go suzuri draws greyscale text there.
+    this.ctx = canvas.getContext("2d", { alpha: !IS_MAC })
     this.cols = 0
     this.rows = 0
     this.dpr = 0
@@ -165,7 +168,6 @@ export class Screen {
         if (!(attrs & A_HIDDEN)) {
           ctx.font = `${attrs & A_ITALIC ? "italic " : ""}${attrs & A_BOLD && BOLD_FACE ? "bold " : ""}${FONT_PX}px ${FAMILY}`
           ctx.fillStyle = hex(fg)
-          ctx.globalAlpha = attrs & A_DIM ? 0.6 : 1
           // ASCII stretches go out as one string; anything else per cell so
           // fallback glyphs can't push the grid out of line.
           let s = "", sx = 0
@@ -178,6 +180,8 @@ export class Screen {
             }
             if (s) { ctx.fillText(s, sx * cw, top + base); s = "" }
             if (cp === 0 || cp === 0x20) continue
+            // Box drawing, blocks and wedges: drawn into the cell, as Go does.
+            if (cp >= 0x2500 && drawCellGlyph(ctx, cp, (col + i) * cw, top, cw, ch)) continue
             ctx.fillText(String.fromCodePoint(cp), (col + i) * cw, top + base)
           }
           if (s && s.trim()) ctx.fillText(s, sx * cw, top + base)
@@ -185,7 +189,6 @@ export class Screen {
             const ly = attrs & A_UNDERLINE ? top + ch - 2 : top + ch / 2
             ctx.fillRect(rx, ly, n * cw, 1)
           }
-          ctx.globalAlpha = 1
         }
         p += n * 4
       }

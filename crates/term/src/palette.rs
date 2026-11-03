@@ -622,6 +622,12 @@ pub fn brighten_bold((r, g, b): Rgb) -> Rgb {
     (up(r), up(g), up(b))
 }
 
+/// Go's dimRGB: 55%, never under 12.
+pub fn dim_faint((r, g, b): Rgb) -> Rgb {
+    let d = |c: u8| ((c as u32 * 55 / 100).max(12)) as u8;
+    (d(r), d(g), d(b))
+}
+
 pub fn near_black((r, g, b): Rgb) -> bool {
     r < 28 && g < 28 && b < 28
 }
@@ -683,6 +689,12 @@ mod tests {
         assert_eq!(hc[2], (0, 230, 120));
         assert_eq!(hc[3], STOCK_ANSI16[3]);
         assert_eq!(theme("nope").id, "inkstone");
+    }
+
+    #[test]
+    fn faint_and_bold_match_go() {
+        assert_eq!(dim_faint((200, 100, 10)), (110, 55, 12));
+        assert_eq!(brighten_bold((0, 128, 255)), (90, 172, 255));
     }
 
     #[test]

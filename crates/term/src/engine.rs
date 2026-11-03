@@ -327,6 +327,15 @@ impl Alacritty {
             let term_bg = pack(palette::term_bg(c));
             let mut fg = self.rgb(cell.fg, bold, false);
             let mut bg = self.rgb(cell.bg, false, true);
+            // Faint: Go suzuri's SGR rewrite dims the ink to 55% (floor 12);
+            // dim default ink that comes out near black is a mid grey
+            // (internal/ui/sgr_rewrite.go dimRGB / dimDefaultFG). Measured
+            // against Go on the Mac: default, 30-37 and 38 ink all dim.
+            if flags.contains(Flags::DIM) {
+                let d = palette::dim_faint(unpack(fg));
+                let default_ink = matches!(cell.fg, Color::Named(NamedColor::Foreground));
+                fg = if default_ink && (d.0 as u32 + d.1 as u32 + d.2 as u32) < 80 { pack((140, 140, 140)) } else { pack(d) };
+            }
             if bold {
                 fg = pack(palette::brighten_bold(unpack(fg)));
             }
