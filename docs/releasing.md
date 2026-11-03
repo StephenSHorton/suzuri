@@ -24,7 +24,7 @@ local feeds (below). At the move:
 | Platform | First install | Update payload |
 |---|---|---|
 | macOS (Apple silicon) | `suzuri_<v>_aarch64.dmg`: signed with Developer ID, notarized and stapled | `suzuri_<v>_aarch64.app.tar.gz` (the stapled app) |
-| Windows x64 | `suzuri_<v>_x64-setup.exe`: NSIS installer, per user (no admin), installs to `%LOCALAPPDATA%\Programs\suzuri-app` (packaging/windows/installer-hooks.nsh: Tauri's per-user default, `%LOCALAPPDATA%\suzuri`, is the config folder shared with Go suzuri, and `Programs\suzuri` is Go suzuri's install, whose helpers this app still runs) | the same setup.exe, run passively by the updater |
+| Windows x64 | `suzuri_<v>_x64-setup.exe`: NSIS installer, per user (no admin), installs to `%LOCALAPPDATA%\Programs\suzuri`, replacing Go suzuri 0.9.x there (packaging/windows/installer-hooks.nsh: it keeps Tauri's reinstall page from running Go's Uninstall.exe, takes over the `Uninstall\suzuri` key, then removes Go's leftovers; `%LOCALAPPDATA%\suzuri`, the config folder, is never touched). Versions start at 0.10.0 so they sort above Go's 0.9.x | the same setup.exe, run passively by the updater |
 
 The Windows install puts OpenConsole's `conpty.dll` and `OpenConsole.exe` next
 to `suzuri.exe`. portable-pty loads that `conpty.dll` before the system
@@ -86,7 +86,7 @@ use a throwaway updater key and allow an http feed through a config overlay, so
 the real key isn't needed and nothing is published.
 
 - Mac: `scripts/release/test-update-mac.sh [old] [new]`
-- PC: `powershell -File scripts\release\test-update-windows.ps1 [-Old 0.1.0] [-New 0.1.1] [-Keep]`.
+- PC: `powershell -File scripts\release\test-update-windows.ps1 [-Old 0.10.0] [-New 0.10.1] [-Keep]`.
   It installs silently per user, checks that `conpty.dll` and
   `OpenConsole.exe` are next to the exe, and uninstalls at the end
   unless `-Keep` is given.

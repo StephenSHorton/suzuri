@@ -4,9 +4,9 @@
 # replaced itself with $NEW. A throwaway updater key is used (and the http
 # feed allowed) through a config overlay, so the real key isn't needed.
 #
-#   scripts/release/test-update-mac.sh [old=0.1.0] [new=0.1.1] [port=8787]
+#   scripts/release/test-update-mac.sh [old=0.10.0] [new=0.10.1] [port=8787]
 set -euo pipefail
-OLD="${1:-0.1.0}" NEW="${2:-0.1.1}" PORT="${3:-8787}"
+OLD="${1:-0.10.0}" NEW="${2:-0.10.1}" PORT="${3:-8787}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # Resolved: the updater refuses a path through a symlink (/var -> /private/var).
 T="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/rsz-uptest.XXXXXX")" && pwd -P)"

@@ -5,8 +5,8 @@
 # the real key never leaves the Mac. The test install is removed at the end
 # unless -Keep.
 #
-#   powershell -File scripts\release\test-update-windows.ps1 [-Old 0.1.0] [-New 0.1.1] [-Port 8787] [-Keep]
-param([string]$Old = "0.1.0", [string]$New = "0.1.1", [int]$Port = 8787, [switch]$Keep)
+#   powershell -File scripts\release\test-update-windows.ps1 [-Old 0.10.0] [-New 0.10.1] [-Port 8787] [-Keep]
+param([string]$Old = "0.10.0", [string]$New = "0.10.1", [int]$Port = 8787, [switch]$Keep)
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 # One run at a time: a second run would uninstall and kill the first one's app.

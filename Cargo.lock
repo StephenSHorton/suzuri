@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "fakeagent"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "crossterm",
 ]
@@ -3303,7 +3303,7 @@ dependencies = [
 
 [[package]]
 name = "rsz-term"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "alacritty_terminal",
  "base64 0.22.1",
@@ -3966,7 +3966,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "suzuri"
-version = "0.1.0"
+version = "0.10.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",

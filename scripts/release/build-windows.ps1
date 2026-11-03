@@ -3,7 +3,7 @@
 # scripts/release/publish.sh on the Mac: it signs the installer for the
 # updater, writes latest.json and publishes. The updater key stays on the Mac.
 #
-#   powershell -File scripts\release\build-windows.ps1 -Version 0.1.1 [-NoUpload]
+#   powershell -File scripts\release\build-windows.ps1 -Version 0.10.1 [-NoUpload]
 #
 # Needs: Rust, cargo-tauri (cargo install tauri-cli --version ^2), gh (logged
 # in) unless -NoUpload. Output: dist\<version>\suzuri_<version>_x64-setup.exe

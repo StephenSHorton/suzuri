@@ -6,7 +6,7 @@ members = ["crates/term", "app", "tools/fakeagent"]
 exclude = ["libs/transfer"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.10.0"
 edition = "2024"
 license = "MIT"
 publish = false

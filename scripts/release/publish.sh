@@ -4,7 +4,7 @@
 # the PC uploaded (scripts/release/build-windows.ps1), writes the updater feed
 # (latest.json) and publishes the GitHub release. Local only, no CI.
 #
-#   scripts/release/publish.sh 0.1.1 [--notes "text"] [--mac-only]
+#   scripts/release/publish.sh 0.10.1 [--notes "text"] [--mac-only]
 #                                    [--no-notarize] [--feed-base URL] [--no-upload]
 #
 # --mac-only     publish without a Windows installer
