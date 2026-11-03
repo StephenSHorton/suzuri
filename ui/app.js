@@ -7,6 +7,9 @@ import { extraShortcut } from "./extras.js"
 import { isOpen as panelOpen } from "./panel.js"
 import "./aicontrol.js"
 import { InputBar, PROMPT, barKey, displayPath } from "./bar.js"
+import { shortcut, chordLabel } from "./shortcuts.js"
+import { Palette } from "./palette.js"
+import { Settings, announce } from "./settings.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -17,7 +20,7 @@ const isMac = navigator.platform.startsWith("Mac")
 if (!isMac) document.body.classList.add("win")
 
 const root = document.getElementById("root")
-const titleEl = document.getElementById("title")
+const strip = document.getElementById("tabs")
 const hud = document.getElementById("hud")
 
 // One hidden textarea holds keyboard focus for every pane, so paste and IME
@@ -41,8 +44,13 @@ function pct(arr, p) {
 const paint = { frames: 0, bytes: 0, applyMs: 0 }
 
 let home = ""
-let focused = null
-let tree = null
+// ---- tabs: each has its own split tree, focused pane and element under
+// #root. Only the active one is shown; the others keep running.
+const tabs = []
+let activeTab = null
+let nextTabId = 1
+const cur = () => activeTab
+let focused = null // the active tab's focused pane
 const byId = new Map()
 const early = new Map() // frames that beat pane_open's reply, by pane id
 
@@ -80,7 +88,9 @@ function connectFrames(spec) {
 }
 
 class PaneView {
-  constructor() {
+  constructor(tab) {
+    this.tab = tab
+    this.titleOverride = "" // Rename pane (or AI control's rename); wins over the program's title
     this.el = document.createElement("div")
     this.el.className = "pane"
     this.head = document.createElement("div")
@@ -118,17 +128,19 @@ class PaneView {
     this.exited = false
     this.wheel = 0
     this.el.addEventListener("mousedown", () => setFocus(this))
+    this.head.addEventListener("dblclick", () => renamePane(this))
     this.body.addEventListener("wheel", (e) => this.onWheel(e), { passive: true })
     this.ro = new ResizeObserver(() => this.fit())
     this.ro.observe(this.body)
   }
 
   // from: the pane this one splits from; the new shell starts in its cwd.
-  async open(cols, rows, from = null) {
+  // profile: a Settings profile's shell and folder (new tabs).
+  async open(cols, rows, from = null, profile = null) {
     const ch = new Channel()
     ch.onmessage = (m) => this.onMessage(m)
     this.size = [cols, rows]
-    this.id = await invoke("pane_open", { cols, rows, command: null, from, onFrame: ch })
+    this.id = await invoke("pane_open", { cols, rows, command: null, from, profile, onFrame: ch })
     byId.set(this.id, this)
     for (const [buf, off] of early.get(this.id) || []) this.enqueue(buf, off)
     early.delete(this.id)
@@ -143,8 +155,7 @@ class PaneView {
     const msg = typeof m === "string" ? JSON.parse(m) : m
     if (msg.t === "title") {
       this.title = msg.title || "shell"
-      this.head.querySelector(".t").textContent = this.titleOverride || this.title
-      if (focused === this) titleEl.textContent = this.title
+      this.showTitle()
     } else if (msg.t === "exit") {
       this.exited = true
       this.head.insertAdjacentHTML("beforeend", `<span class="exited">exited${msg.code != null ? " " + msg.code : ""}</span>`)
@@ -230,6 +241,12 @@ class PaneView {
     this.send(line + "\r")
   }
 
+  label() { return this.titleOverride || this.title }
+  showTitle() {
+    this.head.querySelector(".t").textContent = this.label()
+    if (this.tab.focused === this) renderStrip()
+  }
+
   // A frame is [buffer, byte offset of the frame in it].
   enqueue(buf, off = 0) {
     this.queue.push([buf, off])
@@ -312,7 +329,7 @@ function scheduleFrame() {
   frameScheduled = true
   requestAnimationFrame(() => {
     frameScheduled = false
-    for (const p of allPanes()) {
+    for (const p of everyPane()) {
       if (!p.flush()) continue
       ackFrame(p)
       const now = performance.now()
@@ -330,15 +347,34 @@ function scheduleFrame() {
   })
 }
 
-// ---- layout tree: {pane} leaves and {dir: "h"|"v", a, b} splits.
-function allPanes(node = tree, out = []) {
+// ---- layout tree per tab: {pane} leaves and {dir: "h"|"v", a, b} splits.
+function allPanes(node = activeTab?.tree, out = []) {
   if (!node) return out
   if (node.pane) out.push(node.pane)
   else { allPanes(node.a, out); allPanes(node.b, out) }
   return out
 }
+function everyPane() {
+  const out = []
+  for (const t of tabs) allPanes(t.tree, out)
+  return out
+}
 
-function render() {
+function newTab(at = tabs.length) {
+  const el = document.createElement("div")
+  el.className = "tab-root"
+  root.appendChild(el)
+  const t = { id: nextTabId++, name: "", tree: null, focused: null, zoomed: null, el }
+  tabs.splice(at, 0, t)
+  return t
+}
+
+// The tab's name on the strip: its custom name, else its focused pane's.
+function tabLabel(t) {
+  return t.name || t.focused?.label() || "shell"
+}
+
+function render(tab = activeTab) {
   const build = (node) => {
     if (node.pane) return node.pane.el
     const d = document.createElement("div")
@@ -352,7 +388,12 @@ function render() {
     d.append(a, b)
     return d
   }
-  root.replaceChildren(tree ? build(tree) : "")
+  // Maximized: only that pane shows; the others stay alive, detached.
+  const top = tab.zoomed ? tab.zoomed.el : tab.tree ? build(tab.tree) : ""
+  if (tab.zoomed) tab.zoomed.el.style.flex = "1 1 0"
+  tab.el.replaceChildren(top)
+  tab.el.classList.toggle("zoomed", !!tab.zoomed)
+  renderStrip()
 }
 
 function findParent(node, target, parent = null) {
@@ -360,34 +401,61 @@ function findParent(node, target, parent = null) {
   if (node.pane) return undefined
   return findParent(node.a, target, node) ?? findParent(node.b, target, node)
 }
-function leafOf(pane, node = tree) {
+function leafOf(pane, node = pane?.tab?.tree) {
   if (!node) return null
   if (node.pane === pane) return node
   if (node.pane) return null
   return leafOf(pane, node.a) || leafOf(pane, node.b)
 }
 
-async function split(dir, pane = focused) {
-  const p = new PaneView()
-  if (!tree) {
-    tree = { pane: p }
-  } else {
-    const leaf = leafOf(pane)
-    const old = { pane: leaf.pane }
-    delete leaf.pane
-    leaf.dir = dir
-    leaf.a = old
-    leaf.b = { pane: p }
+// Put `p` into `tab` next to `pane` (or as its only pane).
+function placePane(p, dir, pane, tab) {
+  p.tab = tab
+  if (!tab.tree) {
+    tab.tree = { pane: p }
+    return
   }
-  render()
-  setFocus(p)
+  const leaf = leafOf(pane ?? allPanes(tab.tree).at(-1), tab.tree)
+  const old = { pane: leaf.pane }
+  delete leaf.pane
+  leaf.dir = dir
+  leaf.a = old
+  leaf.b = { pane: p }
+}
+
+// Take `pane` out of its tab's tree. Returns false when it was the only one.
+function detachPane(pane) {
+  const tab = pane.tab
+  const leaf = leafOf(pane)
+  if (!leaf) return false
+  if (tab.zoomed) tab.zoomed = null
+  const parent = findParent(tab.tree, leaf)
+  if (!parent) {
+    tab.tree = null
+    return true
+  }
+  const sibling = parent.a === leaf ? parent.b : parent.a
+  for (const k of ["pane", "dir", "a", "b"]) delete parent[k]
+  Object.assign(parent, sibling)
+  if (tab.focused === pane) tab.focused = allPanes(parent)[0]
+  return true
+}
+
+async function split(dir, pane = focused, opts = {}) {
+  const tab = opts.tab ?? pane?.tab ?? activeTab
+  if (tab.zoomed) tab.zoomed = null
+  const p = new PaneView(tab)
+  placePane(p, dir, pane, tab)
+  render(tab)
+  if (tab === activeTab) setFocus(p)
+  else tab.focused = tab.focused ?? p
   // Size from the laid-out element so the shell starts at its real size.
   await new Promise((r) => requestAnimationFrame(r))
   const { cw, ch } = cellMetrics()
-  const cols = Math.max(2, Math.floor((p.body.clientWidth - 12) / cw))
-  const rows = Math.max(1, Math.floor((p.body.clientHeight - 8) / ch))
-  await p.open(cols, rows, pane?.id ?? null)
-  for (const other of allPanes()) other.fit()
+  const cols = Math.max(2, Math.floor((p.body.clientWidth - 12) / cw) || 80)
+  const rows = Math.max(1, Math.floor((p.body.clientHeight - 8) / ch) || 24)
+  await p.open(cols, rows, pane?.id ?? null, opts.profile)
+  for (const other of allPanes(tab.tree)) other.fit()
   return p
 }
 
@@ -396,44 +464,206 @@ function closePane(pane) {
   if (!pane.exited && pane.id) invoke("pane_close", { id: pane.id })
   pane.exited = true
   pane.ro.disconnect()
-  const leaf = leafOf(pane)
-  if (!leaf) return
-  const parent = findParent(tree, leaf)
-  if (!parent) {
-    tree = null
-    render()
-    split("h") // the window always keeps one shell
+  const tab = pane.tab
+  if (!detachPane(pane)) return
+  if (!tab.tree) {
+    // Its last pane: the tab goes, and the window always keeps one shell.
+    if (tabs.length > 1) return dropTab(tab)
+    render(tab)
+    split("h", null, { tab })
     return
   }
-  const sibling = parent.a === leaf ? parent.b : parent.a
-  for (const k of ["pane", "dir", "a", "b"]) delete parent[k]
-  Object.assign(parent, sibling)
-  render()
-  if (focused === pane) setFocus(allPanes(parent)[0])
+  render(tab)
+  if (tab === activeTab && (focused === pane || !focused)) setFocus(tab.focused)
 }
 
-function setFocus(p) {
+// ---- tabs
+async function openTab(profile) {
+  const t = newTab(activeTab ? tabs.indexOf(activeTab) + 1 : tabs.length)
+  showTab(t)
+  return split("h", null, { tab: t, profile })
+}
+
+function showTab(t) {
+  if (!t) return
+  if (activeTab === t) return void renderStrip()
+  activeTab = t
+  for (const x of tabs) x.el.hidden = x !== t
+  render(t)
+  if (t.focused) setFocus(t.focused, true)
+}
+
+function switchTab(delta) {
+  if (tabs.length < 2) return
+  const i = tabs.indexOf(activeTab)
+  showTab(tabs[(i + delta + tabs.length) % tabs.length])
+}
+
+function closeTab(t = activeTab) {
+  for (const p of allPanes(t.tree)) {
+    if (!p.exited && p.id) invoke("pane_close", { id: p.id })
+    p.exited = true
+    p.ro.disconnect()
+  }
+  t.tree = null
+  if (tabs.length === 1) {
+    render(t)
+    split("h", null, { tab: t })
+    return
+  }
+  dropTab(t)
+}
+
+function dropTab(t) {
+  const i = tabs.indexOf(t)
+  tabs.splice(i, 1)
+  t.el.remove()
+  if (activeTab === t) {
+    activeTab = null
+    showTab(tabs[Math.min(i, tabs.length - 1)])
+  } else renderStrip()
+}
+
+// Move the focused pane to tab `to` (an index; -1 or tabs.length make a new
+// tab at that end). Go suzuri's ⌘⌥⇧←/→ and "Move pane to tab".
+function movePaneToTab(pane, to) {
+  if (!pane) return
+  const from = pane.tab
+  if (to >= 0 && to < tabs.length && tabs[to] === from) return
+  const alone = allPanes(from.tree).length === 1
+  if (alone && (to < 0 || to >= tabs.length)) return // already its own tab
+  let target
+  if (to < 0) target = newTab(0)
+  else if (to >= tabs.length) target = newTab(tabs.length)
+  else target = tabs[to]
+  detachPane(pane)
+  placePane(pane, "h", target.focused, target)
+  target.focused = pane
+  if (!from.tree) dropTab(from)
+  else render(from)
+  activeTab = null
+  showTab(target)
+  render(target)
+  setFocus(pane)
+}
+
+// Every pane of tab `t` joins tab `into` (Go's "Merge tab into").
+function mergeTab(t, into) {
+  if (!into || t === into) return
+  for (const p of allPanes(t.tree)) {
+    placePane(p, "h", into.focused, into)
+    into.focused = into.focused ?? p
+  }
+  t.tree = null
+  dropTab(t)
+  activeTab = null
+  showTab(into)
+}
+
+function togglePaneZoom(tab = activeTab) {
+  if (!tab?.focused) return
+  if (tab.zoomed || allPanes(tab.tree).length < 2) tab.zoomed = null
+  else tab.zoomed = tab.focused
+  render(tab)
+  setFocus(tab.focused, true)
+}
+
+// Inline rename on the strip or a pane head: Enter keeps, Esc drops.
+function editInline(host, value, done) {
+  const box = document.createElement("input")
+  box.className = "rename"
+  box.value = value
+  box.spellcheck = false
+  host.replaceChildren(box)
+  box.focus()
+  box.select()
+  let finished = false
+  const finish = (keep) => {
+    if (finished) return
+    finished = true
+    done(keep ? box.value.trim() : null)
+    input.focus()
+  }
+  box.addEventListener("keydown", (e) => {
+    e.stopPropagation()
+    if (e.key === "Enter") finish(true)
+    else if (e.key === "Escape") finish(false)
+  })
+  box.addEventListener("blur", () => finish(true))
+  box.addEventListener("mousedown", (e) => e.stopPropagation())
+}
+
+function renameTab(t = activeTab) {
+  const el = strip.querySelector(`[data-tab="${t.id}"] .name`)
+  if (!el) return
+  editInline(el, tabLabel(t), (v) => {
+    if (v != null) t.name = v === t.focused?.label() ? t.name : v
+    renderStrip()
+  })
+}
+
+function renamePane(p = focused) {
   if (!p) return
+  const el = p.head.querySelector(".t")
+  editInline(el, p.label(), (v) => {
+    if (v != null) p.titleOverride = v === p.title ? "" : v
+    el.textContent = p.label()
+    renderStrip()
+  })
+}
+
+function renderStrip() {
+  const frag = document.createDocumentFragment()
+  tabs.forEach((t, i) => {
+    const b = document.createElement("div")
+    b.className = "tab" + (t === activeTab ? " active" : "")
+    b.dataset.tab = t.id
+    const n = allPanes(t.tree).length
+    b.title = `${tabLabel(t)}${n > 1 ? ` · ${n} panes` : ""}${i < 9 ? ` · ${isMac ? "⌘" : "Ctrl+"}${i + 1}` : ""}`
+    b.innerHTML = `<span class="num"></span><span class="name"></span><span class="count"></span><button class="x" title="Close tab">×</button>`
+    b.querySelector(".num").textContent = i < 9 ? String(i + 1) : ""
+    b.querySelector(".name").textContent = tabLabel(t)
+    b.querySelector(".count").textContent = n > 1 ? String(n) : ""
+    b.addEventListener("mousedown", (e) => {
+      if (e.target.closest(".x") || e.target.closest("input")) return
+      if (e.button === 1) { e.preventDefault(); return closeTab(t) }
+      showTab(t)
+    })
+    b.addEventListener("dblclick", (e) => { if (!e.target.closest(".x")) renameTab(t) })
+    b.querySelector(".x").addEventListener("click", (e) => { e.stopPropagation(); closeTab(t) })
+    frag.appendChild(b)
+  })
+  // Don't rebuild under an open rename box.
+  if (strip.querySelector("input.rename")) return
+  strip.replaceChildren(frag)
+  const label = activeTab ? tabLabel(activeTab) : "suzuri"
+  document.title = label
+}
+
+function setFocus(p, force = false) {
+  if (!p) return
+  if (p.tab !== activeTab) showTab(p.tab)
   if (window.rszTrace) log("focus", p.id, allPanes().indexOf(p))
   const prev = focused
   focused = p
+  p.tab.focused = p
   for (const q of allPanes()) q.el.classList.toggle("focused", q === p)
   if (prev && prev !== p) prev.renderBar()
   p.renderBar()
-  titleEl.textContent = p.title
+  renderStrip()
   input.focus()
-  if (prev && prev !== p && prev.id) {
+  if (prev && prev !== p && prev.id && !prev.exited) {
     invoke("pane_focus", { id: prev.id, focused: false })
     if (prev.modes & M_FOCUS) invoke("pane_write", { id: prev.id, data: "\x1b[O" })
   }
-  if (p.id && prev !== p) {
+  if (p.id && (prev !== p || force)) {
     invoke("pane_focus", { id: p.id, focused: true })
-    if (p.modes & M_FOCUS) invoke("pane_write", { id: p.id, data: "\x1b[I" })
+    if (prev !== p && p.modes & M_FOCUS) invoke("pane_write", { id: p.id, data: "\x1b[I" })
   }
 }
 
 function moveFocus(dx, dy) {
-  if (!focused) return
+  if (!focused || activeTab.zoomed) return
   const r = focused.el.getBoundingClientRect()
   const cx = r.left + r.width / 2, cy = r.top + r.height / 2
   let best = null, bestD = Infinity
@@ -452,27 +682,112 @@ function moveFocus(dx, dy) {
   if (best) setFocus(best)
 }
 
-// ---- keys
-function appShortcut(e) {
-  const k = e.key.toLowerCase()
-  const arrows = { arrowleft: [-1, 0], arrowright: [1, 0], arrowup: [0, -1], arrowdown: [0, 1] }
-  if (isMac ? e.metaKey : e.ctrlKey && e.shiftKey) {
-    if (k === "d" && (isMac ? !e.shiftKey : true)) return split("h"), true
-    if ((isMac && k === "d" && e.shiftKey) || (!isMac && k === "e")) return split("v"), true
-    if (k === "w") return closePane(focused), true
-    if (k === "h") return toggleHud(), true
-    if (k === "n" && e.shiftKey) return invoke("new_window").catch((err) => log("new window failed", String(err))), true
-    if (isMac && e.altKey && arrows[k]) return moveFocus(...arrows[k]), true
-    if (isMac && (k === "v" || k === "c" || k === "q")) return false // native paste/copy/quit
-  }
-  if (!isMac && e.altKey && !e.ctrlKey && arrows[k]) return moveFocus(...arrows[k]), true
-  return false
+// ---- commands: what the palette lists and the shortcuts run.
+let settingsCfg = null // the saved settings, for the profile entries
+const overlays = document.getElementById("overlays")
+const palette = new Palette(overlays, () => input.focus())
+const settings = new Settings(overlays, () => input.focus())
+const overlayOpen = () => palette.isOpen || settings.isOpen
+
+// Other parts add palette entries here: {id, title, category, hint?, run()}.
+const extraCommands = []
+window.rsz = { addCommands: (cmds) => extraCommands.push(...cmds) }
+
+const ACTIONS = {
+  new_tab: () => openTab(),
+  close_tab: () => closeTab(),
+  next_tab: () => switchTab(1),
+  prev_tab: () => switchTab(-1),
+  select_tab: (i) => tabs[i] && showTab(tabs[i]),
+  rename_tab: () => renameTab(),
+  split_right: () => split("h"),
+  split_down: () => split("v"),
+  close_pane: () => closePane(focused),
+  rename_pane: () => renamePane(),
+  zoom_pane: () => togglePaneZoom(),
+  focus_left: () => moveFocus(-1, 0),
+  focus_right: () => moveFocus(1, 0),
+  focus_up: () => moveFocus(0, -1),
+  focus_down: () => moveFocus(0, 1),
+  move_pane_prev_tab: () => movePaneToTab(focused, tabs.indexOf(activeTab) - 1),
+  move_pane_next_tab: () => movePaneToTab(focused, tabs.indexOf(activeTab) + 1),
+  move_pane_new_tab: () => movePaneToTab(focused, tabs.length),
+  move_pane_to: (id) => movePaneToTab(focused, tabs.findIndex((t) => t.id === id)),
+  merge_tab_into: (id) => mergeTab(activeTab, tabs.find((t) => t.id === id)),
+  new_tab_profile: (name) => openTab(name),
+  palette: () => openPalette(),
+  settings: () => openSettings(),
+  hud: () => toggleHud(),
+  new_window: () => invoke("new_window").catch((err) => log("new window failed", String(err))),
 }
 
+function run(id, arg) {
+  if (palette.isOpen) palette.close()
+  ACTIONS[id]?.(arg)
+}
+
+// Go suzuri's DefaultCommands + TabMoveCommands, for what rust-suzuri has.
+function commandList() {
+  const c = (id, title, category, arg) => ({ id, title, category, arg, hint: chordLabel(id, isMac) })
+  const list = [
+    c("settings", "Settings", "Appearance"),
+    c("new_tab", "New tab", "Tabs"),
+    c("new_window", "New window", "Window"),
+  ]
+  const active = settingsCfg?.active_profile
+  for (const p of settingsCfg?.profiles || []) {
+    list.push({ id: "new_tab_profile", arg: p.name, category: "Tabs", title: `New tab: ${p.name}${p.name === active ? " ★" : ""}`, hint: p.shell || "" })
+  }
+  list.push(
+    c("close_tab", "Close tab", "Tabs"),
+    c("rename_tab", "Rename tab", "Tabs"),
+    c("next_tab", "Next tab", "Tabs"),
+    c("prev_tab", "Previous tab", "Tabs"),
+    c("split_right", "Split right", "Panes"),
+    c("split_down", "Split down", "Panes"),
+    c("rename_pane", "Rename pane", "Panes"),
+    c("close_pane", "Close pane", "Panes"),
+    c("focus_left", "Focus pane left", "Panes"),
+    c("focus_right", "Focus pane right", "Panes"),
+    c("focus_up", "Focus pane up", "Panes"),
+    c("focus_down", "Focus pane down", "Panes"),
+    c("zoom_pane", "Maximize pane", "Panes"),
+    c("move_pane_prev_tab", "Move pane to previous tab", "Panes"),
+    c("move_pane_next_tab", "Move pane to next tab", "Panes"),
+    c("move_pane_new_tab", "Move pane to new tab", "Panes"),
+  )
+  tabs.forEach((t, i) => {
+    if (t === activeTab) return
+    list.push({ id: "move_pane_to", arg: t.id, category: "Panes", title: `Move pane to tab: ${i + 1} ${tabLabel(t)}` })
+  })
+  tabs.forEach((t, i) => {
+    if (t === activeTab) return
+    list.push({ id: "merge_tab_into", arg: t.id, category: "Tabs", title: `Merge tab into: ${i + 1} ${tabLabel(t)}` })
+  })
+  list.push(c("hud", "Stats HUD", "Help"))
+  for (const x of extraCommands) list.push({ ...x, extra: true })
+  return list
+}
+
+function openPalette() {
+  if (settings.isOpen) return
+  palette.open(commandList(), (it) => (it.extra ? it.run() : run(it.id, it.arg)))
+}
+
+function openSettings() {
+  if (palette.isOpen) palette.close()
+  if (!settings.isOpen) settings.open()
+}
+
+window.addEventListener("rsz:config", (e) => { settingsCfg = e.detail })
+
+// ---- keys
 input.addEventListener("keydown", (e) => {
   if (window.rszTrace) log("key", e.key, e.code, e.metaKey, e.ctrlKey, e.altKey, e.isComposing)
   if (e.isComposing) return
-  if (appShortcut(e) || extraShortcut(e, isMac)) { e.preventDefault(); return }
+  const sc = shortcut(e, isMac)
+  if (sc) { e.preventDefault(); run(sc.id, sc.arg); return }
+  if (extraShortcut(e, isMac)) { e.preventDefault(); return }
   if (!focused) return
   if (focused.barActive()) {
     if (focused.barKeydown(e)) e.preventDefault()
@@ -521,15 +836,30 @@ input.addEventListener("paste", (e) => {
   }
   if (text) pasteText(pane, text)
 })
-document.addEventListener("mousedown", () => setTimeout(() => panelOpen() || input.focus(), 0))
-window.addEventListener("focus", () => panelOpen() || input.focus())
+// Clicks give the keyboard back to the terminal, except inside an overlay,
+// a panel (#286) or a rename box.
+document.addEventListener("mousedown", (e) => {
+  if (overlayOpen() || e.target.closest?.("input.rename")) return
+  setTimeout(() => panelOpen() || input.focus(), 0)
+})
+window.addEventListener("focus", () => { if (!overlayOpen() && !panelOpen()) input.focus() })
 window.addEventListener("rsz-panel-closed", () => input.focus())
 
-// For #286's AI control (ui/aicontrol.js): the pane tree and its commands.
-window.rszHost = { tree: () => tree, focused: () => focused, allPanes: () => allPanes(), split, closePane, setFocus }
+// For #286's AI control (ui/aicontrol.js): the active tab's tree, every
+// pane in every tab, and the commands.
+window.rszHost = {
+  tree: () => activeTab?.tree,
+  focused: () => focused,
+  allPanes: () => everyPane(),
+  split, closePane, setFocus,
+  tabs: () => tabs, activeTab: () => activeTab, openTab, showTab, movePaneToTab,
+}
+
+document.getElementById("new-tab").onclick = () => openTab()
 document.getElementById("split-right").onclick = () => split("h")
 document.getElementById("split-down").onclick = () => split("v")
-document.getElementById("close-pane").onclick = () => closePane(focused)
+document.getElementById("open-palette").onclick = () => openPalette()
+document.getElementById("open-settings").onclick = () => openSettings()
 
 // ---- HUD: Cmd/Ctrl+Shift+H
 let hudTimer = 0
@@ -552,7 +882,7 @@ async function updateHud() {
 // in the first pane (focused) and reports after RSZ_BENCH_SECS.
 async function grid(n) {
   // Columns first, then rows: 8 panes = 4 x 2.
-  const first = await split("h")
+  const first = await openTab()
   // Let the first pane's program start before the rest (the bench's quiet
   // probe pane is whichever fakeagent starts first).
   await new Promise((r) => setTimeout(r, 500))
@@ -622,7 +952,9 @@ async function start() {
   window.rszTrace = boot.trace
   home = boot.home
   if (boot.ws) connectFrames(boot.ws)
-  const first = boot.panes > 1 ? await grid(boot.panes) : await split("h")
+  settingsCfg = await invoke("config_get").catch(() => null)
+  if (settingsCfg) announce(settingsCfg)
+  const first = boot.panes > 1 ? await grid(boot.panes) : await openTab()
   if (boot.bench) bench(boot, first)
 }
 start()

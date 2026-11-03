@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 
 mod bridge;
 mod paste;
+mod config;
 mod mcp_client;
 mod sidecar;
 mod transfer;
@@ -70,12 +71,17 @@ fn pane_open(
     rows: u16,
     command: Option<Vec<String>>,
     from: Option<u32>,
+    profile: Option<String>,
     on_frame: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let id = panes.next.fetch_add(1, Ordering::Relaxed) + 1;
-    let command = command.or_else(|| {
-        std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s))
-    });
+    let settings = config::load();
+    // A Settings profile (or the default one) gives the shell and folder;
+    // RSZ_CMD still wins for the bench.
+    let (prof_cmd, prof_cwd) = config::profile_launch(&settings, profile.as_deref());
+    let command = command
+        .or_else(|| std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s)))
+        .or(prof_cmd);
     let panes_ref = Arc::clone(&panes);
     let sink: Sink = Arc::new(move |o| {
         let _ = match o {
@@ -106,10 +112,12 @@ fn pane_open(
         .and_then(|f| panes.get(f))
         .and_then(|p| p.cwd())
         .filter(|d| std::path::Path::new(d).is_dir())
-        .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()));
+        .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()))
+        .or(prof_cwd);
     // RSZ_NO_BAR=1: the plain shell with its own prompt, no input bar.
     let plain_shell = std::env::var_os("RSZ_NO_BAR").is_some();
-    let mut cfg = PaneConfig { cols, rows, command, cwd, plain_shell, ..Default::default() };
+    let cursor = config::cursor_code(&settings);
+    let mut cfg = PaneConfig { cols, rows, command, cwd, plain_shell, cursor, ..Default::default() };
     if let Some(b) = bridge.as_ref() {
         cfg.env.extend(b.pane_env(id));
     }
@@ -204,6 +212,39 @@ fn pane_close(panes: State<'_, Arc<Panes>>, id: u32) {
     if let Some(p) = panes.get(id) {
         p.close();
     }
+}
+
+/// The settings file (config.rs), normalized.
+#[tauri::command]
+fn config_get() -> serde_json::Value {
+    config::load()
+}
+
+/// Merge `patch` into the settings file and save it; returns the result.
+/// Live parts reach running panes here (the cursor); the UI applies the rest
+/// on its `rsz:config` event.
+#[tauri::command]
+fn config_set(panes: State<'_, Arc<Panes>>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
+    let v = config::update(patch).map_err(|e| e.to_string())?;
+    let shape = config::cursor_code(&v);
+    for p in panes.map.lock().values() {
+        p.set_default_cursor(shape);
+    }
+    Ok(v)
+}
+
+/// What the Settings screen offers and where the file is.
+#[tauri::command]
+fn config_meta() -> serde_json::Value {
+    serde_json::json!({
+        "path": config::path().to_string_lossy(),
+        "themes": config::THEMES,
+        "cursors": config::CURSORS,
+        "ansi_maps": config::ANSI_MAPS,
+        "font_min": config::FONT_SIZE_MIN,
+        "font_max": config::FONT_SIZE_MAX,
+        "font_default": config::FONT_SIZE_DEFAULT,
+    })
 }
 
 #[derive(Serialize)]
@@ -354,6 +395,9 @@ fn main() {
             pane_redraw,
             pane_close,
             stats,
+            config_get,
+            config_set,
+            config_meta,
             boot,
             bench_report,
             ui_log,

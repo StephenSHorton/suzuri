@@ -103,11 +103,13 @@ pub struct PaneConfig {
     pub scrollback: usize,
     /// Start the user's shell without suzuri's bootstrap (no input bar).
     pub plain_shell: bool,
+    /// Cursor shape until a program sets one: 1 block, 2 underline, 3 beam.
+    pub cursor: u8,
 }
 
 impl Default for PaneConfig {
     fn default() -> Self {
-        Self { cols: 80, rows: 24, command: None, cwd: None, env: Vec::new(), scrollback: 10_000, plain_shell: false }
+        Self { cols: 80, rows: 24, command: None, cwd: None, env: Vec::new(), scrollback: 10_000, plain_shell: false, cursor: 1 }
     }
 }
 
@@ -248,7 +250,13 @@ impl Pane {
         let writer = pair.master.take_writer().map_err(|e| io(e.into()))?;
 
         let shared = Arc::new(Shared {
-            engine: Mutex::new(Box::new(Alacritty::new(cfg.cols, cfg.rows, cfg.scrollback))),
+            engine: Mutex::new({
+                let mut e: Box<dyn Engine> = Box::new(Alacritty::new(cfg.cols, cfg.rows, cfg.scrollback));
+                if cfg.cursor != 1 {
+                    e.set_default_cursor(cfg.cursor);
+                }
+                e
+            }),
             wake: Mutex::new(Wake { dirty: true, force_full: true, input_at: None, stop: false, sent: 0, sent_at: Instant::now(), acked: 0 }),
             cv: Condvar::new(),
             resize_slot: Mutex::new(None),
@@ -335,6 +343,13 @@ impl Pane {
             w.dirty = true;
             w.force_full = true;
         });
+    }
+
+    /// The Settings cursor shape (1 block, 2 underline, 3 beam) for programs
+    /// that don't set their own.
+    pub fn set_default_cursor(&self, shape: u8) {
+        self.shared.engine.lock().set_default_cursor(shape);
+        self.redraw();
     }
 
     pub fn close(&self) {

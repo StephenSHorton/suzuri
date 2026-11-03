@@ -11,7 +11,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb as ARgb, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb as ARgb, StdSyncHandler};
 use parking_lot::Mutex;
 
 use crate::frame::{self, CellOut, FrameHeader};
@@ -44,6 +44,17 @@ pub trait Engine: Send {
     /// trailing blanks trimmed (the AI control plane's `tail`).
     fn history_tail(&self, lines: usize) -> Vec<String>;
     fn size(&self) -> (u16, u16);
+    /// The cursor shape used until a program sets one (DECSCUSR): 1 block,
+    /// 2 underline, 3 beam (the Settings cursor).
+    fn set_default_cursor(&mut self, _shape: u8) {}
+}
+
+fn cursor_shape(shape: u8) -> CursorShape {
+    match shape {
+        2 => CursorShape::Underline,
+        3 => CursorShape::Beam,
+        _ => CursorShape::Block,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -80,6 +91,7 @@ pub struct Alacritty {
     size: Size,
     full_next: bool,
     row_scratch: Vec<CellOut>,
+    config: Config,
 }
 
 impl Alacritty {
@@ -90,8 +102,8 @@ impl Alacritty {
         // answers CSI ? u; the UI's encoder (ui/kitty.js) reads the flags
         // from the frame's mode word.
         let config = Config { scrolling_history: scrollback, kitty_keyboard: true, ..Config::default() };
-        let term = Term::new(config, &size, pending.clone());
-        Self { term, parser: Processor::new(), pending, size, full_next: true, row_scratch: Vec::new() }
+        let term = Term::new(config.clone(), &size, pending.clone());
+        Self { term, parser: Processor::new(), pending, size, full_next: true, row_scratch: Vec::new(), config }
     }
 
     fn drain(&mut self, events: &mut Vec<EngineEvent>) {
@@ -377,6 +389,12 @@ impl Engine for Alacritty {
 
     fn size(&self) -> (u16, u16) {
         (self.size.cols as u16, self.size.rows as u16)
+    }
+
+    fn set_default_cursor(&mut self, shape: u8) {
+        self.config.default_cursor_style = CursorStyle { shape: cursor_shape(shape), blinking: false };
+        self.term.set_options(self.config.clone());
+        self.full_next = true;
     }
 }
 
