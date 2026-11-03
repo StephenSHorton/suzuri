@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::Mutex;
 
 mod bridge;
+mod caffeine;
 mod paste;
 mod config;
 mod mcp_client;
@@ -375,6 +376,7 @@ fn main() {
     }
     builder
         .setup(move |app| {
+            caffeine::install(app.handle(), &app.state::<Arc<caffeine::Caffeine>>());
             if let Some(b) = &bridge_setup {
                 b.attach(app.handle().clone());
                 app.manage(Arc::clone(b));
@@ -383,6 +385,7 @@ fn main() {
         })
         .manage(bridge)
         .manage(panes)
+        .manage(caffeine::Caffeine::new())
         .manage(Arc::new(transfer::Transfers::default()))
         .manage(Arc::new(mcp_client::McpClient::default()))
         .invoke_handler(tauri::generate_handler![
@@ -410,7 +413,11 @@ fn main() {
             workspace::workspace_me,
             bridge::aicontrol_reply,
             bridge::pane_text,
-            window::new_window
+            window::new_window,
+            caffeine::caffeine_on,
+            caffeine::caffeine_off,
+            caffeine::caffeine_toggle,
+            caffeine::caffeine_status
         ])
         .build(tauri::generate_context!())
         .expect("build rust-suzuri")
