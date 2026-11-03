@@ -3,6 +3,8 @@
 import { Screen, cellMetrics, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_BRACKETED_PASTE, M_FOCUS } from "./frame.js"
 import { encodeKey } from "./keys.js"
 import { clipboardImage, saveClipboardImage } from "./paste_image.js"
+import { extraShortcut } from "./extras.js"
+import { isOpen as panelOpen } from "./panel.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -371,7 +373,7 @@ function appShortcut(e) {
 input.addEventListener("keydown", (e) => {
   if (window.rszTrace) log("key", e.key, e.code, e.metaKey, e.ctrlKey, e.altKey, e.isComposing)
   if (e.isComposing) return
-  if (appShortcut(e)) { e.preventDefault(); return }
+  if (appShortcut(e) || extraShortcut(e, isMac)) { e.preventDefault(); return }
   if (!focused) return
   const data = encodeKey(e, focused.modes, isMac)
   if (data == null) return
@@ -410,8 +412,9 @@ input.addEventListener("paste", (e) => {
   }
   if (text) pasteText(pane, text)
 })
-document.addEventListener("mousedown", () => setTimeout(() => input.focus(), 0))
-window.addEventListener("focus", () => input.focus())
+document.addEventListener("mousedown", () => setTimeout(() => panelOpen() || input.focus(), 0))
+window.addEventListener("focus", () => panelOpen() || input.focus())
+window.addEventListener("rsz-panel-closed", () => input.focus())
 
 document.getElementById("split-right").onclick = () => split("h")
 document.getElementById("split-down").onclick = () => split("v")

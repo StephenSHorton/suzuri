@@ -10,6 +10,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::Mutex;
 
 mod paste;
+mod mcp_client;
+mod sidecar;
+mod transfer;
+mod transfer_engine;
+mod workspace;
 mod ws;
 use rsz_term::{Out, Pane, PaneConfig, Sink};
 use serde::Serialize;
@@ -285,6 +290,8 @@ fn main() {
     let _ = PANES.set(Arc::clone(&panes));
     tauri::Builder::default()
         .manage(panes)
+        .manage(Arc::new(transfer::Transfers::default()))
+        .manage(Arc::new(mcp_client::McpClient::default()))
         .invoke_handler(tauri::generate_handler![
             pane_open,
             pane_write,
@@ -298,7 +305,13 @@ fn main() {
             boot,
             bench_report,
             ui_log,
-            paste::paste_image_save
+            paste::paste_image_save,
+            transfer::transfer_send,
+            transfer::transfer_receive,
+            transfer::transfer_cancel,
+            transfer::transfer_info,
+            workspace::workspace_call,
+            workspace::workspace_me
         ])
         .run(tauri::generate_context!())
         .expect("run rust-suzuri");
