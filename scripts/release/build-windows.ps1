@@ -33,7 +33,8 @@ $overlay = @{
   }
 } | ConvertTo-Json -Depth 5 -Compress
 $overlayFile = Join-Path ([IO.Path]::GetTempPath()) "rsz-release-$Version.json"
-Set-Content -Path $overlayFile -Value $overlay -Encoding utf8
+# UTF-8 without a BOM (PowerShell 5's -Encoding utf8 writes one).
+[IO.File]::WriteAllText($overlayFile, $overlay, (New-Object Text.UTF8Encoding $false))
 
 Push-Location app
 try {

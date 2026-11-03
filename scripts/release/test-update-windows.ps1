@@ -9,6 +9,11 @@
 param([string]$Old = "0.1.0", [string]$New = "0.1.1", [int]$Port = 8787, [switch]$Keep)
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+# One run at a time: a second run would uninstall and kill the first one's app.
+$busy = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($busy -or (Get-Process rust-suzuri -ErrorAction SilentlyContinue)) {
+  throw "port $Port is in use or rust-suzuri is running: another update test may be going; stop it first"
+}
 $T = Join-Path ([IO.Path]::GetTempPath()) ("rsz-uptest-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force $T | Out-Null
 $key = Join-Path $T "test.key"
@@ -21,7 +26,10 @@ $overlay = @{ plugins = @{ updater = @{
   dangerousInsecureTransportProtocol = $true
   windows = @{ installMode = "quiet" } } } } | ConvertTo-Json -Depth 6 -Compress
 $overlayFile = Join-Path $T "overlay.json"
-Set-Content $overlayFile $overlay -Encoding utf8
+# UTF-8 without a BOM: PowerShell 5's -Encoding utf8 writes one, and the
+# updater's JSON parser rejects latest.json with a BOM.
+$utf8 = New-Object Text.UTF8Encoding $false
+[IO.File]::WriteAllText($overlayFile, $overlay, $utf8)
 
 foreach ($v in @($Old, $New)) {
   & (Join-Path $PSScriptRoot "build-windows.ps1") -Version $v -NoUpload -ExtraConfig $overlayFile
@@ -33,9 +41,10 @@ cargo tauri signer sign -f $key "--password=" (Join-Path $dist $newExe) | Out-Nu
 if (-not (Test-Path (Join-Path $dist "$newExe.sig"))) { throw "signer sign failed" }
 $sig = (Get-Content (Join-Path $dist "$newExe.sig") -Raw).Trim()
 $entry = @{ signature = $sig; url = "http://127.0.0.1:$Port/$newExe" }
-@{ version = $New; notes = "local test"; pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+$feed = @{ version = $New; notes = "local test"; pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
    platforms = @{ "windows-x86_64" = $entry; "windows-x86_64-nsis" = $entry } } |
-  ConvertTo-Json -Depth 6 | Set-Content (Join-Path $dist "latest.json") -Encoding utf8
+  ConvertTo-Json -Depth 6
+[IO.File]::WriteAllText((Join-Path $dist "latest.json"), $feed, $utf8)
 
 # Feed server: a background job serving dist\$New.
 $srv = Start-Job -ArgumentList $dist, $Port -ScriptBlock {
