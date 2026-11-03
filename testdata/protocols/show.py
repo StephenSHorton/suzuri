@@ -50,6 +50,16 @@ def notices():
     out("\n")
 
 
+def inline7879():
+    out("OSC 7879 image=<path> (suzuri's own):\n")
+    out(f"{ESC}]7879;image={SMALL}\a")
+
+
+def inlinepath():
+    out("A path printed as text (Go's path scan):\n")
+    out(f"saved {SAMPLE}\n")
+
+
 def inline():
     data = open(SAMPLE, "rb").read()
     out("OSC 1337 (iTerm2 inline image):\n")
@@ -97,7 +107,7 @@ def progress():
 
 def main():
     what = sys.argv[1] if len(sys.argv) > 1 else "all"
-    steps = {"notices": [notices], "inline": [inline], "kitty": [kitty], "progress": [progress], "all": [notices, inline, kitty, progress]}
+    steps = {"notices": [notices], "inline": [inline], "inline7879": [inline7879], "inlinepath": [inlinepath], "kitty": [kitty], "progress": [progress], "all": [notices, inline, kitty, progress]}
     for f in steps.get(what, []):
         f()
 

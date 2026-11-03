@@ -25,8 +25,7 @@ function render(state) {
       shown.delete(key)
     }
   }
-  // Oldest at the stack's base: append in order (the stack's direction
-  // puts the base at the anchored edge).
+  // Oldest first: the stack runs bottom-up, so it sits at the bottom.
   for (const c of state.cards) {
     let el = shown.get(c.key)
     if (!el) {

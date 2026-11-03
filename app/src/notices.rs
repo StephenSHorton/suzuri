@@ -89,7 +89,8 @@ pub struct Notices {
 
 impl Notices {
     pub fn new(app: AppHandle) -> Self {
-        let n = Self { inner: Arc::new(Mutex::new(Inner::default())), app };
+        let anchor = go_anchor().and_then(|a| ANCHORS.iter().position(|x| *x == a)).unwrap_or(0);
+        let n = Self { inner: Arc::new(Mutex::new(Inner { anchor, ..Default::default() })), app };
         let tick = n.clone();
         std::thread::Builder::new()
             .name("rsz-notices".into())
@@ -303,6 +304,20 @@ impl Notices {
         let unread = self.inner.lock().unread;
         let _ = self.app.emit("notice-bell", unread);
     }
+}
+
+/// The corner Go suzuri's config picks (notice_position), until rust-suzuri
+/// has settings of its own (#283 calls notice_anchor then).
+fn go_anchor() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let dir = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Application Support"));
+    #[cfg(windows)]
+    let dir = std::env::var_os("APPDATA").map(std::path::PathBuf::from);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let dir = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from);
+    let text = std::fs::read_to_string(dir?.join("suzuri").join("config.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("notice_position")?.as_str().map(str::to_string)
 }
 
 fn remember(g: &mut Inner, pane: Option<u32>, n: &Notice) {

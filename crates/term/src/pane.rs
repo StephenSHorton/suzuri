@@ -655,6 +655,9 @@ impl Feeder<'_> {
             self.eng.feed(b"\r\n", self.events);
         }
         let (cols, rows) = images::inline_cells(px, self.cell(), self.eng.size().0 as u32);
+        // Go's caption row comes first: "img <name>".
+        let label: String = name.chars().filter(|c| !c.is_control()).take(200).collect();
+        self.eng.feed(format!("img {label}\r\n").as_bytes(), self.events);
         let mut ch = Changes::default();
         let id = {
             let mut im = self.shared.images.lock();
@@ -662,10 +665,7 @@ impl Feeder<'_> {
             self.eng.mark_cursor(tag);
             im.add_inline(path.as_deref().unwrap_or(&name), tag, cols, rows, &mut ch)
         };
-        let mut block = b"\r\n".repeat(rows as usize);
-        let label: String = name.chars().filter(|c| !c.is_control()).take(200).collect();
-        block.extend_from_slice(format!("\x1b[2m{label}\x1b[22m\r\n").as_bytes());
-        self.eng.feed(&block, self.events);
+        self.eng.feed(&b"\r\n".repeat(rows as usize), self.events);
         self.send(ch);
         self.outs.push(Out::ImageData(ImageData {
             id,
@@ -1077,8 +1077,8 @@ mod tests {
 
     #[test]
     fn notice_and_inline_image() {
-        // 90 x 36 px at the default 9 x 18 cell: 10 columns, 2 rows, then a
-        // caption row, under "hi".
+        // 90 x 36 px at the default 9 x 18 cell: a caption row, then 10
+        // columns by 2 rows, under "hi".
         let script = format!(
             "printf 'hi\\033]777;notify;Done;tests pass\\007\\033]1337;File=name=Y2F0LnBuZw==;inline=1:{}\\007after\\n'; sleep 1",
             png_b64(90, 36)
@@ -1087,11 +1087,11 @@ mod tests {
         let seen = wait_exit(&rx);
         assert!(seen.contains(&"notice Done|tests pass".to_string()), "{seen:?}");
         assert!(seen.iter().any(|m| m.starts_with("image 2 cat.png 90x36")), "{seen:?}");
-        // The mark sits at row 1 (under "hi"), column 0.
-        assert!(seen.iter().any(|m| m == "placed [(2, 1, 0, 10, 2)]"), "{seen:?}");
+        // "hi", the caption, then the image's two rows from row 2.
+        assert!(seen.iter().any(|m| m == "placed [(2, 2, 0, 10, 2)]"), "{seen:?}");
         let text = pane.screen_text();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(&lines[..5], &["hi", "", "", "cat.png", "after"], "{text}");
+        assert_eq!(&lines[..5], &["hi", "img cat.png", "", "", "after"], "{text}");
         pane.join();
     }
 
