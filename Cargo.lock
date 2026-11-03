@@ -2820,6 +2820,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

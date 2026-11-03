@@ -50,6 +50,11 @@ enum Msg<'a> {
     Clipboard { text: &'a str },
     #[serde(rename = "exit")]
     Exit { code: Option<u32> },
+    /// The input bar's view of the shell (#285).
+    #[serde(rename = "shell")]
+    Shell { integrated: bool, cwd: &'a str, program: bool },
+    #[serde(rename = "done")]
+    CommandDone { exit: Option<i32>, command: &'a str },
 }
 
 fn json(m: &Msg) -> InvokeResponseBody {
@@ -86,6 +91,8 @@ fn pane_open(
             }
             Out::Bell => on_frame.send(json(&Msg::Bell)),
             Out::Clipboard(s) => on_frame.send(json(&Msg::Clipboard { text: &s })),
+            Out::Shell(st) => on_frame.send(json(&Msg::Shell { integrated: st.integrated, cwd: &st.cwd, program: st.program })),
+            Out::CommandDone { exit, command } => on_frame.send(json(&Msg::CommandDone { exit, command: &command })),
             Out::Exit(code) => {
                 panes_ref.map.lock().remove(&id);
                 panes_ref.titles.lock().remove(&id);
@@ -99,7 +106,9 @@ fn pane_open(
         .and_then(|p| p.cwd())
         .filter(|d| std::path::Path::new(d).is_dir())
         .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()));
-    let mut cfg = PaneConfig { cols, rows, command, cwd, ..Default::default() };
+    // RSZ_NO_BAR=1: the plain shell with its own prompt, no input bar.
+    let plain_shell = std::env::var_os("RSZ_NO_BAR").is_some();
+    let mut cfg = PaneConfig { cols, rows, command, cwd, plain_shell, ..Default::default() };
     if let Some(b) = bridge.as_ref() {
         cfg.env.extend(b.pane_env(id));
     }

@@ -23,6 +23,8 @@ use parking_lot::{Condvar, Mutex};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::engine::{Alacritty, Engine, EngineEvent};
+use crate::fg::Probe;
+use crate::shell::{self, OscFilter, ShellEvent};
 
 /// What a pane sends to its owner.
 pub enum Out {
@@ -30,9 +32,59 @@ pub enum Out {
     Title(String),
     Bell,
     Clipboard(String),
+    /// The shell's state for the input bar changed (#285).
+    Shell(ShellStatus),
+    /// A command run from the shell finished (shell integration only).
+    CommandDone { exit: Option<i32>, command: String },
     /// The pane is closed; sent once. The exit code if the shell reported one.
     Exit(Option<u32>),
 }
+
+/// What the input bar needs to know about the shell.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShellStatus {
+    /// The shell runs with suzuri's bootstrap and has reported a prompt. Until
+    /// then (or never, for a custom command or an unknown shell) the bar stays
+    /// off and keys go to the PTY.
+    pub integrated: bool,
+    /// The working directory at the last prompt.
+    pub cwd: String,
+    /// A program other than the shell owns the keyboard: between a command's
+    /// start mark and the next prompt, or while one holds the terminal.
+    pub program: bool,
+}
+
+/// The shell state as the reader and the probe see it; `status()` is what
+/// the UI is told.
+#[derive(Default)]
+struct ShellState {
+    integrated: bool,
+    cwd: String,
+    /// Latched by the start mark, cleared by the next prompt.
+    started: bool,
+    /// The foreground probe's last answer.
+    child: bool,
+    sent: Option<ShellStatus>,
+}
+
+impl ShellState {
+    fn status(&self) -> ShellStatus {
+        ShellStatus { integrated: self.integrated, cwd: self.cwd.clone(), program: self.started || self.child }
+    }
+
+    /// The status to send, if it changed since the last one sent.
+    fn changed(&mut self) -> Option<ShellStatus> {
+        let st = self.status();
+        if self.sent.as_ref() == Some(&st) {
+            return None;
+        }
+        self.sent = Some(st.clone());
+        Some(st)
+    }
+}
+
+/// How often the foreground probe looks (Go suzuri: 200 ms).
+const FG_POLL: Duration = Duration::from_millis(200);
 
 pub type Sink = Arc<dyn Fn(Out) + Send + Sync>;
 
@@ -45,11 +97,13 @@ pub struct PaneConfig {
     pub cwd: Option<String>,
     pub env: Vec<(String, String)>,
     pub scrollback: usize,
+    /// Start the user's shell without suzuri's bootstrap (no input bar).
+    pub plain_shell: bool,
 }
 
 impl Default for PaneConfig {
     fn default() -> Self {
-        Self { cols: 80, rows: 24, command: None, cwd: None, env: Vec::new(), scrollback: 10_000 }
+        Self { cols: 80, rows: 24, command: None, cwd: None, env: Vec::new(), scrollback: 10_000, plain_shell: false }
     }
 }
 
@@ -102,6 +156,7 @@ struct Shared {
     focused: AtomicBool,
     state: Mutex<State>,
     stats: Stats,
+    shell: Mutex<ShellState>,
 }
 
 impl Shared {
@@ -152,7 +207,17 @@ impl Pane {
         let io = |e: anyhow_like::E| std::io::Error::other(e.0);
         let size = PtySize { rows: cfg.rows, cols: cfg.cols, pixel_width: 0, pixel_height: 0 };
         let pair = native_pty_system().openpty(size).map_err(|e| io(e.into()))?;
-        let argv = cfg.command.clone().unwrap_or_else(default_shell);
+        let mut argv = cfg.command.clone().unwrap_or_else(default_shell);
+        // The input bar's shell hooks, for the user's own shell only.
+        let mut boot_env = Vec::new();
+        let mut temp_dir = None;
+        if cfg.command.is_none() && !cfg.plain_shell {
+            if let Some(b) = shell::bootstrap(&argv) {
+                argv = b.argv;
+                boot_env = b.env;
+                temp_dir = b.temp_dir;
+            }
+        }
         let mut cmd = CommandBuilder::new(&argv[0]);
         cmd.args(&argv[1..]);
         if let Some(cwd) = &cfg.cwd {
@@ -163,10 +228,15 @@ impl Pane {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", "rust-suzuri");
-        for (k, v) in &cfg.env {
+        for (k, v) in boot_env.iter().chain(&cfg.env) {
             cmd.env(k, v);
         }
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| io(e.into()))?;
+        let probe = Probe {
+            shell_pid: child.process_id().unwrap_or(0),
+            #[cfg(unix)]
+            master_fd: pair.master.as_raw_fd().unwrap_or(-1),
+        };
         drop(pair.slave);
         let pid = child.process_id();
         let killer = child.clone_killer();
@@ -181,6 +251,7 @@ impl Pane {
             focused: AtomicBool::new(false),
             state: Mutex::new(State::Starting),
             stats: Stats::default(),
+            shell: Mutex::new(ShellState::default()),
         });
         let (tx, rx) = unbounded::<Cmd>();
         let mut threads = Vec::new();
@@ -200,8 +271,17 @@ impl Pane {
             let tx = tx.clone();
             threads.push(thread("rsz-wait", move || {
                 let code = child.wait().ok().map(|s| s.exit_code());
+                if let Some(dir) = temp_dir {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
                 let _ = tx.send(Cmd::ChildExit(code));
             }));
+        }
+        // Foreground probe: is a program other than the shell running?
+        {
+            let shared = shared.clone();
+            let sink = sink.clone();
+            threads.push(thread("rsz-fg", move || fg_loop(probe, shared, sink)));
         }
         // Frame thread.
         {
@@ -302,6 +382,9 @@ fn home_dir() -> Option<String> {
 fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender<Cmd>, sink: Sink) {
     let mut buf = vec![0u8; 64 * 1024];
     let mut events = Vec::new();
+    let mut osc = OscFilter::default();
+    let mut clean = Vec::with_capacity(buf.len());
+    let mut marks = Vec::new();
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -311,13 +394,70 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
             eprintln!("rsz: read {n} {:?}", String::from_utf8_lossy(&buf[..n.min(200)]));
         }
         let t = Instant::now();
-        shared.engine.lock().feed(&buf[..n], &mut events);
+        clean.clear();
+        osc.feed(&buf[..n], &mut clean, &mut marks);
+        if !marks.is_empty() {
+            shell_marks(&mut marks, &shared, &sink);
+        }
+        shared.engine.lock().feed(&clean, &mut events);
         shared.stats.feed_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         shared.stats.bytes_in.fetch_add(n as u64, Ordering::Relaxed);
         dispatch(&mut events, &tx, &sink);
         shared.kick(|w| w.dirty = true);
     }
     let _ = tx.send(Cmd::ReaderEof);
+}
+
+/// Apply the shell's marks to the bar state and tell the UI what changed.
+fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink) {
+    let mut done = Vec::new();
+    let status = {
+        let mut sh = shared.shell.lock();
+        for m in marks.drain(..) {
+            match m {
+                ShellEvent::Start => sh.started = true,
+                ShellEvent::Cwd(cwd) => {
+                    sh.integrated = true;
+                    sh.started = false;
+                    sh.cwd = cwd;
+                }
+                ShellEvent::Done { exit, command } => {
+                    sh.started = false;
+                    done.push((exit, command));
+                }
+            }
+        }
+        sh.changed()
+    };
+    for (exit, command) in done {
+        sink(Out::CommandDone { exit, command });
+    }
+    if let Some(st) = status {
+        sink(Out::Shell(st));
+    }
+}
+
+/// Poll the foreground program while the pane runs. Only for an integrated
+/// shell: without prompt marks the bar is off anyway.
+fn fg_loop(probe: Probe, shared: Arc<Shared>, sink: Sink) {
+    loop {
+        std::thread::sleep(FG_POLL);
+        if *shared.state.lock() != State::Running {
+            return;
+        }
+        if !shared.shell.lock().integrated {
+            continue;
+        }
+        let child = probe.program_running();
+        let status = {
+            let mut sh = shared.shell.lock();
+            sh.child = child;
+            sh.changed()
+        };
+        if let Some(st) = status {
+            sink(Out::Shell(st));
+        }
+    }
 }
 
 fn trace() -> bool {
@@ -581,6 +721,56 @@ mod tests {
             }
         }
         seen
+    }
+
+    /// The input bar's shell hooks, end to end in a real zsh: the prompt
+    /// marks make the pane integrated with a cwd, a running command is a
+    /// program until the next prompt, and the marks never reach the screen.
+    #[test]
+    fn zsh_hooks_report_prompt_and_program() {
+        if !std::env::var("SHELL").unwrap_or_default().ends_with("zsh") {
+            eprintln!("skipped: $SHELL is not zsh");
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let sink: Sink = Arc::new(move |o| {
+            if let Out::Shell(st) = o {
+                let _ = tx.lock().send(st);
+            }
+        });
+        // An empty ZDOTDIR for the user's files keeps their config out of the test.
+        let home = std::env::temp_dir().join(format!("rsz-test-zdot-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let cfg = PaneConfig {
+            cols: 60,
+            rows: 10,
+            cwd: Some("/tmp".into()),
+            env: vec![("RSZ_USER_ZDOTDIR".into(), home.to_string_lossy().into_owned())],
+            ..Default::default()
+        };
+        let pane = Pane::spawn(cfg, sink).unwrap();
+        let wait = |want: &dyn Fn(&ShellStatus) -> bool, what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                if let Ok(st) = rx.recv_timeout(Duration::from_millis(100)) {
+                    if want(&st) {
+                        return st;
+                    }
+                }
+            }
+            panic!("never saw {what}");
+        };
+        let st = wait(&|s| s.integrated && !s.program, "the first prompt");
+        assert!(st.cwd.ends_with("tmp"), "cwd {:?}", st.cwd);
+        pane.write(b"sleep 1\r".to_vec());
+        wait(&|s| s.program, "the command start");
+        wait(&|s| s.integrated && !s.program, "the prompt after sleep");
+        let screen = pane.screen_text();
+        assert!(!screen.contains("7878") && !screen.contains("7879"), "marks leaked: {screen}");
+        pane.close();
+        pane.join();
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
