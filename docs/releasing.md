@@ -24,7 +24,7 @@ local feeds (below). At the move:
 | Platform | First install | Update payload |
 |---|---|---|
 | macOS (Apple silicon) | `suzuri_<v>_aarch64.dmg`: signed with Developer ID, notarized and stapled | `suzuri_<v>_aarch64.app.tar.gz` (the stapled app) |
-| Windows x64 | `suzuri_<v>_x64-setup.exe`: NSIS installer, per user (no admin), installs to `%LOCALAPPDATA%\<product name>` (Tauri's per-user default; Go suzuri uses `%LOCALAPPDATA%\Programs\suzuri`, so the two don't collide before the move) | the same setup.exe, run passively by the updater |
+| Windows x64 | `suzuri_<v>_x64-setup.exe`: NSIS installer, per user (no admin), installs to `%LOCALAPPDATA%\Programs\suzuri-app` (packaging/windows/installer-hooks.nsh: Tauri's per-user default, `%LOCALAPPDATA%\suzuri`, is the config folder shared with Go suzuri, and `Programs\suzuri` is Go suzuri's install, whose helpers this app still runs) | the same setup.exe, run passively by the updater |
 
 The Windows install puts OpenConsole's `conpty.dll` and `OpenConsole.exe` next
 to `suzuri.exe`. portable-pty loads that `conpty.dll` before the system
