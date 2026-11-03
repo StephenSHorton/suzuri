@@ -1153,7 +1153,8 @@ async function bench(boot, target) {
 
 // After a font change: every pane refits to the new cell size; a theme
 // change alone needs only a repaint (Rust sends full frames itself).
-function relayout(font = true) {
+// (relayout() above is #293's: after a layout op.)
+function refitFont(font = true) {
   if (!font) return
   for (const p of everyPane()) {
     p.screen.setSize(p.screen.cols, p.screen.rows)
@@ -1163,7 +1164,7 @@ function relayout(font = true) {
 }
 
 async function start() {
-  await loadAppearance(relayout).catch((e) => log("appearance", String(e)))
+  await loadAppearance(refitFont).catch((e) => log("appearance", String(e)))
   const boot = await invoke("boot")
   window.rszTrace = boot.trace
   home = boot.home
