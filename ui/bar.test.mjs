@@ -1,4 +1,4 @@
-// node --test ui/
+// node --test 'ui/*.test.mjs'
 import { test } from "node:test"
 import assert from "node:assert/strict"
 

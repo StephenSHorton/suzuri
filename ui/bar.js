@@ -1,7 +1,7 @@
 // The Warp-style input bar (#285): the command line under each pane. A port
 // of Go suzuri's internal/ui/input_bar.go and its bar-mode keys
 // (window_darwin.go / window_windows.go). Pure state, no DOM, so
-// `node --test ui/` covers it.
+// `node --test 'ui/*.test.mjs'` covers it.
 //
 // The buffer is an array of code points; `cursor` is an index into it
 // (0..length). Explicit "\n" is a line break (Shift+Enter); long lines
