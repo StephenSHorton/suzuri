@@ -2,6 +2,7 @@
 // state lives in Rust; this only lays out panes and paints their frames.
 import { Screen, cellMetrics, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_BRACKETED_PASTE, M_FOCUS } from "./frame.js"
 import { encodeKey } from "./keys.js"
+import { clipboardImage, saveClipboardImage } from "./paste_image.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -387,12 +388,26 @@ input.addEventListener("compositionend", () => {
   input.value = ""
   if (v && focused) focused.send(v)
 })
+function pasteText(pane, text) {
+  const body = text.replace(/\r?\n/g, "\r")
+  pane.send(pane.modes & M_BRACKETED_PASTE ? `\x1b[200~${body}\x1b[201~` : body)
+}
 input.addEventListener("paste", (e) => {
   e.preventDefault()
+  if (!focused) return
+  const pane = focused
   const text = e.clipboardData?.getData("text/plain")
-  if (!text || !focused) return
-  const body = text.replace(/\r?\n/g, "\r")
-  focused.send(focused.modes & M_BRACKETED_PASTE ? `\x1b[200~${body}\x1b[201~` : body)
+  // A full-screen app (Claude Code, Grok) gets a pasted image as a file
+  // path it can attach, ahead of any text (ui/paste_image.js).
+  const image = pane.modes & M_ALT_SCREEN ? clipboardImage(e.clipboardData) : null
+  if (image) {
+    saveClipboardImage(image).then(
+      (path) => pasteText(pane, path),
+      (err) => { log("image paste failed", String(err)); if (text) pasteText(pane, text) },
+    )
+    return
+  }
+  if (text) pasteText(pane, text)
 })
 document.addEventListener("mousedown", () => setTimeout(() => input.focus(), 0))
 window.addEventListener("focus", () => input.focus())

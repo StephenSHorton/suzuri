@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 
+mod paste;
 mod ws;
 use rsz_term::{Out, Pane, PaneConfig, Sink};
 use serde::Serialize;
@@ -290,7 +291,8 @@ fn main() {
             stats,
             boot,
             bench_report,
-            ui_log
+            ui_log,
+            paste::paste_image_save
         ])
         .run(tauri::generate_context!())
         .expect("run rust-suzuri");
