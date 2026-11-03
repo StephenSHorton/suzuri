@@ -6,6 +6,8 @@
 import { drawCellGlyph } from "./boxdraw.js"
 import { GDI_CELLS, GDI_MIN_PX } from "./gdi_cells.js"
 export const DEFAULT_BG = 0x01000000
+// The wire format's version (header byte 11, FORMAT_VERSION in frame.rs).
+export const FORMAT_VERSION = 1
 const A_BOLD = 1, A_ITALIC = 2, A_UNDERLINE = 4, A_STRIKE = 8, A_DIM = 16, A_HIDDEN = 32, A_SELECTED = 64
 export const M_APP_CURSOR = 1, M_BRACKETED_PASTE = 2, M_ALT_SCREEN = 4, M_FOCUS = 8,
   M_MOUSE_CLICK = 16, M_MOUSE_DRAG = 32, M_MOUSE_MOTION = 64, M_SGR_MOUSE = 128,
@@ -100,6 +102,7 @@ export function decodeHeader(dv) {
     cx: dv.getUint16(6, true),
     cy: dv.getUint16(8, true),
     shape: dv.getUint8(10),
+    version: dv.getUint8(11),
     modes: dv.getUint32(12, true),
     offset: dv.getUint32(16, true),
     history: dv.getUint32(20, true),
@@ -146,6 +149,7 @@ export class Screen {
   apply(buf, off = 0) {
     const dv = new DataView(buf, off)
     const h = decodeHeader(dv)
+    if (h.version !== FORMAT_VERSION) throw new Error(`terminal format v${h.version}, this app knows v${FORMAT_VERSION}`)
     this.setSize(h.cols, h.rows)
     const { cw, ch, base, runs } = cellMetrics()
     const ctx = this.ctx
@@ -173,7 +177,7 @@ export class Screen {
         }
         if (attrs & A_SELECTED) {
           ctx.fillStyle = SELECTION
-          ctx.fillRect(x0, top, n * cw, ch)
+          ctx.fillRect(rx, top, n * cw, ch)
         }
         if (!(attrs & A_HIDDEN)) {
           // Bold on Windows: a bold face, as GDI picks; the bundled Gohu has

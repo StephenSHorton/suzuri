@@ -128,11 +128,18 @@ pub struct PaneConfig {
     pub plain_shell: bool,
     /// Cursor shape until a program sets one: 1 block, 2 underline, 3 beam.
     pub cursor: u8,
+    /// `TERM_PROGRAM` for the shell; None is this app's own name. An app
+    /// that embeds rsz-term sets its own, so scripts can tell where they run.
+    pub term_program: Option<String>,
+    /// Keep the person's prompt (an embedder with no input bar). The shell
+    /// still reports its marks; a submitted line is written as typed, with
+    /// no command block and no echo filtering.
+    pub keep_prompt: bool,
 }
 
 impl Default for PaneConfig {
     fn default() -> Self {
-        Self { cols: 80, rows: 24, command: None, cwd: None, env: Vec::new(), scrollback: 10_000, plain_shell: false, cursor: 1 }
+        Self { cols: 80, rows: 24, command: None, cwd: None, env: Vec::new(), scrollback: 10_000, plain_shell: false, cursor: 1, term_program: None, keep_prompt: false }
     }
 }
 
@@ -216,6 +223,16 @@ pub struct Pane {
     shell_prog: String,
     /// Bar lines waiting for the shell to be idle: (display, payload).
     queue: Mutex<std::collections::VecDeque<(String, String)>>,
+    keep_prompt: bool,
+}
+
+/// A dropped pane closes its shell. It never joins: the last handle can be
+/// dropped on one of the pane's own threads, and a join there would wait on
+/// itself. Callers that need the threads gone still call close and join.
+impl Drop for Pane {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 /// What a bar submit did.
@@ -226,6 +243,8 @@ pub enum Submit {
     Sent,
     /// Held until the shell is idle; the queue's length.
     Queued(usize),
+    /// [`Pane::try_submit`] only: the shell was busy, so nothing was written.
+    Busy,
 }
 
 /// How long the shell must be quiet before a queued line runs, and the
@@ -269,7 +288,7 @@ impl Pane {
         let mut boot_env = Vec::new();
         let mut temp_dir = None;
         if cfg.command.is_none() && !cfg.plain_shell {
-            if let Some(b) = shell::bootstrap(&argv) {
+            if let Some(b) = shell::bootstrap_with(&argv, cfg.keep_prompt) {
                 argv = b.argv;
                 boot_env = b.env;
                 temp_dir = b.temp_dir;
@@ -284,7 +303,7 @@ impl Pane {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "suzuri");
+        cmd.env("TERM_PROGRAM", cfg.term_program.as_deref().unwrap_or("suzuri"));
         for (k, v) in boot_env.iter().chain(&cfg.env) {
             cmd.env(k, v);
         }
@@ -364,7 +383,7 @@ impl Pane {
             let shared = shared.clone();
             threads.push(thread("rsz-actor", move || actor_loop(rx, pair.master, writer, killer, shared, sink, (cfg.cols, cfg.rows))));
         }
-        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default() })
+        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt })
     }
 
     /// Enter in the input bar (#296, Go suzuri's submitBarLine): the bare-cd
@@ -385,8 +404,49 @@ impl Pane {
             return Submit::Queued(q.len());
         }
         drop(q);
-        self.send_block(&display, &payload);
+        self.send(&display, &payload);
         Submit::Sent
+    }
+
+    /// [`Pane::submit`] that never queues: when the shell is busy it writes
+    /// nothing and says [`Submit::Busy`], so a caller with its own queue
+    /// (Irori's runs) keeps rsz-term's empty.
+    pub fn try_submit(&self, line: &str) -> Submit {
+        let (display, payload) = block::expand(line, &self.shell_prog);
+        if display.trim().is_empty() && payload.trim().is_empty() {
+            self.write(b"\r".to_vec());
+            return Submit::Blank;
+        }
+        if !self.queue.lock().is_empty() || self.busy() {
+            return Submit::Busy;
+        }
+        self.send(&display, &payload);
+        Submit::Sent
+    }
+
+    /// Whether a command owns the pane now (see `busy`): a submit would wait.
+    pub fn is_busy(&self) -> bool {
+        self.busy()
+    }
+
+    /// When the PTY last produced output.
+    pub fn last_output_at(&self) -> Instant {
+        *self.shared.last_io.lock()
+    }
+
+    /// A command block plus the line, or with `keep_prompt` the line alone
+    /// as if typed at the person's prompt (the shell's echo stays).
+    fn send(&self, display: &str, payload: &str) {
+        if !self.keep_prompt {
+            return self.send_block(display, payload);
+        }
+        {
+            let mut sh = self.shared.shell.lock();
+            sh.awaiting = Some(sh.prompts);
+        }
+        let mut line = payload.replace("\r\n", "\n").replace('\n', "\r").into_bytes();
+        line.push(b'\r');
+        self.write(line);
     }
 
     /// Run the next queued line if the shell is idle. Returns how many are
@@ -399,7 +459,7 @@ impl Pane {
         let (display, payload) = q.pop_front()?;
         let left = q.len();
         drop(q);
-        self.send_block(&display, &payload);
+        self.send(&display, &payload);
         Some(left)
     }
 
@@ -414,10 +474,11 @@ impl Pane {
 
     /// A command owns the pane: one sent from the bar and not yet back at a
     /// prompt, one the shell marked as started, a foreground child, or
-    /// output that hasn't been quiet for QUEUE_IDLE.
+    /// output that hasn't been quiet for QUEUE_IDLE. A shell without the
+    /// bootstrap never reports a prompt, so a sent line can't hold it busy.
     fn busy(&self) -> bool {
         let sh = self.shared.shell.lock();
-        if sh.awaiting.is_some_and(|n| sh.prompts <= n) || sh.started || sh.child {
+        if sh.integrated && sh.awaiting.is_some_and(|n| sh.prompts <= n) || sh.started || sh.child {
             return true;
         }
         drop(sh);
@@ -1243,6 +1304,107 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(&lines[..5], &["hi", "img cat.png", "", "", "after"], "{text}");
         pane.join();
+    }
+
+    /// S-2: dropping the last handle closes the shell (and doesn't hang).
+    #[test]
+    fn dropped_pane_closes_its_shell() {
+        let (pane, rx) = run(&["/bin/cat"]);
+        drop(pane);
+        let seen = wait_exit(&rx);
+        assert_eq!(seen.iter().filter(|m| m.starts_with("exit")).count(), 1, "{seen:?}");
+    }
+
+    fn wait_until(what: &str, f: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !f() {
+            assert!(Instant::now() < deadline, "never: {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// S-10: a shell without the bootstrap never reports a prompt, so a
+    /// submitted line must not keep it busy for good; try_submit refuses
+    /// while busy instead of queuing.
+    #[test]
+    fn plain_shell_goes_idle_and_try_submit_never_queues() {
+        let (pane, _rx) = run(&["/bin/cat"]);
+        assert!(pane.is_busy(), "busy until the first QUEUE_IDLE passes");
+        assert_eq!(pane.try_submit("early"), Submit::Busy);
+        wait_until("idle at start", || !pane.is_busy());
+        let before = pane.last_output_at();
+        assert_eq!(pane.try_submit("hello"), Submit::Sent);
+        // The command block shows "hello" at once; cat's echo is the output.
+        wait_until("cat's echo", || pane.last_output_at() > before);
+        assert_eq!(pane.try_submit("again"), Submit::Busy, "output was just now");
+        assert_eq!(pane.queue_len(), 0, "try_submit never queues");
+        wait_until("idle after the line", || !pane.is_busy());
+        assert!(!pane.screen_text().contains("early"));
+        pane.close();
+        pane.join();
+    }
+
+    /// S-3: an embedder names itself in TERM_PROGRAM.
+    #[test]
+    fn term_program_reaches_the_shell() {
+        let sink: Sink = Arc::new(|_| {});
+        let cmd = |tp: Option<&str>| PaneConfig {
+            command: Some(vec!["/bin/sh".into(), "-c".into(), "printf '[%s]' \"$TERM_PROGRAM\"; sleep 5".into()]),
+            term_program: tp.map(Into::into),
+            ..Default::default()
+        };
+        let p = Pane::spawn(cmd(Some("irori")), sink.clone()).unwrap();
+        wait_until("irori", || p.screen_text().contains("[irori]"));
+        let d = Pane::spawn(cmd(None), sink).unwrap();
+        wait_until("the default", || d.screen_text().contains("[suzuri]"));
+    }
+
+    /// S-9: keep_prompt leaves the user's prompt on screen, still reports
+    /// the marks, and a submitted line is typed at that prompt as is.
+    #[test]
+    fn keep_prompt_shows_the_users_prompt() {
+        if !std::env::var("SHELL").unwrap_or_default().ends_with("zsh") {
+            eprintln!("skipped: $SHELL is not zsh");
+            return;
+        }
+        let home = std::env::temp_dir().join(format!("rsz-test-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".zshrc"), "PROMPT='KEEPME> '\n").unwrap();
+        let shell = Arc::new(Mutex::new(ShellStatus::default()));
+        let open = |keep: bool| {
+            let sh = shell.clone();
+            let sink: Sink = Arc::new(move |o| {
+                if let Out::Shell(st) = o {
+                    *sh.lock() = st;
+                }
+            });
+            let cfg = PaneConfig {
+                cols: 60,
+                rows: 10,
+                cwd: Some("/tmp".into()),
+                env: vec![("RSZ_USER_ZDOTDIR".into(), home.to_string_lossy().into_owned())],
+                keep_prompt: keep,
+                ..Default::default()
+            };
+            Pane::spawn(cfg, sink).unwrap()
+        };
+        let kept = open(true);
+        wait_until("the kept prompt", || kept.screen_text().contains("KEEPME>"));
+        wait_until("integrated", || shell.lock().integrated);
+        wait_until("idle", || !kept.is_busy());
+        assert_eq!(kept.submit("echo kept-$((40+2))"), Submit::Sent);
+        wait_until("the result", || kept.screen_text().contains("kept-42"));
+        let screen = kept.screen_text();
+        assert!(screen.contains("KEEPME> echo kept-$((40+2))"), "typed at the prompt, no block: {screen}");
+        kept.close();
+        kept.join();
+        let quiet = open(false);
+        wait_until("integrated", || shell.lock().integrated);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!quiet.screen_text().contains("KEEPME>"), "the bar's prompt stays blank: {}", quiet.screen_text());
+        quiet.close();
+        quiet.join();
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

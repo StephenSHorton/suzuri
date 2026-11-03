@@ -156,6 +156,15 @@ pub struct Bootstrap {
 /// stays off for it: without the prompt marks there is no telling when a
 /// program owns the keyboard.
 pub fn bootstrap(argv: &[String]) -> Option<Bootstrap> {
+    bootstrap_with(argv, false)
+}
+
+/// [`bootstrap`], optionally keeping the person's own prompt (S-9 of
+/// Irori's inline-terminals design: an embedder with no input bar). The
+/// marks are the same either way; with `keep_prompt` the prompt is left as
+/// the user's files set it, and PowerShell's is wrapped instead of replaced.
+pub fn bootstrap_with(argv: &[String], keep_prompt: bool) -> Option<Bootstrap> {
+    let keep = || if keep_prompt { vec![("RSZ_KEEP_PROMPT".to_string(), "1".to_string())] } else { vec![] };
     let exe = argv.first()?;
     let base = Path::new(exe).file_name()?.to_string_lossy().to_lowercase();
     let base = base.strip_suffix(".exe").unwrap_or(&base).to_string();
@@ -174,10 +183,10 @@ pub fn bootstrap(argv: &[String]) -> Option<Bootstrap> {
             let user = std::env::var("ZDOTDIR").ok().filter(|s| !s.is_empty()).or_else(home).unwrap_or_default();
             Some(Bootstrap {
                 argv: argv.to_vec(),
-                env: vec![
-                    ("ZDOTDIR".into(), dir.to_string_lossy().into_owned()),
-                    ("RSZ_USER_ZDOTDIR".into(), user),
-                ],
+                env: [("ZDOTDIR".to_string(), dir.to_string_lossy().into_owned()), ("RSZ_USER_ZDOTDIR".into(), user)]
+                    .into_iter()
+                    .chain(keep())
+                    .collect(),
                 temp_dir: Some(dir),
             })
         }
@@ -189,11 +198,12 @@ pub fn bootstrap(argv: &[String]) -> Option<Bootstrap> {
             // the rc file load the user's login files itself.
             let mut a = vec![exe.clone(), "--rcfile".into(), rc.to_string_lossy().into_owned(), "-i".into()];
             a.extend(argv[1..].iter().filter(|x| *x != "-l" && *x != "--login").cloned());
-            Some(Bootstrap { argv: a, env: vec![], temp_dir: Some(dir) })
+            Some(Bootstrap { argv: a, env: keep(), temp_dir: Some(dir) })
         }
         "pwsh" | "powershell" => {
             let mut a = argv.to_vec();
-            a.extend(["-NoExit".into(), "-Command".into(), PWSH_PROMPT.into()]);
+            let script = if keep_prompt { PWSH_PROMPT.replacen("function global:prompt {", PWSH_KEEP, 1).replace(" ' ' };", " & $global:RszUserPrompt };") } else { PWSH_PROMPT.into() };
+            a.extend(["-NoExit".into(), "-Command".into(), script]);
             Some(Bootstrap { argv: a, env: vec![], temp_dir: None })
         }
         _ => None,
@@ -222,12 +232,16 @@ ZDOTDIR=$_rsz_home
 [[ -f "$_rsz_home/.zshrc" ]] && source "$_rsz_home/.zshrc"
 [[ -o login && -f "$_rsz_home/.zlogin" ]] && source "$_rsz_home/.zlogin"
 unset RSZ_USER_ZDOTDIR
+_rsz_keep=${RSZ_KEEP_PROMPT:-}
+unset RSZ_KEEP_PROMPT
 _rsz_quiet_prompt() {
-  PROMPT=' '
-  RPROMPT=''
-  PS1=' '
-  unset RPS1
-  PROMPT_EOL_MARK=''
+  if [[ -z $_rsz_keep ]]; then
+    PROMPT=' '
+    RPROMPT=''
+    PS1=' '
+    unset RPS1
+    PROMPT_EOL_MARK=''
+  fi
   printf '\033]7878;cwd=%s\007' "$PWD"
 }
 _rsz_preexec() {
@@ -263,9 +277,11 @@ else
 fi
 _rsz_cmd=
 _rsz_ec=0
+_rsz_keep=${RSZ_KEEP_PROMPT:-}
+unset RSZ_KEEP_PROMPT
 _rsz_prompt() {
   _rsz_in_prompt=1
-  PS1=' '
+  [[ -z $_rsz_keep ]] && PS1=' '
   if [[ -n ${_rsz_cmd:-} ]]; then
     local b64
     b64=$(printf '%s' "$_rsz_cmd" | command base64 | tr -d '\n')
@@ -287,6 +303,10 @@ _rsz_debug() {
 PROMPT_COMMAND='_rsz_ec=$?; _rsz_prompt'
 trap _rsz_debug DEBUG
 "#;
+
+/// keep_prompt on PowerShell: the user's prompt (their profile's, or
+/// oh-my-posh's) is kept and called after the marks are written.
+const PWSH_KEEP: &str = "$global:RszUserPrompt = $function:prompt; function global:prompt {";
 
 /// PowerShell: a prompt function that reports the last command and the cwd
 /// and prints a blank prompt. PowerShell has no preexec, so a command start
@@ -349,5 +369,23 @@ mod tests {
         assert!(bootstrap(&["/bin/zsh".into(), "-c".into(), "ls".into()]).is_none());
         assert!(bootstrap(&["/usr/bin/fish".into()]).is_none());
         assert!(bootstrap(&["claude".into()]).is_none());
+    }
+
+    #[test]
+    fn keep_prompt_keeps_the_marks_and_the_users_prompt() {
+        let env = |b: &Bootstrap| b.env.iter().any(|(k, v)| k == "RSZ_KEEP_PROMPT" && v == "1");
+        let z = bootstrap_with(&["/bin/zsh".into()], true).unwrap();
+        assert!(env(&z));
+        assert!(!env(&bootstrap(&["/bin/zsh".into()]).unwrap()));
+        assert!(env(&bootstrap_with(&["/bin/bash".into()], true).unwrap()));
+        let script = |b: Bootstrap| b.argv.last().unwrap().clone();
+        let kept = script(bootstrap_with(&["pwsh.exe".into()], true).unwrap());
+        assert!(kept.starts_with("$global:RszUserPrompt = $function:prompt; function global:prompt {"), "{kept}");
+        assert!(kept.contains("]7878;cwd=") && kept.contains("]7879;done;") && kept.contains("& $global:RszUserPrompt };"), "{kept}");
+        assert!(!kept.contains(" ' ' };"), "{kept}");
+        assert_eq!(script(bootstrap(&["pwsh.exe".into()]).unwrap()), PWSH_PROMPT);
+        for z in [ZSHRC, BASHRC] {
+            assert!(z.contains("unset RSZ_KEEP_PROMPT"), "the flag must not reach child shells");
+        }
     }
 }
