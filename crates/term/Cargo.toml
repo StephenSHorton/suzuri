@@ -11,6 +11,7 @@ alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
 crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }
+libc = "0.2"
 
 [dev-dependencies]
 serde_json = { workspace = true }

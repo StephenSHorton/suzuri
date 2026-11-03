@@ -116,6 +116,10 @@ pub struct Pane {
     tx: Sender<Cmd>,
     shared: Arc<Shared>,
     threads: Mutex<Vec<JoinHandle<()>>>,
+    /// The shell's process id, for its cwd.
+    pid: Option<u32>,
+    /// The cwd the shell last reported (OSC 7 / 7878), if any.
+    reported_cwd: Mutex<Option<String>>,
 }
 
 /// Frame pacing: a focused pane may send at ~120 Hz, an unfocused one at
@@ -164,6 +168,7 @@ impl Pane {
         }
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| io(e.into()))?;
         drop(pair.slave);
+        let pid = child.process_id();
         let killer = child.clone_killer();
         let reader = pair.master.try_clone_reader().map_err(|e| io(e.into()))?;
         let writer = pair.master.take_writer().map_err(|e| io(e.into()))?;
@@ -210,7 +215,7 @@ impl Pane {
             let shared = shared.clone();
             threads.push(thread("rsz-actor", move || actor_loop(rx, pair.master, writer, killer, shared, sink, (cfg.cols, cfg.rows))));
         }
-        Ok(Pane { tx, shared, threads: Mutex::new(threads) })
+        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None) })
     }
 
     /// Input from the user: snaps the view back to the bottom.
@@ -250,6 +255,20 @@ impl Pane {
 
     pub fn close(&self) {
         let _ = self.tx.send(Cmd::Close);
+    }
+
+    /// Records the cwd the shell reported (OSC 7 or Go suzuri's OSC 7878).
+    pub fn set_reported_cwd(&self, cwd: String) {
+        *self.reported_cwd.lock() = Some(cwd);
+    }
+
+    /// Where a new pane split from this one should start: the shell's last
+    /// report, else the shell process's cwd from the OS (macOS, Linux).
+    pub fn cwd(&self) -> Option<String> {
+        if let Some(c) = self.reported_cwd.lock().clone() {
+            return Some(c);
+        }
+        self.pid.and_then(crate::cwd::process_cwd)
     }
 
     pub fn state(&self) -> State {
@@ -592,6 +611,24 @@ mod tests {
         pane.close();
         let seen = wait_exit(&rx);
         assert_eq!(seen.iter().filter(|m| m.starts_with("exit")).count(), 1, "{seen:?}");
+        pane.join();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cwd_follows_the_shell() {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let (pane, rx) = run(&["/bin/sh"]);
+        pane.write(format!("cd '{}'; echo here\r", dir.display()).into_bytes());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pane.cwd().map(std::path::PathBuf::from).as_ref() != Some(&dir) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(pane.cwd().map(std::path::PathBuf::from), Some(dir));
+        pane.set_reported_cwd("/reported".into());
+        assert_eq!(pane.cwd().as_deref(), Some("/reported"));
+        pane.close();
+        wait_exit(&rx);
         pane.join();
     }
 

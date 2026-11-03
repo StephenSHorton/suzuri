@@ -2798,6 +2798,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "crossbeam-channel",
+ "libc",
  "parking_lot",
  "portable-pty",
  "serde_json",

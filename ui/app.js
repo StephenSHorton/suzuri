@@ -107,11 +107,12 @@ class PaneView {
     this.ro.observe(this.body)
   }
 
-  async open(cols, rows) {
+  // from: the pane this one splits from; the new shell starts in its cwd.
+  async open(cols, rows, from = null) {
     const ch = new Channel()
     ch.onmessage = (m) => this.onMessage(m)
     this.size = [cols, rows]
-    this.id = await invoke("pane_open", { cols, rows, command: null, onFrame: ch })
+    this.id = await invoke("pane_open", { cols, rows, command: null, from, onFrame: ch })
     byId.set(this.id, this)
     for (const [buf, off] of early.get(this.id) || []) this.enqueue(buf, off)
     early.delete(this.id)
@@ -287,7 +288,7 @@ async function split(dir, pane = focused) {
   const { cw, ch } = cellMetrics()
   const cols = Math.max(2, Math.floor((p.body.clientWidth - 12) / cw))
   const rows = Math.max(1, Math.floor((p.body.clientHeight - 8) / ch))
-  await p.open(cols, rows)
+  await p.open(cols, rows, pane?.id ?? null)
   for (const other of allPanes()) other.fit()
   return p
 }

@@ -53,6 +53,7 @@ fn pane_open(
     cols: u16,
     rows: u16,
     command: Option<Vec<String>>,
+    from: Option<u32>,
     on_frame: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let id = panes.next.fetch_add(1, Ordering::Relaxed) + 1;
@@ -78,7 +79,12 @@ fn pane_open(
             }
         };
     });
-    let cwd = std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty());
+    // A pane split from another starts in that pane's cwd (Go suzuri's cwd.go).
+    let cwd = from
+        .and_then(|f| panes.get(f))
+        .and_then(|p| p.cwd())
+        .filter(|d| std::path::Path::new(d).is_dir())
+        .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()));
     let mut cfg = PaneConfig { cols, rows, command, cwd, ..Default::default() };
     if let Some(n) = std::env::var("RSZ_SCROLLBACK").ok().and_then(|v| v.parse().ok()) {
         cfg.scrollback = n;
