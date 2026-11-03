@@ -15,6 +15,9 @@ param(
   [string]$ExtraConfig = ""
 )
 $ErrorActionPreference = "Stop"
+# The Windows VERSIONINFO resource takes only x.y.z: a pre-release suffix
+# fails deep in tauri-winres ("RC.EXE"), so refuse it up front.
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be plain x.y.z on Windows (got $Version)" }
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Set-Location $root
 
