@@ -10,7 +10,9 @@
 param(
   [Parameter(Mandatory = $true)][string]$Version,
   [string]$Repo = $(if ($env:RSZ_RELEASE_REPO) { $env:RSZ_RELEASE_REPO } else { "StephenSHorton/suzuri" }),
-  [switch]$NoUpload
+  [switch]$NoUpload,
+  # One more config overlay (a JSON file), e.g. the local update test's.
+  [string]$ExtraConfig = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
@@ -35,7 +37,9 @@ Set-Content -Path $overlayFile -Value $overlay -Encoding utf8
 
 Push-Location app
 try {
-  cargo tauri build --bundles nsis --config $overlayFile
+  $cfg = @("--config", $overlayFile)
+  if ($ExtraConfig) { $cfg += @("--config", (Resolve-Path $ExtraConfig).Path) }
+  cargo tauri build --bundles nsis @cfg
   if ($LASTEXITCODE -ne 0) { throw "cargo tauri build failed: $LASTEXITCODE" }
 } finally { Pop-Location }
 
