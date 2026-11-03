@@ -16,6 +16,7 @@ mod sidecar;
 mod transfer;
 mod transfer_engine;
 mod workspace;
+mod window;
 mod ws;
 use rsz_term::{Out, Pane, PaneConfig, Sink};
 use serde::Serialize;
@@ -325,7 +326,13 @@ fn main() {
     };
     let bridge_setup = bridge.clone();
     let bridge_exit = bridge.clone();
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    #[cfg(windows)]
+    if window::wants_single_instance(std::env::var(window::NEW_WINDOW_ENV).ok().as_deref(), std::env::var("RSZ_ALLOW_MULTI").ok().as_deref()) {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| window::focus_main(app)));
+    }
+    builder
         .setup(move |app| {
             if let Some(b) = &bridge_setup {
                 b.attach(app.handle().clone());
@@ -358,7 +365,8 @@ fn main() {
             workspace::workspace_call,
             workspace::workspace_me,
             bridge::aicontrol_reply,
-            bridge::pane_text
+            bridge::pane_text,
+            window::new_window
         ])
         .build(tauri::generate_context!())
         .expect("build rust-suzuri")

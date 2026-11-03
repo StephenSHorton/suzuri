@@ -461,6 +461,7 @@ function appShortcut(e) {
     if ((isMac && k === "d" && e.shiftKey) || (!isMac && k === "e")) return split("v"), true
     if (k === "w") return closePane(focused), true
     if (k === "h") return toggleHud(), true
+    if (k === "n" && e.shiftKey) return invoke("new_window").catch((err) => log("new window failed", String(err))), true
     if (isMac && e.altKey && arrows[k]) return moveFocus(...arrows[k]), true
     if (isMac && (k === "v" || k === "c" || k === "q")) return false // native paste/copy/quit
   }

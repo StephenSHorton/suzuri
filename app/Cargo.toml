@@ -23,3 +23,6 @@ tungstenite = "0.30.0"
 crossbeam-channel = { workspace = true }
 tiny_http = "0.12"
 getrandom = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-single-instance = "2.5.5"
