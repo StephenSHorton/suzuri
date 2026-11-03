@@ -22,8 +22,9 @@ use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::{Condvar, Mutex};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-use crate::engine::{Alacritty, Engine, EngineEvent};
+use crate::engine::{Alacritty, Engine, EngineEvent, Link, SelectKind};
 use crate::fg::Probe;
+use crate::input::MouseEvent;
 use crate::shell::{self, OscFilter, ShellEvent};
 
 /// What a pane sends to its owner.
@@ -390,6 +391,53 @@ impl Pane {
     /// The last `lines` scrollback lines above the screen, oldest first.
     pub fn history_tail(&self, lines: usize) -> Vec<String> {
         self.shared.engine.lock().history_tail(lines)
+    }
+
+    /// Start a selection at a visible cell (see Engine::select_start).
+    pub fn select_start(&self, col: u16, row: u16, right: bool, kind: SelectKind) {
+        self.shared.engine.lock().select_start(col, row, right, kind);
+        self.shared.kick(|w| w.dirty = true);
+    }
+
+    pub fn select_extend(&self, col: u16, row: u16, right: bool) {
+        self.shared.engine.lock().select_extend(col, row, right);
+        self.shared.kick(|w| w.dirty = true);
+    }
+
+    pub fn select_clear(&self) {
+        self.shared.engine.lock().select_clear();
+        self.shared.kick(|w| w.dirty = true);
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        self.shared.engine.lock().selection_text()
+    }
+
+    pub fn link_at(&self, col: u16, row: u16) -> Option<Link> {
+        self.shared.engine.lock().link_at(col, row)
+    }
+
+    /// Report a mouse event to the app if its modes ask for it. Returns
+    /// whether it was reported (the UI handles it otherwise).
+    pub fn mouse(&self, ev: MouseEvent) -> bool {
+        let bytes = self.shared.engine.lock().mouse_report(ev);
+        match bytes {
+            Some(b) => {
+                let _ = self.tx.send(Cmd::Write(b));
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn alt_screen(&self) -> bool {
+        self.shared.engine.lock().alt_screen()
+    }
+
+    /// Paste text: framed for bracketed paste when the app asked for it.
+    pub fn paste(&self, text: &str) {
+        let bytes = self.shared.engine.lock().paste_bytes(text);
+        self.write(bytes);
     }
 
     /// Wait for every thread to finish (after Exit was sent).

@@ -20,8 +20,8 @@ mod transfer_engine;
 mod workspace;
 mod window;
 mod ws;
-use rsz_term::{Out, Pane, PaneConfig, Sink};
-use serde::Serialize;
+use rsz_term::{Link, MouseEvent, MouseKind, Out, Pane, PaneConfig, SelectKind, Sink};
+use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Manager, State};
 
@@ -98,7 +98,14 @@ fn pane_open(
                 on_frame.send(json(&Msg::Title { title: &t }))
             }
             Out::Bell => on_frame.send(json(&Msg::Bell)),
-            Out::Clipboard(s) => on_frame.send(json(&Msg::Clipboard { text: &s })),
+            // OSC 52: the app copies. Straight to the system clipboard, so it
+            // works without a user gesture in the webview.
+            Out::Clipboard(s) => {
+                if clip_write(&s).is_err() {
+                    let _ = on_frame.send(json(&Msg::Clipboard { text: &s }));
+                }
+                Ok(())
+            }
             Out::Shell(st) => on_frame.send(json(&Msg::Shell { integrated: st.integrated, cwd: &st.cwd, program: st.program, prompts: st.prompts })),
             Out::CommandDone { exit, command } => on_frame.send(json(&Msg::CommandDone { exit, command: &command })),
             Out::Exit(code) => {
@@ -248,6 +255,175 @@ fn config_meta() -> serde_json::Value {
     })
 }
 
+fn clip_write(text: &str) -> Result<(), String> {
+    arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_owned())).map_err(|e| e.to_string())
+}
+
+/// Selection from the UI's pointer: start (cell, word or line), extend
+/// (drag) or clear. Cells are of the visible screen.
+#[tauri::command]
+fn pane_select(panes: State<'_, Arc<Panes>>, id: u32, op: String, col: u16, row: u16, right: bool) {
+    let Some(p) = panes.get(id) else { return };
+    match op.as_str() {
+        "cell" => p.select_start(col, row, right, SelectKind::Cell),
+        "word" => p.select_start(col, row, right, SelectKind::Word),
+        "line" => p.select_start(col, row, right, SelectKind::Line),
+        "extend" => p.select_extend(col, row, right),
+        _ => p.select_clear(),
+    }
+}
+
+/// Copy the pane's selection to the clipboard. Returns whether there was
+/// one.
+#[tauri::command]
+fn pane_copy(panes: State<'_, Arc<Panes>>, id: u32) -> Result<bool, String> {
+    let Some(text) = panes.get(id).and_then(|p| p.selection_text()) else { return Ok(false) };
+    clip_write(&text)?;
+    Ok(true)
+}
+
+/// The clipboard's text, for the input bar (which edits it before the
+/// shell sees it).
+#[tauri::command]
+fn clipboard_text() -> Result<String, String> {
+    arboard::Clipboard::new().and_then(|mut c| c.get_text()).map_err(|e| e.to_string())
+}
+
+/// The clipboard's RGBA image as a PNG.
+fn png_bytes(img: &arboard::ImageData) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut enc = png::Encoder::new(&mut out, img.width as u32, img.height as u32);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().ok()?.write_image_data(&img.bytes).ok()?;
+    Some(out)
+}
+
+/// Paste the clipboard's text into the pane, bracketed when the app asked.
+#[tauri::command]
+fn pane_paste(panes: State<'_, Arc<Panes>>, id: u32, text: Option<String>) -> Result<(), String> {
+    let Some(p) = panes.get(id) else { return Ok(()) };
+    let text = match text {
+        Some(t) => t,
+        None => {
+            let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+            // A full-screen app (Claude Code, Grok) gets a copied image as a
+            // file path it can attach, ahead of any text (Go suzuri).
+            match p.alt_screen().then(|| clip.get_image().ok()).flatten().and_then(|img| png_bytes(&img)) {
+                Some(png) => paste::save_image(&std::env::temp_dir(), &png)?.to_string_lossy().into_owned(),
+                None => clip.get_text().map_err(|e| e.to_string())?,
+            }
+        }
+    };
+    if !text.is_empty() {
+        p.paste(&text);
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct MouseIn {
+    /// "press", "release", "move", "wheelup", "wheeldown"
+    kind: String,
+    button: u8,
+    /// Motion with a button held: which one.
+    held: Option<u8>,
+    col: u16,
+    row: u16,
+    shift: bool,
+    alt: bool,
+    ctrl: bool,
+}
+
+/// A pointer event for the app's mouse modes. Returns whether the app took
+/// it; when not, the UI selects or scrolls instead.
+#[tauri::command]
+fn pane_mouse(panes: State<'_, Arc<Panes>>, id: u32, ev: MouseIn) -> bool {
+    let kind = match ev.kind.as_str() {
+        "press" => MouseKind::Press,
+        "release" => MouseKind::Release,
+        "move" => MouseKind::Motion(ev.held),
+        "wheelup" => MouseKind::WheelUp,
+        "wheeldown" => MouseKind::WheelDown,
+        _ => return false,
+    };
+    let me = MouseEvent { kind, button: ev.button, col: ev.col, row: ev.row, shift: ev.shift, alt: ev.alt, ctrl: ev.ctrl };
+    panes.get(id).is_some_and(|p| p.mouse(me))
+}
+
+#[derive(Serialize)]
+struct LinkOut {
+    url: String,
+    row: u16,
+    x0: u16,
+    x1: u16,
+}
+
+/// The link (OSC 8 or a URL in the text) at a visible cell, if any.
+#[tauri::command]
+fn pane_link(panes: State<'_, Arc<Panes>>, id: u32, col: u16, row: u16) -> Option<LinkOut> {
+    let Link { url, row, x0, x1, .. } = panes.get(id)?.link_at(col, row)?;
+    Some(LinkOut { url, row, x0, x1 })
+}
+
+/// Debug builds: the pane's screen and selection, for ui/selftest.js.
+#[tauri::command]
+fn debug_pane(panes: State<'_, Arc<Panes>>, id: u32) -> Option<(String, Option<String>)> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let p = panes.get(id)?;
+    Some((p.screen_text(), p.selection_text()))
+}
+
+/// macOS: ⌘C and ⌘V are the Edit menu's Copy and Paste, which act on the
+/// webview's own (empty) selection and text field, while the terminal's
+/// selection lives in the core. Swap both predefined items for ones that ask
+/// the UI to copy the pane's selection or paste into the pane.
+#[cfg(target_os = "macos")]
+fn install_menu(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    let menu = Menu::default(app.handle())?;
+    for item in menu.items()? {
+        let MenuItemKind::Submenu(sub) = item else { continue };
+        for (i, it) in sub.items()?.into_iter().enumerate() {
+            if let MenuItemKind::Predefined(p) = &it {
+                let (id, key) = match p.text()?.as_str() {
+                    "Copy" => ("rsz-copy", "CmdOrCtrl+C"),
+                    "Paste" => ("rsz-paste", "CmdOrCtrl+V"),
+                    _ => continue,
+                };
+                let ours = MenuItem::with_id(app.handle(), id, p.text()?, true, Some(key))?;
+                sub.remove(p)?;
+                sub.insert(&ours, i)?;
+            }
+        }
+    }
+    app.set_menu(menu)?;
+    Ok(())
+}
+
+/// Open a link in the default browser: web and mail links only.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    if !rsz_term::input::openable(&url) {
+        return Err(format!("not opening {url}: only http, https and mailto links open"));
+    }
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(windows)]
+    let mut cmd = {
+        // ShellExecute through url.dll: no cmd.exe, so & and ^ in the URL
+        // are not shell syntax.
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    cmd.arg(&url).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
 #[derive(Serialize)]
 struct PaneStats {
     id: u32,
@@ -302,6 +478,8 @@ struct Boot {
     trace: bool,
     /// The home directory, shown as ~ in the input bar's cwd line.
     home: String,
+    /// Debug builds: RSZ_UI_TEST names a ui/selftest.js scenario to run.
+    ui_test: String,
 }
 
 #[tauri::command]
@@ -316,6 +494,7 @@ fn boot(panes: State<'_, Arc<Panes>>) -> Boot {
         ws: panes.bus.as_ref().map(|b| format!("{}/{}", b.port, b.token)).unwrap_or_default(),
         trace: std::env::var_os("RSZ_TRACE").is_some(),
         home: std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
+        ui_test: if cfg!(debug_assertions) { std::env::var("RSZ_UI_TEST").unwrap_or_default() } else { String::new() },
     }
 }
 
@@ -381,7 +560,15 @@ fn main() {
                 b.attach(app.handle().clone());
                 app.manage(Arc::clone(b));
             }
+            #[cfg(target_os = "macos")]
+            install_menu(app)?;
             Ok(())
+        })
+        .on_menu_event(|app, ev| {
+            if ev.id() == "rsz-copy" || ev.id() == "rsz-paste" {
+                use tauri::Emitter;
+                let _ = app.emit(ev.id().as_ref(), ());
+            }
         })
         .manage(bridge)
         .manage(panes)
@@ -397,6 +584,14 @@ fn main() {
             pane_ack,
             pane_redraw,
             pane_close,
+            pane_select,
+            pane_copy,
+            pane_paste,
+            clipboard_text,
+            pane_mouse,
+            pane_link,
+            open_url,
+            debug_pane,
             stats,
             config_get,
             config_set,

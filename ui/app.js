@@ -1,6 +1,6 @@
 // rust-suzuri UI: split layout, focus, input and painting. The terminal
 // state lives in Rust; this only lays out panes and paints their frames.
-import { Screen, cellMetrics, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_BRACKETED_PASTE, M_FOCUS } from "./frame.js"
+import { Screen, cellMetrics, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_FOCUS } from "./frame.js"
 import { encodeKey } from "./keys.js"
 import { clipboardImage, saveClipboardImage } from "./paste_image.js"
 import { extraShortcut } from "./extras.js"
@@ -10,6 +10,7 @@ import { InputBar, PROMPT, barKey, displayPath } from "./bar.js"
 import { shortcut, chordLabel } from "./shortcuts.js"
 import { Palette } from "./palette.js"
 import { Settings, announce } from "./settings.js"
+import { installPointer } from "./pointer.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -29,7 +30,12 @@ const input = document.createElement("textarea")
 input.setAttribute("autocapitalize", "off")
 input.setAttribute("autocomplete", "off")
 input.spellcheck = false
-Object.assign(input.style, { position: "fixed", left: "-1000px", top: "0", width: "10px", height: "10px", opacity: "0" })
+// It sits on the cursor (placeInput) so IME candidate windows open there;
+// transparent text and caret keep it invisible.
+Object.assign(input.style, {
+  position: "fixed", left: "0", top: "0", width: "1px", height: "16px", padding: "0", border: "0",
+  opacity: "0", resize: "none", overflow: "hidden", zIndex: "-1", pointerEvents: "none",
+})
 document.body.appendChild(input)
 
 // ---- latency: oldest unpainted input -> end of the frame that paints it.
@@ -130,6 +136,7 @@ class PaneView {
     this.el.addEventListener("mousedown", () => setFocus(this))
     this.head.addEventListener("dblclick", () => renamePane(this))
     this.body.addEventListener("wheel", (e) => this.onWheel(e), { passive: true })
+    installPointer(this, { invoke, isMac, focus: setFocus, paste: () => paste() })
     this.ro = new ResizeObserver(() => this.fit())
     this.ro.observe(this.body)
   }
@@ -212,6 +219,7 @@ class PaneView {
     caret.style.width = `${cw}px`
     caret.style.height = `${ch}px`
     caret.classList.toggle("dim", focused !== this)
+    if (focused === this) placeInput()
   }
 
   // A key while the bar has the keys. True when it was the bar's.
@@ -280,6 +288,8 @@ class PaneView {
     cs.setProperty("--ch", `${ch}px`)
     this.scrolled.hidden = h.offset === 0
     if (h.offset) this.scrolled.textContent = `↑ ${h.offset} / ${h.history}`
+    this.onFrame?.()
+    if (focused === this) placeInput()
     return true
   }
 
@@ -308,6 +318,7 @@ class PaneView {
     const lines = Math.trunc(this.wheel)
     if (!lines) return
     this.wheel -= lines
+    if (this.wheelToApp?.(e, lines)) return
     if (this.modes & M_ALT_SCREEN) {
       if (this.modes & M_ALT_SCROLL) {
         const seq = (this.modes & M_APP_CURSOR ? "\x1bO" : "\x1b[") + (lines < 0 ? "A" : "B")
@@ -657,6 +668,7 @@ function setFocus(p, force = false) {
   p.renderBar()
   renderStrip()
   input.focus()
+  placeInput()
   if (prev && prev !== p && prev.id && !prev.exited) {
     invoke("pane_focus", { id: prev.id, focused: false })
     if (prev.modes & M_FOCUS) invoke("pane_write", { id: prev.id, data: "\x1b[O" })
@@ -787,9 +799,98 @@ function openSettings() {
 window.addEventListener("rsz:config", (e) => { settingsCfg = e.detail })
 
 // ---- keys
+// ---- keys
+// Copy and paste chords (Go suzuri's): ⌘C/⌘V on macOS (also via the Edit
+// menu); on Windows Ctrl+Shift+C/V, Ctrl+Insert, Shift+Insert, Ctrl+V, and
+// Ctrl+C when there is a selection (otherwise it stays ^C).
+function clipShortcut(e) {
+  const k = (e.key || "").toLowerCase()
+  if (e.altKey) return false
+  if (isMac) {
+    if (!e.metaKey || e.ctrlKey || e.shiftKey) return false
+    if (k === "c") return copy(), true
+    if (k === "v") return paste(), true
+    return false
+  }
+  if (e.metaKey) return false
+  if (e.ctrlKey && e.shiftKey && k === "c") return copy(), true
+  if (e.ctrlKey && e.shiftKey && k === "v") return paste(), true
+  if (e.ctrlKey && !e.shiftKey && e.key === "Insert") return copy(), true
+  if (e.shiftKey && !e.ctrlKey && e.key === "Insert") return paste(), true
+  if (e.ctrlKey && !e.shiftKey && k === "v") return paste(), true
+  if (e.ctrlKey && !e.shiftKey && k === "c" && focused?.hasSelection) {
+    copy().then((had) => { if (!had) focused?.send("\x03") })
+    return true
+  }
+  return false
+}
+
+async function copy() {
+  if (!focused?.id) return false
+  const had = await invoke("pane_copy", { id: focused.id }).catch((err) => (log("copy", String(err)), false))
+  if (had) toast("copied")
+  return had
+}
+let lastPaste = 0
+// ⌘V / Ctrl+V / right-click: the clipboard into the focused pane.
+async function paste() {
+  const pane = focused
+  if (!pane?.id || pane.exited) return
+  // One key press can arrive as both a keydown and a menu action (Go
+  // suzuri debounces the same way).
+  const now = performance.now()
+  if (now - lastPaste < 280) return
+  lastPaste = now
+  try {
+    // At the prompt the bar takes the text; otherwise the core reads the
+    // clipboard itself (an image on the alt screen becomes a file path).
+    if (pane.barActive()) return pasteText(pane, await invoke("clipboard_text"))
+    if (!pane.pendingInput) pane.pendingInput = performance.now()
+    await invoke("pane_paste", { id: pane.id, text: null })
+  } catch (err) {
+    log("paste", String(err))
+  }
+}
+let toastTimer = 0
+function toast(text) {
+  const t = document.getElementById("toast")
+  t.textContent = text
+  t.hidden = false
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => (t.hidden = true), 900)
+}
+
+// ---- IME: the hidden textarea sits on the focused pane's cursor, so the
+// candidate window opens there; the text being composed shows inline.
+const preedit = document.createElement("div")
+preedit.className = "preedit"
+preedit.hidden = true
+function placeInput() {
+  if (!focused) return
+  // At the prompt the caret is the input bar's; otherwise the terminal's.
+  const at = focused.barActive() ? focused.barEl.querySelector(".caret") : focused.cursor
+  const c = at.getBoundingClientRect()
+  input.style.left = `${c.left}px`
+  input.style.top = `${c.top}px`
+  input.style.height = `${c.height || cellMetrics().ch}px`
+  if (!preedit.hidden) {
+    preedit.style.left = `${c.left}px`
+    preedit.style.top = `${c.top}px`
+  }
+}
+input.addEventListener("compositionstart", () => {
+  document.body.append(preedit)
+  preedit.hidden = false
+  placeInput()
+})
+input.addEventListener("compositionupdate", (e) => {
+  preedit.textContent = e.data
+  placeInput()
+})
 input.addEventListener("keydown", (e) => {
   if (window.rszTrace) log("key", e.key, e.code, e.metaKey, e.ctrlKey, e.altKey, e.isComposing)
   if (e.isComposing) return
+  if (clipShortcut(e)) { e.preventDefault(); return }
   const sc = shortcut(e, isMac)
   if (sc) { e.preventDefault(); run(sc.id, sc.arg); return }
   if (extraShortcut(e, isMac)) { e.preventDefault(); return }
@@ -812,17 +913,23 @@ input.addEventListener("input", (e) => {
   else focused.send(v)
 })
 input.addEventListener("compositionend", () => {
+  preedit.hidden = true
+  preedit.textContent = ""
   const v = input.value
   input.value = ""
   if (!v || !focused) return
   if (focused.barActive()) focused.bar.insert(v), focused.renderBar()
   else focused.send(v)
 })
+// macOS: the Edit menu's Copy and Paste are ours (app/src/main.rs
+// install_menu): copy the pane's selection, paste through the core.
+window.__TAURI__.event.listen("rsz-copy", () => copy())
+window.__TAURI__.event.listen("rsz-paste", () => paste())
 function pasteText(pane, text) {
   // At the prompt, a paste goes into the input bar (newlines kept).
   if (pane.barActive()) return pane.bar.insert(text.replace(/\r\n?/g, "\n")), pane.renderBar()
-  const body = text.replace(/\r?\n/g, "\r")
-  pane.send(pane.modes & M_BRACKETED_PASTE ? `\x1b[200~${body}\x1b[201~` : body)
+  // Otherwise the core frames it (bracketed paste when the app asked).
+  invoke("pane_paste", { id: pane.id, text })
 }
 input.addEventListener("paste", (e) => {
   e.preventDefault()
@@ -979,5 +1086,9 @@ async function start() {
   if (settingsCfg) announce(settingsCfg)
   const first = boot.panes > 1 ? await grid(boot.panes) : await openTab()
   if (boot.bench) bench(boot, first)
+  if (boot.ui_test) {
+    const { run } = await import("./selftest.js")
+    run(boot.ui_test, { invoke, log, first, focused: () => focused, split, isMac })
+  }
 }
 start()

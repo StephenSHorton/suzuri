@@ -22,6 +22,8 @@ pub const A_UNDERLINE: u16 = 4;
 pub const A_STRIKE: u16 = 8;
 pub const A_DIM: u16 = 16;
 pub const A_HIDDEN: u16 = 32;
+/// The cell is inside the selection: the UI paints the selection colour.
+pub const A_SELECTED: u16 = 64;
 
 pub const M_APP_CURSOR: u32 = 1;
 pub const M_BRACKETED_PASTE: u32 = 2;

@@ -172,3 +172,20 @@ input.rename {
 .settings .foot { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid #2c2c34; }
 .settings .foot .status { flex: 1; min-width: 0; text-align: right; color: var(--mute); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .settings .foot .ok { color: var(--text); border-color: var(--primary); }
+/* Links under the pointer (pointer.js): underlined, with a hand. */
+.pane .body.on-link { cursor: pointer; }
+.pane .link-hover {
+  position: absolute; pointer-events: none;
+  border-bottom: 1px solid var(--primary); background: rgba(184,160,200,.12);
+}
+/* IME: the text being composed, drawn over the cursor until it commits. */
+.preedit {
+  position: fixed; z-index: 5; pointer-events: none; white-space: pre;
+  font: 14px "Gohu", ui-monospace, Menlo, Consolas, monospace; line-height: 16px;
+  color: var(--text); background: var(--panel); border-bottom: 1px solid var(--primary);
+}
+#toast {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  padding: 4px 12px; border-radius: 6px; background: rgba(20,20,24,.92);
+  border: 1px solid #2c2c34; color: var(--soft); font-size: 11px;
+}

@@ -8,14 +8,37 @@ use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb as ARgb, StdSyncHandler};
 use parking_lot::Mutex;
 
 use crate::frame::{self, CellOut, FrameHeader};
+use crate::input::{self, MouseEvent};
 use crate::palette;
+
+/// How a click selects: by cell (drag), by word (double click) or by line
+/// (triple click).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectKind {
+    Cell,
+    Word,
+    Line,
+}
+
+/// A link under the pointer: an OSC 8 hyperlink or a URL found in the text,
+/// on one row of the visible screen, columns x0..x1 (end exclusive).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub url: String,
+    pub row: u16,
+    pub x0: u16,
+    pub x1: u16,
+    /// True for an OSC 8 hyperlink the app wrote, false for a found URL.
+    pub osc8: bool,
+}
 
 /// What a feed asks of the pane besides new cells.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +67,24 @@ pub trait Engine: Send {
     /// trailing blanks trimmed (the AI control plane's `tail`).
     fn history_tail(&self, lines: usize) -> Vec<String>;
     fn size(&self) -> (u16, u16);
+
+    /// Start a selection at a cell of the visible screen; `right` is true
+    /// when the pointer is in the cell's right half. The anchor stays on its
+    /// text when the view or the output scrolls.
+    fn select_start(&mut self, col: u16, row: u16, right: bool, kind: SelectKind);
+    /// Move the selection's free end (a drag).
+    fn select_extend(&mut self, col: u16, row: u16, right: bool);
+    fn select_clear(&mut self);
+    /// The selected text, or None when nothing is selected.
+    fn selection_text(&self) -> Option<String>;
+    /// The link at a cell of the visible screen.
+    fn link_at(&self, col: u16, row: u16) -> Option<Link>;
+    /// The bytes reporting a mouse event to the app, when its modes ask.
+    fn mouse_report(&self, ev: MouseEvent) -> Option<Vec<u8>>;
+    /// Pasted text as bytes for the PTY (bracketed if the app enabled it).
+    fn paste_bytes(&self, text: &str) -> Vec<u8>;
+    /// A full-screen app is up (DECSET 1049).
+    fn alt_screen(&self) -> bool;
     /// The cursor shape used until a program sets one (DECSCUSR): 1 block,
     /// 2 underline, 3 beam (the Settings cursor).
     fn set_default_cursor(&mut self, _shape: u8) {}
@@ -56,6 +97,11 @@ fn cursor_shape(shape: u8) -> CursorShape {
         _ => CursorShape::Block,
     }
 }
+
+/// What ends a double-click word: everything but letters, digits and "_",
+/// as in Go suzuri's selection.go (isWordRune). ASCII punctuation, blanks
+/// and the box-drawing bar alacritty adds.
+const WORD_BREAKS: &str = " \t!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~│";
 
 #[derive(Clone, Copy)]
 struct Size {
@@ -92,6 +138,9 @@ pub struct Alacritty {
     full_next: bool,
     row_scratch: Vec<CellOut>,
     config: Config,
+    /// A selection was painted in the last frame (its rows need repainting
+    /// once it goes, even if the engine dropped it on its own).
+    sel_shown: bool,
 }
 
 impl Alacritty {
@@ -101,9 +150,14 @@ impl Alacritty {
         // Kitty keyboard on: the engine keeps the flag stacks (per screen) and
         // answers CSI ? u; the UI's encoder (ui/kitty.js) reads the flags
         // from the frame's mode word.
-        let config = Config { scrolling_history: scrollback, kitty_keyboard: true, ..Config::default() };
+        let config = Config {
+            scrolling_history: scrollback,
+            kitty_keyboard: true,
+            semantic_escape_chars: WORD_BREAKS.to_owned(),
+            ..Config::default()
+        };
         let term = Term::new(config.clone(), &size, pending.clone());
-        Self { term, parser: Processor::new(), pending, size, full_next: true, row_scratch: Vec::new(), config }
+        Self { term, parser: Processor::new(), pending, size, full_next: true, row_scratch: Vec::new(), config, sel_shown: false }
     }
 
     fn drain(&mut self, events: &mut Vec<EngineEvent>) {
@@ -188,7 +242,16 @@ impl Alacritty {
         }
     }
 
-    fn encode_row(&mut self, y: usize, out: &mut Vec<u8>) {
+    /// A cell of the visible screen as a grid point (history lines are
+    /// negative), clamped to the screen.
+    fn point(&self, col: u16, row: u16) -> Point {
+        let offset = self.term.grid().display_offset() as i32;
+        let col = (col as usize).min(self.size.cols - 1);
+        let row = (row as usize).min(self.size.rows - 1) as i32;
+        Point::new(Line(row - offset), Column(col))
+    }
+
+    fn encode_row(&mut self, y: usize, out: &mut Vec<u8>, sel: Option<&SelectionRange>) {
         let offset = self.term.grid().display_offset() as i32;
         let line = Line(y as i32 - offset);
         self.row_scratch.clear();
@@ -224,6 +287,9 @@ impl Alacritty {
             if flags.contains(Flags::HIDDEN) {
                 attrs |= frame::A_HIDDEN;
             }
+            if sel.is_some_and(|r| r.contains(Point::new(line, Column(x)))) {
+                attrs |= frame::A_SELECTED;
+            }
             let cp = if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
                 0
             } else {
@@ -253,7 +319,11 @@ impl Engine for Alacritty {
 
     fn snapshot(&mut self, out: &mut Vec<u8>, seq: u32, force_full: bool) -> bool {
         out.clear();
-        let full = force_full || self.full_next;
+        // While a selection shows, every frame is full: the engine moves
+        // the selection with scrolling output without marking damage.
+        let sel = self.term.selection.as_ref().and_then(|s| s.to_range(&self.term));
+        let full = force_full || self.full_next || sel.is_some() || self.sel_shown;
+        self.sel_shown = sel.is_some();
         let rows: Vec<usize> = if full {
             (0..self.size.rows).collect()
         } else {
@@ -321,7 +391,7 @@ impl Engine for Alacritty {
         };
         frame::encode_header(out, &header);
         for y in rows {
-            self.encode_row(y, out);
+            self.encode_row(y, out, sel.as_ref());
         }
         true
     }
@@ -395,6 +465,95 @@ impl Engine for Alacritty {
         self.config.default_cursor_style = CursorStyle { shape: cursor_shape(shape), blinking: false };
         self.term.set_options(self.config.clone());
         self.full_next = true;
+    }
+
+    fn select_start(&mut self, col: u16, row: u16, right: bool, kind: SelectKind) {
+        let ty = match kind {
+            SelectKind::Cell => SelectionType::Simple,
+            SelectKind::Word => SelectionType::Semantic,
+            SelectKind::Line => SelectionType::Lines,
+        };
+        let side = if right { Side::Right } else { Side::Left };
+        let mut sel = Selection::new(ty, self.point(col, row), side);
+        // A word or line selection is the whole word or line straight away;
+        // a cell selection starts empty and grows with the drag.
+        if kind != SelectKind::Cell {
+            sel.update(self.point(col, row), side);
+        }
+        self.term.selection = Some(sel);
+        self.full_next = true;
+    }
+
+    fn select_extend(&mut self, col: u16, row: u16, right: bool) {
+        let p = self.point(col, row);
+        if let Some(sel) = self.term.selection.as_mut() {
+            sel.update(p, if right { Side::Right } else { Side::Left });
+            self.full_next = true;
+        }
+    }
+
+    fn select_clear(&mut self) {
+        if self.term.selection.take().is_some() {
+            self.full_next = true;
+        }
+    }
+
+    fn selection_text(&self) -> Option<String> {
+        let mut s = self.term.selection_to_string()?;
+        // A line selection ends in a newline; copy it like Go suzuri, without.
+        while s.ends_with('\n') {
+            s.pop();
+        }
+        (!s.is_empty()).then_some(s)
+    }
+
+    fn link_at(&self, col: u16, row: u16) -> Option<Link> {
+        let p = self.point(col, row);
+        let grid = self.term.grid();
+        let cols = self.size.cols;
+        let row = p.line.0 + grid.display_offset() as i32;
+        let row = row as u16;
+        // An OSC 8 hyperlink: the run of cells carrying the same link.
+        if let Some(h) = grid[p].hyperlink() {
+            let same = |x: usize| grid[p.line][Column(x)].hyperlink().as_ref() == Some(&h);
+            let mut x0 = p.column.0;
+            while x0 > 0 && same(x0 - 1) {
+                x0 -= 1;
+            }
+            let mut x1 = p.column.0 + 1;
+            while x1 < cols && same(x1) {
+                x1 += 1;
+            }
+            return Some(Link { url: h.uri().to_string(), row, x0: x0 as u16, x1: x1 as u16, osc8: true });
+        }
+        let line: Vec<char> = (0..cols)
+            .map(|x| {
+                let c = &grid[p.line][Column(x)];
+                if c.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    '\0'
+                } else if c.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+                    ' '
+                } else {
+                    c.c
+                }
+            })
+            .collect();
+        input::find_urls(&line)
+            .into_iter()
+            .find(|u| (u.x0..u.x1).contains(&p.column.0))
+            .map(|u| Link { url: u.url, row, x0: u.x0 as u16, x1: u.x1 as u16, osc8: false })
+    }
+
+    fn mouse_report(&self, ev: MouseEvent) -> Option<Vec<u8>> {
+        input::mouse_report(*self.term.mode(), ev)
+    }
+
+    fn paste_bytes(&self, text: &str) -> Vec<u8> {
+        input::paste_bytes(text, self.term.mode().contains(TermMode::BRACKETED_PASTE))
+    }
+
+    fn alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 }
 
@@ -484,5 +643,99 @@ mod tests {
         e.feed(b"\x1b[?2026l", &mut ev);
         assert!(e.sync_deadline().is_none());
         assert_eq!(e.screen_text(), "abc\n");
+    }
+
+    fn fed(cols: u16, rows: u16, sb: usize, bytes: &[u8]) -> Alacritty {
+        let mut e = Alacritty::new(cols, rows, sb);
+        e.feed(bytes, &mut Vec::new());
+        e
+    }
+
+    #[test]
+    fn word_and_line_selection() {
+        let mut e = fed(30, 3, 0, b"ls /usr/local/bin --all\r\nnext");
+        // Words are letters, digits and "_" (Go suzuri's isWordRune).
+        e.select_start(6, 0, false, SelectKind::Word);
+        assert_eq!(e.selection_text().as_deref(), Some("usr"));
+        e.select_start(0, 0, false, SelectKind::Word);
+        assert_eq!(e.selection_text().as_deref(), Some("ls"));
+        e.select_start(1, 0, false, SelectKind::Line);
+        assert_eq!(e.selection_text().as_deref(), Some("ls /usr/local/bin --all"));
+        // A triple click then dragged down takes whole lines.
+        e.select_extend(0, 1, false);
+        assert_eq!(e.selection_text().as_deref(), Some("ls /usr/local/bin --all\nnext"));
+        e.select_clear();
+        assert_eq!(e.selection_text(), None);
+    }
+
+    #[test]
+    fn drag_selection_and_its_cells_in_frames() {
+        let mut e = fed(20, 2, 0, b"hello world");
+        e.select_start(0, 0, false, SelectKind::Cell);
+        // A press without a drag selects nothing.
+        assert_eq!(e.selection_text(), None);
+        e.select_extend(4, 0, true);
+        assert_eq!(e.selection_text().as_deref(), Some("hello"));
+        let mut out = Vec::new();
+        e.snapshot(&mut out, 1, false);
+        // Row 0's first run is "hello", marked selected.
+        let p = HEADER_LEN_FOR_TEST;
+        let attrs = u16::from_le_bytes([out[p + 4 + 12], out[p + 4 + 13]]);
+        let n = u16::from_le_bytes([out[p + 4 + 2], out[p + 4 + 3]]);
+        assert_eq!((n, attrs & frame::A_SELECTED), (5, frame::A_SELECTED));
+        // Clearing it repaints the rows without the mark.
+        e.select_clear();
+        e.snapshot(&mut out, 2, false);
+        assert!(frame::decode_header(&out).unwrap().full);
+        let attrs = u16::from_le_bytes([out[p + 4 + 12], out[p + 4 + 13]]);
+        assert_eq!(attrs & frame::A_SELECTED, 0);
+    }
+    const HEADER_LEN_FOR_TEST: usize = frame::HEADER_LEN;
+
+    #[test]
+    fn selection_reaches_into_scrollback() {
+        let mut text = Vec::new();
+        for i in 0..10 {
+            text.extend_from_slice(format!("line {i}\r\n").as_bytes());
+        }
+        text.extend_from_slice(b"last");
+        let mut e = fed(10, 3, 100, &text);
+        // Screen: line 8, line 9, last. Anchor on "last", scroll up, drag.
+        e.select_start(4, 2, false, SelectKind::Cell);
+        e.scroll(5);
+        e.select_extend(0, 0, false);
+        assert_eq!(e.selection_text().as_deref(), Some("line 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nlast"));
+        // The anchor stays on its text when output scrolls the screen.
+        e.scroll(i32::MIN);
+        e.select_start(0, 2, false, SelectKind::Word);
+        e.feed(b"\r\nmore\r\n", &mut Vec::new());
+        assert_eq!(e.selection_text().as_deref(), Some("last"));
+    }
+
+    #[test]
+    fn links_osc8_and_found_urls() {
+        let mut e = fed(40, 2, 0, b"see \x1b]8;;https://a.io/x\x1b\\docs\x1b]8;;\x1b\\ or https://b.io.");
+        let l = e.link_at(5, 0).unwrap();
+        assert_eq!((l.url.as_str(), l.x0, l.x1, l.osc8), ("https://a.io/x", 4, 8, true));
+        let l = e.link_at(15, 0).unwrap();
+        assert_eq!((l.url.as_str(), l.x0, l.x1, l.osc8), ("https://b.io", 12, 24, false));
+        assert_eq!(e.link_at(2, 0), None);
+        assert_eq!(e.link_at(24, 0), None);
+        // A link in scrollback is found at its on-screen row.
+        e.feed(b"\r\n\r\n", &mut Vec::new());
+        assert_eq!(e.link_at(15, 0), None);
+    }
+
+    #[test]
+    fn mouse_and_paste_follow_app_modes() {
+        let mut e = fed(20, 5, 0, b"");
+        let ev = MouseEvent { kind: crate::input::MouseKind::Press, button: 0, col: 2, row: 3, shift: false, alt: false, ctrl: false };
+        assert_eq!(e.mouse_report(ev), None);
+        assert_eq!(e.paste_bytes("a\nb"), b"a\rb");
+        e.feed(b"\x1b[?1000h\x1b[?1006h\x1b[?2004h", &mut Vec::new());
+        assert_eq!(e.mouse_report(ev).unwrap(), b"\x1b[<0;3;4M");
+        assert_eq!(e.paste_bytes("a\nb"), b"\x1b[200~a\rb\x1b[201~");
+        e.feed(b"\x1b[?1000l", &mut Vec::new());
+        assert_eq!(e.mouse_report(ev), None);
     }
 }

@@ -2,12 +2,14 @@
 // pane's canvas. Only the rows in the frame are repainted.
 
 export const DEFAULT_BG = 0x01000000
-const A_BOLD = 1, A_ITALIC = 2, A_UNDERLINE = 4, A_STRIKE = 8, A_DIM = 16, A_HIDDEN = 32
+const A_BOLD = 1, A_ITALIC = 2, A_UNDERLINE = 4, A_STRIKE = 8, A_DIM = 16, A_HIDDEN = 32, A_SELECTED = 64
 export const M_APP_CURSOR = 1, M_BRACKETED_PASTE = 2, M_ALT_SCREEN = 4, M_FOCUS = 8,
   M_MOUSE_CLICK = 16, M_MOUSE_DRAG = 32, M_MOUSE_MOTION = 64, M_SGR_MOUSE = 128,
   M_ALT_SCROLL = 256, M_APP_KEYPAD = 512, M_KITTY_SHIFT = 10
 
 const VOID = "#0c0c10"
+// The selection: a wash of the accent over whatever background the cell has.
+const SELECTION = "rgba(184, 160, 200, 0.38)" // --primary
 const FONT_PX = 14
 const FAMILY = `"Gohu", ui-monospace, Menlo, Consolas, monospace`
 
@@ -91,6 +93,10 @@ export class Screen {
         const x0 = col * cw
         if (bg !== DEFAULT_BG) {
           ctx.fillStyle = hex(bg)
+          ctx.fillRect(x0, top, n * cw, ch)
+        }
+        if (attrs & A_SELECTED) {
+          ctx.fillStyle = SELECTION
           ctx.fillRect(x0, top, n * cw, ch)
         }
         if (!(attrs & A_HIDDEN)) {
