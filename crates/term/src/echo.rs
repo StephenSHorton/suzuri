@@ -178,6 +178,15 @@ impl EchoFilter {
 
     fn escape_done(&mut self, seq: Vec<u8>, out: &mut Vec<u8>) {
         if self.to_newline {
+            // ConPTY may end the echo's line with a cursor move instead of a
+            // newline: the move ends it, and goes on, so nothing after it is
+            // lost.
+            if seq.starts_with(b"\x1b[") && matches!(seq.last(), Some(b'H' | b'f' | b'B' | b'E' | b'd')) {
+                self.held.clear();
+                self.armed = false;
+                out.extend_from_slice(&seq);
+                return;
+            }
             // Colours of the echo go; a mode change (zsh's bracketed-paste
             // off, a cursor show) must still reach the engine.
             // OSCs other than a title (images and notices, #288) pass.
@@ -294,6 +303,14 @@ mod tests {
         // Before a match, a cursor move is just passed on.
         let (out, _) = run("x", &[b"\x1b[5Cy\r\n"]);
         assert_eq!(out, b"\x1b[5Cy\r\n");
+    }
+
+    #[test]
+    fn a_cursor_move_ends_the_echo() {
+        // No LF after the echo: the move ends it and the output after stays.
+        let (out, armed) = run("echo hi", &[b"echo hi\x1b[2;1Hhi\x1b[3;1Hnext"]);
+        assert_eq!(out, b"\x1b[2;1Hhi\x1b[3;1Hnext", "{:?}", String::from_utf8_lossy(&out));
+        assert!(!armed);
     }
 
     #[test]
