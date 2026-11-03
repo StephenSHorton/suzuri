@@ -7,7 +7,9 @@
 //!   u16 cursor_y, u8 cursor_shape (0 hidden, 1 block, 2 underline, 3 beam,
 //!   4 hollow), u8 0, u32 modes, u32 display_offset, u32 history, u32 seq,
 //!   u16 nrows, u16 0
-//! row: u16 y, u16 nruns, then runs
+//! row: u16 y, u16 nruns, u16 x0, u16 x1, then runs. Columns [x0, x1) are
+//!      the row's dirty range: the UI clears just those and the runs cover
+//!      only them (a full row is 0..cols).
 //! run: u16 col, u16 n, u32 fg, u32 bg, u16 attrs, u16 0, then n × u32
 //!      codepoints (0 = right half of a wide glyph)
 
@@ -105,10 +107,13 @@ pub fn decode_header(b: &[u8]) -> Option<FrameHeader> {
     })
 }
 
-pub fn encode_row(out: &mut Vec<u8>, y: u16, cells: &[CellOut]) {
+/// Encode one row. `cells` are the row's columns [x0, x0 + cells.len()).
+pub fn encode_row(out: &mut Vec<u8>, y: u16, x0: u16, cells: &[CellOut]) {
     out.extend_from_slice(&y.to_le_bytes());
     let nruns_at = out.len();
     out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&x0.to_le_bytes());
+    out.extend_from_slice(&(x0 + cells.len() as u16).to_le_bytes());
     let mut nruns = 0u16;
     let mut i = 0;
     while i < cells.len() {
@@ -118,10 +123,10 @@ pub fn encode_row(out: &mut Vec<u8>, y: u16, cells: &[CellOut]) {
             j += 1;
         }
         // Trailing blank run on the default background: the UI clears the
-        // row first, so it need not be sent.
+        // range first, so it need not be sent.
         let blank_tail = j == cells.len() && c.bg == DEFAULT_BG && c.attrs & (A_UNDERLINE | A_STRIKE) == 0 && cells[i..j].iter().all(|c| c.cp == b' ' as u32);
         if !blank_tail {
-            out.extend_from_slice(&(i as u16).to_le_bytes());
+            out.extend_from_slice(&(x0 + i as u16).to_le_bytes());
             out.extend_from_slice(&((j - i) as u16).to_le_bytes());
             out.extend_from_slice(&c.fg.to_le_bytes());
             out.extend_from_slice(&c.bg.to_le_bytes());
@@ -167,12 +172,23 @@ mod tests {
         let c = |cp: char, fg| CellOut { cp: cp as u32, fg, bg: DEFAULT_BG, attrs: 0 };
         let cells = [c('a', 1), c('b', 1), c('c', 2), c(' ', 2), c(' ', 2)];
         let mut out = Vec::new();
-        encode_row(&mut out, 5, &cells);
+        encode_row(&mut out, 5, 0, &cells);
         // y, nruns=2 (ab, c+blanks is not all blank so it stays)
         assert_eq!(u16::from_le_bytes([out[2], out[3]]), 2);
         let blank = [c('x', 1), c(' ', 2), c(' ', 2)];
         let mut out = Vec::new();
-        encode_row(&mut out, 0, &blank);
+        encode_row(&mut out, 0, 0, &blank);
         assert_eq!(u16::from_le_bytes([out[2], out[3]]), 1);
+    }
+
+    #[test]
+    fn column_range() {
+        let c = |cp: char| CellOut { cp: cp as u32, fg: 1, bg: DEFAULT_BG, attrs: 0 };
+        let mut out = Vec::new();
+        encode_row(&mut out, 3, 7, &[c('a'), c('b')]);
+        let u = |i: usize| u16::from_le_bytes([out[i], out[i + 1]]);
+        assert_eq!((u(0), u(2), u(4), u(6)), (3, 1, 7, 9));
+        // The run starts at the range's first column.
+        assert_eq!((u(8), u(10)), (7, 2));
     }
 }

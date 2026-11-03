@@ -312,12 +312,11 @@ impl Alacritty {
         }
     }
 
-    fn encode_row(&mut self, y: usize, out: &mut Vec<u8>, sel: Option<&SelectionRange>) {
+    fn encode_row(&mut self, y: usize, x0: usize, x1: usize, out: &mut Vec<u8>, sel: Option<&SelectionRange>) {
         let offset = self.term.grid().display_offset() as i32;
         let line = Line(y as i32 - offset);
         self.row_scratch.clear();
-        let cols = self.size.cols;
-        for x in 0..cols {
+        for x in x0..x1 {
             let cell = &self.term.grid()[line][Column(x)];
             let flags = cell.flags;
             let bold = flags.contains(Flags::BOLD);
@@ -381,7 +380,7 @@ impl Alacritty {
             };
             self.row_scratch.push(CellOut { cp, fg, bg, attrs });
         }
-        frame::encode_row(out, y as u16, &self.row_scratch);
+        frame::encode_row(out, y as u16, x0 as u16, &self.row_scratch);
     }
 }
 
@@ -414,15 +413,24 @@ impl Engine for Alacritty {
         let sel = self.term.selection.as_ref().and_then(|s| s.to_range(&self.term));
         let full = force_full || self.full_next || sel.is_some() || self.sel_shown;
         self.sel_shown = sel.is_some();
-        let rows: Vec<usize> = if full {
-            (0..self.size.rows).collect()
+        // (line, first column, end column): the dirty range of each row.
+        let cols = self.size.cols;
+        let all = |n: usize| (0..n).map(|y| (y, 0, cols)).collect::<Vec<_>>();
+        let rows: Vec<(usize, usize, usize)> = if full {
+            all(self.size.rows)
         } else {
             match self.term.damage() {
-                TermDamage::Full => (0..self.size.rows).collect(),
-                TermDamage::Partial(it) => it.map(|d| d.line).collect(),
+                TermDamage::Full => all(self.size.rows),
+                // One cell of slack each side: a wide glyph's other half,
+                // and a neighbour whose ink reaches into the range, are
+                // repainted with it.
+                TermDamage::Partial(it) => it
+                    .filter(|d| d.left <= d.right)
+                    .map(|d| (d.line, d.left.saturating_sub(1), (d.right + 2).min(cols)))
+                    .collect(),
             }
         };
-        let full = full || rows.len() == self.size.rows;
+        let full = full || (rows.len() == self.size.rows && rows.iter().all(|r| r.1 == 0 && r.2 == cols));
         self.term.reset_damage();
         self.full_next = false;
 
@@ -480,8 +488,8 @@ impl Engine for Alacritty {
             nrows: rows.len() as u16,
         };
         frame::encode_header(out, &header);
-        for y in rows {
-            self.encode_row(y, out, sel.as_ref());
+        for (y, x0, x1) in rows {
+            self.encode_row(y, x0, x1, out, sel.as_ref());
         }
         true
     }
@@ -764,6 +772,18 @@ mod tests {
         assert!(!h.full);
         // Row 2 (the write) plus row 0 (where the cursor left from).
         assert!(h.nrows <= 3, "nrows {}", h.nrows);
+        // Each row carries only its dirty columns, with one cell of slack.
+        let mut p = frame::HEADER_LEN;
+        for _ in 0..h.nrows {
+            let u = |i: usize| u16::from_le_bytes([out[i], out[i + 1]]) as usize;
+            let (y, nruns, x0, x1) = (u(p), u(p + 2), u(p + 4), u(p + 6));
+            assert!(x1 - x0 <= 3, "row {y}: range {x0}..{x1}");
+            p += 8;
+            for _ in 0..nruns {
+                p += 16 + 4 * u(p + 2);
+            }
+        }
+        assert_eq!(p, out.len());
     }
 
     #[test]
@@ -813,16 +833,16 @@ mod tests {
         assert_eq!(e.selection_text().as_deref(), Some("hello"));
         let mut out = Vec::new();
         e.snapshot(&mut out, 1, false);
-        // Row 0's first run is "hello", marked selected.
+        // Row 0's first run (after the 8-byte row head) is "hello", marked selected.
         let p = HEADER_LEN_FOR_TEST;
-        let attrs = u16::from_le_bytes([out[p + 4 + 12], out[p + 4 + 13]]);
-        let n = u16::from_le_bytes([out[p + 4 + 2], out[p + 4 + 3]]);
+        let attrs = u16::from_le_bytes([out[p + 8 + 12], out[p + 8 + 13]]);
+        let n = u16::from_le_bytes([out[p + 8 + 2], out[p + 8 + 3]]);
         assert_eq!((n, attrs & frame::A_SELECTED), (5, frame::A_SELECTED));
         // Clearing it repaints the rows without the mark.
         e.select_clear();
         e.snapshot(&mut out, 2, false);
         assert!(frame::decode_header(&out).unwrap().full);
-        let attrs = u16::from_le_bytes([out[p + 4 + 12], out[p + 4 + 13]]);
+        let attrs = u16::from_le_bytes([out[p + 8 + 12], out[p + 8 + 13]]);
         assert_eq!(attrs & frame::A_SELECTED, 0);
     }
     const HEADER_LEN_FOR_TEST: usize = frame::HEADER_LEN;

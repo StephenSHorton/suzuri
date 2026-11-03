@@ -642,6 +642,9 @@ struct Boot {
     home: String,
     /// Debug builds: RSZ_UI_TEST names a ui/selftest.js scenario to run.
     ui_test: String,
+    /// RSZ_PAINT=main paints on the UI thread in requestAnimationFrame;
+    /// otherwise ("worker") an OffscreenCanvas worker paints.
+    paint: String,
 }
 
 #[tauri::command]
@@ -657,6 +660,7 @@ fn boot(panes: State<'_, Arc<Panes>>) -> Boot {
         trace: std::env::var_os("RSZ_TRACE").is_some(),
         home: std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
         ui_test: if cfg!(debug_assertions) { std::env::var("RSZ_UI_TEST").unwrap_or_default() } else { String::new() },
+        paint: std::env::var("RSZ_PAINT").unwrap_or_else(|_| "worker".into()),
     }
 }
 

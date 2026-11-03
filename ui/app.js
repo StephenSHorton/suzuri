@@ -1,6 +1,6 @@
 // rust-suzuri UI: split layout, focus, input and painting. The terminal
 // state lives in Rust; this only lays out panes and paints their frames.
-import { Screen, cellMetrics, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_FOCUS } from "./frame.js"
+import { Screen, cellMetrics, cssSize, onStyle, styleState, M_ALT_SCREEN, M_ALT_SCROLL, M_APP_CURSOR, M_FOCUS } from "./frame.js"
 import { encodeKey } from "./keys.js"
 import { clipboardImage, saveClipboardImage } from "./paste_image.js"
 import { extraShortcut } from "./extras.js"
@@ -66,11 +66,24 @@ let focused = null // the active tab's focused pane
 const byId = new Map()
 const early = new Map() // frames that beat pane_open's reply, by pane id
 
+// Painting: by default every pane's canvas is handed to the paint worker
+// (paint-worker.js) as an OffscreenCanvas, and the worker owns the frame
+// socket: it paints frames as they arrive and acks them itself. RSZ_PAINT=main,
+// or a webview without OffscreenCanvas, paints here in requestAnimationFrame
+// as before.
+let worker = null
+const FONT = ["Gohu", "fonts/GohuFontuni14NerdFontMono-Regular.ttf"]
+
 // Flow control: tell the pane its frames up to lastSeq are painted, so it
 // may send the next (one frame in flight per pane).
 let frameSock = null
 function ackFrame(p) {
   if (!p.id) return
+  if (worker) {
+    // The worker acks socket frames itself; Channel frames ack here.
+    if (!frameSock) invoke("pane_ack", { id: p.id, seq: p.lastSeq >>> 0 })
+    return
+  }
   if (frameSock && frameSock.readyState === 1) {
     const b = new DataView(new ArrayBuffer(8))
     b.setUint32(0, p.id, true)
@@ -81,22 +94,71 @@ function ackFrame(p) {
   }
 }
 
-// The frame socket: every pane's frames on one socket, [u32 pane id][frame].
+// The frame socket (main-thread painting): every pane's frames on one
+// socket, one message per tick of [u32 pane id][u32 len][frame] records.
 function connectFrames(spec) {
   const [port, token] = spec.split("/")
   const sock = new WebSocket(`ws://127.0.0.1:${port}/?t=${token}`)
   sock.binaryType = "arraybuffer"
   frameSock = sock
   sock.onmessage = (e) => {
-    const id = new DataView(e.data).getUint32(0, true)
-    const p = byId.get(id)
-    if (p) p.enqueue(e.data, 4)
-    else {
-      if (!early.has(id)) early.set(id, [])
-      early.get(id).push([e.data, 4])
+    const buf = e.data
+    const dv = new DataView(buf)
+    for (let off = 0; off + 8 <= buf.byteLength;) {
+      const id = dv.getUint32(off, true)
+      const len = dv.getUint32(off + 4, true)
+      const p = byId.get(id)
+      if (p) p.enqueue(buf, off + 8)
+      else {
+        if (!early.has(id)) early.set(id, [])
+        early.get(id).push([buf, off + 8])
+      }
+      off += 8 + len
     }
   }
   sock.onerror = () => log("frame socket error")
+}
+
+// The paint worker; resolves once its font is loaded.
+function startWorker(boot) {
+  worker = new Worker("paint-worker.js", { type: "module" })
+  if (boot.ws) frameSock = true // the worker's socket: acks are its job
+  worker.onerror = (e) => log("paint worker error", e.message)
+  worker.onmessage = (e) => {
+    const m = e.data
+    if (m.t === "painted") return onPainted(m)
+    if (m.t === "log") return log(m.line)
+  }
+  const ready = new Promise((r) => worker.addEventListener("message", (e) => e.data.t === "ready" && r()))
+  worker.postMessage({ t: "init", ws: boot.ws, dpr: window.devicePixelRatio || 1, font: FONT })
+  // Theme and font settings (appearance.js) follow into the worker.
+  worker.postMessage({ t: "style", ...styleState() })
+  onStyle((st) => worker.postMessage({ t: "style", ...st }))
+  // A move to a screen with another pixel ratio: new backing stores, and a
+  // full frame from every pane to fill them.
+  const watchDpr = () => {
+    matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`).addEventListener("change", () => {
+      worker.postMessage({ t: "dpr", dpr: window.devicePixelRatio || 1 })
+      for (const p of everyPane()) if (p.id) invoke("pane_redraw", { id: p.id })
+      watchDpr()
+    }, { once: true })
+  }
+  watchDpr()
+  return ready
+}
+
+// The worker painted these panes' frames, ending at m.at (epoch ms).
+function onPainted(m) {
+  const now = m.at - performance.timeOrigin
+  paint.applyMs += m.ms
+  paint.workerLagMs = (paint.workerLagMs || 0) + (performance.now() - now)
+  for (const h of m.panes) {
+    const p = byId.get(h.id)
+    if (!p) continue
+    paint.frames += h.frames
+    paint.bytes += h.bytes
+    p.painted(h, now)
+  }
 }
 
 class PaneView {
@@ -135,7 +197,7 @@ class PaneView {
     // Set on Enter until the next prompt: the command owns the keys from
     // the moment it is sent, before the shell's start mark arrives.
     this.awaiting = -1
-    this.screen = new Screen(this.canvas)
+    this.screen = worker ? null : new Screen(this.canvas, window.devicePixelRatio || 1)
     this.images = new PaneImages(this.body)
     this.queue = []
     this.modes = 0
@@ -162,6 +224,12 @@ class PaneView {
     this.size = [cols, rows]
     this.id = await invoke("pane_open", { cols, rows, command: null, from, profile, onFrame: ch })
     byId.set(this.id, this)
+    if (worker) {
+      const off = this.canvas.transferControlToOffscreen()
+      worker.postMessage({ t: "pane", id: this.id, canvas: off }, [off])
+      const held = this.queue.splice(0)
+      for (const [buf, o] of held) this.enqueue(buf, o)
+    }
     for (const [buf, off] of early.get(this.id) || []) this.enqueue(buf, off)
     early.delete(this.id)
     this.sendCell()
@@ -352,8 +420,35 @@ class PaneView {
 
   // A frame is [buffer, byte offset of the frame in it].
   enqueue(buf, off = 0) {
+    if (worker && !this.id) {
+      // Before pane_open answers: hold it until the worker knows the pane.
+      this.queue.push([buf, off])
+      return
+    }
+    if (worker) {
+      // A Channel frame: the worker paints it. (Socket frames never come
+      // through here; the worker reads the socket itself.)
+      const b = off ? buf.slice(off) : buf
+      worker.postMessage({ t: "frame", id: this.id, buf: b }, [b])
+      return
+    }
     this.queue.push([buf, off])
     scheduleFrame()
+  }
+
+  // The worker painted this pane up to header h, at `now` (this thread's
+  // clock): move the cursor and chrome, ack, and time pending input.
+  painted(h, now) {
+    if (h.cols !== this.cssCols || h.rows !== this.cssRows) {
+      this.cssCols = h.cols; this.cssRows = h.rows
+      cssSize(this.canvas, h.cols, h.rows)
+    }
+    this.afterPaint(h)
+    ackFrame(this)
+    // The worker's paint reaches the screen with the next composite: time
+    // input to this thread's next animation frame, the same point the
+    // main-thread painter measures to (and never earlier than the pixels).
+    if (this.pendingInput || this.pendingProbe) requestAnimationFrame(() => settleLatency(this, performance.now()))
   }
 
   // Apply queued frames; returns true if something was painted.
@@ -367,14 +462,21 @@ class PaneView {
       paint.frames++
     }
     this.queue.length = 0
+    paint.applyMs += performance.now() - t
+    this.afterPaint(h)
+    return true
+  }
+
+  // DOM that follows a painted frame: modes, cursor, the scrolled badge.
+  afterPaint(h) {
+    const altFlip = (this.modes ^ h.modes) & M_ALT_SCREEN
+    this.modes = h.modes
+    this.lastSeq = h.seq
+    // Images placed for this frame go up with it (#288).
     if (this.pendingPlace) {
       this.images.place(this.pendingPlace)
       this.pendingPlace = null
     }
-    paint.applyMs += performance.now() - t
-    const altFlip = (this.modes ^ h.modes) & M_ALT_SCREEN
-    this.modes = h.modes
-    this.lastSeq = h.seq
     if (altFlip) this.renderBar()
     const { cw, ch } = cellMetrics()
     const cs = this.cursor.style
@@ -389,7 +491,6 @@ class PaneView {
     if (h.offset) this.scrolled.textContent = `↑ ${h.offset} / ${h.history}`
     this.onFrame?.()
     if (focused === this) placeInput()
-    return true
   }
 
   // Inline images are sized in cells on the Rust side (card #288).
@@ -455,19 +556,23 @@ function scheduleFrame() {
     for (const p of everyPane()) {
       if (!p.flush()) continue
       ackFrame(p)
-      const now = performance.now()
-      if (p.pendingInput) {
-        const d = now - p.pendingInput
-        if (d <= 250) lat.samples.push(d)
-        p.pendingInput = 0
-      }
-      if (p.pendingProbe) {
-        const d = now - p.pendingProbe
-        if (d <= 250) lat.probe.push(d)
-        p.pendingProbe = 0
-      }
+      settleLatency(p, performance.now())
     }
   })
+}
+
+// A paint of pane p ended at `now`: that closes its pending input samples.
+function settleLatency(p, now) {
+  if (p.pendingInput) {
+    const d = now - p.pendingInput
+    if (d <= 250) lat.samples.push(d)
+    p.pendingInput = 0
+  }
+  if (p.pendingProbe) {
+    const d = now - p.pendingProbe
+    if (d <= 250) lat.probe.push(d)
+    p.pendingProbe = 0
+  }
 }
 
 // ---- layout tree per tab: {pane} leaves and {dir: "h"|"v", a, b} splits.
@@ -591,6 +696,7 @@ function closePane(pane) {
   pane.exited = true
   pane.ro.disconnect()
   pane.images.destroy()
+  if (worker && pane.id) worker.postMessage({ t: "drop", id: pane.id })
   const tab = pane.tab
   if (!detachPane(pane)) return
   if (!tab.tree) {
@@ -1230,7 +1336,8 @@ async function bench(boot, target) {
 function refitFont(font = true) {
   if (!font) return
   for (const p of everyPane()) {
-    p.screen.setSize(p.screen.cols, p.screen.rows)
+    if (p.screen) p.screen.setSize(p.screen.cols, p.screen.rows)
+    else p.cssCols = 0 // the canvas's CSS size follows at the next paint
     p.fit()
     if (p.id) invoke("pane_redraw", { id: p.id })
   }
@@ -1241,7 +1348,10 @@ async function start() {
   const boot = await invoke("boot")
   window.rszTrace = boot.trace
   home = boot.home
-  if (boot.ws) connectFrames(boot.ws)
+  const canWorker = typeof OffscreenCanvas !== "undefined" && "transferControlToOffscreen" in HTMLCanvasElement.prototype
+  if (boot.paint !== "main" && canWorker) await startWorker(boot)
+  else if (boot.ws) connectFrames(boot.ws)
+  log("paint:", worker ? "worker" : "main", "transport:", boot.ws ? "socket" : "channel")
   settingsCfg = await invoke("config_get").catch(() => null)
   if (settingsCfg) announce(settingsCfg)
   const first = boot.panes > 1 ? await grid(boot.panes) : await openTab()

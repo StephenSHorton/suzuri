@@ -1,6 +1,7 @@
 //! The frame transport (default; RSZ_TRANSPORT=channel for the Tauri
-//! Channel): one WebSocket on 127.0.0.1 carries every pane's frames as
-//! binary messages ([u32 pane id][frame]), and the UI's acks come back on it
+//! Channel): one WebSocket on 127.0.0.1 carries every pane's frames. Each
+//! binary message is one tick: every frame queued when it goes out, from
+//! any pane, as [u32 pane id][u32 len][frame] records. The UI's acks come back on it
 //! ([u32 pane id][u32 seq]). A Tauri Channel runs an eval plus, above 1 KB, a
 //! fetch round trip per message, through the UI thread on Windows; the
 //! socket keeps frames off it. Titles, exits and the rest stay on the pane's
@@ -16,7 +17,7 @@ use tungstenite::{Message, WebSocket};
 use tungstenite::handshake::server::{Request, Response};
 
 pub struct FrameBus {
-    tx: Sender<Vec<u8>>,
+    tx: Sender<(u32, Vec<u8>)>,
     pub port: u16,
     pub token: String,
 }
@@ -26,21 +27,18 @@ impl FrameBus {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         let token = format!("{:016x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 ^ (std::process::id() as u64) << 32);
-        let (tx, rx) = unbounded::<Vec<u8>>();
+        let (tx, rx) = unbounded::<(u32, Vec<u8>)>();
         let want = format!("/?t={token}");
         std::thread::Builder::new().name("rsz-ws".into()).spawn(move || serve(listener, rx, want, on_ack))?;
         Ok(FrameBus { tx, port, token })
     }
 
     pub fn send(&self, pane: u32, frame: Vec<u8>) {
-        let mut msg = Vec::with_capacity(frame.len() + 4);
-        msg.extend_from_slice(&pane.to_le_bytes());
-        msg.extend_from_slice(&frame);
-        let _ = self.tx.send(msg);
+        let _ = self.tx.send((pane, frame));
     }
 }
 
-fn serve(listener: TcpListener, rx: Receiver<Vec<u8>>, want: String, on_ack: Arc<dyn Fn(u32, u32) + Send + Sync>) {
+fn serve(listener: TcpListener, rx: Receiver<(u32, Vec<u8>)>, want: String, on_ack: Arc<dyn Fn(u32, u32) + Send + Sync>) {
     for stream in listener.incoming().flatten() {
         let _ = stream.set_nodelay(true);
         let check = |req: &Request, resp: Response| {
@@ -76,10 +74,17 @@ fn serve(listener: TcpListener, rx: Receiver<Vec<u8>>, want: String, on_ack: Arc
             });
         }
         // One window, one socket: frames go out as soon as they're queued
-        // (recv wakes on send; the timeout only notices a closed socket).
+        // (recv wakes on send; the timeout only notices a closed socket),
+        // and whatever else is queued by then rides in the same message, so
+        // the UI gets one onmessage per tick, not one per pane.
         loop {
             match rx.recv_timeout(Duration::from_millis(250)) {
-                Ok(msg) => {
+                Ok(first) => {
+                    let mut msg = Vec::with_capacity(first.1.len() + 8);
+                    put(&mut msg, first);
+                    while let Ok(more) = rx.try_recv() {
+                        put(&mut msg, more);
+                    }
                     if ws.send(Message::Binary(msg.into())).is_err() {
                         break;
                     }
@@ -93,4 +98,11 @@ fn serve(listener: TcpListener, rx: Receiver<Vec<u8>>, want: String, on_ack: Arc
         }
         let _ = ws.get_ref().shutdown(std::net::Shutdown::Both);
     }
+}
+
+/// Append one [u32 pane id][u32 len][frame] record.
+fn put(msg: &mut Vec<u8>, (pane, frame): (u32, Vec<u8>)) {
+    msg.extend_from_slice(&pane.to_le_bytes());
+    msg.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+    msg.extend_from_slice(&frame);
 }
