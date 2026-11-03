@@ -79,6 +79,8 @@ struct Inner {
     unread: usize,
     hover: bool,
     anchor: usize,
+    /// A sound posted before the panel page was listening.
+    unheard: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -145,6 +147,9 @@ impl Notices {
             g.next += 1;
             let key = g.next;
             g.live.push(Live { key, pane, note: n, until });
+        }
+        if self.app.get_webview_window(PANEL).is_none() {
+            self.inner.lock().unheard = sound;
         }
         self.present(sound);
         effects
@@ -221,14 +226,19 @@ impl Notices {
         }
     }
 
-    /// The history, newest first, and how many are unread.
     /// The panel page asks for the cards once it has loaded: the panel is
     /// made on the first post, and that post's event can reach the page
-    /// before its listener exists, which lost a lone first card.
+    /// before its listener exists, which lost a lone first card (and its
+    /// sound, kept in `unheard` until now).
     pub fn resync(&self) {
-        if !self.inner.lock().live.is_empty() {
-            self.present(None);
-        }
+        let sound = {
+            let mut g = self.inner.lock();
+            if g.live.is_empty() {
+                return;
+            }
+            g.unheard.take()
+        };
+        self.present(sound);
     }
 
     /// Cards on screen now (the notify CLI waits for them to go).
@@ -236,6 +246,7 @@ impl Notices {
         self.inner.lock().live.len()
     }
 
+    /// The history, newest first, and how many are unread.
     pub fn history(&self) -> (Vec<Played>, usize) {
         let g = self.inner.lock();
         (g.history.clone(), g.unread)
