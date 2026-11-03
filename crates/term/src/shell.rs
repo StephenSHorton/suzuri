@@ -35,7 +35,9 @@ pub struct OscFilter {
 /// Longest OSC payload held back before it is given up on and passed through.
 const MAX_OSC: usize = 64 * 1024;
 
-const PREFIXES: [&[u8]; 2] = [b"\x1b]7878;", b"\x1b]7879;"];
+/// Only these forms are ours. `7879;image=` (inline images, #288) and any
+/// other 7879 kind pass through to the next filter.
+const PREFIXES: [&[u8]; 3] = [b"\x1b]7878;cwd=", b"\x1b]7879;start", b"\x1b]7879;done"];
 
 impl OscFilter {
     /// Filter `input`, appending the bytes for the VT engine to `out` and
@@ -69,7 +71,8 @@ impl OscFilter {
                 i += 1;
                 continue;
             }
-            if rest.len() < PREFIXES[0].len() {
+            // Not yet long enough to know: hold it.
+            if PREFIXES.iter().all(|p| rest.len() < p.len()) {
                 self.pending.extend_from_slice(rest);
                 return;
             }
@@ -308,6 +311,13 @@ mod tests {
         let (out, ev) = run(&[b"a\x1b]7878;cwd=/tmp/x y\x07b\x1b[31mc\x1b]0;title\x07d\x1b]7879;start\x1b\\e"]);
         assert_eq!(out, b"ab\x1b[31mc\x1b]0;title\x07de");
         assert_eq!(ev, vec![ShellEvent::Cwd("/tmp/x y".into()), ShellEvent::Start]);
+    }
+
+    #[test]
+    fn other_7879_kinds_pass_through() {
+        let (out, ev) = run(&[b"a\x1b]7879;image=/tmp/a.png\x07b", b"\x1b]7879;sta", b"rt\x07"]);
+        assert_eq!(out, b"a\x1b]7879;image=/tmp/a.png\x07b");
+        assert_eq!(ev, vec![ShellEvent::Start]);
     }
 
     #[test]
