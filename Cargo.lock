@@ -3146,10 +3146,12 @@ name = "rsz-term"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "base64 0.22.1",
  "crossbeam-channel",
  "libc",
  "parking_lot",
  "portable-pty",
+ "regex",
  "serde_json",
  "windows-sys 0.59.0",
 ]

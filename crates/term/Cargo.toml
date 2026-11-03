@@ -11,6 +11,8 @@ alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
 crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }
+base64 = "0.22"
+regex = "1"
 libc = "0.2"
 
 [target.'cfg(unix)'.dependencies]

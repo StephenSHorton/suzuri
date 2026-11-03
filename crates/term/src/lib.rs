@@ -9,6 +9,7 @@ pub mod input;
 pub mod palette;
 pub mod pane;
 pub mod shell;
+pub mod protocols;
 
 pub use engine::{Alacritty, Engine, EngineEvent, Link, SelectKind};
 pub use input::{MouseEvent, MouseKind};
