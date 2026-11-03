@@ -1,6 +1,7 @@
-// Key events to the bytes an xterm-256color shell expects (legacy encoding;
-// kitty keyboard is off in the engine).
-import { M_APP_CURSOR } from "./frame.js"
+// Key events to the bytes an xterm-256color shell expects: legacy encoding,
+// plus the Kitty keyboard pieces Go suzuri sends (ui/kitty.js).
+import { M_APP_CURSOR, M_ALT_SCREEN } from "./frame.js"
+import { encodeEnter, encodeAltScreenChord } from "./kitty.js"
 
 const CSI = "\x1b["
 const SS3 = "\x1bO"
@@ -17,6 +18,10 @@ const FKEY = { F1: "P", F2: "Q", F3: "R", F4: "S" }
 // Returns the bytes for a keydown, or null to let the UI handle it.
 export function encodeKey(e, modes, isMac) {
   const m = modParam(e)
+  if (modes & M_ALT_SCREEN) {
+    const chord = encodeAltScreenChord(e, isMac)
+    if (chord !== null) return chord
+  }
   // macOS: Cmd combos belong to the app; Option is Meta (ESC prefix).
   if (isMac && e.metaKey) return null
   const k = e.key
@@ -28,8 +33,7 @@ export function encodeKey(e, modes, isMac) {
   if (k in FKEY) return m ? `${CSI}1;${m}${FKEY[k]}` : SS3 + FKEY[k]
   switch (k) {
     case "Enter":
-      // Shift/Alt+Enter: ESC CR, which Claude Code reads as a newline.
-      return e.shiftKey || e.altKey ? "\x1b\r" : "\r"
+      return encodeEnter(modes, e.shiftKey, e.altKey, e.ctrlKey, false)
     case "Backspace":
       return (e.altKey ? "\x1b" : "") + (e.ctrlKey ? "\x08" : "\x7f")
     case "Tab":

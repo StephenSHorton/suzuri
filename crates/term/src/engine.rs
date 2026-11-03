@@ -83,8 +83,10 @@ impl Alacritty {
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
         let size = Size { cols: cols.max(2) as usize, rows: rows.max(1) as usize };
         let pending = Listener::default();
-        // Kitty keyboard stays off: the UI's key encoder speaks legacy xterm.
-        let config = Config { scrolling_history: scrollback, kitty_keyboard: false, ..Config::default() };
+        // Kitty keyboard on: the engine keeps the flag stacks (per screen) and
+        // answers CSI ? u; the UI's encoder (ui/kitty.js) reads the flags
+        // from the frame's mode word.
+        let config = Config { scrolling_history: scrollback, kitty_keyboard: true, ..Config::default() };
         let term = Term::new(config, &size, pending.clone());
         Self { term, parser: Processor::new(), pending, size, full_next: true, row_scratch: Vec::new() }
     }
@@ -278,6 +280,11 @@ impl Engine for Alacritty {
             (TermMode::SGR_MOUSE, frame::M_SGR_MOUSE),
             (TermMode::ALTERNATE_SCROLL, frame::M_ALT_SCROLL),
             (TermMode::APP_KEYPAD, frame::M_APP_KEYPAD),
+            (TermMode::DISAMBIGUATE_ESC_CODES, frame::M_KITTY_DISAMBIGUATE),
+            (TermMode::REPORT_EVENT_TYPES, frame::M_KITTY_EVENT_TYPES),
+            (TermMode::REPORT_ALTERNATE_KEYS, frame::M_KITTY_ALTERNATE_KEYS),
+            (TermMode::REPORT_ALL_KEYS_AS_ESC, frame::M_KITTY_ALL_KEYS),
+            (TermMode::REPORT_ASSOCIATED_TEXT, frame::M_KITTY_ASSOCIATED_TEXT),
         ];
         for (m, bit) in map {
             if mode.contains(m) {
@@ -363,6 +370,31 @@ mod tests {
         assert_eq!(e.screen_text(), "hello\nwörld 硯\n");
         e.feed(b"\x1b[6n", &mut ev);
         assert_eq!(ev, vec![EngineEvent::PtyWrite(b"\x1b[2;9R".to_vec())]);
+    }
+
+    fn kitty_flags(e: &mut Alacritty) -> u32 {
+        let mut out = Vec::new();
+        e.snapshot(&mut out, 1, true);
+        (frame::decode_header(&out).unwrap().modes >> frame::M_KITTY_SHIFT) & 31
+    }
+
+    #[test]
+    fn kitty_keyboard_push_query_pop_per_screen() {
+        let mut e = Alacritty::new(10, 2, 0);
+        let mut ev = Vec::new();
+        assert_eq!(kitty_flags(&mut e), 0);
+        e.feed(b"\x1b[>1u\x1b[?u", &mut ev);
+        assert_eq!(kitty_flags(&mut e), 1);
+        assert_eq!(ev, vec![EngineEvent::PtyWrite(b"\x1b[?1u".to_vec())]);
+        // The alt screen keeps its own stack.
+        e.feed(b"\x1b[?1049h", &mut ev);
+        assert_eq!(kitty_flags(&mut e), 0);
+        e.feed(b"\x1b[>31u", &mut ev);
+        assert_eq!(kitty_flags(&mut e), 31);
+        e.feed(b"\x1b[?1049l", &mut ev);
+        assert_eq!(kitty_flags(&mut e), 1);
+        e.feed(b"\x1b[<u", &mut ev);
+        assert_eq!(kitty_flags(&mut e), 0);
     }
 
     #[test]

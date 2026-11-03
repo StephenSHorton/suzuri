@@ -33,6 +33,14 @@ pub const M_MOUSE_MOTION: u32 = 64;
 pub const M_SGR_MOUSE: u32 = 128;
 pub const M_ALT_SCROLL: u32 = 256;
 pub const M_APP_KEYPAD: u32 = 512;
+/// Kitty keyboard progressive-enhancement flags, in the protocol's bit
+/// order (CSI > flags u): flags = (modes >> M_KITTY_SHIFT) & 31.
+pub const M_KITTY_DISAMBIGUATE: u32 = 1024;
+pub const M_KITTY_EVENT_TYPES: u32 = 2048;
+pub const M_KITTY_ALTERNATE_KEYS: u32 = 4096;
+pub const M_KITTY_ALL_KEYS: u32 = 8192;
+pub const M_KITTY_ASSOCIATED_TEXT: u32 = 16384;
+pub const M_KITTY_SHIFT: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameHeader {
