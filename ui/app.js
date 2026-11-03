@@ -5,6 +5,7 @@ import { encodeKey } from "./keys.js"
 import { clipboardImage, saveClipboardImage } from "./paste_image.js"
 import { extraShortcut } from "./extras.js"
 import { isOpen as panelOpen } from "./panel.js"
+import "./aicontrol.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -129,7 +130,7 @@ class PaneView {
     const msg = typeof m === "string" ? JSON.parse(m) : m
     if (msg.t === "title") {
       this.title = msg.title || "shell"
-      this.head.querySelector(".t").textContent = this.title
+      this.head.querySelector(".t").textContent = this.titleOverride || this.title
       if (focused === this) titleEl.textContent = this.title
     } else if (msg.t === "exit") {
       this.exited = true
@@ -416,6 +417,8 @@ document.addEventListener("mousedown", () => setTimeout(() => panelOpen() || inp
 window.addEventListener("focus", () => panelOpen() || input.focus())
 window.addEventListener("rsz-panel-closed", () => input.focus())
 
+// For #286's AI control (ui/aicontrol.js): the pane tree and its commands.
+window.rszHost = { tree: () => tree, focused: () => focused, allPanes: () => allPanes(), split, closePane, setFocus }
 document.getElementById("split-right").onclick = () => split("h")
 document.getElementById("split-down").onclick = () => split("v")
 document.getElementById("close-pane").onclick = () => closePane(focused)

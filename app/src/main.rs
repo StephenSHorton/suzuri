@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 
+mod bridge;
 mod paste;
 mod mcp_client;
 mod sidecar;
@@ -19,18 +20,21 @@ mod ws;
 use rsz_term::{Out, Pane, PaneConfig, Sink};
 use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::State;
+use tauri::{Manager, State};
 
 #[derive(Default)]
-struct Panes {
+pub(crate) struct Panes {
     next: AtomicU32,
-    map: Mutex<HashMap<u32, Arc<Pane>>>,
+    pub(crate) map: Mutex<HashMap<u32, Arc<Pane>>>,
+    /// Last OSC title per pane, and the focused pane (for the agent bridge).
+    pub(crate) titles: Mutex<HashMap<u32, String>>,
+    pub(crate) focused: AtomicU32,
     /// Set when RSZ_TRANSPORT=ws: frames go over the socket, not the Channel.
     bus: Option<ws::FrameBus>,
 }
 
 impl Panes {
-    fn get(&self, id: u32) -> Option<Arc<Pane>> {
+    pub(crate) fn get(&self, id: u32) -> Option<Arc<Pane>> {
         self.map.lock().get(&id).cloned()
     }
 }
@@ -55,6 +59,7 @@ fn json(m: &Msg) -> InvokeResponseBody {
 #[tauri::command]
 fn pane_open(
     panes: State<'_, Arc<Panes>>,
+    bridge: State<'_, Option<Arc<bridge::Bridge>>>,
     cols: u16,
     rows: u16,
     command: Option<Vec<String>>,
@@ -75,11 +80,15 @@ fn pane_open(
                 }
                 None => on_frame.send(InvokeResponseBody::Raw(b)),
             },
-            Out::Title(t) => on_frame.send(json(&Msg::Title { title: &t })),
+            Out::Title(t) => {
+                panes_ref.titles.lock().insert(id, t.clone());
+                on_frame.send(json(&Msg::Title { title: &t }))
+            }
             Out::Bell => on_frame.send(json(&Msg::Bell)),
             Out::Clipboard(s) => on_frame.send(json(&Msg::Clipboard { text: &s })),
             Out::Exit(code) => {
                 panes_ref.map.lock().remove(&id);
+                panes_ref.titles.lock().remove(&id);
                 on_frame.send(json(&Msg::Exit { code }))
             }
         };
@@ -91,6 +100,9 @@ fn pane_open(
         .filter(|d| std::path::Path::new(d).is_dir())
         .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()));
     let mut cfg = PaneConfig { cols, rows, command, cwd, ..Default::default() };
+    if let Some(b) = bridge.as_ref() {
+        cfg.env.extend(b.pane_env(id));
+    }
     if let Some(n) = std::env::var("RSZ_SCROLLBACK").ok().and_then(|v| v.parse().ok()) {
         cfg.scrollback = n;
     }
@@ -162,6 +174,9 @@ fn pane_ack(panes: State<'_, Arc<Panes>>, id: u32, seq: u32) {
 
 #[tauri::command]
 fn pane_focus(panes: State<'_, Arc<Panes>>, id: u32, focused: bool) {
+    if focused {
+        panes.focused.store(id, Ordering::Relaxed);
+    }
     if let Some(p) = panes.get(id) {
         p.set_focused(focused);
     }
@@ -288,7 +303,25 @@ fn main() {
     let bus = (std::env::var("RSZ_TRANSPORT").as_deref() != Ok("channel")).then(|| ws::FrameBus::start(on_ack).expect("frame socket"));
     let panes = Arc::new(Panes { bus, ..Default::default() });
     let _ = PANES.set(Arc::clone(&panes));
+    // The agent bridge (bridge.json + AI control); the app runs without it.
+    let bridge = match bridge::Bridge::start(Arc::clone(&panes)) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            eprintln!("bridge: not started: {e}");
+            None
+        }
+    };
+    let bridge_setup = bridge.clone();
+    let bridge_exit = bridge.clone();
     tauri::Builder::default()
+        .setup(move |app| {
+            if let Some(b) = &bridge_setup {
+                b.attach(app.handle().clone());
+                app.manage(Arc::clone(b));
+            }
+            Ok(())
+        })
+        .manage(bridge)
         .manage(panes)
         .manage(Arc::new(transfer::Transfers::default()))
         .manage(Arc::new(mcp_client::McpClient::default()))
@@ -311,8 +344,17 @@ fn main() {
             transfer::transfer_cancel,
             transfer::transfer_info,
             workspace::workspace_call,
-            workspace::workspace_me
+            workspace::workspace_me,
+            bridge::aicontrol_reply,
+            bridge::pane_text
         ])
-        .run(tauri::generate_context!())
-        .expect("run rust-suzuri");
+        .build(tauri::generate_context!())
+        .expect("build rust-suzuri")
+        .run(move |_, ev| {
+            if let tauri::RunEvent::Exit = ev {
+                if let Some(b) = &bridge_exit {
+                    b.stop();
+                }
+            }
+        });
 }

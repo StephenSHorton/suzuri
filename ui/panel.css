@@ -36,3 +36,7 @@
 .ws-ts { color: var(--mute); font-size: 11px; }
 .ws-from { color: var(--secondary); font-weight: 600; }
 .ws-from.agent { color: var(--primary); }
+/* report_agent states on a pane (AI control). */
+[data-agent="working"] { box-shadow: inset 0 0 0 1px rgba(184,160,200,.55); }
+[data-agent="blocked"] { box-shadow: inset 0 0 0 1px rgba(224,128,128,.7); }
+[data-agent="done"] { box-shadow: inset 0 0 0 1px rgba(128,200,150,.55); }

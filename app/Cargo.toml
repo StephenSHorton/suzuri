@@ -21,3 +21,5 @@ serde_json = { workspace = true }
 parking_lot = { workspace = true }
 tungstenite = "0.30.0"
 crossbeam-channel = { workspace = true }
+tiny_http = "0.12"
+getrandom = "0.3"
