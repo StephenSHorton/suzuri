@@ -50,6 +50,6 @@ function render(state) {
   }
 }
 
-listen("notices", (e) => render(e.payload))
+listen("notices", (e) => render(e.payload)).then(() => invoke("notice_sync"))
 document.addEventListener("mouseenter", () => invoke("notice_hover", { hover: true }))
 document.addEventListener("mouseleave", () => invoke("notice_hover", { hover: false }))

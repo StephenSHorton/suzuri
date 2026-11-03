@@ -222,6 +222,20 @@ impl Notices {
     }
 
     /// The history, newest first, and how many are unread.
+    /// The panel page asks for the cards once it has loaded: the panel is
+    /// made on the first post, and that post's event can reach the page
+    /// before its listener exists, which lost a lone first card.
+    pub fn resync(&self) {
+        if !self.inner.lock().live.is_empty() {
+            self.present(None);
+        }
+    }
+
+    /// Cards on screen now (the notify CLI waits for them to go).
+    pub fn live_count(&self) -> usize {
+        self.inner.lock().live.len()
+    }
+
     pub fn history(&self) -> (Vec<Played>, usize) {
         let g = self.inner.lock();
         (g.history.clone(), g.unread)

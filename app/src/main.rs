@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 mod bridge;
 mod caffeine;
 mod notes;
+mod notify;
 mod complete;
 mod paste;
 mod config;
@@ -283,6 +284,12 @@ fn pane_cell_px(panes: State<'_, Arc<Panes>>, id: u32, w: u16, h: u16) {
 #[tauri::command]
 fn notice_click(app: tauri::AppHandle, notes: State<'_, notices::Notices>, key: u64) {
     notice_effects(&app, notes.activate(key));
+}
+
+/// The panel page loaded: send it the cards (see Notices::resync).
+#[tauri::command]
+fn notice_sync(notes: State<'_, notices::Notices>) {
+    notes.resync();
 }
 
 #[tauri::command]
@@ -720,6 +727,11 @@ mod tests {
 }
 
 fn main() {
+    let ctx = tauri::generate_context!();
+    let args: Vec<String> = std::env::args().collect();
+    if notify::wants(&args) {
+        std::process::exit(notify::run(&args[2..], ctx));
+    }
     // Panes must not inherit the control API of the suzuri this was started
     // from (a dev build run inside Go suzuri): drop those variables first,
     // before any thread exists. The bridge sets its own per pane.
@@ -797,6 +809,7 @@ fn main() {
             pane_cell_px,
             notice_click,
             notice_dismiss,
+            notice_sync,
             notice_hover,
             notice_anchor,
             notice_history,
@@ -827,7 +840,7 @@ fn main() {
             notes::notes_load,
             notes::notes_save
         ])
-        .build(tauri::generate_context!())
+        .build(ctx)
         .expect("build rust-suzuri")
         .run(move |_, ev| {
             if let tauri::RunEvent::Exit = ev {
