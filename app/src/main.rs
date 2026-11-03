@@ -527,6 +527,13 @@ mod tests {
 }
 
 fn main() {
+    // Panes must not inherit the control API of the suzuri this was started
+    // from (a dev build run inside Go suzuri): drop those variables first,
+    // before any thread exists. The bridge sets its own per pane.
+    for k in bridge::INHERITED {
+        // SAFETY: single-threaded here, at the very start of main.
+        unsafe { std::env::remove_var(k) };
+    }
     // Acks from the socket find their pane through this once it exists.
     static PANES: std::sync::OnceLock<Arc<Panes>> = std::sync::OnceLock::new();
     let on_ack: Arc<dyn Fn(u32, u32) + Send + Sync> = Arc::new(|id, seq| {

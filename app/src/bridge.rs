@@ -71,11 +71,13 @@ fn write_private(path: &PathBuf, body: &[u8]) {
 impl Bridge {
     /// Listen on 127.0.0.1:0, write the discovery files, serve on a thread.
     pub fn start(panes: Arc<Panes>) -> std::io::Result<Arc<Bridge>> {
-        if std::env::var("RSZ_BRIDGE").as_deref() == Ok("0") {
-            return Err(std::io::Error::other("off (RSZ_BRIDGE=0)"));
+        if let Some(why) = off_reason(std::env::var("RSZ_BRIDGE").ok().as_deref(), is_dev_build()) {
+            return Err(std::io::Error::other(why));
         }
-        if let Some(url) = live_owner(&config_dir().join("bridge.json")) {
-            return Err(std::io::Error::other(format!("another suzuri owns bridge.json ({url}); leaving it alone")));
+        for f in ["bridge.json", "ai.json"] {
+            if let Some(url) = live_owner(&config_dir().join(f)) {
+                return Err(std::io::Error::other(format!("another suzuri owns {f} ({url}); leaving it alone")));
+            }
         }
         let server = Server::http("127.0.0.1:0").map_err(std::io::Error::other)?;
         let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
@@ -316,6 +318,30 @@ pub fn pane_text(panes: State<'_, Arc<Panes>>, id: u32, lines: Option<usize>) ->
     Some(all[all.len() - n..].join("\n"))
 }
 
+/// A build run from a cargo `target/` dir (debug or release) is a dev build:
+/// it must not take over the person's live suzuri's discovery files.
+fn is_dev_build() -> bool {
+    std::env::current_exe()
+        .map(|p| p.components().any(|c| c.as_os_str() == "target"))
+        .unwrap_or(true)
+}
+
+/// Why the bridge stays off, or None to start it. RSZ_BRIDGE=1 forces it on
+/// (tests: pair it with LOCALAPPDATA=<scratch> for a private config dir),
+/// RSZ_BRIDGE=0 forces it off; otherwise only an installed build starts it.
+fn off_reason(env: Option<&str>, dev: bool) -> Option<String> {
+    match env {
+        Some("1") => None,
+        Some("0") => Some("off (RSZ_BRIDGE=0)".into()),
+        _ if dev => Some("off in dev builds; RSZ_BRIDGE=1 with LOCALAPPDATA=<scratch dir> turns it on".into()),
+        _ => None,
+    }
+}
+
+/// Variables a pane would inherit from the suzuri that started this process.
+/// Removed at startup so a pane never points at another window's control API.
+pub const INHERITED: [&str; 4] = ["SUZURI", "SUZURI_CONTROL_URL", "SUZURI_CONTROL_TOKEN", "SUZURI_PANE_ID"];
+
 /// The URL in an existing bridge.json, if something still listens there
 /// (Go suzuri or another rust-suzuri). A stale file from a crash is ignored.
 fn live_owner(path: &PathBuf) -> Option<String> {
@@ -408,6 +434,14 @@ mod tests {
         assert_eq!(query("/v1/panes/3?lines=40&token=ab", "token").as_deref(), Some("ab"));
         assert_eq!(query("/v1/panes/3?lines=40", "lines").as_deref(), Some("40"));
         assert_eq!(query("/v1/layout", "token"), None);
+    }
+
+    #[test]
+    fn bridge_off_in_dev_unless_asked() {
+        assert!(off_reason(None, true).is_some());
+        assert!(off_reason(Some("1"), true).is_none());
+        assert!(off_reason(None, false).is_none());
+        assert!(off_reason(Some("0"), false).is_some());
     }
 
     #[test]
