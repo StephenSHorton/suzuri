@@ -77,6 +77,9 @@ impl ProgressEmitter {
         if !enabled() {
             return;
         }
+        // Receive counts collection metadata on the wire against the payload
+        // total, so `done` can run past it: never report more than 100%.
+        let done = if total > 0 { done.min(total) } else { done };
         let force = total > 0 && done >= total;
         let mut g = match self.last.lock() {
             Ok(g) => g,

@@ -1,0 +1,33 @@
+[package]
+name = "suzuri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "suzuri: a Rust + Tauri terminal"
+
+[[bin]]
+name = "suzuri"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+rsz-term = { path = "../crates/term" }
+tauri = { workspace = true, features = ["macos-private-api"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+tungstenite = "0.30.0"
+arboard = "3"
+png = "0.18"
+crossbeam-channel = { workspace = true }
+base64 = "0.22"
+tiny_http = "0.12"
+getrandom = "0.3"
+tauri-plugin-updater = "2"
+
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-single-instance = "2.5.5"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

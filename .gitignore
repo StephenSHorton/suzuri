@@ -1,27 +1,8 @@
-/suzuri
-/suzuri.exe
-/suzuri-transfer
-/suzuri-transfer.exe
-*.exe
+/target
+/app/gen
+.DS_Store
+/bench/out
+packaging/windows/conpty/
 dist/
-.idea/
-.vscode/
-*.log
-fyne-cross/
-
-suzuri.exe~
-*.exe~
-
-# Rust engines under libs/*
-libs/**/target/
-
-
-# Generated at Pages deploy
-docs/site/version.json
-
-# Native chrome (wgpu) + web surface experiment
-chrome/target/
-surface/node_modules/
-surface/dist/
-surface/src-tauri/target/
-surface/src-tauri/gen/schemas/
+/target-main
+packaging/bin/

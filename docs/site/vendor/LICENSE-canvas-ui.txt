@@ -1,3 +1,0 @@
-Canvas UI Glyph Rain — Copyright (c) 2026 David Haz
-MIT + Commons Clause. See https://github.com/DavidHDev/canvas-ui
-Vendored for use as part of the suzuri website (not redistributed as a component library).

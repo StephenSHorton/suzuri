@@ -1,0 +1,37 @@
+[package]
+name = "rsz-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "suzuri terminal core: per-pane PTY actor, VT engine, damage frames"
+
+[dependencies]
+alacritty_terminal = { workspace = true }
+portable-pty = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+base64 = "0.22"
+regex = "1"
+unicode-width = "0.2.3"
+imagesize = "0.13"
+libc = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[features]
+# Link libghostty-vt for the engine bench (examples/replay_ghostty.rs).
+# Build it in a ghostty checkout with `zig build -Demit-lib-vt
+# -Doptimize=ReleaseFast` and point GHOSTTY_VT_LIB at its zig-out/lib.
+ghostty = []
+
+[[example]]
+name = "replay_ghostty"
+required-features = ["ghostty"]
