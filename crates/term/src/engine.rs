@@ -693,7 +693,15 @@ impl Engine for Alacritty {
     }
 
     fn mouse_report(&self, ev: MouseEvent) -> Option<Vec<u8>> {
-        input::mouse_report(*self.term.mode(), ev)
+        let m = *self.term.mode();
+        let modes = input::MouseModes {
+            click: m.contains(TermMode::MOUSE_REPORT_CLICK),
+            drag: m.contains(TermMode::MOUSE_DRAG),
+            motion: m.contains(TermMode::MOUSE_MOTION),
+            sgr: m.contains(TermMode::SGR_MOUSE),
+            utf8: m.contains(TermMode::UTF8_MOUSE),
+        };
+        input::mouse_report(modes, ev)
     }
 
     fn paste_bytes(&self, text: &str) -> Vec<u8> {
@@ -734,11 +742,21 @@ impl Engine for Alacritty {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
+    /// The same tests for each engine (card #290: libghostty-vt beside
+    /// alacritty_terminal until the swap is proven).
+    macro_rules! engine_tests {
+        ($name:ident, $engine:ty, $ghostty:expr) => {
+            mod $name {
+                #[allow(unused_imports)]
+                use super::super::*;
+                type E = $engine;
+                #[allow(dead_code)]
+                const GHOSTTY: bool = $ghostty;
 
     #[test]
     fn feeds_text_and_answers_dsr() {
-        let mut e = Alacritty::new(20, 4, 100);
+        let mut e = E::new(20, 4, 100);
         let mut ev = Vec::new();
         e.feed(b"hello\r\nw\xc3\xb6rld \xe7\xa1\xaf", &mut ev);
         assert_eq!(e.screen_text(), "hello\nwörld 硯\n");
@@ -752,16 +770,18 @@ mod tests {
         // grows 42 -> 45; ConPTY keeps its cursor row, so ours must too.
         let w = (1u8, 1u8, 1u8);
         for at_bottom in [false, true] {
-            let mut e = Alacritty::new(20, 4, 100);
+            let mut e = E::new(20, 4, 100);
             e.set_grow_at_bottom(at_bottom);
             let mut ev = Vec::new();
             e.feed(b"\x1b[H\x1b[2J ", &mut ev);
             e.insert_block(&[("rule".into(), w)], &("hdr".into(), w), false);
             e.resize(20, 7);
             e.feed(b"\x1b[6n", &mut ev);
-            // Without it the engine brings the rule (and the line above)
-            // back down and the cursor with them.
-            let want: &[u8] = if at_bottom { b"\x1b[1;2R" } else { b"\x1b[3;2R" };
+            // Without it alacritty brings the rule (and the line above)
+            // back down and the cursor with them. ghostty pulls history
+            // down only when the cursor is on the bottom row, so here it
+            // keeps the row either way.
+            let want: &[u8] = if at_bottom || GHOSTTY { b"\x1b[1;2R" } else { b"\x1b[3;2R" };
             assert_eq!(ev, vec![EngineEvent::PtyWrite(want.to_vec())], "at_bottom {at_bottom}");
             if at_bottom {
                 assert_eq!(e.screen_text().lines().next(), Some("hdr"));
@@ -769,7 +789,7 @@ mod tests {
             }
             // Shrinking and growing back from the bottom row: ConPTY scrolls
             // on the shrink and adds blank rows on the grow.
-            let mut e = Alacritty::new(20, 6, 100);
+            let mut e = E::new(20, 6, 100);
             e.set_grow_at_bottom(at_bottom);
             e.feed(b"a\r\nb\r\nc\r\nd\r\ne\r\nf", &mut ev);
             e.resize(20, 3);
@@ -783,16 +803,16 @@ mod tests {
 
     #[test]
     fn history_tail_is_oldest_first_and_capped() {
-        let mut e = Alacritty::new(10, 2, 100);
+        let mut e = E::new(10, 2, 100);
         let mut ev = Vec::new();
         e.feed(b"one\r\ntwo\r\nthree\r\nfour  \r\nfive", &mut ev);
         assert_eq!(e.screen_text(), "four\nfive\n");
         assert_eq!(e.history_tail(2), vec!["two".to_string(), "three".to_string()]);
         assert_eq!(e.history_tail(50), vec!["one".to_string(), "two".to_string(), "three".to_string()]);
-        assert!(Alacritty::new(10, 2, 100).history_tail(5).is_empty());
+        assert!(E::new(10, 2, 100).history_tail(5).is_empty());
     }
 
-    fn kitty_flags(e: &mut Alacritty) -> u32 {
+    fn kitty_flags(e: &mut E) -> u32 {
         let mut out = Vec::new();
         e.snapshot(&mut out, 1, true);
         (frame::decode_header(&out).unwrap().modes >> frame::M_KITTY_SHIFT) & 31
@@ -800,7 +820,7 @@ mod tests {
 
     #[test]
     fn kitty_keyboard_push_query_pop_per_screen() {
-        let mut e = Alacritty::new(10, 2, 0);
+        let mut e = E::new(10, 2, 0);
         let mut ev = Vec::new();
         assert_eq!(kitty_flags(&mut e), 0);
         e.feed(b"\x1b[>1u\x1b[?u", &mut ev);
@@ -819,7 +839,7 @@ mod tests {
 
     #[test]
     fn utf8_split_across_feeds() {
-        let mut e = Alacritty::new(10, 2, 0);
+        let mut e = E::new(10, 2, 0);
         let mut ev = Vec::new();
         e.feed(b"\xe7\xa1", &mut ev);
         e.feed(b"\xaf!", &mut ev);
@@ -828,7 +848,7 @@ mod tests {
 
     #[test]
     fn partial_damage_after_full() {
-        let mut e = Alacritty::new(10, 5, 0);
+        let mut e = E::new(10, 5, 0);
         let mut out = Vec::new();
         let mut ev = Vec::new();
         assert!(e.snapshot(&mut out, 1, false));
@@ -839,12 +859,14 @@ mod tests {
         assert!(!h.full);
         // Row 2 (the write) plus row 0 (where the cursor left from).
         assert!(h.nrows <= 3, "nrows {}", h.nrows);
-        // Each row carries only its dirty columns, with one cell of slack.
+        // Each row carries only its dirty columns, with one cell of slack
+        // (alacritty). ghostty's damage is by row: the whole row goes.
         let mut p = frame::HEADER_LEN;
         for _ in 0..h.nrows {
             let u = |i: usize| u16::from_le_bytes([out[i], out[i + 1]]) as usize;
             let (y, nruns, x0, x1) = (u(p), u(p + 2), u(p + 4), u(p + 6));
-            assert!(x1 - x0 <= 3, "row {y}: range {x0}..{x1}");
+            let most = if GHOSTTY { 10 } else { 3 };
+            assert!(x1 - x0 <= most, "row {y}: range {x0}..{x1}");
             p += 8;
             for _ in 0..nruns {
                 p += 16 + 4 * u(p + 2);
@@ -855,20 +877,31 @@ mod tests {
 
     #[test]
     fn sync_update_holds_until_end() {
-        let mut e = Alacritty::new(10, 2, 0);
+        let mut e = E::new(10, 2, 0);
         let mut ev = Vec::new();
+        let mut out = Vec::new();
+        // The first frame is always full; take it before the update.
+        e.snapshot(&mut out, 0, false);
         e.feed(b"\x1b[?2026h", &mut ev);
         assert!(e.sync_deadline().is_some());
         e.feed(b"abc", &mut ev);
-        // Bytes inside a sync block are buffered, not applied yet.
-        assert_eq!(e.screen_text(), "\n");
+        if GHOSTTY {
+            // ghostty applies the bytes and holds the frame instead: no
+            // frame goes out until the update ends.
+            assert!(!e.snapshot(&mut out, 1, false));
+        } else {
+            // Bytes inside a sync block are buffered, not applied yet.
+            assert_eq!(e.screen_text(), "\n");
+        }
         e.feed(b"\x1b[?2026l", &mut ev);
         assert!(e.sync_deadline().is_none());
         assert_eq!(e.screen_text(), "abc\n");
+        assert!(e.snapshot(&mut out, 2, false));
+        assert!(frame::decode_header(&out).unwrap().nrows >= 1);
     }
 
-    fn fed(cols: u16, rows: u16, sb: usize, bytes: &[u8]) -> Alacritty {
-        let mut e = Alacritty::new(cols, rows, sb);
+    fn fed(cols: u16, rows: u16, sb: usize, bytes: &[u8]) -> E {
+        let mut e = E::new(cols, rows, sb);
         e.feed(bytes, &mut Vec::new());
         e
     }
@@ -960,4 +993,10 @@ mod tests {
         e.feed(b"\x1b[?1000l", &mut Vec::new());
         assert_eq!(e.mouse_report(ev), None);
     }
+            }
+        };
+    }
+
+    engine_tests!(alacritty, Alacritty, false);
+    engine_tests!(ghostty, crate::ghostty::Ghostty, true);
 }
