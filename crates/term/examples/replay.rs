@@ -12,7 +12,11 @@
 //! Throughput is MB/s of PTY bytes; each case repeats until ~0.4 s.
 use std::time::{Duration, Instant};
 
-use rsz_term::{Alacritty, Engine};
+use rsz_term::{Engine, Ghostty};
+
+fn mk(cols: u16, rows: u16) -> Box<dyn Engine> {
+    Box::new(Ghostty::new(cols, rows, 10_000))
+}
 
 struct Stream {
     name: String,
@@ -57,8 +61,8 @@ fn load(dir: &str) -> Vec<Stream> {
     out
 }
 
-fn feed_recorded(s: &Stream, snap: bool) -> Alacritty {
-    let mut e = Alacritty::new(s.cols, s.rows, 10_000);
+fn feed_recorded(s: &Stream, snap: bool) -> Box<dyn Engine> {
+    let mut e = mk(s.cols, s.rows);
     let mut ev = Vec::new();
     let mut frame = Vec::with_capacity(64 * 1024);
     let mut off = 0;
@@ -87,7 +91,7 @@ fn feed_recorded(s: &Stream, snap: bool) -> Alacritty {
 }
 
 fn feed_fixed(s: &Stream, chunk: usize) {
-    let mut e = Alacritty::new(s.cols, s.rows, 10_000);
+    let mut e = mk(s.cols, s.rows);
     let mut ev = Vec::new();
     for c in s.bytes.chunks(chunk) {
         e.feed(c, &mut ev);

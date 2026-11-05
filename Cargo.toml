@@ -12,7 +12,6 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
-alacritty_terminal = "0.26.0"
 portable-pty = "0.9.0"
 tauri = "2.12.5"
 tauri-build = "2.7.4"

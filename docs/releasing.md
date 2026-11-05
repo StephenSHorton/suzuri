@@ -58,8 +58,11 @@ without asking).
    from https://account.apple.com:
    `xcrun notarytool store-credentials suzuri-notary --apple-id <apple id> --team-id GP6632G333`
 3. `cargo install tauri-cli --version '^2'`, and `gh auth login`.
+4. Zig 0.17.0 on PATH (or `ZIG`), for libghostty-vt (README, Build).
 
-On the PC: Rust, `cargo install tauri-cli --version '^2'`, `gh auth login`.
+On the PC: Rust, `cargo install tauri-cli --version '^2'`, `gh auth login`,
+and Zig 0.17.0 (the zip from https://ziglang.org/download/, on PATH or as
+`ZIG`).
 
 ## Cutting a release
 

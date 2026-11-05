@@ -4,8 +4,6 @@
 //! without a PTY. Go suzuri's equivalents: mouse_pty.go,
 //! pty_keys_common.go, bracketed_paste.go and links.go.
 
-use alacritty_terminal::term::TermMode;
-
 /// A pointer event in cell coordinates (0-based) of the visible screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MouseEvent {
@@ -29,10 +27,21 @@ pub enum MouseKind {
     WheelDown,
 }
 
+/// The mouse modes an app turned on: xterm 1000 (click), 1002 (drag), 1003
+/// (motion), and the encodings 1006 (SGR) and 1005 (UTF-8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MouseModes {
+    pub click: bool,
+    pub drag: bool,
+    pub motion: bool,
+    pub sgr: bool,
+    pub utf8: bool,
+}
+
 /// The bytes that report `ev` to the app, or None when the app's mouse
 /// modes don't ask for this event.
-pub fn mouse_report(mode: TermMode, ev: MouseEvent) -> Option<Vec<u8>> {
-    if !mode.intersects(TermMode::MOUSE_MODE) {
+pub fn mouse_report(mode: MouseModes, ev: MouseEvent) -> Option<Vec<u8>> {
+    if !(mode.click || mode.drag || mode.motion) {
         return None;
     }
     let mut code: u32 = match ev.kind {
@@ -40,8 +49,8 @@ pub fn mouse_report(mode: TermMode, ev: MouseEvent) -> Option<Vec<u8>> {
         MouseKind::Motion(held) => {
             match held {
                 // 1002 reports drags, 1003 every move.
-                Some(b) if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) => 32 + b.min(2) as u32,
-                None if mode.contains(TermMode::MOUSE_MOTION) => 32 + 3,
+                Some(b) if mode.drag || mode.motion => 32 + b.min(2) as u32,
+                None if mode.motion => 32 + 3,
                 _ => return None,
             }
         }
@@ -58,7 +67,7 @@ pub fn mouse_report(mode: TermMode, ev: MouseEvent) -> Option<Vec<u8>> {
         code += 16;
     }
     let (col, row) = (ev.col as u32 + 1, ev.row as u32 + 1);
-    if mode.contains(TermMode::SGR_MOUSE) {
+    if mode.sgr {
         let end = if ev.kind == MouseKind::Release { 'm' } else { 'M' };
         return Some(format!("\x1b[<{code};{col};{row}{end}").into_bytes());
     }
@@ -68,7 +77,7 @@ pub fn mouse_report(mode: TermMode, ev: MouseEvent) -> Option<Vec<u8>> {
     }
     let mut out = b"\x1b[M".to_vec();
     out.push((32 + code) as u8);
-    if mode.contains(TermMode::UTF8_MOUSE) {
+    if mode.utf8 {
         for v in [col, row] {
             let c = char::from_u32(32 + v.min(2015)).unwrap_or(' ');
             let mut buf = [0u8; 4];
@@ -172,18 +181,21 @@ pub fn openable(url: &str) -> bool {
 mod tests {
     use super::*;
 
+    const CLICK: MouseModes = MouseModes { click: true, drag: false, motion: false, sgr: false, utf8: false };
+    const SGR: MouseModes = MouseModes { sgr: true, ..CLICK };
+
     fn ev(kind: MouseKind, button: u8, col: u16, row: u16) -> MouseEvent {
         MouseEvent { kind, button, col, row, shift: false, alt: false, ctrl: false }
     }
 
     #[test]
     fn no_report_without_mouse_mode() {
-        assert_eq!(mouse_report(TermMode::SGR_MOUSE, ev(MouseKind::Press, 0, 1, 1)), None);
+        assert_eq!(mouse_report(MouseModes { click: false, ..SGR }, ev(MouseKind::Press, 0, 1, 1)), None);
     }
 
     #[test]
     fn sgr_press_release_wheel() {
-        let m = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        let m = SGR;
         assert_eq!(mouse_report(m, ev(MouseKind::Press, 0, 4, 9)).unwrap(), b"\x1b[<0;5;10M");
         assert_eq!(mouse_report(m, ev(MouseKind::Release, 0, 4, 9)).unwrap(), b"\x1b[<0;5;10m");
         assert_eq!(mouse_report(m, ev(MouseKind::Press, 2, 0, 0)).unwrap(), b"\x1b[<2;1;1M");
@@ -197,24 +209,24 @@ mod tests {
 
     #[test]
     fn motion_follows_1000_1002_1003() {
-        let click = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+        let click = SGR;
         assert_eq!(mouse_report(click, ev(MouseKind::Motion(Some(0)), 0, 1, 1)), None);
-        let drag = click | TermMode::MOUSE_DRAG;
+        let drag = MouseModes { drag: true, ..click };
         assert_eq!(mouse_report(drag, ev(MouseKind::Motion(Some(0)), 0, 1, 1)).unwrap(), b"\x1b[<32;2;2M");
         assert_eq!(mouse_report(drag, ev(MouseKind::Motion(None), 0, 1, 1)), None);
-        let any = click | TermMode::MOUSE_MOTION;
+        let any = MouseModes { motion: true, ..click };
         assert_eq!(mouse_report(any, ev(MouseKind::Motion(None), 0, 1, 1)).unwrap(), b"\x1b[<35;2;2M");
     }
 
     #[test]
     fn x10_and_utf8_encodings() {
-        let m = TermMode::MOUSE_REPORT_CLICK;
+        let m = CLICK;
         assert_eq!(mouse_report(m, ev(MouseKind::Press, 0, 0, 0)).unwrap(), b"\x1b[M !!");
         // Release has no button in X10: 3.
         assert_eq!(mouse_report(m, ev(MouseKind::Release, 0, 0, 0)).unwrap(), b"\x1b[M#!!");
         // Past 223 columns X10 clamps; UTF-8 mode goes further.
         assert_eq!(mouse_report(m, ev(MouseKind::Press, 0, 300, 0)).unwrap(), [0x1b, b'[', b'M', 32, 255, 33]);
-        let u = mouse_report(m | TermMode::UTF8_MOUSE, ev(MouseKind::Press, 0, 300, 0)).unwrap();
+        let u = mouse_report(MouseModes { utf8: true, ..m }, ev(MouseKind::Press, 0, 300, 0)).unwrap();
         assert_eq!(&u[..4], b"\x1b[M ");
         assert_eq!(std::str::from_utf8(&u[4..]).unwrap(), "\u{14d}!");
     }
