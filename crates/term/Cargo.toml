@@ -7,7 +7,6 @@ publish.workspace = true
 description = "suzuri terminal core: per-pane PTY actor, VT engine, damage frames"
 
 [dependencies]
-alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
 crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }

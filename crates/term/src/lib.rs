@@ -15,7 +15,7 @@ pub mod pane;
 pub mod shell;
 pub mod protocols;
 
-pub use engine::{Alacritty, Engine, EngineEvent, Link, SelectKind};
+pub use engine::{Engine, EngineEvent, Link, SelectKind};
 pub use ghostty::Ghostty;
 pub use input::{MouseEvent, MouseKind};
 pub use pane::{Out, Pane, PaneConfig, Sink, State, Submit};

@@ -2,7 +2,6 @@
 //! suzuri #249) through the VT engine and report throughput.
 //!
 //!   cargo run --release -p rsz-term --example replay [dir]
-//!   RSZ_ENGINE=alacritty cargo run --release -p rsz-term --example replay
 //!
 //! Per stream:
 //! - screen: does the final screen text match the vt10x golden's screen?
@@ -13,11 +12,10 @@
 //! Throughput is MB/s of PTY bytes; each case repeats until ~0.4 s.
 use std::time::{Duration, Instant};
 
-use rsz_term::{Alacritty, Engine, Ghostty};
+use rsz_term::{Engine, Ghostty};
 
-/// RSZ_ENGINE=alacritty benches the old engine; libghostty-vt otherwise.
 fn mk(cols: u16, rows: u16) -> Box<dyn Engine> {
-    if std::env::var("RSZ_ENGINE").is_ok_and(|v| v == "alacritty") { Box::new(Alacritty::new(cols, rows, 10_000)) } else { Box::new(Ghostty::new(cols, rows, 10_000)) }
+    Box::new(Ghostty::new(cols, rows, 10_000))
 }
 
 struct Stream {
