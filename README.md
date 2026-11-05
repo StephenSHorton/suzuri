@@ -72,5 +72,4 @@ Releases and auto-update: see [docs/releasing.md](docs/releasing.md).
 
 Dev knobs: `RSZ_CMD` (pane command instead of the shell), `RSZ_PANES`,
 `RSZ_BENCH=1` with `RSZ_BENCH_SECS` and `RSZ_BENCH_OUT` (latency probe),
-`RSZ_TRACE=1` (log PTY reads), `RSZ_ENGINE=alacritty` (the old VT engine,
-for side-by-side checks until it is removed).
+`RSZ_TRACE=1` (log PTY reads).

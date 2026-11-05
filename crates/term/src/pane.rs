@@ -322,13 +322,8 @@ impl Pane {
 
         let shared = Arc::new(Shared {
             engine: Mutex::new({
-                // libghostty-vt (#290). RSZ_ENGINE=alacritty runs the old
-                // engine, for side-by-side checks until it is removed.
-                let mut e: Box<dyn Engine> = if std::env::var("RSZ_ENGINE").is_ok_and(|v| v == "alacritty") {
-                    Box::new(crate::engine::Alacritty::new(cfg.cols, cfg.rows, cfg.scrollback))
-                } else {
-                    Box::new(Ghostty::new(cfg.cols, cfg.rows, cfg.scrollback))
-                };
+                // libghostty-vt (#290).
+                let mut e: Box<dyn Engine> = Box::new(Ghostty::new(cfg.cols, cfg.rows, cfg.scrollback));
                 if cfg.cursor != 1 {
                     e.set_default_cursor(cfg.cursor);
                 }
