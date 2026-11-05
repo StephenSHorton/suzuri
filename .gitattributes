@@ -1,0 +1,4 @@
+# Raw PTY streams and their goldens must stay byte-exact on every OS.
+internal/ui/testdata/pty/*.bin binary
+internal/ui/testdata/pty/*.golden -text
+internal/ui/testdata/pty/*.json -text
