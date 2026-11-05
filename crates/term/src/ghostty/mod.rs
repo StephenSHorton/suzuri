@@ -7,7 +7,8 @@
 //! What libghostty-vt has no call for is done with VT sequences fed to the
 //! terminal itself (never to the PTY): the command block (#296) writes its
 //! lines inside a scroll region, and an image mark (#288) is an OSC 8
-//! hyperlink on the cell under the cursor.
+//! hyperlink on the cell under the cursor, found again through a tracked
+//! grid reference.
 
 pub mod sys;
 
@@ -157,6 +158,11 @@ pub struct Ghostty {
     /// The theme's colours were given to the terminal for this theme.
     pal_set: Option<(usize, palette::AnsiMap)>,
     default_cursor: u8,
+    /// Image marks (#288): the tag and a tracked reference to its cell. The
+    /// reference follows the cell through scrolling, history and reflow;
+    /// the cell's OSC 8 link says the mark is still there, since rewriting
+    /// or erasing the cell drops the link, as alacritty's cell mark was.
+    marks: Vec<(u32, GhosttyTrackedGridRef)>,
 }
 
 // The terminal is only ever used from one thread at a time (the pane holds
@@ -168,6 +174,9 @@ impl Drop for Ghostty {
         unsafe {
             if let Some(a) = self.anchor.take() {
                 ghostty_tracked_grid_ref_free(a.at);
+            }
+            for (_, r) in self.marks.drain(..) {
+                ghostty_tracked_grid_ref_free(r);
             }
             ghostty_render_state_row_cells_free(self.cells);
             ghostty_render_state_row_iterator_free(self.rows_it);
@@ -203,6 +212,10 @@ impl Ghostty {
             set(GHOSTTY_TERMINAL_OPT_RENDER_HOLD, on_render_hold as *const c_void);
             let lines = scrollback as u64;
             set(GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &lines as *const u64 as *const c_void);
+            // Kitty graphics stay on suzuri's path (protocols.rs takes the
+            // APCs before the engine sees them); ghostty keeps none itself.
+            let kitty_limit = 0u64;
+            set(GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &kitty_limit as *const u64 as *const c_void);
             ok!(ghostty_terminal_resize(t, cols, rows, 8, 16));
 
             let mut rs = ptr::null_mut();
@@ -224,6 +237,7 @@ impl Ghostty {
                 pal: palette::active(),
                 pal_set: None,
                 default_cursor: 1,
+                marks: Vec::new(),
             };
             g.apply_palette();
             // Kitty keyboard flags are kept per screen by the terminal.
@@ -346,14 +360,6 @@ impl Ghostty {
             }
         }
         None
-    }
-
-    fn row_has_hyperlink(r: &GhosttyGridRef) -> bool {
-        unsafe {
-            let mut row: GhosttyRow = 0;
-            let mut has = false;
-            ghostty_grid_ref_row(r, &mut row) == GHOSTTY_SUCCESS && ghostty_row_get(row, GHOSTTY_ROW_DATA_HYPERLINK, &mut has as *mut _ as *mut c_void) == GHOSTTY_SUCCESS && has
-        }
     }
 
     fn feed_internal(&mut self, bytes: &[u8]) {
@@ -575,6 +581,43 @@ impl Ghostty {
         self.selection_points(&out)
     }
 
+    fn mode_ansi(&self, value: u16) -> bool {
+        let mut m = GhosttyTerminalModeConfig { mode: mode(value, true), value: false };
+        self.get(GHOSTTY_TERMINAL_DATA_MODE, &mut m) && m.value
+    }
+
+    fn set_mode(&mut self, value: u16, on: bool) {
+        let m = GhosttyTerminalModeConfig { mode: mode(value, true), value: on };
+        self.set(GHOSTTY_TERMINAL_OPT_MODE, &m as *const _ as *const c_void);
+    }
+
+    /// The mark's cell still carries its link (a tracked reference that
+    /// lost its cell, to a reset or the history's end, has none).
+    fn mark_alive(r: GhosttyTrackedGridRef, tag: u32) -> bool {
+        unsafe {
+            if !ghostty_tracked_grid_ref_has_value(r) {
+                return false;
+            }
+            let mut g: GhosttyGridRef = sized();
+            if ghostty_tracked_grid_ref_snapshot(r, &mut g) != GHOSTTY_SUCCESS {
+                return false;
+            }
+            Self::hyperlink(&g).and_then(|u| u.strip_prefix(MARK_URI).and_then(|t| t.parse::<u32>().ok())) == Some(tag)
+        }
+    }
+
+    /// Forget marks whose cell is gone, so the list stays as long as the
+    /// images on screen.
+    fn prune_marks(&mut self) {
+        self.marks.retain(|&(tag, r)| {
+            let keep = Self::mark_alive(r, tag);
+            if !keep {
+                unsafe { ghostty_tracked_grid_ref_free(r) };
+            }
+            keep
+        });
+    }
+
     fn drop_anchor(&mut self) {
         if let Some(a) = self.anchor.take() {
             unsafe { ghostty_tracked_grid_ref_free(a.at) };
@@ -683,6 +726,9 @@ impl Engine for Ghostty {
         }
         self.pal = pal;
         self.apply_palette();
+        if !self.marks.is_empty() {
+            self.prune_marks();
+        }
         // While a synchronized update holds the screen, the render state
         // keeps the frame from before it (captured when the hold began).
         let held = self.shared.held_since.is_some();
@@ -876,7 +922,14 @@ impl Engine for Ghostty {
                 b.extend(std::iter::repeat_n(b'\n', n));
             }
         };
-        b.extend_from_slice(b"\x1b7");
+        // DECSC (DECRC brings back the pen, origin mode and charsets too);
+        // absolute addressing; G0 is ASCII and shifted in, so the text is
+        // written as it is. Insert mode is off while it is written.
+        b.extend_from_slice(b"\x1b7\x1b[?6l\x1b(B\x0f");
+        let insert = self.mode_ansi(4);
+        if insert {
+            self.set_mode(4, false);
+        }
         // Room below for the lines: scroll part of the way first.
         let early = (cy + shift + 1).saturating_sub(rows);
         scroll(&mut b, early);
@@ -890,6 +943,9 @@ impl Engine for Ghostty {
         scroll(&mut b, shift - early.min(shift));
         b.extend_from_slice(b"\x1b8");
         self.feed_internal(&b);
+        if insert {
+            self.set_mode(4, true);
+        }
         self.full_next = true;
     }
 
@@ -1008,30 +1064,103 @@ impl Engine for Ghostty {
     }
 
     fn mark_cursor(&mut self, tag: u32) {
-        // An OSC 8 link on a blank written at the cursor, which then goes
-        // back where it was: the mark moves and is cleared with the text,
-        // as the alacritty engine's did.
-        let b = format!("\x1b7\x1b]8;id=rsz-img-{tag};{MARK_URI}{tag}\x1b\\ \x1b]8;;\x1b\\\x1b8");
-        self.feed_internal(b.as_bytes());
+        // An OSC 8 link over the cell under the cursor, with the cell's own
+        // text and style written again, so the screen doesn't change. DECSC
+        // and DECRC put the cursor back with its pending wrap, pen, origin
+        // mode and charsets. Insert mode is off meanwhile, so the write
+        // replaces the cell instead of shifting the row.
+        self.prune_marks();
+        let (x, y) = self.cursor();
+        let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_ACTIVE, x, y as u32) else { return };
+        let wide = Self::cell_wide(&r);
+        if wide == GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == GHOSTTY_CELL_WIDE_SPACER_HEAD {
+            // Half of a wide character, or the gap before one that wrapped:
+            // writing there would split it.
+            return;
+        }
+        let mut text = String::new();
+        unsafe {
+            let mut buf = [0u32; 16];
+            let mut n = 0usize;
+            if ghostty_grid_ref_graphemes(&r, buf.as_mut_ptr(), buf.len(), &mut n) == GHOSTTY_SUCCESS {
+                text.extend(buf[..n.min(buf.len())].iter().filter_map(|&c| char::from_u32(c)));
+            }
+        }
+        if text.is_empty() {
+            text.push(' ');
+        }
+        let mut st: GhosttyStyle = unsafe { sized() };
+        if unsafe { ghostty_grid_ref_style(&r, &mut st) } != GHOSTTY_SUCCESS {
+            unsafe { ghostty_style_default(&mut st) };
+        }
+        let insert = self.mode_ansi(4);
+        if insert {
+            self.set_mode(4, false);
+        }
+        let mut b = Vec::with_capacity(96);
+        // DECSC; absolute addressing; G0 is ASCII and shifted in.
+        b.extend_from_slice(b"\x1b7\x1b[?6l\x1b(B\x0f");
+        b.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
+        sgr_bytes(&st, &mut b);
+        b.extend_from_slice(format!("\x1b]8;id=rsz-img-{tag};{MARK_URI}{tag}\x1b\\").as_bytes());
+        b.extend_from_slice(text.as_bytes());
+        b.extend_from_slice(b"\x1b]8;;\x1b\\\x1b8");
+        self.feed_internal(&b);
+        if insert {
+            self.set_mode(4, true);
+        }
+        let pt = GhosttyPoint { tag: GHOSTTY_POINT_TAG_ACTIVE, value: GhosttyPointValue { coordinate: GhosttyPointCoordinate { x, y: y as u32 } } };
+        let mut at: GhosttyTrackedGridRef = ptr::null_mut();
+        if unsafe { ghostty_terminal_grid_ref_track(self.t, pt, &mut at) } == GHOSTTY_SUCCESS {
+            self.marks.push((tag, at));
+        }
     }
 
     fn marks(&self, above: usize) -> Vec<(u32, i32, u16)> {
-        let (cols, rows) = (self.shared.cols, self.shared.rows);
-        let sb = self.scrollbar();
-        let top = sb.offset as i64 - above as i64;
+        // Marks live on the main screen; the alternate screen shows none.
+        if self.alt_screen() {
+            return Vec::new();
+        }
+        let rows = self.shared.rows as i64;
+        let offset = self.scrollbar().offset as i64;
         let mut out = Vec::new();
-        for sy in top.max(0)..sb.offset as i64 + rows as i64 {
-            let Some(r0) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, sy as u32) else { continue };
-            if !Self::row_has_hyperlink(&r0) {
+        for &(tag, r) in &self.marks {
+            let Some((x, sy)) = Self::tracked_screen_point(r) else { continue };
+            let row = sy as i64 - offset;
+            if row < -(above as i64) || row >= rows || !Self::mark_alive(r, tag) {
                 continue;
             }
-            for x in 0..cols {
-                let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, x, sy as u32) else { continue };
-                if let Some(tag) = Self::hyperlink(&r).and_then(|u| u.strip_prefix(MARK_URI).and_then(|t| t.parse().ok())) {
-                    out.push((tag, (sy - sb.offset as i64) as i32, x));
-                }
-            }
+            out.push((tag, row as i32, x));
         }
+        // Screen order, as a scan of the grid finds them.
+        out.sort_by_key(|m| (m.1, m.2));
         out
     }
+}
+
+/// SGR that sets a cell's style from scratch.
+fn sgr_bytes(st: &GhosttyStyle, b: &mut Vec<u8>) {
+    let mut p: Vec<String> = vec!["0".into()];
+    for (on, code) in [(st.bold, "1"), (st.faint, "2"), (st.italic, "3"), (st.blink, "5"), (st.inverse, "7"), (st.invisible, "8"), (st.strikethrough, "9"), (st.overline, "53")] {
+        if on {
+            p.push(code.into());
+        }
+    }
+    if st.underline != 0 {
+        p.push(format!("4:{}", st.underline));
+    }
+    let color = |c: &GhosttyStyleColor, base: u8| -> Option<String> {
+        match c.tag {
+            GHOSTTY_STYLE_COLOR_PALETTE => Some(format!("{base}:5:{}", unsafe { c.value.palette })),
+            GHOSTTY_STYLE_COLOR_RGB => {
+                let v = unsafe { c.value.rgb };
+                Some(format!("{base}:2::{}:{}:{}", v.r, v.g, v.b))
+            }
+            _ => None,
+        }
+    };
+    p.extend(color(&st.fg_color, 38));
+    p.extend(color(&st.bg_color, 48));
+    p.extend(color(&st.underline_color, 58));
+    b.extend_from_slice(format!("\x1b[{}m", p.join(";")).as_bytes());
 }

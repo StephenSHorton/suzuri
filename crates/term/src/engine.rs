@@ -993,6 +993,68 @@ mod tests {
         e.feed(b"\x1b[?1000l", &mut Vec::new());
         assert_eq!(e.mouse_report(ev), None);
     }
+
+    #[test]
+    fn image_marks_move_and_clear_with_the_text() {
+        // #288's anchors: a mark sits on the cell under the cursor, keeps
+        // that cell's text, scrolls with it, and goes when the cell is
+        // rewritten, erased or the terminal reset.
+        let mut e = fed(10, 3, 100, b"ab\x1b[1D");
+        e.mark_cursor(7);
+        assert_eq!(e.cursor(), (1, 0));
+        assert_eq!(e.screen_text(), "ab\n");
+        assert_eq!(e.marks(0), vec![(7, 0, 1)]);
+        // Output scrolls it up and into the history.
+        e.feed(b"\r\n1\r\n2\r\n3", &mut Vec::new());
+        assert_eq!(e.marks(0), vec![]);
+        assert_eq!(e.marks(1), vec![(7, -1, 1)]);
+        // Scrolling the view up shows it again, by its row in the view.
+        e.scroll(1);
+        assert_eq!(e.marks(0), vec![(7, 0, 1)]);
+        e.scroll(i32::MIN);
+        // Two marks; rewriting one's cell drops only that one.
+        e.feed(b"\x1b[2;1H", &mut Vec::new());
+        e.mark_cursor(8);
+        e.feed(b"\x1b[3;1H", &mut Vec::new());
+        e.mark_cursor(9);
+        assert_eq!(e.marks(1), vec![(7, -1, 1), (8, 1, 0), (9, 2, 0)]);
+        e.feed(b"\x1b[2;1Hx", &mut Vec::new());
+        assert_eq!(e.marks(1), vec![(7, -1, 1), (9, 2, 0)]);
+        // Erasing the line drops it too.
+        e.feed(b"\x1b[3;1H\x1b[2K", &mut Vec::new());
+        assert_eq!(e.marks(1), vec![(7, -1, 1)]);
+        // The alternate screen has none of the main screen's; they are
+        // back when it closes.
+        e.feed(b"\x1b[?1049h", &mut Vec::new());
+        assert_eq!(e.marks(5), vec![]);
+        e.feed(b"\x1b[?1049l", &mut Vec::new());
+        assert_eq!(e.marks(1), vec![(7, -1, 1)]);
+        // A mark at the last column with a wrap pending neither wraps nor
+        // scrolls the screen.
+        let mut e = fed(4, 2, 100, b"\x1b[2;1Habcd");
+        e.mark_cursor(3);
+        assert_eq!(e.cursor(), (3, 1));
+        assert_eq!(e.screen_text(), "\nabcd\n");
+        assert_eq!(e.marks(0), vec![(3, 1, 3)]);
+        e.feed(b"\r\n", &mut Vec::new());
+        assert_eq!(e.marks(0), vec![(3, 0, 3)]);
+        // A reset clears them.
+        e.feed(b"\x1bc", &mut Vec::new());
+        assert_eq!(e.marks(10), vec![]);
+        // Insert mode, line drawing and origin mode on: the marked cell keeps
+        // its text, the row doesn't shift, and the program's next character
+        // lands where it would have.
+        let mut e = fed(10, 3, 100, b"aqc\x1b[4h\x1b(0\x1b[1;2r\x1b[?6h\x1b[1;2H");
+        assert_eq!(e.cursor(), (1, 0));
+        e.mark_cursor(5);
+        assert_eq!(e.cursor(), (1, 0));
+        assert_eq!(e.screen_text(), "aqc\n");
+        assert_eq!(e.marks(0), vec![(5, 0, 1)]);
+        // Still inserting, still drawing lines, still addressing from the
+        // region's top.
+        e.feed(b"q\x1b[2;1Hz", &mut Vec::new());
+        assert_eq!(e.screen_text(), "a─qc\n≥\n");
+    }
             }
         };
     }
