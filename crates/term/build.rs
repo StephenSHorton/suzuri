@@ -7,7 +7,7 @@
 //! (%LOCALAPPDATA%\rsz-ghostty on Windows). Needs Zig 0.17 (ZIG, or `zig` on
 //! PATH) and git the first time.
 //!
-//! GHOSTTY_VT_LIB=<dir holding libghostty-vt.a / ghostty-vt.lib> skips all of
+//! GHOSTTY_VT_LIB=<dir holding libghostty-vt.a / ghostty-vt-static.lib> skips all of
 //! that and links a library you built yourself.
 
 use std::path::{Path, PathBuf};
@@ -27,8 +27,14 @@ fn main() {
         None => build_cached(),
     };
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=static=ghostty-vt");
     let target = std::env::var("TARGET").unwrap();
+    // On Windows, zig installs ghostty-vt.lib as the DLL's import library
+    // and the static archive as ghostty-vt-static.lib.
+    if target.contains("windows") {
+        println!("cargo:rustc-link-lib=static=ghostty-vt-static");
+    } else {
+        println!("cargo:rustc-link-lib=static=ghostty-vt");
+    }
     if target.contains("apple") {
         println!("cargo:rustc-link-lib=c++");
     } else if target.contains("linux") {
@@ -71,7 +77,7 @@ fn build_cached() -> PathBuf {
     let root = cache_root();
     let out = root.join(format!("{}-{}", &GHOSTTY_COMMIT[..12], target));
     let lib = out.join("lib");
-    let built = |d: &Path| d.join("libghostty-vt.a").exists() || d.join("ghostty-vt.lib").exists();
+    let built = |d: &Path| d.join("libghostty-vt.a").exists() || d.join("ghostty-vt-static.lib").exists();
     if built(&lib) {
         return lib;
     }
@@ -116,7 +122,8 @@ fn build_cached() -> PathBuf {
     if let Ok(rd) = std::fs::read_dir(tmp_out.join("lib")) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if name.contains(".dylib") || name.contains(".so") || name.ends_with(".dll") || name.ends_with(".xcframework") {
+            // (On Windows the import library ghostty-vt.lib goes too.)
+            if name.contains(".dylib") || name.contains(".so") || name.ends_with(".dll") || name.ends_with(".xcframework") || name == "ghostty-vt.lib" {
                 let p = e.path();
                 let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
             }
