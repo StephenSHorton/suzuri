@@ -844,6 +844,25 @@ mod tests {
         e.feed(b"\xe7\xa1", &mut ev);
         e.feed(b"\xaf!", &mut ev);
         assert_eq!(e.screen_text(), "硯!\n");
+        // A frame taken between the halves (the corpus's cat-large splits
+        // "ü ─" so).
+        let mut e = E::new(10, 2, 0);
+        let mut out = Vec::new();
+        e.feed(b"a \xc3", &mut ev);
+        e.snapshot(&mut out, 1, true);
+        e.feed(b"\xbc b", &mut ev);
+        assert_eq!(e.screen_text(), "a ü b\n");
+        e.snapshot(&mut out, 2, true);
+        let n = frame::HEADER_LEN + 8 + 16;
+        let cps: Vec<u32> = out[n..].chunks(4).take(5).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        assert_eq!(cps, vec!['a' as u32, ' ' as u32, 'ü' as u32, ' ' as u32, 'b' as u32]);
+        // ... and followed by a space and another non-ASCII character, as
+        // in the corpus's cat-large ("ü ─" split after its first byte).
+        // alacritty's vte 0.15 loses that space; ghostty keeps it.
+        let mut e = E::new(10, 2, 0);
+        e.feed(b"a \xc3", &mut ev);
+        e.feed(b"\xbc \xe2\x94\x80", &mut ev);
+        assert_eq!(e.screen_text(), if GHOSTTY { "a ü ─\n" } else { "a ü─\n" });
     }
 
     #[test]
@@ -992,6 +1011,26 @@ mod tests {
         assert_eq!(e.paste_bytes("a\nb"), b"\x1b[200~a\rb\x1b[201~");
         e.feed(b"\x1b[?1000l", &mut Vec::new());
         assert_eq!(e.mouse_report(ev), None);
+        // Tracking modes replace each other (xterm): 1003 then 1003l leaves
+        // no mouse reporting, though 1000 was set first.
+        e.feed(b"\x1b[?1000h\x1b[?1003h\x1b[?1003l", &mut Vec::new());
+        let report = e.mouse_report(ev);
+        assert_eq!(report, None, "got {report:?}");
+    }
+
+    #[test]
+    fn tabs_show_as_blanks_and_copy() {
+        // alacritty keeps the tab in the cell it started from (the frame
+        // carries 0x9, which the UI draws as nothing); ghostty keeps blanks.
+        let mut e = fed(20, 2, 0, b"a\tb");
+        let mut out = Vec::new();
+        e.snapshot(&mut out, 1, true);
+        let n = frame::HEADER_LEN + 8 + 16;
+        let cp1 = u32::from_le_bytes([out[n + 4], out[n + 5], out[n + 6], out[n + 7]]);
+        assert_eq!(cp1, if GHOSTTY { 0x20 } else { 0x09 });
+        e.select_start(0, 0, false, SelectKind::Line);
+        let copied = e.selection_text().unwrap();
+        assert_eq!(copied, if GHOSTTY { "a       b" } else { "a\tb" }, "copy");
     }
 
     #[test]

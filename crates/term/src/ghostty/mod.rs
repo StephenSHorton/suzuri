@@ -163,6 +163,14 @@ pub struct Ghostty {
     /// the cell's OSC 8 link says the mark is still there, since rewriting
     /// or erasing the cell drops the link, as alacritty's cell mark was.
     marks: Vec<(u32, GhosttyTrackedGridRef)>,
+    /// The last frame's modes and (history, offset), sent again while a
+    /// synchronized update holds the screen.
+    last_modes: u32,
+    last_hist: (usize, usize),
+    /// ghostty's own mouse encoder and an event, to learn which tracking
+    /// mode is in effect (see mouse_tracking).
+    menc: GhosttyMouseEncoder,
+    mev: GhosttyMouseEvent,
 }
 
 // The terminal is only ever used from one thread at a time (the pane holds
@@ -178,6 +186,8 @@ impl Drop for Ghostty {
             for (_, r) in self.marks.drain(..) {
                 ghostty_tracked_grid_ref_free(r);
             }
+            ghostty_mouse_event_free(self.mev);
+            ghostty_mouse_encoder_free(self.menc);
             ghostty_render_state_row_cells_free(self.cells);
             ghostty_render_state_row_iterator_free(self.rows_it);
             ghostty_render_state_free(self.rs);
@@ -210,8 +220,15 @@ impl Ghostty {
             set(GHOSTTY_TERMINAL_OPT_SIZE, on_size as *const c_void);
             set(GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES, on_device_attributes as *const c_void);
             set(GHOSTTY_TERMINAL_OPT_RENDER_HOLD, on_render_hold as *const c_void);
-            let lines = scrollback as u64;
+            // ghostty prunes whole pages (a few hundred lines) once past the
+            // limit, so it can keep fewer lines than asked; a page more
+            // keeps at least `scrollback` lines, as alacritty does.
+            let lines = if scrollback == 0 { 0 } else { scrollback as u64 + 1024 };
             set(GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &lines as *const u64 as *const c_void);
+            // The line limit is the only limit, as alacritty's: ghostty's
+            // default byte limit otherwise caps the history at a few hundred
+            // lines of 100 columns.
+            set(GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, ptr::null());
             // Kitty graphics stay on suzuri's path (protocols.rs takes the
             // APCs before the engine sees them); ghostty keeps none itself.
             let kitty_limit = 0u64;
@@ -224,6 +241,18 @@ impl Ghostty {
             ok!(ghostty_render_state_row_iterator_new(ptr::null(), &mut it));
             let mut cells = ptr::null_mut();
             ok!(ghostty_render_state_row_cells_new(ptr::null(), &mut cells));
+            let mut menc = ptr::null_mut();
+            ok!(ghostty_mouse_encoder_new(ptr::null(), &mut menc));
+            let mut mev = ptr::null_mut();
+            ok!(ghostty_mouse_event_new(ptr::null(), &mut mev));
+            // A 1x1 cell grid of 1px cells is all the probe needs; report
+            // every motion, not only cell changes.
+            let mut sz: GhosttyMouseEncoderSize = sized();
+            (sz.screen_width, sz.screen_height, sz.cell_width, sz.cell_height) = (4, 4, 1, 1);
+            ghostty_mouse_encoder_setopt(menc, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &sz as *const _ as *const c_void);
+            let track = false;
+            ghostty_mouse_encoder_setopt(menc, GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL, &track as *const bool as *const c_void);
+            ghostty_mouse_event_set_position(mev, GhosttyMousePosition { x: 1.5, y: 1.5 });
             let mut g = Ghostty {
                 t,
                 rs,
@@ -238,6 +267,10 @@ impl Ghostty {
                 pal_set: None,
                 default_cursor: 1,
                 marks: Vec::new(),
+                last_modes: 0,
+                last_hist: (0, 0),
+                menc,
+                mev,
             };
             g.apply_palette();
             // Kitty keyboard flags are kept per screen by the terminal.
@@ -581,6 +614,83 @@ impl Ghostty {
         self.selection_points(&out)
     }
 
+    /// The frame's mode bits.
+    fn modes(&self) -> u32 {
+        let mut modes = 0u32;
+        let map = [
+            (1, frame::M_APP_CURSOR),
+            (2004, frame::M_BRACKETED_PASTE),
+            (1004, frame::M_FOCUS),
+            (1006, frame::M_SGR_MOUSE),
+            (1007, frame::M_ALT_SCROLL),
+            (66, frame::M_APP_KEYPAD),
+        ];
+        for (m, bit) in map {
+            if self.mode(m) {
+                modes |= bit;
+            }
+        }
+        if self.alt_screen() {
+            modes |= frame::M_ALT_SCREEN;
+        }
+        let (click, drag, motion) = self.mouse_tracking();
+        for (on, bit) in [(click, frame::M_MOUSE_CLICK), (drag, frame::M_MOUSE_DRAG), (motion, frame::M_MOUSE_MOTION)] {
+            if on {
+                modes |= bit;
+            }
+        }
+        let mut kitty: GhosttyKittyKeyFlags = 0;
+        self.get(GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &mut kitty);
+        modes |= ((kitty & 31) as u32) << frame::M_KITTY_SHIFT;
+        modes
+    }
+
+    /// The mouse tracking mode in effect, as (click, drag, motion), at most
+    /// one of them. The tracking modes replace each other (xterm,
+    /// alacritty): after 1000h 1003h 1003l nothing is reported. ghostty
+    /// keeps that state for its mouse encoder only (its mode bits stay set
+    /// per mode), so ask the encoder: does it report a bare motion, a drag,
+    /// or neither?
+    fn mouse_tracking(&self) -> (bool, bool, bool) {
+        let mut on = false;
+        if !self.get(GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &mut on) || !on {
+            return (false, false, false);
+        }
+        unsafe {
+            ghostty_mouse_encoder_setopt_from_terminal(self.menc, self.t);
+            let reports = |action: GhosttyMouseAction, pressed: bool| {
+                ghostty_mouse_encoder_setopt(self.menc, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed as *const bool as *const c_void);
+                ghostty_mouse_event_set_action(self.mev, action);
+                if pressed {
+                    ghostty_mouse_event_set_button(self.mev, GHOSTTY_MOUSE_BUTTON_LEFT);
+                } else {
+                    ghostty_mouse_event_clear_button(self.mev);
+                }
+                let mut buf = [0u8; 32];
+                let mut n = 0usize;
+                ghostty_mouse_encoder_encode(self.menc, self.mev, buf.as_mut_ptr() as *mut _, buf.len(), &mut n) == GHOSTTY_SUCCESS && n > 0
+            };
+            if reports(GHOSTTY_MOUSE_ACTION_MOTION, false) {
+                (false, false, true)
+            } else if reports(GHOSTTY_MOUSE_ACTION_MOTION, true) {
+                (false, true, false)
+            } else {
+                // Normal or X10 tracking report presses; none, nothing.
+                (reports(GHOSTTY_MOUSE_ACTION_PRESS, true), false, false)
+            }
+        }
+    }
+
+    /// The size the render state was last updated at.
+    fn rs_size(&self) -> (u16, u16) {
+        let (mut c, mut r) = (self.shared.cols, self.shared.rows);
+        unsafe {
+            ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_COLS, &mut c as *mut _ as *mut c_void);
+            ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_ROWS, &mut r as *mut _ as *mut c_void);
+        }
+        (c, r)
+    }
+
     fn mode_ansi(&self, value: u16) -> bool {
         let mut m = GhosttyTerminalModeConfig { mode: mode(value, true), value: false };
         self.get(GHOSTTY_TERMINAL_DATA_MODE, &mut m) && m.value
@@ -696,7 +806,20 @@ impl Ghostty {
 
 impl Engine for Ghostty {
     fn feed(&mut self, bytes: &[u8], events: &mut Vec<EngineEvent>) {
-        self.feed_internal(bytes);
+        // A held frame (DEC 2026) is the render state's, which is the screen
+        // at the last update. Update it just before a synchronized update
+        // begins, so it holds the screen as it was there, as alacritty's
+        // buffered bytes did.
+        const BSU: &[u8] = b"\x1b[?2026h";
+        let mut rest = bytes;
+        while self.shared.held_since.is_none() {
+            let Some(i) = rest.windows(BSU.len()).position(|w| w == BSU) else { break };
+            self.feed_internal(&rest[..i]);
+            unsafe { ok!(ghostty_render_state_update(self.rs, self.t)) };
+            self.feed_internal(&rest[i..i + BSU.len()]);
+            rest = &rest[i + BSU.len()..];
+        }
+        self.feed_internal(rest);
         self.drain(events);
     }
 
@@ -707,6 +830,12 @@ impl Engine for Ghostty {
         }
         self.shared.cols = cols;
         self.shared.rows = rows;
+        // A resize ends a synchronized update: the program draws again for
+        // the new size, and the held frame is the old size's.
+        if self.shared.held_since.take().is_some() {
+            let m = GhosttyTerminalModeConfig { mode: mode(2026, false), value: false };
+            self.set(GHOSTTY_TERMINAL_OPT_MODE, &m as *const _ as *const c_void);
+        }
         unsafe { ok!(ghostty_terminal_resize(self.t, cols, rows, 8, 16)) };
         self.full_next = true;
     }
@@ -748,8 +877,10 @@ impl Engine for Ghostty {
 
         let colors = self.colors();
         let bg_over = self.bg_override();
-        let (cols, rows) = (self.shared.cols, self.shared.rows);
-        let (history, offset) = self.history_and_offset();
+        // A held frame is the render state's: its size and cursor, and the
+        // modes and history of the last frame before the hold.
+        let (cols, rows) = if held { self.rs_size() } else { (self.shared.cols, self.shared.rows) };
+        let (history, offset) = if held { self.last_hist } else { self.history_and_offset() };
         let mut cur = unsafe { sized::<GhosttyRenderStateCursor>() };
         unsafe { ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_CURSOR, &mut cur as *mut _ as *mut c_void) };
         let shape = if !cur.visible || offset != 0 {
@@ -763,36 +894,10 @@ impl Engine for Ghostty {
                 _ => 1,
             }
         };
-        let (mut cx, mut cy) = (0u16, 0u16);
-        self.get(GHOSTTY_TERMINAL_DATA_CURSOR_X, &mut cx);
-        self.get(GHOSTTY_TERMINAL_DATA_CURSOR_Y, &mut cy);
-        let mut modes = 0u32;
-        let map = [
-            (1, frame::M_APP_CURSOR),
-            (2004, frame::M_BRACKETED_PASTE),
-            (1000, frame::M_MOUSE_CLICK),
-            (1002, frame::M_MOUSE_DRAG),
-            (1003, frame::M_MOUSE_MOTION),
-            (1004, frame::M_FOCUS),
-            (1006, frame::M_SGR_MOUSE),
-            (1007, frame::M_ALT_SCROLL),
-            (66, frame::M_APP_KEYPAD),
-        ];
-        for (m, bit) in map {
-            if self.mode(m) {
-                modes |= bit;
-            }
-        }
-        if self.alt_screen() {
-            modes |= frame::M_ALT_SCREEN;
-        }
-        // 1002/1003 imply click reports.
-        if modes & (frame::M_MOUSE_DRAG | frame::M_MOUSE_MOTION) != 0 {
-            modes |= frame::M_MOUSE_CLICK;
-        }
-        let mut kitty: GhosttyKittyKeyFlags = 0;
-        self.get(GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &mut kitty);
-        modes |= ((kitty & 31) as u32) << frame::M_KITTY_SHIFT;
+        let (cx, cy) = if cur.viewport_has_value && offset == 0 { (cur.viewport_x, cur.viewport_y) } else { self.cursor() };
+        let modes = if held { self.last_modes } else { self.modes() };
+        self.last_modes = modes;
+        self.last_hist = (history, offset);
 
         // The rows to send: every row, or the dirty ones.
         let mut body = Vec::new();
@@ -1042,7 +1147,8 @@ impl Engine for Ghostty {
     }
 
     fn mouse_report(&self, ev: MouseEvent) -> Option<Vec<u8>> {
-        let modes = MouseModes { click: self.mode(1000), drag: self.mode(1002), motion: self.mode(1003), sgr: self.mode(1006), utf8: self.mode(1005) };
+        let (click, drag, motion) = self.mouse_tracking();
+        let modes = MouseModes { click, drag, motion, sgr: self.mode(1006), utf8: self.mode(1005) };
         input::mouse_report(modes, ev)
     }
 
