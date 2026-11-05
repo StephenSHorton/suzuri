@@ -7,11 +7,21 @@ shells, VT, rendering, input, resize, scrollback.
 
 - `crates/term`: the core. A `Pane` runs one shell. Its PTY actor owns
   writes, resizes and close; a reader thread feeds the VT engine
-  (alacritty_terminal); a frame thread sends dirty rows as binary frames.
+  (libghostty-vt, #290); a frame thread sends dirty rows as binary frames.
 - `app`: the Tauri shell. Each pane's frames go to the webview over a Tauri
   Channel as raw bytes.
 - `ui`: plain HTML/JS, no bundler. Splits, focus, key encoding and a canvas
   renderer that repaints only the rows in each frame.
+
+## Build
+
+The VT engine is libghostty-vt, built from a pinned ghostty commit by
+`crates/term/build.rs`. It needs Zig 0.17.0 (`zig` on PATH, or `ZIG` set
+to the binary, from https://ziglang.org/download/) and git the first time;
+the library is then cached per target in `~/.cache/rsz-ghostty`
+(`%LOCALAPPDATA%\rsz-ghostty` on Windows, or `RSZ_GHOSTTY_CACHE`) and
+linked statically. `GHOSTTY_VT_LIB=<dir>` links a library built elsewhere.
+This holds for anything that builds `rsz-term`, Irori included.
 
 ## Run
 
@@ -62,4 +72,5 @@ Releases and auto-update: see [docs/releasing.md](docs/releasing.md).
 
 Dev knobs: `RSZ_CMD` (pane command instead of the shell), `RSZ_PANES`,
 `RSZ_BENCH=1` with `RSZ_BENCH_SECS` and `RSZ_BENCH_OUT` (latency probe),
-`RSZ_TRACE=1` (log PTY reads).
+`RSZ_TRACE=1` (log PTY reads), `RSZ_ENGINE=alacritty` (the old VT engine,
+for side-by-side checks until it is removed).

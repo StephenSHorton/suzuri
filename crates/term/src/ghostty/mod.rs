@@ -1108,6 +1108,21 @@ impl Engine for Ghostty {
         while s.ends_with('\n') {
             s.pop();
         }
+        // The trim drops trailing blanks, right for blanks past a line's
+        // text, but a selection can also end on spaces with text after
+        // them on its last row: those were selected, and alacritty copies
+        // them. Put them back.
+        if let Some((a, b)) = self.selection_points(&sel) {
+            let end = if (a.1, a.0) <= (b.1, b.0) { b } else { a };
+            let start_x = if (a.1, a.0) <= (b.1, b.0) { a } else { b };
+            let x0 = if start_x.1 == end.1 { start_x.0 } else { 0 };
+            let ch = |x: u16| self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, x, end.1).and_then(|r| Self::cell_char(&r));
+            let text_after = (end.0 + 1..self.shared.cols).any(|x| ch(x).is_some_and(|c| c != ' '));
+            if text_after {
+                let spaces = (x0..=end.0).rev().take_while(|&x| ch(x) == Some(' ')).count();
+                s.extend(std::iter::repeat_n(' ', spaces));
+            }
+        }
         (!s.is_empty()).then_some(s)
     }
 

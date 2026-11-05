@@ -948,6 +948,17 @@ mod tests {
         e.select_start(0, 0, false, SelectKind::Cell);
         // A press without a drag selects nothing.
         assert_eq!(e.selection_text(), None);
+        e.select_extend(5, 0, true);
+        // A space the drag took, with text after it on the line, is copied.
+        assert_eq!(e.selection_text().as_deref(), Some("hello "));
+        // Blanks past the end of a line's text are not.
+        let mut t = fed(20, 3, 0, b"ab\r\ncd");
+        t.select_start(0, 0, false, SelectKind::Cell);
+        t.select_extend(1, 1, true);
+        assert_eq!(t.selection_text().as_deref(), Some("ab\ncd"));
+        t.select_start(0, 0, false, SelectKind::Cell);
+        t.select_extend(15, 0, true);
+        assert_eq!(t.selection_text().as_deref(), Some("ab"));
         e.select_extend(4, 0, true);
         assert_eq!(e.selection_text().as_deref(), Some("hello"));
         let mut out = Vec::new();
