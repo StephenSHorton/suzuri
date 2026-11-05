@@ -728,6 +728,16 @@ impl Ghostty {
         });
     }
 
+    /// A screen row is the soft-wrapped continuation of the row above.
+    fn wraps_from_above(&self, y: u32) -> bool {
+        let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else { return false };
+        unsafe {
+            let mut row: GhosttyRow = 0;
+            let mut cont = false;
+            ghostty_grid_ref_row(&r, &mut row) == GHOSTTY_SUCCESS && ghostty_row_get(row, GHOSTTY_ROW_DATA_WRAP_CONTINUATION, &mut cont as *mut _ as *mut c_void) == GHOSTTY_SUCCESS && cont
+        }
+    }
+
     fn drop_anchor(&mut self) {
         if let Some(a) = self.anchor.take() {
             unsafe { ghostty_tracked_grid_ref_free(a.at) };
@@ -1121,6 +1131,13 @@ impl Engine for Ghostty {
             let text_after = (end.0 + 1..self.shared.cols).any(|x| ch(x).is_some_and(|c| c != ' '));
             if text_after {
                 let spaces = (x0..=end.0).rev().take_while(|&x| ch(x) == Some(' ')).count();
+                // Only spaces taken on the last row: the trim emptied that
+                // row and the pop above took its line break, unless the row
+                // continues the one before it (unwrapped, no break).
+                let all_blank = spaces == (end.0 - x0 + 1) as usize;
+                if spaces > 0 && all_blank && start_x.1 != end.1 && !self.wraps_from_above(end.1) {
+                    s.push('\n');
+                }
                 s.extend(std::iter::repeat_n(' ', spaces));
             }
         }

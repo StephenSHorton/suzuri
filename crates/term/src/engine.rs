@@ -959,6 +959,17 @@ mod tests {
         t.select_start(0, 0, false, SelectKind::Cell);
         t.select_extend(15, 0, true);
         assert_eq!(t.selection_text().as_deref(), Some("ab"));
+        // A drag that ends in the next line's indentation keeps the line
+        // break and the indentation it took.
+        let mut t = fed(20, 3, 0, b"ab\r\n  cd");
+        t.select_start(0, 0, false, SelectKind::Cell);
+        t.select_extend(1, 1, true);
+        assert_eq!(t.selection_text().as_deref(), Some("ab\n  "));
+        // ... and no break when the row only continues a wrapped line.
+        let mut t = fed(4, 3, 0, b"abcd  ef");
+        t.select_start(0, 0, false, SelectKind::Cell);
+        t.select_extend(1, 1, true);
+        assert_eq!(t.selection_text().as_deref(), Some("abcd  "));
         e.select_extend(4, 0, true);
         assert_eq!(e.selection_text().as_deref(), Some("hello"));
         let mut out = Vec::new();
@@ -1104,6 +1115,15 @@ mod tests {
         // region's top.
         e.feed(b"q\x1b[2;1Hz", &mut Vec::new());
         assert_eq!(e.screen_text(), "a─qc\n≥\n");
+        // Known difference: ghostty's mark is written between DECSC and
+        // DECRC, so it replaces the program's own saved cursor. A program
+        // that saves the cursor, prints an image and restores comes back to
+        // the image, not to where it saved (alacritty marks the cell
+        // without touching the saved cursor).
+        let mut e = fed(10, 4, 100, b"\x1b7\x1b[3;5H");
+        e.mark_cursor(6);
+        e.feed(b"\x1b8", &mut Vec::new());
+        assert_eq!(e.cursor(), if GHOSTTY { (4, 2) } else { (0, 0) });
     }
             }
         };
