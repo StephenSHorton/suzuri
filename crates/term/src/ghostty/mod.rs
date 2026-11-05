@@ -810,16 +810,17 @@ impl Engine for Ghostty {
         // at the last update. Update it just before a synchronized update
         // begins, so it holds the screen as it was there, as alacritty's
         // buffered bytes did.
-        const BSU: &[u8] = b"\x1b[?2026h";
-        let mut rest = bytes;
-        while self.shared.held_since.is_none() {
-            let Some(i) = rest.windows(BSU.len()).position(|w| w == BSU) else { break };
-            self.feed_internal(&rest[..i]);
-            unsafe { ok!(ghostty_render_state_update(self.rs, self.t)) };
-            self.feed_internal(&rest[i..i + BSU.len()]);
-            rest = &rest[i + BSU.len()..];
+        // Most updates end in the read they began in (Claude Code wraps every
+        // frame in one), and then no frame can see the hold: only a BSU with
+        // no ESU after it in this read needs the update.
+        match (self.shared.held_since.is_none()).then(|| open_bsu(bytes)).flatten() {
+            Some(i) => {
+                self.feed_internal(&bytes[..i]);
+                unsafe { ok!(ghostty_render_state_update(self.rs, self.t)) };
+                self.feed_internal(&bytes[i..]);
+            }
+            None => self.feed_internal(bytes),
         }
-        self.feed_internal(rest);
         self.drain(events);
     }
 
@@ -1284,4 +1285,25 @@ fn sgr_bytes(st: &GhosttyStyle, b: &mut Vec<u8>) {
     p.extend(color(&st.bg_color, 48));
     p.extend(color(&st.underline_color, 58));
     b.extend_from_slice(format!("\x1b[{}m", p.join(";")).as_bytes());
+}
+
+/// Where the last DEC 2026 begin (CSI ? 2026 h) in `b` starts, when no end
+/// (CSI ? 2026 l) follows it in `b`: the update is still open after `b`.
+fn open_bsu(b: &[u8]) -> Option<usize> {
+    const SEQ: &[u8] = b"\x1b[?2026";
+    let mut open = None;
+    let mut i = 0;
+    while let Some(j) = b[i..].iter().position(|&c| c == 0x1b) {
+        let at = i + j;
+        let rest = &b[at..];
+        if rest.len() > SEQ.len() && rest.starts_with(SEQ) {
+            match rest[SEQ.len()] {
+                b'h' => open = Some(at),
+                b'l' => open = None,
+                _ => {}
+            }
+        }
+        i = at + 1;
+    }
+    open
 }
