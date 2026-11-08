@@ -59,8 +59,14 @@ Write-Host "==> $dist\$name"
 
 if ($NoUpload) { return }
 $tag = "v$Version"
+# PowerShell 5.1 under "Stop" turns gh's stderr ("release not found") into
+# a terminating error, so check for the draft with errors allowed.
+$prev = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 gh release view $tag -R $Repo *> $null
-if ($LASTEXITCODE -ne 0) {
+$found = $LASTEXITCODE -eq 0
+$ErrorActionPreference = $prev
+if (-not $found) {
   gh release create $tag -R $Repo --draft --target main --title "suzuri $Version" --notes "suzuri $Version"
   if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 }
