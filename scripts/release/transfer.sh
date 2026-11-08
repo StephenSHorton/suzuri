@@ -8,5 +8,5 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 cargo build --release --manifest-path "$ROOT/libs/transfer/Cargo.toml" -p hato-cli --bin suzuri-transfer
 mkdir -p "$ROOT/packaging/bin"
-cp "$ROOT/libs/transfer/target/release/suzuri-transfer" "$ROOT/packaging/bin/suzuri-transfer-$TRIPLE"
+cp "${CARGO_TARGET_DIR:-$ROOT/libs/transfer/target}/release/suzuri-transfer" "$ROOT/packaging/bin/suzuri-transfer-$TRIPLE"
 echo "==> packaging/bin/suzuri-transfer-$TRIPLE"
