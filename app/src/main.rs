@@ -371,6 +371,12 @@ fn notice_anchor(notes: State<'_, notices::Notices>, anchor: String) {
     notes.set_anchor(&anchor);
 }
 
+/// A host message from the UI as a notice card (Notices::toast).
+#[tauri::command]
+fn notice_toast(notes: State<'_, notices::Notices>, text: String) {
+    notes.toast(&text);
+}
+
 #[derive(Serialize)]
 struct NoticeHistory {
     items: Vec<notices::Played>,
@@ -430,13 +436,14 @@ fn config_get() -> serde_json::Value {
 /// Live parts reach running panes here (the cursor); the UI applies the rest
 /// on its `rsz:config` event.
 #[tauri::command]
-fn config_set(panes: State<'_, Arc<Panes>>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
-    let v = config::update(patch).map_err(|e| e.to_string())?;
+fn config_set(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
+    let v = config::update(patch.clone()).map_err(|e| e.to_string())?;
     let shape = config::cursor_code(&v);
     for p in panes.map.lock().values() {
         p.set_default_cursor(shape);
     }
     apply_theme(&v, Some(&panes));
+    notes.apply_config(&v, &patch);
     Ok(v)
 }
 
@@ -452,6 +459,8 @@ fn config_meta() -> serde_json::Value {
         "font_max": config::FONT_SIZE_MAX,
         "font_default": config::FONT_SIZE_DEFAULT,
         "fonts": config::mono_font_faces(),
+        "notice_positions": config::NOTICE_POSITIONS,
+        "notice_labels": config::NOTICE_POSITIONS.iter().zip(config::NOTICE_POSITION_LABELS).collect::<HashMap<_, _>>(),
     })
 }
 
@@ -998,6 +1007,7 @@ fn main() {
             notice_sync,
             notice_hover,
             notice_anchor,
+            notice_toast,
             notice_history,
             notice_read,
             stats,
