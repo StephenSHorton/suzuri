@@ -472,8 +472,15 @@ test("clipShortcut classifies the clipboard chords per platform", () => {
   assert.equal(clipShortcut(key({ key: "c", ctrlKey: true }), false, true), "copy-or-interrupt")
   assert.equal(clipShortcut(key({ key: "c", ctrlKey: true, altKey: true }), false, true), null)
   assert.equal(clipShortcut(key({ key: "c", metaKey: true }), true, false), "copy")
-  assert.equal(clipShortcut(key({ key: "v", metaKey: true, shiftKey: true }), true, false), null)
   assert.equal(clipShortcut(key({ key: "v", ctrlKey: true }), true, false), null)
+  assert.equal(clipShortcut(key({ key: "c", ctrlKey: true }), true, true), null)
+  // Go suzuri's ⌘⇧C/⌘⇧V and ⌃⇧C/⌃⇧V on macOS too.
+  assert.equal(clipShortcut(key({ key: "C", metaKey: true, shiftKey: true }), true, false), "copy")
+  assert.equal(clipShortcut(key({ key: "V", metaKey: true, shiftKey: true }), true, false), "paste")
+  assert.equal(clipShortcut(key({ key: "C", ctrlKey: true, shiftKey: true }), true, false), "copy")
+  assert.equal(clipShortcut(key({ key: "V", ctrlKey: true, shiftKey: true }), true, false), "paste")
+  assert.equal(clipShortcut(key({ key: "C", metaKey: true, ctrlKey: true, shiftKey: true }), true, false), null)
+  assert.equal(clipShortcut(key({ key: "T", metaKey: true, shiftKey: true }), true, false), null)
 })
 
 test("keyFilter goes before the clipboard chords and the encoder; true leaves the event alone", () => {

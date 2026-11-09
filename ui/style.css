@@ -82,6 +82,11 @@ body.win #bar { padding-left: 12px; }
   position: absolute; right: 10px; top: 6px; padding: 1px 6px; border-radius: 4px;
   background: var(--sel); color: var(--match); font-size: 10px;
 }
+/* The scrollback thumb (ui/view): thin, on the right edge, while scrolled back. */
+.pane .rsz-scrollbar { width: 3px; opacity: 0; transition: opacity .25s ease-out; }
+.pane .rsz-scrollbar.on { opacity: .8; }
+.pane .rsz-scrollbar.on.idle { opacity: .4; transition-duration: .6s; }
+.pane .rsz-scrollbar .thumb { left: 0; width: 100%; border-radius: 2px; background: var(--match); }
 /* Dragging a divider (ui/sash.js): the resize cursor everywhere, even over the text cursor of a pane's body. */
 body.sash-col, body.sash-col * { cursor: col-resize !important; }
 body.sash-row, body.sash-row * { cursor: row-resize !important; }

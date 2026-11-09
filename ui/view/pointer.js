@@ -1,7 +1,9 @@
 // The pointer over a pane: text selection (drag, double-click word,
 // triple-click line, Shift+click extends, drags past the edge scroll the
 // history), mouse reports to apps that asked for them (Shift bypasses, as in
-// xterm), right-click paste, and links that open on Cmd/Ctrl+click. The
+// xterm), right-click paste, and links that open on Cmd/Ctrl+click (Ctrl
+// too on macOS). On an alt screen that reports the mouse (Claude, Grok), a
+// double or triple click still selects a word or line here. The
 // core keeps the selection and finds links (crates/term); this only turns
 // pixels into cells. Go suzuri: selection.go, mouse_pty.go, links.go.
 //
@@ -17,7 +19,7 @@
 //   link(col, row) -> Promise<{url, row, x0, x1} | null>
 //   openUrl(url), isMac
 // Returns dispose(), which removes every listener and timer it added.
-import { M_MOUSE_CLICK, M_MOUSE_DRAG, M_MOUSE_MOTION } from "./frame.js"
+import { M_ALT_SCREEN, M_MOUSE_CLICK, M_MOUSE_DRAG, M_MOUSE_MOTION } from "./frame.js"
 
 const MOUSE_MODES = M_MOUSE_CLICK | M_MOUSE_DRAG | M_MOUSE_MOTION
 
@@ -60,7 +62,8 @@ export function installPointer(pane, opts) {
   const mods = (e) => ({ shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey })
   const report = (kind, button, c, e, held = null) =>
     opts.mouse({ kind, button, held, col: c.col, row: c.row, ...mods(e) })
-  const linkMod = (e) => (isMac ? e.metaKey : e.ctrlKey)
+  // Go suzuri opened links on ⌘-click or Ctrl-click on macOS.
+  const linkMod = (e) => (isMac ? e.metaKey || e.ctrlKey : e.ctrlKey)
 
   on(body, "contextmenu", (e) => e.preventDefault())
 
@@ -73,8 +76,15 @@ export function installPointer(pane, opts) {
       opts.openUrl(link.url)
       return
     }
-    if (appMouse(e)) {
+    // Go suzuri: on the alt screen a double or triple click is the host's
+    // word or line selection; single clicks still go to the app.
+    const multi = e.button === 0 && e.detail >= 2 && (pane.modes & M_ALT_SCREEN) !== 0
+    if (appMouse(e) && !multi) {
       e.preventDefault()
+      if (pane.hasSelection) {
+        opts.select("clear", c)
+        pane.hasSelection = false
+      }
       held = e.button
       report("press", e.button, c, e)
       return

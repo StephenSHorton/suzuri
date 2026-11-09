@@ -208,7 +208,7 @@ function paneHost(p) {
     // rszDryOpen: the selftest's hook (selftest.js), so a test click opens nothing.
     openUrl: (url) => {
       if (window.rszDryOpen) window.rszDryOpen(url)
-      else invoke("open_url", { url }).catch((err) => console.warn(err))
+      else invoke("open_url", { url }).then(() => toast("opened link"), (err) => console.warn(err))
     },
     keyFilter: keyFilter(p, {
       isMac, shortcut, extraShortcut, closeLarge,
@@ -431,7 +431,7 @@ class PaneView {
     } else if (r.kind === "complete") {
       this.tabComplete(r.reverse)
     } else if (r.kind === "scroll") {
-      invoke("pane_scroll", { id: this.id, delta: Math.round(r.pages * this.size[1]) })
+      this.view.scrollBy(Math.round(r.pages * this.size[1])) // eased (ui/view/smooth.js)
     }
     this.renderBar()
     return true

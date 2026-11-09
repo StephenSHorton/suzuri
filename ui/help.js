@@ -63,13 +63,13 @@ export function helpSections(isMac) {
     ] },
     { title: "Terminal", rows: [
       isMac
-        ? { keys: "⌘C", desc: "Copy", ev: key("c", { metaKey: true }) }
+        ? { keys: "⌘C · ⌘⇧C", desc: "Copy", ev: key("c", { metaKey: true }) }
         : { keys: "Ctrl+Shift+C", desc: "Copy (Ctrl+C with a selection)", ev: key("c", { ctrlKey: true, shiftKey: true }) },
       isMac
-        ? { keys: "⌘V", desc: "Paste", ev: key("v", { metaKey: true }) }
+        ? { keys: "⌘V · ⌘⇧V", desc: "Paste", ev: key("v", { metaKey: true }) }
         : { keys: "Ctrl+V · Ctrl+Shift+V", desc: "Paste", ev: key("v", { ctrlKey: true }) },
       { keys: "Drag · double-click", desc: "Select" },
-      { keys: isMac ? "⌘-click" : "Ctrl-click", desc: "Open link" },
+      { keys: isMac ? "⌘/⌃-click" : "Ctrl-click", desc: "Open link" },
       { keys: "Wheel", desc: "Scrollback" },
     ] },
     { title: "App", rows: [
