@@ -430,6 +430,19 @@ mod tests {
     }
 
     #[test]
+    fn grapheme_mode_survives_ris() {
+        let mut e = fed(20, 2, 0, b"");
+        let mut ev = Vec::new();
+        e.feed(b"\x1b[?2027$p", &mut ev);
+        assert_eq!(ev, vec![EngineEvent::PtyWrite(b"\x1b[?2027;1$y".to_vec())], "DECRQM reports it set");
+        e.feed("\x1bc🇯🇵".as_bytes(), &mut Vec::new());
+        assert_eq!(e.cursor(), (2, 0), "a flag is one cell after RIS");
+        // A program can still turn it off.
+        e.feed("\x1b[?2027l\r\x1b[2K🇯🇵".as_bytes(), &mut Vec::new());
+        assert_eq!(e.cursor(), (4, 0));
+    }
+
+    #[test]
     fn image_marks_move_and_clear_with_the_text() {
         // #288's anchors: a mark sits on the cell under the cursor, keeps
         // that cell's text, scrolls with it, and goes when the cell is

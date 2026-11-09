@@ -273,6 +273,13 @@ impl Ghostty {
                 mev,
             };
             g.apply_palette();
+            // Grapheme clustering (DEC 2027): 👍🏽, 👨‍👩‍👧 and 🇯🇵 each take one
+            // cell (two columns wide). As the default, so RIS keeps it;
+            // programs can still turn it off. RSZ_GRAPHEME_CLUSTER=0 opts out.
+            if std::env::var("RSZ_GRAPHEME_CLUSTER").as_deref() != Ok("0") {
+                let m = GhosttyTerminalModeConfig { mode: mode(2027, false), value: true };
+                g.set(GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, &m as *const _ as *const c_void);
+            }
             // Kitty keyboard flags are kept per screen by the terminal.
             g
         }
