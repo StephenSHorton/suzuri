@@ -284,6 +284,10 @@ impl Ghostty {
             // Grapheme clustering (DEC 2027): 👍🏽, 👨‍👩‍👧 and 🇯🇵 each take one
             // cell (two columns wide). As the default, so RIS keeps it;
             // programs can still turn it off. RSZ_GRAPHEME_CLUSTER=0 opts out.
+            // Chosen on purpose (#1187): it matches Claude Code's layout
+            // (string-width) and Ghostty/kitty/WezTerm, but zsh counts each
+            // codepoint, so editing a line holding 👍🏽 can redraw off by a few
+            // columns until the line is redrawn.
             if std::env::var("RSZ_GRAPHEME_CLUSTER").as_deref() != Ok("0") {
                 let m = GhosttyTerminalModeConfig { mode: mode(GRAPHEME_CLUSTER_MODE, false), value: true };
                 g.set(GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, &m as *const _ as *const c_void);
