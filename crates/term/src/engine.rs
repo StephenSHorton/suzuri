@@ -518,6 +518,13 @@ mod tests {
         let mut e = fed(9, 3, 100, b"");
         e.insert_block(&[], &(line.into(), w), false);
         assert_eq!(e.screen_text().lines().next(), Some("✅ ok 👨‍👩‍👧"));
+        // With clustering turned off the family is 6 columns: the line is
+        // cut there and never spills onto the next row.
+        let mut e = fed(9, 3, 100, b"\x1b[?2027l\r\nrow2-text\x1b[1;1H");
+        e.insert_block(&[], &(line.into(), w), false);
+        let text = e.screen_text();
+        assert!(text.contains("row2-text"), "row below untouched: {text:?}");
+        assert!(!text.lines().next().unwrap_or("").contains('👧'), "{text:?}");
     }
 
     #[test]

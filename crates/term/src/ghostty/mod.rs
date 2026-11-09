@@ -47,6 +47,9 @@ unsafe fn sized<T>() -> T {
     }
 }
 
+/// DEC private mode 2027: grapheme clustering.
+const GRAPHEME_CLUSTER_MODE: u16 = 2027;
+
 fn mode(value: u16, ansi: bool) -> GhosttyMode {
     (value & 0x7fff) | ((ansi as u16) << 15)
 }
@@ -282,7 +285,7 @@ impl Ghostty {
             // cell (two columns wide). As the default, so RIS keeps it;
             // programs can still turn it off. RSZ_GRAPHEME_CLUSTER=0 opts out.
             if std::env::var("RSZ_GRAPHEME_CLUSTER").as_deref() != Ok("0") {
-                let m = GhosttyTerminalModeConfig { mode: mode(2027, false), value: true };
+                let m = GhosttyTerminalModeConfig { mode: mode(GRAPHEME_CLUSTER_MODE, false), value: true };
                 g.set(GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, &m as *const _ as *const c_void);
             }
             // Kitty keyboard flags are kept per screen by the terminal.
@@ -841,20 +844,27 @@ impl Ghostty {
         let cols = self.shared.cols as usize;
         out.extend_from_slice(b"\r\x1b[0m\x1b[2K");
         out.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
-        // Whole graphemes, measured as the terminal will lay them out.
+        // Measured as the terminal will lay them out: whole graphemes while
+        // mode 2027 is on, else one codepoint at a time (marks join the
+        // previous cell either way).
+        let clustered = self.mode(GRAPHEME_CLUSTER_MODE);
         let cps: Vec<u32> = text.chars().filter(|c| !c.is_control()).map(|c| c as u32).collect();
         let (mut x, mut i) = (0, 0);
         while i < cps.len() {
-            let mut w = 0u8;
-            let used = unsafe { ghostty_unicode_grapheme_width(cps[i..].as_ptr(), cps.len() - i, &mut w) }.max(1);
-            let w = w as usize;
+            let (used, w) = if clustered {
+                let mut w = 0u8;
+                let used = unsafe { ghostty_unicode_grapheme_width(cps[i..].as_ptr(), cps.len() - i, &mut w) }.max(1);
+                (used, w as usize)
+            } else {
+                (1, unsafe { ghostty_unicode_codepoint_width(cps[i]) } as usize)
+            };
             // Stop short of the last column: a character there would arm the
             // wrap, and the line must not spill onto the next.
             if x + w > cols {
                 break;
             }
-            // A lone zero-width mark has nothing to sit on.
-            if w > 0 {
+            // A zero-width mark needs something before it to sit on.
+            if w > 0 || x > 0 {
                 for &c in &cps[i..(i + used).min(cps.len())] {
                     let mut buf = [0u8; 4];
                     out.extend_from_slice(char::from_u32(c).unwrap_or(' ').encode_utf8(&mut buf).as_bytes());
