@@ -2,12 +2,17 @@
 // as in Go: the list, and the editor (name + body). The bank is Go's
 // notes.json (app/src/notes.rs), so Go suzuri and `suzuri mcp` share it.
 //
-// Keys, as Go's: ⌘⇧M / Ctrl+Shift+M opens and closes. List: ↑↓, Enter/→/Tab
-// opens, N new, D/Delete/Backspace deletes (asks first), F2/R renames, Esc
-// closes. Editor: Esc back to the list, F2 renames, ⌘N / Ctrl+N new note;
-// undo, redo and selection are the text box's own. Name: Enter/↓ to the
+// Keys, as Go's: ⌘⇧M / ⌃⇧M (Ctrl+Shift+M on Windows) opens and closes. List:
+// ↑↓, Enter/→/Tab opens, N new, D/Delete/Backspace deletes (asks first),
+// F2/R renames, Esc closes. Editor: Esc back to the list, F2 or ↑ on the
+// first row renames, Tab inserts a tab, ⌘N / Ctrl+N new note; undo, redo and
+// selection are the text box's own. Name: Enter/↓ saves and goes to the
 // body, Esc cancels.
 import { openPanel, closePanel, isOpen, h } from "./panel.js"
+import { displayTitle, isNotesChord, renameSeed, insertTab, onFirstLine, caretShape } from "./notes_edit.js"
+import { caretStyle, onFirstRow } from "./notes_caret.js"
+
+export { displayTitle }
 
 const { invoke } = window.__TAURI__.core
 const isMac = navigator.platform.startsWith("Mac")
@@ -17,19 +22,11 @@ let bank = null // {active_id, notes:[{id,title,body,updated}]}
 let panel = null
 let saveTimer = 0
 let pick = 0 // list cursor
+let caret = "bar" // the terminal cursor setting, for the notes caret
 
 const now = () => new Date().toISOString()
 const newId = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join("")
 const active = () => bank.notes.find((n) => n.id === bank.active_id) || bank.notes[0]
-
-// Go's NoteDisplayTitle: the name, else the body's first line, else Untitled.
-export function displayTitle(n, max = 28) {
-  let t = (n.title || "").trim()
-  if (!t) t = ((n.body || "").trim().split("\n")[0] || "").trim()
-  if (!t) return "Untitled"
-  const cs = [...t]
-  return cs.length <= max ? t : cs.slice(0, max - 1).join("") + "…"
-}
 
 const isBlank = (n) => !(n.title || "").trim() && !(n.body || "").trim()
 
@@ -133,16 +130,42 @@ function showEditor(nameFirst) {
   name.value = n.title || ""
   const text = h("textarea", { class: "notes-body", spellcheck: "false", placeholder: "Write here. Saved as you type." })
   text.value = n.body || ""
+  // Renaming starts whenever the name gets focus: it's filled with the
+  // stored or derived name, saves as you type, and Esc puts back the old one.
+  let before = null
+  name.onfocus = () => {
+    if (before !== null) return
+    before = n.title || ""
+    name.value = renameSeed(n)
+    name.select()
+  }
+  name.onblur = () => { before = null; name.value = n.title || "" }
   name.oninput = () => { n.title = name.value.trim() ? name.value : ""; touch(n) }
   text.oninput = () => { n.body = text.value; touch(n) }
   name.onkeydown = (e) => {
-    if (e.key === "Enter" || e.key === "ArrowDown") { e.preventDefault(); text.focus() }
-    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); text.focus() }
+    if (e.isComposing) return
+    if (e.key === "Enter" || e.key === "ArrowDown") {
+      e.preventDefault()
+      // As Go: what's in the field is the name, even an untouched seed.
+      const t = name.value.trim()
+      if (n.title !== t) { n.title = t; touch(n) }
+      text.focus()
+      text.setSelectionRange(0, 0)
+      text.scrollTop = 0
+    } else if (e.key === "Escape") {
+      e.preventDefault()
+      e.stopPropagation()
+      if (n.title !== before) { n.title = before; touch(n) }
+      text.focus()
+    }
   }
   text.onkeydown = (e) => {
+    if (e.isComposing) return
     const mod = isMac ? e.metaKey : e.ctrlKey
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); pick = bank.notes.indexOf(n); save(true); showList() }
-    else if (e.key === "F2") { e.preventDefault(); name.focus(); name.select() }
+    else if (e.key === "F2") { e.preventDefault(); name.focus() }
+    else if (e.key === "Tab" && !mod && !e.altKey) { e.preventDefault(); typeTab(text) }
+    else if (e.key === "ArrowUp" && !e.shiftKey && !mod && !e.altKey && atTop(text)) { e.preventDefault(); name.focus() }
     else if (mod && e.key.toLowerCase() === "n" && !e.shiftKey) { e.preventDefault(); newNote() }
   }
   panel.body.replaceChildren(
@@ -151,17 +174,39 @@ function showEditor(nameFirst) {
     h("div", { class: "rsz-row" },
       h("button", { onclick: () => { pick = bank.notes.indexOf(n); showList() } }, "All notes"),
       h("button", { onclick: deleteActive }, isBlank(n) && bank.notes.length <= 1 ? "Clear" : "Delete"),
-      h("span", { class: "rsz-hint" }, "Esc list · F2 rename"),
+      h("span", { class: "rsz-hint" }, "Esc list · F2 or ↑ rename · Tab indents"),
       h("span", { class: "rsz-status" })),
   )
+  caretStyle(name, caret)
+  caretStyle(text, caret)
   if (nameFirst || isBlank(n)) name.focus()
   else { text.focus(); text.setSelectionRange(text.value.length, text.value.length) }
+}
+
+// Tab through the text box's own editing, so ⌘Z undoes it.
+function typeTab(text) {
+  if (document.execCommand?.("insertText", false, "\t")) return
+  const r = insertTab(text.value, text.selectionStart, text.selectionEnd)
+  text.value = r.value
+  text.setSelectionRange(r.caret, r.caret)
+  text.oninput()
+}
+
+// ↑ leaves the body for the name on its first row, wrapped rows included.
+function atTop(text) {
+  if (text.selectionStart !== text.selectionEnd || !onFirstLine(text.value, text.selectionStart)) return false
+  try {
+    return onFirstRow(text)
+  } catch {
+    return true
+  }
 }
 
 export async function toggleNotes() {
   if (panel && isOpen()) return closePanel()
   try {
     bank = await invoke("notes_load") // fresh from disk: Go suzuri may have written it
+    caret = await invoke("config_get").then((c) => caretShape(c?.cursor), () => "bar")
   } catch (e) {
     panel = openPanel("Notes", (body) => body.append(h("div", { class: "rsz-status err" }, `${e}`)))
     return
@@ -171,11 +216,10 @@ export async function toggleNotes() {
   showEditor(false)
 }
 
-// Go's chord: ⌘⇧M (Ctrl+Shift+M on Windows). Capture phase, so it works
-// while the panel or a pane has focus.
+// Go's chord: ⌘⇧M or ⌃⇧M (Ctrl+Shift+M on Windows). Capture phase, so it
+// works while the panel or a pane has focus.
 window.addEventListener("keydown", (e) => {
-  const mod = isMac ? e.metaKey : e.ctrlKey
-  if (mod && e.shiftKey && !e.altKey && e.code === "KeyM") {
+  if (isNotesChord(e, isMac)) {
     e.preventDefault()
     e.stopPropagation()
     toggleNotes()
@@ -183,5 +227,5 @@ window.addEventListener("keydown", (e) => {
 }, true)
 
 window.rsz?.addCommands([
-  { id: "notes", title: "Notes", category: "Notes", hint: isMac ? "⌘⇧M" : "Ctrl+Shift+M", run: () => toggleNotes() },
+  { id: "notes", title: "Notes", category: "Notes", hint: isMac ? "⌘⇧M / ⌃⇧M" : "Ctrl+Shift+M", run: () => toggleNotes() },
 ])
