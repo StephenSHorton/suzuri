@@ -66,6 +66,7 @@ export class Screen extends ViewScreen {
     this.rev = rev
     this.style = { ...style }
     this.cell = cellMetrics()
+    this.fit.clear() // emoji fits depend on the font and cell size
   }
   cellMetrics() { this.sync(); return this.cell || (this.cell = cellMetrics()) }
   setSize(cols, rows) { this.sync(); return super.setSize(cols, rows) }
