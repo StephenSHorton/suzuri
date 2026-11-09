@@ -24,6 +24,7 @@ const settle = () => new Promise((r) => setImmediate(r))
 
 test("macOS: Ctrl+click opens a link as ⌘+click does; a plain click does not", async () => {
   const p = page()
+  p.win.performance.now = () => 10_000 // past the paste debounce
   const url = "file:///tmp/notes.txt"
   const host = recordingHost({ link: async () => ({ url, row: 0, x0: 0, x1: 10 }) })
   const v = mount(p.el, host, { isMac: true })
@@ -34,7 +35,14 @@ test("macOS: Ctrl+click opens a link as ⌘+click does; a plain click does not",
   assert.deepEqual(host.of("openUrl"), [])
   body.dispatch("mousedown", { button: 0, detail: 1, ctrlKey: true, clientX: 20, clientY: 10 })
   body.dispatch("mousedown", { button: 0, detail: 1, metaKey: true, clientX: 20, clientY: 10 })
-  assert.deepEqual(host.of("openUrl"), [[url], [url]])
+  // WebKit may report a Ctrl-click as the secondary button: still the link.
+  body.dispatch("mousedown", { button: 2, detail: 1, ctrlKey: true, clientX: 20, clientY: 10 })
+  assert.deepEqual(host.of("openUrl"), [[url], [url], [url]])
+  assert.deepEqual(host.of("paste"), [])
+  // A plain right-click pastes, over a link too.
+  body.dispatch("mousedown", { button: 2, detail: 1, clientX: 20, clientY: 10 })
+  assert.deepEqual(host.of("paste"), [[null]])
+  assert.equal(host.of("openUrl").length, 3)
   v.unmount()
 })
 

@@ -71,7 +71,9 @@ export function installPointer(pane, opts) {
     if (!live() || pane.exited) return
     focus(pane)
     const c = cellAt(e)
-    if (e.button === 0 && linkMod(e) && link && link.row === c.row && c.col >= link.x0 && c.col < link.x1) {
+    // A Ctrl-click may come as the secondary button on macOS: still a link click.
+    const linkPress = e.button === 0 || (isMac && e.ctrlKey && e.button === 2)
+    if (linkPress && linkMod(e) && link && link.row === c.row && c.col >= link.x0 && c.col < link.x1) {
       e.preventDefault()
       opts.openUrl(link.url)
       return
@@ -177,7 +179,7 @@ export function installPointer(pane, opts) {
       width: `${(l.x1 - l.x0) * cw}px`,
       height: `${ch}px`,
     })
-    hover.title = `${l.url}\n${isMac ? "⌘" : "Ctrl"}+click to open`
+    hover.title = `${l.url}\n${isMac ? "⌘ or ⌃" : "Ctrl"}+click to open`
     hover.hidden = false
     body.classList.add("on-link")
   }
