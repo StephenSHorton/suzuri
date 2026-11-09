@@ -259,6 +259,31 @@ const FOCUSED_INTERVAL: Duration = Duration::from_millis(8);
 const UNFOCUSED_INTERVAL: Duration = Duration::from_millis(33);
 const WRITE_CHUNK: usize = 4096;
 
+/// Env vars a running Claude Code session sets for its own children.
+/// When Suzuri is launched from inside a session (a rebuild that relaunches
+/// the app, say) it inherits them, and every pane would pass them on: a
+/// `claude` started there then thinks it is a sub-session and, among other
+/// things, stops saving its transcript. Panes are top-level shells, so drop
+/// them. Settings-style vars (CLAUDE_CODE_PLUGIN_DIRS and the like) stay.
+const CLAUDE_SESSION_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+];
+
+fn scrub_claude_session_env(cmd: &mut CommandBuilder) {
+    for k in CLAUDE_SESSION_ENV {
+        cmd.env_remove(k);
+    }
+}
+
 pub fn default_shell() -> Vec<String> {
     #[cfg(windows)]
     {
@@ -305,6 +330,7 @@ impl Pane {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM_PROGRAM", cfg.term_program.as_deref().unwrap_or("suzuri"));
+        scrub_claude_session_env(&mut cmd);
         for (k, v) in boot_env.iter().chain(&cfg.env) {
             cmd.env(k, v);
         }
@@ -1177,6 +1203,20 @@ mod anyhow_like {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn panes_drop_inherited_claude_session_env() {
+        let mut cmd = CommandBuilder::new("sh");
+        for k in CLAUDE_SESSION_ENV {
+            cmd.env(k, "1");
+        }
+        cmd.env("CLAUDE_CODE_PLUGIN_DIRS", "/x");
+        scrub_claude_session_env(&mut cmd);
+        for k in CLAUDE_SESSION_ENV {
+            assert_eq!(cmd.get_env(k), None, "{k} should be dropped");
+        }
+        assert_eq!(cmd.get_env("CLAUDE_CODE_PLUGIN_DIRS"), Some(std::ffi::OsStr::new("/x")));
+    }
 
     fn run(cmd: &[&str]) -> (Pane, mpsc::Receiver<String>) {
         let (tx, rx) = mpsc::channel();
