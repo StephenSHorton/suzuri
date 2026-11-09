@@ -179,6 +179,67 @@ pub fn openable(url: &str) -> bool {
     after("https://") || after("http://") || after("mailto:") || after("file://")
 }
 
+/// The local path a `file://` link names, percent-decoded. None for other
+/// schemes, other hosts, or a path that does not decode.
+pub fn file_url_path(url: &str) -> Option<String> {
+    if !url.get(..7)?.eq_ignore_ascii_case("file://") {
+        return None;
+    }
+    let rest = &url[7..];
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let slash = rest.find('/')?;
+    let host = &rest[..slash];
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    let raw = rest[slash..].as_bytes();
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' {
+            let hex = std::str::from_utf8(raw.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(raw[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    if path.contains('\0') {
+        return None;
+    }
+    // file:///C:/x on Windows: drop the slash before the drive letter.
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        return Some(path[1..].to_string());
+    }
+    Some(path)
+}
+
+/// Extensions the system opener would run rather than show: apps, scripts,
+/// installers and shortcuts on Mac and Windows. A link to one is revealed
+/// in the file manager instead, since its visible text can say anything.
+const LAUNCHES: &[&str] = &[
+    // Mac
+    "app", "command", "tool", "terminal", "webloc", "inetloc", "fileloc", "workflow", "action",
+    "scpt", "scptd", "applescript", "shortcut", "pkg", "mpkg", "prefpane", "saver", "osax",
+    "kext", "plugin", "bundle", "jar", "sh", "zsh", "bash", "csh", "ksh", "py", "pl", "rb",
+    // Windows
+    "exe", "bat", "cmd", "com", "lnk", "msi", "msp", "ps1", "psm1", "vbs", "vbe", "js", "jse",
+    "wsf", "wsh", "scr", "pif", "hta", "cpl", "reg", "url", "appref-ms", "msc", "inf", "gadget",
+];
+
+/// Whether a file name ends in one of LAUNCHES (case-insensitive).
+pub fn launches(name: &str) -> bool {
+    let base = name.trim_end_matches(['/', '\\']);
+    let base = base.rsplit(['/', '\\']).next().unwrap_or(base);
+    match base.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => LAUNCHES.iter().any(|e| e.eq_ignore_ascii_case(ext)),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +330,28 @@ mod tests {
         assert!(!openable("file://"));
         assert!(!openable("mailto:"));
         assert!(!openable("x-man-page://ls"));
+    }
+
+    #[test]
+    fn file_url_paths() {
+        assert_eq!(file_url_path("file:///Users/me/a%20b.txt").as_deref(), Some("/Users/me/a b.txt"));
+        assert_eq!(file_url_path("FILE://localhost/tmp/x?q#f").as_deref(), Some("/tmp/x"));
+        assert_eq!(file_url_path("file:///C:/Users/x.exe").as_deref(), Some("C:/Users/x.exe"));
+        assert_eq!(file_url_path("file://other/tmp/x"), None);
+        assert_eq!(file_url_path("file:///tmp/%zz"), None);
+        assert_eq!(file_url_path("file:///tmp/%00x"), None);
+        assert_eq!(file_url_path("https://a.b/x"), None);
+    }
+
+    #[test]
+    fn launchable_names() {
+        assert!(launches("/tmp/x.command"));
+        assert!(launches("/Applications/Calculator.app/"));
+        assert!(launches("C:\\Users\\me\\setup.EXE"));
+        assert!(launches("/tmp/go.webloc"));
+        assert!(!launches("/Users/me/notes.txt"));
+        assert!(!launches("/tmp/README"));
+        assert!(!launches("/tmp/.bash"));
+        assert!(!launches("/tmp/dir.d/readme"));
     }
 }

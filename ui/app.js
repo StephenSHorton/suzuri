@@ -208,7 +208,7 @@ function paneHost(p) {
     // rszDryOpen: the selftest's hook (selftest.js), so a test click opens nothing.
     openUrl: (url) => {
       if (window.rszDryOpen) window.rszDryOpen(url)
-      else invoke("open_url", { url }).then(() => toast("opened link"), (err) => console.warn(err))
+      else invoke("open_url", { url }).then((note) => toast(note || "opened link"), (err) => console.warn(err))
     },
     keyFilter: keyFilter(p, {
       isMac, shortcut, extraShortcut, closeLarge,
