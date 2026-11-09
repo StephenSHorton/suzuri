@@ -369,28 +369,49 @@ impl Ghostty {
         }
     }
 
-    /// A cell's text: its base character, ' ' when blank, None for the
-    /// right half of a wide character.
-    fn cell_char(r: &GhosttyGridRef) -> Option<char> {
+    /// Push a cell's text onto `out`: its whole grapheme, ' ' when blank.
+    /// False (nothing pushed) for either spacer of a wide character.
+    fn cell_text(r: &GhosttyGridRef, out: &mut String) -> bool {
         unsafe {
-            let mut buf = [0u32; 16];
+            let mut buf = [0u32; frame::CLUSTER_MAX_CPS];
             let mut n = 0usize;
-            let res = ghostty_grid_ref_graphemes(r, buf.as_mut_ptr(), buf.len(), &mut n);
+            let mut res = ghostty_grid_ref_graphemes(r, buf.as_mut_ptr(), buf.len(), &mut n);
+            let mut big = Vec::new();
+            if res == GHOSTTY_OUT_OF_SPACE && n > buf.len() {
+                big = vec![0u32; n];
+                res = ghostty_grid_ref_graphemes(r, big.as_mut_ptr(), big.len(), &mut n);
+            }
             if res == GHOSTTY_SUCCESS && n > 0 {
-                return Some(char::from_u32(buf[0]).unwrap_or(' '));
+                let cps = if big.is_empty() { &buf[..n.min(buf.len())] } else { &big[..n.min(big.len())] };
+                out.extend(cps.iter().filter_map(|&c| char::from_u32(c)));
+                return true;
             }
         }
         match Self::cell_wide(r) {
-            GHOSTTY_CELL_WIDE_SPACER_TAIL => None,
-            _ => Some(' '),
+            GHOSTTY_CELL_WIDE_SPACER_TAIL | GHOSTTY_CELL_WIDE_SPACER_HEAD => false,
+            _ => {
+                out.push(' ');
+                true
+            }
+        }
+    }
+
+    /// A cell's first character, ' ' when blank, None for the right half
+    /// of a wide character: one per column.
+    fn cell_char(r: &GhosttyGridRef) -> Option<char> {
+        let mut s = String::new();
+        match Self::cell_text(r, &mut s) {
+            true => Some(s.chars().next().unwrap_or(' ')),
+            false if Self::cell_wide(r) == GHOSTTY_CELL_WIDE_SPACER_HEAD => Some(' '),
+            false => None,
         }
     }
 
     fn row_text(&self, tag: GhosttyPointTag, y: u32, cols: u16) -> String {
         let mut line = String::new();
         for x in 0..cols {
-            if let Some(c) = self.grid_ref(tag, x, y).and_then(|r| Self::cell_char(&r)) {
-                line.push(c);
+            if let Some(r) = self.grid_ref(tag, x, y) {
+                Self::cell_text(&r, &mut line);
             }
         }
         line.trim_end().to_string()
@@ -817,24 +838,30 @@ impl Ghostty {
 
     /// Write a line of coloured text over the cursor's row (cursor moves).
     fn line_bytes(&self, (text, (r, g, b)): &(String, palette::Rgb), out: &mut Vec<u8>) {
-        use unicode_width::UnicodeWidthChar;
         let cols = self.shared.cols as usize;
         out.extend_from_slice(b"\r\x1b[0m\x1b[2K");
         out.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
-        let mut x = 0;
-        for ch in text.chars() {
-            let w = ch.width().unwrap_or(0);
-            if w == 0 || ch.is_control() {
-                continue;
-            }
+        // Whole graphemes, measured as the terminal will lay them out.
+        let cps: Vec<u32> = text.chars().filter(|c| !c.is_control()).map(|c| c as u32).collect();
+        let (mut x, mut i) = (0, 0);
+        while i < cps.len() {
+            let mut w = 0u8;
+            let used = unsafe { ghostty_unicode_grapheme_width(cps[i..].as_ptr(), cps.len() - i, &mut w) }.max(1);
+            let w = w as usize;
             // Stop short of the last column: a character there would arm the
             // wrap, and the line must not spill onto the next.
             if x + w > cols {
                 break;
             }
-            let mut buf = [0u8; 4];
-            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            // A lone zero-width mark has nothing to sit on.
+            if w > 0 {
+                for &c in &cps[i..(i + used).min(cps.len())] {
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(char::from_u32(c).unwrap_or(' ').encode_utf8(&mut buf).as_bytes());
+                }
+            }
             x += w;
+            i += used;
         }
         out.extend_from_slice(b"\x1b[0m");
     }
@@ -1248,13 +1275,7 @@ impl Engine for Ghostty {
             return;
         }
         let mut text = String::new();
-        unsafe {
-            let mut buf = [0u32; 16];
-            let mut n = 0usize;
-            if ghostty_grid_ref_graphemes(&r, buf.as_mut_ptr(), buf.len(), &mut n) == GHOSTTY_SUCCESS {
-                text.extend(buf[..n.min(buf.len())].iter().filter_map(|&c| char::from_u32(c)));
-            }
-        }
+        Self::cell_text(&r, &mut text);
         if text.is_empty() {
             text.push(' ');
         }

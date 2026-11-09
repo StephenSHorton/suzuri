@@ -457,6 +457,7 @@ mod tests {
         let s = "👍🏽|👨‍👩‍👧|🇯🇵|a\u{301}|";
         let mut e = fed(20, 2, 0, s.as_bytes());
         assert_eq!(e.cursor(), (11, 0));
+        assert_eq!(e.screen_text(), format!("{s}\n"));
         let mut out = Vec::new();
         e.snapshot(&mut out, 1, true);
         let cl = frame::decode_clusters(&out);
@@ -478,6 +479,45 @@ mod tests {
         assert_eq!(frame::decode_clusters(&out), vec![(0, 0, 2, vec![0x2764, 0xFE0F])]);
         e2.snapshot(&mut out, 1, true);
         assert!(frame::decode_clusters(&out).is_empty());
+    }
+
+    #[test]
+    fn long_cluster_not_blanked() {
+        // Past the old 16-codepoint buffers: e + 25 combining acutes.
+        let s = format!("e{}", "\u{301}".repeat(25));
+        let mut e = fed(20, 2, 100, s.as_bytes());
+        assert_eq!(e.screen_text(), format!("{s}\n"));
+        let mut out = Vec::new();
+        e.snapshot(&mut out, 1, true);
+        let cl = frame::decode_clusters(&out);
+        assert_eq!((cl.len(), cl[0].3.len()), (1, 26));
+        // An image mark rewrites the cell with its whole text.
+        e.feed(b"\x1b[1D", &mut Vec::new());
+        e.mark_cursor(4);
+        assert_eq!(e.screen_text(), format!("{s}\n"));
+        assert_eq!(e.marks(0), vec![(4, 0, 0)]);
+    }
+
+    #[test]
+    fn clusters_copy_link_and_block_lines() {
+        // Copy goes through ghostty's formatter, which keeps clusters.
+        let mut e = fed(20, 2, 0, "👨‍👩‍👧x".as_bytes());
+        e.select_start(0, 0, false, SelectKind::Line);
+        assert_eq!(e.selection_text().as_deref(), Some("👨‍👩‍👧x"));
+        // URL columns stay one per cell after an emoji.
+        let e = fed(30, 2, 0, "👍🏽 https://x.y".as_bytes());
+        let l = e.link_at(5, 0).unwrap();
+        assert_eq!((l.url.as_str(), l.x0, l.x1), ("https://x.y", 3, 14));
+        // A command-block line keeps whole clusters and is cut by their
+        // width: the family is 2 columns, not 6.
+        let w = (1u8, 1u8, 1u8);
+        let line = "✅ ok 👨‍👩‍👧 é";
+        let mut e = fed(20, 3, 100, b"");
+        e.insert_block(&[], &(line.into(), w), false);
+        assert_eq!(e.screen_text().lines().next(), Some(line));
+        let mut e = fed(9, 3, 100, b"");
+        e.insert_block(&[], &(line.into(), w), false);
+        assert_eq!(e.screen_text().lines().next(), Some("✅ ok 👨‍👩‍👧"));
     }
 
     #[test]
