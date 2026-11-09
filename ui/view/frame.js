@@ -98,8 +98,44 @@ export function decodeHeader(dv) {
     history: dv.getUint32(20, true),
     seq: dv.getUint32(24, true),
     nrows: dv.getUint16(28, true),
+    // Entries in the cluster table after the rows (0: none).
+    nclusters: dv.getUint16(30, true),
   }
 }
+
+// The cluster table (frame.rs): y -> Map(col -> {s, w}), the cell's whole
+// grapheme and its width in columns. null when the frame has none.
+function readClusters(dv, h) {
+  if (!h.nclusters) return null
+  const end = dv.byteLength
+  let p = 32
+  for (let r = 0; r < h.nrows && p + 8 <= end; r++) {
+    const nruns = dv.getUint16(p + 2, true)
+    p += 8
+    for (let k = 0; k < nruns && p + 16 <= end; k++) p += 16 + 4 * dv.getUint16(p + 2, true)
+  }
+  const map = new Map()
+  for (let e = 0; e < h.nclusters && p + 6 <= end; e++) {
+    const y = dv.getUint16(p, true), col = dv.getUint16(p + 2, true)
+    const w = dv.getUint8(p + 4), n = dv.getUint8(p + 5)
+    if (p + 6 + 4 * n > end) break
+    const cps = []
+    for (let i = 0; i < n; i++) cps.push(dv.getUint32(p + 6 + 4 * i, true))
+    p += 6 + 4 * n
+    let row = map.get(y)
+    if (!row) map.set(y, row = new Map())
+    row.set(col, { s: String.fromCodePoint(...cps), w })
+  }
+  return map
+}
+
+// Colour emoji faces, named first only for emoji: the text family keeps
+// none, so © ™ ↔ stay text.
+const EMOJI_FAMILY = `"Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"`
+const PICTO = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u
+const EMOJI = /\p{Extended_Pictographic}|\p{Regional_Indicator}|\uFE0F|\u200D|\u20E3/u
+// A two-column grapheme drawn as an emoji (not when VS15 asks for text).
+const isEmoji = (s, w) => w === 2 && !s.includes("\uFE0E") && EMOJI.test(s)
 
 export class Screen {
   // canvas: an HTMLCanvasElement or an OffscreenCanvas. dpr: the device
@@ -117,6 +153,8 @@ export class Screen {
     this.dpr = 0
     this.metrics = null
     this.wantDpr = dpr
+    // Emoji fit per `${px}|${w}|${s}`: {width, sc}, measured once.
+    this.fit = new Map()
   }
 
   // Change the style (any DEFAULT_STYLE fields). A font change re-measures
@@ -126,6 +164,7 @@ export class Screen {
     const font = ["family", "px", "bundled", "face", "em"].some((k) => k in st && st[k] !== this.style[k])
     this.style = { ...this.style, ...st }
     if (font) this.cell = null
+    this.fit.clear()
   }
 
   // This screen's cell size: {cw, ch, base, runs}. The same object until the
@@ -135,7 +174,7 @@ export class Screen {
   }
 
   // Measure again (a font that was loading has loaded).
-  resetMetrics() { this.cell = null }
+  resetMetrics() { this.cell = null; this.fit.clear() }
 
   fontSpec() { return `${this.style.px}px ${this.style.family}` }
 
@@ -158,6 +197,45 @@ export class Screen {
     return true
   }
 
+  // Draw one grapheme s over w cells at x. Emoji take the emoji faces,
+  // centred, and shrink (clipped to their cells) only when they overflow;
+  // no bold double strike. Other clusters (e + U+0301) draw in the run's
+  // font with text(). The box is always w*cw by ch, never measured.
+  drawCluster(ctx, s, w, x, top, cw, ch, base, runFont, text) {
+    if (!isEmoji(s, w)) { text(s, x, top + base); return }
+    const { px, family } = this.style
+    ctx.font = `${px}px ${EMOJI_FAMILY}, ${family}`
+    const key = `${px}|${w}|${s}`
+    let f = this.fit.get(key)
+    if (!f) {
+      const m = ctx.measureText(s)
+      const width = m.width || px
+      // A worker canvas can report no bounding box: guess from px.
+      const asc = m.actualBoundingBoxAscent || px * 0.8
+      const desc = m.actualBoundingBoxDescent || px * 0.2
+      const tall = asc + desc > 0 ? asc + desc : px
+      f = { width, sc: Math.min(1, (w * cw) / width, ch / tall) }
+      this.fit.set(key, f)
+    }
+    const bw = w * cw
+    if (f.sc >= 0.999) {
+      ctx.fillText(s, x + (bw - f.width) / 2, top + base)
+    } else {
+      // Clip in whole device pixels, so a fractional dpr leaves no seam.
+      const d = this.dpr || 1
+      const px0 = (v) => Math.round(v * d) / d
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(px0(x), px0(top), px0(x + bw) - px0(x), px0(top + ch) - px0(top))
+      ctx.clip()
+      ctx.translate(x + bw / 2, top + base)
+      ctx.scale(f.sc, f.sc)
+      ctx.fillText(s, -f.width / 2, 0)
+      ctx.restore()
+    }
+    ctx.font = runFont
+  }
+
   // Paint one frame (an ArrayBuffer, from byte `off`). Returns its header.
   apply(buf, off = 0) {
     const dv = new DataView(buf, off)
@@ -167,9 +245,11 @@ export class Screen {
     const { cw, ch, base, runs } = this.cellMetrics()
     const { void: VOID, selection: SELECTION, px: FONT_PX, family: FAMILY, bundled: BUNDLED } = this.style
     const ctx = this.ctx
+    const clusters = readClusters(dv, h)
     let p = 32
     for (let r = 0; r < h.nrows; r++) {
       const y = dv.getUint16(p, true)
+      const rc = clusters && clusters.get(y)
       const nruns = dv.getUint16(p + 2, true)
       const x0 = dv.getUint16(p + 4, true)
       const x1 = dv.getUint16(p + 6, true)
@@ -199,7 +279,8 @@ export class Screen {
           // the same instead of the canvas's smeared synthetic bold.
           const wantBold = attrs & A_BOLD && BOLD_FACE
           const strike = wantBold && BUNDLED
-          ctx.font = `${attrs & A_ITALIC ? "italic " : ""}${wantBold && !strike ? "bold " : ""}${FONT_PX}px ${FAMILY}`
+          const runFont = `${attrs & A_ITALIC ? "italic " : ""}${wantBold && !strike ? "bold " : ""}${FONT_PX}px ${FAMILY}`
+          ctx.font = runFont
           const text = strike ? (t, x, y) => { ctx.fillText(t, x, y); ctx.fillText(t, x + 1, y) } : (t, x, y) => ctx.fillText(t, x, y)
           ctx.fillStyle = hex(fg)
           // ASCII stretches go out as one string; anything else per cell so
@@ -207,6 +288,13 @@ export class Screen {
           let s = "", sx = 0
           for (let i = 0; i < n; i++) {
             const cp = dv.getUint32(p + i * 4, true)
+            // A multi-codepoint grapheme (its base may be ASCII or a space).
+            const c = rc && rc.get(col + i)
+            if (c) {
+              if (s) { text(s, sx * cw, top + base); s = "" }
+              this.drawCluster(ctx, c.s, c.w, (col + i) * cw, top, cw, ch, base, runFont, text)
+              continue
+            }
             if (runs && cp >= 0x20 && cp < 0x7f) {
               if (!s) sx = col + i
               s += String.fromCharCode(cp)
@@ -216,6 +304,11 @@ export class Screen {
             if (cp === 0 || cp === 0x20) continue
             // Box drawing, blocks and wedges: drawn into the cell, as Go does.
             if (cp >= 0x2500 && drawCellGlyph(ctx, cp, (col + i) * cw, top, cw, ch)) continue
+            // A one-codepoint wide pictograph (😀): the emoji path too.
+            if (cp > 0x7f && i + 1 < n && dv.getUint32(p + (i + 1) * 4, true) === 0 && PICTO.test(String.fromCodePoint(cp))) {
+              this.drawCluster(ctx, String.fromCodePoint(cp), 2, (col + i) * cw, top, cw, ch, base, runFont, text)
+              continue
+            }
             text(String.fromCodePoint(cp), (col + i) * cw, top + base)
           }
           if (s && s.trim()) text(s, sx * cw, top + base)

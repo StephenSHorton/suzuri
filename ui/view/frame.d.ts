@@ -60,6 +60,8 @@ export interface FrameHeader {
   history: number
   seq: number
   nrows: number
+  /** Entries in the optional cluster table after the rows (0: none). */
+  nclusters: number
 }
 
 export const DEFAULT_STYLE: Readonly<ScreenStyle>
