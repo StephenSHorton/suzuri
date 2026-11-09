@@ -762,6 +762,8 @@ function quit() {
 // splitOptsFromProfile.
 async function openTab(profile) {
   if (tabs.length >= MAX_TABS) return void toast("tab limit")
+  // Its first pane would go past the pane limit: no empty tab.
+  if (everyPane().length >= MAX_PANES) return void toast("max panes")
   // New tabs go at the end of the strip (Go's addPageWithTab).
   const t = newTab()
   const pname = profile || settingsCfg?.active_profile || ""
@@ -889,8 +891,10 @@ function renameTab(t = activeTab) {
 function renamePane(p = focused) {
   if (!p) return
   const el = p.head.querySelector(".t")
-  editInline(el, p.label() || "shell", (v) => {
-    if (v != null) p.titleOverride = v === p.title ? "" : v
+  const was = p.label() || "shell"
+  editInline(el, was, (v) => {
+    // Unchanged (Enter or a blur on the pre-fill) keeps what it had.
+    if (v != null && v !== was) p.titleOverride = v === p.title ? "" : v
     el.textContent = p.label() || "shell"
     renderStrip()
   })
@@ -1190,8 +1194,10 @@ window.rszHost = {
 
 // Go suzuri's AI-control tab tools (internal/aicontrol/server.go).
 window.rszRegisterTool?.("new_tab", async () => {
+  if (tabs.length >= MAX_TABS) return [400, { error: "tab limit" }]
+  if (everyPane().length >= MAX_PANES) return [400, { error: "max panes" }]
   const p = await openTab()
-  if (!p) return [400, { error: "tab limit" }]
+  if (!p) return [400, { error: "could not open a tab" }]
   return [200, { ok: true, tab_id: p.tab.id, pane_id: p.id }]
 })
 window.rszRegisterTool?.("move_to_tab", async (a) => {

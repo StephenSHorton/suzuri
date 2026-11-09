@@ -4,6 +4,8 @@
 
 // A keydown to "yes", "no" or null (ignored).
 export function confirmKey(e, isMac) {
+  // A held key (⌘W closing pane after pane) must not answer the box.
+  if (e.repeat) return null
   const k = (e.key || "").toLowerCase()
   if (k === "escape") return "no"
   if (k === "enter") return "yes"

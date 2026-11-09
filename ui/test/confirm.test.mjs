@@ -16,3 +16,9 @@ test("Enter or the close chord again says yes, Esc says no", () => {
   assert.equal(confirmKey(key("x"), true), null)
   assert.equal(confirmKey(key("y"), true), null) // a stray key never quits
 })
+
+test("an auto-repeated key never answers", () => {
+  assert.equal(confirmKey(key("w", { metaKey: true, repeat: true }), true), null)
+  assert.equal(confirmKey(key("Enter", { repeat: true }), true), null)
+  assert.equal(confirmKey(key("Escape", { repeat: true }), true), null)
+})
