@@ -346,6 +346,12 @@ fn notice_anchor(notes: State<'_, notices::Notices>, anchor: String) {
     notes.set_anchor(&anchor);
 }
 
+/// A host message from the UI as a notice card (Notices::toast).
+#[tauri::command]
+fn notice_toast(notes: State<'_, notices::Notices>, text: String) {
+    notes.toast(&text);
+}
+
 #[derive(Serialize)]
 struct NoticeHistory {
     items: Vec<notices::Played>,
@@ -891,6 +897,7 @@ fn main() {
             notice_sync,
             notice_hover,
             notice_anchor,
+            notice_toast,
             notice_history,
             notice_read,
             stats,

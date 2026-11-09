@@ -19,6 +19,7 @@ import { shortcut, chordLabel } from "./shortcuts.js"
 import { Palette } from "./palette.js"
 import { Settings, announce } from "./settings.js"
 import { loadAppearance, zoom } from "./appearance.js"
+import { hostToast } from "./host_toast.js"
 import { complete, ghostSuffix, DirCache, PENDING } from "./complete.js"
 import { closeLarge } from "./images.js"
 import { cleanTitle } from "./activity_state.js"
@@ -962,6 +963,8 @@ const extraCommands = []
 window.rsz = { addCommands: (cmds) => extraCommands.push(...cmds) }
 // The bell's history (ui/bell.js) reveals a pane by id; false if it's gone.
 window.rsz.focusPane = (id) => { const p = byId.get(id); if (p) setFocus(p); return !!p }
+// Host feedback as a notice card (ui/host_toast.js).
+window.rsz.toast = hostToast
 
 const ACTIONS = {
   new_tab: () => openTab(),
@@ -1091,7 +1094,7 @@ document.addEventListener("keydown", pageKeys({
 async function copy(pane = focused) {
   if (!pane?.id) return false
   const had = await invoke("pane_copy", { id: pane.id }).catch((err) => (log("copy", String(err)), false))
-  if (had) toast("copied")
+  if (had) hostToast("copied")
   return had
 }
 let lastPaste = 0

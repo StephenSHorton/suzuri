@@ -6,6 +6,8 @@
 // After each save the window gets a `rsz:config` event with the saved
 // settings, so other parts (themes and fonts, #284) can apply them.
 
+import { hostToast } from "./host_toast.js"
+
 const { invoke } = window.__TAURI__.core
 
 const LABELS = {
@@ -54,6 +56,8 @@ export class Settings {
   async done(keep) {
     if (this.el.hidden) return
     this.el.hidden = true
+    // Go toasts each save; ours save as they change, so say it once on Done.
+    if (keep && changed(this.snap, this.cfg)) hostToast("settings saved")
     if (!keep && JSON.stringify(this.snap) !== JSON.stringify(this.cfg)) {
       // The window frame saves itself meanwhile; don't put back a stale one.
       const { window: _frame, ...snap } = this.snap
@@ -124,6 +128,7 @@ export class Settings {
       announce(this.cfg)
     } catch (err) {
       this.status(`Couldn't save: ${err}`)
+      hostToast("save failed")
     }
   }
 
@@ -209,6 +214,13 @@ export class Settings {
       this.el.querySelector(".prow:last-of-type input")?.select()
     }
   }
+}
+
+// Settings that differ, leaving out the window frame (it saves itself).
+function changed(a, b) {
+  const { window: _a, ...x } = a || {}
+  const { window: _b, ...y } = b || {}
+  return JSON.stringify(x) !== JSON.stringify(y)
 }
 
 function esc(s) {

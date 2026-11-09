@@ -183,23 +183,29 @@ impl Notices {
         effects
     }
 
-    /// A host message as a notice card (Go postHostToast), e.g. "Copied".
-    #[allow(dead_code)] // for host features (#294 notify, copy and so on)
-    pub fn toast(&self, title: &str, body: &str) {
-        let mut n = Notice {
-            id: String::new(),
-            title: title.into(),
-            body: body.into(),
-            sound: "silent".into(),
-            icon: String::new(),
+    /// A host message as a notice card (Go postHostToast), e.g. "copied"
+    /// or "font 15px". Messages of one kind replace each other's card.
+    pub fn toast(&self, msg: &str) {
+        let msg = msg.trim();
+        if msg.is_empty() {
+            return;
+        }
+        let title: String = msg.chars().take(180).collect();
+        let sound = host_sound(msg);
+        let n = Notice {
+            id: host_kind(msg).into(),
+            title,
+            body: String::new(),
+            sound: sound.into(),
+            // The accent matches the sound: red for a failure, amber for a warning.
+            icon: if sound == "info" { String::new() } else { sound.into() },
             urgency: 1,
             occasion: "always".into(),
-            expire_ms: None,
+            expire_ms: host_long(msg).then_some(4000),
             report: false,
             focus: true,
             close_event: false,
         };
-        n.title.truncate(180);
         let _ = self.post(None, n);
     }
 
@@ -379,6 +385,49 @@ impl Notices {
     }
 }
 
+/// Go hostToastID: one card per kind of host message ("" stacks).
+fn host_kind(msg: &str) -> &'static str {
+    let s = msg.to_lowercase();
+    let pre = |p: &str| s.starts_with(p);
+    if pre("caffeine") {
+        "host-caffeine"
+    } else if pre("font ") {
+        "host-font"
+    } else if pre("queued") || pre("ran queued") || pre("cleared ") {
+        "host-queue"
+    } else if s.contains("update") || s.contains("up to date") || pre("installing") || s.contains("available") {
+        "host-update"
+    } else if pre("split ") || pre("fork ") || s.ends_with(" panes") || s.ends_with(" tabs") || s == "1 tab" || s == "tab limit" || pre("max ") {
+        "host-layout"
+    } else if pre("transfer") || pre("send:") || pre("receive:") || pre("ticket ") {
+        "host-transfer"
+    } else if pre("settings ") || pre("save failed") {
+        "host-settings"
+    } else if s == "copied" {
+        "host-copy"
+    } else {
+        ""
+    }
+}
+
+/// Go hostToastSound: error, warn or info.
+fn host_sound(msg: &str) -> &'static str {
+    let s = msg.to_lowercase();
+    if ["fail", "not found", "unavailable", "not allowlisted", "missing session"].iter().any(|w| s.contains(w)) {
+        "error"
+    } else if ["ignored", "limit", "empty", "deferred", "already off", "fallback"].iter().any(|w| s.contains(w)) || s.starts_with("max ") {
+        "warn"
+    } else {
+        "info"
+    }
+}
+
+/// Go hostToastLong: update news and opened links stay 4 s.
+fn host_long(msg: &str) -> bool {
+    let s = msg.to_lowercase();
+    ["update", "up to date", "installing", "opened"].iter().any(|w| s.contains(w))
+}
+
 /// Go previewNoticeAnchor: a silent card at the new spot.
 fn sample(label: &str) -> Notice {
     Notice {
@@ -497,4 +546,41 @@ fn place(app: &AppHandle, panel: &tauri::WebviewWindow, n: usize, anchor: usize)
     };
     let _ = panel.set_size(PhysicalSize::new(pw.round() as u32, ph.round() as u32));
     let _ = panel.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_messages_of_one_kind_share_a_card() {
+        assert_eq!(host_kind("caffeine on · 15m"), "host-caffeine");
+        assert_eq!(host_kind("Caffeine off · timer ended"), "host-caffeine");
+        assert_eq!(host_kind("font 15px"), "host-font");
+        assert_eq!(host_kind("font 36px (limit)"), "host-font");
+        assert_eq!(host_kind("Up to date (0.4.1)."), "host-update");
+        assert_eq!(host_kind("Checking for updates…"), "host-update");
+        assert_eq!(host_kind("settings saved"), "host-settings");
+        assert_eq!(host_kind("copied"), "host-copy");
+        assert_eq!(host_kind("max panes"), "host-layout");
+        assert_eq!(host_kind("something else"), "");
+    }
+
+    #[test]
+    fn host_sounds_follow_go() {
+        assert_eq!(host_sound("caffeine failed: no power assertion"), "error");
+        assert_eq!(host_sound("Update check failed: offline"), "error");
+        assert_eq!(host_sound("caffeine already off"), "warn");
+        assert_eq!(host_sound("font 36px (limit)"), "warn");
+        assert_eq!(host_sound("copied"), "info");
+        assert_eq!(sound_for(host_sound("copied"), 1), Some("success"));
+        assert_eq!(sound_for(host_sound("caffeine already off"), 1), Some("published"));
+    }
+
+    #[test]
+    fn update_news_stays_longer() {
+        assert!(host_long("Up to date."));
+        assert!(host_long("Dev build: updates are off."));
+        assert!(!host_long("copied"));
+    }
 }
