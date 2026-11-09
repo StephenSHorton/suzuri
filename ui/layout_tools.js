@@ -44,7 +44,8 @@ registerTool("move", async (a) => {
   const p = byPaneId(a.pane_id), t = byPaneId(a.target_pane_id)
   if (!p || !t || p === t) return [400, { error: "move failed" }]
   if (!L.edgeOf(a.edge)) return [400, { error: "edge must be left|right|top|bottom" }]
-  const h = host(), user = h.activeTab()
+  // What the person had: their tab and pane, and the target tab's own focus.
+  const h = host(), user = h.activeTab(), was = h.focused(), keep = t.tab.focused
   if (p.tab === t.tab) {
     // Already there: leave the tree (and any resized split) alone.
     if (L.dropChanges(p.tab.tree, p, t, a.edge) && !L.dockBeside(p.tab.tree, p, t, a.edge)) return [400, { error: "move failed" }]
@@ -55,6 +56,10 @@ registerTool("move", async (a) => {
     if (!L.dockBeside(p.tab.tree, p, t, a.edge)) return [400, { error: "move failed" }]
   }
   h.relayout()
-  if (h.tabs().includes(user)) h.showTab(user)
+  // movePaneToTab focuses the moved pane; hand focus back (setFocus also
+  // shows its tab), and leave the target tab's focus where it was.
+  if (was && was !== p && h.allPanes().includes(was)) h.setFocus(was)
+  else if (h.tabs().includes(user)) h.showTab(user)
+  if (t.tab !== h.activeTab() && keep && keep !== p && keep.tab === t.tab) t.tab.focused = keep
   return [200, await layout()]
 })
