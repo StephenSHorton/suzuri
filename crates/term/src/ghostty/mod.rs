@@ -38,13 +38,68 @@ fn unpack(v: u32) -> palette::Rgb {
     ((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
-/// A zeroed sized struct with its `size` field (always the first) set.
-unsafe fn sized<T>() -> T {
-    unsafe {
-        let mut v: T = std::mem::zeroed();
-        *(&mut v as *mut T as *mut usize) = std::mem::size_of::<T>();
-        v
-    }
+/// A C struct that starts with a `size` field (ghostty's sized structs).
+trait SizedStruct: Sized {
+    fn set_size(&mut self);
+}
+
+/// Only list structs that have a `size` field: the impl reads the field, so
+/// one that loses it in a ghostty bump stops compiling instead of having its
+/// first bytes overwritten.
+macro_rules! sized_structs {
+    ($($t:ty),* $(,)?) => {$(
+        impl SizedStruct for $t {
+            fn set_size(&mut self) {
+                self.size = std::mem::size_of::<$t>();
+            }
+        }
+    )*};
+}
+sized_structs!(
+    GhosttyClipboardWriteReply,
+    GhosttyMouseEncoderSize,
+    GhosttyRenderStateColors,
+    GhosttyTerminalSelectWordOptions,
+    GhosttyTerminalSelectLineOptions,
+    GhosttyRenderStateRowSelection,
+    GhosttyRenderStateCursor,
+);
+
+/// A zeroed sized struct with its `size` field set.
+unsafe fn sized<T: SizedStruct>() -> T {
+    let mut v: T = unsafe { std::mem::zeroed() };
+    v.set_size();
+    v
+}
+
+/// A zeroed plain C struct (no `size` field).
+unsafe fn zeroed<T>() -> T {
+    unsafe { std::mem::zeroed() }
+}
+
+// Style flags: C macros with casts, which bindgen skips (ghostty style.h).
+const STYLE_BOLD: GhosttyStyleFlags = 1 << 0;
+const STYLE_ITALIC: GhosttyStyleFlags = 1 << 1;
+const STYLE_FAINT: GhosttyStyleFlags = 1 << 2;
+const STYLE_BLINK: GhosttyStyleFlags = 1 << 3;
+const STYLE_INVERSE: GhosttyStyleFlags = 1 << 4;
+const STYLE_INVISIBLE: GhosttyStyleFlags = 1 << 5;
+const STYLE_STRIKETHROUGH: GhosttyStyleFlags = 1 << 6;
+const STYLE_OVERLINE: GhosttyStyleFlags = 1 << 7;
+const STYLE_UNDERLINE_MASK: GhosttyStyleFlags = 0x7 << GHOSTTY_STYLE_UNDERLINE_SHIFT;
+
+// GhosttyStyleColor.tag is one byte; the tag enum is a C int.
+const COLOR_NONE: u8 = GHOSTTY_STYLE_COLOR_NONE as u8;
+const COLOR_PALETTE: u8 = GHOSTTY_STYLE_COLOR_PALETTE as u8;
+const COLOR_RGB: u8 = GHOSTTY_STYLE_COLOR_RGB as u8;
+
+fn style_has(st: &GhosttyStyle, flag: GhosttyStyleFlags) -> bool {
+    st.flags & flag != 0
+}
+
+/// The underline style (a GHOSTTY_SGR_UNDERLINE_* value), 0 for none.
+fn style_underline(st: &GhosttyStyle) -> u16 {
+    (st.flags & STYLE_UNDERLINE_MASK) >> GHOSTTY_STYLE_UNDERLINE_SHIFT
 }
 
 /// DEC private mode 2027: grapheme clustering.
@@ -234,7 +289,9 @@ impl Ghostty {
             // The line limit is the only limit, as alacritty's: ghostty's
             // default byte limit otherwise caps the history at a few hundred
             // lines of 100 columns.
-            set(GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, ptr::null());
+            // SIZE_MAX is "no byte limit"; NULL would restore the default.
+            let no_byte_limit = usize::MAX;
+            set(GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &no_byte_limit as *const usize as *const c_void);
             // Kitty graphics stay on suzuri's path (protocols.rs takes the
             // APCs before the engine sees them); ghostty keeps none itself.
             let kitty_limit = 0u64;
@@ -255,9 +312,9 @@ impl Ghostty {
             // every motion, not only cell changes.
             let mut sz: GhosttyMouseEncoderSize = sized();
             (sz.screen_width, sz.screen_height, sz.cell_width, sz.cell_height) = (4, 4, 1, 1);
-            ghostty_mouse_encoder_setopt(menc, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &sz as *const _ as *const c_void);
+            ghostty_mouse_encoder_set(menc, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &sz as *const _ as *const c_void);
             let track = false;
-            ghostty_mouse_encoder_setopt(menc, GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL, &track as *const bool as *const c_void);
+            ghostty_mouse_encoder_set(menc, GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL, &track as *const bool as *const c_void);
             ghostty_mouse_event_set_position(mev, GhosttyMousePosition { x: 1.5, y: 1.5 });
             let mut g = Ghostty {
                 t,
@@ -359,7 +416,7 @@ impl Ghostty {
 
     fn grid_ref(&self, tag: GhosttyPointTag, x: u16, y: u32) -> Option<GhosttyGridRef> {
         unsafe {
-            let mut r: GhosttyGridRef = sized();
+            let mut r: GhosttyGridRef = zeroed();
             let p = GhosttyPoint { tag, value: GhosttyPointValue { coordinate: GhosttyPointCoordinate { x, y } } };
             (ghostty_terminal_grid_ref(self.t, p, &mut r) == GHOSTTY_SUCCESS).then_some(r)
         }
@@ -481,13 +538,18 @@ impl Ghostty {
             let cp = if n > 0 {
                 let mut buf = [0u32; frame::CLUSTER_MAX_CPS];
                 let mut big: Vec<u32>;
+                let mut fill = |ptr: *mut u32, cap: usize| {
+                    let mut b = GhosttyCodepointBuffer { ptr, cap, len: 0 };
+                    get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, &mut b as *mut _ as *mut c_void);
+                    b.len.min(cap)
+                };
                 let cps: &[u32] = if n as usize <= buf.len() {
-                    get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, buf.as_mut_ptr() as *mut c_void);
-                    &buf[..n as usize]
+                    let got = fill(buf.as_mut_ptr(), buf.len());
+                    &buf[..got]
                 } else {
                     big = vec![0u32; n as usize];
-                    get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, big.as_mut_ptr() as *mut c_void);
-                    &big
+                    let got = fill(big.as_mut_ptr(), big.len());
+                    &big[..got]
                 };
                 // A multi-codepoint grapheme goes in the cluster table, with
                 // its width; the run keeps its base.
@@ -514,18 +576,18 @@ impl Ghostty {
             };
             let mut styled = false;
             get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING, &mut styled as *mut _ as *mut c_void);
-            let mut st: GhosttyStyle = unsafe { sized() };
+            let mut st: GhosttyStyle = unsafe { zeroed() };
             if styled {
                 get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &mut st as *mut _ as *mut c_void);
             }
-            let bold = st.bold;
-            let default_ink = st.fg_color.tag == GHOSTTY_STYLE_COLOR_NONE;
+            let bold = style_has(&st, STYLE_BOLD);
+            let default_ink = st.fg_color.tag == COLOR_NONE;
             let mut fg = match st.fg_color.tag {
-                GHOSTTY_STYLE_COLOR_RGB => {
+                COLOR_RGB => {
                     let v = unsafe { st.fg_color.value.rgb };
                     pack((v.r, v.g, v.b))
                 }
-                GHOSTTY_STYLE_COLOR_PALETTE => {
+                COLOR_PALETTE => {
                     let i = unsafe { st.fg_color.value.palette };
                     pack(pal(if bold && i < 8 { i + 8 } else { i }))
                 }
@@ -543,14 +605,14 @@ impl Ghostty {
             };
             // Go suzuri's paint rules (internal/ui/color.go glyphToCell);
             // see the alacritty engine for the measurements behind them.
-            if st.faint {
+            if style_has(&st, STYLE_FAINT) {
                 let d = palette::dim_faint(unpack(fg));
                 fg = if default_ink && (d.0 as u32 + d.1 as u32 + d.2 as u32) < 80 { pack((140, 140, 140)) } else { pack(d) };
             }
             if bold {
                 fg = pack(palette::brighten_bold(unpack(fg)));
             }
-            if st.inverse {
+            if style_has(&st, STYLE_INVERSE) {
                 let default_rev = default_ink && bg == frame::DEFAULT_BG;
                 let (mut f, mut b) = (if bg == frame::DEFAULT_BG { term_bg } else { bg }, fg);
                 if default_rev {
@@ -572,19 +634,19 @@ impl Ghostty {
             if bold {
                 attrs |= frame::A_BOLD;
             }
-            if st.italic {
+            if style_has(&st, STYLE_ITALIC) {
                 attrs |= frame::A_ITALIC;
             }
-            if st.underline != 0 {
+            if style_underline(&st) != 0 {
                 attrs |= frame::A_UNDERLINE;
             }
-            if st.strikethrough {
+            if style_has(&st, STYLE_STRIKETHROUGH) {
                 attrs |= frame::A_STRIKE;
             }
-            if st.faint {
+            if style_has(&st, STYLE_FAINT) {
                 attrs |= frame::A_DIM;
             }
-            if st.invisible {
+            if style_has(&st, STYLE_INVISIBLE) {
                 attrs |= frame::A_HIDDEN;
             }
             if has_sel && x >= sel.start_x && x <= sel.end_x {
@@ -614,7 +676,7 @@ impl Ghostty {
         let (Some(s), Some(e)) = (self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, a.0, a.1), self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, b.0, b.1)) else {
             return false;
         };
-        let mut sel: GhosttySelection = unsafe { sized() };
+        let mut sel: GhosttySelection = unsafe { zeroed() };
         sel.start = s;
         sel.end = e;
         self.set(GHOSTTY_TERMINAL_OPT_SELECTION, &sel as *const _ as *const c_void);
@@ -626,7 +688,7 @@ impl Ghostty {
     }
 
     fn current_selection(&self) -> Option<GhosttySelection> {
-        let mut sel: GhosttySelection = unsafe { sized() };
+        let mut sel: GhosttySelection = unsafe { zeroed() };
         self.get(GHOSTTY_TERMINAL_DATA_SELECTION, &mut sel).then_some(sel)
     }
 
@@ -644,7 +706,7 @@ impl Ghostty {
     /// The word or line around a screen point, as a pair of points.
     fn unit_at(&self, kind: SelectKind, p: (u16, u32)) -> Option<((u16, u32), (u16, u32))> {
         let r = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, p.0, p.1)?;
-        let mut out: GhosttySelection = unsafe { sized() };
+        let mut out: GhosttySelection = unsafe { zeroed() };
         let res = unsafe {
             match kind {
                 SelectKind::Word => {
@@ -711,9 +773,9 @@ impl Ghostty {
             return (false, false, false);
         }
         unsafe {
-            ghostty_mouse_encoder_setopt_from_terminal(self.menc, self.t);
+            ghostty_mouse_encoder_set_from_terminal(self.menc, self.t);
             let reports = |action: GhosttyMouseAction, pressed: bool| {
-                ghostty_mouse_encoder_setopt(self.menc, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed as *const bool as *const c_void);
+                ghostty_mouse_encoder_set(self.menc, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed as *const bool as *const c_void);
                 ghostty_mouse_event_set_action(self.mev, action);
                 if pressed {
                     ghostty_mouse_event_set_button(self.mev, GHOSTTY_MOUSE_BUTTON_LEFT);
@@ -762,7 +824,7 @@ impl Ghostty {
             if !ghostty_tracked_grid_ref_has_value(r) {
                 return false;
             }
-            let mut g: GhosttyGridRef = sized();
+            let mut g: GhosttyGridRef = zeroed();
             if ghostty_tracked_grid_ref_snapshot(r, &mut g) != GHOSTTY_SUCCESS {
                 return false;
             }
@@ -965,10 +1027,10 @@ impl Engine for Ghostty {
             0
         } else {
             match cur.visual_style {
-                GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK => 1,
-                GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_UNDERLINE => 2,
-                GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR => 3,
-                GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BLOCK_HOLLOW => 4,
+                GHOSTTY_CURSOR_STYLE_BLOCK => 1,
+                GHOSTTY_CURSOR_STYLE_UNDERLINE => 2,
+                GHOSTTY_CURSOR_STYLE_BAR => 3,
+                GHOSTTY_CURSOR_STYLE_BLOCK_HOLLOW => 4,
                 _ => 1,
             }
         };
@@ -1023,10 +1085,10 @@ impl Engine for Ghostty {
         let before = self.history_and_offset().1;
         let mut v: GhosttyTerminalScrollViewport = unsafe { std::mem::zeroed() };
         if delta == i32::MIN {
-            v.tag = GHOSTTY_SCROLL_VIEWPORT_BOTTOM;
+            v.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM;
         } else {
             // Our delta is lines up into the history; ghostty's up is negative.
-            v.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA;
+            v.tag = GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA;
             v.value.delta = -(delta as isize);
         }
         unsafe { ghostty_terminal_scroll_viewport(self.t, v) };
@@ -1073,10 +1135,10 @@ impl Engine for Ghostty {
 
     fn set_default_cursor(&mut self, shape: u8) {
         self.default_cursor = shape;
-        let style: GhosttyTerminalCursorStyle = match shape {
-            2 => GHOSTTY_TERMINAL_CURSOR_STYLE_UNDERLINE,
-            3 => GHOSTTY_TERMINAL_CURSOR_STYLE_BAR,
-            _ => GHOSTTY_TERMINAL_CURSOR_STYLE_BLOCK,
+        let style: GhosttyCursorStyle = match shape {
+            2 => GHOSTTY_CURSOR_STYLE_UNDERLINE,
+            3 => GHOSTTY_CURSOR_STYLE_BAR,
+            _ => GHOSTTY_CURSOR_STYLE_BLOCK,
         };
         self.set(GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE, &style as *const _ as *const c_void);
         let blink = false;
@@ -1172,15 +1234,22 @@ impl Engine for Ghostty {
 
     fn selection_text(&self) -> Option<String> {
         let sel = self.current_selection()?;
-        let mut o: GhosttyTerminalSelectionFormatOptions = unsafe { sized() };
-        o.emit = GHOSTTY_FORMATTER_FORMAT_PLAIN;
-        o.unwrap = true;
-        o.trim = true;
-        o.selection = &sel;
-        let mut p: *mut u8 = ptr::null_mut();
-        let mut n = 0usize;
         let mut s = unsafe {
-            if ghostty_terminal_selection_format_alloc(self.t, ptr::null(), o, &mut p, &mut n) != GHOSTTY_SUCCESS || p.is_null() {
+            let mut f = ptr::null_mut();
+            if ghostty_formatter_terminal_new(ptr::null(), &mut f, self.t) != GHOSTTY_SUCCESS {
+                return None;
+            }
+            let emit: GhosttyFormatterFormat = GHOSTTY_FORMATTER_FORMAT_PLAIN;
+            let on = true;
+            let set_ok = ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_EMIT, &emit as *const _ as *const c_void) == GHOSTTY_SUCCESS
+                && ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_UNWRAP, &on as *const bool as *const c_void) == GHOSTTY_SUCCESS
+                && ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_TRIM, &on as *const bool as *const c_void) == GHOSTTY_SUCCESS
+                && ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_SELECTION, &sel as *const _ as *const c_void) == GHOSTTY_SUCCESS;
+            let mut p: *mut u8 = ptr::null_mut();
+            let mut n = 0usize;
+            let got = set_ok && ghostty_formatter_format_alloc(f, ptr::null(), &mut p, &mut n) == GHOSTTY_SUCCESS;
+            ghostty_formatter_free(f);
+            if !got || p.is_null() {
                 return None;
             }
             let s = String::from_utf8_lossy(std::slice::from_raw_parts(p, n)).into_owned();
@@ -1293,7 +1362,7 @@ impl Engine for Ghostty {
         if text.is_empty() {
             text.push(' ');
         }
-        let mut st: GhosttyStyle = unsafe { sized() };
+        let mut st: GhosttyStyle = unsafe { zeroed() };
         if unsafe { ghostty_grid_ref_style(&r, &mut st) } != GHOSTTY_SUCCESS {
             unsafe { ghostty_style_default(&mut st) };
         }
@@ -1345,18 +1414,18 @@ impl Engine for Ghostty {
 /// SGR that sets a cell's style from scratch.
 fn sgr_bytes(st: &GhosttyStyle, b: &mut Vec<u8>) {
     let mut p: Vec<String> = vec!["0".into()];
-    for (on, code) in [(st.bold, "1"), (st.faint, "2"), (st.italic, "3"), (st.blink, "5"), (st.inverse, "7"), (st.invisible, "8"), (st.strikethrough, "9"), (st.overline, "53")] {
-        if on {
+    for (flag, code) in [(STYLE_BOLD, "1"), (STYLE_FAINT, "2"), (STYLE_ITALIC, "3"), (STYLE_BLINK, "5"), (STYLE_INVERSE, "7"), (STYLE_INVISIBLE, "8"), (STYLE_STRIKETHROUGH, "9"), (STYLE_OVERLINE, "53")] {
+        if style_has(st, flag) {
             p.push(code.into());
         }
     }
-    if st.underline != 0 {
-        p.push(format!("4:{}", st.underline));
+    if style_underline(st) != 0 {
+        p.push(format!("4:{}", style_underline(st)));
     }
     let color = |c: &GhosttyStyleColor, base: u8| -> Option<String> {
         match c.tag {
-            GHOSTTY_STYLE_COLOR_PALETTE => Some(format!("{base}:5:{}", unsafe { c.value.palette })),
-            GHOSTTY_STYLE_COLOR_RGB => {
+            COLOR_PALETTE => Some(format!("{base}:5:{}", unsafe { c.value.palette })),
+            COLOR_RGB => {
                 let v = unsafe { c.value.rgb };
                 Some(format!("{base}:2::{}:{}:{}", v.r, v.g, v.b))
             }
