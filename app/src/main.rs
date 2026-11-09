@@ -412,13 +412,13 @@ fn config_get() -> serde_json::Value {
 /// on its `rsz:config` event.
 #[tauri::command]
 fn config_set(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
-    let v = config::update(patch).map_err(|e| e.to_string())?;
+    let v = config::update(patch.clone()).map_err(|e| e.to_string())?;
     let shape = config::cursor_code(&v);
     for p in panes.map.lock().values() {
         p.set_default_cursor(shape);
     }
     apply_theme(&v, Some(&panes));
-    notes.apply_config(&v);
+    notes.apply_config(&v, &patch);
     Ok(v)
 }
 

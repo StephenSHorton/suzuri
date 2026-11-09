@@ -32,6 +32,11 @@ fn anchor_of(cfg: &serde_json::Value) -> usize {
     crate::config::NOTICE_POSITIONS.iter().position(|a| *a == id).unwrap_or(0)
 }
 
+/// Whether a settings patch sets the notice position (null resets it).
+fn sets_position(patch: &serde_json::Value) -> bool {
+    patch.get("notice_position").is_some()
+}
+
 struct Live {
     key: u64,
     pane: Option<u32>,
@@ -260,10 +265,13 @@ impl Notices {
         }
     }
 
-    /// Saved settings (config_set): move the cards to the notice position,
-    /// with a silent sample card when it changed (Go setNoticeAnchor with
-    /// preview), and repaint cards already up in the theme's colours.
-    pub fn apply_config(&self, cfg: &serde_json::Value) {
+    /// Saved settings (config_set): move the cards to the notice position
+    /// and repaint cards already up in the theme's colours. The silent
+    /// sample card (Go setNoticeAnchor with preview) shows only when this
+    /// save's `patch` set the position: every window is its own process, so
+    /// a save here of anything else may just be catching up with a move
+    /// made in another window.
+    pub fn apply_config(&self, cfg: &serde_json::Value, patch: &serde_json::Value) {
         let anchor = anchor_of(cfg);
         let (moved, live) = {
             let mut g = self.inner.lock();
@@ -271,7 +279,7 @@ impl Notices {
             g.anchor = anchor;
             (moved, !g.live.is_empty())
         };
-        if moved {
+        if moved && sets_position(patch) {
             let label = crate::config::NOTICE_POSITION_LABELS[anchor];
             let _ = self.post_as(None, sample(label), false);
         } else if live {
@@ -575,6 +583,15 @@ mod tests {
         assert_eq!(host_sound("copied"), "info");
         assert_eq!(sound_for(host_sound("copied"), 1), Some("success"));
         assert_eq!(sound_for(host_sound("caffeine already off"), 1), Some("published"));
+    }
+
+    #[test]
+    fn only_a_position_save_previews() {
+        use serde_json::json;
+        assert!(sets_position(&json!({"notice_position": "top-right"})));
+        assert!(!sets_position(&json!({"font_size": 15})));
+        assert!(sets_position(&json!({"notice_position": null})));
+        assert!(!sets_position(&json!(null)));
     }
 
     #[test]
