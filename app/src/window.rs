@@ -39,6 +39,13 @@ pub fn new_window() -> Result<(), String> {
     Ok(())
 }
 
+/// Quits this window's process: the last tab closed (after "Quit suzuri?")
+/// or its last shell exited. The Exit event saves the window's frame.
+#[tauri::command]
+pub fn app_quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 /// Brings the main window back up for a second launch (Windows).
 #[cfg(windows)]
 pub fn focus_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {

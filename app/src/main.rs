@@ -40,6 +40,9 @@ pub(crate) struct Panes {
     pub(crate) titles: Mutex<HashMap<u32, String>>,
     /// Last size per pane (cols, rows), for the bridge snapshot.
     pub(crate) sizes: Mutex<HashMap<u32, (u16, u16)>>,
+    /// The command each pane runs, when not the default shell: a split
+    /// runs the same one (Go's tabOpts{shell: focus.shell}).
+    launch: Mutex<HashMap<u32, Vec<String>>>,
     pub(crate) focused: AtomicU32,
     /// Set when RSZ_TRANSPORT=ws: frames go over the socket, not the Channel.
     bus: Option<ws::FrameBus>,
@@ -104,9 +107,9 @@ fn pane_open(
     // A Settings profile (or the default one) gives the shell and folder;
     // RSZ_CMD still wins for the bench.
     let (prof_cmd, prof_cwd) = config::profile_launch(&settings, profile.as_deref());
-    let command = command
-        .or_else(|| std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s)))
-        .or(prof_cmd);
+    let inherited = from.and_then(|f| panes.launch.lock().get(&f).cloned());
+    let env_cmd = std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s));
+    let command = launch_command(command, env_cmd, profile.is_some(), inherited, prof_cmd);
     let panes_ref = Arc::clone(&panes);
     let notes = notes.inner().clone();
     let sink: Sink = Arc::new(move |o| {
@@ -137,6 +140,7 @@ fn pane_open(
                 panes_ref.map.lock().remove(&id);
                 panes_ref.titles.lock().remove(&id);
                 panes_ref.sizes.lock().remove(&id);
+                panes_ref.launch.lock().remove(&id);
                 on_frame.send(json(&Msg::Exit { code }))
             }
             Out::Notice(n) => {
@@ -200,9 +204,30 @@ fn pane_open(
     if let Some(n) = std::env::var("RSZ_SCROLLBACK").ok().and_then(|v| v.parse().ok()) {
         cfg.scrollback = n;
     }
+    let launched = cfg.command.clone();
     let pane = Pane::spawn(cfg, sink).map_err(|e| e.to_string())?;
     panes.map.lock().insert(id, Arc::new(pane));
+    if let Some(c) = launched {
+        panes.launch.lock().insert(id, c);
+    }
     Ok(id)
+}
+
+/// What a new pane runs: an explicit command, then RSZ_CMD (the bench), then
+/// a profile the caller named, then the program of the pane it splits from,
+/// then the active profile's shell. None: the login shell.
+fn launch_command(
+    explicit: Option<Vec<String>>,
+    env: Option<Vec<String>>,
+    named_profile: bool,
+    inherited: Option<Vec<String>>,
+    profile: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let first = explicit.or(env);
+    if named_profile {
+        return first.or(profile);
+    }
+    first.or(inherited).or(profile)
 }
 
 /// Split a command line on spaces, keeping "double-quoted parts" together
@@ -765,6 +790,21 @@ fn ui_log(line: String) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_split_runs_the_program_it_split_from() {
+        let v = |s: &str| Some(vec![s.to_string()]);
+        // A split (no profile named): the source pane's program beats the active profile's.
+        assert_eq!(super::launch_command(None, None, false, v("pwsh"), v("zsh")), v("pwsh"));
+        // A source on the login shell: the active profile's, as before.
+        assert_eq!(super::launch_command(None, None, false, None, v("zsh")), v("zsh"));
+        // A named profile (New tab: X) wins over what it split from.
+        assert_eq!(super::launch_command(None, None, true, v("pwsh"), v("fish")), v("fish"));
+        assert_eq!(super::launch_command(None, None, true, v("pwsh"), None), None);
+        // An explicit command and RSZ_CMD win over both.
+        assert_eq!(super::launch_command(v("top"), v("bench"), false, v("pwsh"), None), v("top"));
+        assert_eq!(super::launch_command(None, v("bench"), false, v("pwsh"), None), v("bench"));
+    }
+
+    #[test]
     fn split_args_keeps_quotes() {
         assert_eq!(super::split_args(r#""C:\Program Files\x.exe" --a "b c""#), vec![r"C:\Program Files\x.exe", "--a", "b c"]);
         assert_eq!(super::split_args("claude"), vec!["claude"]);
@@ -906,6 +946,7 @@ fn main() {
             complete::complete_list,
             bridge::pane_text,
             window::new_window,
+            window::app_quit,
             caffeine::caffeine_on,
             caffeine::caffeine_off,
             caffeine::caffeine_toggle,
