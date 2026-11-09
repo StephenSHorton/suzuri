@@ -11,8 +11,9 @@
 //   2. a bell or notification while you're not looking at the pane: blocked;
 //   3. the program's title (Claude Code: ◐/◑ working, ✳ idle; Grok: braille)
 //      or OSC 9;4 progress;
-//   4. shell integration: at the prompt is idle, a command running is busy,
-//      unless it's interactive (it took your keys or went full screen);
+//   4. shell integration: at the prompt is idle, a command running for
+//      CMD_RISE_MS is busy, unless it's interactive (it took your keys or
+//      went full screen);
 //   5. sustained output, with hysteresis so it doesn't flicker.
 
 // The output guess: busy after this much steady output...
@@ -28,6 +29,9 @@ export const SPIN_MS = 2000
 // Without shell marks, a title spinner with no title change and no output
 // this long is stale.
 export const STALE_MS = 30000
+// A command is busy only once it has run this long, so ls or cd never
+// flash the spinner.
+export const CMD_RISE_MS = 700
 // "Command finished" only for commands that ran at least this long.
 export const LONG_CMD_MS = 10000
 
@@ -79,7 +83,7 @@ export function newActivity(now = 0) {
     titleAt: now, // when the title last changed
     progress: 0, // OSC 9;4 state: 1 set, 2 error, 3 indeterminate, 4 paused
     shell: { integrated: false, program: false, prompts: 0 },
-    cmdAt: 0, // when the running command started (0: none)
+    cmdAt: null, // when the running command started (null: none)
     interactive: false, // the running command took keys or the alt screen
     inputAt: -Infinity,
     outAt: -Infinity, // last output, echo included (for staleness)
@@ -94,7 +98,7 @@ function promptBack(s) {
   s.glyph = ""
   s.glyphAt = 0
   s.progress = 0
-  s.cmdAt = 0
+  s.cmdAt = null
   s.interactive = false
 }
 
@@ -162,7 +166,7 @@ export function step(s, ev, now, ctx = {}) {
     case "done": {
       // Comes before the shell's prompt status, so cmdAt is still set.
       const cmd = String(ev.command || "").trim()
-      const ran = s.cmdAt ? now - s.cmdAt : 0
+      const ran = s.cmdAt != null ? now - s.cmdAt : 0
       if (cmd.startsWith("_suzuri_") || ran < LONG_CMD_MS || ctx.looking) return null
       const failed = ev.exit != null && ev.exit !== 0
       const body = ev.exit == null ? "finished" : failed ? `failed (exit ${ev.exit})` : "succeeded"
@@ -200,7 +204,9 @@ export function activity(s, now, ctx = {}) {
   if (said) return said
   const sh = s.shell
   if (sh.integrated && !sh.program) return "idle"
-  if (sh.program && !s.interactive && !ctx.alt) return "busy"
+  // No cmdAt while program is only the foreground probe lagging behind a
+  // prompt that's back (it catches up within 200 ms): no busy from that.
+  if (sh.program && s.cmdAt != null && now - s.cmdAt >= CMD_RISE_MS && !s.interactive && !ctx.alt) return "busy"
   const steady = s.runAt - s.runFrom >= OUT_RISE_MS
   return steady && now - s.runAt < OUT_QUIET_MS ? "busy" : "idle"
 }

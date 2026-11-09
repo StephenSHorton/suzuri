@@ -88,6 +88,9 @@ struct ShellState {
     started: bool,
     /// The foreground probe's last answer.
     child: bool,
+    /// A shell with its own marks (133/633) is running a command. Shown to
+    /// the UI, never busy(): its C may never get a D.
+    foreign: bool,
     prompts: u64,
     sent: Option<ShellStatus>,
     /// A bar line was sent at this prompt count: the command owns the pane
@@ -97,7 +100,7 @@ struct ShellState {
 
 impl ShellState {
     fn status(&self) -> ShellStatus {
-        ShellStatus { integrated: self.integrated, cwd: self.cwd.clone(), program: self.started || self.child, prompts: self.prompts }
+        ShellStatus { integrated: self.integrated, cwd: self.cwd.clone(), program: self.started || self.child || self.foreign, prompts: self.prompts }
     }
 
     /// The status to send, if it changed since the last one sent.
@@ -773,11 +776,14 @@ fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink) {
                     // next submit, ends it.
                     sh.integrated = true;
                     sh.started = false;
+                    sh.foreign = false;
                     sh.prompts += 1;
                     sh.cwd = cwd;
                 }
+                ShellEvent::Foreign(running) => sh.foreign = running,
                 ShellEvent::Done { exit, command } => {
                     sh.started = false;
+                    sh.foreign = false;
                     done.push((exit, command));
                 }
             }
@@ -1382,6 +1388,33 @@ mod tests {
         assert_eq!(pane.queue_len(), 0, "try_submit never queues");
         wait_until("idle after the line", || !pane.is_busy());
         assert!(!pane.screen_text().contains("early"));
+        pane.close();
+        pane.join();
+    }
+
+    /// A foreign 133;C with no D (a remote fish's `exit`, a dropped ssh)
+    /// shows as a program to the UI but never holds the pane busy, and its
+    /// next prompt (133;A) clears it.
+    #[test]
+    fn foreign_start_without_done_never_holds_busy() {
+        let shell = Arc::new(Mutex::new(ShellStatus::default()));
+        let sh = shell.clone();
+        let sink: Sink = Arc::new(move |o| {
+            if let Out::Shell(st) = o {
+                *sh.lock() = st;
+            }
+        });
+        let cfg = PaneConfig {
+            command: Some(vec!["/bin/sh".into(), "-c".into(), "printf '\\033]133;C\\007'; sleep 2; printf '\\033]133;A\\007'; sleep 5".into()]),
+            ..Default::default()
+        };
+        let pane = Pane::spawn(cfg, sink).unwrap();
+        wait_until("program", || shell.lock().program);
+        assert!(!shell.lock().integrated);
+        wait_until("idle with the C still open", || !pane.is_busy());
+        assert!(shell.lock().program, "the UI still sees the command");
+        assert_eq!(pane.try_submit("x"), Submit::Sent);
+        wait_until("the prompt clears it", || !shell.lock().program);
         pane.close();
         pane.join();
     }

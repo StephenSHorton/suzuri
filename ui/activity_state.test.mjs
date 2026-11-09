@@ -4,7 +4,7 @@ import assert from "node:assert/strict"
 
 import {
   newActivity, step, activity, rollUp, cleanTitle, titleGlyph,
-  OUT_QUIET_MS, STALE_MS, LONG_CMD_MS,
+  OUT_QUIET_MS, STALE_MS, LONG_CMD_MS, CMD_RISE_MS,
 } from "./activity_state.js"
 
 // A pane with suzuri's shell hooks, at its prompt.
@@ -33,11 +33,35 @@ test("the prompt is idle and a running command is busy", () => {
   const s = atPrompt()
   assert.equal(activity(s, 10), "idle")
   run(s, 100)
-  assert.equal(activity(s, 200), "busy")
+  assert.equal(activity(s, 100 + CMD_RISE_MS), "busy")
   // A quiet build is still busy: no output guess while the shell knows.
   assert.equal(activity(s, 60000), "busy")
   prompt(s, 61000)
   assert.equal(activity(s, 61001), "idle")
+})
+
+test("a quick command never flashes busy", () => {
+  const s = atPrompt()
+  run(s, 1000)
+  assert.equal(activity(s, 1000), "idle")
+  assert.equal(activity(s, 1040), "idle")
+  prompt(s, 1050) // ls: done in 50 ms
+  assert.equal(activity(s, 1050 + CMD_RISE_MS), "idle")
+})
+
+test("a foreground probe lagging behind the prompt isn't busy", () => {
+  const s = atPrompt()
+  run(s, 0)
+  assert.equal(activity(s, 5000), "busy")
+  // The prompt is back, but the probe still sees the child for a moment.
+  step(s, { t: "shell", integrated: true, program: true, prompts: 2 }, 5000)
+  assert.equal(activity(s, 5000), "idle")
+  assert.equal(activity(s, 5000 + CMD_RISE_MS), "idle")
+  step(s, { t: "shell", integrated: true, program: false, prompts: 2 }, 5200)
+  assert.equal(activity(s, 5200), "idle")
+  // The next command still rises as usual.
+  run(s, 6000)
+  assert.equal(activity(s, 6000 + CMD_RISE_MS), "busy")
 })
 
 test("typing at the prompt never spins (Go spun on every echo)", () => {
@@ -144,7 +168,7 @@ test("the agent's report wins and clears at the next prompt", () => {
 
 test("a bell you didn't see is blocked until you look", () => {
   const s = atPrompt()
-  run(s, 0)
+  run(s, -CMD_RISE_MS)
   step(s, { t: "bell" }, 10, { looking: true })
   assert.equal(activity(s, 20), "busy")
   step(s, { t: "notice" }, 30, { looking: false })

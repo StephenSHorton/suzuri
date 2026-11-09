@@ -12,10 +12,11 @@
 //!
 //! A pane shell with its own integration instead (fish, starship, VS Code's,
 //! or `ssh host` as the pane's command) sends FinalTerm OSC 133 or VS Code
-//! OSC 633 marks: C (command running), E (its command line), D (done, with the exit). Those
-//! give the same start and done events, but never a prompt (Cwd): the bar
-//! needs suzuri's blank prompt, so it stays off for them. Once suzuri's own
-//! marks are seen, 133/633 are dropped silently so nothing counts twice.
+//! OSC 633 marks: A/B (prompt), C (command running), E (its command line),
+//! D (done, with the exit). Those give [`ShellEvent::Foreign`] and the same
+//! done event, but never a prompt (Cwd): the bar needs suzuri's blank prompt,
+//! so it stays off for them. Once suzuri's own marks are seen, 133/633 are
+//! dropped silently so nothing counts twice.
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,10 @@ pub enum ShellEvent {
     Start,
     /// A command finished, with its exit status and command line when known.
     Done { exit: Option<i32>, command: String },
+    /// A shell with its own marks (133/633) started a command (true) or
+    /// showed its prompt (false). For the UI only: a C with no D (`exit` in
+    /// a remote fish, a dropped ssh) must not hold the pane busy.
+    Foreign(bool),
 }
 
 /// Removes suzuri's private OSCs (7878, 7879) from a byte stream. Other
@@ -131,7 +136,8 @@ impl OscFilter {
         }
         let mut parts = mark.splitn(3, ';');
         match parts.next()? {
-            "C" => Some(ShellEvent::Start),
+            "A" | "B" => Some(ShellEvent::Foreign(false)),
+            "C" => Some(ShellEvent::Foreign(true)),
             "E" => {
                 self.command = unescape_633(parts.next().unwrap_or_default());
                 None
@@ -414,7 +420,12 @@ mod tests {
         assert_eq!(out, b"$ hi\n\x1b]1337;SetMark\x07");
         assert_eq!(
             ev,
-            vec![ShellEvent::Start, ShellEvent::Done { exit: Some(1), command: "ls; echo a\\b".into() }]
+            vec![
+                ShellEvent::Foreign(false),
+                ShellEvent::Foreign(false),
+                ShellEvent::Foreign(true),
+                ShellEvent::Done { exit: Some(1), command: "ls; echo a\\b".into() }
+            ]
         );
         // A D with no command (the first prompt) has no exit.
         let (_, ev) = run(&[b"\x1b]133;D\x07"]);
