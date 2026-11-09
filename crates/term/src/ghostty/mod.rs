@@ -188,6 +188,18 @@ unsafe extern "C" fn on_render_hold(_t: GhosttyTerminal, ud: *mut c_void, held: 
     s.held_since = if held { Some(Instant::now()) } else { None };
 }
 
+// The callbacks go to ghostty as `*const c_void`, so check their signatures
+// against the headers' typedefs here: a changed callback fails to compile.
+const _: () = {
+    let _: GhosttyTerminalWritePtyFn = Some(on_write_pty);
+    let _: GhosttyTerminalBellFn = Some(on_bell);
+    let _: GhosttyTerminalTitleChangedFn = Some(on_title);
+    let _: GhosttyTerminalClipboardWriteFn = Some(on_clipboard);
+    let _: GhosttyTerminalSizeFn = Some(on_size);
+    let _: GhosttyTerminalDeviceAttributesFn = Some(on_device_attributes);
+    let _: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
+};
+
 unsafe fn gstr(s: &GhosttyString) -> &[u8] {
     if s.ptr.is_null() || s.len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(s.ptr, s.len) } }
 }
@@ -538,7 +550,7 @@ impl Ghostty {
             let cp = if n > 0 {
                 let mut buf = [0u32; frame::CLUSTER_MAX_CPS];
                 let mut big: Vec<u32>;
-                let mut fill = |ptr: *mut u32, cap: usize| {
+                let fill = |ptr: *mut u32, cap: usize| {
                     let mut b = GhosttyCodepointBuffer { ptr, cap, len: 0 };
                     get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, &mut b as *mut _ as *mut c_void);
                     b.len.min(cap)
