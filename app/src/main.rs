@@ -20,8 +20,6 @@ mod complete;
 mod paste;
 mod config;
 mod sidecar;
-mod transfer;
-mod transfer_engine;
 mod window;
 mod window_state;
 mod notices;
@@ -859,7 +857,6 @@ fn main() {
         .manage(panes)
         .manage(update::Pending::default())
         .manage(caffeine::Caffeine::new())
-        .manage(Arc::new(transfer::Transfers::default()))
         .invoke_handler(tauri::generate_handler![
             pane_open,
             pane_write,
@@ -898,10 +895,6 @@ fn main() {
             bench_report,
             ui_log,
             paste::paste_image_save,
-            transfer::transfer_send,
-            transfer::transfer_receive,
-            transfer::transfer_cancel,
-            transfer::transfer_info,
             bridge::aicontrol_reply,
             complete::complete_list,
             bridge::pane_text,
@@ -918,14 +911,11 @@ fn main() {
         ])
         .build(ctx)
         .expect("build suzuri")
-        .run(move |app, ev| {
+        .run(move |_app, ev| {
             if let tauri::RunEvent::Exit = ev {
                 window_state::flush();
                 if let Some(b) = &bridge_exit {
                     b.stop();
-                }
-                if let Some(tr) = app.try_state::<Arc<transfer::Transfers>>() {
-                    transfer::stop_all(&tr);
                 }
             }
         });

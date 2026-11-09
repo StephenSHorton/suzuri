@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Hardened Runtime entitlements for Developer ID + notarization.
-  Terminal host needs network (PTY tools, transfer, updates) and some
+  Terminal host needs network (PTY tools, updates) and some
   flexibility for dynamic code paths. Copied from Go suzuri so child tools
   get the same permissions.
   Audio input: child tools (e.g. Grok /voice) open CoreAudio; TCC attributes

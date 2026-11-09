@@ -3,7 +3,7 @@
 // these are the TermHost filters app.js gives it, which take what is
 // suzuri's first, in the order the one shared textarea used to:
 //   the view's copy/paste chords, Escape on a large image, app shortcuts,
-//   the interim panel shortcuts (extras.js), then the input bar at a prompt;
+//   then the input bar at a prompt;
 //   anything left is the view's, which encodes it and calls host.write.
 // No Tauri here (tests import it): app.js passes what it needs in `env`.
 //
@@ -13,7 +13,7 @@ import { clipShortcut, encodeKey } from "./view/index.js"
 import { M_ALT_SCREEN } from "./view/frame.js"
 
 // env: {isMac, shortcut(e, isMac) -> {id, arg} | null, run(id, arg),
-//   extraShortcut(e, isMac) -> bool, closeLarge() -> bool,
+//   closeLarge() -> bool,
 //   now() -> ms (performance.now), copyOrInterrupt?()}
 export function keyFilter(pane, env) {
   return (e) => {
@@ -31,7 +31,6 @@ export function keyFilter(pane, env) {
     if (e.key === "Escape" && env.closeLarge()) { e.preventDefault(); return true }
     const sc = env.shortcut(e, env.isMac)
     if (sc) { e.preventDefault(); env.run(sc.id, sc.arg); return true }
-    if (env.extraShortcut(e, env.isMac)) { e.preventDefault(); return true }
     // At the prompt the bar has every other key, taken or not.
     if (pane.barActive()) {
       if (pane.barKeydown(e)) e.preventDefault()
@@ -59,7 +58,7 @@ export function keyFilter(pane, env) {
 // page's are nobody's, as before.
 // env: {isMac, page: [targets that count as no focus], blocked(), pane() ->
 //   focused PaneView | null, hasSelection(), clip(kind), closeLarge(),
-//   shortcut(e, isMac), run(id, arg), extraShortcut(e, isMac)}
+//   shortcut(e, isMac), run(id, arg)}
 export function pageKeys(env) {
   return (e) => {
     if (e.isComposing || !env.page.includes(e.target) || env.blocked()) return
@@ -73,8 +72,7 @@ export function pageKeys(env) {
     if (clip) { e.preventDefault(); env.clip(clip); return }
     if (e.key === "Escape" && env.closeLarge()) { e.preventDefault(); return }
     const sc = env.shortcut(e, env.isMac)
-    if (sc) { e.preventDefault(); env.run(sc.id, sc.arg); return }
-    if (env.extraShortcut(e, env.isMac)) e.preventDefault()
+    if (sc) { e.preventDefault(); env.run(sc.id, sc.arg) }
   }
 }
 

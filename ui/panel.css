@@ -1,4 +1,4 @@
-/* #286 panels: transfer. Uses style.css's tokens. */
+/* Panels (ui/panel.js). Uses style.css's tokens. */
 .rsz-panel {
   position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
   width: min(520px, calc(100vw - 32px)); z-index: 50;
@@ -20,11 +20,9 @@
 .rsz-panel input:focus, .rsz-panel textarea:focus { outline: none; border-color: var(--primary); }
 .rsz-row { display: flex; gap: 8px; align-items: center; }
 .rsz-row.end { justify-content: flex-end; }
-.rsz-ticket { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
 .rsz-status { color: var(--soft); min-height: 1em; }
 .rsz-status.err { color: #e08080; }
 .rsz-hint { color: var(--dim); font-size: 12px; }
-.rsz-panel progress { width: 100%; accent-color: var(--primary); }
 .ws-grid { display: flex; gap: 12px; flex: 1; min-height: 0; }
 .ws-side { width: 180px; display: flex; flex-direction: column; gap: 12px; overflow: auto; }
 .ws-channels { display: flex; flex-direction: column; gap: 2px; }

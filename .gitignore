@@ -5,4 +5,3 @@
 packaging/windows/conpty/
 dist/
 /target-main
-packaging/bin/

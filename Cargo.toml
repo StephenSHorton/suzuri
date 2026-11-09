@@ -1,9 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["crates/term", "app", "tools/fakeagent"]
-# The transfer engine (hato) is its own workspace with its own lock; the
-# release scripts build it (scripts/release/transfer.*).
-exclude = ["libs/transfer"]
 
 [workspace.package]
 version = "0.10.0"
