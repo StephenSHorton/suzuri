@@ -9,6 +9,13 @@
 //!
 //! [`OscFilter`] takes those sequences out of the PTY stream before the VT
 //! engine sees it, and turns them into [`ShellEvent`]s.
+//!
+//! Shells with their own integration (fish, starship, VS Code's, a remote
+//! host over ssh) send FinalTerm OSC 133 or VS Code OSC 633 marks instead:
+//! C (command running), E (its command line), D (done, with the exit). Those
+//! give the same start and done events, but never a prompt (Cwd): the bar
+//! needs suzuri's blank prompt, so it stays off for them. Once suzuri's own
+//! marks are seen, 133/633 are dropped silently so nothing counts twice.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +37,10 @@ pub enum ShellEvent {
 pub struct OscFilter {
     /// Bytes of a possible suzuri OSC not yet resolved: starts with ESC.
     pending: Vec<u8>,
+    /// suzuri's own marks (7878/7879) have been seen.
+    own: bool,
+    /// The command line from a 633;E, for the next D.
+    command: String,
 }
 
 /// Longest OSC payload held back before it is given up on and passed through.
@@ -37,7 +48,7 @@ const MAX_OSC: usize = 64 * 1024;
 
 /// Only these forms are ours. `7879;image=` (inline images, #288) and any
 /// other 7879 kind pass through to the next filter.
-const PREFIXES: [&[u8]; 3] = [b"\x1b]7878;cwd=", b"\x1b]7879;start", b"\x1b]7879;done"];
+const PREFIXES: [&[u8]; 5] = [b"\x1b]7878;cwd=", b"\x1b]7879;start", b"\x1b]7879;done", b"\x1b]133;", b"\x1b]633;"];
 
 impl OscFilter {
     /// Filter `input`, appending the bytes for the VT engine to `out` and
@@ -85,7 +96,7 @@ impl OscFilter {
             });
             match end {
                 Some((j, term)) => {
-                    if let Some(ev) = parse(&body[..j]) {
+                    if let Some(ev) = self.parse(&body[..j]) {
                         events.push(ev);
                     }
                     i += 2 + j + term;
@@ -108,8 +119,61 @@ fn memchr_esc(b: &[u8]) -> Option<usize> {
     b.iter().position(|&c| c == 0x1b)
 }
 
-fn parse(payload: &[u8]) -> Option<ShellEvent> {
-    let s = String::from_utf8_lossy(payload);
+impl OscFilter {
+    fn parse(&mut self, payload: &[u8]) -> Option<ShellEvent> {
+        let s = String::from_utf8_lossy(payload);
+        let Some(mark) = s.strip_prefix("133;").or_else(|| s.strip_prefix("633;")) else {
+            self.own = true;
+            return parse(&s);
+        };
+        if self.own {
+            return None;
+        }
+        let mut parts = mark.splitn(3, ';');
+        match parts.next()? {
+            "C" => Some(ShellEvent::Start),
+            "E" => {
+                self.command = unescape_633(parts.next().unwrap_or_default());
+                None
+            }
+            "D" => {
+                let exit = parts.next().and_then(|e| e.trim().parse().ok());
+                Some(ShellEvent::Done { exit, command: std::mem::take(&mut self.command) })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// 633;E escapes `\` as `\\` and bytes like `;` as `\x3b`.
+fn unescape_633(s: &str) -> String {
+    let mut out = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && b.get(i + 1) == Some(&b'\\') {
+            out.push(b'\\');
+            i += 2;
+        } else if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
+            match s.get(i + 2..i + 4).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                Some(v) => {
+                    out.push(v);
+                    i += 4;
+                }
+                None => {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn parse(s: &str) -> Option<ShellEvent> {
     if let Some(path) = s.strip_prefix("7878;cwd=") {
         return Some(ShellEvent::Cwd(path.to_string()));
     }
@@ -337,6 +401,30 @@ mod tests {
     fn other_7879_kinds_pass_through() {
         let (out, ev) = run(&[b"a\x1b]7879;image=/tmp/a.png\x07b", b"\x1b]7879;sta", b"rt\x07"]);
         assert_eq!(out, b"a\x1b]7879;image=/tmp/a.png\x07b");
+        assert_eq!(ev, vec![ShellEvent::Start]);
+    }
+
+    #[test]
+    fn foreign_marks_start_and_finish_commands() {
+        // fish / VS Code: A, B, E, C, output, D;exit. No prompt (Cwd) event.
+        let (out, ev) = run(&[
+            b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b]633;E;ls\\x3b echo a\\\\b;nonce\x07\x1b]133;C\x07hi\n",
+            b"\x1b]133;D;1\x07\x1b]1337;SetMark\x07",
+        ]);
+        assert_eq!(out, b"$ hi\n\x1b]1337;SetMark\x07");
+        assert_eq!(
+            ev,
+            vec![ShellEvent::Start, ShellEvent::Done { exit: Some(1), command: "ls; echo a\\b".into() }]
+        );
+        // A D with no command (the first prompt) has no exit.
+        let (_, ev) = run(&[b"\x1b]133;D\x07"]);
+        assert_eq!(ev, vec![ShellEvent::Done { exit: None, command: String::new() }]);
+    }
+
+    #[test]
+    fn foreign_marks_are_dropped_once_ours_are_seen() {
+        let (out, ev) = run(&[b"\x1b]7879;start\x07\x1b]133;C\x07x\x1b]133;D;0\x07"]);
+        assert_eq!(out, b"x");
         assert_eq!(ev, vec![ShellEvent::Start]);
     }
 

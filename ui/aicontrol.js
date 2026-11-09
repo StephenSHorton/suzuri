@@ -19,6 +19,7 @@ async function paneInfo(p, lines = 20) {
     rows: p.size?.[1] ?? 0,
     focused: p === host().focused(),
     agent_state: p.agentState || "",
+    activity: window.rszActivity?.of(p) || "",
     live: !p.exited,
     tail,
   }
@@ -83,9 +84,13 @@ const tools = {
   report_agent: async (a) => {
     const p = byPaneId(a.pane_id)
     if (!p) return [404, { error: `no pane ${a.pane_id}` }]
-    const state = String(a.state || "")
-    p.agentState = ["idle", "working", "blocked", "done"].includes(state) ? state : ""
+    const state = String(a.state || "").toLowerCase().trim()
+    // clear (or unknown) hands the pane back to the automatic guess.
+    const ok = ["idle", "working", "blocked", "done"].includes(state)
+    if (!ok && !["", "clear", "unknown"].includes(state)) return [400, { error: `state must be idle, working, blocked, done or clear, not ${a.state}` }]
+    p.agentState = ok ? state : ""
     if (p.el) p.el.dataset.agent = p.agentState
+    window.rszActivity?.report(p, p.agentState)
     return [200, { ok: true, pane_id: p.id, state: p.agentState || "clear" }]
   },
 }
