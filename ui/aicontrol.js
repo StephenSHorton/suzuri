@@ -13,7 +13,7 @@ async function paneInfo(p, lines = 20) {
   const tail = (await invoke("pane_text", { id: p.id, lines })) ?? ""
   return {
     id: p.id,
-    title: p.titleOverride || p.title,
+    title: p.titleOverride || p.title || "shell",
     kind: "shell",
     cols: p.size?.[0] ?? 0,
     rows: p.size?.[1] ?? 0,
@@ -44,7 +44,7 @@ export async function layout() {
 }
 
 function setTitle(p) {
-  const t = p.titleOverride || p.title
+  const t = p.titleOverride || p.title || "shell"
   const el = p.head?.querySelector(".t")
   if (el) el.textContent = t
 }
@@ -60,6 +60,7 @@ const tools = {
     if (!from) return [404, { error: `no pane ${a.pane_id}` }]
     const axis = a.axis === "down" ? "v" : "h"
     const p = await host().split(axis, from)
+    if (!p) return [400, { error: "max panes" }]
     return [200, { ok: true, pane_id: p.id }]
   },
   focus: async (a) => {
