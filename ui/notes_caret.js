@@ -9,6 +9,16 @@ const COPY = [
   "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
 ]
 
+// The mirror's text split around the caret: before, the mark's character,
+// after. The rest of the value stays in so a word wraps in the mirror as it
+// does in the field. At the end or a newline the mark is a space.
+export function mirrorParts(v, pos) {
+  const ch = v.charAt(pos)
+  if (!ch) return [v.slice(0, pos), " ", ""]
+  if (ch === "\n") return [v.slice(0, pos), " ", v.slice(pos)]
+  return [v.slice(0, pos), ch, v.slice(pos + 1)]
+}
+
 // Where the caret at pos sits in field, from the field's padding edge and
 // before scrolling: {x, y, w, h}. w is the width of the character under it.
 export function caretAt(field, pos) {
@@ -22,19 +32,18 @@ export function caretAt(field, pos) {
     boxSizing: "content-box", whiteSpace: area ? "pre-wrap" : "pre", overflowWrap: area ? "break-word" : "normal",
     width: area ? `${field.clientWidth - padX}px` : "auto",
   })
-  const v = field.value
-  const ch = v.charAt(pos)
+  const [before, at, after] = mirrorParts(field.value, pos)
   const mark = document.createElement("span")
-  mark.style.display = "inline-block"
-  mark.textContent = !ch || ch === "\n" ? " " : ch
-  m.append(v.slice(0, pos), mark)
+  mark.textContent = at
+  m.append(before, mark, after)
   document.body.append(m)
   const r = { x: mark.offsetLeft, y: mark.offsetTop, w: mark.offsetWidth, h: mark.offsetHeight }
   m.remove()
   return r
 }
 
-// True when the textarea's caret is on its first wrapped row.
+// True when the textarea's caret is on its first wrapped row. A word that
+// wraps puts its start on row 2, which the mirror sees as it keeps the rest.
 export function onFirstRow(field) {
   return caretAt(field, field.selectionStart).y === caretAt(field, 0).y
 }
