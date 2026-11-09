@@ -168,11 +168,15 @@ function paneHost(p) {
     paste: (text) => (text == null ? paste(p) : pasteText(p, text, invoke)),
     // p.size is what the core has: pane_open's size, then each change.
     // Before pane_open answers the view's fit waits in p.fitSize.
+    // While a divider is dragged (ui/sash.js) the gate spaces these out.
     resize: (cols, rows) => {
       if (!p.id) return void (p.fitSize = [cols, rows])
-      if (cols === p.size[0] && rows === p.size[1]) return
-      p.size = [cols, rows]
-      invoke("pane_resize", { id: p.id, cols, rows })
+      const send = () => {
+        if (cols === p.size[0] && rows === p.size[1]) return
+        p.size = [cols, rows]
+        invoke("pane_resize", { id: p.id, cols, rows })
+      }
+      window.rszResizeGate ? window.rszResizeGate(p, send) : send()
     },
     // Inline images are sized in cells on the Rust side (card #288). Before
     // pane_open answers it waits in p.cell, and open() sends it.
