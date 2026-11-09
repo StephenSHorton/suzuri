@@ -64,6 +64,23 @@ struct PanelState {
     anchor: usize,
     /// A sound to play now: success, fail or published.
     sound: Option<&'static str>,
+    /// The theme's chrome colours (Go drawCard: panel, primary, text, soft).
+    colors: Colors,
+}
+
+#[derive(Serialize, Clone)]
+struct Colors {
+    panel: String,
+    primary: String,
+    text: String,
+    soft: String,
+}
+
+impl Colors {
+    fn now() -> Self {
+        let c = &rsz_term::palette::active().theme.chrome;
+        Colors { panel: crate::hex(c.panel), primary: crate::hex(c.primary), text: crate::hex(c.text), soft: crate::hex(c.soft) }
+    }
 }
 
 /// Something the app has to do after a notice is clicked or closed.
@@ -342,16 +359,17 @@ impl Notices {
                 .collect();
             (cards, g.anchor)
         };
+        let colors = Colors::now();
         let app = self.app.clone();
         let _ = self.app.run_on_main_thread(move || {
             let Some(panel) = panel(&app) else { return };
             if cards.is_empty() {
-                let _ = panel.emit_to(PANEL, "notices", PanelState { cards, anchor, sound });
+                let _ = panel.emit_to(PANEL, "notices", PanelState { cards, anchor, sound, colors });
                 let _ = panel.hide();
                 return;
             }
             place(&app, &panel, cards.len(), anchor);
-            let _ = panel.emit_to(PANEL, "notices", PanelState { cards, anchor, sound });
+            let _ = panel.emit_to(PANEL, "notices", PanelState { cards, anchor, sound, colors });
             if !panel.is_visible().unwrap_or(false) {
                 show_inactive(&panel);
             }
