@@ -152,6 +152,7 @@ export class Settings {
       </div>`).join("")
     const session = `
       <label><span>New tabs use</span><select data-k="active_profile">${opt(names, null, c.active_profile)}</select></label>
+      <label><span>Notice</span><select data-k="notice_position">${opt(m.notice_positions || [], m.notice_labels, c.notice_position)}</select></label>
       <div class="profiles"><div class="phead">Profiles <small>shell and folder for "New tab: …" in the palette</small></div>${rows}
         <button class="add">Add profile</button></div>`
     this.el.innerHTML = `

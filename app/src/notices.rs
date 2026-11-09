@@ -25,9 +25,12 @@ const GAP: f64 = 8.0;
 const MARGIN: f64 = 16.0;
 const SCREEN_INSET: f64 = 16.0;
 
-/// Where the panel sits (Go config.NoticePosition).
-pub const ANCHORS: [&str; 9] =
-    ["bottom-left", "bottom-center", "bottom-right", "center-left", "center", "center-right", "top-left", "top-center", "top-right"];
+/// Where the panel sits: the settings' notice_position (Go
+/// config.NoticePositionIDs), as an index.
+fn anchor_of(cfg: &serde_json::Value) -> usize {
+    let id = cfg["notice_position"].as_str().unwrap_or("");
+    crate::config::NOTICE_POSITIONS.iter().position(|a| *a == id).unwrap_or(0)
+}
 
 struct Live {
     key: u64,
@@ -91,7 +94,7 @@ pub struct Notices {
 
 impl Notices {
     pub fn new(app: AppHandle) -> Self {
-        let anchor = go_anchor().and_then(|a| ANCHORS.iter().position(|x| *x == a)).unwrap_or(0);
+        let anchor = anchor_of(&crate::config::load());
         let n = Self { inner: Arc::new(Mutex::new(Inner { anchor, ..Default::default() })), app };
         let tick = n.clone();
         std::thread::Builder::new()
@@ -105,7 +108,13 @@ impl Notices {
     }
 
     /// Post a notice (Go postDeskNote). `pane` is the pane that asked, if any.
-    pub fn post(&self, pane: Option<u32>, mut n: Notice) -> Vec<Effect> {
+    pub fn post(&self, pane: Option<u32>, n: Notice) -> Vec<Effect> {
+        self.post_as(pane, n, true)
+    }
+
+    /// `history`: false leaves the card out of the history and the unread
+    /// count (Go's placement preview).
+    fn post_as(&self, pane: Option<u32>, mut n: Notice, history: bool) -> Vec<Effect> {
         let (focused, visible) = self.window_state();
         match n.occasion.as_str() {
             "unfocused" if focused => return Vec::new(),
@@ -129,7 +138,9 @@ impl Notices {
         let sound = sound_for(&n.sound, n.urgency);
         {
             let mut g = self.inner.lock();
-            remember(&mut g, pane, &n);
+            if history {
+                remember(&mut g, pane, &n);
+            }
             if !n.id.is_empty() {
                 if let Some(l) = g.live.iter_mut().find(|l| l.note.id == n.id && l.pane == pane) {
                     l.note = n;
@@ -220,8 +231,27 @@ impl Notices {
     }
 
     pub fn set_anchor(&self, anchor: &str) {
-        if let Some(i) = ANCHORS.iter().position(|a| *a == anchor) {
+        if let Some(i) = crate::config::NOTICE_POSITIONS.iter().position(|a| *a == anchor) {
             self.inner.lock().anchor = i;
+            self.present(None);
+        }
+    }
+
+    /// Saved settings (config_set): move the cards to the notice position,
+    /// with a silent sample card when it changed (Go setNoticeAnchor with
+    /// preview), and repaint cards already up in the theme's colours.
+    pub fn apply_config(&self, cfg: &serde_json::Value) {
+        let anchor = anchor_of(cfg);
+        let (moved, live) = {
+            let mut g = self.inner.lock();
+            let moved = g.anchor != anchor;
+            g.anchor = anchor;
+            (moved, !g.live.is_empty())
+        };
+        if moved {
+            let label = crate::config::NOTICE_POSITION_LABELS[anchor];
+            let _ = self.post_as(None, sample(label), false);
+        } else if live {
             self.present(None);
         }
     }
@@ -331,18 +361,21 @@ impl Notices {
     }
 }
 
-/// The corner Go suzuri's config picks (notice_position), until suzuri
-/// has settings of its own (#283 calls notice_anchor then).
-fn go_anchor() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    let dir = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Application Support"));
-    #[cfg(windows)]
-    let dir = std::env::var_os("APPDATA").map(std::path::PathBuf::from);
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let dir = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from);
-    let text = std::fs::read_to_string(dir?.join("suzuri").join("config.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v.get("notice_position")?.as_str().map(str::to_string)
+/// Go previewNoticeAnchor: a silent card at the new spot.
+fn sample(label: &str) -> Notice {
+    Notice {
+        id: "host-notice-place".into(),
+        title: "Notifications".into(),
+        body: label.into(),
+        sound: "silent".into(),
+        icon: String::new(),
+        urgency: 1,
+        occasion: "always".into(),
+        expire_ms: Some(2400),
+        report: false,
+        focus: false,
+        close_event: false,
+    }
 }
 
 fn remember(g: &mut Inner, pane: Option<u32>, n: &Notice) {
