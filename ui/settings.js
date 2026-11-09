@@ -19,6 +19,7 @@ const LABELS = {
   },
   cursors: { block: "Block", underline: "Underline", bar: "Bar" },
   ansi_maps: { none: "Off (stock ANSI colours)", soft: "Soft (blend into the theme)", full: "Full (theme palette)" },
+  anim: { on: "On", off: "Off (spinners rest while another app is in front)" },
 }
 
 export function announce(cfg) {
@@ -158,6 +159,7 @@ export class Settings {
     const session = `
       <label><span>New tabs use</span><select data-k="active_profile">${opt(names, null, c.active_profile)}</select></label>
       <label><span>Notice</span><select data-k="notice_position">${opt(m.notice_positions || [], m.notice_labels, c.notice_position)}</select></label>
+      <label><span>Animate unfocused</span><select data-k="animate_unfocused" data-bool>${opt(["on", "off"], LABELS.anim, c.animate_unfocused === false ? "off" : "on")}</select></label>
       <div class="profiles"><div class="phead">Profiles <small>shell and folder for "New tab: …" in the palette</small></div>${rows}
         <button class="add">Add profile</button></div>`
     this.el.innerHTML = `
@@ -180,7 +182,7 @@ export class Settings {
     this.rows().forEach((r, i) => r.addEventListener("mousedown", () => { this.row = i; this.rows().forEach((x, j) => x.classList.toggle("cur", j === i)) }))
     this.el.querySelector(".cancel").onclick = () => this.done(false)
     this.el.querySelector(".ok").onclick = () => this.done(true)
-    for (const s of q("select[data-k]")) s.onchange = () => this.set({ [s.dataset.k]: s.value })
+    for (const s of q("select[data-k]")) s.onchange = () => this.set({ [s.dataset.k]: "bool" in s.dataset ? s.value === "on" : s.value })
     const range = this.el.querySelector('input[type=range]')
     if (range) {
       range.oninput = () => { range.nextElementSibling.textContent = `${range.value}px` }

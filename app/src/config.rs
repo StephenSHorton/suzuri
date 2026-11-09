@@ -170,6 +170,10 @@ pub fn normalize(v: Value) -> Value {
     };
     m.insert("shell_ansi_map".into(), ansi.into());
 
+    // Go's Bg anim: keep animating while another app has focus.
+    let anim = m.get("animate_unfocused").and_then(Value::as_bool).unwrap_or(true);
+    m.insert("animate_unfocused".into(), anim.into());
+
     let pos = s(&m, "notice_position")
         .filter(|p| NOTICE_POSITIONS.contains(&p.as_str()))
         .unwrap_or_else(|| NOTICE_POSITIONS[0].into());
@@ -431,6 +435,13 @@ mod tests {
         assert_eq!(normalize(json!({}))["notice_position"], "bottom-left");
         assert_eq!(normalize(json!({"notice_position": " Top-Right "}))["notice_position"], "top-right");
         assert_eq!(normalize(json!({"notice_position": "upstairs"}))["notice_position"], "bottom-left");
+    }
+
+    #[test]
+    fn animate_unfocused_defaults_on() {
+        assert_eq!(normalize(json!({}))["animate_unfocused"], true);
+        assert_eq!(normalize(json!({"animate_unfocused": false}))["animate_unfocused"], false);
+        assert_eq!(normalize(json!({"animate_unfocused": "nope"}))["animate_unfocused"], true);
     }
 
     #[test]
