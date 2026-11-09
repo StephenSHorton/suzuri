@@ -429,6 +429,65 @@ mod tests {
         assert_eq!(copied, if GHOSTTY { "a       b" } else { "a\tb" }, "copy");
     }
 
+    /// A frame's run codepoints for row `y` (a full frame).
+    fn row_cps(out: &[u8], y: u16) -> Vec<u32> {
+        let h = frame::decode_header(out).unwrap();
+        let u = |i: usize| u16::from_le_bytes([out[i], out[i + 1]]) as usize;
+        let mut p = frame::HEADER_LEN;
+        let mut cps = vec![0x20; h.cols as usize];
+        for _ in 0..h.nrows {
+            let (ry, nruns) = (u(p), u(p + 2));
+            p += 8;
+            for _ in 0..nruns {
+                let (col, n) = (u(p), u(p + 2));
+                for i in 0..n {
+                    let c = u32::from_le_bytes(out[p + 16 + 4 * i..p + 20 + 4 * i].try_into().unwrap());
+                    if ry == y as usize {
+                        cps[col + i] = c;
+                    }
+                }
+                p += 16 + 4 * n;
+            }
+        }
+        cps
+    }
+
+    #[test]
+    fn grapheme_clusters_one_cell() {
+        let s = "👍🏽|👨‍👩‍👧|🇯🇵|a\u{301}|";
+        let mut e = fed(20, 2, 0, s.as_bytes());
+        assert_eq!(e.cursor(), (11, 0));
+        let mut out = Vec::new();
+        e.snapshot(&mut out, 1, true);
+        let cl = frame::decode_clusters(&out);
+        let want: Vec<(u16, u16, u8, Vec<u32>)> = vec![
+            (0, 0, 2, "👍🏽".chars().map(|c| c as u32).collect()),
+            (0, 3, 2, "👨‍👩‍👧".chars().map(|c| c as u32).collect()),
+            (0, 6, 2, "🇯🇵".chars().map(|c| c as u32).collect()),
+            (0, 9, 1, vec!['a' as u32, 0x301]),
+        ];
+        assert_eq!(cl, want);
+        let cps = row_cps(&out, 0);
+        assert_eq!((cps[0], cps[1], cps[3], cps[4], cps[6], cps[7], cps[9]), (0x1F44D, 0, 0x1F468, 0, 0x1F1EF, 0, 'a' as u32));
+        // VS16 makes ❤ an emoji two wide; alone it is one, with no entry.
+        let mut e = fed(20, 2, 0, "❤\u{FE0F}".as_bytes());
+        assert_eq!(e.cursor(), (2, 0));
+        let mut e2 = fed(20, 2, 0, "❤".as_bytes());
+        assert_eq!(e2.cursor(), (1, 0));
+        e.snapshot(&mut out, 1, true);
+        assert_eq!(frame::decode_clusters(&out), vec![(0, 0, 2, vec![0x2764, 0xFE0F])]);
+        e2.snapshot(&mut out, 1, true);
+        assert!(frame::decode_clusters(&out).is_empty());
+    }
+
+    #[test]
+    fn ascii_frame_has_no_cluster_table() {
+        let mut e = fed(20, 2, 0, "ab 漢 😀".as_bytes());
+        let mut out = Vec::new();
+        e.snapshot(&mut out, 1, true);
+        assert_eq!(&out[30..32], &[0, 0]);
+    }
+
     #[test]
     fn grapheme_mode_survives_ris() {
         let mut e = fed(20, 2, 0, b"");

@@ -6,19 +6,30 @@
 //!   u8 'F', u8 flags (1 = full), u16 cols, u16 rows, u16 cursor_x,
 //!   u16 cursor_y, u8 cursor_shape (0 hidden, 1 block, 2 underline, 3 beam,
 //!   4 hollow), u8 version (FORMAT_VERSION), u32 modes, u32 display_offset, u32 history, u32 seq,
-//!   u16 nrows, u16 0
+//!   u16 nrows, u16 nclusters
 //! row: u16 y, u16 nruns, u16 x0, u16 x1, then runs. Columns [x0, x1) are
 //!      the row's dirty range: the UI clears just those and the runs cover
 //!      only them (a full row is 0..cols).
 //! run: u16 col, u16 n, u32 fg, u32 bg, u16 attrs, u16 0, then n × u32
 //!      codepoints (0 = right half of a wide glyph)
+//!
+//! cluster table: only when nclusters > 0, right after the last row. One
+//! entry per cell whose grapheme has 2+ codepoints (👍🏽, 👨‍👩‍👧, 🇯🇵, e +
+//! U+0301), in (y, col) order: u16 y, u16 col, u8 w (1 or 2 columns), u8 n
+//! (2..=64), then n × u32 codepoints, base first. Unaligned. The cell's run
+//! still carries the base codepoint, so a decoder that ignores the table
+//! draws the base glyph. To find it, walk past the rows.
 
 pub const MAGIC: u8 = b'F';
 /// The wire format's version, header byte 11. Bump it on any change to the
 /// layout below, together with FORMAT_VERSION in ui/view: a decoder in
 /// another app refuses a version it doesn't know instead of drawing garbage.
+/// An optional section after the rows, announced in header bytes that were
+/// reserved (written 0), is additive and needs no bump: the cluster table.
 pub const FORMAT_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 32;
+/// The most codepoints a cluster entry carries (ghostty's grapheme limit).
+pub const CLUSTER_MAX_CPS: usize = 64;
 /// bg value meaning "the theme background": the UI leaves it unpainted.
 pub const DEFAULT_BG: u32 = 0x0100_0000;
 
@@ -146,6 +157,56 @@ pub fn encode_row(out: &mut Vec<u8>, y: u16, x0: u16, cells: &[CellOut]) {
     out[nruns_at..nruns_at + 2].copy_from_slice(&nruns.to_le_bytes());
 }
 
+/// Add a cluster entry to `table` (cut to CLUSTER_MAX_CPS codepoints).
+pub fn encode_cluster(table: &mut Vec<u8>, y: u16, col: u16, w: u8, cps: &[u32]) {
+    let cps = &cps[..cps.len().min(CLUSTER_MAX_CPS)];
+    table.extend_from_slice(&y.to_le_bytes());
+    table.extend_from_slice(&col.to_le_bytes());
+    table.push(w);
+    table.push(cps.len() as u8);
+    for cp in cps {
+        table.extend_from_slice(&cp.to_le_bytes());
+    }
+}
+
+/// End the frame that starts at `out[frame_start]`: with entries, write
+/// their count into the header and append the table. With none the frame
+/// is unchanged.
+pub fn finish_clusters(out: &mut Vec<u8>, frame_start: usize, count: u16, table: &[u8]) {
+    if count == 0 {
+        return;
+    }
+    out[frame_start + 30..frame_start + 32].copy_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(table);
+}
+
+/// A frame's cluster table as (y, col, w, codepoints), for tests and
+/// embedders. Empty when there is none or the frame is cut short.
+pub fn decode_clusters(b: &[u8]) -> Vec<(u16, u16, u8, Vec<u32>)> {
+    let mut v = Vec::new();
+    if b.len() < HEADER_LEN {
+        return v;
+    }
+    let u16_at = |i: usize| b.get(i..i + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize);
+    let (Some(nrows), Some(count)) = (u16_at(28), u16_at(30)) else { return v };
+    let mut p = HEADER_LEN;
+    for _ in 0..nrows {
+        let Some(nruns) = u16_at(p + 2) else { return v };
+        p += 8;
+        for _ in 0..nruns {
+            let Some(n) = u16_at(p + 2) else { return v };
+            p += 16 + 4 * n;
+        }
+    }
+    for _ in 0..count {
+        let (Some(y), Some(col), Some(&w), Some(&n)) = (u16_at(p), u16_at(p + 2), b.get(p + 4), b.get(p + 5)) else { return v };
+        let Some(cps) = b.get(p + 6..p + 6 + 4 * n as usize) else { return v };
+        v.push((y as u16, col as u16, w, cps.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()));
+        p += 6 + 4 * n as usize;
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +247,32 @@ mod tests {
         let mut out = Vec::new();
         encode_row(&mut out, 0, 0, &blank);
         assert_eq!(u16::from_le_bytes([out[2], out[3]]), 1);
+    }
+
+    #[test]
+    fn cluster_table_roundtrip() {
+        let h = FrameHeader { full: true, cols: 4, rows: 2, cursor_x: 0, cursor_y: 0, cursor_shape: 1, modes: 0, display_offset: 0, history: 0, seq: 1, nrows: 2 };
+        let c = |cp: u32| CellOut { cp, fg: 1, bg: DEFAULT_BG, attrs: 0 };
+        let mut out = Vec::new();
+        encode_header(&mut out, &h);
+        encode_row(&mut out, 0, 0, &[c(0x1F44D), c(0), c('x' as u32), c(' ' as u32)]);
+        encode_row(&mut out, 1, 0, &[c('e' as u32), c(' ' as u32), c(' ' as u32), c(' ' as u32)]);
+        let plain = out.clone();
+        // No entries: the frame is unchanged and bytes 30-31 stay 0.
+        finish_clusters(&mut out, 0, 0, &[]);
+        assert_eq!(out, plain);
+        assert_eq!(&out[30..32], &[0, 0]);
+        assert!(decode_clusters(&out).is_empty());
+        let mut table = Vec::new();
+        encode_cluster(&mut table, 0, 0, 2, &[0x1F44D, 0x1F3FD]);
+        encode_cluster(&mut table, 1, 0, 1, &['e' as u32, 0x301]);
+        finish_clusters(&mut out, 0, 2, &table);
+        assert_eq!(decode_header(&out), Some(h));
+        assert_eq!(decode_clusters(&out), vec![(0, 0, 2, vec![0x1F44D, 0x1F3FD]), (1, 0, 1, vec!['e' as u32, 0x301])]);
+        // A long cluster is cut to the limit.
+        let mut t = Vec::new();
+        encode_cluster(&mut t, 0, 0, 1, &[0x301; 70]);
+        assert_eq!((t[5] as usize, t.len()), (CLUSTER_MAX_CPS, 6 + 4 * CLUSTER_MAX_CPS));
     }
 
     #[test]

@@ -152,6 +152,9 @@ pub struct Ghostty {
     shared: Box<Shared>,
     full_next: bool,
     row_scratch: Vec<CellOut>,
+    /// The frame's cluster table (frame::encode_cluster) and its entries.
+    cluster_table: Vec<u8>,
+    nclusters: u16,
     sel_shown: bool,
     anchor: Option<Anchor>,
     pal: palette::Active,
@@ -261,6 +264,8 @@ impl Ghostty {
                 shared,
                 full_next: true,
                 row_scratch: Vec::new(),
+                cluster_table: Vec::new(),
+                nclusters: 0,
                 sel_shown: false,
                 anchor: None,
                 pal: palette::active(),
@@ -446,15 +451,29 @@ impl Ghostty {
             let mut n = 0u32;
             get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &mut n as *mut _ as *mut c_void);
             let cp = if n > 0 {
-                let mut buf = [0u32; 16];
-                if n as usize <= buf.len() {
+                let mut buf = [0u32; frame::CLUSTER_MAX_CPS];
+                let mut big: Vec<u32>;
+                let cps: &[u32] = if n as usize <= buf.len() {
                     get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, buf.as_mut_ptr() as *mut c_void);
-                    buf[0]
+                    &buf[..n as usize]
                 } else {
-                    let mut big = vec![0u32; n as usize];
+                    big = vec![0u32; n as usize];
                     get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, big.as_mut_ptr() as *mut c_void);
-                    big[0]
+                    &big
+                };
+                // A multi-codepoint grapheme goes in the cluster table, with
+                // its width; the run keeps its base.
+                if n >= 2 && self.nclusters < u16::MAX {
+                    let mut raw: GhosttyCell = 0;
+                    let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
+                    if get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &mut raw as *mut _ as *mut c_void) == GHOSTTY_SUCCESS {
+                        unsafe { ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void) };
+                    }
+                    let w = if wide == GHOSTTY_CELL_WIDE_WIDE { 2 } else { 1 };
+                    frame::encode_cluster(&mut self.cluster_table, y, x, w, cps);
+                    self.nclusters += 1;
                 }
+                cps[0]
             } else {
                 // A blank cell is a space; either spacer of a wide
                 // character is 0, as the alacritty engine sent them.
@@ -920,6 +939,8 @@ impl Engine for Ghostty {
         // The rows to send: every row, or the dirty ones.
         let mut body = Vec::new();
         let mut nrows = 0u16;
+        self.cluster_table.clear();
+        self.nclusters = 0;
         unsafe {
             ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &mut self.rows_it as *mut _ as *mut c_void);
         }
@@ -950,8 +971,10 @@ impl Engine for Ghostty {
             seq,
             nrows,
         };
+        let start = out.len();
         frame::encode_header(out, &header);
         out.extend_from_slice(&body);
+        frame::finish_clusters(out, start, self.nclusters, &self.cluster_table);
         true
     }
 

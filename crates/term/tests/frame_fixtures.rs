@@ -72,6 +72,30 @@ fn partial() -> Vec<u8> {
     out
 }
 
+/// A full frame with grapheme clusters on row 0: 👍🏽, e + U+0301, 🇯🇵 and
+/// 👨‍👩‍👧, each base in its run and the whole cluster in the table.
+fn clusters() -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_header(&mut out, &header(true, 1, 9));
+    let spacer = CellOut { cp: 0, fg: WHITE, bg: DEFAULT_BG, attrs: 0 };
+    let groups = ["👍🏽", "e\u{301}", "🇯🇵", "👨‍👩‍👧"];
+    let mut row = Vec::new();
+    let mut table = Vec::new();
+    for g in groups {
+        let cps: Vec<u32> = g.chars().map(|c| c as u32).collect();
+        let w = if cps[0] == 'e' as u32 { 1 } else { 2 };
+        encode_cluster(&mut table, 0, row.len() as u16, w, &cps);
+        row.push(CellOut { cp: cps[0], fg: WHITE, bg: DEFAULT_BG, attrs: 0 });
+        if w == 2 {
+            row.push(spacer);
+        }
+    }
+    row.extend(text("   ", WHITE, DEFAULT_BG, 0));
+    encode_row(&mut out, 0, 0, &row);
+    finish_clusters(&mut out, 0, groups.len() as u16, &table);
+    out
+}
+
 fn dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/frames")
 }
@@ -79,7 +103,7 @@ fn dir() -> PathBuf {
 #[test]
 fn fixtures_match_the_encoder() {
     let regen = std::env::var_os("SUZURI_REGEN_FIXTURES").is_some();
-    for (name, bytes) in [("full.bin", full()), ("partial.bin", partial())] {
+    for (name, bytes) in [("full.bin", full()), ("partial.bin", partial()), ("clusters.bin", clusters())] {
         let path = dir().join(name);
         if regen {
             std::fs::create_dir_all(dir()).unwrap();
