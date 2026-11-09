@@ -4,6 +4,8 @@ suzuri's terminal view as a package. It paints `rsz-term` frames on a canvas and
 
 It is plain ESM with hand-written types (`index.d.ts`) and no dependencies. Its version is the same as the `rsz-term` crate's, and both move in one suzuri tag. `feed` checks the frame's length (at least its 32-byte header) and format version (header byte 11). A frame too short or in another version is refused, the view shows why (for a version, "terminal format vN, this app knows vM"), and that frame is not acked.
 
+Grapheme clusters (👍🏽, 👨‍👩‍👧, 🇯🇵, e + U+0301) come in an optional cluster table after the last row. Header bytes 30-31 hold its entry count (`nclusters` in `decodeHeader`), 0 when there is none, and the frame is then the same bytes as before. Each entry is `u16 y, u16 col, u8 w, u8 n, n × u32` codepoints, and the cell's run still carries the base codepoint (`crates/term/src/frame.rs` has the layout). This is additive, so the format version stays 1. An older suzuri-view ignores the table and draws the base glyph across the cluster's cells, as it always did. This one draws each cluster as one string, and emoji in the system colour-emoji fonts (Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji), shrunk to their cells only when they would overflow.
+
 ## Embedding
 
 ```js

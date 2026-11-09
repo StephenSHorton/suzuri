@@ -429,6 +429,125 @@ mod tests {
         assert_eq!(copied, if GHOSTTY { "a       b" } else { "a\tb" }, "copy");
     }
 
+    /// A frame's run codepoints for row `y` (a full frame).
+    fn row_cps(out: &[u8], y: u16) -> Vec<u32> {
+        let h = frame::decode_header(out).unwrap();
+        let u = |i: usize| u16::from_le_bytes([out[i], out[i + 1]]) as usize;
+        let mut p = frame::HEADER_LEN;
+        let mut cps = vec![0x20; h.cols as usize];
+        for _ in 0..h.nrows {
+            let (ry, nruns) = (u(p), u(p + 2));
+            p += 8;
+            for _ in 0..nruns {
+                let (col, n) = (u(p), u(p + 2));
+                for i in 0..n {
+                    let c = u32::from_le_bytes(out[p + 16 + 4 * i..p + 20 + 4 * i].try_into().unwrap());
+                    if ry == y as usize {
+                        cps[col + i] = c;
+                    }
+                }
+                p += 16 + 4 * n;
+            }
+        }
+        cps
+    }
+
+    #[test]
+    fn grapheme_clusters_one_cell() {
+        let s = "👍🏽|👨‍👩‍👧|🇯🇵|a\u{301}|";
+        let mut e = fed(20, 2, 0, s.as_bytes());
+        assert_eq!(e.cursor(), (11, 0));
+        assert_eq!(e.screen_text(), format!("{s}\n"));
+        let mut out = Vec::new();
+        e.snapshot(&mut out, 1, true);
+        let cl = frame::decode_clusters(&out);
+        let want: Vec<(u16, u16, u8, Vec<u32>)> = vec![
+            (0, 0, 2, "👍🏽".chars().map(|c| c as u32).collect()),
+            (0, 3, 2, "👨‍👩‍👧".chars().map(|c| c as u32).collect()),
+            (0, 6, 2, "🇯🇵".chars().map(|c| c as u32).collect()),
+            (0, 9, 1, vec!['a' as u32, 0x301]),
+        ];
+        assert_eq!(cl, want);
+        let cps = row_cps(&out, 0);
+        assert_eq!((cps[0], cps[1], cps[3], cps[4], cps[6], cps[7], cps[9]), (0x1F44D, 0, 0x1F468, 0, 0x1F1EF, 0, 'a' as u32));
+        // VS16 makes ❤ an emoji two wide; alone it is one, with no entry.
+        let mut e = fed(20, 2, 0, "❤\u{FE0F}".as_bytes());
+        assert_eq!(e.cursor(), (2, 0));
+        let mut e2 = fed(20, 2, 0, "❤".as_bytes());
+        assert_eq!(e2.cursor(), (1, 0));
+        e.snapshot(&mut out, 1, true);
+        assert_eq!(frame::decode_clusters(&out), vec![(0, 0, 2, vec![0x2764, 0xFE0F])]);
+        e2.snapshot(&mut out, 1, true);
+        assert!(frame::decode_clusters(&out).is_empty());
+    }
+
+    #[test]
+    fn long_cluster_not_blanked() {
+        // Past the old 16-codepoint buffers: e + 25 combining acutes.
+        let s = format!("e{}", "\u{301}".repeat(25));
+        let mut e = fed(20, 2, 100, s.as_bytes());
+        assert_eq!(e.screen_text(), format!("{s}\n"));
+        let mut out = Vec::new();
+        e.snapshot(&mut out, 1, true);
+        let cl = frame::decode_clusters(&out);
+        assert_eq!((cl.len(), cl[0].3.len()), (1, 26));
+        // An image mark rewrites the cell with its whole text.
+        e.feed(b"\x1b[1D", &mut Vec::new());
+        e.mark_cursor(4);
+        assert_eq!(e.screen_text(), format!("{s}\n"));
+        assert_eq!(e.marks(0), vec![(4, 0, 0)]);
+    }
+
+    #[test]
+    fn clusters_copy_link_and_block_lines() {
+        // Copy goes through ghostty's formatter, which keeps clusters.
+        let mut e = fed(20, 2, 0, "👨‍👩‍👧x".as_bytes());
+        e.select_start(0, 0, false, SelectKind::Line);
+        assert_eq!(e.selection_text().as_deref(), Some("👨‍👩‍👧x"));
+        // URL columns stay one per cell after an emoji.
+        let e = fed(30, 2, 0, "👍🏽 https://x.y".as_bytes());
+        let l = e.link_at(5, 0).unwrap();
+        assert_eq!((l.url.as_str(), l.x0, l.x1), ("https://x.y", 3, 14));
+        // A command-block line keeps whole clusters and is cut by their
+        // width: the family is 2 columns, not 6.
+        let w = (1u8, 1u8, 1u8);
+        let line = "✅ ok 👨‍👩‍👧 é";
+        let mut e = fed(20, 3, 100, b"");
+        e.insert_block(&[], &(line.into(), w), false);
+        assert_eq!(e.screen_text().lines().next(), Some(line));
+        let mut e = fed(9, 3, 100, b"");
+        e.insert_block(&[], &(line.into(), w), false);
+        assert_eq!(e.screen_text().lines().next(), Some("✅ ok 👨‍👩‍👧"));
+        // With clustering turned off the family is 6 columns: the line is
+        // cut there and never spills onto the next row.
+        let mut e = fed(9, 3, 100, b"\x1b[?2027l\r\nrow2-text\x1b[1;1H");
+        e.insert_block(&[], &(line.into(), w), false);
+        let text = e.screen_text();
+        assert!(text.contains("row2-text"), "row below untouched: {text:?}");
+        assert!(!text.lines().next().unwrap_or("").contains('👧'), "{text:?}");
+    }
+
+    #[test]
+    fn ascii_frame_has_no_cluster_table() {
+        let mut e = fed(20, 2, 0, "ab 漢 😀".as_bytes());
+        let mut out = Vec::new();
+        e.snapshot(&mut out, 1, true);
+        assert_eq!(&out[30..32], &[0, 0]);
+    }
+
+    #[test]
+    fn grapheme_mode_survives_ris() {
+        let mut e = fed(20, 2, 0, b"");
+        let mut ev = Vec::new();
+        e.feed(b"\x1b[?2027$p", &mut ev);
+        assert_eq!(ev, vec![EngineEvent::PtyWrite(b"\x1b[?2027;1$y".to_vec())], "DECRQM reports it set");
+        e.feed("\x1bc🇯🇵".as_bytes(), &mut Vec::new());
+        assert_eq!(e.cursor(), (2, 0), "a flag is one cell after RIS");
+        // A program can still turn it off.
+        e.feed("\x1b[?2027l\r\x1b[2K🇯🇵".as_bytes(), &mut Vec::new());
+        assert_eq!(e.cursor(), (4, 0));
+    }
+
     #[test]
     fn image_marks_move_and_clear_with_the_text() {
         // #288's anchors: a mark sits on the cell under the cursor, keeps

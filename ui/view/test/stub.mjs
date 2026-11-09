@@ -15,6 +15,9 @@ export function recorder() {
     fillRect(x, y, w, h) { ops.push({ op: "rect", style: ctx.fillStyle, r: [x, y, w, h] }) },
     fillText(t, x, y) { ops.push({ op: "text", t, at: [x, y] }) },
     drawImage() {},
+    // The emoji path's clip and scale (frame.js drawCluster).
+    save() { ops.push({ op: "save" }) }, restore() { ops.push({ op: "restore" }) },
+    beginPath() {}, rect() {}, clip() {}, translate() {}, scale(x) { ops.push({ op: "scale", x }) },
     measureText(s) {
       const px = Number(/(\d+)px/.exec(ctx.font)?.[1] || 14)
       return { width: s.length * glyphW(ctx.font), fontBoundingBoxAscent: Math.round(px * 0.8), fontBoundingBoxDescent: Math.round(px * 0.2) }

@@ -47,6 +47,9 @@ unsafe fn sized<T>() -> T {
     }
 }
 
+/// DEC private mode 2027: grapheme clustering.
+const GRAPHEME_CLUSTER_MODE: u16 = 2027;
+
 fn mode(value: u16, ansi: bool) -> GhosttyMode {
     (value & 0x7fff) | ((ansi as u16) << 15)
 }
@@ -152,6 +155,9 @@ pub struct Ghostty {
     shared: Box<Shared>,
     full_next: bool,
     row_scratch: Vec<CellOut>,
+    /// The frame's cluster table (frame::encode_cluster) and its entries.
+    cluster_table: Vec<u8>,
+    nclusters: u16,
     sel_shown: bool,
     anchor: Option<Anchor>,
     pal: palette::Active,
@@ -261,6 +267,8 @@ impl Ghostty {
                 shared,
                 full_next: true,
                 row_scratch: Vec::new(),
+                cluster_table: Vec::new(),
+                nclusters: 0,
                 sel_shown: false,
                 anchor: None,
                 pal: palette::active(),
@@ -273,6 +281,17 @@ impl Ghostty {
                 mev,
             };
             g.apply_palette();
+            // Grapheme clustering (DEC 2027): 👍🏽, 👨‍👩‍👧 and 🇯🇵 each take one
+            // cell (two columns wide). As the default, so RIS keeps it;
+            // programs can still turn it off. RSZ_GRAPHEME_CLUSTER=0 opts out.
+            // Chosen on purpose (#1187): it matches Claude Code's layout
+            // (string-width) and Ghostty/kitty/WezTerm, but zsh counts each
+            // codepoint, so editing a line holding 👍🏽 can redraw off by a few
+            // columns until the line is redrawn.
+            if std::env::var("RSZ_GRAPHEME_CLUSTER").as_deref() != Ok("0") {
+                let m = GhosttyTerminalModeConfig { mode: mode(GRAPHEME_CLUSTER_MODE, false), value: true };
+                g.set(GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, &m as *const _ as *const c_void);
+            }
             // Kitty keyboard flags are kept per screen by the terminal.
             g
         }
@@ -357,28 +376,49 @@ impl Ghostty {
         }
     }
 
-    /// A cell's text: its base character, ' ' when blank, None for the
-    /// right half of a wide character.
-    fn cell_char(r: &GhosttyGridRef) -> Option<char> {
+    /// Push a cell's text onto `out`: its whole grapheme, ' ' when blank.
+    /// False (nothing pushed) for either spacer of a wide character.
+    fn cell_text(r: &GhosttyGridRef, out: &mut String) -> bool {
         unsafe {
-            let mut buf = [0u32; 16];
+            let mut buf = [0u32; frame::CLUSTER_MAX_CPS];
             let mut n = 0usize;
-            let res = ghostty_grid_ref_graphemes(r, buf.as_mut_ptr(), buf.len(), &mut n);
+            let mut res = ghostty_grid_ref_graphemes(r, buf.as_mut_ptr(), buf.len(), &mut n);
+            let mut big = Vec::new();
+            if res == GHOSTTY_OUT_OF_SPACE && n > buf.len() {
+                big = vec![0u32; n];
+                res = ghostty_grid_ref_graphemes(r, big.as_mut_ptr(), big.len(), &mut n);
+            }
             if res == GHOSTTY_SUCCESS && n > 0 {
-                return Some(char::from_u32(buf[0]).unwrap_or(' '));
+                let cps = if big.is_empty() { &buf[..n.min(buf.len())] } else { &big[..n.min(big.len())] };
+                out.extend(cps.iter().filter_map(|&c| char::from_u32(c)));
+                return true;
             }
         }
         match Self::cell_wide(r) {
-            GHOSTTY_CELL_WIDE_SPACER_TAIL => None,
-            _ => Some(' '),
+            GHOSTTY_CELL_WIDE_SPACER_TAIL | GHOSTTY_CELL_WIDE_SPACER_HEAD => false,
+            _ => {
+                out.push(' ');
+                true
+            }
+        }
+    }
+
+    /// A cell's first character, ' ' when blank, None for the right half
+    /// of a wide character: one per column.
+    fn cell_char(r: &GhosttyGridRef) -> Option<char> {
+        let mut s = String::new();
+        match Self::cell_text(r, &mut s) {
+            true => Some(s.chars().next().unwrap_or(' ')),
+            false if Self::cell_wide(r) == GHOSTTY_CELL_WIDE_SPACER_HEAD => Some(' '),
+            false => None,
         }
     }
 
     fn row_text(&self, tag: GhosttyPointTag, y: u32, cols: u16) -> String {
         let mut line = String::new();
         for x in 0..cols {
-            if let Some(c) = self.grid_ref(tag, x, y).and_then(|r| Self::cell_char(&r)) {
-                line.push(c);
+            if let Some(r) = self.grid_ref(tag, x, y) {
+                Self::cell_text(&r, &mut line);
             }
         }
         line.trim_end().to_string()
@@ -439,15 +479,29 @@ impl Ghostty {
             let mut n = 0u32;
             get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &mut n as *mut _ as *mut c_void);
             let cp = if n > 0 {
-                let mut buf = [0u32; 16];
-                if n as usize <= buf.len() {
+                let mut buf = [0u32; frame::CLUSTER_MAX_CPS];
+                let mut big: Vec<u32>;
+                let cps: &[u32] = if n as usize <= buf.len() {
                     get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, buf.as_mut_ptr() as *mut c_void);
-                    buf[0]
+                    &buf[..n as usize]
                 } else {
-                    let mut big = vec![0u32; n as usize];
+                    big = vec![0u32; n as usize];
                     get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, big.as_mut_ptr() as *mut c_void);
-                    big[0]
+                    &big
+                };
+                // A multi-codepoint grapheme goes in the cluster table, with
+                // its width; the run keeps its base.
+                if n >= 2 && self.nclusters < u16::MAX {
+                    let mut raw: GhosttyCell = 0;
+                    let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
+                    if get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &mut raw as *mut _ as *mut c_void) == GHOSTTY_SUCCESS {
+                        unsafe { ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void) };
+                    }
+                    let w = if wide == GHOSTTY_CELL_WIDE_WIDE { 2 } else { 1 };
+                    frame::encode_cluster(&mut self.cluster_table, y, x, w, cps);
+                    self.nclusters += 1;
                 }
+                cps[0]
             } else {
                 // A blank cell is a space; either spacer of a wide
                 // character is 0, as the alacritty engine sent them.
@@ -791,24 +845,37 @@ impl Ghostty {
 
     /// Write a line of coloured text over the cursor's row (cursor moves).
     fn line_bytes(&self, (text, (r, g, b)): &(String, palette::Rgb), out: &mut Vec<u8>) {
-        use unicode_width::UnicodeWidthChar;
         let cols = self.shared.cols as usize;
         out.extend_from_slice(b"\r\x1b[0m\x1b[2K");
         out.extend_from_slice(format!("\x1b[38;2;{r};{g};{b}m").as_bytes());
-        let mut x = 0;
-        for ch in text.chars() {
-            let w = ch.width().unwrap_or(0);
-            if w == 0 || ch.is_control() {
-                continue;
-            }
+        // Measured as the terminal will lay them out: whole graphemes while
+        // mode 2027 is on, else one codepoint at a time (marks join the
+        // previous cell either way).
+        let clustered = self.mode(GRAPHEME_CLUSTER_MODE);
+        let cps: Vec<u32> = text.chars().filter(|c| !c.is_control()).map(|c| c as u32).collect();
+        let (mut x, mut i) = (0, 0);
+        while i < cps.len() {
+            let (used, w) = if clustered {
+                let mut w = 0u8;
+                let used = unsafe { ghostty_unicode_grapheme_width(cps[i..].as_ptr(), cps.len() - i, &mut w) }.max(1);
+                (used, w as usize)
+            } else {
+                (1, unsafe { ghostty_unicode_codepoint_width(cps[i]) } as usize)
+            };
             // Stop short of the last column: a character there would arm the
             // wrap, and the line must not spill onto the next.
             if x + w > cols {
                 break;
             }
-            let mut buf = [0u8; 4];
-            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+            // A zero-width mark needs something before it to sit on.
+            if w > 0 || x > 0 {
+                for &c in &cps[i..(i + used).min(cps.len())] {
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(char::from_u32(c).unwrap_or(' ').encode_utf8(&mut buf).as_bytes());
+                }
+            }
             x += w;
+            i += used;
         }
         out.extend_from_slice(b"\x1b[0m");
     }
@@ -913,6 +980,8 @@ impl Engine for Ghostty {
         // The rows to send: every row, or the dirty ones.
         let mut body = Vec::new();
         let mut nrows = 0u16;
+        self.cluster_table.clear();
+        self.nclusters = 0;
         unsafe {
             ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &mut self.rows_it as *mut _ as *mut c_void);
         }
@@ -943,8 +1012,10 @@ impl Engine for Ghostty {
             seq,
             nrows,
         };
+        let start = out.len();
         frame::encode_header(out, &header);
         out.extend_from_slice(&body);
+        frame::finish_clusters(out, start, self.nclusters, &self.cluster_table);
         true
     }
 
@@ -1218,13 +1289,7 @@ impl Engine for Ghostty {
             return;
         }
         let mut text = String::new();
-        unsafe {
-            let mut buf = [0u32; 16];
-            let mut n = 0usize;
-            if ghostty_grid_ref_graphemes(&r, buf.as_mut_ptr(), buf.len(), &mut n) == GHOSTTY_SUCCESS {
-                text.extend(buf[..n.min(buf.len())].iter().filter_map(|&c| char::from_u32(c)));
-            }
-        }
+        Self::cell_text(&r, &mut text);
         if text.is_empty() {
             text.push(' ');
         }
