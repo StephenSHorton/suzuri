@@ -603,12 +603,80 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Open a link in the default browser: web and mail links only.
+/// Open a link with the system: web, mail and file:// links only. A file
+/// link to an app, script or other executable is revealed in the file
+/// manager rather than run; the reply then says so for the toast.
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
+fn open_url(url: String) -> Result<Option<String>, String> {
     if !rsz_term::input::openable(&url) {
-        return Err(format!("not opening {url}: only http, https and mailto links open"));
+        return Err(format!("not opening {url}: only http, https, mailto and file links open"));
     }
+    if url.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("file://")) {
+        // Local paths only: another host would be a network share.
+        let Some(path) = rsz_term::input::file_url_path(&url) else {
+            return Err(format!("not opening {url}: not a local file"));
+        };
+        let real = std::fs::canonicalize(&path).map_err(|e| format!("{path}: {e}"))?;
+        #[cfg(windows)]
+        let real = std::path::PathBuf::from(real.to_string_lossy().trim_start_matches(r"\\?\").to_string());
+        if runs_when_opened(&path, &real) {
+            reveal(&real)?;
+            return Ok(Some(format!("revealed {}, not run", real.display())));
+        }
+        system_open(&real.to_string_lossy())?;
+        return Ok(Some(format!("opened {}", real.display())));
+    }
+    system_open(&url)?;
+    Ok(None)
+}
+
+/// Whether opening a local file would launch something: an executable
+/// extension on the link or its symlink target, a Mac bundle directory, or
+/// a file with an exec bit.
+fn runs_when_opened(link: &str, real: &std::path::Path) -> bool {
+    use rsz_term::input::launches;
+    if launches(link) || launches(&real.to_string_lossy()) {
+        return true;
+    }
+    let Ok(meta) = std::fs::metadata(real) else { return true };
+    if meta.is_dir() {
+        // Packages (.app, .xpc, ...) are directories with an extension.
+        return cfg!(target_os = "macos") && real.extension().is_some();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Show a file selected in Finder / Explorer instead of opening it.
+fn reveal(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn system_open(target: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut cmd = std::process::Command::new("open");
     #[cfg(windows)]
@@ -621,7 +689,7 @@ fn open_url(url: String) -> Result<(), String> {
     };
     #[cfg(not(any(target_os = "macos", windows)))]
     let mut cmd = std::process::Command::new("xdg-open");
-    cmd.arg(&url).spawn().map(|_| ()).map_err(|e| e.to_string())
+    cmd.arg(target).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -854,6 +922,8 @@ fn main() {
     let panes = Arc::new(Panes { bus, ..Default::default() });
     let _ = PANES.set(Arc::clone(&panes));
     apply_theme(&config::load(), None);
+    // OSC 52 "?" reads get the clipboard's text, as Go suzuri answered them.
+    rsz_term::set_clipboard_reader(|| arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok());
     // The agent bridge (bridge.json + AI control); the app runs without it.
     let bridge = match bridge::Bridge::start(Arc::clone(&panes)) {
         Ok(b) => Some(b),

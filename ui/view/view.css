@@ -31,3 +31,8 @@
 }
 .img-modal canvas { border-radius: 6px; box-shadow: 0 8px 40px rgba(0, 0, 0, .6); }
 .img-modal .cap { color: #ccc; font-size: 12px; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The scrollback thumb: thin, on the right edge, only while scrolled back. */
+.rsz-view .rsz-scrollbar { width: 3px; opacity: 0; transition: opacity .25s ease-out; }
+.rsz-view .rsz-scrollbar.on { opacity: .9; }
+.rsz-view .rsz-scrollbar.on.idle { opacity: .45; transition-duration: .6s; }
+.rsz-view .rsz-scrollbar .thumb { left: 0; width: 100%; border-radius: 2px; background: var(--rsz-thumb, rgba(184, 160, 200, .7)); }

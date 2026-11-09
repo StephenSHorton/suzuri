@@ -8,6 +8,7 @@ import { Screen, DEFAULT_STYLE, FORMAT_VERSION, fontStyle, measureCell, cssSize,
 import { encodeKey } from "./keys.js"
 import { installPointer } from "./pointer.js"
 import { PaneImages } from "./images.js"
+import { SmoothScroll } from "./smooth.js"
 
 export { FORMAT_VERSION, DEFAULT_STYLE }
 export { Screen, decodeHeader, measureCell } from "./frame.js"
@@ -54,14 +55,21 @@ function releaseFace(doc, key) {
 
 const PASTE_DEBOUNCE_MS = 280 // one key press can arrive as a keydown and a menu action
 
-// Copy and paste chords (Go suzuri's): ⌘C/⌘V on macOS; elsewhere
-// Ctrl+Shift+C/V, Ctrl+Insert, Shift+Insert, Ctrl+V, and Ctrl+C when there
-// is a selection (otherwise it stays ^C). "copy-or-interrupt" is that
-// Ctrl+C: it copies, and sends ^C when there turned out to be nothing to copy.
+// Copy and paste chords (Go suzuri's): ⌘C/⌘V on macOS, and ⌘⇧C/⌘⇧V or
+// ⌃⇧C/⌃⇧V there too; elsewhere Ctrl+Shift+C/V, Ctrl+Insert, Shift+Insert,
+// Ctrl+V, and Ctrl+C when there is a selection (otherwise it stays ^C).
+// "copy-or-interrupt" is that Ctrl+C: it copies, and sends ^C when there
+// turned out to be nothing to copy.
 export function clipShortcut(e, isMac, hasSelection) {
   const k = (e.key || "").toLowerCase()
   if (e.altKey) return null
   if (isMac) {
+    // Go's "ctrl" on macOS is Cmd or Ctrl, but not both.
+    if (e.shiftKey && e.metaKey !== e.ctrlKey) {
+      if (k === "c") return "copy"
+      if (k === "v") return "paste"
+      return null
+    }
     if (!e.metaKey || e.ctrlKey || e.shiftKey) return null
     if (k === "c") return "copy"
     if (k === "v") return "paste"
@@ -109,6 +117,9 @@ export function mount(el, host, opts = {}) {
   // Paste chords are debounced here unless the host debounces its own
   // clipboard paste (opts.debouncePaste false).
   const debouncePaste = opts.debouncePaste ?? true
+  // The wheel and scrollBy ease through the history (smooth.js) unless
+  // opts.smoothScroll is false.
+  const smoothOn = opts.smoothScroll ?? true
   let readOnly = !!opts.readOnly
   let alive = true
 
@@ -127,6 +138,12 @@ export function mount(el, host, opts = {}) {
   Object.assign(cursor.style, { position: "absolute", pointerEvents: "none" })
   const scrolled = make("div", "scrolled")
   scrolled.hidden = true
+  // The scrollback's thumb on the right edge, shown while scrolled back.
+  const track = make("div", "rsz-scrollbar")
+  Object.assign(track.style, { position: "absolute", pointerEvents: "none" })
+  const thumb = make("div", "thumb")
+  thumb.style.position = "absolute"
+  track.append(thumb)
   const error = make("div", "rsz-error")
   error.hidden = true
   // One textarea per view holds this view's keyboard focus, so paste and IME
@@ -143,7 +160,7 @@ export function mount(el, host, opts = {}) {
   const preedit = make("div", "preedit rsz-preedit")
   preedit.hidden = true
   Object.assign(preedit.style, { position: "absolute", pointerEvents: "none", whiteSpace: "pre" })
-  body.append(canvas, cursor, scrolled, error, input)
+  body.append(canvas, cursor, scrolled, track, error, input)
   el.append(body)
 
   // With a caret element (opts.caret) the textarea and preedit sit on its
@@ -169,7 +186,23 @@ export function mount(el, host, opts = {}) {
   // press on an exited pane itself).
   const can = () => alive && !readOnly
   const canSend = () => can() && !pane.exited
-  const write = (data) => { if (canSend()) host.write(data) }
+  const write = (data) => {
+    if (!canSend()) return
+    smooth.stop()
+    host.write(data)
+  }
+  const smooth = new SmoothScroll({
+    raf: (fn) => win.requestAnimationFrame(fn),
+    cancel: (id) => win.cancelAnimationFrame(id),
+    now: () => win.performance?.now?.() ?? Date.now(),
+    apply: (n) => { if (can()) host.scroll(n) },
+  })
+  // History lines (> 0 up), eased or at once.
+  function scrollBy(lines) {
+    if (!lines || !can()) return
+    if (smoothOn) smooth.by(lines)
+    else host.scroll(lines)
+  }
 
   const listeners = []
   const on = (t, type, fn, o) => { t.addEventListener(type, fn, o); listeners.push([t, type, fn, o]) }
@@ -252,8 +285,33 @@ export function mount(el, host, opts = {}) {
     cs.setProperty("--ch", `${ch}px`)
     scrolled.hidden = h.offset === 0
     if (h.offset) scrolled.textContent = `↑ ${h.offset} / ${h.history}`
+    smooth.clamp(h.offset, h.history)
+    placeThumb(h, ch)
     pane.onFrame?.()
     placeInput()
+  }
+
+  // The thumb: its height the screen's share of screen + history (18px at
+  // least, as Go's), its top where the screen sits in the history. It
+  // fades in while scrolled back and out at the bottom (view.css), and
+  // dims when the scrolling rests.
+  let thumbIdle = 0
+  let lastThumb = ""
+  function placeThumb(h, ch) {
+    const on = h.offset > 0 && h.history > 0
+    track.classList.toggle("on", on)
+    if (!on) { lastThumb = ""; return }
+    const height = h.rows * ch
+    const size = Math.min(height, Math.max(18, (height * h.rows) / (h.history + h.rows)))
+    const top = ((height - size) * (h.history - Math.min(h.offset, h.history))) / h.history
+    Object.assign(track.style, { right: "2px", top: `${padY}px`, height: `${height}px` })
+    Object.assign(thumb.style, { top: `${Math.round(top)}px`, height: `${Math.round(size)}px` })
+    const key = `${h.offset}/${h.history}`
+    if (key === lastThumb) return
+    lastThumb = key
+    track.classList.remove("idle")
+    win.clearTimeout?.(thumbIdle)
+    thumbIdle = win.setTimeout?.(() => track.classList.add("idle"), 1200) || 0
   }
 
   // The textarea and the IME preedit sit on the terminal's cursor, or on the
@@ -419,7 +477,7 @@ export function mount(el, host, opts = {}) {
       }
       return
     }
-    host.scroll(-lines)
+    scrollBy(-lines)
   }, { passive: true })
 
   // ---- style: a font change re-measures, refits and asks for a full frame;
@@ -543,6 +601,10 @@ export function mount(el, host, opts = {}) {
 
     key(e) { keydown(e) },
 
+    // History lines (> 0 up into it), eased unless opts.smoothScroll is
+    // false; suzuri's input bar scrolls PageUp/PageDown through this.
+    scrollBy(lines) { scrollBy(lines) },
+
     placeInput() { placeInput() },
 
     painted(h) {
@@ -560,6 +622,8 @@ export function mount(el, host, opts = {}) {
       raf = 0
       queue.length = 0
       ro?.disconnect()
+      smooth.stop()
+      win.clearTimeout?.(thumbIdle)
       disposePointer()
       for (const [t, type, fn, o] of listeners) t.removeEventListener(type, fn, o)
       listeners.length = 0

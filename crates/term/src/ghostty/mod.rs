@@ -57,6 +57,7 @@ macro_rules! sized_structs {
 }
 sized_structs!(
     GhosttyClipboardWriteReply,
+    GhosttyClipboardReadReply,
     GhosttyMouseEncoderSize,
     GhosttyRenderStateColors,
     GhosttyTerminalSelectWordOptions,
@@ -161,6 +162,47 @@ unsafe extern "C" fn on_clipboard(_t: GhosttyTerminal, ud: *mut c_void, w: *cons
     }
 }
 
+/// What answers a program's clipboard read (OSC 52 with "?", or a kitty
+/// OSC 5522 read): the system clipboard's text, None for an empty answer.
+/// One per process, set by the app before it opens panes (Go suzuri's
+/// clipRead); a terminal made while none is set ignores reads, as before.
+pub type ClipboardReader = dyn Fn() -> Option<String> + Send + Sync;
+static CLIPBOARD_READER: std::sync::RwLock<Option<std::sync::Arc<ClipboardReader>>> = std::sync::RwLock::new(None);
+
+/// Answer clipboard reads with `f` in every terminal made from now on.
+pub fn set_clipboard_reader(f: impl Fn() -> Option<String> + Send + Sync + 'static) {
+    *CLIPBOARD_READER.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(f));
+}
+
+fn clipboard_reader() -> Option<std::sync::Arc<ClipboardReader>> {
+    CLIPBOARD_READER.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+const TEXT_PLAIN: &[u8] = b"text/plain";
+
+unsafe extern "C" fn on_clipboard_read(_t: GhosttyTerminal, _ud: *mut c_void, r: *const GhosttyClipboardRead) {
+    let r = unsafe { &*r };
+    let Some(reply) = r.reply else { return };
+    let mimes = if r.mimes.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(r.mimes, r.mimes_len) } };
+    // Text is all suzuri reads; OSC 52 asks for text/plain.
+    let wants_text = mimes.iter().any(|m| unsafe { gstr(m) }.starts_with(TEXT_PLAIN));
+    let text = if wants_text { clipboard_reader().and_then(|f| f()) } else { None };
+    let mime = GhosttyString { ptr: TEXT_PLAIN.as_ptr(), len: TEXT_PLAIN.len() };
+    let content = text.as_ref().map(|t| GhosttyClipboardContent { mime, data: GhosttyString { ptr: t.as_ptr(), len: t.len() } });
+    let mut out: GhosttyClipboardReadReply = unsafe { sized() };
+    out.result = GHOSTTY_CLIPBOARD_READ_RESULT_SUCCESS;
+    if let Some(c) = content.as_ref() {
+        out.contents = c;
+        out.contents_len = 1;
+    }
+    if r.list {
+        out.available = &mime;
+        out.available_len = 1;
+    }
+    // Borrowed only for this call: `text`, `content` and `mime` outlive it.
+    unsafe { reply(r, &out) };
+}
+
 unsafe extern "C" fn on_size(_t: GhosttyTerminal, ud: *mut c_void, out: *mut GhosttySizeReportSize) -> bool {
     let s = unsafe { shared(ud) };
     unsafe {
@@ -195,6 +237,7 @@ const _: () = {
     let _: GhosttyTerminalBellFn = Some(on_bell);
     let _: GhosttyTerminalTitleChangedFn = Some(on_title);
     let _: GhosttyTerminalClipboardWriteFn = Some(on_clipboard);
+    let _: GhosttyTerminalClipboardReadFn = Some(on_clipboard_read);
     let _: GhosttyTerminalSizeFn = Some(on_size);
     let _: GhosttyTerminalDeviceAttributesFn = Some(on_device_attributes);
     let _: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -290,6 +333,9 @@ impl Ghostty {
             set(GHOSTTY_TERMINAL_OPT_BELL, on_bell as *const c_void);
             set(GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, on_title as *const c_void);
             set(GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, on_clipboard as *const c_void);
+            if clipboard_reader().is_some() {
+                set(GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ, on_clipboard_read as *const c_void);
+            }
             set(GHOSTTY_TERMINAL_OPT_SIZE, on_size as *const c_void);
             set(GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES, on_device_attributes as *const c_void);
             set(GHOSTTY_TERMINAL_OPT_RENDER_HOLD, on_render_hold as *const c_void);
@@ -1469,4 +1515,21 @@ fn open_bsu(b: &[u8]) -> Option<usize> {
         i = at + 1;
     }
     open
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn osc52_read_answers_with_the_clipboard() {
+        set_clipboard_reader(|| Some("hi 硯".into()));
+        let mut e = Ghostty::new(20, 4, 100);
+        let mut ev = Vec::new();
+        e.feed(b"\x1b]52;c;?\x07", &mut ev);
+        let out: Vec<u8> = ev.iter().filter_map(|x| if let EngineEvent::PtyWrite(b) = x { Some(b.clone()) } else { None }).flatten().collect();
+        let s = String::from_utf8_lossy(&out);
+        // base64("hi 硯")
+        assert!(s.starts_with("\x1b]52;c;aGkg56Gv"), "{s:?}");
+    }
 }
