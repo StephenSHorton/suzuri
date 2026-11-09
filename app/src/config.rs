@@ -4,7 +4,7 @@
 //! The file is Go suzuri's own config.json, in the same folder under the OS
 //! config dir (Windows %LOCALAPPDATA%\suzuri, macOS ~/Library/Application
 //! Support/suzuri, Linux ~/.config/suzuri), so both apps read and write one
-//! file. Keys this app does not use yet (intro, ambient, glass, window...)
+//! file. Keys this app does not use yet (intro, ambient, glass...)
 //! are kept as they are, so nothing is lost on save. RSZ_CONFIG_DIR
 //! overrides the folder (tests, screenshots); there, Go's file is looked
 //! for in a go-suzuri subfolder and copied on first run.
@@ -229,6 +229,10 @@ pub fn load_from(path: &Path, go: &Path) -> Value {
 /// Merge `patch`'s keys into the file, normalize and save. Returns what was
 /// saved.
 pub fn update(patch: Value) -> std::io::Result<Value> {
+    // One writer at a time: Settings and the window frame (window_state.rs)
+    // both read, merge and write the file.
+    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let _g = LOCK.lock();
     update_at(&path(), &go_path(), patch)
 }
 

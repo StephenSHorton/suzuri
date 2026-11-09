@@ -20,6 +20,7 @@ mod sidecar;
 mod transfer;
 mod transfer_engine;
 mod window;
+mod window_state;
 mod notices;
 mod update;
 mod ws;
@@ -816,6 +817,7 @@ fn main() {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            window_state::install(app.handle());
             app.manage(notices::Notices::new(app.handle().clone()));
             update::start(app.handle());
             caffeine::install(app.handle(), &app.state::<Arc<caffeine::Caffeine>>());
@@ -896,6 +898,7 @@ fn main() {
         .expect("build suzuri")
         .run(move |app, ev| {
             if let tauri::RunEvent::Exit = ev {
+                window_state::flush();
                 if let Some(b) = &bridge_exit {
                     b.stop();
                 }

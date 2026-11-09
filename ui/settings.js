@@ -55,7 +55,9 @@ export class Settings {
     if (this.el.hidden) return
     this.el.hidden = true
     if (!keep && JSON.stringify(this.snap) !== JSON.stringify(this.cfg)) {
-      this.cfg = await invoke("config_set", { patch: this.snap })
+      // The window frame saves itself meanwhile; don't put back a stale one.
+      const { window: _frame, ...snap } = this.snap
+      this.cfg = await invoke("config_set", { patch: snap })
       announce(this.cfg)
     }
     this.onClose?.()
