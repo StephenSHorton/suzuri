@@ -7,7 +7,9 @@
 //! A panic writes suzuri-crash.txt next to the log: the message, where it
 //! happened, a backtrace, the version and OS, and the last lines logged (the
 //! trail). The next launch shows a notice saying where it is, once, and
-//! renames it to suzuri-crash.prev.txt.
+//! renames it to suzuri-crash.prev.txt. Only a panic on the main thread
+//! takes the app down; one on a bridge, pane or async worker thread is
+//! reported as an error, not a crash.
 
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
@@ -203,7 +205,7 @@ fn install_panic_hook() {
 
 pub fn crash_report(at: &str, thread: &str, msg: &str, location: &str, backtrace: &str, trail: &[String]) -> String {
     let mut s = String::new();
-    s.push_str(&format!("suzuri {} crashed at {at}\n", env!("CARGO_PKG_VERSION")));
+    s.push_str(&format!("suzuri {} panicked at {at}\n", env!("CARGO_PKG_VERSION")));
     s.push_str(&format!("os: {} {}\npid: {}\nthread: {thread}\n", std::env::consts::OS, std::env::consts::ARCH, std::process::id()));
     s.push_str(&format!("panic: {msg}\nat: {location}\n\nbacktrace:\n{backtrace}\n"));
     s.push_str(&format!("\nlast {} log lines:\n", trail.len()));
@@ -239,12 +241,32 @@ pub fn take_crash(dir: &Path) -> Option<PathBuf> {
     Some(if std::fs::rename(&from, &to).is_ok() { to } else { from })
 }
 
-/// The notice for the last run's crash; stays up until clicked away.
+/// The threads that panicked, from a crash file's "thread:" lines.
+pub fn panic_threads(report: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    for t in report.lines().filter_map(|l| l.strip_prefix("thread: ")) {
+        if !v.iter().any(|x| x == t) {
+            v.push(t.to_string());
+        }
+    }
+    v
+}
+
+/// The notice for the last run's panic report; stays up until clicked
+/// away. "Crashed" only when the main thread panicked: other threads
+/// unwind and the app keeps running.
 pub fn crash_notice(file: &Path) -> rsz_term::protocols::Notice {
+    let threads = panic_threads(&std::fs::read_to_string(file).unwrap_or_default());
+    let fatal = threads.is_empty() || threads.iter().any(|t| t == "main");
+    let (title, body) = if fatal {
+        ("suzuri crashed last time".to_string(), format!("Crash report: {}", file.display()))
+    } else {
+        ("suzuri hit an error last time".to_string(), format!("Panic in thread {}. Report: {}", threads.join(", "), file.display()))
+    };
     rsz_term::protocols::Notice {
         id: "suzuri-crash".into(),
-        title: "suzuri crashed last time".into(),
-        body: format!("Crash report: {}", file.display()),
+        title,
+        body,
         sound: "silent".into(),
         icon: "warn".into(),
         urgency: 1,
@@ -363,5 +385,23 @@ mod tests {
         assert!(take_crash(&d).is_none());
         let n = crash_notice(&seen);
         assert!(n.body.contains(CRASH_SEEN) && n.expire_ms == Some(0));
+        assert_eq!(n.title, "suzuri crashed last time");
+    }
+
+    #[test]
+    fn worker_panic_is_an_error_not_a_crash() {
+        let d = tmp("worker-panic");
+        let a = crash_report("T", "bridge-req", "boom", "src/x.rs:1:2", "bt", &[]);
+        let b = crash_report("T", "tokio-runtime-worker", "bang", "src/y.rs:1:2", "bt", &[]);
+        write_crash(&d, &a).unwrap();
+        write_crash(&d, &b).unwrap();
+        let seen = take_crash(&d).unwrap();
+        assert_eq!(panic_threads(&std::fs::read_to_string(&seen).unwrap()), vec!["bridge-req", "tokio-runtime-worker"]);
+        let n = crash_notice(&seen);
+        assert_eq!(n.title, "suzuri hit an error last time");
+        assert!(n.body.contains("bridge-req, tokio-runtime-worker") && n.body.contains(CRASH_SEEN), "{}", n.body);
+        // A main-thread panic in the same file still counts as a crash.
+        write_crash(&d, &crash_report("T", "main", "x", "", "", &[])).unwrap();
+        assert_eq!(crash_notice(&take_crash(&d).unwrap()).title, "suzuri crashed last time");
     }
 }
