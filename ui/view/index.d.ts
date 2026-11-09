@@ -172,6 +172,9 @@ export interface TermView {
    *  the clipboard chords, the key encoder), for a key that landed elsewhere on
    *  the page while this view is the host's focused one. */
   key(e: KeyboardEvent): void
+  /** Scroll the history by lines (> 0 up into it), eased over a few animation
+   *  frames unless opts.smoothScroll is false; each step is a host.scroll call. */
+  scrollBy(lines: number): void
   /** paint: "external" only: the host painted a frame with this header; the view
    *  follows it (cursor, badge, canvas CSS size), acks it, then calls onPaint. */
   painted(header: FrameHeader): void
@@ -207,6 +210,9 @@ export interface MountOptions {
   /** Default true: paste chords within 280 ms of the last are one paste. false: every
    *  chord calls host.paste(null), for a host that debounces its own clipboard paste. */
   debouncePaste?: boolean
+  /** Default true: the wheel (and scrollBy) eases through the history, a few
+   *  host.scroll calls over ~0.3 s. false: one host.scroll per wheel step. */
+  smoothScroll?: boolean
 }
 
 export function mount(el: HTMLElement, host: TermHost, opts?: MountOptions): TermView

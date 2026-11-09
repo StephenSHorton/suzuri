@@ -28,8 +28,8 @@ export function shortcut(e, isMac) {
   if (isMac && meta && ctrl && !alt && !shift && arrow) return r("move_pane_" + arrow)
   if (!isMac && ctrl && alt && !shift && !meta && arrow) return r("move_pane_" + arrow)
 
-  // Pane focus: ⌘⌥+arrows on macOS, Alt+arrows on Windows.
-  if (isMac && meta && alt && !shift && arrow) return r("focus_" + arrow)
+  // Pane focus: ⌘⌥+arrows (or ⌃⌥+arrows) on macOS, Alt+arrows on Windows.
+  if (isMac && (meta || ctrl) && alt && !shift && arrow) return r("focus_" + arrow)
   if (!isMac && alt && !ctrl && !shift && arrow) return r("focus_" + arrow)
 
   // Split: Alt+Shift+= / Alt+Shift+- on Windows too (Windows Terminal's).

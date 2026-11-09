@@ -5,4 +5,7 @@
 .notes-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .notes-when { color: var(--mute); font-size: 11px; flex: none; }
 .rsz-panel .notes-title { font-weight: 600; }
-.rsz-panel .notes-body { flex: 1; min-height: 0; line-height: 1.45; font-family: "Gohu", ui-monospace, Menlo, Consolas, monospace; }
+.rsz-panel .notes-body { flex: 1; min-height: 0; line-height: 1.45; font-family: "Gohu", ui-monospace, Menlo, Consolas, monospace; tab-size: 4; }
+/* The caret in the terminal's cursor shape (notes_caret.js). */
+.rsz-panel-body:has(> .notes-caret) { position: relative; }
+.notes-caret { position: absolute; pointer-events: none; background: var(--text); opacity: .85; mix-blend-mode: difference; }

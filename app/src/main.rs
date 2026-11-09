@@ -40,6 +40,9 @@ pub(crate) struct Panes {
     pub(crate) titles: Mutex<HashMap<u32, String>>,
     /// Last size per pane (cols, rows), for the bridge snapshot.
     pub(crate) sizes: Mutex<HashMap<u32, (u16, u16)>>,
+    /// The command each pane runs, when not the default shell: a split
+    /// runs the same one (Go's tabOpts{shell: focus.shell}).
+    launch: Mutex<HashMap<u32, Vec<String>>>,
     pub(crate) focused: AtomicU32,
     /// Set when RSZ_TRANSPORT=ws: frames go over the socket, not the Channel.
     bus: Option<ws::FrameBus>,
@@ -104,9 +107,9 @@ fn pane_open(
     // A Settings profile (or the default one) gives the shell and folder;
     // RSZ_CMD still wins for the bench.
     let (prof_cmd, prof_cwd) = config::profile_launch(&settings, profile.as_deref());
-    let command = command
-        .or_else(|| std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s)))
-        .or(prof_cmd);
+    let inherited = from.and_then(|f| panes.launch.lock().get(&f).cloned());
+    let env_cmd = std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s));
+    let command = launch_command(command, env_cmd, profile.is_some(), inherited, prof_cmd);
     let panes_ref = Arc::clone(&panes);
     let notes = notes.inner().clone();
     let sink: Sink = Arc::new(move |o| {
@@ -137,6 +140,7 @@ fn pane_open(
                 panes_ref.map.lock().remove(&id);
                 panes_ref.titles.lock().remove(&id);
                 panes_ref.sizes.lock().remove(&id);
+                panes_ref.launch.lock().remove(&id);
                 on_frame.send(json(&Msg::Exit { code }))
             }
             Out::Notice(n) => {
@@ -200,9 +204,30 @@ fn pane_open(
     if let Some(n) = std::env::var("RSZ_SCROLLBACK").ok().and_then(|v| v.parse().ok()) {
         cfg.scrollback = n;
     }
+    let launched = cfg.command.clone();
     let pane = Pane::spawn(cfg, sink).map_err(|e| e.to_string())?;
     panes.map.lock().insert(id, Arc::new(pane));
+    if let Some(c) = launched {
+        panes.launch.lock().insert(id, c);
+    }
     Ok(id)
+}
+
+/// What a new pane runs: an explicit command, then RSZ_CMD (the bench), then
+/// a profile the caller named, then the program of the pane it splits from,
+/// then the active profile's shell. None: the login shell.
+fn launch_command(
+    explicit: Option<Vec<String>>,
+    env: Option<Vec<String>>,
+    named_profile: bool,
+    inherited: Option<Vec<String>>,
+    profile: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let first = explicit.or(env);
+    if named_profile {
+        return first.or(profile);
+    }
+    first.or(inherited).or(profile)
 }
 
 /// Split a command line on spaces, keeping "double-quoted parts" together
@@ -346,6 +371,12 @@ fn notice_anchor(notes: State<'_, notices::Notices>, anchor: String) {
     notes.set_anchor(&anchor);
 }
 
+/// A host message from the UI as a notice card (Notices::toast).
+#[tauri::command]
+fn notice_toast(notes: State<'_, notices::Notices>, text: String) {
+    notes.toast(&text);
+}
+
 #[derive(Serialize)]
 struct NoticeHistory {
     items: Vec<notices::Played>,
@@ -405,13 +436,14 @@ fn config_get() -> serde_json::Value {
 /// Live parts reach running panes here (the cursor); the UI applies the rest
 /// on its `rsz:config` event.
 #[tauri::command]
-fn config_set(panes: State<'_, Arc<Panes>>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
-    let v = config::update(patch).map_err(|e| e.to_string())?;
+fn config_set(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
+    let v = config::update(patch.clone()).map_err(|e| e.to_string())?;
     let shape = config::cursor_code(&v);
     for p in panes.map.lock().values() {
         p.set_default_cursor(shape);
     }
     apply_theme(&v, Some(&panes));
+    notes.apply_config(&v, &patch);
     Ok(v)
 }
 
@@ -427,6 +459,8 @@ fn config_meta() -> serde_json::Value {
         "font_max": config::FONT_SIZE_MAX,
         "font_default": config::FONT_SIZE_DEFAULT,
         "fonts": config::mono_font_faces(),
+        "notice_positions": config::NOTICE_POSITIONS,
+        "notice_labels": config::NOTICE_POSITIONS.iter().zip(config::NOTICE_POSITION_LABELS).collect::<HashMap<_, _>>(),
     })
 }
 
@@ -578,12 +612,80 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Open a link in the default browser: web and mail links only.
+/// Open a link with the system: web, mail and file:// links only. A file
+/// link to an app, script or other executable is revealed in the file
+/// manager rather than run; the reply then says so for the toast.
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
+fn open_url(url: String) -> Result<Option<String>, String> {
     if !rsz_term::input::openable(&url) {
-        return Err(format!("not opening {url}: only http, https and mailto links open"));
+        return Err(format!("not opening {url}: only http, https, mailto and file links open"));
     }
+    if url.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("file://")) {
+        // Local paths only: another host would be a network share.
+        let Some(path) = rsz_term::input::file_url_path(&url) else {
+            return Err(format!("not opening {url}: not a local file"));
+        };
+        let real = std::fs::canonicalize(&path).map_err(|e| format!("{path}: {e}"))?;
+        #[cfg(windows)]
+        let real = std::path::PathBuf::from(real.to_string_lossy().trim_start_matches(r"\\?\").to_string());
+        if runs_when_opened(&path, &real) {
+            reveal(&real)?;
+            return Ok(Some(format!("revealed {}, not run", real.display())));
+        }
+        system_open(&real.to_string_lossy())?;
+        return Ok(Some(format!("opened {}", real.display())));
+    }
+    system_open(&url)?;
+    Ok(None)
+}
+
+/// Whether opening a local file would launch something: an executable
+/// extension on the link or its symlink target, a Mac bundle directory, or
+/// a file with an exec bit.
+fn runs_when_opened(link: &str, real: &std::path::Path) -> bool {
+    use rsz_term::input::launches;
+    if launches(link) || launches(&real.to_string_lossy()) {
+        return true;
+    }
+    let Ok(meta) = std::fs::metadata(real) else { return true };
+    if meta.is_dir() {
+        // Packages (.app, .xpc, ...) are directories with an extension.
+        return cfg!(target_os = "macos") && real.extension().is_some();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Show a file selected in Finder / Explorer instead of opening it.
+fn reveal(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn system_open(target: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut cmd = std::process::Command::new("open");
     #[cfg(windows)]
@@ -596,7 +698,7 @@ fn open_url(url: String) -> Result<(), String> {
     };
     #[cfg(not(any(target_os = "macos", windows)))]
     let mut cmd = std::process::Command::new("xdg-open");
-    cmd.arg(&url).spawn().map(|_| ()).map_err(|e| e.to_string())
+    cmd.arg(target).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -765,6 +867,21 @@ fn ui_log(line: String) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_split_runs_the_program_it_split_from() {
+        let v = |s: &str| Some(vec![s.to_string()]);
+        // A split (no profile named): the source pane's program beats the active profile's.
+        assert_eq!(super::launch_command(None, None, false, v("pwsh"), v("zsh")), v("pwsh"));
+        // A source on the login shell: the active profile's, as before.
+        assert_eq!(super::launch_command(None, None, false, None, v("zsh")), v("zsh"));
+        // A named profile (New tab: X) wins over what it split from.
+        assert_eq!(super::launch_command(None, None, true, v("pwsh"), v("fish")), v("fish"));
+        assert_eq!(super::launch_command(None, None, true, v("pwsh"), None), None);
+        // An explicit command and RSZ_CMD win over both.
+        assert_eq!(super::launch_command(v("top"), v("bench"), false, v("pwsh"), None), v("top"));
+        assert_eq!(super::launch_command(None, v("bench"), false, v("pwsh"), None), v("bench"));
+    }
+
+    #[test]
     fn split_args_keeps_quotes() {
         assert_eq!(super::split_args(r#""C:\Program Files\x.exe" --a "b c""#), vec![r"C:\Program Files\x.exe", "--a", "b c"]);
         assert_eq!(super::split_args("claude"), vec!["claude"]);
@@ -814,6 +931,8 @@ fn main() {
     let panes = Arc::new(Panes { bus, ..Default::default() });
     let _ = PANES.set(Arc::clone(&panes));
     apply_theme(&config::load(), None);
+    // OSC 52 "?" reads get the clipboard's text, as Go suzuri answered them.
+    rsz_term::set_clipboard_reader(|| arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok());
     // The agent bridge (bridge.json + AI control); the app runs without it.
     let bridge = match bridge::Bridge::start(Arc::clone(&panes)) {
         Ok(b) => Some(b),
@@ -888,6 +1007,7 @@ fn main() {
             notice_sync,
             notice_hover,
             notice_anchor,
+            notice_toast,
             notice_history,
             notice_read,
             stats,
@@ -904,8 +1024,9 @@ fn main() {
             transfer::transfer_info,
             bridge::aicontrol_reply,
             complete::complete_list,
-            bridge::pane_text,
+            bridge::pane_lines,
             window::new_window,
+            window::app_quit,
             caffeine::caffeine_on,
             caffeine::caffeine_off,
             caffeine::caffeine_toggle,

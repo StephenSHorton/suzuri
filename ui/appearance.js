@@ -5,6 +5,7 @@
 // (the `rsz:config` event from settings.js), and runs font zoom.
 import { setFont, setSelection, setVoid } from "./frame.js"
 import { announce } from "./settings.js"
+import { fontToast, hostToast } from "./host_toast.js"
 
 const { invoke } = window.__TAURI__.core
 
@@ -57,7 +58,9 @@ export async function loadAppearance(relayout) {
 
 // Zoom (Go: Ctrl/⌘ + - 0); the settings file clamps the size.
 export async function zoom(delta) {
+  const before = cur.px
   const px = delta === 0 ? cat.default_font_size_px : cur.px + delta
   const cfg = await invoke("config_set", { patch: { font_size_px: px } })
+  hostToast(fontToast(delta, before, cfg.font_size_px, cat.default_font_size_px))
   announce(cfg)
 }

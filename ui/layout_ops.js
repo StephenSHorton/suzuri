@@ -60,11 +60,16 @@ export function removePane(tree, pane) {
   return tree
 }
 
+// A move edge's canonical name, or "" for a bad one.
+export function edgeOf(edge) {
+  return { left: "left", right: "right", top: "top", up: "top", bottom: "bottom", down: "bottom" }[String(edge).toLowerCase().trim()] || ""
+}
+
 // Moves pane next to target on one edge (left, right, top/up, bottom/down),
 // as dragging a pane's title onto another pane does (Go's movePaneBeside /
 // dockExisting). Returns the new root, or null when the move isn't possible.
 export function dockBeside(tree, pane, target, edge) {
-  const e = { left: "left", right: "right", top: "top", up: "top", bottom: "bottom", down: "bottom" }[String(edge).toLowerCase()]
+  const e = edgeOf(edge)
   if (!e || pane === target || !leafOf(tree, pane) || !leafOf(tree, target)) return null
   tree = removePane(tree, pane)
   const t = leafOf(tree, target)

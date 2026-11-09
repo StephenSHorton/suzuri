@@ -158,6 +158,8 @@ fn show(notes: Vec<Notice>, mut ctx: tauri::Context) -> i32 {
     let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![crate::notice_click, crate::notice_dismiss, crate::notice_sync, crate::notice_hover, crate::notice_anchor])
         .setup(move |app| {
+            // The cards take the theme's colours (Go drawCard).
+            crate::apply_theme(&crate::config::load(), None);
             app.manage(crate::notices::Notices::new(app.handle().clone()));
             let handle = app.handle().clone();
             std::thread::spawn(move || {
