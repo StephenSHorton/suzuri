@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 
+mod applog;
 mod bridge;
 mod caffeine;
 mod notes;
@@ -748,10 +749,10 @@ fn appearance() -> serde_json::Value {
     })
 }
 
-/// UI log line (errors, dev traces) to stderr.
+/// UI log line (errors, dev traces) to the app log.
 #[tauri::command]
 fn ui_log(line: String) {
-    eprintln!("ui: {line}");
+    log::info!(target: "ui", "{line}");
 }
 
 #[cfg(test)]
@@ -779,6 +780,8 @@ fn main() {
         eprintln!("suzuri {sub}: not available in this version of suzuri");
         std::process::exit(2);
     }
+    // suzuri.log and the panic hook, before any thread exists.
+    applog::init();
     // Panes must not inherit the control API of the suzuri this was started
     // from (a dev build run inside Go suzuri): drop those variables first,
     // before any thread exists. The bridge sets its own per pane.
@@ -801,7 +804,7 @@ fn main() {
     let bridge = match bridge::Bridge::start(Arc::clone(&panes)) {
         Ok(b) => Some(b),
         Err(e) => {
-            eprintln!("bridge: not started: {e}");
+            log::warn!("bridge: not started: {e}");
             None
         }
     };
@@ -817,6 +820,10 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             app.manage(notices::Notices::new(app.handle().clone()));
+            if let Some(crash) = applog::take_crash(&applog::dir()) {
+                log::info!("last run crashed: {}", crash.display());
+                let _ = app.state::<notices::Notices>().post(None, applog::crash_notice(&crash));
+            }
             update::start(app.handle());
             caffeine::install(app.handle(), &app.state::<Arc<caffeine::Caffeine>>());
             if let Some(b) = &bridge_setup {
