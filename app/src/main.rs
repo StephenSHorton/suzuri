@@ -578,11 +578,11 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Open a link in the default browser: web and mail links only.
+/// Open a link with the system: web, mail and file:// links only.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     if !rsz_term::input::openable(&url) {
-        return Err(format!("not opening {url}: only http, https and mailto links open"));
+        return Err(format!("not opening {url}: only http, https, mailto and file links open"));
     }
     #[cfg(target_os = "macos")]
     let mut cmd = std::process::Command::new("open");
@@ -814,6 +814,8 @@ fn main() {
     let panes = Arc::new(Panes { bus, ..Default::default() });
     let _ = PANES.set(Arc::clone(&panes));
     apply_theme(&config::load(), None);
+    // OSC 52 "?" reads get the clipboard's text, as Go suzuri answered them.
+    rsz_term::set_clipboard_reader(|| arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok());
     // The agent bridge (bridge.json + AI control); the app runs without it.
     let bridge = match bridge::Bridge::start(Arc::clone(&panes)) {
         Ok(b) => Some(b),

@@ -170,11 +170,13 @@ pub fn find_urls(line: &[char]) -> Vec<UrlSpan> {
     out
 }
 
-/// Schemes a click may open: web pages and mail. Anything else an app puts
-/// in an OSC 8 link (file:, custom handlers) is not launched.
+/// Schemes a click may open: web pages, mail and local files (an OSC 8
+/// `file://` link, as Go suzuri's safeLink allowed). Anything else an app
+/// puts in a link (javascript:, custom handlers) is not launched.
 pub fn openable(url: &str) -> bool {
     let l = url.to_ascii_lowercase();
-    (l.starts_with("https://") || l.starts_with("http://")) && url.len() > 8 || l.starts_with("mailto:") && url.len() > 7
+    let after = |p: &str| l.starts_with(p) && url.len() > p.len();
+    after("https://") || after("http://") || after("mailto:") || after("file://")
 }
 
 #[cfg(test)]
@@ -256,11 +258,16 @@ mod tests {
     }
 
     #[test]
-    fn only_web_and_mail_open() {
+    fn only_web_mail_and_files_open() {
         assert!(openable("https://a.b"));
+        assert!(openable("http://a.b"));
         assert!(openable("mailto:x@y.z"));
-        assert!(!openable("file:///etc/passwd"));
+        assert!(openable("file:///Users/me/notes.txt"));
+        assert!(openable("FILE:///tmp/x"));
         assert!(!openable("javascript:alert(1)"));
         assert!(!openable("https://"));
+        assert!(!openable("file://"));
+        assert!(!openable("mailto:"));
+        assert!(!openable("x-man-page://ls"));
     }
 }
