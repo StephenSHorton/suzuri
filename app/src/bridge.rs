@@ -172,9 +172,13 @@ impl Bridge {
             (Method::Post, "/v1/submit") => self.submit(&body),
             (Method::Get, "/v1/layout") => self.ui("layout", json!({})),
             (Method::Get, p) if p.starts_with("/v1/panes/") => {
-                let id = p.trim_start_matches("/v1/panes/").parse::<u64>().unwrap_or(0);
-                let lines = query(req.url(), "lines").and_then(|v| v.parse::<u64>().ok()).unwrap_or(200);
-                self.ui("pane", json!({ "pane_id": id, "lines": lines }))
+                match p.trim_start_matches("/v1/panes/").parse::<u64>() {
+                    Ok(id) => {
+                        let lines = query(req.url(), "lines").and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0).unwrap_or(80);
+                        self.ui("pane", json!({ "pane_id": id, "lines": lines }))
+                    }
+                    Err(_) => (400, json!({ "error": "bad pane id" })),
+                }
             }
             (Method::Post, "/v1/call") => match serde_json::from_str::<Value>(&body) {
                 Ok(v) => {
@@ -285,7 +289,7 @@ impl Bridge {
             return (503, json!({ "error": "window not reachable" }));
         }
         match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(r) => r,
+            Ok((status, body)) => (status, with_pid(body)),
             Err(_) => {
                 self.pending.lock().remove(&id);
                 (504, json!({ "error": "the window did not answer within 5 s" }))
@@ -306,18 +310,33 @@ pub fn aicontrol_reply(bridge: State<'_, Arc<Bridge>>, id: u64, status: u16, bod
     bridge.resolve(id, status, body);
 }
 
-/// A pane's text for the AI control `pane` tool: the last `lines` lines.
+/// A pane's lines for the AI control `pane` tool, as Go's paneJSON: `tail`
+/// is the last `lines` scrollback lines above the screen, `live` the screen.
 #[tauri::command]
-pub fn pane_text(panes: State<'_, Arc<Panes>>, id: u32, lines: Option<usize>) -> Option<String> {
+pub fn pane_lines(panes: State<'_, Arc<Panes>>, id: u32, lines: Option<usize>) -> Option<Value> {
     let p = panes.get(id)?;
-    let text = p.screen_text();
-    let screen: Vec<&str> = text.lines().collect();
-    let n = lines.unwrap_or(screen.len());
-    // Like Go's pane tool: past the screen, the tail reaches into scrollback.
-    let history = p.history_tail(n.saturating_sub(screen.len()));
-    let all: Vec<&str> = history.iter().map(String::as_str).chain(screen.iter().copied()).collect();
-    let n = n.min(all.len());
-    Some(all[all.len() - n..].join("\n"))
+    let tail = p.history_tail(lines.unwrap_or(80));
+    Some(json!({ "tail": tail, "live": live_lines(&p.screen_text()) }))
+}
+
+/// The screen's rows, right-trimmed, without the blank rows under the last
+/// written one.
+fn live_lines(screen: &str) -> Vec<String> {
+    let mut out: Vec<String> = screen.lines().map(|l| l.trim_end().to_string()).collect();
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+/// Go puts the window's pid on every layout reply; the webview can't know it.
+fn with_pid(mut body: Value) -> Value {
+    if let Some(o) = body.as_object_mut() {
+        if o.contains_key("windows") && !o.contains_key("pid") {
+            o.insert("pid".into(), json!(std::process::id()));
+        }
+    }
+    body
 }
 
 /// A build run from a cargo `target/` dir (debug or release) is a dev build:
@@ -399,18 +418,25 @@ fn logs(n: Option<usize>) -> Value {
     }
 }
 
+/// Go's toolsJSON (internal/aicontrol/server.go), same order and docs.
 fn tools() -> Value {
     json!({ "tools": [
-        { "name": "layout", "args": {} },
-        { "name": "pane", "args": { "pane_id": "int", "lines": "int?" } },
-        { "name": "split", "args": { "pane_id": "int?", "axis": "right|down" } },
-        { "name": "focus", "args": { "pane_id": "int" } },
-        { "name": "close", "args": { "pane_id": "int?" } },
-        { "name": "rename", "args": { "pane_id": "int", "title": "string" } },
-        { "name": "report_agent", "args": { "pane_id": "int", "state": "idle|working|blocked|done|clear" } },
-        { "name": "new_tab", "args": {} },
-        { "name": "move_to_tab", "args": { "pane_id": "int", "tab_id": "int?" } },
-    ], "not_yet": ["move", "rotate", "swap", "grow", "shrink", "equalize"] })
+        { "name": "layout", "args": {}, "doc": "Snapshot windows, tabs, pane trees, titles, cwd, tail text." },
+        { "name": "pane", "args": { "pane_id": "u64", "lines": "u32?" }, "doc": "One pane including more scrollback." },
+        { "name": "split", "args": { "pane_id": "u64?", "axis": "right|down" }, "doc": "Split a pane (default: focused)." },
+        { "name": "focus", "args": { "pane_id": "u64" }, "doc": "Focus a pane." },
+        { "name": "move", "args": { "pane_id": "u64", "target_pane_id": "u64", "edge": "left|right|top|bottom" }, "doc": "Re-dock pane_id onto an edge of target_pane_id." },
+        { "name": "move_to_tab", "args": { "pane_id": "u64", "tab_id": "u64?" }, "doc": "Move onto an existing tab, or extract to a new tab if tab_id omitted." },
+        { "name": "rotate", "args": { "pane_id": "u64?" }, "doc": "Rotate the split around the pane." },
+        { "name": "swap", "args": { "pane_id": "u64?" }, "doc": "Swap the two sides of the split." },
+        { "name": "grow", "args": { "pane_id": "u64?" }, "doc": "Grow the pane." },
+        { "name": "shrink", "args": { "pane_id": "u64?" }, "doc": "Shrink the pane." },
+        { "name": "equalize", "args": { "pane_id": "u64?" }, "doc": "50/50 the split." },
+        { "name": "close", "args": { "pane_id": "u64?" }, "doc": "Close pane (or its tab if last pane)." },
+        { "name": "rename", "args": { "pane_id": "u64", "title": "string" }, "doc": "Set the pane title." },
+        { "name": "new_tab", "args": {}, "doc": "Open a new tab with a shell." },
+        { "name": "report_agent", "args": { "pane_id": "u64", "state": "idle|working|blocked|done|clear" }, "doc": "Explicit agent lifecycle for a pane. Replaces the title and PTY activity guess. blocked means waiting on a person. clear restores the guess." },
+    ] })
 }
 
 const HELP: &str = "# Suzuri AI control
@@ -423,17 +449,22 @@ or X-Suzuri-Token, or ?token=.
 Discovery: $SUZURI_CONTROL_URL (in every pane), $SUZURI=1, $SUZURI_PANE_ID,
 {config_dir}/ai.json, {config_dir}/ai/{pid}.json
 
-  GET  /help, /tools
-  GET  /v1/layout          the pane tree, titles, tail text
-  GET  /v1/panes/:id       one pane (?lines=N)
+  GET  /help, /tools       /tools lists every tool with its args and a doc line
+  GET  /v1/layout          {pid, focus_pane, active_tab, windows:[{surface, tabs:[
+                           {id, title, active, focus_pane, tree, panes}]}]}
+  GET  /v1/panes/:id       one pane: cwd, cols, rows, agent_state, activity
+                           (working|blocked|idle|dead), tail and live lines
+                           (?lines=N, default 80)
   GET  /v1/logs            the end of suzuri.log (?lines=N, default 150, max 5000)
   POST /v1/call            {\"tool\":\"<name>\",\"args\":{...}}
 
 Tools: layout; pane {pane_id, lines?}; split {pane_id?, axis: right|down};
 focus {pane_id}; close {pane_id?}; rename {pane_id, title};
 report_agent {pane_id, state: idle|working|blocked|done|clear};
-new_tab; move_to_tab {pane_id, tab_id?} (no tab_id: its own new tab).
-Not yet in suzuri: move, rotate, swap, grow, shrink, equalize.
+new_tab; move_to_tab {pane_id, tab_id?} (no tab_id: its own new tab);
+move {pane_id, target_pane_id, edge: left|right|top|bottom} (any tab);
+rotate, swap, grow, shrink, equalize {pane_id?} (the split around the pane).
+Changes answer with the new layout.
 ";
 
 #[cfg(test)]
@@ -453,6 +484,32 @@ mod tests {
         assert!(off_reason(Some("1"), true).is_none());
         assert!(off_reason(None, false).is_none());
         assert!(off_reason(Some("0"), false).is_some());
+    }
+
+    #[test]
+    fn tools_lists_all_with_docs() {
+        let v = tools();
+        let list = v["tools"].as_array().unwrap();
+        assert_eq!(list.len(), 15);
+        for name in ["move", "rotate", "swap", "grow", "shrink", "equalize", "move_to_tab", "new_tab"] {
+            assert!(list.iter().any(|t| t["name"] == name), "{name}");
+        }
+        assert!(list.iter().all(|t| t["doc"].as_str().is_some_and(|d| !d.is_empty())));
+        assert!(v.get("not_yet").is_none());
+    }
+
+    #[test]
+    fn live_lines_trim() {
+        assert_eq!(live_lines("$ ls  \na b\n\n   \n"), vec!["$ ls", "a b"]);
+        assert!(live_lines("\n\n").is_empty());
+    }
+
+    #[test]
+    fn layout_replies_get_the_pid() {
+        let pid = std::process::id() as u64;
+        assert_eq!(with_pid(json!({ "windows": [] }))["pid"], pid);
+        assert!(with_pid(json!({ "ok": true })).get("pid").is_none());
+        assert_eq!(with_pid(json!({ "windows": [], "pid": 7 }))["pid"], 7);
     }
 
     #[test]

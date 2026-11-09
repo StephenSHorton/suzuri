@@ -904,7 +904,7 @@ fn main() {
             transfer::transfer_info,
             bridge::aicontrol_reply,
             complete::complete_list,
-            bridge::pane_text,
+            bridge::pane_lines,
             window::new_window,
             caffeine::caffeine_on,
             caffeine::caffeine_off,
