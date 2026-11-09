@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 mod applog;
 mod bridge;
 mod caffeine;
+mod cli;
 mod notes;
 mod notify;
 mod complete;
@@ -771,6 +772,13 @@ const GO_ONLY_SUBCOMMANDS: &[&str] = &["mcp", "workspace-sync", "guest", "chrome
 fn main() {
     let ctx = tauri::generate_context!();
     let args: Vec<String> = std::env::args().collect();
+    if cli::wants_console(&args) {
+        cli::attach_parent_console();
+    }
+    if cli::wants_version(&args) {
+        println!("{}", ctx.package_info().version);
+        return;
+    }
     if notify::wants(&args) {
         std::process::exit(notify::run(&args[2..], ctx));
     }

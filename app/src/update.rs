@@ -26,6 +26,8 @@ pub struct Available {
 
 const FIRST_CHECK: Duration = Duration::from_secs(5);
 const RECHECK: Duration = Duration::from_secs(6 * 60 * 60);
+/// update_check's error in a dev build (ui/update.js shows it as is).
+const DEV_BUILD: &str = "dev build: updates are off";
 
 fn feed_override() -> Option<String> {
     std::env::var("RSZ_UPDATE_URL").ok().filter(|s| !s.is_empty())
@@ -73,9 +75,13 @@ pub fn start(app: &AppHandle) {
     });
 }
 
-/// Checks now (the UI's "check for updates").
+/// Checks now (the palette's "Check for updates", and Retry). Off in debug
+/// builds without a test feed, like the timed check (Go: "dev build").
 #[tauri::command]
 pub async fn update_check(app: AppHandle) -> Result<Option<Available>, String> {
+    if cfg!(debug_assertions) && feed_override().is_none() {
+        return Err(DEV_BUILD.into());
+    }
     check(&app).await
 }
 

@@ -991,7 +991,9 @@ const ACTIONS = {
 
 function run(id, arg) {
   if (palette.isOpen) palette.close()
-  ACTIONS[id]?.(arg)
+  // A chord for a command another module added (help.js's ⌘/).
+  const act = ACTIONS[id] || extraCommands.find((x) => x.id === id)?.run
+  act?.(arg)
 }
 
 // Go suzuri's DefaultCommands + TabMoveCommands, for what suzuri has.
