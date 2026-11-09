@@ -953,6 +953,8 @@ const overlayOpen = () => palette.isOpen || settings.isOpen
 // Other parts add palette entries here: {id, title, category, hint?, run()}.
 const extraCommands = []
 window.rsz = { addCommands: (cmds) => extraCommands.push(...cmds) }
+// The bell's history (ui/bell.js) reveals a pane by id; false if it's gone.
+window.rsz.focusPane = (id) => { const p = byId.get(id); if (p) setFocus(p); return !!p }
 
 const ACTIONS = {
   new_tab: () => openTab(),
