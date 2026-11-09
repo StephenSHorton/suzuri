@@ -54,8 +54,8 @@ shows "?", and in a split tab a resting pane gets a hollow ring and sinks
 back. The state comes, best first, from an agent's `report_agent`, a bell
 or notification you haven't seen (blocked until you look), a program's
 title spinner or OSC 9;4 progress, the shell's prompt marks (suzuri's own,
-or OSC 133/633 from fish, starship or ssh hosts), and last from steady
-output. A command that ran 10 s or more in a pane you're not looking at
+or OSC 133/633 when the pane's shell has its own integration, e.g. fish),
+and last from steady output. A command that ran 10 s or more in a pane you're not looking at
 posts a "succeeded" / "failed (exit N)" notice. Rules: `ui/activity_state.js`.
 
 Tests: `cargo test` and `node --test 'ui/*.test.mjs' 'ui/test/*.test.mjs' 'ui/view/test/*.test.mjs'`.

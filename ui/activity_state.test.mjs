@@ -79,9 +79,12 @@ test("a title spinner is busy until it stops, and never outlives its program", (
   step(s, { t: "input" }, 100) // claude takes the keys
   step(s, { t: "title", title: "✳ Claude Code" }, 200)
   assert.equal(activity(s, 300), "idle")
-  step(s, { t: "title", title: "⠂ Fix the tests" }, 1000)
-  step(s, { t: "title", title: "⠐ Fix the tests" }, 1500)
+  // Claude Code 2.1: ◐/◑ while working, and still (no animation) in an
+  // unfocused pane, which must stay busy.
+  step(s, { t: "title", title: "◐ Fix the tests" }, 1000)
   assert.equal(activity(s, 1600), "busy")
+  step(s, { t: "title", title: "◑ Fix the tests" }, 1960)
+  assert.equal(activity(s, 120000), "busy")
   step(s, { t: "title", title: "✳ Fix the tests" }, 2000)
   assert.equal(activity(s, 2001), "idle")
   // Go's stale spinner: a glyph left in the title after the program exits.
@@ -90,19 +93,23 @@ test("a title spinner is busy until it stops, and never outlives its program", (
   assert.equal(activity(s, 6001), "idle")
 })
 
-test("a frozen braille title goes stale", () => {
+test("a frozen spinner title goes stale only without shell marks", () => {
   const s = newActivity() // no shell hooks (fish, a custom command)
   step(s, { t: "title", title: "⠿ tool" }, 0)
   assert.equal(activity(s, 1000), "busy")
   assert.equal(activity(s, STALE_MS + 1), "idle")
+  const t = atPrompt()
+  run(t, 0)
+  step(t, { t: "title", title: "⠿ tool" }, 0)
+  assert.equal(activity(t, STALE_MS * 4, { alt: true }), "busy")
 })
 
-test("a geometric glyph only counts while it animates", () => {
+test("other status glyphs only count while they animate", () => {
   const s = newActivity()
   step(s, { t: "title", title: "● build" }, 0)
   assert.equal(activity(s, 10), "idle")
-  step(s, { t: "title", title: "◐ build" }, 100)
-  step(s, { t: "title", title: "◓ build" }, 200)
+  step(s, { t: "title", title: "■ build" }, 100)
+  step(s, { t: "title", title: "▲ build" }, 200)
   assert.equal(activity(s, 300), "busy")
   assert.equal(activity(s, 3000), "idle")
 })

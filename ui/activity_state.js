@@ -9,7 +9,8 @@
 // and the output guess only runs when nothing better speaks:
 //   1. the agent's own report (AI control report_agent);
 //   2. a bell or notification while you're not looking at the pane: blocked;
-//   3. the program's title spinner (Claude Code, Grok) or OSC 9;4 progress;
+//   3. the program's title (Claude Code: ◐/◑ working, ✳ idle; Grok: braille)
+//      or OSC 9;4 progress;
 //   4. shell integration: at the prompt is idle, a command running is busy,
 //      unless it's interactive (it took your keys or went full screen);
 //   5. sustained output, with hysteresis so it doesn't flicker.
@@ -24,7 +25,8 @@ export const OUT_QUIET_MS = 2500
 export const ECHO_MS = 400
 // A title glyph that changed this recently is animating.
 export const SPIN_MS = 2000
-// A title spinner with no title change and no output this long is stale.
+// Without shell marks, a title spinner with no title change and no output
+// this long is stale.
 export const STALE_MS = 30000
 // "Command finished" only for commands that ran at least this long.
 export const LONG_CMD_MS = 10000
@@ -40,9 +42,12 @@ export function isStatusGlyph(ch) {
     (c >= 0x2722 && c <= 0x273d) || "•·∙…⋯".includes(ch)
 }
 
-const isBraille = (ch) => {
+// Spinner glyphs that mean busy even when they stop animating: braille
+// (Grok) and the half circles Claude Code alternates (◐ ◑, every 960 ms,
+// and only while its pane has focus, so a background one sits still).
+const isSpinner = (ch) => {
   const c = ch?.codePointAt(0) ?? 0
-  return c > 0x2800 && c <= 0x28ff
+  return (c > 0x2800 && c <= 0x28ff) || (c >= 0x25d0 && c <= 0x25d3)
 }
 
 // The title's leading status glyph, or "".
@@ -172,11 +177,13 @@ export function step(s, ev, now, ctx = {}) {
 function programSays(s, now) {
   if (s.progress === 1 || s.progress === 3) return "busy"
   if (!s.glyph) return ""
-  if (isBraille(s.glyph)) {
-    const stale = now - s.titleAt > STALE_MS && now - s.outAt > STALE_MS
+  if (isSpinner(s.glyph)) {
+    // With shell marks the next prompt clears it; without, a spinner that
+    // hasn't moved and a pane that hasn't printed for a while is left over.
+    const stale = !s.shell.integrated && now - s.titleAt > STALE_MS && now - s.outAt > STALE_MS
     return stale ? "" : "busy"
   }
-  // Claude Code's resting title.
+  // Claude Code's resting (and waiting-on-you) title.
   if (s.glyph === "✳") return "idle"
   // Any other status glyph only while it animates.
   if (s.glyphAt && now - s.glyphAt < SPIN_MS) return "busy"

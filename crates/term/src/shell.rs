@@ -10,9 +10,9 @@
 //! [`OscFilter`] takes those sequences out of the PTY stream before the VT
 //! engine sees it, and turns them into [`ShellEvent`]s.
 //!
-//! Shells with their own integration (fish, starship, VS Code's, a remote
-//! host over ssh) send FinalTerm OSC 133 or VS Code OSC 633 marks instead:
-//! C (command running), E (its command line), D (done, with the exit). Those
+//! A pane shell with its own integration instead (fish, starship, VS Code's,
+//! or `ssh host` as the pane's command) sends FinalTerm OSC 133 or VS Code
+//! OSC 633 marks: C (command running), E (its command line), D (done, with the exit). Those
 //! give the same start and done events, but never a prompt (Cwd): the bar
 //! needs suzuri's blank prompt, so it stays off for them. Once suzuri's own
 //! marks are seen, 133/633 are dropped silently so nothing counts twice.
