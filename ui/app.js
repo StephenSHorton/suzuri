@@ -4,7 +4,7 @@
 // canvas, keys, IME, paste, the pointer and the wheel); this wires each one
 // to the pane_* commands through its TermHost, and keeps the tabs, splits,
 // input bar, settings, HUD and the paint worker.
-import { Screen, cellMetrics, fontSpec, onStyle, styleState, M_ALT_SCREEN, M_FOCUS } from "./frame.js"
+import { Screen, cellMetrics, fontSpec, onStyle, styleState, M_ALT_SCREEN } from "./frame.js"
 import { mount } from "./view/index.js"
 import { keyFilter, pageKeys, textFilter, pasteFilter, pasteText, writeFrom } from "./pane_input.js"
 import { clipboardImage, saveClipboardImage } from "./paste_image.js"
@@ -22,6 +22,7 @@ import { loadAppearance, zoom } from "./appearance.js"
 import { complete, ghostSuffix, DirCache, PENDING } from "./complete.js"
 import { closeLarge } from "./images.js"
 import { cleanTitle } from "./activity_state.js"
+import { FocusReports } from "./focus_report.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -61,6 +62,14 @@ const cur = () => activeTab
 let focused = null // the active tab's focused pane
 const byId = new Map()
 const early = new Map() // frames that beat pane_open's reply, by pane id
+// DECSET 1004 reports, for pane, tab and window focus (ui/focus_report.js).
+const focusReports = new FocusReports({
+  panes: () => everyPane(),
+  focused: () => focused,
+  write: (p, data) => invoke("pane_write", { id: p.id, data }),
+  windowFocused: document.hasFocus(),
+})
+focusReports.listen(window)
 
 // Painting: each pane's view paints its frames in requestAnimationFrame
 // (default). RSZ_PAINT=worker hands every canvas to the paint worker
@@ -533,6 +542,7 @@ class PaneView {
   // After the view followed a painted frame, before its ack. stats: the
   // view painted it (main thread), so it counts here and closes latency.
   onPaint(h, stats) {
+    focusReports.check(this)
     const altFlip = (this.lastModes ^ h.modes) & M_ALT_SCREEN
     this.lastModes = h.modes
     if (altFlip) this.renderBar()
@@ -904,12 +914,9 @@ function setFocus(p, force = false) {
   p.view.focus()
   if (prev && prev !== p && prev.id && !prev.exited) {
     invoke("pane_focus", { id: prev.id, focused: false })
-    if (prev.modes & M_FOCUS) invoke("pane_write", { id: prev.id, data: "\x1b[O" })
   }
-  if (p.id && (prev !== p || force)) {
-    invoke("pane_focus", { id: p.id, focused: true })
-    if (prev !== p && p.modes & M_FOCUS) invoke("pane_write", { id: p.id, data: "\x1b[I" })
-  }
+  if (p.id && (prev !== p || force)) invoke("pane_focus", { id: p.id, focused: true })
+  focusReports.sync()
 }
 
 // After a layout op (ui/layout_ops.js): rebuild the DOM, keep focus, refit.
