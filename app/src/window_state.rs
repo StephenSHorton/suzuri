@@ -152,12 +152,18 @@ struct Tracker {
     normal: Option<Placement>,
     /// Captured but not yet written.
     pending: Option<Placement>,
-    /// What the file holds, to skip writing the same frame.
+    /// What this process last wrote (or read at launch), to skip writing
+    /// the same frame again while it moves about.
     saved: Option<Placement>,
+    /// The window's latest frame, written on close even if unchanged.
+    last: Option<Placement>,
+    /// A close has been written already (close, destroy and exit all try).
+    closed: bool,
     due: Option<Instant>,
 }
 
-static TRACKER: Mutex<Tracker> = Mutex::new(Tracker { normal: None, pending: None, saved: None, due: None });
+static TRACKER: Mutex<Tracker> =
+    Mutex::new(Tracker { normal: None, pending: None, saved: None, last: None, closed: false, due: None });
 static TIMER: AtomicBool = AtomicBool::new(false);
 
 fn units(v: f64, scale: f64) -> f64 {
@@ -203,8 +209,15 @@ fn set_frame(w: &WebviewWindow, r: Rect) {
             PhysicalPosition::new(r.x.round() as i32, r.y.round() as i32).into(),
         )
     };
-    let _ = w.set_size(size);
-    let _ = w.set_position(pos);
+    // Windows: move first. Landing on a monitor with another DPI makes tao
+    // rescale the size (WM_DPICHANGED), so the size is set after, in place.
+    if LOGICAL {
+        let _ = w.set_size(size);
+        let _ = w.set_position(pos);
+    } else {
+        let _ = w.set_position(pos);
+        let _ = w.set_size(size);
+    }
 }
 
 /// Put the main window where it was, show it, and start saving its frame.
@@ -224,14 +237,16 @@ pub fn install(app: &tauri::AppHandle) {
         .inner_size()
         .map(|z| (units(z.width as f64, s), units(z.height as f64, s)))
         .unwrap_or((1200.0, 800.0));
+    let restore_max = !cascade && saved.is_some_and(|p| p.maximized && !p.fullscreen);
+    let restore_fs = !cascade && saved.is_some_and(|p| p.fullscreen);
     if let Some(r) = place(saved, &rects, pi, default, cascade) {
         set_frame(&w, r);
         let mut t = TRACKER.lock();
-        t.normal = Some(Placement { x: r.x as i32, y: r.y as i32, width: r.w as i32, height: r.h as i32, ..Default::default() });
+        let n = Placement { x: r.x as i32, y: r.y as i32, width: r.w as i32, height: r.h as i32, ..Default::default() };
+        t.normal = Some(n);
+        t.last = Some(Placement { maximized: restore_max, fullscreen: restore_fs, ..n }).filter(Placement::valid);
         t.saved = saved;
     }
-    let restore_max = !cascade && saved.is_some_and(|p| p.maximized && !p.fullscreen);
-    let restore_fs = !cascade && saved.is_some_and(|p| p.fullscreen);
     if restore_max {
         let _ = w.maximize();
     }
@@ -243,7 +258,7 @@ pub fn install(app: &tauri::AppHandle) {
     w.on_window_event(move |ev| match ev {
         WindowEvent::Moved(_) | WindowEvent::Resized(_) => note(&ww, false),
         WindowEvent::CloseRequested { .. } => note(&ww, true),
-        WindowEvent::Destroyed => flush(),
+        WindowEvent::Destroyed => flush_now(true),
         _ => {}
     });
 }
@@ -263,10 +278,13 @@ fn note(w: &WebviewWindow, now: bool) {
             return;
         }
         t.pending = Some(f);
+        t.last = Some(f);
+        // Still open after all (a close that didn't happen): close again later.
+        t.closed &= now;
         t.due = Some(Instant::now() + DEBOUNCE);
     }
     if now {
-        flush();
+        flush_now(true);
         return;
     }
     if TIMER.swap(true, Ordering::AcqRel) {
@@ -281,26 +299,41 @@ fn note(w: &WebviewWindow, now: bool) {
             }
         }
         TIMER.store(false, Ordering::Release);
-        flush();
+        flush_now(false);
     });
 }
 
-/// Write the pending frame, if it differs from the file's. Called on exit too.
+/// Write the window's frame on exit, as on close.
 pub fn flush() {
+    flush_now(true)
+}
+
+/// Write the pending frame if it differs from what this process last wrote.
+/// `closing` writes the latest frame even if unchanged, once: another window
+/// may have written its own since, and the one closed last decides.
+fn flush_now(closing: bool) {
     let p = {
         let mut t = TRACKER.lock();
         t.due = None;
-        match t.pending.take() {
-            Some(p) if t.saved != Some(p) => {
-                t.saved = Some(p);
-                p
-            }
-            _ => return,
+        let pending = t.pending.take();
+        let p = if closing { pending.or(t.last) } else { pending };
+        if !should_write(p, t.saved, closing && !t.closed) {
+            return;
         }
+        t.closed |= closing;
+        let p = p.expect("should_write checked");
+        t.saved = Some(p);
+        p
     };
     if let Err(e) = crate::config::update(json!({"window": p.to_value()})) {
         eprintln!("window: couldn't save placement: {e}");
     }
+}
+
+/// Debounced saves skip a frame this process already wrote; a close never
+/// does.
+fn should_write(pending: Option<Placement>, saved: Option<Placement>, closing: bool) -> bool {
+    pending.is_some() && (closing || pending != saved)
 }
 
 #[cfg(test)]
@@ -384,5 +417,15 @@ mod tests {
         assert_eq!(frame_for(zoomed, true, true, Some(normal)), Placement { fullscreen: true, ..normal });
         // No normal frame seen yet: the current one stands in.
         assert_eq!(frame_for(zoomed, true, false, None), Placement { maximized: true, ..zoomed });
+    }
+
+    #[test]
+    fn close_writes_even_an_unchanged_frame() {
+        let f = Some(p(100, 100, 900, 600));
+        // Another window wrote since; this one closes without moving.
+        assert!(should_write(f, f, true));
+        assert!(!should_write(f, f, false));
+        assert!(should_write(f, Some(p(0, 25, 900, 600)), false));
+        assert!(!should_write(None, f, true));
     }
 }
