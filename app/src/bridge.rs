@@ -106,7 +106,7 @@ impl Bridge {
                 std::thread::spawn(move || b.handle(req));
             }
         })?;
-        eprintln!("bridge: {} ({})", b.url, dir.join("bridge.json").display());
+        log::info!("bridge: {} ({})", b.url, dir.join("bridge.json").display());
         Ok(b)
     }
 
@@ -168,7 +168,7 @@ impl Bridge {
             (Method::Get, "/tools") => (200, tools()),
             (Method::Get, "/v1/status") => (200, self.status()),
             (Method::Get, "/v1/snapshot" | "/v1/diag") => (200, self.snapshot()),
-            (Method::Get, "/v1/logs") => (200, json!({ "ok": false, "path": "", "lines": [], "count": 0, "error": "suzuri has no app log file yet; it logs to stderr" })),
+            (Method::Get, "/v1/logs") => (200, logs(query(req.url(), "lines").and_then(|v| v.parse().ok()))),
             (Method::Post, "/v1/submit") => self.submit(&body),
             (Method::Get, "/v1/layout") => self.ui("layout", json!({})),
             (Method::Get, p) if p.starts_with("/v1/panes/") => {
@@ -391,6 +391,14 @@ pub fn rfc3339_now() -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
+/// The tail of suzuri.log, in Go's LogsResult shape (`suzuri mcp` reads it).
+fn logs(n: Option<usize>) -> Value {
+    match crate::applog::tail(n) {
+        (path, Ok(lines)) => json!({ "ok": true, "path": path, "count": lines.len(), "lines": lines }),
+        (path, Err(e)) => json!({ "ok": false, "path": path, "lines": [], "count": 0, "error": e.to_string() }),
+    }
+}
+
 fn tools() -> Value {
     json!({ "tools": [
         { "name": "layout", "args": {} },
@@ -418,6 +426,7 @@ Discovery: $SUZURI_CONTROL_URL (in every pane), $SUZURI=1, $SUZURI_PANE_ID,
   GET  /help, /tools
   GET  /v1/layout          the pane tree, titles, tail text
   GET  /v1/panes/:id       one pane (?lines=N)
+  GET  /v1/logs            the end of suzuri.log (?lines=N, default 150, max 5000)
   POST /v1/call            {\"tool\":\"<name>\",\"args\":{...}}
 
 Tools: layout; pane {pane_id, lines?}; split {pane_id?, axis: right|down};

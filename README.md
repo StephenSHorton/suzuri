@@ -73,3 +73,12 @@ Releases and auto-update: see [docs/releasing.md](docs/releasing.md).
 Dev knobs: `RSZ_CMD` (pane command instead of the shell), `RSZ_PANES`,
 `RSZ_BENCH=1` with `RSZ_BENCH_SECS` and `RSZ_BENCH_OUT` (latency probe),
 `RSZ_TRACE=1` (log PTY reads).
+
+Logs: `suzuri.log` in `~/Library/Logs/suzuri` (macOS) or
+`%LOCALAPPDATA%\suzuri\logs` (Windows), `$RSZ_CONFIG_DIR/logs` when that is
+set. It rolls over to `suzuri.log.1` past 5 MB and is mirrored to stderr from
+a terminal. `SUZURI_LOG_LEVEL` (or `RSZ_LOG_LEVEL`) sets the level: off,
+error, warn, info, debug (default) or trace. A panic writes
+`suzuri-crash.txt` beside it (backtrace, version, OS, the last log lines); the
+next launch says so once and renames it `suzuri-crash.prev.txt`. Agents can
+read the log with `GET /v1/logs?lines=N` on the AI control bridge.

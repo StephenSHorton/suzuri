@@ -27,6 +27,7 @@ base64 = "0.22"
 tiny_http = "0.12"
 getrandom = "0.3"
 tauri-plugin-updater = "2"
+log = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2.5.5"
