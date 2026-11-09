@@ -70,3 +70,19 @@ test("drop edge and no-op drops", () => {
   assert.equal(L.dropChanges(t, "A", "B", "top"), true)
   assert.equal(shape(t), "h(A,B)") // untouched
 })
+
+test("move edges and their aliases", () => {
+  assert.equal(L.edgeOf("Up"), "top")
+  assert.equal(L.edgeOf("down"), "bottom")
+  assert.equal(L.edgeOf("left"), "left")
+  assert.equal(L.edgeOf("middle"), "")
+  assert.equal(L.edgeOf(undefined), "")
+})
+
+test("a pane moved in from another tab docks beside its target", () => {
+  // What AI control's move does across tabs: move_to_tab put D beside the
+  // tab's focused pane, then D docks on the asked edge of B.
+  const t = { dir: "h", a: { dir: "h", a: { pane: "A" }, b: { pane: "D" } }, b: { pane: "B" } }
+  assert.ok(L.dockBeside(t, "D", "B", "top"))
+  assert.equal(shape(t), "h(A,v(D,B))")
+})

@@ -16,7 +16,16 @@ const COLS = ["left", "center", "right"]
 const ROWS = ["bottom", "middle", "top"]
 let shown = new Map() // key -> element
 
+// The theme's chrome colours (Go drawCard), so cards follow theme changes.
+function paint(colors) {
+  if (!colors) return
+  for (const k of ["panel", "primary", "text", "soft"]) {
+    if (colors[k]) document.documentElement.style.setProperty(`--${k}`, colors[k])
+  }
+}
+
 function render(state) {
+  paint(state.colors)
   document.body.className = `${COLS[state.anchor % 3]} ${ROWS[Math.floor(state.anchor / 3)]}`
   const keep = new Set(state.cards.map((c) => c.key))
   for (const [key, el] of shown) {

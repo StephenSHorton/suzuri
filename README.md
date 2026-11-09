@@ -36,6 +36,9 @@ stats HUD ⌘⇧H / Ctrl+Shift+H, every shortcut ⌘/ / Ctrl+/ (palette:
 "Keyboard shortcuts"). `suzuri version` (or `--version`) prints the version.
 Drag the gap between two panes to resize them; double-click it to even
 the panes out again.
+Closing the last tab (or its last pane) asks "Quit suzuri?"; `exit` in the
+last shell quits. A split runs the same program as the pane it split from.
+Up to 16 tabs and 24 panes.
 
 Input bar (#285, Go suzuri's Warp bar): zsh, bash and PowerShell start
 with a quiet prompt and the command line is an editable bar under each pane,

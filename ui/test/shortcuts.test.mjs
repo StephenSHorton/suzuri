@@ -26,6 +26,7 @@ test("macOS: Go suzuri's Cmd chords", () => {
   assert.equal(id(key("}", { metaKey: true, shiftKey: true }, "BracketRight"), M), "next_tab")
   assert.equal(id(key("ArrowLeft", { metaKey: true, shiftKey: true }), M), "prev_tab")
   assert.equal(id(key("ArrowLeft", { metaKey: true, altKey: true }), M), "focus_left")
+  assert.equal(id(key("ArrowUp", { ctrlKey: true, altKey: true }), M), "focus_up")
   assert.equal(id(key("ArrowRight", { metaKey: true, altKey: true, shiftKey: true }), M), "move_pane_next_tab")
   assert.equal(id(key("Enter", { metaKey: true, shiftKey: true }), M), "zoom_pane")
   assert.deepEqual(shortcut(key("3", { metaKey: true }, "Digit3"), M), { id: "select_tab", arg: 2 })

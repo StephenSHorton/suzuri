@@ -61,6 +61,7 @@ suzuri itself mounts every pane this way (`ui/app.js`, `ui/pane_input.js`), with
 - `mount(el, host, { debouncePaste: false })`: every paste chord calls `host.paste(null)`; the host debounces its own clipboard paste (suzuri's one 280 ms debounce also covers the macOS Edit menu). Default: chords within 280 ms are one paste.
 - `view.key(e)`: a keydown that landed elsewhere (suzuri: the page itself focused while a pane is) handled as the textarea's would be: `keyFilter`, the clipboard chords, the encoder.
 - `view.modes` (the last frame's mode bits) and `view.hasSelection`.
+- `view.scrollBy(lines)`: scroll the history (> 0 up), eased like the wheel. `mount(el, host, { smoothScroll: false })` makes the wheel and `scrollBy` call `host.scroll` at once. While scrolled back, a thin thumb (`.rsz-scrollbar .thumb`) shows on the right edge.
 
 An error (a frame shorter than its 32-byte header, a frame in another format version, or a frame that fails to paint) shows in the view until the next frame paints or `setStyle` is called. When the view is unmounted while it has focus, it calls `host.focus(false)`.
 
@@ -79,7 +80,8 @@ suzuri 0.10 had one hidden textarea and one paint loop for every pane in `ui/app
 - `frame.js`: the frame decoder and `Screen` (style and metrics per Screen); types `frame.d.ts`
 - `boxdraw.js`, `gdi_cells.js`: box glyphs drawn into the cell, and Go's Windows cell sizes
 - `keys.js`, `kitty.js`: the key encoder; types `keys.d.ts`, `kitty.d.ts`
-- `pointer.js`: selection, mouse reports and links
+- `pointer.js`: selection, mouse reports and links (⌘- or Ctrl-click on macOS; on an alt screen that reports the mouse, a double or triple click still selects)
+- `smooth.js`: eased scrollback scrolling (Go suzuri's k = 16 ease, in whole lines)
 - `images.js`: inline images and Kitty graphics
 - `view.css`: the look, themed through `--rsz-*` custom properties, and the Gohu `@font-face`
 - `fonts/`: the bundled Gohu (GohuFont uni14 Nerd Font Mono) and its license, `COPYING-LICENSE`

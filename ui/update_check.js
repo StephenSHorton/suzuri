@@ -3,7 +3,8 @@
 //   found: update_check's result (null when up to date), current: the
 //   running version, error: update_check's error, if it failed.
 // Returns { text, offer, ms }: offer the update (the Install banner), or
-// show text, hidden after ms (0: stays until closed).
+// show text (update.js puts it on a notice card; ms is how long it would
+// stay, 0 for until closed).
 export function checkMessage({ found, current, error }) {
   if (error != null) {
     const e = String(error)

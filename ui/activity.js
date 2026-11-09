@@ -138,6 +138,10 @@ function paintStrip(byTab) {
 // slow tick for the time-based edges (output going quiet, stale titles).
 // An event repaints at once.
 const SPIN_MS = 80
+// Settings' animate_unfocused (Go's "Bg anim", default on): off, the
+// spinner rests while another app is in front.
+let animateUnfocused = true
+const animating = () => !document.hidden && (animateUnfocused || document.hasFocus())
 let frame = 0
 let frameAt = 0
 let timer = 0
@@ -149,9 +153,10 @@ async function tick() {
   const now = performance.now()
   if (now - polledAt >= 500) await poll()
   const spinning = paint()
-  if (spinning && now - frameAt >= SPIN_MS) { frame = (frame + 1) % SPIN.length; frameAt = now }
+  const spin = spinning && animating()
+  if (spin && now - frameAt >= SPIN_MS) { frame = (frame + 1) % SPIN.length; frameAt = now }
   running = false
-  if (!timer) timer = setTimeout(tick, spinning && !document.hidden ? SPIN_MS : 500)
+  if (!timer) timer = setTimeout(tick, spin ? SPIN_MS : 500)
 }
 function schedule() {
   clearTimeout(timer)
@@ -162,4 +167,8 @@ schedule()
 // renderStrip rebuilds the tabs; put the marks back right away.
 if (strip) new MutationObserver(() => paint()).observe(strip, { childList: true })
 window.addEventListener("focus", schedule)
+window.addEventListener("blur", schedule)
+const animSetting = (cfg) => { animateUnfocused = cfg?.animate_unfocused !== false }
+invoke("config_get").then(animSetting).catch(() => {})
+window.addEventListener("rsz:config", (e) => { animSetting(e.detail); schedule() })
 document.addEventListener("visibilitychange", schedule)

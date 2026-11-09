@@ -59,6 +59,14 @@ pub fn mono_font_faces() -> Vec<&'static str> {
 pub const CURSORS: &[&str] = &["block", "underline", "bar"];
 pub const ANSI_MAPS: &[&str] = &["none", "soft", "full"];
 
+/// Where notice cards sit (Go config.NoticePositionIDs); the index is the
+/// panel's placement code (notices.rs). The first is the default.
+pub const NOTICE_POSITIONS: &[&str] =
+    &["bottom-left", "bottom-center", "bottom-right", "center-left", "center", "center-right", "top-left", "top-center", "top-right"];
+/// Go config.NoticePositionLabel, in the same order.
+pub const NOTICE_POSITION_LABELS: &[&str] =
+    &["Bottom left", "Bottom center", "Bottom right", "Center left", "Center", "Center right", "Top left", "Top center", "Top right"];
+
 /// The folder settings live in, named `name` under the OS config dir.
 fn dir_named(name: &str) -> PathBuf {
     if let Some(d) = std::env::var_os("RSZ_CONFIG_DIR").filter(|d| !d.is_empty()) {
@@ -161,6 +169,15 @@ pub fn normalize(v: Value) -> Value {
         _ => "soft".into(),
     };
     m.insert("shell_ansi_map".into(), ansi.into());
+
+    // Go's Bg anim: keep animating while another app has focus.
+    let anim = m.get("animate_unfocused").and_then(Value::as_bool).unwrap_or(true);
+    m.insert("animate_unfocused".into(), anim.into());
+
+    let pos = s(&m, "notice_position")
+        .filter(|p| NOTICE_POSITIONS.contains(&p.as_str()))
+        .unwrap_or_else(|| NOTICE_POSITIONS[0].into());
+    m.insert("notice_position".into(), pos.into());
 
     // Profiles: unique, non-empty names (case-insensitive), never empty.
     let mut seen = std::collections::HashSet::new();
@@ -411,6 +428,20 @@ mod tests {
         let v = update_at(&rs, &go, json!({"cursor": "underline"})).unwrap();
         assert_eq!(v["extra"], 1, "earlier keys kept");
         assert_eq!(load_from(&rs, &go)["cursor"], "underline");
+    }
+
+    #[test]
+    fn notice_position_is_one_of_go_anchors() {
+        assert_eq!(normalize(json!({}))["notice_position"], "bottom-left");
+        assert_eq!(normalize(json!({"notice_position": " Top-Right "}))["notice_position"], "top-right");
+        assert_eq!(normalize(json!({"notice_position": "upstairs"}))["notice_position"], "bottom-left");
+    }
+
+    #[test]
+    fn animate_unfocused_defaults_on() {
+        assert_eq!(normalize(json!({}))["animate_unfocused"], true);
+        assert_eq!(normalize(json!({"animate_unfocused": false}))["animate_unfocused"], false);
+        assert_eq!(normalize(json!({"animate_unfocused": "nope"}))["animate_unfocused"], true);
     }
 
     #[test]
