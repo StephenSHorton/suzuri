@@ -46,6 +46,11 @@ body.win #bar { padding-left: 12px; }
   border-radius: 6px; height: 24px; min-width: 28px; font-size: 12px; cursor: pointer;
 }
 #bar button:hover { background: var(--panel); border-color: var(--hair); color: var(--text); }
+/* ☕ (caffeine.js): dim cup when off, bright with the time left when on
+   (Go styleCaffeineOff/On). The emoji ignores color, so dim with opacity. */
+#bar #caffeine { color: var(--mute); opacity: .45; filter: grayscale(1); white-space: nowrap; }
+#bar #caffeine.on { color: var(--secondary); font-weight: 600; opacity: 1; filter: none; }
+#bar #caffeine:hover { opacity: 1; filter: none; }
 #root { position: absolute; inset: 34px 0 0 0; padding: var(--gap); display: flex; }
 .split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; gap: var(--gap); }
 .split.v { flex-direction: column; }
