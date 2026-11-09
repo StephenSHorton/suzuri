@@ -119,6 +119,10 @@ document.addEventListener("mousedown", (e) => {
   if (isOpen() && !pop.contains(e.target) && !el.contains(e.target)) close()
 }, true)
 window.addEventListener("resize", () => { if (isOpen()) place() })
+// The terminal's hidden textarea steals focus on any mousedown; keep it here.
+pop.addEventListener("mousedown", (e) => e.stopPropagation())
+// app.js refocuses the pane when the window comes back, so close on the way out.
+window.addEventListener("blur", () => close(false))
 
 el.addEventListener("mousedown", (e) => e.preventDefault())
 el.addEventListener("click", () => (isOpen() ? close() : open()))
