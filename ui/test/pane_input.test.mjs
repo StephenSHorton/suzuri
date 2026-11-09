@@ -14,7 +14,7 @@ const { shortcut } = await import("../shortcuts.js")
 const { M_ALT_SCREEN } = await import("../view/frame.js")
 
 // A PaneView's input side, recording what it was asked to do.
-function setup({ isMac = false, bar = false, largeImage = false, extra = () => false, copyOrInterrupt } = {}) {
+function setup({ isMac = false, bar = false, largeImage = false, copyOrInterrupt } = {}) {
   const p = page()
   p.win.performance.now = () => 100_000
   const did = []
@@ -29,7 +29,7 @@ function setup({ isMac = false, bar = false, largeImage = false, extra = () => f
   const invoked = []
   const invoke = (cmd, args) => (invoked.push([cmd, args]), Promise.resolve())
   const env = {
-    isMac, shortcut, extraShortcut: extra,
+    isMac, shortcut,
     closeLarge: () => (largeImage ? (largeImage = false, did.push(["closeLarge"]), true) : false),
     run: (id, arg) => did.push(["run", id, arg]),
     now: () => 42,
@@ -105,14 +105,6 @@ test("app shortcuts beat the terminal and are prevented", () => {
   press({ key: "ArrowLeft", code: "ArrowLeft", altKey: true })
   assert.deepEqual(did.at(-1), ["run", "focus_left", undefined])
   assert.deepEqual(host.of("write"), [])
-  pane.view.unmount()
-})
-
-test("panel shortcuts (extras.js) come after the app's", () => {
-  const { did, press, pane } = setup({ extra: (e) => e.ctrlKey && e.shiftKey && e.key === "S" })
-  const e = press({ key: "S", code: "KeyS", ctrlKey: true, shiftKey: true })
-  assert.equal(e.defaultPrevented, true)
-  assert.deepEqual(did, [])
   pane.view.unmount()
 })
 
@@ -204,7 +196,7 @@ test("pageKeys: with no pane's textarea focused the app shortcuts and chords sti
     hasSelection: () => false,
     clip: (kind) => did.push(["clip", kind]),
     closeLarge: () => (large ? (large = false, did.push(["closeLarge"]), true) : false),
-    shortcut, extraShortcut: (e) => e.key === "S" && (did.push(["extra"]), true),
+    shortcut,
     run: (id, arg) => did.push(["run", id, arg]),
   })
   const ev = (k, target = p.doc.body) => {
@@ -215,9 +207,8 @@ test("pageKeys: with no pane's textarea focused the app shortcuts and chords sti
   assert.equal(ev({ key: "T", code: "KeyT", ctrlKey: true, shiftKey: true }).defaultPrevented, true)
   ev({ key: "v", code: "KeyV", ctrlKey: true })
   ev({ key: "Escape", code: "Escape" })
-  ev({ key: "S", code: "KeyS", ctrlKey: true, shiftKey: true })
   assert.equal(ev({ key: "a", code: "KeyA" }).defaultPrevented, false, "typing goes nowhere, as before")
-  assert.deepEqual(did, [["run", "new_tab", undefined], ["clip", "paste"], ["closeLarge"], ["extra"]])
+  assert.deepEqual(did, [["run", "new_tab", undefined], ["clip", "paste"], ["closeLarge"]])
   // A key in a pane, a panel or a box is theirs; nothing while an overlay is open.
   did.length = 0
   ev({ key: "T", code: "KeyT", ctrlKey: true, shiftKey: true }, p.doc.createElement("textarea"))
@@ -246,7 +237,7 @@ test("pageKeys: with the page focused and a pane focused, typing reaches that pa
     hasSelection: () => false,
     clip: (kind) => did.push(["clip", kind]),
     closeLarge: () => false,
-    shortcut, extraShortcut: () => false,
+    shortcut,
     run: (id, arg) => did.push(["run", id, arg]),
   })
   const ev = (k) => {

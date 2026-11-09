@@ -1,6 +1,4 @@
-// A small modal panel over the panes, used by transfer
-// (#286). Interim UI until the palette (#283) and notices (#288) land; those
-// cards can open these panels from their own entry points.
+// A small modal panel over the panes, used by notes.
 
 let current = null
 

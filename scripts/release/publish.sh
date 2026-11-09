@@ -75,15 +75,12 @@ sign_update() { # <file> -> prints the minisign signature
 }
 
 # 1. Build and sign the .app (Tauri applies hardened runtime + entitlements).
-# suzuri-transfer (hato) ships inside the bundle, next to suzuri.
-"$ROOT/scripts/release/transfer.sh"
 cat >"$WORK/overlay.json" <<EOF
-{"version": "$VERSION", "bundle": {"createUpdaterArtifacts": false, "externalBin": ["../packaging/bin/suzuri-transfer"]}}
+{"version": "$VERSION", "bundle": {"createUpdaterArtifacts": false}}
 EOF
 (cd "$ROOT/app" && APPLE_SIGNING_IDENTITY="$IDENTITY" cargo tauri build --bundles app --config "$WORK/overlay.json" ${RSZ_TAURI_CONFIG:+--config "$RSZ_TAURI_CONFIG"})
 APP="$ROOT/target/release/bundle/macos/suzuri.app"
 codesign --verify --deep --strict "$APP"
-[[ -x "$APP/Contents/MacOS/suzuri-transfer" ]] || { echo "error: suzuri-transfer missing from the bundle" >&2; exit 1; }
 BUILT="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
 [[ "$BUILT" == "$VERSION" ]] || { echo "error: built $BUILT, wanted $VERSION" >&2; exit 1; }
 ditto "$APP" "$WORK/suzuri.app"

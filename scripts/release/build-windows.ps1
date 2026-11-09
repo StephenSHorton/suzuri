@@ -22,7 +22,6 @@ $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Set-Location $root
 
 & (Join-Path $PSScriptRoot "conpty.ps1")
-& (Join-Path $PSScriptRoot "transfer.ps1")
 
 # Version and the bundled conpty files come in as a config overlay, so dev
 # builds never need the conpty files. Updater signing happens on the Mac.
@@ -30,7 +29,6 @@ $overlay = @{
   version = $Version
   bundle  = @{
     createUpdaterArtifacts = $false
-    externalBin = @("../packaging/bin/suzuri-transfer")
     resources = @{
       "../packaging/windows/conpty/conpty.dll"      = "conpty.dll"
       "../packaging/windows/conpty/OpenConsole.exe" = "OpenConsole.exe"

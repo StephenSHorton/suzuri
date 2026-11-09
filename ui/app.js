@@ -8,7 +8,6 @@ import { Screen, cellMetrics, fontSpec, onStyle, styleState, M_ALT_SCREEN } from
 import { mount } from "./view/index.js"
 import { keyFilter, pageKeys, textFilter, pasteFilter, pasteText, writeFrom } from "./pane_input.js"
 import { clipboardImage, saveClipboardImage } from "./paste_image.js"
-import { extraShortcut } from "./extras.js"
 import { isOpen as panelOpen } from "./panel.js"
 import "./aicontrol.js"
 import "./layout_tools.js"
@@ -214,7 +213,7 @@ function paneHost(p) {
       else invoke("open_url", { url }).then((note) => toast(note || "opened link"), (err) => console.warn(err))
     },
     keyFilter: keyFilter(p, {
-      isMac, shortcut, extraShortcut, closeLarge,
+      isMac, shortcut, closeLarge,
       run: (id, arg) => run(id, arg),
       now: () => performance.now(),
       copyOrInterrupt,
@@ -1017,6 +1016,8 @@ const extraCommands = []
 window.rsz = { addCommands: (cmds) => extraCommands.push(...cmds), toast: (text) => toast(text) }
 // The bell's history (ui/bell.js) reveals a pane by id; false if it's gone.
 window.rsz.focusPane = (id) => { const p = byId.get(id); if (p) setFocus(p); return !!p }
+// Files dropped on the window (ui/file_drop.js) paste into the focused pane.
+window.rsz.pasteFocused = (text) => { if (focused?.id && !focused.disposed) pasteText(focused, text, invoke) }
 // Host feedback as a notice card (ui/host_toast.js).
 window.rsz.toast = hostToast
 
@@ -1141,7 +1142,7 @@ document.addEventListener("keydown", pageKeys({
   pane: () => (focused && !focused.disposed ? focused : null),
   hasSelection: () => !!focused?.view.hasSelection,
   clip: (kind) => (kind === "paste" ? paste() : kind === "copy" ? copy() : copyOrInterrupt()),
-  closeLarge, shortcut, extraShortcut,
+  closeLarge, shortcut,
   run: (id, arg) => run(id, arg),
 }))
 

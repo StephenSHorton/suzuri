@@ -91,15 +91,17 @@ FunctionEnd
 ; Start menu folder and desktop shortcut, Uninstall\suzuri and
 ; Software\suzuri, and leaves $LOCALAPPDATA\suzuri. Here suzuri.exe has
 ; just been replaced, Uninstall.exe is Tauri's uninstall.exe now (same name
-; on NTFS), the key has just been rewritten by Tauri, and suzuri-transfer.exe
-; has been overwritten by this app's own (bundle.externalBin).
+; on NTFS), and the key has just been rewritten by Tauri. suzuri no longer
+; sends files: suzuri-transfer.exe, from Go or from a Rust release that
+; bundled it, goes on every install.
 !macro NSIS_HOOK_POSTINSTALL
   DeleteRegValue HKCU "${SUZURI_UNINSTKEY}" "GoUninstallString"
+  Delete "$INSTDIR\suzuri-transfer.exe"
+  Delete "$INSTDIR\suzuri-transfer.exe.old"
   ${If} $SuzuriGoDir != ""
     nsExec::ExecToLog 'taskkill /IM suzuri-chrome.exe /F'
     Pop $SuzuriTmp
     Delete "$INSTDIR\suzuri.exe.old"
-    Delete "$INSTDIR\suzuri-transfer.exe.old"
     Delete "$INSTDIR\suzuri-chrome.exe"
     Delete "$INSTDIR\suzuri-chrome.exe.old"
     Delete "$INSTDIR\suzuri.ico"
