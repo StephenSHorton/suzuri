@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 
+mod activity;
 mod applog;
 mod bridge;
 mod caffeine;
@@ -76,6 +77,9 @@ enum Msg<'a> {
     Placements { list: Vec<[i64; 11]> },
     #[serde(rename = "progress")]
     Progress { state: u8, percent: u8 },
+    /// The program posted a notification (ui/activity.js: it may want you).
+    #[serde(rename = "notice")]
+    Notified,
 }
 
 fn json(m: &Msg) -> InvokeResponseBody {
@@ -136,6 +140,7 @@ fn pane_open(
                 on_frame.send(json(&Msg::Exit { code }))
             }
             Out::Notice(n) => {
+                let _ = on_frame.send(json(&Msg::Notified));
                 notice_effects(&app, notes.post(Some(id), n));
                 Ok(())
             }
@@ -858,6 +863,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             pane_open,
             pane_write,
+            activity::pane_activity,
+            activity::activity_notice,
             pane_submit,
             pane_queue_flush,
             pane_queue_clear,

@@ -21,6 +21,7 @@ import { Settings, announce } from "./settings.js"
 import { loadAppearance, zoom } from "./appearance.js"
 import { complete, ghostSuffix, DirCache, PENDING } from "./complete.js"
 import { closeLarge } from "./images.js"
+import { cleanTitle } from "./activity_state.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -332,8 +333,9 @@ class PaneView {
   }
 
   onMessage(msg) {
+    window.rszActivity?.onMessage(this, msg)
     if (msg.t === "title") {
-      this.title = msg.title || "shell"
+      this.title = cleanTitle(msg.title) || "shell"
       this.showTitle()
     } else if (msg.t === "exit") {
       this.exited = true
@@ -549,6 +551,7 @@ class PaneView {
   send(data, t0) {
     if (!this.id || this.exited) return
     if (!this.pendingInput) this.pendingInput = t0 ?? performance.now()
+    window.rszActivity?.onInput(this)
     invoke("pane_write", { id: this.id, data })
   }
 
