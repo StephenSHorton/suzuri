@@ -75,13 +75,22 @@ window.addEventListener("mousedown", (e) => {
   if (!s) return
   e.preventDefault()
   e.stopPropagation()
-  if (e.detail === 2) {
-    if (equalizeRun(s.node)) host().relayout()
-    return
-  }
+  // The second press of a double-click starts no drag; dblclick evens it.
+  if (e.detail >= 2) return
   drag = { s }
   gate.hold()
   setCursor(s.dir)
+}, true)
+
+// A double-click on a divider evens the run out. Swallow it here, since the
+// divider's hit area overlaps the lower pane's title bar (rename on dblclick).
+window.addEventListener("dblclick", (e) => {
+  if (e.button !== 0 || !onPanes(e)) return
+  const s = hitSash(sashes(), e.clientX, e.clientY)
+  if (!s) return
+  e.preventDefault()
+  e.stopPropagation()
+  if (equalizeRun(s.node)) host().relayout()
 }, true)
 
 window.addEventListener("mouseup", (e) => {
