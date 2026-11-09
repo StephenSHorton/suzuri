@@ -1024,7 +1024,7 @@ fn main() {
             transfer::transfer_info,
             bridge::aicontrol_reply,
             complete::complete_list,
-            bridge::pane_text,
+            bridge::pane_lines,
             window::new_window,
             window::app_quit,
             caffeine::caffeine_on,

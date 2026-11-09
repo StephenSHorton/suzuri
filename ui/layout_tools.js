@@ -36,15 +36,30 @@ registerTool("equalize", around(L.equalize))
 registerTool("rotate", around(L.rotate))
 registerTool("swap", around(L.swapSides))
 
+// Go's movePane: docks pane_id on an edge of target_pane_id, in the same tab
+// or across tabs, and the person stays on the tab they were using.
 registerTool("move", async (a) => {
   if (a.pane_id == null) return [400, { error: "pane_id required" }]
   if (a.target_pane_id == null) return [400, { error: "target_pane_id required" }]
   const p = byPaneId(a.pane_id), t = byPaneId(a.target_pane_id)
-  if (!p || !t) return [400, { error: "move failed" }]
-  if (!["left", "right", "top", "bottom", "up", "down"].includes(String(a.edge).toLowerCase()))
-    return [400, { error: "edge must be left|right|top|bottom" }]
-  if (!L.dockBeside(host().tree(), p, t, a.edge)) return [400, { error: "move failed" }]
-  host().relayout()
-  host().setFocus(p)
+  if (!p || !t || p === t) return [400, { error: "move failed" }]
+  if (!L.edgeOf(a.edge)) return [400, { error: "edge must be left|right|top|bottom" }]
+  // What the person had: their tab and pane, and the target tab's own focus.
+  const h = host(), user = h.activeTab(), was = h.focused(), keep = t.tab.focused
+  if (p.tab === t.tab) {
+    // Already there: leave the tree (and any resized split) alone.
+    if (L.dropChanges(p.tab.tree, p, t, a.edge) && !L.dockBeside(p.tab.tree, p, t, a.edge)) return [400, { error: "move failed" }]
+    if (p.tab !== user) h.showTab(p.tab)
+  } else {
+    // Into the target's tab first (that shows it), then onto the edge.
+    h.movePaneToTab(p, h.tabs().indexOf(t.tab))
+    if (!L.dockBeside(p.tab.tree, p, t, a.edge)) return [400, { error: "move failed" }]
+  }
+  h.relayout()
+  // movePaneToTab focuses the moved pane; hand focus back (setFocus also
+  // shows its tab), and leave the target tab's focus where it was.
+  if (was && was !== p && h.allPanes().includes(was)) h.setFocus(was)
+  else if (h.tabs().includes(user)) h.showTab(user)
+  if (t.tab !== h.activeTab() && keep && keep !== p && keep.tab === t.tab) t.tab.focused = keep
   return [200, await layout()]
 })
