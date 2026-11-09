@@ -9,11 +9,24 @@
 //!
 //! GHOSTTY_VT_LIB=<dir holding libghostty-vt.a / ghostty-vt-static.lib> skips all of
 //! that and links a library you built yourself.
+//!
+//! On a bump, regenerate sys.rs with bindgen-cli 0.73.2 from a ghostty
+//! checkout at the new commit, keeping sys.rs's first three lines and
+//! updating the commit in its fourth:
+//!
+//! ```text
+//! bindgen include/ghostty/vt.h --no-doc-comments --no-layout-tests --use-core \
+//!   --no-prepend-enum-name --allowlist-function 'ghostty_.*' \
+//!   --allowlist-type 'Ghostty.*' --allowlist-var 'GHOSTTY_.*' -- -Iinclude
+//! ```
+//!
+//! Then check every `*mut c_void` get/set in src/ghostty/mod.rs against the
+//! headers: the compiler can't see a changed pointee type.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const GHOSTTY_COMMIT: &str = "c7f68a7f48c6a5b357689eb8c2328bc2dab5d8ed";
+const GHOSTTY_COMMIT: &str = "2166b446eece5f402809681105b377d8dd602378";
 const ZIG_VERSION: &str = "0.17.0";
 
 fn main() {

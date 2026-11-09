@@ -176,6 +176,21 @@ mod tests {
     }
 
     #[test]
+    fn long_scrollback_keeps_every_line() {
+        // Only the line limit caps history: no byte limit sneaks in (ghostty
+        // restores a 10,000-byte cap when the byte option is NULL).
+        let mut e = E::new(100, 5, 10_000);
+        let mut b = Vec::new();
+        for i in 0..5000 {
+            b.extend_from_slice(format!("{i:0>100}\r\n").as_bytes());
+        }
+        e.feed(&b, &mut Vec::new());
+        let h = e.history_tail(10_000);
+        assert!(h.len() >= 4995, "kept {} lines", h.len());
+        assert_eq!(h[0], format!("{:0>100}", 0));
+    }
+
+    #[test]
     fn history_tail_is_oldest_first_and_capped() {
         let mut e = E::new(10, 2, 100);
         let mut ev = Vec::new();
