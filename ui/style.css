@@ -77,7 +77,9 @@ body.win #bar { padding-left: 12px; }
   position: absolute; right: 10px; top: 6px; padding: 1px 6px; border-radius: 4px;
   background: var(--sel); color: var(--match); font-size: 10px;
 }
-.split > .sash { display: none; }
+/* Dragging a divider (ui/sash.js): the resize cursor everywhere, even over the text cursor of a pane's body. */
+body.sash-col, body.sash-col * { cursor: col-resize !important; }
+body.sash-row, body.sash-row * { cursor: row-resize !important; }
 /* The input bar (#285): Go suzuri's Warp bar, a hairline over the prompt. */
 .pane .inbar {
   position: relative; flex: none; padding: 5px 8px 6px;

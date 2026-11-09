@@ -33,6 +33,8 @@ RSZ_PANES=8 cargo run -p suzuri # 8 panes, 4 x 2
 Keys (macOS / Windows): split right ⌘D / Ctrl+Shift+D, split down ⌘⇧D /
 Ctrl+Shift+E, close pane ⌘W / Ctrl+Shift+W, focus ⌘⌥+arrows / Alt+arrows,
 stats HUD ⌘⇧H / Ctrl+Shift+H.
+Drag the gap between two panes to resize them; double-click it to even
+the panes out again.
 
 Input bar (#285, Go suzuri's Warp bar): zsh, bash and PowerShell start
 with a quiet prompt and the command line is an editable bar under each pane,
