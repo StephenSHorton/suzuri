@@ -126,6 +126,13 @@ impl Caffeine {
         self.changed(inner)
     }
 
+    /// Go turns caffeine on, indefinitely, when the window opens
+    /// (window_darwin.go, window_windows.go), so long sessions don't sleep.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    pub fn launch(self: &Arc<Self>) -> Status {
+        self.activate(None)
+    }
+
     /// Go's caffeine_toggle: off when on (timed or not), else indefinite.
     pub fn toggle(self: &Arc<Self>) -> Status {
         if self.inner.lock().active { self.deactivate() } else { self.activate(None) }
@@ -277,12 +284,16 @@ mod platform {
     }
 }
 
-/// Wires the change events to the UI (`caffeine` event with a Status).
+/// Wires the change events to the UI (`caffeine` event with a Status) and
+/// turns caffeine on, as Go does at launch. Other platforms have no hold, so
+/// they start off rather than toast an error.
 pub fn install(app: &AppHandle, c: &Arc<Caffeine>) {
     let app = app.clone();
     c.on_change(move |s| {
         let _ = app.emit("caffeine", s);
     });
+    #[cfg(any(target_os = "macos", windows))]
+    c.launch();
 }
 
 /// minutes: Some(n) for n minutes, None (or 0) for indefinitely.
@@ -362,6 +373,20 @@ mod tests {
         assert_eq!(f.held.load(Ordering::SeqCst), 0);
         // The hold is always taken on the caffeine thread, never the caller's.
         assert_ne!(*f.thread.lock(), Some(std::thread::current().id()));
+    }
+
+    #[test]
+    fn launch_is_on_indefinitely_and_a_click_turns_it_off() {
+        let f = Fake::default();
+        let c = Caffeine::with_hold(f.clone());
+        let s = c.launch();
+        assert_eq!(s, Status { active: true, remaining_s: None, label: "∞".into(), error: None });
+        assert_eq!(f.held.load(Ordering::SeqCst), 1);
+        // The ☕ click is caffeine_toggle: off, then back on.
+        assert!(!c.toggle().active);
+        assert_eq!(f.held.load(Ordering::SeqCst), 0);
+        assert_eq!(c.toggle().label, "∞");
+        assert_eq!(f.held.load(Ordering::SeqCst), 1);
     }
 
     #[test]

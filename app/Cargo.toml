@@ -27,7 +27,8 @@ base64 = "0.22"
 tiny_http = "0.12"
 getrandom = "0.3"
 tauri-plugin-updater = "2"
+log = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2.5.5"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }

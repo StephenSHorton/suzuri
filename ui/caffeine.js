@@ -1,26 +1,28 @@
 // Caffeine (#294): keep the machine awake, as Go suzuri's ☕ strip does.
-// The hold lives in Rust (app/src/caffeine.rs); this adds the palette
-// entries and the ☕ label in the bar ("∞", "12m"; click turns it off).
+// The hold lives in Rust (app/src/caffeine.rs) and is on from launch; this
+// adds the palette entries and the ☕ button at the right of the bar (dim when
+// off, "☕ ∞" / "☕ 12m" when on; a click toggles).
+import { chipText, chipTitle } from "./caffeine_chip.js"
+
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
 
 const el = document.createElement("button")
 el.id = "caffeine"
-el.hidden = true
-el.title = "Caffeine: the computer stays awake (click to turn off)"
-const bar = document.getElementById("bar")
-bar.insertBefore(el, document.getElementById("split-right") || null)
+document.getElementById("bar").appendChild(el)
 
 let tick = 0
 function show(s) {
   clearTimeout(tick)
-  el.hidden = !s.active
-  el.textContent = s.active ? `☕ ${s.label}` : ""
-  if (s.error) window.rsz?.toast?.(`Caffeine: ${s.error}`)
+  el.textContent = chipText(s)
+  el.title = chipTitle(s)
+  el.classList.toggle("on", !!s?.active)
+  if (s?.error) window.rsz?.toast?.(`Caffeine: ${s.error}`)
   // Keep a timed label current (Go repaints the strip every second).
-  if (s.active && s.remaining_s != null) tick = setTimeout(() => invoke("caffeine_status").then(show), 1000)
+  if (s?.active && s.remaining_s != null) tick = setTimeout(() => invoke("caffeine_status").then(show), 1000)
 }
-el.addEventListener("click", () => invoke("caffeine_off").then(show))
+show(null)
+el.addEventListener("click", () => invoke("caffeine_toggle").then(show))
 listen("caffeine", (e) => show(e.payload))
 invoke("caffeine_status").then(show)
 

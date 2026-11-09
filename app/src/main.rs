@@ -9,8 +9,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use parking_lot::Mutex;
 
+mod activity;
+mod applog;
 mod bridge;
 mod caffeine;
+mod cli;
 mod notes;
 mod notify;
 mod complete;
@@ -20,6 +23,7 @@ mod sidecar;
 mod transfer;
 mod transfer_engine;
 mod window;
+mod window_state;
 mod notices;
 mod update;
 mod ws;
@@ -73,6 +77,9 @@ enum Msg<'a> {
     Placements { list: Vec<[i64; 11]> },
     #[serde(rename = "progress")]
     Progress { state: u8, percent: u8 },
+    /// The program posted a notification (ui/activity.js: it may want you).
+    #[serde(rename = "notice")]
+    Notified,
 }
 
 fn json(m: &Msg) -> InvokeResponseBody {
@@ -133,6 +140,7 @@ fn pane_open(
                 on_frame.send(json(&Msg::Exit { code }))
             }
             Out::Notice(n) => {
+                let _ = on_frame.send(json(&Msg::Notified));
                 notice_effects(&app, notes.post(Some(id), n));
                 Ok(())
             }
@@ -748,10 +756,10 @@ fn appearance() -> serde_json::Value {
     })
 }
 
-/// UI log line (errors, dev traces) to stderr.
+/// UI log line (errors, dev traces) to the app log.
 #[tauri::command]
 fn ui_log(line: String) {
-    eprintln!("ui: {line}");
+    log::info!(target: "ui", "{line}");
 }
 
 #[cfg(test)]
@@ -769,6 +777,13 @@ const GO_ONLY_SUBCOMMANDS: &[&str] = &["mcp", "workspace-sync", "guest", "chrome
 fn main() {
     let ctx = tauri::generate_context!();
     let args: Vec<String> = std::env::args().collect();
+    if cli::wants_console(&args) {
+        cli::attach_parent_console();
+    }
+    if cli::wants_version(&args) {
+        println!("{}", ctx.package_info().version);
+        return;
+    }
     if notify::wants(&args) {
         std::process::exit(notify::run(&args[2..], ctx));
     }
@@ -779,6 +794,8 @@ fn main() {
         eprintln!("suzuri {sub}: not available in this version of suzuri");
         std::process::exit(2);
     }
+    // suzuri.log and the panic hook, before any thread exists.
+    applog::init();
     // Panes must not inherit the control API of the suzuri this was started
     // from (a dev build run inside Go suzuri): drop those variables first,
     // before any thread exists. The bridge sets its own per pane.
@@ -801,7 +818,7 @@ fn main() {
     let bridge = match bridge::Bridge::start(Arc::clone(&panes)) {
         Ok(b) => Some(b),
         Err(e) => {
-            eprintln!("bridge: not started: {e}");
+            log::warn!("bridge: not started: {e}");
             None
         }
     };
@@ -816,7 +833,12 @@ fn main() {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
+            window_state::install(app.handle());
             app.manage(notices::Notices::new(app.handle().clone()));
+            if let Some(crash) = applog::take_crash(&applog::dir()) {
+                log::info!("last run crashed: {}", crash.display());
+                let _ = app.state::<notices::Notices>().post(None, applog::crash_notice(&crash));
+            }
             update::start(app.handle());
             caffeine::install(app.handle(), &app.state::<Arc<caffeine::Caffeine>>());
             if let Some(b) = &bridge_setup {
@@ -841,6 +863,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             pane_open,
             pane_write,
+            activity::pane_activity,
+            activity::activity_notice,
             pane_submit,
             pane_queue_flush,
             pane_queue_clear,
@@ -896,6 +920,7 @@ fn main() {
         .expect("build suzuri")
         .run(move |app, ev| {
             if let tauri::RunEvent::Exit = ev {
+                window_state::flush();
                 if let Some(b) = &bridge_exit {
                     b.stop();
                 }

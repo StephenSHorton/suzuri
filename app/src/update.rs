@@ -26,6 +26,8 @@ pub struct Available {
 
 const FIRST_CHECK: Duration = Duration::from_secs(5);
 const RECHECK: Duration = Duration::from_secs(6 * 60 * 60);
+/// update_check's error in a dev build (ui/update.js shows it as is).
+const DEV_BUILD: &str = "dev build: updates are off";
 
 fn feed_override() -> Option<String> {
     std::env::var("RSZ_UPDATE_URL").ok().filter(|s| !s.is_empty())
@@ -59,23 +61,27 @@ pub fn start(app: &AppHandle) {
         loop {
             match tauri::async_runtime::block_on(check(&app)) {
                 Ok(Some(info)) => {
-                    eprintln!("update: {} available (running {})", info.version, info.current);
+                    log::info!("update: {} available (running {})", info.version, info.current);
                     let _ = app.emit("update", info);
                     if std::env::var("RSZ_UPDATE_AUTO").is_ok_and(|v| v == "1") {
                         install_pending(&app);
                     }
                 }
-                Ok(None) => eprintln!("update: up to date"),
-                Err(e) => eprintln!("update: check failed: {e}"),
+                Ok(None) => log::info!("update: up to date"),
+                Err(e) => log::warn!("update: check failed: {e}"),
             }
             std::thread::sleep(RECHECK);
         }
     });
 }
 
-/// Checks now (the UI's "check for updates").
+/// Checks now (the palette's "Check for updates", and Retry). Off in debug
+/// builds without a test feed, like the timed check (Go: "dev build").
 #[tauri::command]
 pub async fn update_check(app: AppHandle) -> Result<Option<Available>, String> {
+    if cfg!(debug_assertions) && feed_override().is_none() {
+        return Err(DEV_BUILD.into());
+    }
     check(&app).await
 }
 
@@ -84,7 +90,7 @@ pub async fn update_check(app: AppHandle) -> Result<Option<Available>, String> {
 #[tauri::command]
 pub async fn update_install(app: AppHandle, pending: State<'_, Pending>) -> Result<(), String> {
     let update = pending.0.lock().take().ok_or("no update pending")?;
-    eprintln!("update: installing {}", update.version);
+    log::info!("update: installing {}", update.version);
     update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
     app.restart();
 }
@@ -93,11 +99,11 @@ fn install_pending(app: &AppHandle) {
     let app2 = app.clone();
     let res = tauri::async_runtime::block_on(async move {
         let update = app2.state::<Pending>().0.lock().take().ok_or("no update pending".to_string())?;
-        eprintln!("update: installing {}", update.version);
+        log::info!("update: installing {}", update.version);
         update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())
     });
     match res {
         Ok(()) => app.restart(),
-        Err(e) => eprintln!("update: install failed: {e}"),
+        Err(e) => log::error!("update: install failed: {e}"),
     }
 }

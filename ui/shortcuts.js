@@ -65,6 +65,7 @@ export function shortcut(e, isMac) {
     if (k === "w") return r("close_pane")
     if (k === "k" || k === "p") return r("palette")
     if (k === "," || code === "Comma") return r("settings")
+    if (k === "/" || code === "Slash") return r("help")
     if (digit) return r("select_tab", digit - 1)
   }
 
@@ -74,10 +75,16 @@ export function shortcut(e, isMac) {
 
 // The chord shown next to a command in the palette, per platform.
 export function chordLabel(id, isMac) {
+  return chordLabels(isMac)[id] || ""
+}
+
+// Every command's chord label by id (the shortcuts sheet, help.js, lists
+// them all; its test checks none is left out).
+export function chordLabels(isMac) {
   const m = isMac ? "⌘" : "Ctrl+"
   const ms = isMac ? "⌘⇧" : "Ctrl+Shift+"
   const mas = isMac ? "⌘⌥⇧" : "Ctrl+Alt+Shift+"
-  const L = {
+  return {
     new_tab: isMac ? "⌘T" : ms + "T",
     new_window: ms + "N",
     close_tab: isMac ? "⌘⇧W" : "",
@@ -100,10 +107,11 @@ export function chordLabel(id, isMac) {
     rename_pane: "F2",
     palette: m + "K · " + m + "P",
     settings: m + ",",
+    help: m + "/",
+    select_tab: m + "1–9",
     hud: ms + "H",
     zoom_in: m + "+",
     zoom_out: m + "-",
     zoom_reset: m + "0",
   }
-  return L[id] || ""
 }

@@ -4,7 +4,7 @@
 //! The file is Go suzuri's own config.json, in the same folder under the OS
 //! config dir (Windows %LOCALAPPDATA%\suzuri, macOS ~/Library/Application
 //! Support/suzuri, Linux ~/.config/suzuri), so both apps read and write one
-//! file. Keys this app does not use yet (intro, ambient, glass, window...)
+//! file. Keys this app does not use yet (intro, ambient, glass...)
 //! are kept as they are, so nothing is lost on save. RSZ_CONFIG_DIR
 //! overrides the folder (tests, screenshots); there, Go's file is looked
 //! for in a go-suzuri subfolder and copied on first run.
@@ -229,7 +229,30 @@ pub fn load_from(path: &Path, go: &Path) -> Value {
 /// Merge `patch`'s keys into the file, normalize and save. Returns what was
 /// saved.
 pub fn update(patch: Value) -> std::io::Result<Value> {
-    update_at(&path(), &go_path(), patch)
+    // One writer at a time: Settings and the window frame (window_state.rs)
+    // both read, merge and write the file, and every window is its own
+    // process, so the mutex covers this process and a file lock the rest.
+    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let _g = LOCK.lock();
+    let path = path();
+    let _f = lock_file(&path);
+    update_at(&path, &go_path(), patch)
+}
+
+/// An OS lock on `config.json.lock` next to the file, held until dropped.
+/// None if it can't be had; the write goes ahead unlocked then.
+fn lock_file(path: &Path) -> Option<std::fs::File> {
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).ok()?;
+    }
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("json.lock"))
+        .ok()?;
+    f.lock().ok()?;
+    Some(f)
 }
 
 pub fn update_at(path: &Path, go: &Path, patch: Value) -> std::io::Result<Value> {
@@ -247,20 +270,36 @@ pub fn update_at(path: &Path, go: &Path, patch: Value) -> std::io::Result<Value>
     Ok(v)
 }
 
-/// Atomic write: temp file, then rename over the old one.
+/// Atomic write: a temp file of its own (pid and a counter, so two windows
+/// saving at once never share one), then rename over the old file. The old
+/// file is never deleted first: a failed rename leaves it as it was.
 fn save_to(path: &Path, v: &Value) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }
     let mut text = serde_json::to_string_pretty(v).map_err(std::io::Error::other)?;
     text.push('\n');
-    let tmp = path.with_extension("json.tmp");
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
     std::fs::write(&tmp, text)?;
-    if std::fs::rename(&tmp, path).is_err() {
-        let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp, path)?;
+    // Windows replaces the target too, but fails while another process has
+    // it open (a reader, antivirus); try again for a moment.
+    let mut tries = if cfg!(windows) { 10 } else { 0 };
+    let res = loop {
+        match std::fs::rename(&tmp, path) {
+            Err(_) if tries > 0 => {
+                tries -= 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            r => break r,
+        }
+    };
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    Ok(())
+    res
 }
 
 /// A profile's launch: argv (None = the user's shell) and cwd.
@@ -399,5 +438,37 @@ mod tests {
         std::fs::write(&go, r#"{"font_size_px": 20}"#).unwrap();
         assert_eq!(load_from(&rs, &go)["font_size_px"], 14);
         assert_eq!(std::fs::read_to_string(&rs).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn writers_at_once_never_lose_the_file_or_a_key() {
+        // Each thread stands in for a window's process: its own file lock,
+        // then read, merge and write a key of its own.
+        let d = tmp("race");
+        let (rs, go) = (d.join("rs/config.json"), d.join("go/config.json"));
+        let hs: Vec<_> = (0..8)
+            .map(|i| {
+                let (rs, go) = (rs.clone(), go.clone());
+                std::thread::spawn(move || {
+                    for j in 0..10 {
+                        let _f = lock_file(&rs).expect("lock");
+                        update_at(&rs, &go, json!({format!("k{i}"): j})).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        let v = load_from(&rs, &go);
+        for i in 0..8 {
+            assert_eq!(v[format!("k{i}")], 9);
+        }
+        let left: Vec<_> = std::fs::read_dir(rs.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "temp files left: {left:?}");
     }
 }

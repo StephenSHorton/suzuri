@@ -21,6 +21,7 @@ import { Settings, announce } from "./settings.js"
 import { loadAppearance, zoom } from "./appearance.js"
 import { complete, ghostSuffix, DirCache, PENDING } from "./complete.js"
 import { closeLarge } from "./images.js"
+import { cleanTitle } from "./activity_state.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -168,11 +169,15 @@ function paneHost(p) {
     paste: (text) => (text == null ? paste(p) : pasteText(p, text, invoke)),
     // p.size is what the core has: pane_open's size, then each change.
     // Before pane_open answers the view's fit waits in p.fitSize.
+    // While a divider is dragged (ui/sash.js) the gate spaces these out.
     resize: (cols, rows) => {
       if (!p.id) return void (p.fitSize = [cols, rows])
-      if (cols === p.size[0] && rows === p.size[1]) return
-      p.size = [cols, rows]
-      invoke("pane_resize", { id: p.id, cols, rows })
+      const send = () => {
+        if (cols === p.size[0] && rows === p.size[1]) return
+        p.size = [cols, rows]
+        invoke("pane_resize", { id: p.id, cols, rows })
+      }
+      window.rszResizeGate ? window.rszResizeGate(p, send) : send()
     },
     // Inline images are sized in cells on the Rust side (card #288). Before
     // pane_open answers it waits in p.cell, and open() sends it.
@@ -328,8 +333,9 @@ class PaneView {
   }
 
   onMessage(msg) {
+    window.rszActivity?.onMessage(this, msg)
     if (msg.t === "title") {
-      this.title = msg.title || "shell"
+      this.title = cleanTitle(msg.title) || "shell"
       this.showTitle()
     } else if (msg.t === "exit") {
       this.exited = true
@@ -545,6 +551,7 @@ class PaneView {
   send(data, t0) {
     if (!this.id || this.exited) return
     if (!this.pendingInput) this.pendingInput = t0 ?? performance.now()
+    window.rszActivity?.onInput(this)
     invoke("pane_write", { id: this.id, data })
   }
 
@@ -953,6 +960,8 @@ const overlayOpen = () => palette.isOpen || settings.isOpen
 // Other parts add palette entries here: {id, title, category, hint?, run()}.
 const extraCommands = []
 window.rsz = { addCommands: (cmds) => extraCommands.push(...cmds) }
+// The bell's history (ui/bell.js) reveals a pane by id; false if it's gone.
+window.rsz.focusPane = (id) => { const p = byId.get(id); if (p) setFocus(p); return !!p }
 
 const ACTIONS = {
   new_tab: () => openTab(),
@@ -991,7 +1000,9 @@ const ACTIONS = {
 
 function run(id, arg) {
   if (palette.isOpen) palette.close()
-  ACTIONS[id]?.(arg)
+  // A chord for a command another module added (help.js's ⌘/).
+  const act = ACTIONS[id] || extraCommands.find((x) => x.id === id)?.run
+  act?.(arg)
 }
 
 // Go suzuri's DefaultCommands + TabMoveCommands, for what suzuri has.
