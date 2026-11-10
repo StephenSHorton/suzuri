@@ -110,11 +110,17 @@ export function NotesView({ model }) {
   )
 }
 
-// A key and what it does, for the hint rows.
+// A key (or keys that do the same) and what it does, for the hint rows.
 function Hint({ keys, children }) {
+  const all = Array.isArray(keys) ? keys : [keys]
   return (
     <HStack gap={1} align="center">
-      <Kbd keys={keys} />
+      {all.map((k, i) => (
+        <HStack key={k} gap={1} align="center">
+          {i > 0 && <Text type="supporting">or</Text>}
+          <Kbd keys={k} />
+        </HStack>
+      ))}
       <Text type="supporting">{children}</Text>
     </HStack>
   )
@@ -337,7 +343,7 @@ function NotesEditor({ note: n, model, nameFirst, canClear, actions, status }) {
         <Button label="All notes" icon={<Icon icon="chevronLeft" />} onClick={() => { model.save(true); actions.showList(n) }} />
         <Button label={canClear ? "Clear" : "Delete"} icon={<Icon icon={Trash2} />} onClick={() => actions.askDelete()} />
         <Hint keys="escape">list</Hint>
-        <Hint keys="F2">rename</Hint>
+        <Hint keys={["F2", "up"]}>rename</Hint>
         <Hint keys="tab">indents</Hint>
         {status}
       </HStack>
