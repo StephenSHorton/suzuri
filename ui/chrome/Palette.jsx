@@ -17,6 +17,9 @@ import { filterCommands, hintChords } from "../palette.js"
 // The query field, plus two things the old palette did that CommandPalette
 // leaves out: the first result is highlighted, so typing then Enter runs it,
 // and the open chord toggles the palette shut.
+// Not Astryx: CommandPalette starts with no highlight and clears it on every
+// keystroke, and has no close chord; this wraps CommandPaletteInput through
+// its exported context (no custom DOM or CSS) to keep both behaviours.
 function PaletteInput({ onToggle }) {
   const ctx = useCommandPaletteContext()
   const count = ctx?.selectableItems.length ?? 0
@@ -25,6 +28,8 @@ function PaletteInput({ onToggle }) {
     if (ctx && highlighted < 0 && count > 0) ctx.setHighlightedIndex(0)
   }, [ctx, highlighted, count, ctx?.selectableItems])
   const onKeyDown = (e) => {
+    // An IME composition owns its keys (Enter commits it, not a command).
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return
     if ((e.metaKey || e.ctrlKey) && /^[kp]$/i.test(e.key)) {
       e.preventDefault()
       onToggle()
@@ -73,6 +78,8 @@ function Row({ item }) {
 // when it closes, with the command to run or null for a dismissal.
 export function PaletteView({ items, onDone, onToggle }) {
   const chosen = useRef(null)
+  // Not Astryx: a hand-made SearchSource rather than createStaticSource, so
+  // matching stays filterCommands' (every word across title, hint, category).
   const source = useMemo(() => {
     // Ids are positions: the same command id can appear more than once
     // (Move pane to tab: 1, 2 …, each its own arg).

@@ -21,6 +21,8 @@ const MAC_MODS = { "⌘": "meta", "⌥": "alt", "⇧": "shift", "⌃": "ctrl" }
 const NAMED = { "←": "left", "→": "right", "↑": "up", "↓": "down", "+": "plus", enter: "enter", tab: "tab", esc: "escape", escape: "escape" }
 const keyName = (k) => NAMED[k.toLowerCase()] || k
 
+// Not Astryx: Kbd takes key strings but nothing parses suzuri's
+// platform-specific chord labels (shortcuts.js chordLabels), so this does.
 // One chord label ("Ctrl+Shift+T", "Ctrl++", "⌘⇧W", "F2") as Kbd keys
 // ("ctrl+shift+T", "ctrl+plus", "meta+shift+W", "F2"); null when it is not
 // a chord (a profile's shell, "Stay awake 15m").
