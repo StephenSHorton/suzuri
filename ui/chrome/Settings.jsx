@@ -20,6 +20,7 @@ import { Icon } from "@astryxdesign/core/Icon"
 import { Text } from "@astryxdesign/core/Text"
 import { Kbd } from "@astryxdesign/core/Kbd"
 import { Divider } from "@astryxdesign/core/Divider"
+import { Tooltip } from "@astryxdesign/core/Tooltip"
 import { Plus, Trash2 } from "lucide-react"
 
 export const LABELS = {
@@ -43,8 +44,10 @@ export function SettingsView(props) {
   // Keys stay in the screen: none reach the terminal or app.js's shortcuts.
   // Escape is left to bubble, because Astryx's layer stack answers it on the
   // document (closing an open Selector first, else the dialog: cancel).
+  // Plain Tab bubbles too: the Dialog's focus trap listens on the document.
+  const pathRef = useRef(null)
   const onKeyDown = (e) => {
-    if (e.key === "Escape") return
+    if (e.key === "Escape" || (e.key === "Tab" && !e.ctrlKey)) return
     e.stopPropagation()
     if ((e.metaKey || e.ctrlKey) && e.key === ",") { e.preventDefault(); return onDone(true) }
     // Ctrl+Tab switches page (old suzuri used plain Tab, which now moves focus).
@@ -76,6 +79,8 @@ export function SettingsView(props) {
         }
         content={
           <LayoutContent>
+            {/* Not Astryx: a plain role="tabpanel" div, because TabList's tabs
+                pattern asks the caller to supply the panel element (Tab.md). */}
             <div id={`rsz-settings-${page}`} role="tabpanel">
               {page === "look" ? <LookPage {...props} /> : <SessionPage {...props} />}
             </div>
@@ -91,9 +96,11 @@ export function SettingsView(props) {
                     <Kbd keys="enter" /><Text type="supporting">done</Text>
                     <Kbd keys="esc" /><Text type="supporting">cancel</Text>
                   </HStack>
-                  <span title={status ? undefined : meta.path}>
+                  {/* Not Astryx: a span to anchor the Tooltip, since Text takes no ref. */}
+                  <span ref={pathRef}>
                     <Text type="supporting" maxLines={1}>{status || `Saved to ${shortPath(meta.path)}`}</Text>
                   </span>
+                  <Tooltip content={meta.path} anchorRef={pathRef} isEnabled={!status} />
                 </VStack>
               </StackItem>
               <HStack gap={2}>
@@ -153,7 +160,7 @@ function SessionPage({ cfg, meta, onSet, onProfiles, onAddProfile, selectLast })
           <Text type="supporting">Shell and folder for "New tab: …" in the palette.</Text>
         </VStack>
         {cfg.profiles.map((p, i) => (
-          <ProfileRow key={`${i}:${JSON.stringify(p)}`} index={i} profile={p}
+          <ProfileRow key={i} index={i} profile={p}
             canDelete={cfg.profiles.length > 1}
             select={selectLast && i === cfg.profiles.length - 1}
             onSave={(np) => saveRow(i, np)}
@@ -170,7 +177,11 @@ function SessionPage({ cfg, meta, onSet, onProfiles, onAddProfile, selectLast })
 // One profile: name, shell and folder. Edits stay local while focus is in
 // the row and save when it leaves (or on Enter), as the old change events did.
 function ProfileRow({ index, profile, canDelete, select, onSave, onDelete }) {
-  const [draft, setDraft] = useState({ name: profile.name || "", shell: profile.shell || "", cwd: profile.cwd || "" })
+  const fromProfile = () => ({ name: profile.name || "", shell: profile.shell || "", cwd: profile.cwd || "" })
+  const [draft, setDraft] = useState(fromProfile)
+  // A save, or a delete above this row, brings a new profile: show it.
+  const saved = JSON.stringify(profile)
+  useEffect(() => setDraft(fromProfile()), [saved])
   const row = useRef(null)
   useEffect(() => {
     if (!select) return
@@ -208,6 +219,8 @@ function ProfileRow({ index, profile, canDelete, select, onSave, onDelete }) {
 
 // A labelled row in the horizontal-labels FormLayout for a control that has
 // no label of its own (SegmentedControl only takes an aria-label).
+// Not Astryx: the inner div only carries the id Field's label points at;
+// SegmentedControl takes no id prop.
 function FieldRow({ label, children }) {
   return (
     <Field label={label} inputID={`rsz-settings-${label.toLowerCase()}`} isGroupLabel>
