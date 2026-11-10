@@ -4,8 +4,8 @@
 // "🔔", or "🔔 3" with unread notices; Go caps the number at 9.
 export function bellLabel(unread) {
   const n = Number(unread) || 0
-  if (n <= 0) return "🔔"
-  return `🔔 ${n > 9 ? "9+" : n}`
+  if (n <= 0) return ""
+  return n > 9 ? "9+" : String(n)
 }
 
 // Unix ms as local "15:04".
