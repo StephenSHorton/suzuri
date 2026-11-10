@@ -5,11 +5,11 @@ import assert from "node:assert/strict"
 import { bellLabel, noticeTime, noticeText, moveIndex } from "./notice_list.js"
 
 test("bell label shows the unread count, capped like Go", () => {
-  assert.equal(bellLabel(0), "🔔")
-  assert.equal(bellLabel(undefined), "🔔")
-  assert.equal(bellLabel(3), "🔔 3")
-  assert.equal(bellLabel(9), "🔔 9")
-  assert.equal(bellLabel(12), "🔔 9+")
+  assert.equal(bellLabel(0), "")
+  assert.equal(bellLabel(undefined), "")
+  assert.equal(bellLabel(3), "3")
+  assert.equal(bellLabel(9), "9")
+  assert.equal(bellLabel(12), "9+")
 })
 
 test("notice time is local HH:MM", () => {

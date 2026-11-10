@@ -1225,10 +1225,9 @@ window.rszRegisterTool?.("move_to_tab", async (a) => {
 })
 
 document.getElementById("new-tab").onclick = () => openTab()
-document.getElementById("split-right").onclick = () => split("h")
-document.getElementById("split-down").onclick = () => split("v")
-document.getElementById("open-palette").onclick = () => openPalette()
-document.getElementById("open-settings").onclick = () => openSettings()
+// Split, palette and settings live in the palette and on their shortcuts;
+// the bar keeps only the bell and the cup on its right (and the window
+// buttons on Windows, titlebar.js).
 
 // ---- HUD: Cmd/Ctrl+Shift+H
 let hudTimer = 0

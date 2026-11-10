@@ -1,8 +1,9 @@
 // Caffeine (#294): keep the machine awake, as Go suzuri's ☕ strip does.
 // The hold lives in Rust (app/src/caffeine.rs) and is on from launch; this
-// adds the palette entries and the ☕ button at the right of the bar (dim when
-// off, "☕ ∞" / "☕ 12m" when on; a click toggles).
+// adds the palette entries and the cup button at the right of the bar (dim
+// when off, cup + "∞" / "12m" when on; a click toggles).
 import { chipText, chipTitle, caffeineToast } from "./caffeine_chip.js"
+import { icon } from "./icons.js"
 import { hostToast } from "./host_toast.js"
 
 const { invoke } = window.__TAURI__.core
@@ -10,7 +11,7 @@ const { listen } = window.__TAURI__.event
 
 const el = document.createElement("button")
 el.id = "caffeine"
-document.getElementById("bar").appendChild(el)
+;(document.getElementById("chips") || document.getElementById("bar")).appendChild(el)
 
 let tick = 0
 let last = null
@@ -22,7 +23,8 @@ function show(s, action = null, prev = last, minutes) {
   // background window, so remaining_s alone can be stale.
   last = s?.active && s.remaining_s != null ? { ...s, ends: Date.now() + s.remaining_s * 1000 } : s
   clearTimeout(tick)
-  el.textContent = chipText(s)
+  const label = chipText(s)
+  el.innerHTML = icon("coffee") + (label ? `<span class="count">${label}</span>` : "")
   el.title = chipTitle(s)
   el.classList.toggle("on", !!s?.active)
   // Keep a timed label current (Go repaints the strip every second).

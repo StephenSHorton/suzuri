@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "What the main window and the notice panel may call.",
   "windows": ["main", "notices"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize", "core:window:allow-minimize", "core:window:allow-toggle-maximize", "core:window:allow-close"]
 }
