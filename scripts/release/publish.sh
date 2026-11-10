@@ -16,8 +16,8 @@
 # Needs on the Mac:
 #   - the "Developer ID Application" identity in the login keychain
 #   - notary credentials saved as a keychain profile (RSZ_NOTARY_PROFILE,
-#     default suzuri-notary):
-#       xcrun notarytool store-credentials suzuri-notary \
+#     default irori-notary):
+#       xcrun notarytool store-credentials irori-notary \
 #         --apple-id <apple id> --team-id GP6632G333
 #   - the updater key (RSZ_UPDATER_KEY, default ~/.tauri/suzuri-updater.key;
 #     public half in packaging/updater.pub and tauri.conf.json)
@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO="${RSZ_RELEASE_REPO:-StephenSHorton/suzuri}"
-PROFILE="${RSZ_NOTARY_PROFILE:-suzuri-notary}"
+PROFILE="${RSZ_NOTARY_PROFILE:-irori-notary}"
 KEY="${RSZ_UPDATER_KEY:-$HOME/.tauri/suzuri-updater.key}"
 TAG="v$VERSION"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

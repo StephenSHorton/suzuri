@@ -54,11 +54,17 @@ without asking).
 
 1. Developer ID certificate in the login keychain
    (`security find-identity -v -p codesigning`).
-2. Notary credentials as a keychain profile, using an app-specific password
-   from https://account.apple.com:
-   `xcrun notarytool store-credentials suzuri-notary --apple-id <apple id> --team-id GP6632G333`
+2. Notary credentials as the keychain profile `irori-notary`, the one Irori's
+   releases use (same Apple team; `publish.sh` uses it by default, or the one
+   named in `RSZ_NOTARY_PROFILE`). Check it with
+   `xcrun notarytool history --keychain-profile irori-notary`. If it is
+   missing, make it with an app-specific password from https://account.apple.com:
+   `xcrun notarytool store-credentials irori-notary --apple-id <apple id> --team-id GP6632G333`
 3. `cargo install tauri-cli --version '^2'`, and `gh auth login`.
-4. Zig 0.17.0 on PATH (or `ZIG`), for libghostty-vt (README, Build).
+4. Zig, exactly 0.17.0, for libghostty-vt (README, Build). On the Mac it is
+   `~/.local/zig/zig-aarch64-macos-0.17.0/zig`, linked as `~/.local/bin/zig`
+   so it is on PATH (`zig version` must print `0.17.0`; `ZIG` can name
+   another binary). Not Homebrew's: it ships 0.17.1, which the build refuses.
 
 On the PC: Rust, `cargo install tauri-cli --version '^2'`, `gh auth login`,
 and Zig 0.17.0 (the zip from https://ziglang.org/download/, on PATH or as
