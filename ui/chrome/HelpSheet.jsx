@@ -14,7 +14,7 @@ import { kbdParts } from "../help.js"
 
 function Keys({ label, isMac }) {
   return (
-    <HStack gap={1} align="center" wrap="wrap" className="rsz-help-keys">
+    <HStack gap={1} align="center" wrap="wrap">
       {kbdParts(label, isMac).map((p, i) =>
         p.kbd ? <Kbd key={i} keys={p.kbd} />
         : p.sep ? <Text key={i} type="supporting">·</Text>
@@ -29,10 +29,11 @@ function Section({ section, isMac }) {
     <VStack gap={1.5}>
       <Heading level={3} color="secondary">{section.title}</Heading>
       {section.rows.map((r) => (
-        <HStack key={r.desc} gap={3} align="center">
+        // Two equal tracks: every description in a section starts at one edge.
+        <Grid key={r.desc} columns={2} gap={3} align="center">
           <Keys label={r.keys} isMac={isMac} />
           <Text>{r.desc}</Text>
-        </HStack>
+        </Grid>
       ))}
     </VStack>
   )

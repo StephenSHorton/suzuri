@@ -47,7 +47,9 @@ export function confirm({ title, body, yes = "OK", no = "Cancel" }) {
     render(false)
     setTimeout(() => {
       if (shown === id) unmountOverlay("confirm")
-      if (!openBox && document.activeElement !== back) back?.focus?.()
+      // Only when the native restore left focus nowhere.
+      const at = document.activeElement
+      if (!openBox && (!at || at === document.body)) back?.focus?.()
     }, 200)
     done(v)
   }

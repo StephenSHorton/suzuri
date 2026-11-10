@@ -1,4 +1,2 @@
-/* Keyboard shortcuts sheet (ui/help.js, chrome/HelpSheet.jsx).
-   Not Astryx: HStack has no fixed-basis prop, so the keys column gets its
-   width here, so every description in a section starts at the same edge. */
-.rsz-help-keys { flex: 0 0 45%; min-width: 0; row-gap: var(--spacing-0-5); }
+/* Keyboard shortcuts sheet (ui/help.js): drawn entirely with Astryx
+   components in chrome/HelpSheet.jsx, so it needs no rules of its own. */

@@ -135,7 +135,7 @@ export function kbdParts(label, isMac) {
 // Esc, Enter, ⌘/ or a click outside closes it. It takes every key while
 // open: app.js doesn't know about it, so this listener alone keeps keys from
 // the terminal.
-const SCROLL_KEYS = new Set(["Tab", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"])
+const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"])
 
 export class HelpSheet {
   constructor(_host, isMac) {
@@ -175,7 +175,9 @@ export class HelpSheet {
     this.drop = setTimeout(() => {
       if (this.isOpen) return
       unmountOverlay("help")
-      if (document.activeElement !== back) back?.focus?.()
+      // Only when the native restore left focus nowhere.
+      const at = document.activeElement
+      if (!at || at === document.body) back?.focus?.()
     }, 200)
   }
 
