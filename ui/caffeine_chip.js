@@ -1,8 +1,8 @@
-// The text beside the cup icon in the bar for a caffeine Status (Go's
-// renderCaffeineChip): the cup is always there, dim when off, bright with
-// the time left ("∞", "14m", "40s") when on. A click toggles.
+// What the ☕ button in the bar shows for a caffeine Status (Go's
+// renderCaffeineChip): always there, dim when off, bright with the time left
+// ("∞", "14m", "40s") when on. A click toggles.
 export function chipText(s) {
-  return s?.active && s.label ? s.label : ""
+  return s?.active && s.label ? `☕ ${s.label}` : "☕"
 }
 
 export function chipTitle(s) {

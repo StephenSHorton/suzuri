@@ -5,7 +5,6 @@
 // and a click on an entry focuses the pane that posted it. Opening the
 // list marks everything read, as in Go.
 import { bellLabel, noticeTime, noticeText, moveIndex } from "./notice_list.js"
-import { icon } from "./icons.js"
 
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
@@ -14,14 +13,12 @@ const el = document.createElement("button")
 el.id = "bell"
 el.title = "Notifications"
 const bar = document.getElementById("bar")
-// In the bar's chip slot, before the cup if caffeine.js got here first
-// (else caffeine.js appends the cup after us).
-const chips = document.getElementById("chips") || bar
-chips.insertBefore(el, document.getElementById("caffeine"))
+// Before the cup if caffeine.js got here first, else before split-right
+// (caffeine.js then puts the cup between us).
+bar.insertBefore(el, document.getElementById("caffeine") || document.getElementById("split-right") || null)
 
 function setUnread(n) {
-  const count = bellLabel(n)
-  el.innerHTML = icon(n > 0 ? "bellDot" : "bell") + (count ? `<span class="count">${count}</span>` : "")
+  el.textContent = bellLabel(n)
   el.classList.toggle("unread", n > 0)
   el.title = n > 0 ? `Notifications (${n} unread)` : "Notifications"
 }
