@@ -1,57 +1,52 @@
 // The notice panel (card #288; app/src/notices.rs holds the notices and
-// sizes and places this window). Left click: focus the pane that asked.
-// Right click: dismiss. Hovering holds every card.
+// sizes and places this window). Its own page, so its own React root: the
+// Astryx stylesheets in main.jsx's cascade order, the Neutral theme in dark
+// mode, and the cards (chrome/Notices.jsx). Left click: focus the pane that
+// asked. Right click or the close button: dismiss. Hovering holds every card.
+import "@astryxdesign/core/reset.css"
+import "@astryxdesign/core/astryx.css"
+import "@astryxdesign/theme-neutral/theme.css"
+import "./chrome/notices.css"
+
+import { createElement as h } from "react"
+import { createRoot } from "react-dom/client"
+import { Theme } from "@astryxdesign/core/theme"
+import { neutralTheme } from "@astryxdesign/theme-neutral/built"
+import { Notices } from "./chrome/Notices.jsx"
+// Imported so Vite copies the files into dist (a bare "sounds/x.wav" string
+// never reached the build).
+import successWav from "./sounds/success.wav"
+import failWav from "./sounds/fail.wav"
+import publishedWav from "./sounds/published.wav"
+
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
 
-const stack = document.getElementById("stack")
 const sounds = {}
-for (const name of ["success", "fail", "published"]) {
-  const a = new Audio(`sounds/${name}.wav`)
+for (const [name, url] of [["success", successWav], ["fail", failWav], ["published", publishedWav]]) {
+  const a = new Audio(url)
   a.preload = "auto"
   sounds[name] = a
 }
 
 const COLS = ["left", "center", "right"]
 const ROWS = ["bottom", "middle", "top"]
-let shown = new Map() // key -> element
 
-// The theme's chrome colours (Go drawCard), so cards follow theme changes.
-function paint(colors) {
-  if (!colors) return
-  for (const k of ["panel", "primary", "text", "soft"]) {
-    if (colors[k]) document.documentElement.style.setProperty(`--${k}`, colors[k])
-  }
+const actions = {
+  click: (key) => invoke("notice_click", { key }),
+  dismiss: (key) => invoke("notice_dismiss", { key }),
 }
 
+const root = createRoot(document.getElementById("root"))
+
+// notices.rs sends the whole panel each time: the cards (oldest first), the
+// anchor (0..8: column + 3 * row) and a sound to play now. Its `colors` are
+// the terminal theme's; the cards use Astryx tokens instead.
 function render(state) {
-  paint(state.colors)
   document.body.className = `${COLS[state.anchor % 3]} ${ROWS[Math.floor(state.anchor / 3)]}`
-  const keep = new Set(state.cards.map((c) => c.key))
-  for (const [key, el] of shown) {
-    if (!keep.has(key)) {
-      el.remove()
-      shown.delete(key)
-    }
-  }
-  // Oldest first: the stack runs bottom-up, so it sits at the bottom.
-  for (const c of state.cards) {
-    let el = shown.get(c.key)
-    if (!el) {
-      el = document.createElement("div")
-      el.innerHTML = `<div class="t"></div><div class="b"></div>`
-      el.addEventListener("click", () => invoke("notice_click", { key: c.key }))
-      el.addEventListener("contextmenu", (e) => {
-        e.preventDefault()
-        invoke("notice_dismiss", { key: c.key })
-      })
-      shown.set(c.key, el)
-    }
-    el.className = `card ${c.tone}`
-    el.querySelector(".t").textContent = c.title
-    el.querySelector(".b").textContent = c.body
-    stack.append(el)
-  }
+  root.render(
+    h(Theme, { theme: neutralTheme, mode: "dark" }, h(Notices, { cards: state.cards, ...actions })),
+  )
   if (state.sound && sounds[state.sound]) {
     const a = sounds[state.sound]
     a.currentTime = 0
