@@ -61,7 +61,7 @@ function RenameBox({ tab }) {
   )
 }
 
-// One terminal tab. Astryx's Tab is page navigation with no close control,
+// Not Astryx: one terminal tab. Astryx's Tab is page navigation with no close control,
 // so a terminal tab is composed from Astryx parts: an Icon, the label, a
 // Badge for the pane count and a ghost IconButton to close.
 function TerminalTab({ tab }) {

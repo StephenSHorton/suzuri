@@ -28,6 +28,7 @@
   --cyan: var(--color-text-cyan);
   --dim-matte: var(--color-background-muted);
   --hair: var(--color-border);
+  --gap: var(--spacing-1-5);
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -59,6 +60,8 @@ html, body {
   font-size: 11px; white-space: nowrap; overflow: hidden;
 }
 .pane.focused .head { color: var(--color-text-primary); }
+/* Not Astryx: the focus dot is a span in the head app.js builds as plain
+   DOM outside React, so it can't be a StatusDot; token colours. */
 .pane .head .dot { width: 6px; height: 6px; border-radius: var(--radius-full); background: var(--color-text-disabled); flex: none; }
 .pane.focused .head .dot { background: var(--color-accent); }
 .pane .head .exited { color: var(--color-text-warning); }
@@ -217,7 +220,10 @@ input.rename:focus { border-color: var(--color-accent); }
 .img-modal canvas { border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
 .img-modal .cap { color: var(--soft); font-size: 12px; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* ConEmu OSC 9;4 progress: a thin bar along the pane head's bottom edge
-   (accent; 2 error; 3 indeterminate; 4 paused, warning). */
+   (accent; 2 error; 3 indeterminate; 4 paused, warning).
+   Not Astryx: a 2px line painted on the plain-DOM head (app.js sets
+   data-progress/--progress); a ProgressBar is a React track with its own
+   height, which the 22px head has no room for. */
 .pane[data-progress]:not([data-progress=""]) .head { background-image: linear-gradient(var(--color-accent), var(--color-accent)); background-size: var(--progress, 0%) 2px; background-repeat: no-repeat; background-position: left bottom; }
 .pane[data-progress="2"] .head { background-image: linear-gradient(var(--color-error), var(--color-error)); }
 .pane[data-progress="3"] .head { background-size: 100% 2px; }
