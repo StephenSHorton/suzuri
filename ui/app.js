@@ -25,6 +25,7 @@ import { cleanTitle } from "./activity_state.js"
 import { tabTitle, stickyAt, windowTitle, zoomCycle, MAX_TABS, MAX_PANES } from "./tab_rules.js"
 import { confirm, isOpen as confirmOpen } from "./confirm.js"
 import { FocusReports } from "./focus_report.js"
+import { chrome } from "./chrome/store.js"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -35,7 +36,6 @@ const isMac = navigator.platform.startsWith("Mac")
 if (!isMac) document.body.classList.add("win")
 
 const root = document.getElementById("root")
-const strip = document.getElementById("tabs")
 const hud = document.getElementById("hud")
 
 // Each pane's view has its own hidden textarea; the focused pane's holds
@@ -131,7 +131,7 @@ function connectFrames(spec) {
 
 // The paint worker; resolves once its font is loaded.
 function startWorker(boot) {
-  worker = new Worker("paint-worker.js", { type: "module" })
+  worker = new Worker(new URL("./paint-worker.js", import.meta.url), { type: "module" })
   if (boot.ws) frameSock = true // the worker's socket: acks are its job
   worker.onerror = (e) => log("paint worker error", e.message)
   worker.onmessage = (e) => {
@@ -889,13 +889,20 @@ function editInline(host, value, done) {
   box.addEventListener("mousedown", (e) => e.stopPropagation())
 }
 
+// Rename in place on the strip (chrome/TitleBar.jsx draws the box; Enter
+// keeps, Esc drops, a blur keeps).
+let renamingTab = null
 function renameTab(t = activeTab) {
-  const el = strip.querySelector(`[data-tab="${t.id}"] .name`)
-  if (!el) return
-  editInline(el, tabLabel(t), (v) => {
-    if (v != null && v !== tabLabel(t)) { t.name = v; toast("renamed") }
-    renderStrip()
-  })
+  if (!t) return
+  renamingTab = t
+  renderStrip()
+}
+function finishRenameTab(id, v) {
+  const t = tabs.find((x) => x.id === id)
+  renamingTab = null
+  if (t && v != null && v !== tabLabel(t)) { t.name = v; toast("renamed") }
+  renderStrip()
+  focusInput()
 }
 
 function renamePane(p = focused) {
@@ -910,32 +917,34 @@ function renamePane(p = focused) {
   })
 }
 
+// The strip's state for the React title bar (chrome/store.js); activity.js
+// adds each tab's mark.
 function renderStrip() {
-  const frag = document.createDocumentFragment()
-  tabs.forEach((t, i) => {
-    const b = document.createElement("div")
-    b.className = "tab" + (t === activeTab ? " active" : "")
-    b.dataset.tab = t.id
-    const n = allPanes(t.tree).length
-    b.title = `${tabLabel(t)}${n > 1 ? ` · ${n} panes` : ""}${i < 9 ? ` · ${isMac ? "⌘" : "Ctrl+"}${i + 1}` : ""}`
-    b.innerHTML = `<span class="num"></span><span class="name"></span><span class="count"></span><button class="x" title="Close tab">×</button>`
-    b.querySelector(".num").textContent = i < 9 ? String(i + 1) : ""
-    b.querySelector(".name").textContent = tabLabel(t)
-    b.querySelector(".count").textContent = n > 1 ? String(n) : ""
-    b.addEventListener("mousedown", (e) => {
-      if (e.target.closest(".x") || e.target.closest("input")) return
-      if (e.button === 1) { e.preventDefault(); return closeTab(t) }
-      showTab(t)
-    })
-    b.addEventListener("dblclick", (e) => { if (!e.target.closest(".x")) renameTab(t) })
-    b.querySelector(".x").addEventListener("click", (e) => { e.stopPropagation(); closeTab(t) })
-    frag.appendChild(b)
+  const activity = new Map(chrome.get().tabs.map((x) => [x.id, x.activity]))
+  chrome.set({
+    tabs: tabs.map((t, i) => {
+      const n = allPanes(t.tree).length
+      return {
+        id: t.id,
+        index: i,
+        label: tabLabel(t),
+        title: `${tabLabel(t)}${n > 1 ? ` · ${n} panes` : ""}${i < 9 ? ` · ${isMac ? "⌘" : "Ctrl+"}${i + 1}` : ""}`,
+        panes: n,
+        active: t === activeTab,
+        renaming: t === renamingTab,
+        activity: activity.get(t.id) ?? null,
+      }
+    }),
   })
-  // Don't rebuild under an open rename box.
-  if (strip.querySelector("input.rename")) return
-  strip.replaceChildren(frag)
   document.title = windowTitle(activeTab ? tabLabel(activeTab) : "")
 }
+Object.assign(chrome.actions, {
+  showTab: (id) => { const t = tabs.find((x) => x.id === id); if (t) showTab(t) },
+  closeTab: (id) => { const t = tabs.find((x) => x.id === id); if (t) closeTab(t) },
+  newTab: () => openTab(),
+  startRename: (id) => { const t = tabs.find((x) => x.id === id); if (t) renameTab(t) },
+  finishRename: finishRenameTab,
+})
 
 function setFocus(p, force = false) {
   if (!p) return
@@ -1224,11 +1233,8 @@ window.rszRegisterTool?.("move_to_tab", async (a) => {
   return [200, { ok: true, pane_id: p.id, tab_id: p.tab.id }]
 })
 
-document.getElementById("new-tab").onclick = () => openTab()
-document.getElementById("split-right").onclick = () => split("h")
-document.getElementById("split-down").onclick = () => split("v")
-document.getElementById("open-palette").onclick = () => openPalette()
-document.getElementById("open-settings").onclick = () => openSettings()
+// Split, palette and settings live on their shortcuts and in the palette;
+// the bar keeps only the bell and the cup on its right.
 
 // ---- HUD: Cmd/Ctrl+Shift+H
 let hudTimer = 0

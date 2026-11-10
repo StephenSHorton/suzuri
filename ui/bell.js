@@ -4,23 +4,18 @@
 // lists the history under the bell (also "Notifications" in the palette),
 // and a click on an entry focuses the pane that posted it. Opening the
 // list marks everything read, as in Go.
-import { bellLabel, noticeTime, noticeText, moveIndex } from "./notice_list.js"
+import { noticeTime, noticeText, moveIndex } from "./notice_list.js"
+import { chrome } from "./chrome/store.js"
 
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
 
-const el = document.createElement("button")
-el.id = "bell"
-el.title = "Notifications"
-const bar = document.getElementById("bar")
-// Before the cup if caffeine.js got here first, else before split-right
-// (caffeine.js then puts the cup between us).
-bar.insertBefore(el, document.getElementById("caffeine") || document.getElementById("split-right") || null)
+// The bell button is the React title bar's (chrome/TitleBar.jsx); this owns
+// the count and the history popover anchored under it.
+const anchor = () => document.querySelector('[data-chrome="bell"]')
 
 function setUnread(n) {
-  el.textContent = bellLabel(n)
-  el.classList.toggle("unread", n > 0)
-  el.title = n > 0 ? `Notifications (${n} unread)` : "Notifications"
+  chrome.set({ unread: Math.max(0, Number(n) || 0) })
 }
 setUnread(0)
 
@@ -41,6 +36,7 @@ async function open() {
   if (!isOpen()) {
     index = 0
     pop.hidden = false
+    chrome.set({ bellOpen: true })
     place()
     pop.focus({ preventScroll: true })
   }
@@ -58,12 +54,13 @@ async function refresh() {
 function close(refocus = true) {
   if (!isOpen()) return
   pop.hidden = true
+  chrome.set({ bellOpen: false })
   // app.js puts the keyboard back on the focused pane.
   if (refocus) window.dispatchEvent(new Event("rsz-panel-closed"))
 }
 
 function place() {
-  const r = el.getBoundingClientRect()
+  const r = anchor()?.getBoundingClientRect() ?? { bottom: 34, right: window.innerWidth - 12 }
   const w = pop.offsetWidth
   pop.style.top = `${Math.round(r.bottom + 4)}px`
   pop.style.left = `${Math.round(Math.max(12, Math.min(r.right - w, window.innerWidth - w - 12)))}px`
@@ -116,7 +113,7 @@ pop.addEventListener("keydown", (e) => {
 })
 // A click anywhere else closes it (the bell itself toggles).
 document.addEventListener("mousedown", (e) => {
-  if (isOpen() && !pop.contains(e.target) && !el.contains(e.target)) close()
+  if (isOpen() && !pop.contains(e.target) && !anchor()?.contains(e.target)) close()
 }, true)
 window.addEventListener("resize", () => { if (isOpen()) place() })
 // The terminal's hidden textarea steals focus on any mousedown; keep it here.
@@ -124,8 +121,7 @@ pop.addEventListener("mousedown", (e) => e.stopPropagation())
 // app.js refocuses the pane when the window comes back, so close on the way out.
 window.addEventListener("blur", () => close(false))
 
-el.addEventListener("mousedown", (e) => e.preventDefault())
-el.addEventListener("click", () => (isOpen() ? close() : open()))
+chrome.actions.toggleBell = () => (isOpen() ? close() : open())
 
 // The count; refresh an open list as notices arrive (that marks them read).
 listen("notice-bell", (e) => {

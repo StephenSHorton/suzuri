@@ -1,0 +1,76 @@
+/* The title bar (chrome/TitleBar.jsx). Colours, spacing and radii are
+   Astryx tokens (theme Neutral, dark), so the bar matches every Astryx
+   component; see docs/astryx/topics/tokens.md. Figtree is Neutral's face,
+   served locally because the CSP allows no outside fonts. */
+@import "@fontsource/figtree/400.css";
+@import "@fontsource/figtree/500.css";
+@import "@fontsource/figtree/600.css";
+
+#chrome-bar { display: contents; }
+
+.rsz-bar {
+  position: absolute; inset: 0 0 auto 0; height: 34px; z-index: 5;
+  display: flex; align-items: center; gap: var(--spacing-1);
+  padding-inline: 84px var(--spacing-2); /* room for the macOS traffic lights */
+  background: var(--color-background-body); border-bottom: 1px solid var(--color-border);
+  font-family: var(--font-family-body); font-size: var(--font-size-sm); color: var(--color-text-secondary);
+  user-select: none; -webkit-user-select: none;
+}
+body.win .rsz-bar { padding-inline: var(--spacing-3) 0; }
+
+.rsz-mark {
+  flex: none; padding-inline-end: var(--spacing-2);
+  font-size: 15px; font-weight: 600; color: var(--color-text-primary);
+}
+
+/* The tabs: hug their label up to a cap, scroll when there are too many. */
+.rsz-tabs {
+  display: flex; align-items: center; gap: var(--spacing-1); min-width: 0; height: 100%;
+  overflow-x: auto; scrollbar-width: none;
+}
+.rsz-tabs::-webkit-scrollbar { display: none; }
+.rsz-tab {
+  flex: 0 1 auto; min-width: 72px; max-width: 220px; height: 26px;
+  display: flex; align-items: center; gap: var(--spacing-1-5);
+  padding-inline: var(--spacing-2) var(--spacing-0-5);
+  border-radius: var(--radius-element); color: var(--color-text-secondary); cursor: default;
+}
+.rsz-tab:hover { background: var(--color-overlay-hover); color: var(--color-text-primary); }
+.rsz-tab[data-active] { background: var(--color-background-surface); color: var(--color-text-primary); }
+.rsz-tab-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rsz-tab-close { display: flex; visibility: hidden; }
+.rsz-tab:hover .rsz-tab-close, .rsz-tab[data-active] .rsz-tab-close { visibility: visible; }
+.rsz-tab-rename {
+  flex: 1; min-width: 0; height: 20px; padding: 0 var(--spacing-1);
+  font: inherit; color: var(--color-text-primary);
+  background: var(--color-background-body); border: 1px solid var(--color-border-emphasized); border-radius: var(--radius-inner);
+  outline: none;
+}
+/* The activity mark (activity.js): busy spinner, blocked "?", idle. */
+.rsz-tab-act { flex: none; width: 16px; text-align: center; font: 12px "Gohu", ui-monospace, monospace; color: var(--color-text-accent); }
+.rsz-tab-act[data-a="blocked"] { color: var(--color-text-error); font-weight: 600; }
+.rsz-tab-act[data-a="idle"], .rsz-tab-act[data-a="dead"] { color: var(--color-text-disabled); }
+
+/* Always something to drag, even with many tabs. */
+.rsz-spacer { flex: 1; min-width: 48px; align-self: stretch; }
+
+/* The bell and the cup. */
+.rsz-chip { position: relative; display: flex; align-items: center; flex: none; }
+.rsz-chip-count {
+  position: absolute; top: 2px; right: 1px; min-width: 14px; height: 14px; padding: 0 3px;
+  border-radius: var(--radius-full); background: var(--color-accent); color: var(--color-on-accent);
+  font-size: 10px; font-weight: 600; line-height: 14px; text-align: center; pointer-events: none;
+}
+.rsz-chip-time { padding-inline-end: var(--spacing-1); font-size: var(--font-size-xs); font-weight: 600; color: var(--color-text-accent); font-variant-numeric: tabular-nums; }
+
+/* Windows' caption buttons, flush right and full height, as Windows draws them. */
+.rsz-caption { display: flex; align-self: stretch; flex: none; margin-inline-start: var(--spacing-2); }
+.rsz-caption button {
+  width: 46px; height: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; cursor: default;
+  font: 10px "Segoe Fluent Icons", "Segoe MDL2 Assets"; color: var(--color-text-primary);
+}
+.rsz-caption button:hover { background: var(--color-overlay-hover); }
+.rsz-caption button:active { background: var(--color-overlay-pressed); }
+.rsz-caption .close:hover { background: #c42b1c; color: #fff; }
+.rsz-caption .close:active { background: #b3271a; color: #fff; }
+.rsz-bar[data-inactive] .rsz-caption button:not(:hover) { color: var(--color-text-disabled); }

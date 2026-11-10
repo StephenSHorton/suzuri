@@ -1,9 +1,8 @@
 /* Activity marks (ui/activity.js): Go suzuri's strip spinner, pane title
    marks, idle ring and resting panes. */
-.tab .act, .pane .head .act { flex: none; color: var(--primary); font: 12px "Gohu", ui-monospace, monospace; }
-.tab .act:empty, .pane .head .act:empty { display: none; }
-.tab .act[data-a="blocked"], .pane .head .act[data-a="blocked"] { color: #e08080; font-weight: 600; }
-.tab .act:not([data-a]), .tab .act[data-a=""] { color: var(--mute); }
+.pane .head .act { flex: none; color: var(--primary); font: 12px "Gohu", ui-monospace, monospace; }
+.pane .head .act:empty { display: none; }
+.pane .head .act[data-a="blocked"] { color: #e08080; font-weight: 600; }
 /* Split tabs: the focused head takes a touch of the primary colour; a
    resting pane's head sinks toward the background so working ones stand out. */
 .pane.multi.focused .head { background: color-mix(in srgb, var(--panel) 75%, var(--primary)); }

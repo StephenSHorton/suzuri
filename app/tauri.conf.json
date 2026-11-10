@@ -5,7 +5,15 @@
   "version": "0.10.0",
   "identifier": "com.stephenshorton.suzuri",
   "build": {
-    "frontendDist": "../ui"
+    "frontendDist": "../ui/dist",
+    "beforeBuildCommand": {
+      "script": "npm run build",
+      "cwd": "../ui"
+    },
+    "beforeDevCommand": {
+      "script": "npm run build",
+      "cwd": "../ui"
+    }
   },
   "app": {
     "withGlobalTauri": true,

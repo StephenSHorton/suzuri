@@ -1,5 +1,4 @@
 /* The notification bell and its history popover (ui/bell.js). */
-#bar #bell.unread { color: var(--primary); font-weight: 700; }
 .bell-pop {
   position: fixed; z-index: 60; width: min(380px, calc(100vw - 24px)); max-height: min(420px, 70vh);
   display: flex; flex-direction: column; overflow: hidden; outline: none;

@@ -2,15 +2,15 @@
 // The hold lives in Rust (app/src/caffeine.rs) and is on from launch; this
 // adds the palette entries and the ☕ button at the right of the bar (dim when
 // off, "☕ ∞" / "☕ 12m" when on; a click toggles).
-import { chipText, chipTitle, caffeineToast } from "./caffeine_chip.js"
+import { caffeineToast } from "./caffeine_chip.js"
+import { chrome } from "./chrome/store.js"
 import { hostToast } from "./host_toast.js"
 
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
 
-const el = document.createElement("button")
-el.id = "caffeine"
-document.getElementById("bar").appendChild(el)
+// The cup button is the React title bar's (chrome/TitleBar.jsx); this owns
+// the status it shows and the toasts.
 
 let tick = 0
 let last = null
@@ -22,9 +22,7 @@ function show(s, action = null, prev = last, minutes) {
   // background window, so remaining_s alone can be stale.
   last = s?.active && s.remaining_s != null ? { ...s, ends: Date.now() + s.remaining_s * 1000 } : s
   clearTimeout(tick)
-  el.textContent = chipText(s)
-  el.title = chipTitle(s)
-  el.classList.toggle("on", !!s?.active)
+  chrome.set({ caffeine: s })
   // Keep a timed label current (Go repaints the strip every second).
   if (s?.active && s.remaining_s != null) tick = setTimeout(() => invoke("caffeine_status").then((s) => show(s)), 1000)
 }
@@ -34,7 +32,7 @@ function act(cmd, action, minutes) {
   const prev = last
   return invoke(cmd, minutes ? { minutes } : {}).then((s) => show(s, action, prev, minutes))
 }
-el.addEventListener("click", () => act("caffeine_toggle", "toggle"))
+chrome.actions.toggleCaffeine = () => act("caffeine_toggle", "toggle")
 listen("caffeine", (e) => show(e.payload))
 invoke("caffeine_status").then((s) => show(s))
 
