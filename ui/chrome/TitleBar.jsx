@@ -5,11 +5,13 @@
 // The bar drags the window (data-tauri-drag-region on the bar, the spacer
 // and the mark); every control stops that by not carrying the attribute.
 // Presses keep the terminal's keyboard: controls prevent mousedown focus.
-import { useSyncExternalStore, useEffect, useRef } from "react"
+import { useSyncExternalStore, useEffect, useRef, useState } from "react"
 import { IconButton } from "@astryxdesign/core/IconButton"
 import { ToggleButton } from "@astryxdesign/core/ToggleButton"
 import { Icon } from "@astryxdesign/core/Icon"
 import { Badge } from "@astryxdesign/core/Badge"
+import { TextInput } from "@astryxdesign/core/TextInput"
+import { HStack } from "@astryxdesign/core/HStack"
 import { Bell, BellDot, Coffee, Plus, SquareTerminal, X } from "lucide-react"
 import { chrome } from "./store.js"
 import { Caption } from "./Caption.jsx"
@@ -18,27 +20,44 @@ const isMac = navigator.platform.startsWith("Mac")
 const useChrome = () => useSyncExternalStore(chrome.subscribe, chrome.get)
 const keepFocus = (e) => e.preventDefault()
 
+// The rename box: Astryx's TextInput, small and auto-focused, its label
+// hidden (the tab is the context). Enter keeps, Escape drops, a blur keeps;
+// every key stops here so none reaches the terminal. The span takes the
+// presses on the control's padding too, which the tab would otherwise
+// read as a click on itself.
 function RenameBox({ tab }) {
   const ref = useRef(null)
+  const [value, setValue] = useState(tab.label)
+  const finished = useRef(false)
   useEffect(() => {
     ref.current?.focus()
     ref.current?.select()
   }, [])
-  const done = (keep) => chrome.actions.finishRename(tab.id, keep ? ref.current.value.trim() : null)
+  const done = (keep) => {
+    if (finished.current) return
+    finished.current = true
+    chrome.actions.finishRename(tab.id, keep ? (ref.current?.value ?? value).trim() : null)
+  }
   return (
-    <input
-      ref={ref}
-      className="rsz-tab-rename"
-      defaultValue={tab.label}
-      spellCheck={false}
-      onMouseDown={(e) => e.stopPropagation()}
-      onKeyDown={(e) => {
-        e.stopPropagation()
-        if (e.key === "Enter") done(true)
-        else if (e.key === "Escape") done(false)
-      }}
-      onBlur={() => done(true)}
-    />
+    <span className="rsz-tab-rename" onMouseDown={(e) => e.stopPropagation()}>
+      <TextInput
+        ref={ref}
+        label="Tab name"
+        isLabelHidden
+        size="sm"
+        hasAutoFocus
+        hasSpellCheck={false}
+        value={value}
+        onChange={setValue}
+        onEnter={() => done(true)}
+        onKeyDown={(e) => {
+          e.stopPropagation()
+          if (e.key === "Escape") done(false)
+        }}
+        onBlur={() => done(true)}
+        width="100%"
+      />
+    </span>
   )
 }
 
@@ -100,7 +119,10 @@ export function TitleBar() {
   const s = useChrome()
   const unread = s.unread > 0
   return (
-    <header id="bar" className="rsz-bar" data-tauri-drag-region data-inactive={s.inactive || undefined}>
+    // An Astryx HStack as the <header>: it passes id and the data attributes
+    // through, so the bar itself still drags the window. Its height, the
+    // macOS traffic-light inset and its place over the panes are chrome.css.
+    <HStack as="header" id="bar" className="rsz-bar" gap={1} vAlign="center" data-tauri-drag-region data-inactive={s.inactive || undefined}>
       <span className="rsz-mark" data-tauri-drag-region>
         硯
       </span>
@@ -125,6 +147,6 @@ export function TitleBar() {
       </span>
       <CaffeineButton status={s.caffeine} />
       {!isMac && <Caption maximized={s.maximized} />}
-    </header>
+    </HStack>
   )
 }

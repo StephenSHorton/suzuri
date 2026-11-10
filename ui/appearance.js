@@ -1,8 +1,11 @@
 // Appearance: Go suzuri's 16 themes, ANSI map and font settings. The
 // catalogue lives in Rust (palette.rs) and the choice in the settings file
-// (config.rs); Rust recolours the panes itself. This paints the chrome from
-// the theme's roles and sets the terminal font whenever the settings change
-// (the `rsz:config` event from settings.js), and runs font zoom.
+// (config.rs); Rust recolours the panes' cells itself. The chrome around the
+// panes is Astryx (theme Neutral, dark) and never follows the terminal
+// theme: this sets only what the terminal grid takes from the theme (its
+// background, foreground, cursor and selection) and the terminal font,
+// whenever the settings change (the `rsz:config` event from settings.js),
+// and runs font zoom.
 import { setFont, setSelection, setVoid } from "./frame.js"
 import { announce } from "./settings.js"
 import { fontToast, hostToast } from "./host_toast.js"
@@ -22,21 +25,30 @@ function family(face) {
   return `${head}, "Gohu", ui-monospace, Menlo, Consolas, monospace`
 }
 
-function paintChrome(id) {
+const rgba = (h, a) =>
+  `rgba(${parseInt(h.slice(1, 3), 16)}, ${parseInt(h.slice(3, 5), 16)}, ${parseInt(h.slice(5, 7), 16)}, ${a})`
+
+// The terminal's own colours, which style.css reads on the panes:
+// --term-bg (the pane under the canvas), --term-fg (text drawn over the
+// grid: the IME preedit, the link underline), --term-cursor (the cursor, in
+// the theme's border role as Go draws it), and the selection the canvas
+// paints. Nothing else on :root follows the terminal theme.
+function paintTerminal(id) {
   const t = cat.themes.find((x) => x.id === id) || cat.themes[0]
+  const c = t.chrome
   const root = document.documentElement.style
-  for (const [k, v] of Object.entries(t.chrome)) root.setProperty(`--${k}`, v)
-  setVoid(t.chrome["term-bg"])
-  const h = t.chrome.primary
-  setSelection(`rgba(${parseInt(h.slice(1, 3), 16)}, ${parseInt(h.slice(3, 5), 16)}, ${parseInt(h.slice(5, 7), 16)}, 0.38)`)
-  document.documentElement.dataset.theme = t.id
+  root.setProperty("--term-bg", c["term-bg"])
+  root.setProperty("--term-fg", c.text)
+  root.setProperty("--term-cursor", c.border)
+  setVoid(c["term-bg"])
+  setSelection(rgba(c.primary, 0.38))
 }
 
 async function apply(cfg) {
   if (!cat || !cfg) return
   if (cfg.theme !== cur.theme) {
     cur.theme = cfg.theme
-    paintChrome(cfg.theme)
+    paintTerminal(cfg.theme)
   }
   if (cfg.font_face !== cur.face || cfg.font_size_px !== cur.px) {
     const first = !cur.face

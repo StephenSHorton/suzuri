@@ -1,13 +1,16 @@
 /* Activity marks (ui/activity.js): Go suzuri's strip spinner, pane title
-   marks, idle ring and resting panes. */
-.pane .head .act { flex: none; color: var(--primary); font: 12px "Gohu", ui-monospace, monospace; }
+   marks, idle ring and resting panes. Colours are Astryx tokens.
+   Not Astryx: the mark is a spinner glyph in the terminal's bundled face
+   (Gohu), written by activity.js into the plain pane head; Astryx's Spinner
+   is a React component and the ring is a hollow dot StatusDot doesn't draw. */
+.pane .head .act { flex: none; color: var(--color-text-accent); font: 12px "Gohu", var(--font-family-code); }
 .pane .head .act:empty { display: none; }
-.pane .head .act[data-a="blocked"] { color: #e08080; font-weight: 600; }
-/* Split tabs: the focused head takes a touch of the primary colour; a
-   resting pane's head sinks toward the background so working ones stand out. */
-.pane.multi.focused .head { background: color-mix(in srgb, var(--panel) 75%, var(--primary)); }
-.pane.multi:not(.focused)[data-activity="idle"] .head { background: color-mix(in srgb, var(--panel) 38%, var(--void)); color: var(--mute); }
+.pane .head .act[data-a="blocked"] { color: var(--color-text-error); font-weight: 600; }
+/* Split tabs: the focused head lifts a step above the others; a resting
+   pane's head sinks to the page colour so working ones stand out. */
+.pane.multi.focused .head { background: color-mix(in srgb, var(--color-background-surface) 88%, var(--color-accent)); }
+.pane.multi:not(.focused)[data-activity="idle"] .head { background: var(--color-background-body); color: var(--color-text-disabled); }
 /* The idle ring: hollow, so it reads as waiting rather than a badge. */
-.pane .head .ring { display: none; flex: none; margin-left: auto; width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--primary); }
+.pane .head .ring { display: none; flex: none; margin-left: auto; width: 7px; height: 7px; border-radius: var(--radius-full); border: 1px solid var(--color-text-accent); }
 .pane.multi[data-activity="idle"] .head .ring { display: block; }
-.pane.multi.focused[data-activity="idle"] .head .ring { border-color: color-mix(in srgb, var(--mute) 55%, var(--primary)); }
+.pane.multi.focused[data-activity="idle"] .head .ring { border-color: var(--color-text-disabled); }
