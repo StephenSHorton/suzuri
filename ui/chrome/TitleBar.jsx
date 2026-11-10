@@ -12,7 +12,7 @@ import { Icon } from "@astryxdesign/core/Icon"
 import { Badge } from "@astryxdesign/core/Badge"
 import { TextInput } from "@astryxdesign/core/TextInput"
 import { HStack } from "@astryxdesign/core/HStack"
-import { Bell, BellDot, Coffee, Plus, SquareTerminal, X } from "lucide-react"
+import { Bell, Coffee, Plus, SquareTerminal, X } from "lucide-react"
 import { chrome } from "./store.js"
 import { Caption } from "./Caption.jsx"
 
@@ -135,15 +135,20 @@ export function TitleBar() {
         <IconButton label="New tab" icon={<Icon icon={Plus} />} variant="ghost" size="sm" tooltip={`New tab (${isMac ? "⌘T" : "Ctrl+Shift+T"})`} onClick={() => chrome.actions.newTab()} />
       </span>
       <span className="rsz-spacer" data-tauri-drag-region />
+      {/* The history popover (chrome/Bell.jsx, mounted by bell.js) anchors
+          here and owns this button's click. */}
       <span className="rsz-chip" data-chrome="bell" onMouseDown={keepFocus}>
         <IconButton
           label={unread ? `Notifications (${s.unread} unread)` : "Notifications"}
-          icon={<Icon icon={unread ? BellDot : Bell} color={unread ? "accent" : "secondary"} />}
+          icon={<Icon icon={Bell} color={unread ? "accent" : "secondary"} />}
           variant="ghost"
           tooltip={s.bellOpen ? undefined : "Notifications"}
-          onClick={() => chrome.actions.toggleBell()}
         />
-        {unread && <span className="rsz-chip-count">{s.unread > 9 ? "9+" : s.unread}</span>}
+        {unread && (
+          <span className="rsz-bell-count" aria-hidden="true">
+            <Badge label={s.unread > 9 ? "9+" : String(s.unread)} variant="info" />
+          </span>
+        )}
       </span>
       <CaffeineButton status={s.caffeine} />
       {!isMac && <Caption maximized={s.maximized} />}
