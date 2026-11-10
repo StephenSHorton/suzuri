@@ -1,11 +1,13 @@
 //! Notices (card #288): Go suzuri's notice cards (notices.go). Programs ask
 //! for them with OSC 9 / 777 / 99; host features may post their own with
-//! [`Notices::post`]. They show in a small always-on-top panel at a corner
-//! of the screen (ui/notice.html), at most 5 at once, newest on top of the
-//! stack. A left click focuses the pane that asked (and reports back to it
-//! for OSC 99 a=report), a right click dismisses. Each one expires after
-//! 3.2 s (6.4 s critical) unless the program says otherwise; hovering the
-//! panel holds them. The last 40 stay in a history with an unread count.
+//! [`Notices::post`]. They post on the desktop as rust-toast cards (native
+//! topmost windows that never take focus, stacked in the screen corner the
+//! settings' notice_position names), at most 5 at once. A left click
+//! focuses the pane that asked (and reports back to it for OSC 99
+//! a=report); a right click or the x dismisses. Each one expires after
+//! 3.2 s (6.4 s critical) unless the program says otherwise; rust-toast
+//! holds them while the cursor is over the stack. The last 40 stay in a
+//! history with an unread count. The cards' look is toast_look.rs.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13,20 +15,18 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use rsz_term::protocols::{self, Notice};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager};
+use toast::Kind;
 
-const PANEL: &str = "notices";
 const MAX_LIVE: usize = 5;
 const MAX_HISTORY: usize = 40;
-// Go's geometry, in points (notices.go).
-const CARD_W: f64 = 320.0;
-const CARD_H: f64 = 72.0;
-const GAP: f64 = 8.0;
-const MARGIN: f64 = 16.0;
-const SCREEN_INSET: f64 = 16.0;
+/// A notice whose card rust-toast stopped showing counts as expired this
+/// long after: a click or dismiss callback (which runs just after its card
+/// leaves) takes it first.
+const GONE_GRACE: Duration = Duration::from_millis(300);
 
-/// Where the panel sits: the settings' notice_position (Go
-/// config.NoticePositionIDs), as an index.
+/// Where the cards sit: the settings' notice_position as an index into
+/// config::NOTICE_POSITIONS (normalize keeps it one of them).
 fn anchor_of(cfg: &serde_json::Value) -> usize {
     let id = cfg["notice_position"].as_str().unwrap_or("");
     crate::config::NOTICE_POSITIONS.iter().position(|a| *a == id).unwrap_or(0)
@@ -37,11 +37,25 @@ fn sets_position(patch: &serde_json::Value) -> bool {
     patch.get("notice_position").is_some()
 }
 
+/// rust-toast's options for an anchor: cards and sounds on (full volume,
+/// as the old webview's audio played), no confetti. The positions are
+/// rust-toast's corner names.
+fn options(anchor: usize) -> toast::Options {
+    let corner = crate::config::NOTICE_POSITIONS.get(anchor).copied().unwrap_or(toast::CORNER_BOTTOM_LEFT);
+    toast::Options { enabled: true, sound: true, volume: 1.0, corner: corner.into(), confetti: false }.normalized()
+}
+
 struct Live {
     key: u64,
     pane: Option<u32>,
     note: Notice,
+    /// None never expires.
+    expire: Option<Duration>,
     until: Option<Instant>,
+    /// rust-toast's key for the card, once it showed.
+    shown: Option<u64>,
+    /// When rust-toast stopped showing it.
+    gone: Option<Instant>,
 }
 
 #[derive(Serialize, Clone)]
@@ -52,40 +66,6 @@ pub struct Played {
     pub at: u64,
     pub pane: Option<u32>,
     pub id: String,
-}
-
-#[derive(Serialize, Clone)]
-struct Card {
-    key: u64,
-    title: String,
-    body: String,
-    /// "", "error" (red) or "warn" (amber) accent.
-    tone: &'static str,
-}
-
-#[derive(Serialize, Clone)]
-struct PanelState {
-    cards: Vec<Card>,
-    anchor: usize,
-    /// A sound to play now: success, fail or published.
-    sound: Option<&'static str>,
-    /// The theme's chrome colours (Go drawCard: panel, primary, text, soft).
-    colors: Colors,
-}
-
-#[derive(Serialize, Clone)]
-struct Colors {
-    panel: String,
-    primary: String,
-    text: String,
-    soft: String,
-}
-
-impl Colors {
-    fn now() -> Self {
-        let c = &rsz_term::palette::active().theme.chrome;
-        Colors { panel: crate::hex(c.panel), primary: crate::hex(c.primary), text: crate::hex(c.text), soft: crate::hex(c.soft) }
-    }
 }
 
 /// Something the app has to do after a notice is clicked or closed.
@@ -102,10 +82,7 @@ struct Inner {
     live: Vec<Live>,
     history: Vec<Played>,
     unread: usize,
-    hover: bool,
     anchor: usize,
-    /// A sound posted before the panel page was listening.
-    unheard: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -117,6 +94,8 @@ pub struct Notices {
 impl Notices {
     pub fn new(app: AppHandle) -> Self {
         let anchor = anchor_of(&crate::config::load());
+        toast::configure(crate::toast_look::config());
+        toast::set_options(options(anchor));
         let n = Self { inner: Arc::new(Mutex::new(Inner { anchor, ..Default::default() })), app };
         let tick = n.clone();
         std::thread::Builder::new()
@@ -157,35 +136,69 @@ impl Notices {
         };
         let until = expire.map(|d| Instant::now() + d);
         let mut effects = Vec::new();
-        let sound = sound_for(&n.sound, n.urgency);
         {
+            // Held while posting, so the rust-toast key that appears is this
+            // card's (see show): only this lock posts.
             let mut g = self.inner.lock();
             if history {
                 remember(&mut g, pane, &n);
             }
-            if !n.id.is_empty() {
-                if let Some(l) = g.live.iter_mut().find(|l| l.note.id == n.id && l.pane == pane) {
-                    l.note = n;
-                    l.until = until;
-                    drop(g);
-                    self.present(None);
-                    return effects;
+            let same = if n.id.is_empty() { None } else { g.live.iter().position(|l| l.note.id == n.id && l.pane == pane) };
+            if let Some(at) = same {
+                let l = &mut g.live[at];
+                l.note = n;
+                l.expire = expire;
+                l.until = until;
+                self.show(l);
+            } else {
+                if g.live.len() >= MAX_LIVE {
+                    // Ours to drop, not rust-toast's: close it first so its
+                    // own push-off never runs.
+                    let at = g.live.iter().position(|l| l.until.is_some()).unwrap_or(0);
+                    let dropped = g.live.remove(at);
+                    toast::close(&card_id(dropped.key));
+                    effects.extend(close_event(&dropped));
                 }
+                g.next += 1;
+                let key = g.next;
+                g.live.push(Live { key, pane, note: n, expire, until, shown: None, gone: None });
+                let l = g.live.last_mut().expect("just pushed");
+                self.show(l);
             }
-            if g.live.len() >= MAX_LIVE {
-                let at = g.live.iter().position(|l| l.until.is_some()).unwrap_or(0);
-                let dropped = g.live.remove(at);
-                effects.extend(close_event(&dropped));
-            }
-            g.next += 1;
-            let key = g.next;
-            g.live.push(Live { key, pane, note: n, until });
         }
-        if self.app.get_webview_window(PANEL).is_none() {
-            self.inner.lock().unheard = sound;
-        }
-        self.present(sound);
+        self.bell();
         effects
+    }
+
+    /// Posts l's card, or replaces it in place (its toast id is its key).
+    /// The callbacks run on rust-toast's callback thread and hop back
+    /// through the AppHandle.
+    fn show(&self, l: &mut Live) {
+        let (mut note, extra) = card(l.key, &l.note, l.expire);
+        let key = l.key;
+        let app = self.app.clone();
+        note.on_click = Some(Arc::new(move || {
+            if let Some(ns) = app.try_state::<Notices>() {
+                crate::notice_effects(&app, ns.activate(key));
+            }
+        }));
+        let app = self.app.clone();
+        note.on_dismiss = Some(Arc::new(move || {
+            if let Some(ns) = app.try_state::<Notices>() {
+                crate::notice_effects(&app, ns.dismiss(key));
+            }
+        }));
+        let before = toast::card_keys();
+        toast::post(note);
+        // A replace keeps its key; a new card (or one re-posted after its
+        // card went) gets the one new key.
+        if let Some(k) = toast::card_keys().into_iter().find(|k| !before.contains(k)) {
+            l.shown = Some(k);
+        }
+        l.gone = None;
+        if let Some(k) = extra {
+            toast::play_sound(k);
+        }
     }
 
     /// A host message as a notice card (Go postHostToast), e.g. "copied"
@@ -216,14 +229,13 @@ impl Notices {
 
     /// OSC 99 p=close from a program.
     pub fn close(&self, pane: u32, id: &str) {
-        let mut g = self.inner.lock();
-        let before = g.live.len();
-        g.live.retain(|l| !(l.pane == Some(pane) && l.note.id == id));
-        let changed = g.live.len() != before;
-        drop(g);
-        if changed {
-            self.present(None);
-        }
+        self.inner.lock().live.retain(|l| {
+            let hit = l.pane == Some(pane) && l.note.id == id;
+            if hit {
+                toast::close(&card_id(l.key));
+            }
+            !hit
+        });
     }
 
     /// OSC 99 p=alive: the ids of this pane's notices still showing.
@@ -240,66 +252,36 @@ impl Notices {
         if l.note.focus {
             out.push(Effect::Focus(l.pane));
         }
-        if l.note.report {
-            if let Some(p) = l.pane {
-                out.push(Effect::Reply(p, protocols::activate_report(&l.note.id)));
-            }
+        if l.note.report
+            && let Some(p) = l.pane
+        {
+            out.push(Effect::Reply(p, protocols::activate_report(&l.note.id)));
         }
         out.extend(close_event(&l));
         out
     }
 
-    /// A right click on a card (Go dismissNoticeAt).
+    /// A right click or the x on a card (Go dismissNoticeAt).
     pub fn dismiss(&self, key: u64) -> Vec<Effect> {
         self.take(key).map(|l| close_event(&l).into_iter().collect()).unwrap_or_default()
     }
 
-    pub fn set_hover(&self, hover: bool) {
-        self.inner.lock().hover = hover;
-    }
-
-    pub fn set_anchor(&self, anchor: &str) {
-        if let Some(i) = crate::config::NOTICE_POSITIONS.iter().position(|a| *a == anchor) {
-            self.inner.lock().anchor = i;
-            self.present(None);
-        }
-    }
-
-    /// Saved settings (config_set): move the cards to the notice position
-    /// and repaint cards already up in the theme's colours. The silent
-    /// sample card (Go setNoticeAnchor with preview) shows only when this
-    /// save's `patch` set the position: every window is its own process, so
-    /// a save here of anything else may just be catching up with a move
-    /// made in another window.
+    /// Saved settings (config_set): move the cards to the notice position.
+    /// The silent sample card (Go setNoticeAnchor with preview) shows only
+    /// when this save's `patch` set the position: every window is its own
+    /// process, so a save here of anything else may just be catching up
+    /// with a move made in another window.
     pub fn apply_config(&self, cfg: &serde_json::Value, patch: &serde_json::Value) {
         let anchor = anchor_of(cfg);
-        let (moved, live) = {
-            let mut g = self.inner.lock();
-            let moved = g.anchor != anchor;
-            g.anchor = anchor;
-            (moved, !g.live.is_empty())
-        };
-        if moved && sets_position(patch) {
+        let moved = std::mem::replace(&mut self.inner.lock().anchor, anchor) != anchor;
+        if !moved {
+            return;
+        }
+        toast::set_options(toast::Options { corner: options(anchor).corner, ..toast::current_options() });
+        if sets_position(patch) {
             let label = crate::config::NOTICE_POSITION_LABELS[anchor];
             let _ = self.post_as(None, sample(label), false);
-        } else if live {
-            self.present(None);
         }
-    }
-
-    /// The panel page asks for the cards once it has loaded: the panel is
-    /// made on the first post, and that post's event can reach the page
-    /// before its listener exists, which lost a lone first card (and its
-    /// sound, kept in `unheard` until now).
-    pub fn resync(&self) {
-        let sound = {
-            let mut g = self.inner.lock();
-            if g.live.is_empty() {
-                return;
-            }
-            g.unheard.take()
-        };
-        self.present(sound);
     }
 
     /// Cards on screen now (the notify CLI waits for them to go).
@@ -318,22 +300,45 @@ impl Notices {
         let _ = self.app.emit("notice-bell", 0usize);
     }
 
+    /// The bell's unread count to the window.
+    fn bell(&self) {
+        let unread = self.inner.lock().unread;
+        let _ = self.app.emit("notice-bell", unread);
+    }
+
     fn take(&self, key: u64) -> Option<Live> {
         let mut g = self.inner.lock();
         let at = g.live.iter().position(|l| l.key == key)?;
         let l = g.live.remove(at);
-        drop(g);
-        self.present(None);
+        toast::close(&card_id(l.key));
         Some(l)
     }
 
+    /// Drops the notices whose cards rust-toast no longer shows (they
+    /// expired; it holds them while the cursor is over the stack) and sends
+    /// their close events.
     fn expire(&self) {
         let now = Instant::now();
         let mut g = self.inner.lock();
-        if g.hover || g.live.is_empty() {
+        if g.live.is_empty() {
             return;
         }
-        let (dead, keep): (Vec<Live>, Vec<Live>) = std::mem::take(&mut g.live).into_iter().partition(|l| l.until.is_some_and(|u| now >= u));
+        let keys = toast::card_keys();
+        for l in &mut g.live {
+            let up = match l.shown {
+                Some(k) => keys.contains(&k),
+                // Never shown (no cards on this platform): its own timer.
+                None => l.until.is_none_or(|u| now < u),
+            };
+            if up {
+                l.gone = None;
+            } else {
+                l.gone.get_or_insert(now);
+            }
+        }
+        let (dead, keep): (Vec<Live>, Vec<Live>) = std::mem::take(&mut g.live)
+            .into_iter()
+            .partition(|l| l.gone.is_some_and(|t| now.saturating_duration_since(t) >= GONE_GRACE));
         g.live = keep;
         drop(g);
         if dead.is_empty() {
@@ -341,7 +346,6 @@ impl Notices {
         }
         let effects: Vec<Effect> = dead.iter().filter_map(close_event).collect();
         crate::notice_effects(&self.app, effects);
-        self.present(None);
     }
 
     fn window_state(&self) -> (bool, bool) {
@@ -350,47 +354,60 @@ impl Notices {
         let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
         (focused, visible)
     }
+}
 
-    /// Size and place the panel for the cards, and hand them to it.
-    fn present(&self, sound: Option<&'static str>) {
-        let (cards, anchor) = {
-            let g = self.inner.lock();
-            let cards: Vec<Card> = g
-                .live
-                .iter()
-                .map(|l| Card {
-                    key: l.key,
-                    title: l.note.title.clone(),
-                    body: l.note.body.clone(),
-                    tone: if l.note.urgency >= 2 || l.note.icon == "error" {
-                        "error"
-                    } else if matches!(l.note.icon.as_str(), "warn" | "warning") {
-                        "warn"
-                    } else {
-                        ""
-                    },
-                })
-                .collect();
-            (cards, g.anchor)
-        };
-        let colors = Colors::now();
-        let app = self.app.clone();
-        let _ = self.app.run_on_main_thread(move || {
-            let Some(panel) = panel(&app) else { return };
-            if cards.is_empty() {
-                let _ = panel.emit_to(PANEL, "notices", PanelState { cards, anchor, sound, colors });
-                let _ = panel.hide();
-                return;
-            }
-            place(&app, &panel, cards.len(), anchor);
-            let _ = panel.emit_to(PANEL, "notices", PanelState { cards, anchor, sound, colors });
-            if !panel.is_visible().unwrap_or(false) {
-                show_inactive(&panel);
-            }
-        });
-        let unread = self.inner.lock().unread;
-        let _ = self.app.emit("notice-bell", unread);
+/// The rust-toast id of the notice with key: one per notice, not the
+/// program's OSC 99 id, which is only unique within its pane (and often
+/// empty).
+fn card_id(key: u64) -> String {
+    format!("rsz-notice-{key}")
+}
+
+/// The card's kind, i.e. its accent: red for critical or an error icon,
+/// amber for a warning icon, the plain accent otherwise (the old webview
+/// cards' tones).
+fn kind_of(n: &Notice) -> Kind {
+    if n.urgency >= 2 || n.icon == "error" {
+        Kind::Error
+    } else if matches!(n.icon.as_str(), "warn" | "warning") {
+        Kind::Warn
+    } else {
+        Kind::Info
     }
+}
+
+/// The kind whose rust-toast sound is the one Go plays for n (fail is
+/// Error's, published Warn's, success Info's), or None for silent.
+fn sound_kind(n: &Notice) -> Option<Kind> {
+    match sound_for(&n.sound, n.urgency)? {
+        "fail" => Some(Kind::Error),
+        "published" => Some(Kind::Warn),
+        _ => Some(Kind::Info),
+    }
+}
+
+/// A notice as a rust-toast note (without its callbacks), and the kind
+/// whose sound to play beside it when the card's own sound (from its kind)
+/// is not Go's: the card is then posted silent. Notices carry no buttons
+/// (rsz_term's Notice has no actions), so the note has none.
+fn card(key: u64, n: &Notice, expire: Option<Duration>) -> (toast::Note, Option<Kind>) {
+    let kind = kind_of(n);
+    let (silent, extra) = match sound_kind(n) {
+        None => (true, None),
+        Some(k) if toast::sound::sound_for(k, false) == toast::sound::sound_for(kind, false) => (false, None),
+        Some(k) => (true, Some(k)),
+    };
+    let note = toast::Note {
+        id: card_id(key),
+        title: n.title.clone(),
+        body: n.body.clone(),
+        kind,
+        silent,
+        expire: expire.unwrap_or_default(),
+        sticky: expire.is_none(),
+        ..toast::Note::default()
+    };
+    (note, extra)
 }
 
 /// Go hostToastID: one card per kind of host message ("" stacks).
@@ -479,86 +496,51 @@ fn sound_for(name: &str, urgency: u8) -> Option<&'static str> {
     }
 }
 
-/// The panel window, made on first use: transparent, no frame, above other
-/// windows, not in the taskbar, and it doesn't take focus when shown.
-fn panel(app: &AppHandle) -> Option<tauri::WebviewWindow> {
-    if let Some(w) = app.get_webview_window(PANEL) {
-        return Some(w);
-    }
-    WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("notice.html".into()))
-        .title("suzuri notices")
-        .transparent(true)
-        .decorations(false)
-        .shadow(false)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .focused(false)
-        .focusable(false)
-        .visible(false)
-        .inner_size(CARD_W + 2.0 * MARGIN, CARD_H + 2.0 * MARGIN)
-        .build()
-        .ok()
-}
-
-/// Show the panel without taking the foreground from whatever has it.
-/// On Windows show() activates the window (kestrel saw typed keys go to the
-/// panel), so do what Go's notice_windows.go does: WS_EX_NOACTIVATE and a
-/// show that doesn't activate.
-fn show_inactive(panel: &tauri::WebviewWindow) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::HWND;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GWL_EXSTYLE, GetWindowLongPtrW, SW_SHOWNOACTIVATE, SetWindowLongPtrW, ShowWindow, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-        };
-        if let Ok(h) = panel.hwnd() {
-            let hwnd = h.0 as HWND;
-            // SAFETY: a live window handle from Tauri, on the main thread.
-            unsafe {
-                let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST) as isize);
-                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            }
-            return;
-        }
-    }
-    let _ = panel.show();
-}
-
-// Go noticePanelOrigin: the stack sits at the anchor, inset from the screen
-// edges, on the screen the main window is on.
-fn place(app: &AppHandle, panel: &tauri::WebviewWindow, n: usize, anchor: usize) {
-    let w = CARD_W + 2.0 * MARGIN;
-    let h = n as f64 * (CARD_H + GAP) - GAP + 2.0 * MARGIN;
-    let main = app.get_webview_window("main");
-    let monitor = main.as_ref().and_then(|m| m.current_monitor().ok().flatten()).or_else(|| panel.primary_monitor().ok().flatten());
-    let Some(mon) = monitor else { return };
-    let scale = mon.scale_factor();
-    let area = mon.work_area();
-    let (ax, ay) = (area.position.x as f64, area.position.y as f64);
-    let (aw, ah) = (area.size.width as f64, area.size.height as f64);
-    let (pw, ph) = (w * scale, h * scale);
-    let inset = (SCREEN_INSET - MARGIN).max(0.0) * scale;
-    let x = match anchor % 3 {
-        0 => ax + inset,
-        1 => ax + (aw - pw) / 2.0,
-        _ => ax + aw - pw - inset,
-    };
-    let y = match anchor / 3 {
-        0 => ay + ah - ph - inset,
-        1 => ay + (ah - ph) / 2.0,
-        _ => ay + inset,
-    };
-    let _ = panel.set_size(PhysicalSize::new(pw.round() as u32, ph.round() as u32));
-    let _ = panel.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn notice(sound: &str, icon: &str, urgency: u8) -> Notice {
+        Notice {
+            id: "x".into(),
+            title: "t".into(),
+            body: "b".into(),
+            sound: sound.into(),
+            icon: icon.into(),
+            urgency,
+            occasion: "always".into(),
+            expire_ms: None,
+            report: false,
+            focus: true,
+            close_event: false,
+        }
+    }
+
+    // Pure: nothing here posts a card (that would draw on the screen).
+    #[test]
+    fn cards_keep_the_old_tone_and_sound() {
+        let (c, extra) = card(7, &notice("info", "", 1), Some(Duration::from_millis(3200)));
+        assert_eq!((c.kind, c.silent, extra), (Kind::Info, false, None));
+        assert_eq!(c.id, "rsz-notice-7");
+        assert_eq!((c.expire, c.sticky), (Duration::from_millis(3200), false));
+        assert!(c.actions.is_empty());
+        let (c, extra) = card(1, &notice("error", "error", 1), None);
+        assert_eq!((c.kind, c.silent, extra, c.sticky), (Kind::Error, false, None, true));
+        let (c, extra) = card(1, &notice("warn", "warn", 1), None);
+        assert_eq!((c.kind, c.silent, extra), (Kind::Warn, false, None));
+        let (c, extra) = card(1, &notice("silent", "error", 2), None);
+        assert_eq!((c.kind, c.silent, extra), (Kind::Error, true, None));
+        // A sound that is not the kind's own plays beside a silent card.
+        let (c, extra) = card(1, &notice("question", "", 1), None);
+        assert_eq!((c.kind, c.silent, extra), (Kind::Info, true, Some(Kind::Warn)));
+    }
+
+    #[test]
+    fn positions_are_rust_toast_corners() {
+        for (i, p) in crate::config::NOTICE_POSITIONS.iter().enumerate() {
+            assert_eq!(options(i).corner, *p);
+        }
+    }
 
     #[test]
     fn host_messages_of_one_kind_share_a_card() {

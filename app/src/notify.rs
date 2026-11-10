@@ -149,17 +149,15 @@ pub fn run(args: &[String], ctx: tauri::Context) -> i32 {
     0
 }
 
-/// Shows the cards in rowan's notice panel (#288) with no terminal window,
+/// Shows the cards on the desktop (#288) with no terminal window,
 /// then exits once they are gone (or 2 min for a card that never expires).
 fn show(notes: Vec<Notice>, mut ctx: tauri::Context) -> i32 {
     println!("showing {} notification(s) — click to dismiss, or wait", notes.len());
-    // No main window: only the notice panel, which Notices makes on first use.
+    // No windows at all: the cards are rust-toast's (notices.rs). Tauri
+    // still runs, for the AppKit main thread the Mac's cards need.
     ctx.config_mut().app.windows.clear();
     let app = tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![crate::notice_click, crate::notice_dismiss, crate::notice_sync, crate::notice_hover, crate::notice_anchor])
         .setup(move |app| {
-            // The cards take the theme's colours (Go drawCard).
-            crate::apply_theme(&crate::config::load(), None);
             app.manage(crate::notices::Notices::new(app.handle().clone()));
             let handle = app.handle().clone();
             std::thread::spawn(move || {

@@ -59,13 +59,24 @@ pub fn mono_font_faces() -> Vec<&'static str> {
 pub const CURSORS: &[&str] = &["block", "underline", "bar"];
 pub const ANSI_MAPS: &[&str] = &["none", "soft", "full"];
 
-/// Where notice cards sit (Go config.NoticePositionIDs); the index is the
-/// panel's placement code (notices.rs). The first is the default.
-pub const NOTICE_POSITIONS: &[&str] =
-    &["bottom-left", "bottom-center", "bottom-right", "center-left", "center", "center-right", "top-left", "top-center", "top-right"];
-/// Go config.NoticePositionLabel, in the same order.
-pub const NOTICE_POSITION_LABELS: &[&str] =
-    &["Bottom left", "Bottom center", "Bottom right", "Center left", "Center", "Center right", "Top left", "Top center", "Top right"];
+/// Where notice cards sit: the four screen corners rust-toast stacks cards
+/// in (toast::CORNER_*). The first is the default.
+pub const NOTICE_POSITIONS: &[&str] = &["bottom-left", "bottom-right", "top-left", "top-right"];
+/// The Settings labels, in the same order.
+pub const NOTICE_POSITION_LABELS: &[&str] = &["Bottom left", "Bottom right", "Top left", "Top right"];
+
+/// Go's nine anchors (and anything else) to the nearest corner: the middle
+/// row goes to the bottom, the center column to the right (a tie either
+/// way; rust-toast's own default side is the right).
+fn notice_corner(p: &str) -> &'static str {
+    match p {
+        "bottom-left" | "center-left" => "bottom-left",
+        "bottom-right" | "bottom-center" | "center-right" | "center" => "bottom-right",
+        "top-left" => "top-left",
+        "top-right" | "top-center" => "top-right",
+        _ => NOTICE_POSITIONS[0],
+    }
+}
 
 /// The folder settings live in, named `name` under the OS config dir.
 fn dir_named(name: &str) -> PathBuf {
@@ -174,9 +185,7 @@ pub fn normalize(v: Value) -> Value {
     let anim = m.get("animate_unfocused").and_then(Value::as_bool).unwrap_or(true);
     m.insert("animate_unfocused".into(), anim.into());
 
-    let pos = s(&m, "notice_position")
-        .filter(|p| NOTICE_POSITIONS.contains(&p.as_str()))
-        .unwrap_or_else(|| NOTICE_POSITIONS[0].into());
+    let pos = notice_corner(s(&m, "notice_position").as_deref().unwrap_or(""));
     m.insert("notice_position".into(), pos.into());
 
     // Profiles: unique, non-empty names (case-insensitive), never empty.
@@ -435,6 +444,21 @@ mod tests {
         assert_eq!(normalize(json!({}))["notice_position"], "bottom-left");
         assert_eq!(normalize(json!({"notice_position": " Top-Right "}))["notice_position"], "top-right");
         assert_eq!(normalize(json!({"notice_position": "upstairs"}))["notice_position"], "bottom-left");
+        // Go's other anchors move to the nearest corner.
+        for (from, to) in [
+            ("bottom-center", "bottom-right"),
+            ("center-left", "bottom-left"),
+            ("center", "bottom-right"),
+            ("center-right", "bottom-right"),
+            ("top-center", "top-right"),
+            ("top-left", "top-left"),
+            ("bottom-right", "bottom-right"),
+        ] {
+            assert_eq!(normalize(json!({"notice_position": from}))["notice_position"], to, "{from}");
+        }
+        for p in NOTICE_POSITIONS {
+            assert_eq!(notice_corner(p), *p);
+        }
     }
 
     #[test]

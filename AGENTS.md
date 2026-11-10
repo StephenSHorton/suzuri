@@ -3,8 +3,10 @@
 ## UI: React + Astryx
 
 Everything around the terminal panes (title bar, tabs, palette, settings,
-notices, dialogs) is React 19 with Meta's [Astryx](https://astryx.atmeta.com)
-design system, theme Neutral in dark mode. The terminal panes, splits and
+the bell's notice history, dialogs) is React 19 with Meta's
+[Astryx](https://astryx.atmeta.com) design system, theme Neutral in dark
+mode. Notice cards themselves are native desktop cards from rust-toast
+(`app/src/notices.rs`, look in `app/src/toast_look.rs`). The terminal panes, splits and
 key routing stay plain JS (`ui/app.js`, `ui/view`); the two meet in
 `ui/chrome/store.js`.
 

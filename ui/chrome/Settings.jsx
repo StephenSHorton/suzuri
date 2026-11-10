@@ -154,7 +154,7 @@ function SessionPage({ cfg, meta, onSet, onProfiles, onAddProfile, selectLast })
     <VStack gap={4}>
       <FormLayout direction="horizontal-labels">
         <Selector label="New tabs use" options={opts(names)} value={cfg.active_profile} onChange={(v) => onSet({ active_profile: v })} />
-        <Selector label="Notice" description="Where notice cards appear."
+        <Selector label="Notice" description="The screen corner notice cards stack in."
           options={opts(meta.notice_positions, meta.notice_labels)} value={cfg.notice_position} onChange={(v) => onSet({ notice_position: v })} />
         <Switch label="Animate unfocused" description="Off: spinners rest while another app is in front."
           value={cfg.animate_unfocused !== false} onChange={(on) => onSet({ animate_unfocused: on })} />

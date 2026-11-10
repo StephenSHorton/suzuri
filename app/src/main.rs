@@ -23,6 +23,7 @@ mod sidecar;
 mod window;
 mod window_state;
 mod notices;
+mod toast_look;
 mod update;
 mod ws;
 use rsz_term::{Link, MouseEvent, MouseKind, Out, Pane, PaneConfig, SelectKind, Sink};
@@ -342,33 +343,8 @@ fn pane_cell_px(panes: State<'_, Arc<Panes>>, id: u32, w: u16, h: u16) {
     }
 }
 
-// Card #288: the notice panel (ui/notice.html) and the history.
-#[tauri::command]
-fn notice_click(app: tauri::AppHandle, notes: State<'_, notices::Notices>, key: u64) {
-    notice_effects(&app, notes.activate(key));
-}
-
-/// The panel page loaded: send it the cards (see Notices::resync).
-#[tauri::command]
-fn notice_sync(notes: State<'_, notices::Notices>) {
-    notes.resync();
-}
-
-#[tauri::command]
-fn notice_dismiss(app: tauri::AppHandle, notes: State<'_, notices::Notices>, key: u64) {
-    notice_effects(&app, notes.dismiss(key));
-}
-
-#[tauri::command]
-fn notice_hover(notes: State<'_, notices::Notices>, hover: bool) {
-    notes.set_hover(hover);
-}
-
-#[tauri::command]
-fn notice_anchor(notes: State<'_, notices::Notices>, anchor: String) {
-    notes.set_anchor(&anchor);
-}
-
+// Card #288: notices post on the desktop (rust-toast, notices.rs); the
+// window keeps the history under the bell.
 /// A host message from the UI as a notice card (Notices::toast).
 #[tauri::command]
 fn notice_toast(notes: State<'_, notices::Notices>, text: String) {
@@ -1008,11 +984,6 @@ fn main() {
             open_url,
             debug_pane,
             pane_cell_px,
-            notice_click,
-            notice_dismiss,
-            notice_sync,
-            notice_hover,
-            notice_anchor,
             notice_toast,
             notice_history,
             notice_read,
