@@ -48,9 +48,17 @@ export class Settings {
     this.open_ = false
     // Unmount now, so the dialog has let go of focus before the terminal takes it.
     flushSync(() => unmountOverlay("settings"))
-    // Go toasts each save; ours save as they change, so say it once on Done.
-    if (keep && changed(this.snap, this.cfg)) hostToast("settings saved")
-    if (!keep && JSON.stringify(this.snap) !== JSON.stringify(this.cfg)) {
+    if (keep) {
+      this.onClose?.()
+      // Go toasts each save; ours save as they change, so say it once on Done,
+      // after a save still in flight (a profile row saves on blur) has landed.
+      await this.saving
+      if (changed(this.snap, this.cfg)) hostToast("settings saved")
+      return
+    }
+    // Let a save in flight land first, so it can't overwrite the restore.
+    await this.saving
+    if (JSON.stringify(this.snap) !== JSON.stringify(this.cfg)) {
       // The window frame saves itself meanwhile; don't put back a stale one.
       const { window: _frame, ...snap } = this.snap
       this.cfg = await invoke("config_set", { patch: snap })
@@ -59,7 +67,12 @@ export class Settings {
     this.onClose?.()
   }
 
-  async set(patch) {
+  set(patch) {
+    this.saving = this.save(patch)
+    return this.saving
+  }
+
+  async save(patch) {
     try {
       this.cfg = await invoke("config_set", { patch })
       this.status = ""

@@ -49,7 +49,13 @@ export function SettingsView(props) {
   const onKeyDown = (e) => {
     if (e.key === "Escape" || (e.key === "Tab" && !e.ctrlKey)) return
     e.stopPropagation()
-    if ((e.metaKey || e.ctrlKey) && e.key === ",") { e.preventDefault(); return onDone(true) }
+    if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+      e.preventDefault()
+      // Blur first, so a profile row being edited saves before the screen
+      // unmounts (removing a focused input fires no blur).
+      e.target?.blur?.()
+      return onDone(true)
+    }
     // Ctrl+Tab switches page (old suzuri used plain Tab, which now moves focus).
     if (e.ctrlKey && e.key === "Tab") { e.preventDefault(); return onPage(page === "look" ? "session" : "look") }
     if (e.key === "Enter" && !e.defaultPrevented && keepsEnter(e.target) === false) {
