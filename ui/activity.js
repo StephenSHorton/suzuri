@@ -170,7 +170,15 @@ function schedule() {
 schedule()
 
 // renderStrip rebuilds the tabs; put the marks back right away.
-if (strip) new MutationObserver(() => paint()).observe(strip, { childList: true })
+// The strip was rebuilt (a tab opened, closed or moved): mark its tabs.
+let tabIds = ""
+chrome.subscribe(() => {
+  const ids = chrome.get().tabs.map((t) => t.id).join(",")
+  if (ids !== tabIds) {
+    tabIds = ids
+    paint()
+  }
+})
 window.addEventListener("focus", schedule)
 window.addEventListener("blur", schedule)
 const animSetting = (cfg) => { animateUnfocused = cfg?.animate_unfocused !== false }

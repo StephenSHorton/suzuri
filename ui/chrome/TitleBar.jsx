@@ -15,6 +15,8 @@ import { HStack } from "@astryxdesign/core/HStack"
 import { Bell, Coffee, Plus, SquareTerminal, X } from "lucide-react"
 import { chrome } from "./store.js"
 import { Caption } from "./Caption.jsx"
+import { Theme } from "@astryxdesign/core/theme"
+import { windowsBarTheme } from "./barTheme.js"
 
 const isMac = navigator.platform.startsWith("Mac")
 const useChrome = () => useSyncExternalStore(chrome.subscribe, chrome.get)
@@ -115,6 +117,19 @@ function CaffeineButton({ status }) {
   )
 }
 
+// Windows: the caption-button look; the Mac: stock Astryx.
+function PlatformButtons({ children }) {
+  if (isMac) return children
+  return (
+    <Theme theme={windowsBarTheme} mode="dark">
+      {/* No gaps: the slots sit edge to edge, like the caption buttons. */}
+      <HStack gap={0} vAlign="center">
+        {children}
+      </HStack>
+    </Theme>
+  )
+}
+
 export function TitleBar() {
   const s = useChrome()
   const unread = s.unread > 0
@@ -135,8 +150,10 @@ export function TitleBar() {
         <IconButton label="New tab" icon={<Icon icon={Plus} />} variant="ghost" size="sm" tooltip={`New tab (${isMac ? "⌘T" : "Ctrl+Shift+T"})`} onClick={() => chrome.actions.newTab()} />
       </span>
       <span className="rsz-spacer" data-tauri-drag-region />
-      {/* The history popover (chrome/Bell.jsx, mounted by bell.js) anchors
-          here and owns this button's click. */}
+      {/* The bell and the cup, styled per platform (chrome/barTheme.js).
+          The history popover (chrome/Bell.jsx, mounted by bell.js) anchors
+          on the bell and owns its click. */}
+      <PlatformButtons>
       <span className="rsz-chip" data-chrome="bell" onMouseDown={keepFocus}>
         <IconButton
           label={unread ? `Notifications (${s.unread} unread)` : "Notifications"}
@@ -151,6 +168,7 @@ export function TitleBar() {
         )}
       </span>
       <CaffeineButton status={s.caffeine} />
+      </PlatformButtons>
       {!isMac && <Caption maximized={s.maximized} />}
     </HStack>
   )
