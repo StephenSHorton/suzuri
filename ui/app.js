@@ -1166,7 +1166,7 @@ async function paste(pane = focused) {
     // clipboard itself (an image on the alt screen becomes a file path).
     if (pane.barActive()) return pasteText(pane, await invoke("clipboard_text"), invoke)
     if (!pane.pendingInput) pane.pendingInput = performance.now()
-    await invoke("pane_paste", { id: pane.id, text: null })
+    await invoke("pane_paste_clipboard", { id: pane.id })
   } catch (err) {
     log("paste", String(err))
   }

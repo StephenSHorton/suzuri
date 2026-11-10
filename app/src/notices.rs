@@ -352,44 +352,68 @@ impl Notices {
     }
 
     /// Size and place the panel for the cards, and hand them to it.
+    ///
+    /// The work runs on the main thread. While the panel doesn't exist yet
+    /// it is handed over from a helper thread, so it always waits its turn
+    /// in the event loop: run_on_main_thread runs inline when called on the
+    /// main thread, and a sync command (notice_toast's "copied", a finished
+    /// command's activity_notice, a settings save) runs there inside
+    /// WebView2's request handler, where building the panel's WebView2
+    /// deadlocks (wry#583; Tauri's WebviewWindowBuilder docs). The cards are
+    /// read when the work runs, so a late hand-over still shows the latest.
     fn present(&self, sound: Option<&'static str>) {
-        let (cards, anchor) = {
-            let g = self.inner.lock();
-            let cards: Vec<Card> = g
-                .live
-                .iter()
-                .map(|l| Card {
-                    key: l.key,
-                    title: l.note.title.clone(),
-                    body: l.note.body.clone(),
-                    tone: if l.note.urgency >= 2 || l.note.icon == "error" {
-                        "error"
-                    } else if matches!(l.note.icon.as_str(), "warn" | "warning") {
-                        "warn"
-                    } else {
-                        ""
-                    },
-                })
-                .collect();
-            (cards, g.anchor)
-        };
-        let colors = Colors::now();
-        let app = self.app.clone();
-        let _ = self.app.run_on_main_thread(move || {
-            let Some(panel) = panel(&app) else { return };
+        let me = self.clone();
+        let show = move || {
+            let app = &me.app;
+            let Some(panel) = panel(app) else { return };
+            let (cards, anchor) = me.cards();
+            let colors = Colors::now();
             if cards.is_empty() {
                 let _ = panel.emit_to(PANEL, "notices", PanelState { cards, anchor, sound, colors });
                 let _ = panel.hide();
                 return;
             }
-            place(&app, &panel, cards.len(), anchor);
+            place(app, &panel, cards.len(), anchor);
             let _ = panel.emit_to(PANEL, "notices", PanelState { cards, anchor, sound, colors });
             if !panel.is_visible().unwrap_or(false) {
                 show_inactive(&panel);
             }
-        });
+        };
+        if self.app.get_webview_window(PANEL).is_some() {
+            let _ = self.app.run_on_main_thread(show);
+        } else {
+            let app = self.app.clone();
+            let handed = std::thread::Builder::new().name("rsz-notice-panel".into()).spawn(move || {
+                let _ = app.run_on_main_thread(show);
+            });
+            if let Err(e) = handed {
+                log::warn!("notices: panel thread: {e}");
+            }
+        }
         let unread = self.inner.lock().unread;
         let _ = self.app.emit("notice-bell", unread);
+    }
+
+    /// The live cards as the panel shows them, and where.
+    fn cards(&self) -> (Vec<Card>, usize) {
+        let g = self.inner.lock();
+        let cards: Vec<Card> = g
+            .live
+            .iter()
+            .map(|l| Card {
+                key: l.key,
+                title: l.note.title.clone(),
+                body: l.note.body.clone(),
+                tone: if l.note.urgency >= 2 || l.note.icon == "error" {
+                    "error"
+                } else if matches!(l.note.icon.as_str(), "warn" | "warning") {
+                    "warn"
+                } else {
+                    ""
+                },
+            })
+            .collect();
+        (cards, g.anchor)
     }
 }
 
