@@ -527,16 +527,12 @@ fn clipboard_paste_text(p: &Pane) -> Result<String, String> {
 }
 
 /// Paste text the UI already has into the pane, bracketed when the app
-/// asked. Sync, so it stays in order with the keys typed around it; with
-/// no text it reads the clipboard (bounded, see clip), but the UI uses
-/// pane_paste_clipboard for that.
+/// asked. Sync, so it stays in order with the keys typed around it. The
+/// clipboard's own paste is pane_paste_clipboard (never on the main
+/// thread).
 #[tauri::command]
-fn pane_paste(panes: State<'_, Arc<Panes>>, id: u32, text: Option<String>) -> Result<(), String> {
+fn pane_paste(panes: State<'_, Arc<Panes>>, id: u32, text: String) -> Result<(), String> {
     let Some(p) = panes.get(id) else { return Ok(()) };
-    let text = match text {
-        Some(t) => t,
-        None => clipboard_paste_text(&p)?,
-    };
     if !text.is_empty() {
         p.paste(&text);
     }
@@ -926,6 +922,11 @@ fn main() {
     if cli::wants_version(&args) {
         println!("{}", ctx.package_info().version);
         return;
+    }
+    // The hang watchdog's dump helper (hang.rs): no log, no window, no
+    // single-instance hand-off to the app it is dumping.
+    if hang::wants_dump(&args) {
+        std::process::exit(hang::run_dump(&args[2..]));
     }
     if notify::wants(&args) {
         std::process::exit(notify::run(&args[2..], ctx));

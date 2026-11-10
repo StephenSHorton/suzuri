@@ -13,11 +13,13 @@ a no-op message every 500 ms. When the main (UI) thread has not answered for
    dev instance). Only the newest 3 are kept;
 3. logs `ui stall ended after N s` if the window comes back.
 
-One dump per stall. A hang that still pumps messages (a nested modal loop)
-answers the probe and is not caught. The dump is written from inside the
-process, so in rare cases (a frozen thread holding the heap or loader lock)
-writing it can itself stall; the log lines come first for that reason.
-macOS has no watchdog.
+At most one dump per stall and one per 10 minutes (later stalls in that
+window are only logged). The dump is written by a second `suzuri.exe` started
+as a hidden helper (`suzuri __hang-dump <pid> <path>`), so a frozen thread
+holding the heap or loader lock can't stall the dump inside the app; the app
+waits up to 30 s for it and never kills it. A hang that still pumps messages
+(a nested modal loop) answers the probe and is not caught. macOS has no
+watchdog.
 
 ## Reading a dump
 
