@@ -3,7 +3,9 @@
 // shortcuts.js's table and the command line rows carry a sample key that
 // the test runs through bar.js, so the sheet can't drift from the keys.
 
+import { createElement as h } from "react"
 import { chordLabel, chordLabels, shortcut } from "./shortcuts.js"
+import { mountOverlay, unmountOverlay } from "./chrome/overlays.js"
 
 const key = (k, mods = {}) => ({ key: k, code: "", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...mods })
 
@@ -86,75 +88,112 @@ export function helpSections(isMac) {
   ]
 }
 
-// The overlay: the sections in two columns (one when narrow); Esc, Enter,
-// ⌘/ or a click outside closes it. It takes every key while open.
+// A keys label from helpSections() as pieces for Astryx Kbd: { kbd } (a
+// Kbd `keys` string such as "mod+shift+t" or "ctrl+plus"), { text } (words
+// that are no key, "Double-click", "at the end") and { sep } (the " · "
+// between alternatives).
+const MAC_MODS = { "⌘": "mod", "⌥": "alt", "⇧": "shift", "⌃": "ctrl" }
+const WORD_MODS = { "Ctrl+": "ctrl", "Alt+": "alt", "Shift+": "shift" }
+const ARROW_KEYS = { "←": "left", "→": "right", "↑": "up", "↓": "down" }
+const NAMED_KEYS = { Enter: "enter", Esc: "esc", Tab: "tab", "⌫": "backspace", "+": "plus", "1–9": "1–9" }
+
+// One space-free word to a Kbd keys string, or null when it is no chord.
+function chordKeys(word, isMac) {
+  const mods = []
+  let rest = word
+  for (;;) {
+    const glyph = isMac && MAC_MODS[rest[0]]
+    const named = Object.keys(WORD_MODS).find((m) => rest.startsWith(m) && rest.length > m.length)
+    if (glyph) { mods.push(glyph); rest = rest.slice(1) }
+    else if (named) { mods.push(WORD_MODS[named]); rest = rest.slice(named.length) }
+    else break
+  }
+  let keys
+  if (NAMED_KEYS[rest]) keys = [NAMED_KEYS[rest]]
+  else if (/^[←→↑↓]+$/.test(rest)) keys = [...rest].map((a) => ARROW_KEYS[a])
+  else if (/^(F\d{1,2}|[A-Za-z0-9[\]\\/,.=\-])$/.test(rest)) keys = [rest.toLowerCase()]
+  else return null
+  return [...mods, ...keys].join("+")
+}
+
+export function kbdParts(label, isMac) {
+  const out = []
+  label.split(" · ").forEach((alt, i) => {
+    if (i) out.push({ sep: true })
+    for (const word of alt.split(" ")) {
+      const kbd = chordKeys(word, isMac)
+      const last = out[out.length - 1]
+      if (kbd) out.push({ kbd })
+      else if (last?.text != null) last.text += " " + word
+      else out.push({ text: word })
+    }
+  })
+  return out
+}
+
+// The sheet: an Astryx Dialog (chrome/HelpSheet.jsx) on the overlay host.
+// Esc, Enter, ⌘/ or a click outside closes it. It takes every key while
+// open: app.js doesn't know about it, so this listener alone keeps keys from
+// the terminal.
+const SCROLL_KEYS = new Set(["Tab", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"])
+
 export class HelpSheet {
-  constructor(host, isMac) {
+  constructor(_host, isMac) {
     this.isMac = isMac
-    this.el = document.createElement("div")
-    this.el.className = "overlay help"
-    this.el.hidden = true
-    this.el.innerHTML = `<div class="card" tabindex="-1"><div class="head">Keyboard shortcuts</div><div class="cols"></div><div class="foot"><kbd>Esc</kbd> close</div></div>`
-    host.appendChild(this.el)
-    this.card = this.el.querySelector(".card")
-    this.el.querySelector(".cols").replaceChildren(...helpSections(isMac).map(renderSection))
-    this.el.addEventListener("mousedown", (e) => {
-      if (e.target === this.el) { e.preventDefault(); this.close() }
-    })
+    this.open_ = false
+    this.sections = helpSections(isMac)
+    // The view loads only in the webview (node --test imports this module).
+    this.view = import("./chrome/HelpSheet.jsx").then((m) => (this.View = m.HelpSheet))
     window.addEventListener("keydown", (e) => this.onKey(e), true)
   }
 
-  get isOpen() { return !this.el.hidden }
+  get isOpen() { return this.open_ }
 
   toggle() { this.isOpen ? this.close() : this.open() }
+
+  render() {
+    if (!this.View) return void this.view.then(() => this.render())
+    mountOverlay("help", h(this.View, { isOpen: this.open_, sections: this.sections, isMac: this.isMac, onClose: () => this.close() }))
+  }
 
   open() {
     if (this.isOpen) return
     this.back = document.activeElement
-    this.el.hidden = false
-    this.card.focus()
+    this.open_ = true
+    clearTimeout(this.drop)
+    this.render()
   }
 
   close() {
     if (!this.isOpen) return
-    this.el.hidden = true
-    this.back?.focus?.()
+    this.open_ = false
+    // Close through the dialog (it leaves the top layer cleanly), then drop
+    // it and give the keyboard back once the page is no longer inert.
+    this.render()
+    const back = this.back
     this.back = null
+    this.drop = setTimeout(() => {
+      if (this.isOpen) return
+      unmountOverlay("help")
+      if (document.activeElement !== back) back?.focus?.()
+    }, 200)
   }
 
   onKey(e) {
     if (!this.isOpen || e.isComposing) return
-    e.preventDefault()
     e.stopPropagation()
-    if (e.key === "Escape" || e.key === "Enter" || shortcut(e, this.isMac)?.id === "help") this.close()
+    if (e.key === "Escape" || e.key === "Enter" || shortcut(e, this.isMac)?.id === "help") {
+      e.preventDefault()
+      this.close()
+    } else if (!SCROLL_KEYS.has(e.key)) e.preventDefault()
   }
-}
-
-function renderSection(s) {
-  const sec = document.createElement("section")
-  const h = document.createElement("h3")
-  h.textContent = s.title
-  sec.appendChild(h)
-  for (const r of s.rows) {
-    const row = document.createElement("div")
-    row.className = "row"
-    const k = document.createElement("span")
-    k.className = "keys"
-    k.textContent = r.keys
-    const d = document.createElement("span")
-    d.className = "desc"
-    d.textContent = r.desc
-    row.append(k, d)
-    sec.appendChild(row)
-  }
-  return sec
 }
 
 // In the app (not under node --test): the sheet and its palette entry. ⌘/
 // reaches it through shortcuts.js and app.js's run().
 if (globalThis.window?.rsz) {
   const isMac = navigator.platform.startsWith("Mac")
-  const sheet = new HelpSheet(document.getElementById("overlays") || document.body, isMac)
+  const sheet = new HelpSheet(null, isMac)
   window.rsz.addCommands([
     { id: "help", title: "Keyboard shortcuts", category: "Help", hint: chordLabel("help", isMac), run: () => sheet.toggle() },
   ])
