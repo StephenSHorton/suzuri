@@ -58,6 +58,9 @@ pub fn config() -> Config {
         // Shown in screenshots and recordings, as the old webview cards were
         // (rust-toast hides them by default).
         capture_exclude: false,
+        // No coloured bar down the left edge (Stephen, 2026-11-10): the
+        // icon alone carries the kind's colour.
+        stripe: false,
         ..Config::default()
     }
 }
