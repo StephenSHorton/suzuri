@@ -60,12 +60,6 @@ body.win .rsz-bar { padding-inline: var(--spacing-3) 0; }
 
 /* The bell and the cup. */
 .rsz-chip { position: relative; display: flex; align-items: center; flex: none; }
-.rsz-chip-count {
-  position: absolute; top: 2px; right: 1px; min-width: 14px; height: 14px; padding: 0 3px;
-  border-radius: var(--radius-full); background: var(--color-accent); color: var(--color-on-accent);
-  font-size: 10px; font-weight: 600; line-height: 14px; text-align: center; pointer-events: none;
-}
-.rsz-chip-time { padding-inline-end: var(--spacing-1); font-size: var(--font-size-xs); font-weight: 600; color: var(--color-text-accent); font-variant-numeric: tabular-nums; }
 
 /* Windows' caption buttons, flush right and full height, as Windows draws them. */
 .rsz-caption { display: flex; align-self: stretch; flex: none; margin-inline-start: var(--spacing-2); }

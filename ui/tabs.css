@@ -1,15 +1,4 @@
-/* Tabs and panes: the yes/no box (ui/confirm.js) on the palette overlay. */
-.rsz-confirm { align-items: center; }
-.rsz-confirm .card { margin-top: 0; width: min(360px, calc(100vw - 32px)); padding: 14px 16px 12px; }
-.rsz-confirm b { display: block; color: var(--primary); font-weight: 600; margin-bottom: 6px; }
-.rsz-confirm p { margin: 0 0 14px; color: var(--soft); }
-.rsz-confirm .row { display: flex; justify-content: flex-end; gap: 8px; }
-.rsz-confirm button {
-  font: inherit; color: var(--secondary); background: transparent; border: 1px solid var(--hair);
-  border-radius: 6px; padding: 4px 12px; cursor: pointer;
-}
-.rsz-confirm button:hover { color: var(--text); background: var(--sel); }
-.rsz-confirm button.yes { color: var(--on-primary); background: var(--primary); border-color: var(--primary); }
+/* Tabs and panes. */
 
 /* A tab with one pane is all terminal: no title row (Go's split.go), except
    while that pane is being renamed. */
