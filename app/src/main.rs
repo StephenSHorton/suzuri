@@ -950,15 +950,6 @@ fn main() {
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
-            // Windows: no native caption; the tab strip is the title bar and
-            // draws its own window buttons (ui/titlebar.js). Done before the
-            // window is first shown, so it never flashes a caption. Resize
-            // edges, the drop shadow and snapping stay.
-            #[cfg(windows)]
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_decorations(false);
-                let _ = w.set_shadow(true);
-            }
             window_state::install(app.handle());
             app.manage(notices::Notices::new(app.handle().clone()));
             if let Some(crash) = applog::take_crash(&applog::dir()) {

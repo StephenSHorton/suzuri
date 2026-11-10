@@ -46,6 +46,11 @@ body.win #bar { padding-left: 12px; }
   border-radius: 6px; height: 24px; min-width: 28px; font-size: 12px; cursor: pointer;
 }
 #bar button:hover { background: var(--panel); border-color: var(--hair); color: var(--text); }
+/* ☕ (caffeine.js): dim cup when off, bright with the time left when on
+   (Go styleCaffeineOff/On). The emoji ignores color, so dim with opacity. */
+#bar #caffeine { color: var(--mute); opacity: .45; filter: grayscale(1); white-space: nowrap; }
+#bar #caffeine.on { color: var(--secondary); font-weight: 600; opacity: 1; filter: none; }
+#bar #caffeine:hover { opacity: 1; filter: none; }
 #root { position: absolute; inset: 34px 0 0 0; padding: var(--gap); display: flex; }
 .split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; gap: var(--gap); }
 .split.v { flex-direction: column; }
@@ -241,34 +246,3 @@ input.rename {
 #update button.go { border-color: var(--primary); color: var(--primary); }
 #update button.later { border-color: transparent; color: var(--dim); padding: 0 6px; }
 #update button:disabled { opacity: .6; cursor: default; }
-
-/* ---- the bar's right side (titlebar.js, icons.js): the bell and the cup,
-   then on Windows the window buttons. Icons are Lucide strokes. */
-#bar .icon { width: 15px; height: 15px; display: block; flex: none; }
-#bar #new-tab { display: grid; place-items: center; min-width: 24px; width: 24px; padding: 0; }
-#bar #new-tab .icon { width: 14px; height: 14px; }
-.spacer { min-width: 48px; } /* always something to drag, even with many tabs */
-#chips { display: flex; align-items: center; gap: 2px; flex: none; }
-#chips button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 6px; }
-#chips .count { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; }
-#bar #bell { color: var(--dim); }
-#bar #bell.unread { color: var(--primary); }
-#bar #bell .dot { fill: currentColor; stroke: none; }
-/* The cup: dim when off, the theme's accent with the time left when on. */
-#bar #caffeine { color: var(--mute); white-space: nowrap; }
-#bar #caffeine.on { color: var(--primary); font-weight: 600; }
-#bar #caffeine:hover { color: var(--text); }
-
-/* Windows: the strip is the title bar, so it runs edge to edge with the
-   caption buttons flush right, full height (Windows' 46px wide). */
-body.win #bar { padding-right: 0; }
-#caption { display: flex; align-self: stretch; flex: none; margin-left: 6px; }
-#bar #caption button {
-  width: 46px; height: 100%; min-width: 0; border: 0; border-radius: 0; padding: 0;
-  font: 10px "Segoe Fluent Icons", "Segoe MDL2 Assets"; color: var(--soft);
-}
-#bar #caption button:hover { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text); border: 0; }
-#bar #caption button:active { background: color-mix(in srgb, var(--text) 6%, transparent); }
-#bar #caption .close:hover { background: #c42b1c; color: #fff; }
-#bar #caption .close:active { background: #b3271a; color: #fff; }
-body.inactive #bar #caption button:not(:hover) { color: var(--mute); }
