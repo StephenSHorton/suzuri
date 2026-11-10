@@ -47,7 +47,7 @@ pub fn palette() -> Palette {
 }
 
 /// The app-level toast setup: suzuri's name, Neutral dark, solid cards
-/// (Neutral's surfaces are opaque, so no glass).
+/// (Neutral's surfaces are opaque, so no glass), visible to screen capture.
 pub fn config() -> Config {
     Config {
         app_name: "suzuri".into(),
@@ -55,6 +55,9 @@ pub fn config() -> Config {
         scheme: Scheme::Dark,
         corner_radius: CORNER_RADIUS,
         glass: 1.0,
+        // Shown in screenshots and recordings, as the old webview cards were
+        // (rust-toast hides them by default).
+        capture_exclude: false,
         ..Config::default()
     }
 }
@@ -75,6 +78,7 @@ mod tests {
         assert_eq!(c.scheme, Scheme::Dark);
         assert_eq!(c.corner_radius, 12.0);
         assert!(c.glass_alpha().is_none());
+        assert!(!c.capture_exclude);
         assert_eq!(c.dark.background.to_string(), "#262626");
         assert_eq!(c.dark.on_primary.to_string(), "#111111");
     }

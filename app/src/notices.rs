@@ -149,7 +149,8 @@ impl Notices {
                 l.note = n;
                 l.expire = expire;
                 l.until = until;
-                self.show(l);
+                // An update in place stays quiet, as the old panel's did.
+                self.show(l, true);
             } else {
                 if g.live.len() >= MAX_LIVE {
                     // Ours to drop, not rust-toast's: close it first so its
@@ -163,7 +164,7 @@ impl Notices {
                 let key = g.next;
                 g.live.push(Live { key, pane, note: n, expire, until, shown: None, gone: None });
                 let l = g.live.last_mut().expect("just pushed");
-                self.show(l);
+                self.show(l, false);
             }
         }
         self.bell();
@@ -172,9 +173,13 @@ impl Notices {
 
     /// Posts l's card, or replaces it in place (its toast id is its key).
     /// The callbacks run on rust-toast's callback thread and hop back
-    /// through the AppHandle.
-    fn show(&self, l: &mut Live) {
-        let (mut note, extra) = card(l.key, &l.note, l.expire);
+    /// through the AppHandle. `quiet` posts it without a sound.
+    fn show(&self, l: &mut Live, quiet: bool) {
+        let (mut note, mut extra) = card(l.key, &l.note, l.expire);
+        if quiet {
+            note.silent = true;
+            extra = None;
+        }
         let key = l.key;
         let app = self.app.clone();
         note.on_click = Some(Arc::new(move || {
