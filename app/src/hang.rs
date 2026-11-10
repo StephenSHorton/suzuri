@@ -41,7 +41,8 @@ pub fn install(app: &tauri::AppHandle) {
         keep: 3,
     };
     let spawned = std::thread::Builder::new().name("rsz-hang-watch".into()).spawn(move || {
-        watch.run(&STOP, &mut |line: String| log::warn!("{line}"));
+        let say: win::Say = std::sync::Arc::new(|line: String| log::warn!("{line}"));
+        watch.run(&STOP, &say);
     });
     if let Err(e) = spawned {
         log::warn!("hang watchdog: not started: {e}");
@@ -56,6 +57,7 @@ mod win {
     use std::io;
     use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
@@ -78,6 +80,29 @@ mod win {
     const DUMP: MINIDUMP_TYPE =
         MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithUnloadedModules | MiniDumpWithHandleData;
 
+    /// Logs a line (log::warn! in the app).
+    pub type Say = Arc<dyn Fn(String) + Send + Sync>;
+
+    /// How long the watch waits for its log lines before going on: the
+    /// log can be what's stuck (a paused console under a dev build's
+    /// stderr mirror), and the dump must still be written.
+    const SAY_WAIT: Duration = Duration::from_secs(1);
+
+    /// Log `lines` from a helper thread, waiting up to SAY_WAIT for them.
+    fn say_all(say: &Say, lines: Vec<String>) {
+        let (tx, rx) = crossbeam_channel::bounded::<()>(1);
+        let say = Arc::clone(say);
+        let spawned = std::thread::Builder::new().name("rsz-hang-log".into()).spawn(move || {
+            for l in lines {
+                say(l);
+            }
+            let _ = tx.send(());
+        });
+        if spawned.is_ok() {
+            let _ = rx.recv_timeout(SAY_WAIT);
+        }
+    }
+
     pub struct Watch {
         /// The main window, as an integer so the watch can move threads.
         pub hwnd: isize,
@@ -92,7 +117,7 @@ mod win {
 
     impl Watch {
         /// Probe until `stop` or the window is gone. `say` logs a line.
-        pub fn run(&self, stop: &AtomicBool, say: &mut dyn FnMut(String)) {
+        pub fn run(&self, stop: &AtomicBool, say: &Say) {
             let hwnd = self.hwnd as HWND;
             let timeout_ms = self.timeout.as_millis().min(u32::MAX as u128) as u32;
             let mut last_ok = Instant::now();
@@ -108,7 +133,7 @@ mod win {
                 let answered = unsafe { SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, timeout_ms, &mut res) } != 0;
                 if answered {
                     if stalled {
-                        say(format!("ui stall ended after {:.1} s", last_ok.elapsed().as_secs_f64()));
+                        say_all(say, vec![format!("ui stall ended after {:.1} s", last_ok.elapsed().as_secs_f64())]);
                         stalled = false;
                     }
                     last_ok = Instant::now();
@@ -129,28 +154,29 @@ mod win {
             }
         }
 
-        fn report(&self, quiet: Duration, say: &mut dyn FnMut(String)) {
-            say(format!("ui stall: main thread not answering for {:.1} s (at {})", quiet.as_secs_f64(), crate::bridge::rfc3339_now()));
-            let threads = thread_names();
+        fn report(&self, quiet: Duration, say: &Say) {
+            let mut lines = vec![format!("ui stall: main thread not answering for {:.1} s (at {})", quiet.as_secs_f64(), crate::bridge::rfc3339_now())];
             let mut unnamed = Vec::new();
-            for (id, name) in &threads {
-                let ui = if *id == self.ui_thread { " (ui)" } else { "" };
+            for (id, name) in thread_names() {
+                let ui = if id == self.ui_thread { " (ui)" } else { "" };
                 match name {
-                    Some(n) => say(format!("ui stall thread {id}{ui}: {n}")),
-                    None if !ui.is_empty() => say(format!("ui stall thread {id}{ui}")),
+                    Some(n) => lines.push(format!("ui stall thread {id}{ui}: {n}")),
+                    None if !ui.is_empty() => lines.push(format!("ui stall thread {id}{ui}")),
                     None => unnamed.push(id.to_string()),
                 }
             }
             if !unnamed.is_empty() {
-                say(format!("ui stall unnamed threads: {}", unnamed.join(" ")));
+                lines.push(format!("ui stall unnamed threads: {}", unnamed.join(" ")));
             }
             let name = format!("hang-{}.dmp", crate::bridge::rfc3339_now().replace(':', ""));
             let path = self.dir.join(name);
-            // All logging happens before the dump: it suspends the other
-            // threads, and one of them may hold the log's lock.
-            say(format!("ui stall: writing {}", path.display()));
+            lines.push(format!("ui stall: writing {}", path.display()));
+            // All logging happens before the dump (it suspends the other
+            // threads, one of which may hold the log's lock), and a stuck
+            // log doesn't stop the dump.
+            say_all(say, lines);
             if let Err(e) = write_dump(&path) {
-                say(format!("ui stall: dump failed: {e}"));
+                say_all(say, vec![format!("ui stall: dump failed: {e}")]);
             }
             prune(&self.dir, self.keep);
         }
@@ -208,6 +234,9 @@ mod win {
 
     /// A minidump of this whole process at `path`.
     pub fn write_dump(path: &Path) -> io::Result<()> {
+        // dbghelp is single-threaded.
+        static DUMPING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one = DUMPING.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d)?;
         }
@@ -251,7 +280,6 @@ mod win {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::sync::Arc;
 
         fn temp(tag: &str) -> PathBuf {
             let d = std::env::temp_dir().join(format!("rsz-hang-{tag}-{}", std::process::id()));
@@ -290,6 +318,31 @@ mod win {
             let mut left: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
             left.sort();
             assert_eq!(left, ["hang-3.dmp", "hang-4.dmp", "hang-5.dmp", "suzuri.log"]);
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        #[test]
+        fn a_stuck_log_does_not_stop_the_dump() {
+            let d = temp("stuck-log");
+            let watch = Watch {
+                hwnd: 0,
+                ui_thread: 0,
+                dir: d.clone(),
+                every: Duration::from_millis(20),
+                timeout: Duration::from_millis(100),
+                stall_after: Duration::from_millis(400),
+                keep: 3,
+            };
+            let (release, wait) = crossbeam_channel::bounded::<()>(0);
+            let say: Say = Arc::new(move |_| {
+                let _ = wait.recv();
+            });
+            let t = Instant::now();
+            watch.report(Duration::from_secs(3), &say);
+            assert!(t.elapsed() < Duration::from_secs(5));
+            drop(release);
+            let dumps = std::fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".dmp")).count();
+            assert_eq!(dumps, 1);
             let _ = std::fs::remove_dir_all(&d);
         }
 
@@ -342,7 +395,8 @@ mod win {
             let lines = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
             let l2 = Arc::clone(&lines);
             let stop = AtomicBool::new(false);
-            watch.run(&stop, &mut |s| l2.lock().push(s));
+            let say: Say = Arc::new(move |s| l2.lock().push(s));
+            watch.run(&stop, &say);
             ui.join().unwrap();
             let lines = lines.lock().clone();
             assert_eq!(lines.iter().filter(|l| l.starts_with("ui stall: main thread not answering")).count(), 1, "{lines:?}");

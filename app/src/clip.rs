@@ -21,7 +21,7 @@ pub const OSC52: Duration = Duration::from_millis(250);
 pub const WRITE: Duration = Duration::from_secs(1);
 
 /// Clipboard threads that have not finished yet (stuck or still working).
-const MAX_STUCK: usize = 2;
+const MAX_STUCK: usize = 4;
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// Run `f` on a clipboard thread and wait up to `limit` for its answer.

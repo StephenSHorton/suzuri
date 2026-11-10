@@ -14,13 +14,19 @@ a no-op message every 500 ms. When the main (UI) thread has not answered for
 3. logs `ui stall ended after N s` if the window comes back.
 
 One dump per stall. A hang that still pumps messages (a nested modal loop)
-answers the probe and is not caught. macOS has no watchdog.
+answers the probe and is not caught. The dump is written from inside the
+process, so in rare cases (a frozen thread holding the heap or loader lock)
+writing it can itself stall; the log lines come first for that reason.
+macOS has no watchdog.
 
 ## Reading a dump
 
-Use WinDbg (Microsoft Store) or `cdb` from the Windows SDK debugging tools,
-with the matching `suzuri.exe` and `suzuri.pdb` next to it (or on the symbol
-path) and Microsoft's symbol server for system DLLs:
+Use WinDbg (Microsoft Store) or `cdb` from the Windows SDK debugging tools.
+Stacks need the `suzuri.pdb` built with that exact `suzuri.exe`: release
+builds keep line tables (`debug = 1` in Cargo.toml), so it is
+`target\release\suzuri.pdb` of the build that made the installer, not part of
+the installer itself. Put it on the symbol path, with Microsoft's symbol
+server for system DLLs:
 
 ```
 cdb -z hang-2026-11-10T153000Z.dmp -y "srv*C:\symbols*https://msdl.microsoft.com/download/symbols;C:\path\to\suzuri-pdb"
