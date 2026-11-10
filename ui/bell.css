@@ -1,17 +1,13 @@
-/* The notification bell and its history popover (ui/bell.js). */
-.bell-pop {
-  position: fixed; z-index: 60; width: min(380px, calc(100vw - 24px)); max-height: min(420px, 70vh);
-  display: flex; flex-direction: column; overflow: hidden; outline: none;
-  background: var(--panel); border: 1px solid var(--hair); border-radius: 10px;
-  box-shadow: 0 16px 48px rgba(0,0,0,.55);
+/* The notification bell (chrome/TitleBar.jsx) and its history popover
+   (ui/bell.js, chrome/Bell.jsx). */
+
+/* Not Astryx: the unread count sits on the bell's corner; Astryx's Badge has
+   no anchored/overlay placement, so this pins it there. */
+.rsz-bell-count {
+  position: absolute; inset-block-start: 0; inset-inline-end: 0;
+  transform: translate(25%, -15%); pointer-events: none;
 }
-/* display:flex above beats the UA [hidden] rule. */
-.bell-pop[hidden] { display: none; }
-.bell-pop .head { padding: 8px 12px; color: var(--dim); font-size: 11px; border-bottom: 1px solid var(--hair); }
-.bell-pop .list { overflow-y: auto; padding: 4px 0; }
-.bell-pop .row { display: flex; gap: 10px; padding: 5px 12px; color: var(--soft); cursor: pointer; }
-.bell-pop .row.sel { background: var(--sel); color: var(--text); }
-.bell-pop .row.gone { cursor: default; }
-.bell-pop .when { flex: none; color: var(--dim); font-variant-numeric: tabular-nums; }
-.bell-pop .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bell-pop .empty { padding: 14px 12px; color: var(--dim); }
+
+/* Not Astryx: ScrollableArea has no max height; this caps the list. */
+.rsz-bell-scroll { max-block-size: min(420px, 70vh); overflow-y: auto; padding-block: var(--spacing-1); }
+.rsz-bell { outline: none; }
