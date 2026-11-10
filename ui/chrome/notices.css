@@ -1,0 +1,50 @@
+/* The notice panel (notice.html, chrome/Notices.jsx). Astryx tokens only;
+   Figtree is Neutral's face, served locally because the CSP allows no
+   outside fonts. The geometry is notices.rs's: 320 x 72 cards, an 8 px gap,
+   a 16 px margin round the stack (--spacing-2 and --spacing-4). */
+@import "@fontsource/figtree/400.css";
+@import "@fontsource/figtree/500.css";
+@import "@fontsource/figtree/600.css";
+
+/* The window is transparent: only the cards paint. Unlayered, so it wins
+   over the theme's prose body background. */
+html, body, #root { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+body {
+  font-family: var(--font-family-body);
+  user-select: none; -webkit-user-select: none; cursor: default;
+}
+
+/* Not Astryx: a bottom-up stack (oldest card at the bottom whatever the
+   anchor, Go noticeStackLayout); VStack has no reversed direction. */
+#stack {
+  position: absolute; inset: var(--spacing-4);
+  display: flex; flex-direction: column-reverse; gap: var(--spacing-2);
+}
+
+/* Not Astryx: the accent bar and the entrance (see Notices.jsx). The wrapper
+   clips the bar to the card's corners and carries the card's shadow, which
+   the clip would otherwise cut. */
+.rsz-notice {
+  position: relative; flex: none; width: 320px; height: 72px;
+  border-radius: var(--radius-container); overflow: hidden;
+  box-shadow: var(--shadow-low);
+  animation: rsz-notice-in var(--duration-medium) var(--ease-entrance);
+}
+.rsz-notice::before {
+  content: ""; position: absolute; z-index: 1; inset-block: 0; inset-inline-start: 0;
+  width: var(--spacing-1); background: var(--color-accent); pointer-events: none;
+}
+.rsz-notice[data-tone="error"]::before { background: var(--color-error); }
+.rsz-notice[data-tone="warn"]::before { background: var(--color-warning); }
+
+.rsz-notice-text { flex: 1; min-width: 0; }
+
+/* Go: left anchors enter from the left, right from the right, and every
+   anchor nudges toward its edge (centre rises). */
+@keyframes rsz-notice-in {
+  from { opacity: 0; transform: translate(var(--dx, 0), var(--dy, var(--spacing-3))); }
+}
+body.left .rsz-notice { --dx: calc(-1 * var(--spacing-8)); --dy: 0; }
+body.right .rsz-notice { --dx: var(--spacing-8); --dy: 0; }
+body.top .rsz-notice { --dy: calc(-1 * var(--spacing-3)); }
+@media (prefers-reduced-motion: reduce) { .rsz-notice { animation: none; } }
