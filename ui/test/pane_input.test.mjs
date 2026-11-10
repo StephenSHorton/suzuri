@@ -254,3 +254,30 @@ test("pageKeys: with the page focused and a pane focused, typing reaches that pa
   assert.deepEqual(did, [["run", "new_tab", undefined]])
   pane.view.unmount()
 })
+
+test("writes wait behind a clipboard paste in flight, in order, and stop waiting once it settles", async () => {
+  const { writeAfterPaste, pasteInOrder } = await import("../pane_input.js")
+  const pane = {}
+  const sent = []
+  writeAfterPaste(pane, () => sent.push("a"))
+  assert.deepEqual(sent, ["a"], "no paste: written at once")
+  let answer
+  const pasted = pasteInOrder(pane, () => new Promise((ok) => (answer = ok)).then(() => sent.push("paste")))
+  writeAfterPaste(pane, () => sent.push("\r"))
+  writeAfterPaste(pane, () => sent.push("b"))
+  await new Promise((r) => setTimeout(r, 5))
+  assert.deepEqual(sent, ["a"], "keys wait for the paste")
+  answer()
+  await pasted
+  await new Promise((r) => setTimeout(r, 5))
+  assert.deepEqual(sent, ["a", "paste", "\r", "b"])
+  assert.equal(pane.pasteGate, null)
+  // A failed paste still lets the keys through.
+  const failed = pasteInOrder(pane, () => Promise.reject(new Error("clipboard not answering")))
+  writeAfterPaste(pane, () => sent.push("c"))
+  await assert.rejects(failed)
+  await new Promise((r) => setTimeout(r, 5))
+  assert.deepEqual(sent.at(-1), "c")
+  writeAfterPaste(pane, () => sent.push("d"))
+  assert.deepEqual(sent.at(-1), "d", "settled: written at once again")
+})

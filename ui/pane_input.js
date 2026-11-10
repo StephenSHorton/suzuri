@@ -101,7 +101,30 @@ export function textFilter(pane) {
 // frames it (bracketed paste when the app asked).
 export function pasteText(pane, text, invoke) {
   if (pane.barActive()) return pane.bar.insert(text.replace(/\r\n?/g, "\n")), pane.renderBar()
-  invoke("pane_paste", { id: pane.id, text })
+  writeAfterPaste(pane, () => invoke("pane_paste", { id: pane.id, text }))
+}
+
+// A clipboard paste (pane_paste_clipboard) reads the clipboard off the
+// core's main thread, so it can answer after writes sent later. Writes to a
+// pane wait behind a paste in flight, in the order they were sent: Enter
+// typed right after Ctrl+V still reaches the program after the text.
+// pane.pasteGate is the promise the next write waits for (unset when none).
+export function writeAfterPaste(pane, write) {
+  if (!pane.pasteGate) return void write()
+  gate(pane, pane.pasteGate.then(() => { try { write() } catch {} }))
+}
+
+// Run `paste` (a clipboard paste) after the writes before it; later writes
+// wait for it to finish, whether it worked or not. Returns its result.
+export function pasteInOrder(pane, paste) {
+  const done = (pane.pasteGate ?? Promise.resolve()).then(paste)
+  gate(pane, done.then(() => {}, () => {}))
+  return done
+}
+
+function gate(pane, next) {
+  pane.pasteGate = next
+  next.then(() => { if (pane.pasteGate === next) pane.pasteGate = null })
 }
 
 // A paste event: a full-screen app (Claude Code, Grok) gets a pasted image
