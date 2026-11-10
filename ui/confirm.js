@@ -1,6 +1,10 @@
-// A yes/no box in the palette's card style (Go suzuri's confirm modal,
-// chrome/model.go: "Quit suzuri?" on closing the last tab). While it is up it
+// A yes/no box (Go suzuri's confirm modal, chrome/model.go: "Quit suzuri?"
+// on closing the last tab), drawn as an Astryx AlertDialog
+// (chrome/ConfirmDialog.jsx) through the overlay host. While it is up it
 // takes every key: Enter (or the close chord again) says yes, Esc says no.
+
+import { createElement as h } from "react"
+import { mountOverlay, unmountOverlay } from "./chrome/overlays.js"
 
 // A keydown to "yes", "no" or null (ignored).
 export function confirmKey(e, isMac) {
@@ -14,30 +18,48 @@ export function confirmKey(e, isMac) {
   return null
 }
 
+// The view loads only in the webview (node --test imports this module for
+// confirmKey); started at load so the first ask doesn't wait on it.
+const view = globalThis.document ? import("./chrome/ConfirmDialog.jsx").then((m) => m.ConfirmDialog) : null
+
 let openBox = null
+let shown = 0 // which ask the mounted view belongs to
 
 export const isOpen = () => !!openBox
+
+const lost = () => !document.activeElement || document.activeElement === document.body
 
 // Resolves true for yes, false for no. A second ask while one is up gets
 // the first one's answer.
 export function confirm({ title, body, yes = "OK", no = "Cancel" }) {
   if (openBox) return openBox.answer
   const isMac = navigator.platform.startsWith("Mac")
-  const wrap = document.createElement("div")
-  wrap.className = "overlay rsz-confirm"
-  wrap.innerHTML = `<div class="card" role="alertdialog"><b></b><p></p><div class="row"><button class="no"></button><button class="yes"></button></div></div>`
-  wrap.querySelector("b").textContent = title
-  wrap.querySelector("p").textContent = body
-  wrap.querySelector(".no").textContent = no
-  wrap.querySelector(".yes").textContent = yes
+  const back = document.activeElement
+  const id = ++shown
+  let View = null
   let done
   const answer = new Promise((r) => (done = r))
-  const finish = (v) => {
+  const render = (isOpen) => View && mountOverlay("confirm", h(View, { isOpen, title, body, yes, no, onAnswer: finish }))
+  function finish(v) {
+    if (openBox?.answer !== answer) return // answered already
     window.removeEventListener("keydown", onKey, true)
-    wrap.remove()
     openBox = null
+    // Close through the dialog (so it leaves the top layer cleanly), then
+    // drop it and give the keyboard back to whoever had it.
+    render(false)
+    setTimeout(() => {
+      if (shown === id) unmountOverlay("confirm")
+      // Not Astryx: focus fallback. Only when the native restore left focus
+      // nowhere: the element that had it, else the pane (app.js listens).
+      if (openBox) return
+      if (lost()) back?.isConnected && back.focus?.()
+      if (lost()) window.dispatchEvent(new Event("rsz-panel-closed"))
+    }, 200)
     done(v)
   }
+  // Not Astryx: AlertDialog has no key-to-answer mapping. Every key is the
+  // box's while it is up; Enter must say yes even though the dialog focuses
+  // Cancel, so the keys never reach its buttons (or the terminal).
   const onKey = (e) => {
     e.preventDefault()
     e.stopImmediatePropagation()
@@ -45,13 +67,10 @@ export function confirm({ title, body, yes = "OK", no = "Cancel" }) {
     if (a) finish(a === "yes")
   }
   window.addEventListener("keydown", onKey, true)
-  wrap.addEventListener("mousedown", (e) => {
-    e.stopPropagation()
-    if (e.target === wrap) finish(false)
-  })
-  wrap.querySelector(".no").onclick = () => finish(false)
-  wrap.querySelector(".yes").onclick = () => finish(true)
-  ;(document.getElementById("overlays") || document.body).append(wrap)
   openBox = { answer }
+  view?.then((V) => {
+    View = V
+    if (openBox?.answer === answer) render(true)
+  })
   return answer
 }
