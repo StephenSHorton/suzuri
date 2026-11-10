@@ -15,11 +15,13 @@
    while that pane is being renamed. */
 .pane.solo .head { display: none; }
 .pane.solo .head:has(input.rename) { display: flex; }
-/* With no title row, OSC 9;4 progress draws on the pane's top edge. */
+/* With no title row, OSC 9;4 progress draws on the pane's top edge.
+   Not Astryx: a 2px pseudo-element over the terminal on a plain-DOM pane;
+   ProgressBar is a React track that would push the canvas down. */
 .pane.solo[data-progress]:not([data-progress=""])::after {
   content: ""; position: absolute; top: 0; left: 0; height: 2px; z-index: 3; pointer-events: none;
-  width: var(--progress, 0%); background: var(--primary);
+  width: var(--progress, 0%); background: var(--color-accent);
 }
-.pane.solo[data-progress="2"]::after { background: #c07070; }
+.pane.solo[data-progress="2"]::after { background: var(--color-error); }
 .pane.solo[data-progress="3"]::after { width: 100%; }
-.pane.solo[data-progress="4"]::after { background: #c8a860; }
+.pane.solo[data-progress="4"]::after { background: var(--color-warning); }
