@@ -26,6 +26,8 @@ import { tabTitle, stickyAt, windowTitle, zoomCycle, MAX_TABS, MAX_PANES } from 
 import { confirm, isOpen as confirmOpen } from "./confirm.js"
 import { FocusReports } from "./focus_report.js"
 import { chrome } from "./chrome/store.js"
+import { showToast } from "./chrome/Toasts.jsx"
+import { showHud, hideHud } from "./chrome/Hud.jsx"
 
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
@@ -36,7 +38,6 @@ const isMac = navigator.platform.startsWith("Mac")
 if (!isMac) document.body.classList.add("win")
 
 const root = document.getElementById("root")
-const hud = document.getElementById("hud")
 
 // Each pane's view has its own hidden textarea; the focused pane's holds
 // the keyboard (paste and IME events land there). With no pane focused the
@@ -1180,13 +1181,10 @@ async function paste(pane = focused) {
     log("paste", String(err))
   }
 }
-let toastTimer = 0
+// Short status ("split right", "renamed") as an Astryx Toast
+// (chrome/Toasts.jsx); each one replaces the last, and it goes quickly.
 function toast(text) {
-  const t = document.getElementById("toast")
-  t.textContent = text
-  t.hidden = false
-  clearTimeout(toastTimer)
-  toastTimer = setTimeout(() => (t.hidden = true), 900)
+  showToast({ body: text, uniqueID: "status", collisionBehavior: "overwrite", autoHideDuration: 900 })
 }
 
 // macOS: the Edit menu's Copy and Paste are ours (app/src/main.rs
@@ -1237,20 +1235,28 @@ window.rszRegisterTool?.("move_to_tab", async (a) => {
 // the bar keeps only the bell and the cup on its right.
 
 // ---- HUD: Cmd/Ctrl+Shift+H
+// An Astryx Card in the bottom right (chrome/Hud.jsx).
 let hudTimer = 0
+let hudOn = false
 function toggleHud() {
-  hud.hidden = !hud.hidden
+  hudOn = !hudOn
   clearInterval(hudTimer)
-  if (!hud.hidden) hudTimer = setInterval(updateHud, 500)
+  if (hudOn) {
+    updateHud()
+    hudTimer = setInterval(updateHud, 500)
+  } else hideHud()
 }
 async function updateHud() {
   const st = await invoke("stats")
+  // A tick still waiting on stats when the HUD closed must not bring it back.
+  if (!hudOn) return
   const inBytes = st.reduce((a, s) => a + s.bytes_in, 0)
   const feed = st.reduce((a, s) => a + s.feed_ms, 0)
-  hud.textContent =
-    `panes ${st.length}  in ${(inBytes / 1e6).toFixed(1)} MB  feed ${feed.toFixed(0)} ms\n` +
-    `frames ${paint.frames}  ${(paint.bytes / 1e6).toFixed(1)} MB  paint ${paint.applyMs.toFixed(0)} ms\n` +
-    `input p50 ${pct(lat.samples, 50).toFixed(1)}  p99 ${pct(lat.samples, 99).toFixed(1)} ms  n=${lat.samples.length}`
+  showHud([
+    `panes ${st.length}  in ${(inBytes / 1e6).toFixed(1)} MB  feed ${feed.toFixed(0)} ms`,
+    `frames ${paint.frames}  ${(paint.bytes / 1e6).toFixed(1)} MB  paint ${paint.applyMs.toFixed(0)} ms`,
+    `input p50 ${pct(lat.samples, 50).toFixed(1)}  p99 ${pct(lat.samples, 99).toFixed(1)} ms  n=${lat.samples.length}`,
+  ])
 }
 
 // ---- bench: RSZ_PANES opens N panes; RSZ_BENCH=1 runs the latency probe
