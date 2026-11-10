@@ -27,6 +27,8 @@ let shown = 0 // which ask the mounted view belongs to
 
 export const isOpen = () => !!openBox
 
+const lost = () => !document.activeElement || document.activeElement === document.body
+
 // Resolves true for yes, false for no. A second ask while one is up gets
 // the first one's answer.
 export function confirm({ title, body, yes = "OK", no = "Cancel" }) {
@@ -47,14 +49,17 @@ export function confirm({ title, body, yes = "OK", no = "Cancel" }) {
     render(false)
     setTimeout(() => {
       if (shown === id) unmountOverlay("confirm")
-      // Only when the native restore left focus nowhere.
-      const at = document.activeElement
-      if (!openBox && (!at || at === document.body)) back?.focus?.()
+      // Not Astryx: focus fallback. Only when the native restore left focus
+      // nowhere: the element that had it, else the pane (app.js listens).
+      if (openBox) return
+      if (lost()) back?.isConnected && back.focus?.()
+      if (lost()) window.dispatchEvent(new Event("rsz-panel-closed"))
     }, 200)
     done(v)
   }
-  // Every key is the box's while it is up; Enter must say yes even though
-  // the dialog focuses Cancel, so the keys never reach its buttons.
+  // Not Astryx: AlertDialog has no key-to-answer mapping. Every key is the
+  // box's while it is up; Enter must say yes even though the dialog focuses
+  // Cancel, so the keys never reach its buttons (or the terminal).
   const onKey = (e) => {
     e.preventDefault()
     e.stopImmediatePropagation()

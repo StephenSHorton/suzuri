@@ -132,9 +132,10 @@ export function kbdParts(label, isMac) {
 }
 
 // The sheet: an Astryx Dialog (chrome/HelpSheet.jsx) on the overlay host.
-// Esc, Enter, ⌘/ or a click outside closes it. It takes every key while
-// open: app.js doesn't know about it, so this listener alone keeps keys from
-// the terminal.
+// Esc, Enter, ⌘/ or a click outside closes it. Not Astryx: the window
+// capture keydown listener. It takes every key while open: app.js doesn't
+// know about the sheet, so this listener alone keeps keys from the terminal,
+// and Dialog has no Enter / help-chord close.
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"])
 
 export class HelpSheet {
@@ -175,9 +176,11 @@ export class HelpSheet {
     this.drop = setTimeout(() => {
       if (this.isOpen) return
       unmountOverlay("help")
-      // Only when the native restore left focus nowhere.
-      const at = document.activeElement
-      if (!at || at === document.body) back?.focus?.()
+      // Not Astryx: focus fallback. Only when the native restore left focus
+      // nowhere: the element that had it, else the pane (app.js listens).
+      const lost = () => !document.activeElement || document.activeElement === document.body
+      if (lost()) back?.isConnected && back.focus?.()
+      if (lost()) window.dispatchEvent(new Event("rsz-panel-closed"))
     }, 200)
   }
 
