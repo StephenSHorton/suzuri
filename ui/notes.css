@@ -12,7 +12,8 @@
 .notes-body .notes-body-box { flex: 1; min-height: 0; display: flex; }
 .notes-body textarea {
   flex: 1; height: auto; min-height: 0; resize: none; tab-size: 4; line-height: 1.45;
-  /* The terminal's face (style.css @font-face), then the theme's code face. */
+  /* Not Astryx: the terminal's own face (style.css @font-face) so notes
+     read like the panes; Astryx's code face is the fallback. */
   font-family: "Gohu", var(--font-family-code);
 }
 .notes-title input { font-weight: 600; }

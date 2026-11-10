@@ -125,7 +125,10 @@ function NotesList({ bank, model, pick, setPick, actions, status }) {
   const at = Math.max(0, Math.min(pick, bank.notes.length - 1))
   const full = bank.notes.length >= model.maxNotes
 
-  useEffect(() => later(() => box.current?.focus()), [])
+  useEffect(() => {
+    const t = later(() => box.current?.focus())
+    return () => clearTimeout(t)
+  }, [])
   useLayoutEffect(() => {
     box.current?.querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest" })
   }, [at])
@@ -139,7 +142,7 @@ function NotesList({ bank, model, pick, setPick, actions, status }) {
     if (k === "arrowup") setPick((at - 1 + count) % count)
     else if (k === "arrowdown") setPick((at + 1) % count)
     else if (k === "enter" || k === "arrowright" || k === "tab") actions.openNote(at)
-    else if (k === "n" && !e.metaKey && !e.ctrlKey) actions.newNote()
+    else if (k === "n" && !e.metaKey) actions.newNote()
     else if (k === "d" || k === "delete" || k === "backspace") actions.askDelete(at)
     else if (k === "f2" || k === "r") actions.rename(at)
     else return
@@ -183,7 +186,10 @@ function NotesList({ bank, model, pick, setPick, actions, status }) {
 
 function NotesConfirm({ note, last, onYes, onNo }) {
   const yes = useRef(null)
-  useEffect(() => later(() => yes.current?.focus()), [])
+  useEffect(() => {
+    const t = later(() => yes.current?.focus())
+    return () => clearTimeout(t)
+  }, [])
   const label = displayTitle(note)
   return (
     <VStack
@@ -210,17 +216,17 @@ function NotesEditor({ note: n, model, nameFirst, canClear, actions, status }) {
   // stored or derived name, saves as you type, and Esc puts back the old one.
   const before = useRef(null)
   const [draft, setDraft] = useState(null)
-  const [, redraw] = useReducer((x) => x + 1, 0)
 
   useEffect(() => {
-    later(() => {
+    const t = later(() => {
       if (nameFirst || isBlank(n)) name.current?.focus()
       else if (text.current) {
-        const t = text.current
-        t.focus()
-        t.setSelectionRange(t.value.length, t.value.length)
+        const f = text.current
+        f.focus()
+        f.setSelectionRange(f.value.length, f.value.length)
       }
     })
+    return () => clearTimeout(t)
   }, [])
 
   // Not Astryx: the caret in the terminal's cursor shape (notes_caret.js).
