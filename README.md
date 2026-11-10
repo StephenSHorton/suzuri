@@ -98,3 +98,5 @@ error, warn, info, debug (default) or trace. A panic writes
 `suzuri-crash.txt` beside it (backtrace, version, OS, the last log lines); the
 next launch says so once and renames it `suzuri-crash.prev.txt`. Agents can
 read the log with `GET /v1/logs?lines=N` on the AI control bridge.
+On Windows a frozen window (main thread silent for 3 s) writes
+`hang-<time>.dmp` there too; see [docs/hangs.md](docs/hangs.md).

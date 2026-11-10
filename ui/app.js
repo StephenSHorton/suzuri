@@ -6,7 +6,7 @@
 // input bar, settings, HUD and the paint worker.
 import { Screen, cellMetrics, fontSpec, onStyle, styleState, M_ALT_SCREEN } from "./frame.js"
 import { mount } from "./view/index.js"
-import { keyFilter, pageKeys, textFilter, pasteFilter, pasteText, writeFrom } from "./pane_input.js"
+import { keyFilter, pageKeys, textFilter, pasteFilter, pasteText, writeFrom, writeAfterPaste, pasteInOrder } from "./pane_input.js"
 import { clipboardImage, saveClipboardImage } from "./paste_image.js"
 import { isOpen as panelOpen } from "./panel.js"
 import "./aicontrol.js"
@@ -199,7 +199,7 @@ function paneHost(p) {
     scroll: (delta) => { if (p.id) invoke("pane_scroll", { id: p.id, delta }) },
     // The wheel's arrow keys on an alt screen: straight to the PTY, not
     // timed as typed input.
-    wheelKeys: (data) => invoke("pane_write", { id: p.id, data }),
+    wheelKeys: (data) => writeAfterPaste(p, () => invoke("pane_write", { id: p.id, data })),
     ack: (seq) => ackFrame(p, seq),
     redraw: () => { if (p.id) invoke("pane_redraw", { id: p.id }) },
     focus: () => {}, // setFocus reports the focused pane (mount's reportFocus: false)
@@ -567,7 +567,7 @@ class PaneView {
     if (!this.id || this.exited) return
     if (!this.pendingInput) this.pendingInput = t0 ?? performance.now()
     window.rszActivity?.onInput(this)
-    invoke("pane_write", { id: this.id, data })
+    writeAfterPaste(this, () => invoke("pane_write", { id: this.id, data }))
   }
 
   // The pane is gone: its view lets go of its DOM, listeners and frames.
@@ -1166,7 +1166,8 @@ async function paste(pane = focused) {
     // clipboard itself (an image on the alt screen becomes a file path).
     if (pane.barActive()) return pasteText(pane, await invoke("clipboard_text"), invoke)
     if (!pane.pendingInput) pane.pendingInput = performance.now()
-    await invoke("pane_paste", { id: pane.id, text: null })
+    // Read off the core's main thread: keys typed meanwhile wait for it.
+    await pasteInOrder(pane, () => invoke("pane_paste_clipboard", { id: pane.id }))
   } catch (err) {
     log("paste", String(err))
   }

@@ -13,12 +13,14 @@ mod activity;
 mod applog;
 mod bridge;
 mod caffeine;
+mod clip;
 mod cli;
 mod notes;
 mod notify;
 mod complete;
 mod paste;
 mod config;
+mod hang;
 mod sidecar;
 mod window;
 mod window_state;
@@ -463,7 +465,7 @@ fn config_meta() -> serde_json::Value {
 }
 
 fn clip_write(text: &str) -> Result<(), String> {
-    arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_owned())).map_err(|e| e.to_string())
+    clip::set_text(clip::WRITE, text.to_owned())
 }
 
 /// Selection from the UI's pointer: start (cell, word or line), extend
@@ -481,19 +483,19 @@ fn pane_select(panes: State<'_, Arc<Panes>>, id: u32, op: String, col: u16, row:
 }
 
 /// Copy the pane's selection to the clipboard. Returns whether there was
-/// one.
-#[tauri::command]
+/// one. Async, like every clipboard command: off the main thread (see clip).
+#[tauri::command(async)]
 fn pane_copy(panes: State<'_, Arc<Panes>>, id: u32) -> Result<bool, String> {
     let Some(text) = panes.get(id).and_then(|p| p.selection_text()) else { return Ok(false) };
-    clip_write(&text)?;
+    clip::set_text(clip::USER, text)?;
     Ok(true)
 }
 
 /// The clipboard's text, for the input bar (which edits it before the
 /// shell sees it).
-#[tauri::command]
+#[tauri::command(async)]
 fn clipboard_text() -> Result<String, String> {
-    arboard::Clipboard::new().and_then(|mut c| c.get_text()).map_err(|e| e.to_string())
+    clip::text(clip::USER)
 }
 
 /// The clipboard's RGBA image as a PNG.
@@ -506,22 +508,44 @@ fn png_bytes(img: &arboard::ImageData) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Paste the clipboard's text into the pane, bracketed when the app asked.
-#[tauri::command]
-fn pane_paste(panes: State<'_, Arc<Panes>>, id: u32, text: Option<String>) -> Result<(), String> {
-    let Some(p) = panes.get(id) else { return Ok(()) };
-    let text = match text {
-        Some(t) => t,
-        None => {
-            let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-            // A full-screen app (Claude Code, Grok) gets a copied image as a
-            // file path it can attach, ahead of any text (Go suzuri).
-            match p.alt_screen().then(|| clip.get_image().ok()).flatten().and_then(|img| png_bytes(&img)) {
-                Some(png) => paste::save_image(&std::env::temp_dir(), &png)?.to_string_lossy().into_owned(),
-                None => clip.get_text().map_err(|e| e.to_string())?,
-            }
+/// What a paste of the clipboard sends: a full-screen app (Claude Code,
+/// Grok) gets a copied image as a file path it can attach, ahead of any
+/// text (Go suzuri). Reads through clip, so never on the main thread for
+/// long; the PNG encode runs on the caller's thread.
+fn clipboard_paste_text(p: &Pane) -> Result<String, String> {
+    let mut got = clip::paste(clip::USER, p.alt_screen())?;
+    if let clip::Paste::Image(img) = &got {
+        match png_bytes(img) {
+            Some(png) => return Ok(paste::save_image(&std::env::temp_dir(), &png)?.to_string_lossy().into_owned()),
+            None => got = clip::Paste::Text(clip::text(clip::USER)?),
         }
-    };
+    }
+    match got {
+        clip::Paste::Text(t) => Ok(t),
+        clip::Paste::Image(_) => Ok(String::new()),
+    }
+}
+
+/// Paste text the UI already has into the pane, bracketed when the app
+/// asked. Sync, so it stays in order with the keys typed around it. The
+/// clipboard's own paste is pane_paste_clipboard (never on the main
+/// thread).
+#[tauri::command]
+fn pane_paste(panes: State<'_, Arc<Panes>>, id: u32, text: String) -> Result<(), String> {
+    let Some(p) = panes.get(id) else { return Ok(()) };
+    if !text.is_empty() {
+        p.paste(&text);
+    }
+    Ok(())
+}
+
+/// Paste the clipboard into the pane (Ctrl+V, right-click, the Edit menu).
+/// Async: the clipboard read and an image's PNG encode stay off the main
+/// thread.
+#[tauri::command(async)]
+fn pane_paste_clipboard(panes: State<'_, Arc<Panes>>, id: u32) -> Result<(), String> {
+    let Some(p) = panes.get(id) else { return Ok(()) };
+    let text = clipboard_paste_text(&p)?;
     if !text.is_empty() {
         p.paste(&text);
     }
@@ -899,6 +923,11 @@ fn main() {
         println!("{}", ctx.package_info().version);
         return;
     }
+    // The hang watchdog's dump helper (hang.rs): no log, no window, no
+    // single-instance hand-off to the app it is dumping.
+    if hang::wants_dump(&args) {
+        std::process::exit(hang::run_dump(&args[2..]));
+    }
     if notify::wants(&args) {
         std::process::exit(notify::run(&args[2..], ctx));
     }
@@ -930,7 +959,9 @@ fn main() {
     let _ = PANES.set(Arc::clone(&panes));
     apply_theme(&config::load(), None);
     // OSC 52 "?" reads get the clipboard's text, as Go suzuri answered them.
-    rsz_term::set_clipboard_reader(|| arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok());
+    // The read runs under the pane's engine lock, so it is short and gives
+    // an empty answer when the clipboard's owner doesn't answer (clip).
+    rsz_term::set_clipboard_reader(|| clip::text(clip::OSC52).ok());
     // The agent bridge (bridge.json + AI control); the app runs without it.
     let bridge = match bridge::Bridge::start(Arc::clone(&panes)) {
         Ok(b) => Some(b),
@@ -951,6 +982,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             window_state::install(app.handle());
+            hang::install(app.handle());
             app.manage(notices::Notices::new(app.handle().clone()));
             if let Some(crash) = applog::take_crash(&applog::dir()) {
                 log::info!("last run crashed: {}", crash.display());
@@ -993,6 +1025,7 @@ fn main() {
             pane_select,
             pane_copy,
             pane_paste,
+            pane_paste_clipboard,
             clipboard_text,
             pane_mouse,
             pane_link,
@@ -1033,7 +1066,11 @@ fn main() {
         .build(ctx)
         .expect("build suzuri")
         .run(move |_app, ev| {
+            if let tauri::RunEvent::ExitRequested { .. } = ev {
+                hang::stop();
+            }
             if let tauri::RunEvent::Exit = ev {
+                hang::stop();
                 window_state::flush();
                 if let Some(b) = &bridge_exit {
                     b.stop();
