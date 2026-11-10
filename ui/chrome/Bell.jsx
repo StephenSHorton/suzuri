@@ -39,6 +39,20 @@ function History({ items, index, onIndex, onChoose, onClose }) {
     rowButton(ref.current, index)?.scrollIntoView?.({ block: "nearest" })
   }, [index, items])
 
+  // The first open of a session shows the empty state until the history
+  // arrives, so the Popover's autofocus lands on its surface, outside the
+  // key handler below. When rows appear, put the focus on the selected one
+  // so the arrow keys and Enter work without a Tab first.
+  const hasRows = items.length > 0
+  useEffect(() => {
+    const el = ref.current
+    if (!el || !hasRows) return
+    const active = el.ownerDocument.activeElement
+    if (active && !el.contains(active) && active.contains(el)) {
+      rowButton(el, index)?.focus({ preventScroll: true })
+    }
+  }, [hasRows])
+
   const onKeyDown = (e) => {
     if (e.nativeEvent.isComposing) return
     if (e.key === "Escape") {
