@@ -11,7 +11,9 @@
 .notes-body > :has(.notes-body-box) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .notes-body .notes-body-box { flex: 1; min-height: 0; display: flex; }
 .notes-body textarea {
-  flex: 1; height: auto; min-height: 0; resize: none; tab-size: 4; line-height: 1.45;
+  /* align-self: Astryx's control centres its field; the note fills it, so
+     the text and the placeholder start at the top. */
+  flex: 1; align-self: stretch; height: auto; min-height: 0; resize: none; tab-size: 4; line-height: 1.45;
   /* Not Astryx: the terminal's own face (style.css @font-face) so notes
      read like the panes; Astryx's code face is the fallback. */
   font-family: "Gohu", var(--font-family-code);
