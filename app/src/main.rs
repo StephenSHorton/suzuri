@@ -854,6 +854,8 @@ fn appearance() -> serde_json::Value {
     serde_json::json!({
         "default_font_face": config::FONT_FACE_DEFAULT,
         "default_font_size_px": config::FONT_SIZE_DEFAULT,
+        "font_min": config::FONT_SIZE_MIN,
+        "font_max": config::FONT_SIZE_MAX,
     })
 }
 
