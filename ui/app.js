@@ -392,13 +392,24 @@ class PaneView {
     // The ghost text (#295): dim, after the caret, in the focused pane only.
     const ghost = focused === this ? ghostSuffix(this.bar, this.completionFs()) : ""
     const lines = this.barEl.querySelector(".lines")
+    // The rows are drawn in the terminal's face and size, one character
+    // per cell: barCols() and the caret count in cells of cw, so the text
+    // must advance by exactly cw, whatever the face's own (fractional)
+    // advance is. A fixed 14px face drifted from the caret at every other
+    // size, a char further each key.
     lines.style.setProperty("--ch", `${ch}px`)
+    lines.style.setProperty("--cw", `${cw}px`)
+    lines.style.font = fontSpec()
+    lines.style.letterSpacing = `${cw - barAdvance(fontSpec())}px`
     lines.replaceChildren(
       ...v.lines.map((text, i) => {
         const d = document.createElement("div")
         d.className = "row"
         const p = document.createElement("span")
         p.className = "prompt"
+        // A box of whole cells: "❯" may come from a fallback face (WebKit
+        // draws it two cells wide), which would push the text off the grid.
+        p.style.width = `${[...PROMPT].length * cw}px`
         p.textContent = i === 0 ? PROMPT : " ".repeat([...PROMPT].length)
         d.append(p, text)
         if (ghost && i === v.row) {
@@ -411,7 +422,7 @@ class PaneView {
       }),
     )
     const caret = this.barEl.querySelector(".caret")
-    caret.style.left = `${BAR_PAD_X + ([...PROMPT].length + v.col) * cw}px`
+    caret.style.left = `${barCaretX(lines.children[v.row], v.col, BAR_PAD_X + ([...PROMPT].length + v.col) * cw, this.barEl)}px`
     caret.style.top = `${lines.offsetTop + v.row * ch}px`
     caret.style.width = `${cw}px`
     caret.style.height = `${ch}px`
@@ -584,6 +595,44 @@ const PATH_SEP = navigator.platform.startsWith("Win") ? "\\" : "/"
 
 // Horizontal padding inside the input bar (matches .inbar in style.css).
 const BAR_PAD_X = 8
+
+// The bar's per-character advance in a font, as the page lays text out
+// (not the canvas: the two can differ by a hair, and a hair a char adds
+// up). Measured once per font.
+const barAdvances = new Map()
+function barAdvance(font) {
+  let adv = barAdvances.get(font)
+  if (adv) return adv
+  const probe = document.createElement("span")
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;letter-spacing:0;font-kerning:none;font-variant-ligatures:none"
+  probe.style.font = font
+  probe.textContent = "M".repeat(100)
+  document.body.append(probe)
+  adv = probe.getBoundingClientRect().width / 100
+  probe.remove()
+  if (!(adv > 0)) return cellMetrics().cw // not laid out (hidden page): no correction
+  barAdvances.set(font, adv)
+  return adv
+}
+
+// The caret's x in the bar: where the row's text actually ends after `col`
+// characters, so it hugs the text even where a glyph is off the grid (a
+// wide one). `grid` is the cell-grid x, used when the row can't be measured.
+function barCaretX(row, col, grid, bar) {
+  const text = row?.childNodes[1]
+  const from = bar.getBoundingClientRect().left
+  if (!row || !bar.offsetWidth) return grid
+  if (!col || !text || text.nodeType !== Node.TEXT_NODE) {
+    const p = row.firstChild?.getBoundingClientRect()
+    return p && p.width ? p.right - from : grid
+  }
+  const off = [...text.data].slice(0, col).join("").length
+  const r = document.createRange()
+  r.setStart(text, 0)
+  r.setEnd(text, Math.min(off, text.length))
+  const rect = r.getBoundingClientRect()
+  return rect.width ? rect.right - from : grid
+}
 
 // A paint of pane p ended at `now`: that closes its pending input samples.
 function settleLatency(p, now) {
