@@ -9,11 +9,12 @@
 import { setFont, setSelection, setVoid } from "./frame.js"
 import { announce } from "./settings.js"
 import { fontToast, hostToast } from "./host_toast.js"
+import { applyTextSize } from "./text_size.js"
 
 const { invoke } = window.__TAURI__.core
 
 let cat = null // { themes, default_font_face, default_font_size_px }
-let cur = { theme: "", face: "", px: 0 }
+let cur = { theme: "", face: "", px: 0, text: "" }
 let onFont = () => {}
 
 // Go's face names → CSS families. The default face is the bundled Gohu.
@@ -46,6 +47,11 @@ function paintTerminal(id) {
 
 async function apply(cfg) {
   if (!cat || !cfg) return
+  // The chrome's text size (text_size.js); the terminal's is font_size_px.
+  if (cfg.ui_text_size !== cur.text) {
+    cur.text = cfg.ui_text_size
+    applyTextSize(cur.text)
+  }
   if (cfg.theme !== cur.theme) {
     cur.theme = cfg.theme
     paintTerminal(cfg.theme)

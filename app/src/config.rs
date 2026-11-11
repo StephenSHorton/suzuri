@@ -59,6 +59,16 @@ pub fn mono_font_faces() -> Vec<&'static str> {
 pub const CURSORS: &[&str] = &["block", "underline", "bar"];
 pub const ANSI_MAPS: &[&str] = &["none", "soft", "full"];
 
+/// The UI's text size (Settings › Look), in Astryx's text-size categories
+/// (iOS Dynamic Type's standard sizes; ui/text_size.js applies them). Only
+/// the window chrome's text follows it; the terminal keeps font_size_px.
+pub const TEXT_SIZES: &[&str] = &["xs", "s", "m", "l", "xl", "xxl", "xxxl"];
+/// The Settings labels, in the same order. "l" is Astryx's own default.
+pub const TEXT_SIZE_LABELS: &[&str] = &["Smallest", "Smaller", "Small", "Standard", "Large", "Larger", "Largest"];
+/// suzuri's default: one step above Astryx's, so the chrome's text isn't
+/// small against its controls.
+pub const TEXT_SIZE_DEFAULT: &str = "xl";
+
 /// Where notice cards sit: the four screen corners rust-toast stacks cards
 /// in (toast::CORNER_*). The first is the default.
 pub const NOTICE_POSITIONS: &[&str] = &["bottom-left", "bottom-right", "top-left", "top-right"];
@@ -187,6 +197,10 @@ pub fn normalize(v: Value) -> Value {
 
     let pos = notice_corner(s(&m, "notice_position").as_deref().unwrap_or(""));
     m.insert("notice_position".into(), pos.into());
+
+    let size = s(&m, "ui_text_size").map(|v| v.trim().to_lowercase()).unwrap_or_default();
+    let size = TEXT_SIZES.iter().find(|t| **t == size).copied().unwrap_or(TEXT_SIZE_DEFAULT);
+    m.insert("ui_text_size".into(), size.into());
 
     // Profiles: unique, non-empty names (case-insensitive), never empty.
     let mut seen = std::collections::HashSet::new();
@@ -437,6 +451,14 @@ mod tests {
         let v = update_at(&rs, &go, json!({"cursor": "underline"})).unwrap();
         assert_eq!(v["extra"], 1, "earlier keys kept");
         assert_eq!(load_from(&rs, &go)["cursor"], "underline");
+    }
+
+    #[test]
+    fn ui_text_size_is_a_category() {
+        assert_eq!(normalize(json!({}))["ui_text_size"], TEXT_SIZE_DEFAULT);
+        assert_eq!(normalize(json!({"ui_text_size": " XXL "}))["ui_text_size"], "xxl");
+        assert_eq!(normalize(json!({"ui_text_size": "huge"}))["ui_text_size"], TEXT_SIZE_DEFAULT);
+        assert_eq!(TEXT_SIZES.len(), TEXT_SIZE_LABELS.len());
     }
 
     #[test]

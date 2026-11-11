@@ -437,6 +437,8 @@ fn config_meta() -> serde_json::Value {
         "fonts": config::mono_font_faces(),
         "notice_positions": config::NOTICE_POSITIONS,
         "notice_labels": config::NOTICE_POSITIONS.iter().zip(config::NOTICE_POSITION_LABELS).collect::<HashMap<_, _>>(),
+        "text_sizes": config::TEXT_SIZES,
+        "text_size_labels": config::TEXT_SIZES.iter().zip(config::TEXT_SIZE_LABELS).collect::<HashMap<_, _>>(),
     })
 }
 

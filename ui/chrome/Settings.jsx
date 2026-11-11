@@ -134,6 +134,8 @@ function LookPage({ cfg, meta, onSet }) {
       <Slider label="Size" value={size} min={meta.font_min} max={meta.font_max} step={1}
         valueDisplay="text" formatValue={(v) => `${v}px`}
         onChange={setSize} onChangeEnd={saveSize} />
+      <Selector label="Text size" description="The size of the text around the terminal: tabs, menus, settings and notes. Size above sets the terminal's."
+        options={opts(meta.text_sizes, meta.text_size_labels)} value={cfg.ui_text_size} onChange={(v) => onSet({ ui_text_size: v })} />
       <FieldRow label="Cursor">
         <SegmentedControl label="Cursor" value={cfg.cursor} onChange={(v) => onSet({ cursor: v })}>
           {(meta.cursors || []).map((id) => <SegmentedControlItem key={id} value={id} label={LABELS.cursors[id] || id} />)}
