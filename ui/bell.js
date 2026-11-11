@@ -4,135 +4,103 @@
 // lists the history under the bell (also "Notifications" in the palette),
 // and a click on an entry focuses the pane that posted it. Opening the
 // list marks everything read, as in Go.
-import { bellLabel, noticeTime, noticeText, moveIndex } from "./notice_list.js"
+//
+// The view is chrome/Bell.jsx (an Astryx Popover anchored on the title bar's
+// bell button), mounted through chrome/overlays.js; this keeps the state.
+import { createElement as h } from "react"
+import { chrome } from "./chrome/store.js"
+import { mountOverlay } from "./chrome/overlays.js"
+import { BellPopover } from "./chrome/Bell.jsx"
 
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
 
-const el = document.createElement("button")
-el.id = "bell"
-el.title = "Notifications"
-const bar = document.getElementById("bar")
-// Before the cup if caffeine.js got here first, else before split-right
-// (caffeine.js then puts the cup between us).
-bar.insertBefore(el, document.getElementById("caffeine") || document.getElementById("split-right") || null)
-
 function setUnread(n) {
-  el.textContent = bellLabel(n)
-  el.classList.toggle("unread", n > 0)
-  el.title = n > 0 ? `Notifications (${n} unread)` : "Notifications"
+  chrome.set({ unread: Math.max(0, Number(n) || 0) })
 }
 setUnread(0)
 
-// The popover.
-const pop = document.createElement("div")
-pop.className = "bell-pop"
-pop.tabIndex = -1
-pop.hidden = true
-pop.innerHTML = `<div class="head">Notifications</div><div class="list" role="listbox"></div>`
-const list = pop.querySelector(".list")
-;(document.getElementById("overlays") || document.body).appendChild(pop)
+let shown = false
 let items = []
 let index = 0
 
-const isOpen = () => !pop.hidden
+const isOpen = () => shown
+
+// The popover stays mounted (it owns the bell button's click), open or not.
+function render() {
+  mountOverlay(
+    "bell",
+    h(BellPopover, {
+      isOpen: shown,
+      items,
+      index,
+      onOpenChange: (next) => (next ? open() : close()),
+      onIndex: (i) => {
+        index = i
+        render()
+      },
+      onChoose: choose,
+      onClose: () => close(),
+    }),
+  )
+}
 
 async function open() {
-  if (!isOpen()) {
+  if (!shown) {
     index = 0
-    pop.hidden = false
-    place()
-    pop.focus({ preventScroll: true })
+    shown = true
+    chrome.set({ bellOpen: true })
+    render()
   }
   await refresh()
 }
 
 async function refresh() {
-  const h = await invoke("notice_history").catch(() => ({ items: [], unread: 0 }))
-  items = h.items || []
+  const res = await invoke("notice_history").catch(() => ({ items: [], unread: 0 }))
+  items = res.items || []
   if (index >= items.length) index = Math.max(0, items.length - 1)
-  paint()
-  if (h.unread) invoke("notice_read")
+  render()
+  if (res.unread) invoke("notice_read")
 }
+
+// Runs after the popover's own focus restore, so what app.js does with the
+// keyboard (back on the focused pane, or on the chosen notice's pane) wins.
+const later = (f) => setTimeout(f, 0)
 
 function close(refocus = true) {
-  if (!isOpen()) return
-  pop.hidden = true
+  if (!shown) return
+  shown = false
+  chrome.set({ bellOpen: false })
+  render()
   // app.js puts the keyboard back on the focused pane.
-  if (refocus) window.dispatchEvent(new Event("rsz-panel-closed"))
-}
-
-function place() {
-  const r = el.getBoundingClientRect()
-  const w = pop.offsetWidth
-  pop.style.top = `${Math.round(r.bottom + 4)}px`
-  pop.style.left = `${Math.round(Math.max(12, Math.min(r.right - w, window.innerWidth - w - 12)))}px`
-}
-
-function paint() {
-  if (!items.length) {
-    const d = document.createElement("div")
-    d.className = "empty"
-    d.textContent = "No notifications this session"
-    list.replaceChildren(d)
-    return
-  }
-  const frag = document.createDocumentFragment()
-  items.forEach((it, i) => {
-    const row = document.createElement("div")
-    row.className = "row" + (i === index ? " sel" : "") + (it.pane == null ? " gone" : "")
-    row.setAttribute("role", "option")
-    row.innerHTML = `<span class="when"></span><span class="text"></span>`
-    row.querySelector(".when").textContent = noticeTime(it.at)
-    row.querySelector(".text").textContent = noticeText(it)
-    row.title = noticeText(it)
-    row.addEventListener("mousemove", () => { if (index !== i) { index = i; paint() } })
-    row.addEventListener("mousedown", (e) => { e.preventDefault(); choose(it) })
-    frag.appendChild(row)
-  })
-  list.replaceChildren(frag)
-  list.querySelector(".sel")?.scrollIntoView({ block: "nearest" })
+  if (refocus) later(() => window.dispatchEvent(new Event("rsz-panel-closed")))
 }
 
 // Go ActionFocusNoticePane: reveal the pane that posted it, if it's still open.
 function choose(it) {
   if (!it) return
   close(false)
-  const shown = it.pane != null && window.rsz?.focusPane?.(it.pane)
-  if (!shown) window.dispatchEvent(new Event("rsz-panel-closed"))
+  later(() => {
+    const revealed = it.pane != null && window.rsz?.focusPane?.(it.pane)
+    if (!revealed) window.dispatchEvent(new Event("rsz-panel-closed"))
+  })
 }
 
-pop.addEventListener("keydown", (e) => {
-  e.stopPropagation()
-  if (e.isComposing) return
-  if (e.key === "Escape") { e.preventDefault(); return close() }
-  if (e.key === "Enter") { e.preventDefault(); return choose(items[index]) }
-  const next = moveIndex(index, e.key, items.length)
-  if (next !== index || ["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
-    e.preventDefault()
-    index = next
-    paint()
-  }
-})
-// A click anywhere else closes it (the bell itself toggles).
-document.addEventListener("mousedown", (e) => {
-  if (isOpen() && !pop.contains(e.target) && !el.contains(e.target)) close()
-}, true)
-window.addEventListener("resize", () => { if (isOpen()) place() })
-// The terminal's hidden textarea steals focus on any mousedown; keep it here.
-pop.addEventListener("mousedown", (e) => e.stopPropagation())
 // app.js refocuses the pane when the window comes back, so close on the way out.
 window.addEventListener("blur", () => close(false))
 
-el.addEventListener("mousedown", (e) => e.preventDefault())
-el.addEventListener("click", () => (isOpen() ? close() : open()))
+chrome.actions.toggleBell = () => (isOpen() ? close() : open())
 
 // The count; refresh an open list as notices arrive (that marks them read).
 listen("notice-bell", (e) => {
   setUnread(e.payload)
   if (isOpen() && e.payload > 0) refresh()
 })
-invoke("notice_history").then((h) => setUnread(h.unread)).catch(() => setUnread(0))
+invoke("notice_history")
+  .then((res) => setUnread(res.unread))
+  .catch(() => setUnread(0))
+
+render()
 
 window.rsz?.addCommands([
   { id: "notifications", title: "Notifications", category: "System", hint: "Session history · 🔔", run: () => open() },

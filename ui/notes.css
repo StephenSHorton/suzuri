@@ -1,11 +1,26 @@
-/* Notes (#294), inside sparrow's .rsz-panel. */
-.notes-list { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 2px; outline: none; min-height: 0; }
-.notes-row { display: flex; justify-content: space-between; gap: 12px; text-align: left; border-color: transparent !important; }
-.notes-row.on { color: var(--text) !important; background: var(--sel) !important; }
-.notes-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.notes-when { color: var(--mute); font-size: 11px; flex: none; }
-.rsz-panel .notes-title { font-weight: 600; }
-.rsz-panel .notes-body { flex: 1; min-height: 0; line-height: 1.45; font-family: "Gohu", ui-monospace, Menlo, Consolas, monospace; tab-size: 4; }
-/* The caret in the terminal's cursor shape (notes_caret.js). */
-.rsz-panel-body:has(> .notes-caret) { position: relative; }
-.notes-caret { position: absolute; pointer-events: none; background: var(--text); opacity: .85; mix-blend-mode: difference; }
+/* Notes (#294), in the modal panel (chrome/Notes.jsx). Astryx tokens only. */
+/* The list box scrolls; the footer stays. */
+.notes-list {
+  flex: 1; min-height: 0; overflow: auto; outline: none;
+  border-radius: var(--radius-element);
+}
+.notes-list:focus-visible { box-shadow: 0 0 0 2px var(--color-accent); }
+/* The body fills the panel: the field, its attached box, the control and
+   the textarea each take the rest of the height. */
+.notes-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.notes-body > :has(.notes-body-box) { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.notes-body .notes-body-box { flex: 1; min-height: 0; display: flex; }
+.notes-body textarea {
+  /* align-self: Astryx's control centres its field; the note fills it, so
+     the text and the placeholder start at the top. */
+  flex: 1; align-self: stretch; height: auto; min-height: 0; resize: none; tab-size: 4; line-height: 1.45;
+  /* Not Astryx: the terminal's own face (style.css @font-face) so notes
+     read like the panes; Astryx's code face is the fallback. */
+  font-family: "Gohu", var(--font-family-code);
+}
+.notes-title input { font-weight: 600; }
+.notes-status { color: var(--color-text-error); }
+/* The caret in the terminal's cursor shape (notes_caret.js): a box over the
+   field's transparent native caret, inside the field's control box. */
+.rsz-panel :has(> .notes-caret) { position: relative; }
+.notes-caret { position: absolute; pointer-events: none; background: var(--color-text-primary); opacity: .85; mix-blend-mode: difference; }

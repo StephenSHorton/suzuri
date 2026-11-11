@@ -1,0 +1,7 @@
+/* Not Astryx: Astryx has no fixed-corner placement for a Card that is not a
+   popover or toast, so this wrapper pins the HUD to the bottom right. Tokens
+   only. white-space keeps the stats' column spacing. */
+.rsz-hud {
+  position: fixed; right: var(--spacing-3); bottom: var(--spacing-3); z-index: 10;
+  pointer-events: none; white-space: pre;
+}

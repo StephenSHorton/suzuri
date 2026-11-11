@@ -5,6 +5,7 @@
 // looking at. The rules are in activity_state.js; this feeds it and paints.
 // app.js calls window.rszActivity.onMessage / onInput; aicontrol.js calls
 // report.
+import { chrome } from "./chrome/store.js"
 import { newActivity, step, activity, rollUp, SPIN } from "./activity_state.js"
 import { M_ALT_SCREEN } from "./frame.js"
 
@@ -115,23 +116,27 @@ function setMark(el, a) {
   el.title = a === "blocked" ? "Waiting on you" : a === "busy" ? "Working" : ""
 }
 
-const strip = document.getElementById("tabs")
+// Each tab's mark on the strip, through the React title bar's store
+// (chrome/TitleBar.jsx draws it in place of the tab's icon).
+function tabMark(a) {
+  if (a === "busy") return { kind: "busy", text: SPIN[frame], title: "Working" }
+  if (a === "blocked") return { kind: "blocked", text: "?", title: "Waiting on you" }
+  if (a === "dead") return { kind: "dead", text: "⠁", title: "" }
+  return null
+}
 function paintStrip(byTab) {
   const h = host()
+  const marks = new Map()
   for (const t of h.tabs()) {
-    const el = strip?.querySelector(`.tab[data-tab="${t.id}"]`)
-    if (!el) continue
     const list = byTab.get(t) || []
     // The shown split tab's pane heads already carry the marks.
-    const a = t === h.activeTab() && list.length > 1 ? "idle" : rollUp(list)
-    let mark = el.querySelector(".act")
-    if (!mark) {
-      mark = document.createElement("span")
-      mark.className = "act"
-      el.querySelector(".name")?.before(mark)
-    }
-    setMark(mark, a)
+    marks.set(t.id, tabMark(t === h.activeTab() && list.length > 1 ? "idle" : rollUp(list)))
   }
+  const same = (x, y) => x?.kind === y?.kind && x?.text === y?.text
+  chrome.set((s) => {
+    if (s.tabs.every((x) => same(x.activity, marks.get(x.id) ?? null))) return {}
+    return { tabs: s.tabs.map((x) => ({ ...x, activity: marks.get(x.id) ?? null })) }
+  })
 }
 
 // One timer: the spinner at ~80 ms a frame while anything works, else a
@@ -165,7 +170,15 @@ function schedule() {
 schedule()
 
 // renderStrip rebuilds the tabs; put the marks back right away.
-if (strip) new MutationObserver(() => paint()).observe(strip, { childList: true })
+// The strip was rebuilt (a tab opened, closed or moved): mark its tabs.
+let tabIds = ""
+chrome.subscribe(() => {
+  const ids = chrome.get().tabs.map((t) => t.id).join(",")
+  if (ids !== tabIds) {
+    tabIds = ids
+    paint()
+  }
+})
 window.addEventListener("focus", schedule)
 window.addEventListener("blur", schedule)
 const animSetting = (cfg) => { animateUnfocused = cfg?.animate_unfocused !== false }

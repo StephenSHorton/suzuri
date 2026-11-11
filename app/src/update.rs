@@ -85,6 +85,44 @@ pub async fn update_check(app: AppHandle) -> Result<Option<Available>, String> {
     check(&app).await
 }
 
+/// Shows the update offer as a desktop card with Install and Skip
+/// (ui/update.js calls it for each new version, and after a manual check).
+#[tauri::command]
+pub fn update_offer(app: AppHandle, version: String, current: String) {
+    let a = app.clone();
+    toast::post(crate::notices::update_note(&version, &current, move || install_from_card(&a)));
+}
+
+/// The card's Install: says it's installing, installs and restarts. On a
+/// failure it says why and, once the feed answers again, offers it anew.
+fn install_from_card(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let say = |m: &str| {
+            if let Some(n) = app.try_state::<crate::notices::Notices>() {
+                n.toast(m);
+            }
+        };
+        say("Installing update…");
+        let a = app.clone();
+        let res = tauri::async_runtime::block_on(async move {
+            let update = a.state::<Pending>().0.lock().take().ok_or("no update pending".to_string())?;
+            log::info!("update: installing {}", update.version);
+            update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())
+        });
+        match res {
+            Ok(()) => app.restart(),
+            Err(e) => {
+                log::error!("update: install failed: {e}");
+                say(&format!("Update failed: {e}"));
+                if let Ok(Some(info)) = tauri::async_runtime::block_on(check(&app)) {
+                    update_offer(app.clone(), info.version, info.current);
+                }
+            }
+        }
+    });
+}
+
 /// Downloads, verifies and installs the pending update, then restarts.
 /// On Windows the installer exits the app itself.
 #[tauri::command]

@@ -1,220 +1,150 @@
-/* Chrome colours are Go suzuri's theme roles (internal/chrome/theme.go);
-   appearance.js sets them from the active theme. Inkstone until it loads. */
+/* Everything around the terminal (gaps, pane frames, heads, the input bar,
+   marks) is Astryx, theme Neutral in dark mode: --color-*, --spacing-*,
+   --radius-* tokens, which Astryx's root Theme puts on <html>. Only what the
+   terminal grid draws follows the user's terminal theme, from appearance.js:
+   --term-bg, --term-fg, --term-cursor (and the selection, in the canvas). */
 @font-face {
   font-family: "Gohu";
   src: url("view/fonts/GohuFontuni14NerdFontMono-Regular.ttf") format("truetype");
 }
 :root {
-  --void: #0c0c10;
-  --bar: #141418;
-  --panel: #1c1c22;
-  --primary: #b8a0c8;
-  --secondary: #9a9ab0;
-  --text: #e8e6e3;
-  --soft: #b0aea8;
-  --dim: #787870;
-  --mute: #484848;
-  --sel: #2a2430;
-  --match: #c8b0d8;
-  --on-primary: #0c0c10;
-  --border: #b8a0c8;
-  --cyan: #7a9a9a;
-  --dim-matte: #08080a;
-  --term-bg: #0c0c10;
-  --hair: color-mix(in srgb, var(--text) 9%, var(--void));
-  --gap: 6px;
+  /* A shim for the old suzuri roles: nothing in this unit's rules reads
+     them, and appearance.js no longer writes them. They alias Astryx tokens
+     so any rule not yet moved to tokens (overlays, HUD, toast, update)
+     still looks Neutral. Remove once nothing reads var(--void ... --hair). */
+  --void: var(--color-background-body);
+  --bar: var(--color-background-body);
+  --panel: var(--color-background-surface);
+  --primary: var(--color-accent);
+  --secondary: var(--color-text-secondary);
+  --text: var(--color-text-primary);
+  --soft: var(--color-text-secondary);
+  --dim: var(--color-text-secondary);
+  --mute: var(--color-text-disabled);
+  --sel: var(--color-overlay-pressed);
+  --match: var(--color-text-accent);
+  --on-primary: var(--color-on-accent);
+  --border: var(--color-border-emphasized);
+  --cyan: var(--color-text-cyan);
+  --dim-matte: var(--color-background-muted);
+  --hair: var(--color-border);
+  --gap: var(--spacing-1-5);
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+/* Astryx sizes in rem against a 16 px root; suzuri's own text is 12 px. */
+html { font-size: 16px; }
 html, body {
   margin: 0; height: 100%; overflow: hidden;
-  background: var(--void); color: var(--text);
-  font: 12px/1.4 -apple-system, "Segoe UI", system-ui, sans-serif;
+  background: var(--color-background-body); color: var(--color-text-primary);
+  font: 12px/1.4 var(--font-family-body);
   user-select: none; -webkit-user-select: none;
 }
-#bar {
-  height: 34px; display: flex; align-items: center; gap: 10px;
-  padding: 0 10px 0 84px; /* room for macOS traffic lights */
-  background: var(--bar); border-bottom: 1px solid var(--hair);
-}
-body.win #bar { padding-left: 12px; }
-.mark { color: var(--border); font-weight: 600; letter-spacing: .04em; }
-#title { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.spacer { flex: 1; align-self: stretch; }
-#bar button {
-  background: transparent; border: 1px solid transparent; color: var(--secondary);
-  border-radius: 6px; height: 24px; min-width: 28px; font-size: 12px; cursor: pointer;
-}
-#bar button:hover { background: var(--panel); border-color: var(--hair); color: var(--text); }
-/* ☕ (caffeine.js): dim cup when off, bright with the time left when on
-   (Go styleCaffeineOff/On). The emoji ignores color, so dim with opacity. */
-#bar #caffeine { color: var(--mute); opacity: .45; filter: grayscale(1); white-space: nowrap; }
-#bar #caffeine.on { color: var(--secondary); font-weight: 600; opacity: 1; filter: none; }
-#bar #caffeine:hover { opacity: 1; filter: none; }
-#root { position: absolute; inset: 34px 0 0 0; padding: var(--gap); display: flex; }
-.split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; gap: var(--gap); }
+/* The gaps between panes are the page itself (Neutral's body colour, the
+   same as the title bar); sash.js measures them as the dividers. */
+#root { position: absolute; inset: 34px 0 0 0; padding: var(--spacing-1-5); display: flex; }
+.split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; gap: var(--spacing-1-5); }
 .split.v { flex-direction: column; }
+/* Not Astryx: a pane is a frame around a terminal canvas; Astryx's Card
+   would add padding and a surface the canvas has to sit flush against. */
 .pane {
   position: relative; flex: 1 1 0; min-width: 0; min-height: 0;
   display: flex; flex-direction: column;
-  background: var(--term-bg); border: 1px solid var(--hair); border-radius: 8px; overflow: hidden;
+  background: var(--term-bg, var(--color-background-body));
+  border: 1px solid var(--color-border); border-radius: var(--radius-element); overflow: hidden;
 }
-.pane.focused { border-color: var(--border); box-shadow: 0 0 0 1px color-mix(in srgb, var(--border) 25%, transparent); }
+.pane.focused { border-color: var(--color-border-emphasized); box-shadow: 0 0 0 1px var(--color-border); }
 .pane .head {
-  height: 22px; flex: none; display: flex; align-items: center; padding: 0 8px; gap: 6px;
-  background: var(--panel); color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden;
+  height: 22px; flex: none; display: flex; align-items: center; padding: 0 var(--spacing-2); gap: var(--spacing-1-5);
+  background: var(--color-background-surface); color: var(--color-text-secondary);
+  font-size: 11px; white-space: nowrap; overflow: hidden;
 }
-.pane.focused .head { color: var(--soft); }
-.pane .head .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--mute); flex: none; }
-.pane.focused .head .dot { background: var(--border); }
-.pane .head .exited { color: var(--secondary); }
+.pane.focused .head { color: var(--color-text-primary); }
+/* Not Astryx: the focus dot is a span in the head app.js builds as plain
+   DOM outside React, so it can't be a StatusDot; token colours. */
+.pane .head .dot { width: 6px; height: 6px; border-radius: var(--radius-full); background: var(--color-text-disabled); flex: none; }
+.pane.focused .head .dot { background: var(--color-accent); }
+.pane .head .exited { color: var(--color-text-warning); }
 .pane .body { position: relative; flex: 1; min-height: 0; padding: 4px 6px; outline: none; cursor: text; }
 .pane canvas { position: absolute; left: 6px; top: 4px; image-rendering: pixelated; }
+/* The cursor is the terminal's: its theme's cursor colour. */
 .pane .cursor {
-  position: absolute; pointer-events: none; background: var(--border); opacity: .85;
+  position: absolute; pointer-events: none; background: var(--term-cursor, var(--color-text-primary)); opacity: .85;
   mix-blend-mode: difference;
 }
 .pane .cursor.underline { height: 2px !important; margin-top: calc(var(--ch) - 2px); }
 .pane .cursor.beam { width: 2px !important; }
-.pane .cursor.hollow { background: transparent; border: 1px solid var(--border); mix-blend-mode: normal; }
+.pane .cursor.hollow { background: transparent; border: 1px solid var(--term-cursor, var(--color-text-primary)); mix-blend-mode: normal; }
 .pane:not(.focused) .cursor { opacity: .35; }
+/* Not Astryx: the "↑ n / m" scrollback count the view writes into its own
+   element (ui/view); Astryx's Badge is a React component. Token colours. */
 .pane .scrolled {
-  position: absolute; right: 10px; top: 6px; padding: 1px 6px; border-radius: 4px;
-  background: var(--sel); color: var(--match); font-size: 10px;
+  position: absolute; right: 10px; top: 6px; padding: 1px var(--spacing-1-5); border-radius: var(--radius-inner);
+  background: var(--color-background-popover); border: 1px solid var(--color-border);
+  color: var(--color-text-secondary); font-size: 10px;
 }
 /* The scrollback thumb (ui/view): thin, on the right edge, while scrolled back. */
 .pane .rsz-scrollbar { width: 3px; opacity: 0; transition: opacity .25s ease-out; }
 .pane .rsz-scrollbar.on { opacity: .8; }
 .pane .rsz-scrollbar.on.idle { opacity: .4; transition-duration: .6s; }
-.pane .rsz-scrollbar .thumb { left: 0; width: 100%; border-radius: 2px; background: var(--match); }
+.pane .rsz-scrollbar .thumb { left: 0; width: 100%; border-radius: var(--radius-full); background: var(--color-text-secondary); }
 /* Dragging a divider (ui/sash.js): the resize cursor everywhere, even over the text cursor of a pane's body. */
 body.sash-col, body.sash-col * { cursor: col-resize !important; }
 body.sash-row, body.sash-row * { cursor: row-resize !important; }
-/* The input bar (#285): Go suzuri's Warp bar, a hairline over the prompt. */
+/* The input bar (#285): Go suzuri's Warp bar, a hairline over the prompt.
+   Not Astryx: it draws the shell's command line cell by cell in the
+   terminal's face (Gohu), so it is no TextInput; its frame and colours are
+   tokens. The padding is mirrored in app.js (keep 5px 8px 6px). */
 .pane .inbar {
   position: relative; flex: none; padding: 5px 8px 6px;
-  border-top: 1px solid #24242c; background: var(--bar);
-  font: 14px "Gohu", ui-monospace, monospace; color: var(--text);
+  border-top: 1px solid var(--color-border); background: var(--color-background-surface);
+  font: 14px "Gohu", var(--font-family-code); color: var(--color-text-primary);
 }
-.pane .inbar .cwd { color: var(--dim); font-size: 12px; line-height: 16px; margin-bottom: 2px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.pane .inbar .cwd { color: var(--color-text-secondary); font-size: 12px; line-height: 16px; margin-bottom: 2px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
 .pane .inbar .lines .row { height: var(--ch); line-height: var(--ch); white-space: pre; }
-.pane .inbar .prompt { color: var(--primary); }
-/* The ghost text (#295): the theme's mute role, as Go suzuri draws it (chrome.Mute), well below the typed text. */
-.pane .inbar .ghost { color: var(--mute); }
-.pane .inbar .caret { position: absolute; background: var(--primary); opacity: .85; mix-blend-mode: difference; pointer-events: none; }
+.pane .inbar .prompt { color: var(--color-text-accent); }
+/* The ghost text (#295): well below the typed text. */
+.pane .inbar .ghost { color: var(--color-text-disabled); }
+.pane .inbar .caret { position: absolute; background: var(--color-text-primary); opacity: .85; mix-blend-mode: difference; pointer-events: none; }
 .pane .inbar .caret.dim { opacity: .3; }
-#hud {
-  position: fixed; right: 10px; bottom: 10px; padding: 6px 10px; border-radius: 6px;
-  background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--hair); color: var(--soft);
-  font: 11px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre;
-}
 
-/* ---- tabs (#283): a strip in the title bar, one root per tab. */
-#tabs { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; align-self: stretch; align-items: center; }
-#tabs::-webkit-scrollbar { display: none; }
-.tab {
-  display: flex; align-items: center; gap: 6px; height: 24px; max-width: 220px; min-width: 64px;
-  padding: 0 4px 0 8px; border-radius: 6px; border: 1px solid transparent;
-  color: var(--dim); cursor: default; white-space: nowrap; flex: 0 1 auto;
-}
-.tab:hover { background: var(--panel); color: var(--soft); }
-.tab.active { background: var(--panel); border-color: var(--hair); color: var(--text); box-shadow: inset 0 -2px 0 var(--primary); }
-.tab .num { color: var(--mute); font-size: 10px; }
-.tab.active .num { color: var(--primary); }
-.tab .name { overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; }
-.tab .count { color: var(--secondary); font-size: 10px; background: var(--sel); border-radius: 4px; padding: 0 4px; }
-.tab .count:empty { display: none; }
-.tab .x {
-  background: transparent; border: 0; color: var(--mute); width: 18px; height: 18px; border-radius: 4px;
-  font-size: 13px; line-height: 1; cursor: pointer; padding: 0; visibility: hidden;
-}
-.tab:hover .x, .tab.active .x { visibility: visible; }
-.tab .x:hover { background: var(--hair); color: var(--text); }
-#bar .mark { font-size: 15px; }
+/* ---- tabs (#283): one root per tab; the strip itself is chrome/TitleBar.jsx. */
 #root > .tab-root { flex: 1; display: flex; min-width: 0; min-height: 0; }
 #root > .tab-root[hidden] { display: none; }
+/* Not Astryx: the pane-head rename box is a plain <input> app.js puts into
+   the 22px head (editInline), outside React, so it can't be a TextInput;
+   it takes TextInput's look from the tokens. */
 input.rename {
-  font: inherit; color: var(--text); background: var(--void); border: 1px solid var(--primary);
-  border-radius: 4px; padding: 0 4px; height: 18px; width: 100%; min-width: 80px; outline: none;
+  font: inherit; color: var(--color-text-primary); background: var(--color-background-body);
+  border: 1px solid var(--color-border-emphasized); border-radius: var(--radius-inner);
+  padding: 0 var(--spacing-1); height: 18px; width: 100%; min-width: 80px; outline: none;
 }
+input.rename:focus { border-color: var(--color-accent); }
 
-/* ---- palette and settings overlays */
-.overlay { position: fixed; inset: 0; z-index: 20; background: rgba(6,6,8,.45); display: flex; justify-content: center; align-items: flex-start; }
-.overlay[hidden] { display: none; }
-.overlay .card {
-  margin-top: 72px; width: min(620px, calc(100vw - 32px)); background: var(--panel);
-  border: 1px solid var(--hair); border-radius: 10px; box-shadow: 0 16px 48px rgba(0,0,0,.55); overflow: hidden;
-}
-.palette .filter {
-  width: 100%; font: 13px/1 inherit; font-family: inherit; color: var(--text); background: var(--bar);
-  border: 0; border-bottom: 1px solid var(--hair); padding: 12px 14px; outline: none;
-}
-.palette .filter::placeholder { color: var(--mute); }
-.palette .list { max-height: calc(12 * 30px); overflow-y: auto; padding: 4px; }
-.palette .row { display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 10px; border-radius: 6px; color: var(--soft); cursor: default; }
-.palette .row.sel { background: var(--sel); color: var(--text); box-shadow: inset 2px 0 0 var(--primary); }
-.palette .row .title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.palette .row .cat { color: var(--mute); font-size: 11px; }
-.palette .row .hint { color: var(--secondary); font-size: 11px; font-family: ui-monospace, Menlo, Consolas, monospace; white-space: nowrap; }
-.palette .row.sel .hint { color: var(--match); }
-.palette .empty { color: var(--mute); padding: 10px 14px; }
 
-.settings .card { width: min(640px, calc(100vw - 32px)); }
-.settings .top { display: flex; align-items: center; gap: 16px; padding: 12px 14px; background: var(--bar); border-bottom: 1px solid var(--hair); }
-.settings .top b { color: var(--primary); font-weight: 600; }
-.settings nav { display: flex; gap: 4px; }
-.settings nav button, .settings .foot button, .settings .add, .settings .del {
-  font: inherit; color: var(--secondary); background: transparent; border: 1px solid var(--hair); border-radius: 6px; padding: 4px 10px; cursor: pointer;
-}
-.settings nav button.on { color: var(--text); background: var(--sel); border-color: var(--primary); }
-.settings button:hover:not(:disabled) { color: var(--text); background: var(--sel); }
-.settings button:disabled { opacity: .35; cursor: default; }
-.settings .page { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
-.settings label { display: flex; align-items: center; gap: 12px; }
-.settings label > span:first-child { width: 110px; color: var(--dim); flex: none; }
-.settings .page > label { padding: 3px 8px; margin: 0 -8px; border-radius: 6px; }
-.settings .page > label.cur { background: var(--sel); box-shadow: inset 2px 0 0 var(--primary); }
-.settings .page > label.cur > span:first-child { color: var(--text); }
-.settings .foot .keys { color: var(--mute); font-size: 11px; white-space: nowrap; }
-.settings select, .settings .prow input {
-  font: inherit; color: var(--text); background: var(--void); border: 1px solid var(--hair); border-radius: 6px; padding: 4px 8px; outline: none;
-}
-.settings select { flex: 1; }
-.settings select:focus, .settings .prow input:focus, .settings input[type=range]:focus { border-color: var(--primary); }
-.settings .size { display: flex; align-items: center; gap: 10px; flex: 1; }
-.settings .size input { flex: 1; accent-color: var(--primary); }
-.settings .size b { color: var(--soft); font-weight: 500; width: 40px; }
-.settings .profiles { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
-.settings .phead { color: var(--dim); }
-.settings .phead small { color: var(--mute); margin-left: 6px; }
-.settings .prow { display: grid; grid-template-columns: 1fr 1.6fr 1.2fr auto; gap: 6px; }
-.settings .prow input { min-width: 0; }
-.settings .add { align-self: flex-start; }
-.settings .foot { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--hair); }
-.settings .foot .status { flex: 1; min-width: 0; text-align: right; color: var(--mute); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.settings .foot .ok { color: var(--text); border-color: var(--primary); }
 /* Links under the pointer (ui/view/pointer.js): underlined, with a hand. */
 .pane .body.on-link { cursor: pointer; }
 .pane .link-hover {
   position: absolute; pointer-events: none;
-  border-bottom: 1px solid var(--primary); background: rgba(184,160,200,.12);
+  border-bottom: 1px solid var(--term-fg, var(--color-text-primary));
+  background: color-mix(in srgb, var(--term-fg, var(--color-text-primary)) 12%, transparent);
 }
-/* A frame the view couldn't paint (ui/view: another format version, or shorter than its header). */
+/* A frame the view couldn't paint (ui/view: another format version, or shorter than its header).
+   Not Astryx: the view writes this element itself (no React), so it is no
+   Banner; it takes the error fill's tokens. */
 .pane .rsz-error {
-  position: absolute; left: 6px; right: 6px; bottom: 4px; padding: 4px 8px; border-radius: 4px;
-  background: rgba(160, 60, 60, .85); color: #fff; font-size: 12px;
+  position: absolute; left: 6px; right: 6px; bottom: 4px; padding: var(--spacing-1) var(--spacing-2); border-radius: var(--radius-inner);
+  background: var(--color-error); color: var(--color-on-error); font-size: 12px;
 }
-/* IME: the text being composed, drawn over the cursor until it commits. */
+/* IME: the text being composed, drawn over the cursor until it commits, in
+   the terminal's own face and colours (it stands in for terminal text). */
 .preedit {
   position: fixed; z-index: 5; pointer-events: none; white-space: pre;
-  font: 14px "Gohu", ui-monospace, Menlo, Consolas, monospace; line-height: 16px;
-  color: var(--text); background: var(--panel); border-bottom: 1px solid var(--primary);
+  font: 14px "Gohu", var(--font-family-code); line-height: 16px;
+  color: var(--term-fg, var(--color-text-primary)); background: var(--term-bg, var(--color-background-body));
+  border-bottom: 1px solid var(--term-cursor, var(--color-text-primary));
 }
-#toast {
-  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
-  padding: 4px 12px; border-radius: 6px; background: rgba(20,20,24,.92);
-  border: 1px solid #2c2c34; color: var(--soft); font-size: 11px;
-}
+
 /* Inline images and Kitty graphics over the text (card #288, ui/images.js). */
 .pane .imgs { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
 .pane .imgs .img { position: absolute; left: 0; top: 0; image-rendering: auto; }
@@ -226,23 +156,13 @@ input.rename {
 }
 .img-modal canvas { border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
 .img-modal .cap { color: var(--soft); font-size: 12px; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* ConEmu OSC 9;4 progress: a thin bar along the pane's top edge. */
-.pane[data-progress]:not([data-progress=""]) .head { background-image: linear-gradient(var(--primary), var(--primary)); background-size: var(--progress, 0%) 2px; background-repeat: no-repeat; background-position: left bottom; }
-.pane[data-progress="2"] .head { background-image: linear-gradient(#c07070, #c07070); }
+/* ConEmu OSC 9;4 progress: a thin bar along the pane head's bottom edge
+   (accent; 2 error; 3 indeterminate; 4 paused, warning).
+   Not Astryx: a 2px line painted on the plain-DOM head (app.js sets
+   data-progress/--progress); a ProgressBar is a React track with its own
+   height, which the 22px head has no room for. */
+.pane[data-progress]:not([data-progress=""]) .head { background-image: linear-gradient(var(--color-accent), var(--color-accent)); background-size: var(--progress, 0%) 2px; background-repeat: no-repeat; background-position: left bottom; }
+.pane[data-progress="2"] .head { background-image: linear-gradient(var(--color-error), var(--color-error)); }
 .pane[data-progress="3"] .head { background-size: 100% 2px; }
-.pane[data-progress="4"] .head { background-image: linear-gradient(#c8a860, #c8a860); }
-#update {
-  /* Under the title bar, clear of the input bar at the bottom. */
-  position: fixed; left: 50%; top: 44px; transform: translateX(-50%);
-  display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 12px;
-  border-radius: 8px; background: var(--panel); border: 1px solid #2c2c34;
-  color: var(--soft); box-shadow: 0 6px 24px rgba(0,0,0,.45); z-index: 10;
-}
-#update[hidden] { display: none; }
-#update button {
-  background: transparent; border: 1px solid #34343e; color: var(--text);
-  border-radius: 6px; height: 24px; padding: 0 10px; font-size: 12px; cursor: pointer;
-}
-#update button.go { border-color: var(--primary); color: var(--primary); }
-#update button.later { border-color: transparent; color: var(--dim); padding: 0 6px; }
-#update button:disabled { opacity: .6; cursor: default; }
+.pane[data-progress="4"] .head { background-image: linear-gradient(var(--color-warning), var(--color-warning)); }
+

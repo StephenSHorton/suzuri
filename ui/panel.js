@@ -1,4 +1,11 @@
-// A small modal panel over the panes, used by notes.
+// A modal panel over the panes, used by notes. The view is an Astryx Dialog
+// (chrome/Panel.jsx) rendered by the chrome's React root (chrome/overlays.js);
+// this module keeps the open state so app.js can ask isOpen() at any time,
+// and gives the keyboard back to the terminal on close ("rsz-panel-closed").
+import { createElement as h } from "react"
+import { flushSync } from "react-dom"
+import { mountOverlay, unmountOverlay } from "./chrome/overlays.js"
+import { Panel } from "./chrome/Panel.jsx"
 
 let current = null
 
@@ -10,52 +17,18 @@ export function closePanel() {
   if (!current) return
   const p = current
   current = null
-  p.el.remove()
+  // Unmount now, so the Dialog's own focus return runs before app.js puts
+  // the keyboard back on the pane.
+  flushSync(() => unmountOverlay("panel"))
   p.onClose?.()
   window.dispatchEvent(new Event("rsz-panel-closed"))
 }
 
-// Open a panel. build(body, panel) fills it; returns the panel.
-export function openPanel(title, build, { onClose, wide } = {}) {
+// Open a panel showing content (a React element) under title; returns the
+// panel. Escape, the close button and closePanel() close it.
+export function openPanel(title, content, { onClose, wide } = {}) {
   closePanel()
-  const el = document.createElement("div")
-  el.className = "rsz-panel" + (wide ? " wide" : "")
-  // The terminal's hidden textarea steals focus on any mousedown; keep it here.
-  el.addEventListener("mousedown", (e) => e.stopPropagation())
-  el.addEventListener("keydown", (e) => {
-    e.stopPropagation()
-    if (e.key === "Escape") {
-      e.preventDefault()
-      closePanel()
-    }
-  })
-  const head = document.createElement("div")
-  head.className = "rsz-panel-head"
-  const h = document.createElement("span")
-  h.textContent = title
-  const x = document.createElement("button")
-  x.textContent = "✕"
-  x.title = "Close (Esc)"
-  x.onclick = closePanel
-  head.append(h, x)
-  const body = document.createElement("div")
-  body.className = "rsz-panel-body"
-  el.append(head, body)
-  document.body.appendChild(el)
-  current = { el, body, onClose }
-  build(body, current)
-  const first = el.querySelector("input, textarea, button.primary")
-  if (first) setTimeout(() => first.focus(), 0)
+  current = { title, onClose }
+  mountOverlay("panel", h(Panel, { title, wide, onClose: closePanel }, content))
   return current
-}
-
-export function h(tag, props = {}, ...kids) {
-  const el = document.createElement(tag)
-  for (const [k, v] of Object.entries(props)) {
-    if (k === "class") el.className = v
-    else if (k.startsWith("on")) el[k] = v
-    else if (v != null) el.setAttribute(k, v)
-  }
-  for (const c of kids.flat()) if (c != null) el.append(c)
-  return el
 }

@@ -5,3 +5,4 @@
 packaging/windows/conpty/
 dist/
 /target-main
+node_modules/
