@@ -41,10 +41,10 @@ pub const NEUTRAL_DARK: Palette = Palette {
     panel: hex(0x262626),
     accent: hex(0xf1f1f1),
     ansi16: [
-        hex(0x303030), hex(0xfa6762), hex(0x6ab26b), hex(0xc29900),
-        hex(0x5aa0f8), hex(0xd885eb), hex(0x49adc4), hex(0x9e9e9e),
-        hex(0x6c6c6c), hex(0xffaea7), hex(0x90ca90), hex(0xeec448),
-        hex(0xa1caff), hex(0xeaacf8), hex(0x85d5e9), hex(0xffffff),
+        hex(0x303030), hex(0xfd736d), hex(0x71b972), hex(0xc79f18),
+        hex(0x67a7f8), hex(0xd17fe4), hex(0x51b4cb), hex(0x9e9e9e),
+        hex(0x6c6c6c), hex(0xffaba3), hex(0x96d896), hex(0xe7c04b),
+        hex(0x9ec7fd), hex(0xeba6fb), hex(0x7dd3e8), hex(0xffffff),
     ],
 };
 
