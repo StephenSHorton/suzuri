@@ -151,7 +151,11 @@ fn show_update(version: &str, mut ctx: tauri::Context) -> i32 {
     println!("showing the update offer — Install or Skip");
     ctx.config_mut().app.windows.clear();
     let version = version.to_string();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Tauri activates the app at launch by default; the cards never should.
+    #[cfg(target_os = "macos")]
+    let builder = builder.activate_ignoring_other_apps(false);
+    let app = builder
         .setup(move |app| {
             app.manage(crate::notices::Notices::new(app.handle().clone()));
             let handle = app.handle().clone();
@@ -170,7 +174,13 @@ fn show_update(version: &str, mut ctx: tauri::Context) -> i32 {
         })
         .build(ctx);
     match app {
-        Ok(app) => {
+        #[allow(unused_mut)]
+        Ok(mut app) => {
+            // No Dock icon or menu bar and never the active app: the cards
+            // must not take focus from what the person is typing in. Set
+            // before run, which is when the Mac applies it.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             app.run(|_, _| {});
             0
         }
@@ -188,7 +198,11 @@ fn show(notes: Vec<Notice>, mut ctx: tauri::Context) -> i32 {
     // No windows at all: the cards are rust-toast's (notices.rs). Tauri
     // still runs, for the AppKit main thread the Mac's cards need.
     ctx.config_mut().app.windows.clear();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Tauri activates the app at launch by default; the cards never should.
+    #[cfg(target_os = "macos")]
+    let builder = builder.activate_ignoring_other_apps(false);
+    let app = builder
         .setup(move |app| {
             app.manage(crate::notices::Notices::new(app.handle().clone()));
             let handle = app.handle().clone();
@@ -219,7 +233,13 @@ fn show(notes: Vec<Notice>, mut ctx: tauri::Context) -> i32 {
         })
         .build(ctx);
     match app {
-        Ok(app) => {
+        #[allow(unused_mut)]
+        Ok(mut app) => {
+            // No Dock icon or menu bar and never the active app: the cards
+            // must not take focus from what the person is typing in. Set
+            // before run, which is when the Mac applies it.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             app.run(|_, _| {});
             0
         }
