@@ -13,6 +13,7 @@ import { Button } from "@astryxdesign/core/Button"
 import { EmptyState } from "@astryxdesign/core/EmptyState"
 import { HStack, VStack } from "@astryxdesign/core/Layout"
 import { Icon } from "@astryxdesign/core/Icon"
+import { IconButton } from "@astryxdesign/core/IconButton"
 import { Kbd } from "@astryxdesign/core/Kbd"
 import { List, ListItem } from "@astryxdesign/core/List"
 import { Text } from "@astryxdesign/core/Text"
@@ -21,6 +22,7 @@ import { TextInput } from "@astryxdesign/core/TextInput"
 import { Plus, Trash2 } from "lucide-react"
 import { displayTitle, renameSeed, insertTab, onFirstLine } from "../notes_edit.js"
 import { caretStyle, onFirstRow } from "../notes_caret.js"
+import { PanelHeader } from "./Panel.jsx"
 
 const isBlank = (n) => !(n.title || "").trim() && !(n.body || "").trim()
 const runes = (s) => [...s].length
@@ -170,22 +172,27 @@ function NotesList({ bank, model, pick, setPick, actions, status }) {
           ))}
         </List>
       </div>
-      <HStack gap={3} align="center" wrap="wrap">
-        <Button
-          label="New note"
-          icon={<Icon icon={Plus} />}
-          onClick={actions.newNote}
-          isDisabled={full}
-          tooltip={full ? `At most ${model.maxNotes} notes.` : undefined}
-        />
-        <Text type="supporting" hasTabularNumbers>{bank.notes.length} of {model.maxNotes}</Text>
-        <Hint keys="enter">open</Hint>
-        <Hint keys="N">new</Hint>
-        <Hint keys="D">delete</Hint>
-        <Hint keys="R">rename</Hint>
-        <Hint keys="escape">close</Hint>
-        {status}
-      </HStack>
+      {/* The list's keys, count and New note sit in the panel's header. */}
+      <PanelHeader
+        end={
+          <>
+            <Hint keys="enter">open</Hint>
+            <Hint keys="N">new</Hint>
+            <Hint keys="D">delete</Hint>
+            <Hint keys="R">rename</Hint>
+            <Text type="supporting" hasTabularNumbers>{bank.notes.length} of {model.maxNotes}</Text>
+            <IconButton
+              label="New note"
+              icon={<Icon icon={Plus} />}
+              variant="ghost"
+              onClick={actions.newNote}
+              isDisabled={full}
+              tooltip={full ? `At most ${model.maxNotes} notes.` : "New note (N)"}
+            />
+          </>
+        }
+      />
+      {status}
     </VStack>
   )
 }
@@ -339,14 +346,33 @@ function NotesEditor({ note: n, model, nameFirst, canClear, actions, status }) {
         containerClassName="notes-body"
         controlClassName="notes-body-box"
       />
-      <HStack gap={3} align="center" wrap="wrap">
-        <Button label="All notes" icon={<Icon icon="chevronLeft" />} onClick={() => { model.save(true); actions.showList(n) }} />
-        <Button label={canClear ? "Clear" : "Delete"} icon={<Icon icon={Trash2} />} onClick={() => actions.askDelete()} />
-        <Hint keys="escape">list</Hint>
-        <Hint keys={["F2", "up"]}>rename</Hint>
-        <Hint keys="tab">indents</Hint>
-        {status}
-      </HStack>
+      {/* Back to the list before the title; the keys and Clear/Delete
+          before the close button. */}
+      <PanelHeader
+        start={
+          <IconButton
+            label="All notes"
+            icon={<Icon icon="chevronLeft" />}
+            variant="ghost"
+            tooltip="All notes (Esc)"
+            onClick={() => { model.save(true); actions.showList(n) }}
+          />
+        }
+        end={
+          <>
+            <Hint keys={["F2", "up"]}>rename</Hint>
+            <Hint keys="tab">indents</Hint>
+            <IconButton
+              label={canClear ? "Clear note" : "Delete note"}
+              icon={<Icon icon={Trash2} />}
+              variant="ghost"
+              tooltip={canClear ? "Clear note" : "Delete note"}
+              onClick={() => actions.askDelete()}
+            />
+          </>
+        }
+      />
+      {status}
     </VStack>
   )
 }

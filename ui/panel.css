@@ -7,3 +7,17 @@
 [data-agent="working"] { box-shadow: inset 0 0 0 1px rgba(184,160,200,.55); }
 [data-agent="blocked"] { box-shadow: inset 0 0 0 1px rgba(224,128,128,.7); }
 [data-agent="done"] { box-shadow: inset 0 0 0 1px rgba(128,200,150,.55); }
+
+/* The header slots screens fill (chrome/Panel.jsx PanelHeader): a row with
+   Astryx's slot gap, gone when empty. Their buttons are default size, like
+   the close button. The start slot gets the same edge compensation
+   DialogHeader gives the end slot (margin-block and the outer inline edge
+   of -spacing-2), so a back button doesn't make the row taller and the
+   title lines up with it as with the close button. */
+.rsz-panel-slot { display: flex; align-items: center; gap: var(--spacing-2); }
+.rsz-panel-slot:empty { display: none; }
+.rsz-panel-start { margin-block: calc(-1 * var(--spacing-2)); margin-inline-start: calc(-1 * var(--spacing-2)); }
+/* A back button reads with the title ("‹ Notes"): its inner edge gives back
+   the button's padding and most of the header's slot gap, so the chevron
+   sits about 8px from the title instead of 20px. */
+.rsz-panel-start { margin-inline-end: calc(-1 * var(--spacing-3)); }
