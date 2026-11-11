@@ -9,7 +9,7 @@ import { Layout, LayoutContent, LayoutFooter, HStack, VStack, StackItem } from "
 import { TabList, Tab } from "@astryxdesign/core/TabList"
 import { FormLayout } from "@astryxdesign/core/FormLayout"
 import { Field } from "@astryxdesign/core/Field"
-import { Selector } from "@astryxdesign/core/Selector"
+import { Selector, SelectorOption } from "@astryxdesign/core/Selector"
 import { Slider } from "@astryxdesign/core/Slider"
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl"
 import { Switch } from "@astryxdesign/core/Switch"
@@ -22,16 +22,20 @@ import { Kbd } from "@astryxdesign/core/Kbd"
 import { Divider } from "@astryxdesign/core/Divider"
 import { Tooltip } from "@astryxdesign/core/Tooltip"
 import { Plus, Trash2 } from "lucide-react"
+import { SWATCHES } from "./themes.js"
 
 export const LABELS = {
-  themes: {
-    inkstone: "Inkstone", charmtone: "Charmtone", high_contrast: "High contrast", nord: "Nord",
-    dracula: "Dracula", tokyo_night: "Tokyo Night", catppuccin: "Catppuccin", gruvbox: "Gruvbox",
-    one_dark: "One Dark", solarized: "Solarized", rose_pine: "Rosé Pine", kanagawa: "Kanagawa",
-    monokai: "Monokai", forest: "Forest", ocean: "Ocean", amber: "Amber",
-  },
   cursors: { block: "Block", underline: "Underline", bar: "Bar" },
-  ansi_maps: { none: "Off (stock ANSI colours)", soft: "Soft (blend into the theme)", full: "Full (theme palette)" },
+  // One line each, from Astryx's own theme list (docs/astryx/topics/use-a-theme.md).
+  theme_notes: {
+    neutral: "Restrained grays, minimal and quiet",
+    stone: "Warm stone and slate",
+    matcha: "Earthy greens",
+    chocolate: "Warm browns and cozy beige",
+    butter: "Golden yellows with blue accents",
+    gothic: "Deep blue-grays, dark only",
+    y2k: "Periwinkle, pinks and lime",
+  },
 }
 
 const opts = (ids, labels) => (ids || []).map((id) => ({ value: id, label: labels?.[id] || id }))
@@ -127,8 +131,22 @@ function LookPage({ cfg, meta, onSet }) {
   const [size, setSize] = useState(cfg.font_size_px)
   useEffect(() => setSize(cfg.font_size_px), [cfg.font_size_px])
   const saveSize = (v) => { if (v !== cfg.font_size_px) onSet({ font_size_px: v }) }
+  const themes = (meta.ui_themes || []).map((id) => ({
+    value: id,
+    label: meta.ui_theme_labels?.[id] || id,
+    description: LABELS.theme_notes[id],
+    icon: <Swatch id={id} />,
+  }))
   return (
     <FormLayout direction="horizontal-labels">
+      <Selector label="Theme" description="Astryx's look for the whole window: the chrome, the terminal's colours and the notice cards."
+        options={themes} value={cfg.ui_theme} onChange={(v) => onSet({ ui_theme: v })}
+        renderValue={(o) => <SelectorOption label={o.label} icon={o.icon} layout="inline" />} />
+      <FieldRow label="Mode">
+        <SegmentedControl label="Mode" value={cfg.ui_mode} onChange={(v) => onSet({ ui_mode: v })}>
+          {(meta.ui_modes || []).map((id) => <SegmentedControlItem key={id} value={id} label={meta.ui_mode_labels?.[id] || id} />)}
+        </SegmentedControl>
+      </FieldRow>
       <Selector label="Font" options={opts(fonts)} value={cfg.font_face} hasSearch={fonts.length > 8}
         onChange={(v) => onSet({ font_face: v })} />
       <Slider label="Size" value={size} min={meta.font_min} max={meta.font_max} step={1}
@@ -141,11 +159,18 @@ function LookPage({ cfg, meta, onSet }) {
           {(meta.cursors || []).map((id) => <SegmentedControlItem key={id} value={id} label={LABELS.cursors[id] || id} />)}
         </SegmentedControl>
       </FieldRow>
-      <Selector label="Terminal theme" description="Colours inside the terminal panes only; the window chrome is always Astryx Neutral."
-        options={opts(meta.themes, LABELS.themes)} value={cfg.theme} onChange={(v) => onSet({ theme: v })} />
-      <Selector label="ANSI map" description="How programs' ANSI colours map onto the terminal theme."
-        options={opts(meta.ansi_maps, LABELS.ansi_maps)} value={cfg.shell_ansi_map} onChange={(v) => onSet({ shell_ansi_map: v })} />
     </FormLayout>
+  )
+}
+
+// A theme's swatch: its body colour in light and dark mode, then its accent
+// in each (chrome/themes.js SWATCHES). Not Astryx: it has no colour-swatch
+// component; the dots are spans sized and rounded with its tokens.
+function Swatch({ id }) {
+  return (
+    <span className="rsz-swatch" aria-hidden="true">
+      {(SWATCHES[id] || []).map((c, i) => <span key={i} style={{ background: c }} />)}
+    </span>
   )
 }
 

@@ -271,8 +271,8 @@ pub struct Ghostty {
     sel_shown: bool,
     anchor: Option<Anchor>,
     pal: palette::Active,
-    /// The theme's colours were given to the terminal for this theme.
-    pal_set: Option<(usize, palette::AnsiMap)>,
+    /// The palette generation whose colours the terminal was given.
+    pal_set: Option<u64>,
     default_cursor: u8,
     /// Image marks (#288): the tag and a tracked reference to its cell. The
     /// reference follows the cell through scrolling, history and reflow;
@@ -428,21 +428,21 @@ impl Ghostty {
     /// Give the terminal the theme's colours as its defaults (OSC 4/10/11
     /// queries answer with them; a program's overrides stay on top).
     fn apply_palette(&mut self) {
-        let key = (self.pal.theme as *const _ as usize, self.pal.map);
+        let key = self.pal.generation;
         if self.pal_set == Some(key) {
             return;
         }
         self.pal_set = Some(key);
-        let ansi = self.pal.ansi16;
+        let ansi = self.pal.pal.ansi16;
         let mut p = [GhosttyColorRgb { r: 0, g: 0, b: 0 }; 256];
         for (i, c) in p.iter_mut().enumerate() {
             let (r, g, b) = palette::xterm256(&ansi, i as u8);
             *c = GhosttyColorRgb { r, g, b };
         }
         self.set(GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, p.as_ptr() as *const c_void);
-        let c = &self.pal.theme.chrome;
-        let fg = GhosttyColorRgb { r: c.text.0, g: c.text.1, b: c.text.2 };
-        let bg = GhosttyColorRgb { r: c.void.0, g: c.void.1, b: c.void.2 };
+        let c = &self.pal.pal;
+        let fg = GhosttyColorRgb { r: c.fg.0, g: c.fg.1, b: c.fg.2 };
+        let bg = GhosttyColorRgb { r: c.bg.0, g: c.bg.1, b: c.bg.2 };
         self.set(GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg as *const _ as *const c_void);
         self.set(GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg as *const _ as *const c_void);
     }
@@ -581,8 +581,8 @@ impl Ghostty {
         unsafe {
             ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &mut self.cells as *mut _ as *mut c_void);
         }
-        let c = &self.pal.theme.chrome;
-        let term_bg = pack(palette::term_bg(c));
+        let c = self.pal.pal;
+        let term_bg = pack(palette::term_bg(&c));
         let pal = |i: u8| {
             let p = colors.palette[i as usize];
             (p.r, p.g, p.b)
@@ -664,28 +664,28 @@ impl Ghostty {
             // Go suzuri's paint rules (internal/ui/color.go glyphToCell);
             // see the alacritty engine for the measurements behind them.
             if style_has(&st, STYLE_FAINT) {
-                let d = palette::dim_faint(unpack(fg));
-                fg = if default_ink && (d.0 as u32 + d.1 as u32 + d.2 as u32) < 80 { pack((140, 140, 140)) } else { pack(d) };
+                let d = palette::faint_ink(unpack(fg), &c);
+                fg = if c.dark && default_ink && (d.0 as u32 + d.1 as u32 + d.2 as u32) < 80 { pack((140, 140, 140)) } else { pack(d) };
             }
             if bold {
-                fg = pack(palette::brighten_bold(unpack(fg)));
+                fg = pack(palette::bold_ink(unpack(fg), &c));
             }
             if style_has(&st, STYLE_INVERSE) {
                 let default_rev = default_ink && bg == frame::DEFAULT_BG;
                 let (mut f, mut b) = (if bg == frame::DEFAULT_BG { term_bg } else { bg }, fg);
                 if default_rev {
-                    (f, b) = (pack(c.text), pack(c.panel));
+                    (f, b) = (pack(c.fg), pack(c.panel));
                 } else if palette::near_black(unpack(b)) {
                     b = pack(c.panel);
                     if palette::near_black(unpack(f)) {
-                        f = pack(c.text);
+                        f = pack(c.fg);
                     }
                 } else if palette::low_contrast(unpack(f), unpack(b)) {
-                    (f, b) = (pack(c.text), pack(c.panel));
+                    (f, b) = (pack(c.fg), pack(c.panel));
                 }
                 (fg, bg) = (f, b);
             }
-            if bg != frame::DEFAULT_BG && palette::bg_shows_through(unpack(bg), c) {
+            if bg != frame::DEFAULT_BG && palette::bg_shows_through(unpack(bg), &c) {
                 bg = frame::DEFAULT_BG;
             }
             let mut attrs = 0u16;
@@ -1048,7 +1048,7 @@ impl Engine for Ghostty {
     fn snapshot(&mut self, out: &mut Vec<u8>, seq: u32, force_full: bool) -> bool {
         out.clear();
         let pal = palette::active();
-        if !std::ptr::eq(pal.theme, self.pal.theme) || pal.map != self.pal.map {
+        if pal.generation != self.pal.generation {
             self.full_next = true;
         }
         self.pal = pal;

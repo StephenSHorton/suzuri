@@ -17,6 +17,7 @@ import { chrome } from "./store.js"
 import { Caption } from "./Caption.jsx"
 import { Theme } from "@astryxdesign/core/theme"
 import { windowsBarTheme } from "./barTheme.js"
+import { chromeTheme } from "./themes.js"
 
 const isMac = navigator.platform.startsWith("Mac")
 const useChrome = () => useSyncExternalStore(chrome.subscribe, chrome.get)
@@ -117,11 +118,13 @@ function CaffeineButton({ status }) {
   )
 }
 
-// Windows: the caption-button look; the Mac: stock Astryx.
+// Windows: the caption-button look over the active theme and mode; the
+// Mac: stock Astryx.
 function PlatformButtons({ children }) {
+  const { theme, mode } = useSyncExternalStore(chromeTheme.subscribe, chromeTheme.get)
   if (isMac) return children
   return (
-    <Theme theme={windowsBarTheme} mode="dark">
+    <Theme theme={windowsBarTheme(theme)} mode={mode}>
       {/* No gaps: the slots sit edge to edge, like the caption buttons. */}
       <HStack gap={0} vAlign="center">
         {children}
