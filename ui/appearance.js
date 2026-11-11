@@ -14,13 +14,14 @@ import { setFont, setSelection, setVoid } from "./frame.js"
 import { announce } from "./settings.js"
 import { fontToast, hostToast } from "./host_toast.js"
 import { applyTextSize } from "./text_size.js"
+import { gohuStep } from "./zoom_steps.js"
 import { chromeTheme, loadTheme, DEFAULT_THEME, DEFAULT_MODE, MODES } from "./chrome/themes.js"
 import { TOKENS, RADIUS_TOKEN, deriveLook } from "./theme_palette.js"
 
 const { invoke } = window.__TAURI__.core
 const log = (line) => invoke("ui_log", { line: `appearance: ${line}` }).catch(() => {})
 
-let cat = null // { default_font_face, default_font_size_px }
+let cat = null // { default_font_face, default_font_size_px, font_min, font_max }
 let cur = { theme: "", mode: "", face: "", px: 0, text: "" }
 let onFont = () => {}
 
@@ -158,10 +159,14 @@ export async function loadAppearance(relayout) {
   window.addEventListener("rsz:config", (e) => apply(e.detail))
 }
 
-// Zoom (Go: Ctrl/⌘ + - 0); the settings file clamps the size.
+// Zoom (Go: Ctrl/⌘ + - 0); the settings file clamps the size. With the
+// bundled Gohu it steps between the sizes Gohu stays crisp at (zoom_steps.js).
 export async function zoom(delta) {
   const before = cur.px
-  const px = delta === 0 ? cat.default_font_size_px : cur.px + delta
+  const px = delta === 0 ? cat.default_font_size_px
+    : cur.face === cat.default_font_face
+      ? gohuStep(cur.px, delta, window.devicePixelRatio, cat.font_min, cat.font_max)
+      : cur.px + delta
   const cfg = await invoke("config_set", { patch: { font_size_px: px } })
   hostToast(fontToast(delta, before, cfg.font_size_px, cat.default_font_size_px))
   announce(cfg)
