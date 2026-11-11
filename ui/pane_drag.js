@@ -12,7 +12,9 @@ let drag = null // {pane, x, y, active}
 const hint = document.createElement("div")
 Object.assign(hint.style, {
   position: "fixed", pointerEvents: "none", zIndex: 50, display: "none",
-  background: "rgba(200, 160, 255, 0.16)", border: "2px solid rgba(200, 160, 255, 0.7)", borderRadius: "6px",
+  // The theme's accent (tokens on <html>), so it reads in light and dark.
+  background: "color-mix(in srgb, var(--color-accent) 16%, transparent)",
+  border: "2px solid color-mix(in srgb, var(--color-accent) 70%, transparent)", borderRadius: "6px",
 })
 document.body.append(hint)
 

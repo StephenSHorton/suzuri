@@ -10,7 +10,8 @@
 // --color-background-body):
 //   background   --color-background-body
 //   foreground   --color-text-primary
-//   cursor       --color-accent; the selection is the accent at 38%
+//   cursor       --color-accent; the selection is the accent at 38%; the
+//                block cursor's blended fill, cursorFill below
 //   panel        --color-background-surface (reverse video's default)
 //   0 black      the background end of the gray ramp: the first of
 //                --color-{background,border,icon,text}-gray and
@@ -120,6 +121,21 @@ function legible(c, bg, toward, min) {
   return toward
 }
 
+/**
+ * The block cursor's fill. style.css draws it with mix-blend-mode:
+ * difference (the glyph under it inverts), which shows |fill - bg|. Per
+ * channel: where the accent is darker than the background, the fill is
+ * bg - accent, so the cursor shows as the accent itself (a dark cursor on a
+ * light theme; the accent as the fill would come out nearly the
+ * background); elsewhere the accent, as on dark themes before. (A channel
+ * brighter than a light background can't be shown exactly: Butter light's
+ * blue accent shows as a dark green, still well readable.)
+ */
+export function cursorFill(accent, bg) {
+  const ch = (a, b) => (a <= b ? b - a : a)
+  return { r: ch(accent.r, bg.r), g: ch(accent.g, bg.g), b: ch(accent.b, bg.b), a: 1 }
+}
+
 /** A CSS length (px or rem at a 16 px root) in px, or null. */
 export function lengthPx(s) {
   const m = /^\s*([\d.]+)(px|rem)\s*$/.exec(String(s ?? ""))
@@ -186,6 +202,7 @@ export function deriveLook(tokens) {
       bg: hex(bg),
       fg: hex(fg),
       cursor: hex(accent),
+      cursorFill: hex(cursorFill(accent, bg)),
       selection: `rgba(${sel.r}, ${sel.g}, ${sel.b}, ${SELECTION_ALPHA})`,
       panel: hex(surface),
       accent: hex(accent),

@@ -69,9 +69,11 @@ html, body {
 .pane .head .exited { color: var(--color-text-warning); }
 .pane .body { position: relative; flex: 1; min-height: 0; padding: 4px 6px; outline: none; cursor: text; }
 .pane canvas { position: absolute; left: 6px; top: 4px; image-rendering: pixelated; }
-/* The cursor is the terminal's: its theme's cursor colour. */
+/* The cursor is the terminal's: its theme's cursor colour. The block is
+   blended (difference), so it is filled with what shows as that colour
+   (--term-cursor-fill, theme_palette.js cursorFill). */
 .pane .cursor {
-  position: absolute; pointer-events: none; background: var(--term-cursor, var(--color-text-primary)); opacity: .85;
+  position: absolute; pointer-events: none; background: var(--term-cursor-fill, var(--term-cursor, var(--color-text-primary))); opacity: .85;
   mix-blend-mode: difference;
 }
 .pane .cursor.underline { height: 2px !important; margin-top: calc(var(--ch) - 2px); }

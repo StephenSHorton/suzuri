@@ -3,10 +3,11 @@
 /* body has user-select:none; WebKit then refuses typing into <input>. */
 .rsz-panel input, .rsz-panel textarea { user-select: text; -webkit-user-select: text; }
 /* report_agent states on a pane (AI control, aicontrol.js sets data-agent).
-   Pane outlines, not part of the panel; they sit outside the Astryx Theme. */
-[data-agent="working"] { box-shadow: inset 0 0 0 1px rgba(184,160,200,.55); }
-[data-agent="blocked"] { box-shadow: inset 0 0 0 1px rgba(224,128,128,.7); }
-[data-agent="done"] { box-shadow: inset 0 0 0 1px rgba(128,200,150,.55); }
+   Pane outlines, not part of the panel; they take the theme's tokens from
+   <html>, so they follow its mode. */
+[data-agent="working"] { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 55%, transparent); }
+[data-agent="blocked"] { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-text-error) 70%, transparent); }
+[data-agent="done"] { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-text-success) 55%, transparent); }
 
 /* The header slots screens fill (chrome/Panel.jsx PanelHeader): a row with
    Astryx's slot gap, gone when empty. Their buttons are default size, like

@@ -57,7 +57,9 @@ async function applyTheme(id, mode) {
   await repaint(my)
 }
 
-const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()))
+// A short wait between tries (a timer, not a frame: frames don't run while
+// the window is hidden, and startup waits on this).
+const nextFrame = () => new Promise((r) => setTimeout(r, 16))
 
 // The theme's stylesheet is in and applies to <html>.
 function themeApplied() {
@@ -109,6 +111,7 @@ function paint(look) {
   root.setProperty("--term-bg", t.bg)
   root.setProperty("--term-fg", t.fg)
   root.setProperty("--term-cursor", t.cursor)
+  root.setProperty("--term-cursor-fill", t.cursorFill)
   setVoid(t.bg)
   setSelection(t.selection)
   invoke("appearance_set", { look }).catch((e) => log(`appearance_set: ${e}`))

@@ -59,6 +59,12 @@ for (const id of THEME_IDS) {
         assert.ok(contrast(t.ansi[i + 8], t.bg) >= contrast(t.ansi[i], t.bg), `bright ${i} reads at least as well`)
       }
       assert.equal(t.ansi[15], t.fg)
+      // The block cursor, blended (difference) over the background, shows.
+      const [f, b] = [parseColor(t.cursorFill), parseColor(t.bg)]
+      const shown = { r: Math.abs(f.r - b.r), g: Math.abs(f.g - b.g), b: Math.abs(f.b - b.b) }
+      assert.ok(contrast(shown, b) >= MIN_CONTRAST_DIM, `cursor shows as ${JSON.stringify(shown)}`)
+      const a = parseColor(t.cursor)
+      if (a.r <= b.r && a.g <= b.g && a.b <= b.b) assert.deepEqual(shown, { r: a.r, g: a.g, b: a.b }, "an accent darker than the background shows as itself")
       const c = look.card
       for (const k of ["surface", "text", "muted", "border", "accent", "on_accent", "success", "warning", "error"]) assert.match(c[k], HEX, `card ${k}`)
       assert.ok(contrast(c.text, c.surface) >= MIN_CONTRAST, "card text")
