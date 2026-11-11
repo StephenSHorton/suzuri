@@ -105,7 +105,6 @@ body.sash-row, body.sash-row * { cursor: row-resize !important; }
   font: 14px "Gohu", var(--font-family-code); color: var(--color-text-primary);
 }
 .pane .inbar .cwd { color: var(--color-text-secondary); font-size: 12px; line-height: 16px; margin-bottom: 2px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
-.pane .inbar .lines { font-kerning: none; font-variant-ligatures: none; }
 .pane .inbar .lines .row { height: var(--ch); line-height: var(--ch); white-space: pre; }
 /* Its width is whole cells (app.js renderBar), so the text starts on the grid. */
 .pane .inbar .prompt { display: inline-block; overflow: hidden; vertical-align: top; color: var(--color-text-accent); }

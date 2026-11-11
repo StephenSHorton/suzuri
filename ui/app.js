@@ -400,6 +400,9 @@ class PaneView {
     lines.style.setProperty("--ch", `${ch}px`)
     lines.style.setProperty("--cw", `${cw}px`)
     lines.style.font = fontSpec()
+    // After the shorthand, which resets them: one glyph per cell, no pairs.
+    lines.style.fontKerning = "none"
+    lines.style.fontVariantLigatures = "none"
     lines.style.letterSpacing = `${cw - barAdvance(fontSpec())}px`
     lines.replaceChildren(
       ...v.lines.map((text, i) => {
@@ -422,8 +425,10 @@ class PaneView {
       }),
     )
     const caret = this.barEl.querySelector(".caret")
-    caret.style.left = `${barCaretX(lines.children[v.row], v.col, BAR_PAD_X + ([...PROMPT].length + v.col) * cw, this.barEl)}px`
-    caret.style.top = `${lines.offsetTop + v.row * ch}px`
+    const x = barCaretX(lines.children[v.row], v.col, BAR_PAD_X + ([...PROMPT].length + v.col) * cw, this.barEl)
+    const top = lines.offsetTop + v.row * ch
+    caret.style.left = `${x}px`
+    caret.style.top = `${top}px`
     caret.style.width = `${cw}px`
     caret.style.height = `${ch}px`
     caret.classList.toggle("dim", focused !== this)
@@ -598,20 +603,24 @@ const BAR_PAD_X = 8
 
 // The bar's per-character advance in a font, as the page lays text out
 // (not the canvas: the two can differ by a hair, and a hair a char adds
-// up). Measured once per font.
+// up). Measured once per font and pixel ratio: text may snap to device
+// pixels, so moving to another screen changes it.
 const barAdvances = new Map()
 function barAdvance(font) {
-  let adv = barAdvances.get(font)
+  const key = `${window.devicePixelRatio} ${font}`
+  let adv = barAdvances.get(key)
   if (adv) return adv
   const probe = document.createElement("span")
-  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;letter-spacing:0;font-kerning:none;font-variant-ligatures:none"
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;letter-spacing:0"
   probe.style.font = font
+  probe.style.fontKerning = "none"
+  probe.style.fontVariantLigatures = "none"
   probe.textContent = "M".repeat(100)
   document.body.append(probe)
   adv = probe.getBoundingClientRect().width / 100
   probe.remove()
   if (!(adv > 0)) return cellMetrics().cw // not laid out (hidden page): no correction
-  barAdvances.set(font, adv)
+  barAdvances.set(key, adv)
   return adv
 }
 
