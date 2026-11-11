@@ -1,8 +1,9 @@
 # suzuri
 
 A spike of suzuri's successor: the terminal core rebuilt in Rust with a Tauri
-UI. It keeps suzuri's look (Inkstone theme, Gohu font) but the chrome is real
-UI, not ASCII drawn into the cell grid. Terminal parts only: panes, splits,
+UI. It keeps suzuri's Gohu font, takes its look from Astryx's seven themes
+(Neutral dark by default), and the chrome is real UI, not ASCII drawn into
+the cell grid. Terminal parts only: panes, splits,
 shells, VT, rendering, input, resize, scrollback.
 
 - `crates/term`: the core. A `Pane` runs one shell. Its PTY actor owns

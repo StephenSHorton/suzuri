@@ -418,7 +418,6 @@ fn config_set(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, 
     for p in panes.map.lock().values() {
         p.set_default_cursor(shape);
     }
-    apply_theme(&v, Some(&panes));
     notes.apply_config(&v, &patch);
     Ok(v)
 }
@@ -428,9 +427,11 @@ fn config_set(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, 
 fn config_meta() -> serde_json::Value {
     serde_json::json!({
         "path": config::path().to_string_lossy(),
-        "themes": config::THEMES,
+        "ui_themes": config::UI_THEMES,
+        "ui_theme_labels": config::UI_THEMES.iter().zip(config::UI_THEME_LABELS).collect::<HashMap<_, _>>(),
+        "ui_modes": config::UI_MODES,
+        "ui_mode_labels": config::UI_MODES.iter().zip(config::UI_MODE_LABELS).collect::<HashMap<_, _>>(),
         "cursors": config::CURSORS,
-        "ansi_maps": config::ANSI_MAPS,
         "font_min": config::FONT_SIZE_MIN,
         "font_max": config::FONT_SIZE_MAX,
         "font_default": config::FONT_SIZE_DEFAULT,
@@ -794,65 +795,63 @@ fn bench_report(app: tauri::AppHandle, report: serde_json::Value, exit: bool) {
     }
 }
 
-// ---- appearance: Go suzuri's themes, ANSI map and font settings.
+// ---- appearance: the active Astryx theme's colours (the UI derives them,
+// ui/theme_palette.js) and the font settings.
 
-/// Set the palette from the settings' theme and ANSI map; with panes, every
-/// pane repaints in the new colours.
-fn apply_theme(cfg: &serde_json::Value, panes: Option<&Panes>) {
-    let s = |k: &str| cfg.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let map = rsz_term::palette::AnsiMap::parse(&s("shell_ansi_map")).unwrap_or(rsz_term::palette::AnsiMap::Soft);
-    let before = rsz_term::palette::active();
-    let now = rsz_term::palette::set_active(&s("theme"), map);
-    if let Some(panes) = panes {
-        if !std::ptr::eq(before.theme, now.theme) || before.map != now.map {
-            for p in panes.map.lock().values() {
-                p.redraw();
-            }
+/// The terminal palette the UI derives from the theme (its `terminal`), all
+/// `#rrggbb`.
+#[derive(Debug, Deserialize)]
+struct TerminalLook {
+    bg: String,
+    fg: String,
+    panel: String,
+    accent: String,
+    ansi: Vec<String>,
+}
+
+/// What appearance_set takes: ui/theme_palette.js's deriveLook().
+#[derive(Debug, Deserialize)]
+struct Look {
+    /// The theme's resolved background is dark.
+    dark: bool,
+    terminal: TerminalLook,
+    card: toast_look::CardLook,
+}
+
+fn terminal_palette(dark: bool, t: &TerminalLook) -> Result<rsz_term::palette::Palette, String> {
+    let c = |name: &str, s: &str| rsz_term::palette::parse_hex(s).ok_or_else(|| format!("terminal {name}: not #rrggbb: {s:?}"));
+    if t.ansi.len() != 16 {
+        return Err(format!("terminal ansi: {} colours, want 16", t.ansi.len()));
+    }
+    let mut ansi16 = [(0, 0, 0); 16];
+    for (i, s) in t.ansi.iter().enumerate() {
+        ansi16[i] = c("ansi", s)?;
+    }
+    Ok(rsz_term::palette::Palette { dark, bg: c("bg", &t.bg)?, fg: c("fg", &t.fg)?, panel: c("panel", &t.panel)?, accent: c("accent", &t.accent)?, ansi16 })
+}
+
+/// The active theme's colours, from the UI whenever the theme, its mode or
+/// the OS's light/dark (mode System) changes: the terminal palette (every
+/// pane repaints when it changed) and the notice cards' look. Before the
+/// first call both are Neutral dark (palette::NEUTRAL_DARK, toast_look).
+#[tauri::command]
+fn appearance_set(panes: State<'_, Arc<Panes>>, look: Look) -> Result<(), String> {
+    let pal = terminal_palette(look.dark, &look.terminal)?;
+    let cards = toast_look::config_for(&look.card, look.dark)?;
+    if rsz_term::palette::set_active(pal) {
+        for p in panes.map.lock().values() {
+            p.redraw();
         }
     }
+    toast::configure(cards);
+    Ok(())
 }
 
-fn hex((r, g, b): rsz_term::palette::Rgb) -> String {
-    format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-#[derive(Serialize)]
-struct ThemeOut {
-    id: &'static str,
-    label: &'static str,
-    /// Chrome roles, as CSS colours.
-    chrome: HashMap<&'static str, String>,
-}
-
-fn theme_out(t: &rsz_term::palette::ThemeSpec) -> ThemeOut {
-    let c = &t.chrome;
-    let chrome = HashMap::from([
-        ("void", hex(c.void)),
-        ("bar", hex(c.bar)),
-        ("panel", hex(c.panel)),
-        ("primary", hex(c.primary)),
-        ("secondary", hex(c.secondary)),
-        ("on-primary", hex(c.on_primary)),
-        ("text", hex(c.text)),
-        ("soft", hex(c.soft)),
-        ("dim", hex(c.dim)),
-        ("mute", hex(c.mute)),
-        ("sel", hex(c.sel)),
-        ("match", hex(c.match_)),
-        ("cyan", hex(c.cyan)),
-        ("border", hex(c.border)),
-        ("dim-matte", hex(c.dim_matte)),
-        ("term-bg", hex(rsz_term::palette::term_bg(c))),
-    ]);
-    ThemeOut { id: t.id, label: t.label, chrome }
-}
-
-/// The theme catalogue (chrome roles as CSS colours) for ui/appearance.js;
-/// the chosen theme and font come from config_get.
+/// The font defaults for ui/appearance.js; the chosen theme and font come
+/// from config_get.
 #[tauri::command]
 fn appearance() -> serde_json::Value {
     serde_json::json!({
-        "themes": rsz_term::palette::THEMES.iter().map(theme_out).collect::<Vec<_>>(),
         "default_font_face": config::FONT_FACE_DEFAULT,
         "default_font_size_px": config::FONT_SIZE_DEFAULT,
     })
@@ -935,7 +934,6 @@ fn main() {
     let bus = (std::env::var("RSZ_TRANSPORT").as_deref() != Ok("channel")).then(|| ws::FrameBus::start(on_ack).expect("frame socket"));
     let panes = Arc::new(Panes { bus, ..Default::default() });
     let _ = PANES.set(Arc::clone(&panes));
-    apply_theme(&config::load(), None);
     // OSC 52 "?" reads get the clipboard's text, as Go suzuri answered them.
     // The read runs under the pane's engine lock, so it is short and gives
     // an empty answer when the clipboard's owner doesn't answer (clip).
@@ -1026,6 +1024,7 @@ fn main() {
             config_get,
             config_set,
             config_meta,
+            appearance_set,
             boot,
             bench_report,
             ui_log,

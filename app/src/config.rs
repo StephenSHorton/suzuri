@@ -18,25 +18,18 @@ pub const FONT_SIZE_MIN: i64 = 10;
 pub const FONT_SIZE_MAX: i64 = 36;
 pub const FONT_FACE_DEFAULT: &str = "GohuFont uni14 Nerd Font Mono";
 
-/// Go suzuri's theme ids (config.ThemeIDs). Drawing them is #284's part.
-pub const THEMES: &[&str] = &[
-    "inkstone",
-    "charmtone",
-    "high_contrast",
-    "nord",
-    "dracula",
-    "tokyo_night",
-    "catppuccin",
-    "gruvbox",
-    "one_dark",
-    "solarized",
-    "rose_pine",
-    "kanagawa",
-    "monokai",
-    "forest",
-    "ocean",
-    "amber",
-];
+/// The look: one of Astryx's seven themes (npm @astryxdesign/theme-<id>),
+/// for the whole window, the terminal's colours and the notice cards
+/// (ui/appearance.js). The first is the default.
+pub const UI_THEMES: &[&str] = &["neutral", "stone", "matcha", "chocolate", "butter", "gothic", "y2k"];
+/// The Settings labels, in the same order.
+pub const UI_THEME_LABELS: &[&str] = &["Neutral", "Stone", "Matcha", "Chocolate", "Butter", "Gothic", "Y2K"];
+/// Its mode; "system" follows the OS. The first is the default.
+pub const UI_MODES: &[&str] = &["dark", "light", "system"];
+pub const UI_MODE_LABELS: &[&str] = &["Dark", "Light", "System"];
+/// Go suzuri's terminal theme and ANSI map, replaced by ui_theme: dropped
+/// from the file on load.
+const RETIRED_KEYS: &[&str] = &["theme", "shell_ansi_map"];
 /// Go's MonoFontFaces: the settings list, bundled face first.
 pub fn mono_font_faces() -> Vec<&'static str> {
     if cfg!(target_os = "macos") {
@@ -57,7 +50,6 @@ pub fn mono_font_faces() -> Vec<&'static str> {
 }
 
 pub const CURSORS: &[&str] = &["block", "underline", "bar"];
-pub const ANSI_MAPS: &[&str] = &["none", "soft", "full"];
 
 /// The UI's text size (Settings › Look), in Astryx's text-size categories
 /// (iOS Dynamic Type's standard sizes; ui/text_size.js applies them). Only
@@ -179,17 +171,15 @@ pub fn normalize(v: Value) -> Value {
         .unwrap_or_else(|| "block".into());
     m.insert("cursor".into(), cursor.into());
 
-    // Go falls back to high_contrast for an unknown theme; so do we.
-    let theme = s(&m, "theme")
-        .filter(|t| THEMES.contains(&t.as_str()))
-        .unwrap_or_else(|| "high_contrast".into());
-    m.insert("theme".into(), theme.into());
-
-    let ansi = match s(&m, "shell_ansi_map").as_deref() {
-        Some(a) if ANSI_MAPS.contains(&a) => a.to_string(),
-        _ => "soft".into(),
-    };
-    m.insert("shell_ansi_map".into(), ansi.into());
+    // The old 16 terminal themes are gone; whoever had one starts on the
+    // default look (Neutral, dark).
+    for k in RETIRED_KEYS {
+        m.remove(*k);
+    }
+    let theme = s(&m, "ui_theme").filter(|t| UI_THEMES.contains(&t.as_str())).unwrap_or_else(|| UI_THEMES[0].into());
+    m.insert("ui_theme".into(), theme.into());
+    let mode = s(&m, "ui_mode").filter(|t| UI_MODES.contains(&t.as_str())).unwrap_or_else(|| UI_MODES[0].into());
+    m.insert("ui_mode".into(), mode.into());
 
     // Go's Bg anim: keep animating while another app has focus.
     let anim = m.get("animate_unfocused").and_then(Value::as_bool).unwrap_or(true);
@@ -404,7 +394,9 @@ mod tests {
         let v = load_from(&d.join("rs/config.json"), &d.join("go/config.json"));
         assert_eq!(v["font_size_px"], 14);
         assert_eq!(v["cursor"], "block");
-        assert_eq!(v["theme"], "high_contrast");
+        assert_eq!(v["ui_theme"], "neutral");
+        assert_eq!(v["ui_mode"], "dark");
+        assert!(v.get("theme").is_none());
         assert_eq!(v["active_profile"], "Default");
         assert!(v["profiles"].as_array().unwrap().len() >= 3);
     }
@@ -425,7 +417,9 @@ mod tests {
         let v = load_from(&rs, &go);
         assert_eq!(v["font_size_px"], 16);
         assert_eq!(v["cursor"], "bar");
-        assert_eq!(v["theme"], "nord");
+        // Go's terminal theme doesn't carry over: the default look does.
+        assert!(v.get("theme").is_none());
+        assert_eq!(v["ui_theme"], "neutral");
         assert_eq!(v["active_profile"], "Work");
         assert_eq!(v["intro"], "matrix");
         assert_eq!(v["window"]["width"], 1728);
@@ -442,15 +436,30 @@ mod tests {
         let v = update_at(
             &rs,
             &go,
-            json!({"font_size_px": 99, "theme": "nope", "extra": 1}),
+            json!({"font_size_px": 99, "ui_theme": "nope", "extra": 1}),
         )
         .unwrap();
         assert_eq!(v["font_size_px"], 36);
-        assert_eq!(v["theme"], "high_contrast");
+        assert_eq!(v["ui_theme"], "neutral");
         assert_eq!(v["extra"], 1);
         let v = update_at(&rs, &go, json!({"cursor": "underline"})).unwrap();
         assert_eq!(v["extra"], 1, "earlier keys kept");
         assert_eq!(load_from(&rs, &go)["cursor"], "underline");
+    }
+
+    #[test]
+    fn ui_theme_and_mode_are_astryx_ones_and_the_old_theme_keys_go() {
+        let v = normalize(json!({"theme": "dracula", "shell_ansi_map": "full", "intro": "matrix"}));
+        assert!(v.get("theme").is_none());
+        assert!(v.get("shell_ansi_map").is_none());
+        assert_eq!(v["intro"], "matrix", "unknown keys stay");
+        assert_eq!((v["ui_theme"].as_str(), v["ui_mode"].as_str()), (Some("neutral"), Some("dark")));
+        let v = normalize(json!({"ui_theme": " Y2K ", "ui_mode": "System"}));
+        assert_eq!((v["ui_theme"].as_str(), v["ui_mode"].as_str()), (Some("y2k"), Some("system")));
+        let v = normalize(json!({"ui_theme": "dracula", "ui_mode": "dim"}));
+        assert_eq!((v["ui_theme"].as_str(), v["ui_mode"].as_str()), (Some("neutral"), Some("dark")));
+        assert_eq!(UI_THEMES.len(), UI_THEME_LABELS.len());
+        assert_eq!(UI_MODES.len(), UI_MODE_LABELS.len());
     }
 
     #[test]

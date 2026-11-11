@@ -1,8 +1,9 @@
 /* Everything around the terminal (gaps, pane frames, heads, the input bar,
-   marks) is Astryx, theme Neutral in dark mode: --color-*, --spacing-*,
-   --radius-* tokens, which Astryx's root Theme puts on <html>. Only what the
-   terminal grid draws follows the user's terminal theme, from appearance.js:
-   --term-bg, --term-fg, --term-cursor (and the selection, in the canvas). */
+   marks) is Astryx, in the theme and mode picked in Settings: --color-*,
+   --spacing-*, --radius-* tokens, which Astryx's root Theme puts on <html>.
+   What the terminal grid draws comes from the same theme, derived by
+   appearance.js: --term-bg, --term-fg, --term-cursor (and the selection,
+   in the canvas). */
 @font-face {
   font-family: "Gohu";
   src: url("view/fonts/GohuFontuni14NerdFontMono-Regular.ttf") format("truetype");
@@ -11,7 +12,9 @@
   /* A shim for the old suzuri roles: nothing in this unit's rules reads
      them, and appearance.js no longer writes them. They alias Astryx tokens
      so any rule not yet moved to tokens (overlays, HUD, toast, update)
-     still looks Neutral. Remove once nothing reads var(--void ... --hair). */
+     still follows the theme. Remove once nothing reads var(--void ... --hair).
+     No color-scheme here: Astryx sets it per mode (an unlayered one would
+     beat its layered rules and keep light themes' native controls dark). */
   --void: var(--color-background-body);
   --bar: var(--color-background-body);
   --panel: var(--color-background-surface);
@@ -29,7 +32,6 @@
   --dim-matte: var(--color-background-muted);
   --hair: var(--color-border);
   --gap: var(--spacing-1-5);
-  color-scheme: dark;
 }
 * { box-sizing: border-box; }
 /* Astryx sizes in rem against a 16 px root; suzuri's own text is 12 px. */
@@ -40,7 +42,7 @@ html, body {
   font: 12px/1.4 var(--font-family-body);
   user-select: none; -webkit-user-select: none;
 }
-/* The gaps between panes are the page itself (Neutral's body colour, the
+/* The gaps between panes are the page itself (the theme's body colour, the
    same as the title bar); sash.js measures them as the dividers. */
 #root { position: absolute; inset: 34px 0 0 0; padding: var(--spacing-1-5); display: flex; }
 .split { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; gap: var(--spacing-1-5); }

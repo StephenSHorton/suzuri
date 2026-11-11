@@ -1,10 +1,13 @@
 /* The title bar (chrome/TitleBar.jsx). Colours, spacing and radii are
-   Astryx tokens (theme Neutral, dark), so the bar matches every Astryx
-   component; see docs/astryx/topics/tokens.md. Figtree is Neutral's face,
-   served locally because the CSP allows no outside fonts. */
+   Astryx tokens (the active theme, chrome/themes.js), so the bar matches
+   every Astryx component; see docs/astryx/topics/tokens.md. Figtree is
+   Neutral's face (the default theme's, so it ships with the page; the other
+   themes load theirs when picked), served locally because the CSP allows
+   no outside fonts. */
 @import "@fontsource/figtree/400.css";
 @import "@fontsource/figtree/500.css";
 @import "@fontsource/figtree/600.css";
+@import "@fontsource/figtree/700.css";
 
 #chrome-bar { display: contents; }
 
@@ -79,3 +82,12 @@ body:not(.win) .rsz-bar { --size-element-sm: 24px; --size-element-md: 26px; }
 .rsz-caption .close:hover { background: #c42b1c; color: var(--color-on-dark); }
 .rsz-caption .close:active { background: #b3271a; color: var(--color-on-dark); }
 .rsz-bar[data-inactive] .rsz-caption button:not(:hover) { color: var(--color-text-disabled); }
+
+/* Settings › Theme: each theme's swatch (chrome/Settings.jsx), four
+   overlapping dots ringed in the current theme's border colour. */
+.rsz-swatch { display: inline-flex; flex: none; }
+.rsz-swatch > span {
+  width: var(--spacing-3); height: var(--spacing-3); border-radius: var(--radius-full);
+  box-shadow: 0 0 0 1px var(--color-border-emphasized);
+}
+.rsz-swatch > span + span { margin-left: calc(var(--spacing-1) * -1); }

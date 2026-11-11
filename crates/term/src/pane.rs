@@ -534,7 +534,7 @@ impl Pane {
             let keep = !row(cy);
             let spacer = !(cy == 0 || if keep { false } else { row(cy - 1) });
             let home = home_dir().unwrap_or_default();
-            let mut lines = block::block_lines(display, &cwd, &home, cols, spacer, palette::active().theme.chrome.primary);
+            let mut lines = block::block_lines(display, &cwd, &home, cols, spacer, palette::active().pal.accent);
             // The command's last line goes on the cursor's row: the shell's
             // echo would have been there, and its newline still follows.
             let on_line = lines.pop().unwrap_or_default();
