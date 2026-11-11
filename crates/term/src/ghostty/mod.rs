@@ -665,7 +665,7 @@ impl Ghostty {
             // see the alacritty engine for the measurements behind them.
             if style_has(&st, STYLE_FAINT) {
                 let d = palette::faint_ink(unpack(fg), &c);
-                fg = if c.dark && default_ink &&(d.0 as u32 + d.1 as u32 + d.2 as u32) < 80 { pack((140, 140, 140)) } else { pack(d) };
+                fg = if c.dark && default_ink && (d.0 as u32 + d.1 as u32 + d.2 as u32) < 80 { pack((140, 140, 140)) } else { pack(d) };
             }
             if bold {
                 fg = pack(palette::bold_ink(unpack(fg), &c));
