@@ -415,6 +415,25 @@ fn card(key: u64, n: &Notice, expire: Option<Duration>) -> (toast::Note, Option<
     (note, extra)
 }
 
+/// The update offer's card id: one at a time, a new offer replaces it.
+pub const UPDATE_CARD: &str = "suzuri-update";
+
+/// The update offer: a card that stays until answered, with Install (runs
+/// `install`) and Skip (just closes it). Neither a body click nor a right
+/// click installs anything; the buttons are the only answers.
+pub fn update_note(version: &str, current: &str, install: impl Fn() + Send + Sync + 'static) -> toast::Note {
+    let v = |s: &str| format!("v{}", s.trim_start_matches('v'));
+    toast::Note {
+        id: UPDATE_CARD.into(),
+        title: if version.is_empty() { "Update available".into() } else { format!("Update to {}", v(version)) },
+        body: if current.is_empty() { String::new() } else { format!("You have {}", v(current)) },
+        kind: Kind::Info,
+        sticky: true,
+        actions: vec![toast::Action::new("Install", install), toast::Action::close("Skip")],
+        ..toast::Note::default()
+    }
+}
+
 /// Go hostToastID: one card per kind of host message ("" stacks).
 fn host_kind(msg: &str) -> &'static str {
     let s = msg.to_lowercase();
@@ -504,6 +523,19 @@ fn sound_for(name: &str, urgency: u8) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_card_has_install_and_skip() {
+        let n = update_note("0.11.2", "v0.11.1", || {});
+        assert_eq!(n.title, "Update to v0.11.2");
+        assert_eq!(n.body, "You have v0.11.1");
+        assert!(n.sticky);
+        let labels: Vec<_> = n.actions.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, ["Install", "Skip"]);
+        assert!(n.actions[0].run.is_some() && n.actions[1].run.is_none());
+        assert!(n.on_click.is_none());
+    }
+
 
     fn notice(sound: &str, icon: &str, urgency: u8) -> Notice {
         Notice {

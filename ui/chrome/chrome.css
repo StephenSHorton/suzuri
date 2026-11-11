@@ -21,6 +21,11 @@
   user-select: none; -webkit-user-select: none;
 }
 body.win .rsz-bar { padding-inline: var(--spacing-3) 0; }
+/* The Mac: controls sit inside the bar with room above and below, like a
+   Mac toolbar's, instead of filling its 34px. Only the boxes shrink (the
+   element-size tokens Astryx sizes buttons and the tabs by); icons and
+   text keep their size. Windows keeps its full-height caption slots. */
+body:not(.win) .rsz-bar { --size-element-sm: 24px; --size-element-md: 26px; }
 
 .rsz-mark {
   flex: none; padding-inline-end: var(--spacing-2);

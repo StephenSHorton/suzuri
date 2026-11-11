@@ -1,52 +1,24 @@
 // Update notice: the app checks its release feed and sends "update" when a
 // newer build is out. Like Go suzuri, nothing installs until the person
-// clicks Install; the app then downloads, verifies, installs and restarts.
-// The offer is an Astryx Toast that stays until dismissed (chrome/Toasts.jsx);
-// the palette's "Check for updates" checks now and says what it found.
-import { createElement as h } from "react"
-import { Button } from "@astryxdesign/core/Button"
+// says so: the offer is a desktop card (rust-toast, app/src/update.rs
+// update_offer) with Install and Skip buttons. Install downloads, verifies,
+// installs and restarts; a failure is said on a card and offered again.
+// The palette's "Check for updates" checks now and says what it found.
 import { checkMessage } from "./update_check.js"
 import { hostToast } from "./host_toast.js"
-import { showToast } from "./chrome/Toasts.jsx"
 
 const { invoke } = window.__TAURI__.core
 const { listen } = window.__TAURI__.event
 
+// The version last offered: a skipped offer stays skipped until a newer
+// version, or a manual check.
 let shown = null
-// The update on offer and where its install is: "offer", "installing" or
-// "failed" (with the error).
-let offered = null
-let state = "offer"
-let failure = ""
 
-// One toast, updated in place (same uniqueID) as the state changes.
-function render() {
-  if (!offered) return
-  const body = state === "failed"
-    ? `Update failed: ${failure}`
-    : `suzuri ${offered.version} is available (you have ${offered.current}).`
-  showToast({
-    uniqueID: "update",
-    collisionBehavior: "overwrite",
-    isAutoHide: false,
-    body,
-    endContent: h(Button, {
-      label: state === "installing" ? "Installing…" : state === "failed" ? "Retry" : "Install and restart",
-      variant: "primary",
-      size: "sm",
-      isLoading: state === "installing",
-      onClick: install,
-    }),
-  })
-}
-
-// force: a manual check shows it again after it was dismissed.
+// force: a manual check shows it again after it was skipped.
 function offer(payload, force) {
   if (!force && shown === payload.version) return
   shown = payload.version
-  offered = payload
-  state = "offer"
-  render()
+  invoke("update_offer", { version: payload.version, current: payload.current ?? "" }).catch(() => {})
 }
 
 listen("update", ({ payload }) => offer(payload))
@@ -55,8 +27,7 @@ let checking = false
 async function checkNow() {
   if (checking) return
   checking = true
-  // The check's news goes on notice cards (Go's update toasts); the toast
-  // here is for the Install button.
+  // The check's news goes on notice cards (Go's update toasts).
   hostToast("Checking for updates…")
   let found = null, error = null, current = ""
   try {
@@ -71,21 +42,6 @@ async function checkNow() {
   const m = checkMessage({ found, current, error })
   if (m.offer) offer(found, true)
   else hostToast(m.text)
-}
-
-async function install() {
-  if (state === "installing") return
-  state = "installing"
-  render()
-  try {
-    await invoke("update_install")
-  } catch (e) {
-    state = "failed"
-    failure = String(e)
-    render()
-    // The failed update was dropped; fetch it again for the retry.
-    invoke("update_check").catch(() => {})
-  }
 }
 
 window.rsz?.addCommands([

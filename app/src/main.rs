@@ -1041,7 +1041,8 @@ fn main() {
             notes::notes_load,
             notes::notes_save,
             update::update_check,
-            update::update_install
+            update::update_install,
+            update::update_offer
         ])
         .build(ctx)
         .expect("build suzuri")

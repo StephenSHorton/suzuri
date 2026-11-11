@@ -1,5 +1,5 @@
 // In-window toasts as Astryx Toast: app.js's short status ("split right",
-// "renamed") and the update offer (update.js). One ToastViewport, mounted
+// "renamed"). The update offer is a desktop card (update.js). One ToastViewport, mounted
 // through the overlay host so it sits inside the app's <Theme>; a child
 // calls useToast() and hands its function to plain modules through
 // showToast(). (A useToast() outside a viewport would start Astryx's

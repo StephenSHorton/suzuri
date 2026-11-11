@@ -6,7 +6,7 @@
 //!   notify fail published  play those
 //!   notify show            one card of each kind, with its sound
 //!   notify show fail "Compile failed" "main.go:12"
-//!   notify show update     the permanent update card
+//!   notify show update     the update offer (Install / Skip)
 
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ pub const USAGE: &str = "usage: suzuri notify [success|fail|published|all]
   notify                 play the three sounds
   notify show            show one card of each kind, with its sound
   notify show fail \"Compile failed\" \"main.go:12\"
-  notify show update     the permanent update card (click or right-click)
+  notify show update [v] the update offer: Install and Skip buttons
 ";
 
 const SUCCESS: &[u8] = include_bytes!("../../ui/sounds/success.wav");
@@ -90,14 +90,6 @@ pub fn show_args(args: &[String]) -> Result<Vec<Notice>, String> {
         "success" | "info" | "system" => ("Build finished".to_string(), "3 targets".to_string()),
         "fail" | "error" => ("Compile failed".into(), "main.go:12".into()),
         "published" | "warn" | "warning" | "question" => ("Published".into(), "workshop item is live".into()),
-        "update" => {
-            // Go's sampleUpdateNote: never expires, until clicked or dismissed.
-            let title = match args.get(1) {
-                Some(v) => format!("Update to v{}", v.trim_start_matches('v')),
-                None => "Update available".into(),
-            };
-            return Ok(vec![note(&title, "Click to install · right-click to skip", "info", "", 1, 0, "suzuri-update")]);
-        }
         _ => return Err(format!("unknown notification {:?}", args[0])),
     };
     if let Some(t) = args.get(1) {
@@ -112,6 +104,9 @@ pub fn show_args(args: &[String]) -> Result<Vec<Notice>, String> {
 /// Runs the CLI; returns the process exit code.
 pub fn run(args: &[String], ctx: tauri::Context) -> i32 {
     if let Some(rest) = args.first().filter(|a| matches!(a.as_str(), "show" | "toast")).map(|_| &args[1..]) {
+        if rest.first().is_some_and(|k| k == "update") {
+            return show_update(rest.get(1).map(String::as_str).unwrap_or(""), ctx);
+        }
         return match show_args(rest) {
             Ok(notes) => show(notes, ctx),
             Err(e) => {
@@ -147,6 +142,43 @@ pub fn run(args: &[String], ctx: tauri::Context) -> i32 {
         }
     }
     0
+}
+
+/// Shows the update offer card (as the app does, but its Install only
+/// prints: nothing installs from here), then exits once it is answered
+/// or after 2 min.
+fn show_update(version: &str, mut ctx: tauri::Context) -> i32 {
+    println!("showing the update offer — Install or Skip");
+    ctx.config_mut().app.windows.clear();
+    let version = version.to_string();
+    let app = tauri::Builder::default()
+        .setup(move |app| {
+            app.manage(crate::notices::Notices::new(app.handle().clone()));
+            let handle = app.handle().clone();
+            let current = handle.package_info().version.to_string();
+            std::thread::spawn(move || {
+                toast::post(crate::notices::update_note(&version, &current, || println!("  Install (a sample: nothing installs)")));
+                let end = Instant::now() + Duration::from_secs(120);
+                std::thread::sleep(Duration::from_millis(500));
+                while Instant::now() < end && !toast::card_keys().is_empty() {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                handle.exit(0);
+            });
+            Ok(())
+        })
+        .build(ctx);
+    match app {
+        Ok(app) => {
+            app.run(|_, _| {});
+            0
+        }
+        Err(e) => {
+            eprintln!("suzuri notify: {e}");
+            1
+        }
+    }
 }
 
 /// Shows the cards on the desktop (#288) with no terminal window,
@@ -267,10 +299,8 @@ mod tests {
         assert!(three.iter().all(|n| n.expire_ms == Some(4000)));
         let one = show_args(&s(&["fail", "Compile failed", "main.go:12", "and", "more"])).unwrap();
         assert_eq!((one[0].title.as_str(), one[0].body.as_str()), ("Compile failed", "main.go:12 and more"));
-        let up = show_args(&s(&["update", "v0.9.200"])).unwrap();
-        assert_eq!(up[0].title, "Update to v0.9.200");
-        assert_eq!(up[0].expire_ms, Some(0));
-        assert_eq!(show_args(&s(&["update"])).unwrap()[0].title, "Update available");
+        // "update" is the action card (notices::update_note), not a Notice.
+        assert!(show_args(&s(&["update"])).is_err());
         assert!(show_args(&s(&["nope"])).is_err());
     }
 
