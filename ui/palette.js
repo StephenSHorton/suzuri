@@ -101,6 +101,10 @@ export class Palette {
   choose(it) {
     if (!this.shown) return
     this.close()
-    if (it) this.run(it)
+    // The palette is a modal <dialog>: until React removes it everything
+    // else is inert (a focus() there does nothing), and the removal hands
+    // focus back to the terminal. Run after both, so a command that takes
+    // the focus (rename pane or tab) keeps it.
+    if (it) requestAnimationFrame(() => setTimeout(() => this.run(it)))
   }
 }
