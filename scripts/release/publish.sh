@@ -116,6 +116,13 @@ if [[ $MAC_ONLY == 0 ]]; then
   if [[ -f "$ROOT/dist/win/$WIN_EXE" ]]; then
     cp "$ROOT/dist/win/$WIN_EXE" "$DIST/"
   else
+    # The PC may still be building: wait for its upload (RSZ_WIN_WAIT_MIN,
+    # default 60) so both machines can build at once.
+    for ((i = 0; i < ${RSZ_WIN_WAIT_MIN:-60} * 2; i++)); do
+      gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name' 2>/dev/null | grep -qx "$WIN_EXE" && break
+      ((i == 0)) && echo "==> waiting for $WIN_EXE on the $TAG draft (from the PC)"
+      sleep 30
+    done
     gh release download "$TAG" -R "$REPO" -p "$WIN_EXE" -D "$DIST" --clobber
   fi
   WIN_SIG="$(sign_update "$DIST/$WIN_EXE")"
