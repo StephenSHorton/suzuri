@@ -526,7 +526,11 @@ class PaneView {
 
   label() { return this.titleOverride || this.title }
   showTitle() {
-    this.head.querySelector(".t").textContent = this.label() || "shell"
+    // Not while the head's rename box is open: replacing the text deletes
+    // the box mid-word and the keys go back to the program (Claude Code
+    // retitles every few hundred ms). The rename puts the label back.
+    const el = this.head.querySelector(".t")
+    if (!el.querySelector("input.rename")) el.textContent = this.label() || "shell"
     if (this.tab.focused === this) renderStrip()
   }
 
@@ -1256,7 +1260,9 @@ document.addEventListener("mousedown", (e) => {
   if (overlayOpen() || e.target.closest?.("input.rename")) return
   setTimeout(() => panelOpen() || focusInput(), 0)
 })
-window.addEventListener("focus", () => { if (!overlayOpen() && !panelOpen()) focusInput() })
+// Coming back to the window keeps a rename box (pane or tab) that had the keys.
+const renaming = () => !!document.activeElement?.closest?.("input.rename, .rsz-tab-rename")
+window.addEventListener("focus", () => { if (!overlayOpen() && !panelOpen() && !renaming()) focusInput() })
 window.addEventListener("rsz-panel-closed", () => focusInput())
 
 // For #286's AI control (ui/aicontrol.js): the active tab's tree, every

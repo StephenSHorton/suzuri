@@ -33,7 +33,8 @@ export async function layout() {
 function setTitle(p) {
   const t = p.titleOverride || p.title || "shell"
   const el = p.head?.querySelector(".t")
-  if (el) el.textContent = t
+  // An open rename box stays (ui/app.js showTitle); its finish shows the label.
+  if (el && !el.querySelector("input.rename")) el.textContent = t
 }
 
 const tools = {
