@@ -23,7 +23,15 @@ export function encodeKey(e, modes, isMac) {
     if (chord !== null) return chord
   }
   // macOS: Cmd combos belong to the app; Option is Meta (ESC prefix).
-  if (isMac && e.metaKey) return null
+  // Except Cmd+Left / Cmd+Right, the line ends as in Terminal, iTerm and
+  // Ghostty: Ctrl+A / Ctrl+E (readline's, which every shell has bound).
+  if (isMac && e.metaKey) {
+    if (!e.ctrlKey && !e.altKey && !e.shiftKey) {
+      if (e.key === "ArrowLeft") return "\x01"
+      if (e.key === "ArrowRight") return "\x05"
+    }
+    return null
+  }
   const k = e.key
   if (k in CURSOR) {
     if (m) return `${CSI}1;${m}${CURSOR[k]}`

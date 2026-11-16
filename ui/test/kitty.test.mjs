@@ -36,3 +36,25 @@ test("alt-screen chords", () => {
   assert.equal(encodeKey(key({ key: "z", code: "KeyZ", metaKey: true }), ALT, mac), "\x1a")
   assert.equal(encodeKey(key({ key: "a", code: "KeyA", ctrlKey: true }), ALT, mac), "\x01")
 })
+
+test("macOS Cmd+Left / Cmd+Right go to the line ends as Ctrl+A / Ctrl+E; Option and Windows keys unchanged", () => {
+  const mac = true
+  for (const modes of [0, ALT]) {
+    assert.equal(encodeKey(key({ key: "ArrowLeft", code: "ArrowLeft", metaKey: true }), modes, mac), "\x01")
+    assert.equal(encodeKey(key({ key: "ArrowRight", code: "ArrowRight", metaKey: true }), modes, mac), "\x05")
+  }
+  // Other Cmd arrows and Cmd+Shift/Ctrl/Option chords stay the app's.
+  assert.equal(encodeKey(key({ key: "ArrowUp", metaKey: true }), 0, mac), null)
+  assert.equal(encodeKey(key({ key: "ArrowLeft", metaKey: true, shiftKey: true }), 0, mac), null)
+  assert.equal(encodeKey(key({ key: "ArrowLeft", metaKey: true, altKey: true }), 0, mac), null)
+  assert.equal(encodeKey(key({ key: "ArrowLeft", metaKey: true, ctrlKey: true }), 0, mac), null)
+  // Option+Arrow (word jumps) is the xterm modified-cursor sequence, as before.
+  assert.equal(encodeKey(key({ key: "ArrowLeft", altKey: true }), 0, mac), "\x1b[1;3D")
+  assert.equal(encodeKey(key({ key: "ArrowRight", altKey: true }), 0, mac), "\x1b[1;3C")
+  // Plain arrows, and non-Mac (Windows/Linux) keys, are unchanged.
+  assert.equal(encodeKey(key({ key: "ArrowLeft" }), 0, mac), "\x1b[D")
+  assert.equal(encodeKey(key({ key: "ArrowLeft", ctrlKey: true }), 0, false), "\x1b[1;5D")
+  assert.equal(encodeKey(key({ key: "ArrowRight", ctrlKey: true }), 0, false), "\x1b[1;5C")
+  assert.equal(encodeKey(key({ key: "ArrowLeft", metaKey: true }), 0, false), "\x1b[1;9D")
+  assert.equal(encodeKey(key({ key: "Home" }), 0, false), "\x1b[H")
+})
