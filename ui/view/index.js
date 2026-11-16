@@ -389,7 +389,10 @@ export function mount(el, host, opts = {}) {
   // A key for this view: its textarea's keydown, or one the host hands over
   // (view.key) while the keyboard sits elsewhere.
   function keydown(e) {
-    if (!alive || e.isComposing) return
+    // Keys the IME took: WebKit (macOS) reports them as keydown with
+    // keyCode 229 and isComposing false (the composition events come
+    // first), so isComposing alone lets "nihon" through as plain keys.
+    if (!alive || e.isComposing || e.keyCode === 229) return
     if (host.keyFilter?.(e)) return
     const clip = clipShortcut(e, isMac, pane.hasSelection)
     if (clip) {
@@ -414,6 +417,10 @@ export function mount(el, host, opts = {}) {
   on(input, "input", (e) => {
     const v = input.value
     input.value = ""
+    // WebKit (macOS) commits an IME with a plain insertText and no
+    // compositionend (each key restarted the composition), which would leave
+    // the preedit on screen after its text went in.
+    if (!e.isComposing) endPreedit()
     if (v && !e.isComposing) text(v)
   })
   on(input, "compositionstart", () => {
@@ -425,10 +432,13 @@ export function mount(el, host, opts = {}) {
     preedit.textContent = e.data
     placeInput()
   })
-  on(input, "compositionend", () => {
+  function endPreedit() {
     preedit.hidden = true
     preedit.textContent = ""
     if (caret) preedit.remove() // one on the page at a time
+  }
+  on(input, "compositionend", () => {
+    endPreedit()
     const v = input.value
     input.value = ""
     if (v) text(v)

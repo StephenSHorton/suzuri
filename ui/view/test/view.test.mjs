@@ -359,6 +359,30 @@ test("IME: the preedit shows while composing, and the committed text is written 
   v.unmount()
 })
 
+test("IME on WebKit: keydown with keyCode 229 is the IME's, and a plain commit ends the preedit", () => {
+  const p = page()
+  const host = recordingHost()
+  const v = mount(p.el, host)
+  const ta = textarea(p.el)
+  const pre = viewBody(p.el).children.find((c) => c.classList.contains("preedit"))
+  // WebKit reports the keys the IME took as keydown 229, isComposing false.
+  ta.dispatch("compositionstart", { data: "" })
+  ta.dispatch("compositionupdate", { data: "にほn" })
+  ta.dispatch("keydown", key({ key: "n", code: "KeyN", keyCode: 229 }))
+  ta.dispatch("keydown", key({ key: "Enter", code: "Enter", keyCode: 229 }))
+  assert.deepEqual(host.of("write"), [])
+  // The commit is an insertText, not composing, with no compositionend.
+  ta.value = "日本"
+  ta.dispatch("input", { isComposing: false })
+  assert.equal(pre.hidden, true)
+  assert.equal(pre.textContent, "")
+  assert.deepEqual(host.of("write"), [["日本"]])
+  // A real Enter (keyCode 13) is still the terminal's.
+  ta.dispatch("keydown", key({ key: "Enter", code: "Enter", keyCode: 13 }))
+  assert.deepEqual(host.of("write").at(-1), ["\r"])
+  v.unmount()
+})
+
 test("textFilter takes committed text before host.write", () => {
   const p = page()
   const took = []

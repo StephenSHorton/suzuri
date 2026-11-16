@@ -785,7 +785,10 @@ async function split(dir, pane = focused, opts = {}) {
   if (tab === activeTab) setFocus(p)
   else tab.focused = tab.focused ?? p
   // Size from the laid-out element so the shell starts at its real size.
-  await new Promise((r) => requestAnimationFrame(r))
+  // A window covered by another app (or on another Space) gets no
+  // animation frames on macOS, so don't wait on one alone: the shell would
+  // not start until the window came into view (30-90 s of blank pane).
+  await new Promise((r) => { requestAnimationFrame(r); setTimeout(r, 100) })
   const { cw, ch } = cellMetrics()
   const cols = Math.max(2, Math.floor((p.body.clientWidth - 12) / cw) || 80)
   const rows = Math.max(1, Math.floor((p.body.clientHeight - 8) / ch) || 24)
@@ -1198,7 +1201,14 @@ window.addEventListener("rsz:config", (e) => { settingsCfg = e.detail })
 // ---- keys: each pane's view takes its keys, IME and pastes (ui/view),
 // after suzuri's own (pane_input.js: shortcuts, the input bar).
 document.addEventListener("keydown", (e) => {
-  if (window.rszTrace && e.target?.closest?.(".rsz-view")) log("key", e.key, e.code, e.metaKey, e.ctrlKey, e.altKey, e.isComposing)
+  if (window.rszTrace && e.target?.closest?.(".rsz-view")) log("key", e.key, e.code, e.metaKey, e.ctrlKey, e.altKey, e.isComposing, "keyCode", e.keyCode)
+}, true)
+// RSZ_TRACE=1 also logs IME composition events (where they fall among the keys).
+for (const t of ["compositionstart", "compositionupdate", "compositionend"]) {
+  document.addEventListener(t, (e) => { if (window.rszTrace) log(t, JSON.stringify(e.data)) }, true)
+}
+document.addEventListener("input", (e) => {
+  if (window.rszTrace && e.target?.closest?.(".rsz-view")) log("input", e.inputType, JSON.stringify(e.data), e.isComposing)
 }, true)
 
 // Ctrl+C with a selection: copy, and ^C to the pane focused by then when

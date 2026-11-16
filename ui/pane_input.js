@@ -61,7 +61,7 @@ export function keyFilter(pane, env) {
 //   shortcut(e, isMac), run(id, arg)}
 export function pageKeys(env) {
   return (e) => {
-    if (e.isComposing || !env.page.includes(e.target) || env.blocked()) return
+    if (e.isComposing || e.keyCode === 229 || !env.page.includes(e.target) || env.blocked()) return
     const pane = env.pane?.()
     if (pane) {
       pane.view.focus()
