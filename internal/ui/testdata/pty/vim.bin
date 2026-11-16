@@ -1,0 +1,79 @@
+[?1049h[>4;2m[?1h=[?2004h[?1004h[1;30r[?12h[?12l[22;2t[22;1t[27m[23m[29m[m[H[2J[?25l[30;1H"edit2.go" 227L, 5373B[2;1H▽[6n[2;1H  [3;1HPzz\[0%m[6n[3;1H           [1;1H[>c[1;1H//go:build windows || darwin[2;1H[K[3;1Hpackage ui[3;11H[K[5;1Himport ([6;9H"bytes"[8;9H"github.com/charmbracelet/log"
+)
+
+// How far ingestPTY got. Hosts use this to decide paint and bridge work
+// without reimplementing the byte pipeline.
+const ([14;9HptyNone = iota[15;9HptyQuiet[16;9HptyFrame
+)
+
+// ptyHooks carries the few host decisions the shared pipeline cannot see:
+// focus (the user is looking at this pane), cell metrics for inline images,
+// and fork/cwd side effects.
+type ptyHooks struct {[23;9H// Focused is true only when the window is focused and this pane is the[24;9H// active one. Command-finished cards and DEC 1004 use that, not the[25;9H// window bit alone.[26;9HFocused  bool[27;9HVisible  bool[28;9HCellW    int[29;9HCellH    int[1;1H[?25h[?4m[?25l[30;1H[K[30;1H:set number[1;1H[93m  1 [m//go:build windows || darwin
+[93m  2 
+  3 [mpackage ui
+[93m  4 
+  5 [mimport (
+[93m  6 [m        "bytes"
+[93m  7 
+  8 [m        "github.com/charmbracelet/log"
+[93m  9 [m)
+[93m 10 
+ 11 [m// How far ingestPTY got. Hosts use this to decide paint and bridge work
+[93m 12 [m// without reimplementing the byte pipeline.
+[93m 13 [mconst (
+[93m 14 [m        ptyNone = iota
+[93m 15 [m        ptyQuiet
+[93m 16 [m        ptyFrame
+[93m 17 [m)
+[93m 18 
+ 19 [m// ptyHooks carries the few host decisions the shared pipeline cannot see:
+[93m 20 [m// focus (the user is looking at this pane), cell metrics for inline images,
+[93m 21 [m// and fork/cwd side effects.
+[93m 22 [mtype ptyHooks struct {
+[93m 23 [m        // Focused is true only when the window is focused and this pane is the
+[93m 24 [m        // active one. Command-finished cards and DEC 1004 use that, not the
+[93m 25 [m        // window bit alone.
+[93m 26 [m        Focused  bool
+[93m 27 [m        Visible  bool
+[93m 28 [m        CellW    int
+[93m 29 [m        CellH    int[1;5H[?25h[?25l[1;29r[1;1H[11M[1;30r[19;1H[93m 30 [m[8CPaneCols int
+[93m 31 [m[8COnFork   func(forkPaneRequest)
+[93m 32 [m[8COnCwd    func(prev, next string)
+[93m 33 [m[8C// OnLeaveAlt runs while an alt-screen app is being torn down, after the
+[93m 34 [m[8C// VT modes are cleared and before the host reflows.
+[93m 35 [m[8COnLeaveAlt func()
+[93m 36 [m[8COnAlt      func()
+[93m 37 [m[8C// OnInputOwner runs when a foreground command takes or returns the
+[93m 38 [m[8C// keyboard (Warp bar hides or comes back). Hosts reflow the bar.
+[93m 39 [m[8COnInputOwner func()
+[93m 40 [m}[30;1H[K[29;5H[?25h[?25l
+[1m-- INSERT --[m[30;1H[K[1;29r[29;1H
+[1;30r[29;1H[93m 41 [mjust typed in vim[?25h[?25l
+/ingestPTY[1;29r[1;1H[12M[1;30r[18;1H[93m 42 
+ 43 [m// ptyResult is what the host still has to do after the shared pipeline.
+[93m 44 [mtype ptyResult struct {
+[93m 45 [m[8CAction[7Cint
+[93m 46 [m[8CDirty[8Cbool
+[93m 47 [m[8CMore[9Cbool
+[93m 48 [m[8CTitleChanged bool
+[93m 49 [m[8CBusyChanged  bool
+[93m 50 [m[8CTitle[8Cstring
+[93m 51 [m}
+[93m 52 
+ 53 [m// ingestPTY is the single PTY→[29;36HVT path for both hosts. It owns protocol[30;1H[K[29;8H[?25h[?25l[1;29r[1;1H[14M[1;30r[16;1H[93m 54 [m// filtering, cwd and fork OSC, inline images, Kitty graphics, and the grid
+[93m 55 [m// update. Window title, resize, and paint stay with the host.
+[93m 56 [mfunc (t *tab) ingestPTY(data []byte, h ptyHooks) ptyResult {
+[93m 57 [m[8Cvar res ptyResult
+[93m 58 [m[8Cif t == nil || t.term == nil || len(data) == 0 {
+[93m 59 [m[16Creturn res
+[93m 60 [m[8C}
+[93m 61 [m[8CwasOwner := t.programOwnsKeys()
+[93m 62 [m[8Cdefer func() {
+[93m 63 [m[16Ct.logOwnerFlip(wasOwner, "pty")
+[93m 64 [m[16Cif wasOwner != t.programOwnsKeys() && h.OnInputOwner != nil {
+[93m 65 [m[24Ch.OnInputOwner()
+[93m 66 [m[16C}
+[93m 67 [m[8C}()[?25h[?25l
+:vsplit[1;2H[93m47[m[9CMore         bool  [19C[7m|[m[2;3H[93m8[m[1C [7CTitleChanged bool[21C[7m|[m[3;3H[93m9[m[1C        BusyChanged  bool[21C[7m|[m[4;2H[93m50[m[9CTitle[8Cstring[19C[7m|[m[5;2H[93m51[m[1C}                                             [7m|[m[6;2H[93m52[m[1C                       [23C[7m|[m[7;2H[93m53[m[1C// ingestPTY is the single PTY→[7;36HVT path for bot[7m|[m[8;2H[93m  [m[1Ch hosts. It owns protoc[23C[7m|[m[9;2H[93m54[m[1C// filtering, cwd and fork OSC, inline images,[7m|[m[10;2H[93m  [m[2CKitty graphics, and the grid[17C[7m|[m[11;2H[93m55[m[1C// update. Window title, resize, and paint sta[7m|[m[12;2H[93m  [m[1Cy with the host.           [19C[7m|[m[13;3H[93m6[m[1Cfunc (t *tab) ingestPTY(data []byte, h ptyHook[7m|[m[14;2H[93m  [m[1Cs) ptyResult {[32C[7m|[m[15;3H[93m7[m[1C        var res ptyResult                     [7m|[m[16;3H[93m8[m[1C        if t == nil || t.term == nil || len(da[7m|[m[17;2H[93m  [m[1Cta) == 0 {                                    [7m|[m[18;3H[93m9[m[1C                return res                    [7m|[m[19;2H[93m60[m[9C}                [21C[7m|[m[20;2H[93m61[m[9CwasOwner := t.programOwnsKeys()       [7m|[m[21;2H[93m62[m[9Cdefer func() {    [20C[7m|[m[22;3H[93m3[m[9C [7Ct.logOwnerFlip(wasOwner, "pty"[7m|[m[23;2H[93m  [m[1C)[7C                               [7C[7m|[m[24;3H[93m4[m[9C        if wasOwner != t.programOwnsKe[7m|[m[25;2H[93m  [m[1Cys() && h.OnInputOwner != nil {               [7m|[m[26;3H[93m5[m[17C        h.OnInputOwner()      [7m|[m[27;3H[93m6[m[17C}[7C                      [7m|[m[28;3H[93m7[m[9C}()      [29C[7m|[m
+[1m[7medit2.go [+]                                       [m[1;52H[93m 47 [m[8CMore[9Cbool[2;52H[93m 48 [m[8CTitleChanged bool[3;52H[93m 49 [m[8CBusyChanged  bool[4;52H[93m 50 [m[8CTitle[8Cstring[5;52H[93m 51 [m}[5;57H[K[6;52H[93m 52 [7;52H 53 [m// ingestPTY is the single PTY→[7;87HVT path for bo[8;52H[93m    [mth hosts. It owns protocol[9;52H[93m 54 [m// filtering, cwd and fork OSC, inline images[10;52H[93m    [m, Kitty graphics, and the grid[11;52H[93m 55 [m// update. Window title, resize, and paint st[12;52H[93m    [may with the host.[13;52H[93m 56 [mfunc (t *tab) ingestPTY(data []byte, h ptyHoo[14;52H[93m    [mks) ptyResult {[15;52H[93m 57 [m        var res ptyResult[16;52H[93m 58 [m        if t == nil || t.term == nil || len(d[17;52H[93m    [mata) == 0 {[18;52H[93m 59 [m         [7Creturn res[19;52H[93m 60 [m[8C}[20;52H[93m 61 [m        wasOwner := t.programOwnsKeys()[21;52H[93m 62 [m[8Cdefer func() {[22;52H[93m 63 [m[16Ct.logOwnerFlip(wasOwner, "pty[23;52H[93m    [m")[24;52H[93m 64 [m[16Cif wasOwner != t.programOwnsK[25;52H[93m    [meys() && h.OnInputOwner != nil {[26;52H[93m 65 [m                        h.OnInputOwner()[27;52H[93m 66 [m[16C}[28;52H[93m 67 [m[8C}()[29;52H[7medit2.go [+]                                     [28;13H[?25h

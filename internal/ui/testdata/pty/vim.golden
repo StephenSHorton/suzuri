@@ -1,0 +1,32 @@
+== screen 100x30 cursor 12,27 alt=true ==
+ 47         More         bool                     | 47         More         bool
+ 48         TitleChanged bool                     | 48         TitleChanged bool
+ 49         BusyChanged  bool                     | 49         BusyChanged  bool
+ 50         Title        string                   | 50         Title        string
+ 51 }                                             | 51 }
+ 52                                               | 52
+ 53 // ingestPTY is the single PTY→VT path for bot| 53 // ingestPTY is the single PTY→VT path for bo
+    h hosts. It owns protocol                     |    th hosts. It owns protocol
+ 54 // filtering, cwd and fork OSC, inline images,| 54 // filtering, cwd and fork OSC, inline images
+     Kitty graphics, and the grid                 |    , Kitty graphics, and the grid
+ 55 // update. Window title, resize, and paint sta| 55 // update. Window title, resize, and paint st
+    y with the host.                              |    ay with the host.
+ 56 func (t *tab) ingestPTY(data []byte, h ptyHook| 56 func (t *tab) ingestPTY(data []byte, h ptyHoo
+    s) ptyResult {                                |    ks) ptyResult {
+ 57         var res ptyResult                     | 57         var res ptyResult
+ 58         if t == nil || t.term == nil || len(da| 58         if t == nil || t.term == nil || len(d
+    ta) == 0 {                                    |    ata) == 0 {
+ 59                 return res                    | 59                 return res
+ 60         }                                     | 60         }
+ 61         wasOwner := t.programOwnsKeys()       | 61         wasOwner := t.programOwnsKeys()
+ 62         defer func() {                        | 62         defer func() {
+ 63                 t.logOwnerFlip(wasOwner, "pty"| 63                 t.logOwnerFlip(wasOwner, "pty
+    )                                             |    ")
+ 64                 if wasOwner != t.programOwnsKe| 64                 if wasOwner != t.programOwnsK
+    ys() && h.OnInputOwner != nil {               |    eys() && h.OnInputOwner != nil {
+ 65                         h.OnInputOwner()      | 65                         h.OnInputOwner()
+ 66                 }                             | 66                 }
+ 67         }()                                   | 67         }()
+edit2.go [+]                                       edit2.go [+]
+:vsplit
+== scrollback 0 ==

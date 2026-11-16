@@ -1,0 +1,1 @@
+{"name":"claude-wipe-synth","command":"synthetic: claudeInlineFrame + claudeResizeWipe (pty_ingest_test.go)","cols":107,"rows":32,"chunks":[1697,21,1373,21,989],"resizes":[{"chunk":1,"offset":1697,"cols":53,"rows":32},{"chunk":3,"offset":3091,"cols":53,"rows":20}]}
