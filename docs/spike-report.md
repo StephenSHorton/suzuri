@@ -179,6 +179,10 @@ stays put if that changes. Switch to libghostty-vt when Kitty graphics or
 its reflow matter more than keeping Zig out of the build. Don't build vte
 plus an own grid.
 
+Later: card #290 made that switch in v0.10.0. libghostty-vt, built from a
+pinned ghostty commit by `crates/term/build.rs`, is now the only engine,
+and alacritty_terminal is gone (README, Build).
+
 ### Rendering: webview canvas (built) vs a native wgpu surface (not built)
 
 The webview path is built and measured. On macOS it beats Go suzuri on
