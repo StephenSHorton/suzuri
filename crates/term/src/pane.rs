@@ -1380,6 +1380,8 @@ mod tests {
         (lines, seen)
     }
 
+    // One test, three panes in a row: opening many ptys at once makes
+    // openpty fail on macOS, so this adds one pane at a time, not three.
     #[test]
     fn kitty_image_moves_the_cursor_past_it() {
         // 3 x 2 cells at row 3, col 5 (1-based): the cursor lands on the
@@ -1389,17 +1391,11 @@ mod tests {
         assert_eq!(lines[3].find('X'), Some(7), "{lines:?}");
         assert!(!lines[2].contains('X'), "{lines:?}");
         assert!(seen.iter().any(|m| m == "placed [(1, 2, 4, 3, 2)]"), "{seen:?}");
-    }
 
-    #[test]
-    fn kitty_c1_leaves_the_cursor() {
         // C=1: X is written on the image's top-left cell, as before.
         let (lines, _) = kitty_then_x("\\033[3;5H", "c=3,r=2,C=1");
         assert_eq!(lines[2].find('X'), Some(4), "{lines:?}");
-    }
 
-    #[test]
-    fn kitty_cursor_move_scrolls_at_the_bottom() {
         // The pane is 10 rows. An image 4 rows tall from row 9 runs off the
         // bottom: the screen scrolls two rows, the cursor ends on the last
         // row, and the image moves up with its text.

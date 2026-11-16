@@ -30,17 +30,26 @@ fn openpty(size: PtySize) -> anyhow::Result<(UnixMasterPty, UnixSlavePty)> {
         ws_ypixel: size.pixel_height,
     };
 
-    let result = unsafe {
-        // BSDish systems may require mut pointers to some args
-        #[allow(clippy::unnecessary_mut_passed)]
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            &mut size,
-        )
-    };
+    // macOS's openpty fails now and then (errno -6, not a real errno) when
+    // several are opened at once; a second try works.
+    let mut result = -1;
+    for attempt in 0..8 {
+        result = unsafe {
+            // BSDish systems may require mut pointers to some args
+            #[allow(clippy::unnecessary_mut_passed)]
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut size,
+            )
+        };
+        if result == 0 || attempt == 7 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 
     if result != 0 {
         bail!("failed to openpty: {:?}", io::Error::last_os_error());
