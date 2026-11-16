@@ -947,18 +947,30 @@ impl Feeder<'_> {
         self.shared.kick(|w| w.dirty = true);
     }
 
-    // Go places Kitty images at the cursor and leaves the cursor alone.
+    // Kitty places an image at the cursor, then moves the cursor to the
+    // right of it on its last row, unless C=1. The move only travels (LF and
+    // a column move write no cell), so the mark cell stays as it is.
     fn place(&mut self, kid: u32, place: KittyPlace) {
         self.settle();
         let alt = self.eng.alt_screen();
         let cell = self.eng.cursor();
-        let mut im = self.shared.images.lock();
-        let mark = (!alt).then(|| {
-            let tag = im.tag();
-            self.eng.mark_cursor(tag);
-            tag
-        });
-        im.kitty_place(kid, place, mark, cell);
+        {
+            let mut im = self.shared.images.lock();
+            let mark = (!alt).then(|| {
+                let tag = im.tag();
+                self.eng.mark_cursor(tag);
+                tag
+            });
+            im.kitty_place(kid, place, mark, cell);
+        }
+        if !place.keep_cursor {
+            let (cols, _) = self.eng.size();
+            let col = (cell.0 as u32 + place.cols).min(cols.saturating_sub(1) as u32);
+            // LF scrolls at the bottom row, taking the image with the text.
+            let mut mv = b"\n".repeat(place.rows.saturating_sub(1).min(u16::MAX as u32) as usize);
+            mv.extend_from_slice(format!("\x1b[{}G", col + 1).as_bytes());
+            self.eng.feed(&mv, self.events);
+        }
     }
 
     fn send(&mut self, ch: Changes) {
@@ -1352,6 +1364,48 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(&lines[..5], &["hi", "img cat.png", "", "", "after"], "{text}");
         pane.join();
+    }
+
+    /// Run a shell script that prints a Kitty image then `X`, and give the
+    /// screen's lines and what the pane placed.
+    fn kitty_then_x(at: &str, keys: &str) -> (Vec<String>, Vec<String>) {
+        let script = format!(
+            "printf '{at}\\033_Ga=T,i=1,f=100,t=d,{keys};{}\\033\\\\X'; sleep 1",
+            png_b64(30, 20)
+        );
+        let (pane, rx) = run(&["/bin/sh", "-c", &script]);
+        let seen = wait_exit(&rx);
+        let lines = pane.screen_text().lines().map(str::to_string).collect();
+        pane.join();
+        (lines, seen)
+    }
+
+    #[test]
+    fn kitty_image_moves_the_cursor_past_it() {
+        // 3 x 2 cells at row 3, col 5 (1-based): the cursor lands on the
+        // image's last row, just right of it, so X is at row 4, col 8 (0-based
+        // row 3, col 7) and the image is still shown, anchored at row 2 col 4.
+        let (lines, seen) = kitty_then_x("\\033[3;5H", "c=3,r=2");
+        assert_eq!(lines[3].find('X'), Some(7), "{lines:?}");
+        assert!(!lines[2].contains('X'), "{lines:?}");
+        assert!(seen.iter().any(|m| m == "placed [(1, 2, 4, 3, 2)]"), "{seen:?}");
+    }
+
+    #[test]
+    fn kitty_c1_leaves_the_cursor() {
+        // C=1: X is written on the image's top-left cell, as before.
+        let (lines, _) = kitty_then_x("\\033[3;5H", "c=3,r=2,C=1");
+        assert_eq!(lines[2].find('X'), Some(4), "{lines:?}");
+    }
+
+    #[test]
+    fn kitty_cursor_move_scrolls_at_the_bottom() {
+        // The pane is 10 rows. An image 4 rows tall from row 9 runs off the
+        // bottom: the screen scrolls two rows, the cursor ends on the last
+        // row, and the image moves up with its text.
+        let (lines, seen) = kitty_then_x("\\033[9;1H", "c=2,r=4");
+        assert_eq!(lines[9].find('X'), Some(2), "{lines:?}");
+        assert!(seen.iter().any(|m| m == "placed [(1, 6, 0, 2, 4)]"), "{seen:?}");
     }
 
     /// S-2: dropping the last handle closes the shell (and doesn't hang).

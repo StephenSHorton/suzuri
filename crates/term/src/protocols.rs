@@ -72,6 +72,9 @@ pub struct KittyPlace {
     pub y: u32,
     pub w: u32,
     pub h: u32,
+    /// C=1: leave the cursor where it was. Otherwise it moves to the right
+    /// of the image on its last row.
+    pub keep_cursor: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +132,7 @@ struct KittyMeta {
     rows: u32,
     z: i32,
     place: bool,
+    keep_cursor: bool,
 }
 
 enum Seq {
@@ -385,6 +389,7 @@ impl Protocols {
                     rows: num("r", 0).max(0) as u32,
                     z: num("z", 1) as i32,
                     place: action == "T",
+                    keep_cursor: get("C") == Some("1"),
                 };
                 if payload.len() > MAX_HELD {
                     return;
@@ -405,6 +410,7 @@ impl Protocols {
                     y: num("y", 0).max(0) as u32,
                     w: num("w", 0).max(0) as u32,
                     h: num("h", 0).max(0) as u32,
+                    keep_cursor: get("C") == Some("1"),
                 };
                 sink.event(ProtoEvent::Kitty(Kitty::Place { id, place }));
             }
@@ -426,6 +432,7 @@ fn finish_kitty(id: u32, b64: &[u8], meta: KittyMeta, sink: &mut impl ProtoSink)
         cols: if meta.cols < 1 { 10 } else { meta.cols },
         rows: if meta.rows < 1 { 5 } else { meta.rows },
         z: meta.z,
+        keep_cursor: meta.keep_cursor,
         ..Default::default()
     });
     sink.event(ProtoEvent::Kitty(Kitty::Image {
