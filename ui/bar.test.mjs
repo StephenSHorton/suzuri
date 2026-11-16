@@ -158,3 +158,17 @@ test("displayPath shortens home", () => {
   assert.equal(displayPath("/Users/stephen", "/Users/s"), "/Users/stephen")
   assert.equal(displayPath("C:\\Users\\s\\x", "C:\\Users\\s"), "~\\x")
 })
+
+test("macOS Cmd+Left/Right move to the line's start and end; Option+Left/Right jump words", () => {
+  const b = bar("git commit -m", 7)
+  key(b, "ArrowLeft", { metaKey: true })
+  assert.equal(b.cursor, 0)
+  key(b, "ArrowRight", { metaKey: true })
+  assert.equal(b.cursor, 13)
+  key(b, "ArrowLeft", { altKey: true })
+  assert.equal(b.cursor, 11)
+  key(b, "ArrowLeft", { altKey: true })
+  assert.equal(b.cursor, 4)
+  key(b, "ArrowRight", { altKey: true })
+  assert.equal(b.cursor, 11)
+})
