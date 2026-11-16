@@ -392,6 +392,10 @@ export function mount(el, host, opts = {}) {
     // Keys the IME took: WebKit (macOS) reports them as keydown with
     // keyCode 229 and isComposing false (the composition events come
     // first), so isComposing alone lets "nihon" through as plain keys.
+    // The same holds when a composition ends: WebKit ends a composition (Return
+    // committing it) with compositionend first, then a keydown that is no
+    // longer isComposing but still has keyCode 229: left to the bar or the
+    // encoder, that Return would send the line it just committed.
     if (!alive || e.isComposing || e.keyCode === 229) return
     if (host.keyFilter?.(e)) return
     const clip = clipShortcut(e, isMac, pane.hasSelection)

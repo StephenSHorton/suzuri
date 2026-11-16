@@ -327,6 +327,11 @@ test("keys become the bytes the shell expects, on host.write", () => {
   ta.dispatch("keydown", key({ key: "Shift", code: "ShiftLeft", shiftKey: true }))
   ta.dispatch("keydown", key({ key: "a", code: "KeyA", isComposing: true }))
   assert.equal(host.of("write").length, n)
+  // WebKit's Return that commits a composition arrives after compositionend,
+  // no longer isComposing, with keyCode 229: it is the IME's, not a CR.
+  const f = ta.dispatch("keydown", key({ key: "Enter", code: "Enter", keyCode: 229 }))
+  assert.equal(host.of("write").length, n)
+  assert.equal(f.defaultPrevented, false)
   // The app's cursor-key mode follows the last frame.
   v.feed(withModes(M_APP_CURSOR))
   p.tick()
