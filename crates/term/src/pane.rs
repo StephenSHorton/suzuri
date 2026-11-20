@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use parking_lot::{Condvar, Mutex};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -226,6 +226,31 @@ struct Shared {
     /// Held while a shell status is made and sent, so the UI gets them in
     /// the order they happened.
     status_order: Mutex<()>,
+    /// Keys typed right after a bar line, held back from PSReadLine.
+    hold: Mutex<Hold>,
+}
+
+/// PSReadLine reads every key waiting in the console input buffer at once
+/// (a paste comes in one go) and keeps those after the Enter for its next
+/// line, so keys typed right after a bar line never reach the command it
+/// starts (cmd, Read-Host): PowerShell runs them itself at the next prompt.
+/// After a bar line, the pane holds the keys typed next until PSReadLine has
+/// taken the line (its echo is done), a prompt comes, or HOLD_MAX passes.
+#[derive(Default)]
+struct Hold {
+    until: Option<Instant>,
+    keys: Vec<u8>,
+}
+
+/// The longest keys wait for PowerShell to take a bar line.
+const HOLD_MAX: Duration = Duration::from_millis(500);
+
+/// Let the held keys go to the PTY, ahead of any typed after them.
+fn release_hold(shared: &Shared, tx: &Sender<Cmd>) {
+    let mut h = shared.hold.lock();
+    if h.until.take().is_some() && !h.keys.is_empty() {
+        let _ = tx.send(Cmd::Write(std::mem::take(&mut h.keys)));
+    }
 }
 
 impl Shared {
@@ -249,6 +274,8 @@ pub struct Pane {
     /// Bar lines waiting for the shell to be idle: (display, payload).
     queue: Mutex<std::collections::VecDeque<(String, String)>>,
     keep_prompt: bool,
+    /// PowerShell: PSReadLine reads ahead of a bar line's Enter (see Hold).
+    reads_ahead: bool,
     sink: Sink,
 }
 
@@ -335,6 +362,10 @@ impl Pane {
         let pair = native_pty_system().openpty(size).map_err(|e| io(e.into()))?;
         let mut argv = cfg.command.clone().unwrap_or_else(default_shell);
         let shell_prog = argv.first().cloned().unwrap_or_default();
+        let reads_ahead = {
+            let base = std::path::Path::new(&shell_prog).file_name().map(|b| b.to_string_lossy().to_lowercase()).unwrap_or_default();
+            matches!(base.strip_suffix(".exe").unwrap_or(&base), "pwsh" | "powershell")
+        };
         // The input bar's shell hooks, for the user's own shell only.
         let mut boot_env = Vec::new();
         let mut temp_dir = None;
@@ -405,6 +436,7 @@ impl Pane {
             echo: Mutex::new(EchoFilter::default()),
             last_io: Mutex::new(Instant::now()),
             status_order: Mutex::new(()),
+            hold: Mutex::new(Hold::default()),
         });
         let (tx, rx) = unbounded::<Cmd>();
         let mut threads = Vec::new();
@@ -449,7 +481,7 @@ impl Pane {
             let sink = sink.clone();
             threads.push(thread("rsz-actor", move || actor_loop(rx, pair.master, writer, killer, shared, sink, (cfg.cols, cfg.rows))));
         }
-        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt, sink })
+        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt, reads_ahead, sink })
     }
 
     /// Enter in the input bar (#296, Go suzuri's submitBarLine): the bare-cd
@@ -608,12 +640,29 @@ impl Pane {
         self.shared.echo.lock().arm(payload);
         let mut line = payload.replace("\r\n", "\n").replace('\n', "\r").into_bytes();
         line.push(b'\r');
-        self.write(line);
+        self.typing(&line);
+        let mut h = self.shared.hold.lock();
+        if !h.keys.is_empty() {
+            let _ = self.tx.send(Cmd::Write(std::mem::take(&mut h.keys)));
+        }
+        let _ = self.tx.send(Cmd::Write(line));
+        h.until = self.reads_ahead.then(|| Instant::now() + HOLD_MAX);
     }
 
     /// Input from the user: snaps the view back to the bottom. Before the
     /// first prompt it ends the wait (the keys go to the PTY from now on).
     pub fn write(&self, bytes: Vec<u8>) {
+        self.typing(&bytes);
+        let mut h = self.shared.hold.lock();
+        if h.until.is_some() {
+            h.keys.extend_from_slice(&bytes);
+            return;
+        }
+        let _ = self.tx.send(Cmd::Write(bytes));
+    }
+
+    /// What typing does besides reaching the PTY.
+    fn typing(&self, bytes: &[u8]) {
         let pending = {
             let mut sh = self.shared.shell.lock();
             if sh.hooked && !sh.integrated {
@@ -626,7 +675,6 @@ impl Pane {
         }
         self.shared.engine.lock().scroll(i32::MIN);
         self.shared.kick(|w| w.input_at = Some(Instant::now()));
-        let _ = self.tx.send(Cmd::Write(bytes));
     }
 
     /// Latest-wins: only the newest size reaches the PTY.
@@ -821,6 +869,10 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
                 let raw = std::mem::take(&mut clean);
                 echo.feed(&raw, &mut clean);
             }
+            // The echo is done: PSReadLine has taken the line.
+            if !echo.armed() {
+                release_hold(&shared, &tx);
+            }
         }
         // Then #288's protocols (notices, images) on what is left, ahead of
         // the engine.
@@ -867,6 +919,7 @@ fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink, tx: &S
                     sh.foreign = false;
                     sh.prompts += 1;
                     sh.cwd = cwd;
+                    release_hold(shared, tx);
                 }
                 ShellEvent::Foreign(running) => sh.foreign = running,
                 ShellEvent::Typeahead(raw) => {
@@ -1264,7 +1317,31 @@ fn actor_loop(
 
     let set_state = |s: State| *shared.state.lock() = s;
 
-    while let Ok(cmd) = rx.recv() {
+    loop {
+        let until = shared.hold.lock().until;
+        let cmd = match until {
+            None => match rx.recv() {
+                Ok(c) => c,
+                Err(_) => break,
+            },
+            Some(t) => match rx.recv_timeout(t.saturating_duration_since(Instant::now())) {
+                Ok(c) => c,
+                Err(RecvTimeoutError::Timeout) => {
+                    // PowerShell never showed taking the line: the keys go.
+                    let mut h = shared.hold.lock();
+                    if !h.until.is_some_and(|u| u <= Instant::now()) {
+                        continue;
+                    }
+                    h.until = None;
+                    let keys = std::mem::take(&mut h.keys);
+                    if keys.is_empty() {
+                        continue;
+                    }
+                    Cmd::Write(keys)
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+        };
         let state = *shared.state.lock();
         match cmd {
             Cmd::Write(bytes) => {
@@ -2265,17 +2342,21 @@ mod windows_tests {
         assert!(!has_line("42"), "{exe}: the typed-ahead line ran: {screen}");
         assert!(!screen.contains("7878") && !screen.contains("typeahead"), "{exe}: marks leaked: {screen}");
         // Programs that read the keyboard get every key: cmd (a REPL in its
-        // own process) and Read-Host (PowerShell's own).
+        // own process) and Read-Host (PowerShell's own), even keys typed at
+        // once after the bar's Enter, which PSReadLine would read ahead and
+        // keep for itself (the pane holds them until it has taken the line).
         wait_until("idle", || !pane.is_busy());
         assert_eq!(pane.submit("cmd.exe /d"), Submit::Sent);
-        wait_until("cmd's banner", || pane.screen_text().contains("Microsoft Corporation"));
-        std::thread::sleep(Duration::from_millis(300));
         pane.write(b"echo got-cmd\rexit\r".to_vec());
         next_prompt("the prompt after cmd");
         wait_until("cmd got the keys", || has_line("got-cmd"));
+        let screen = pane.screen_text();
+        eprintln!("{exe} cmd:\n{screen}");
+        // cmd's own prompt read both lines (not PowerShell, later).
+        assert!(lines_of(&screen).iter().any(|l| l.ends_with(">echo got-cmd")), "{exe}: cmd never read the line: {screen}");
+        assert!(lines_of(&screen).iter().any(|l| l.ends_with(">exit")), "{exe}: cmd never read exit: {screen}");
         wait_until("idle", || !pane.is_busy());
         assert_eq!(pane.submit("Read-Host | % { \"got-$_\" }"), Submit::Sent);
-        std::thread::sleep(Duration::from_millis(800));
         pane.write(b"abc\r".to_vec());
         next_prompt("the prompt after Read-Host");
         wait_until("Read-Host got the keys", || has_line("got-abc"));
