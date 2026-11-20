@@ -6,7 +6,7 @@
 // input bar, settings, HUD and the paint worker.
 import { Screen, cellMetrics, fontSpec, onStyle, styleState, M_ALT_SCREEN } from "./frame.js"
 import { mount } from "./view/index.js"
-import { keyFilter, pageKeys, textFilter, pasteFilter, pasteText, writeFrom, writeAfterPaste, pasteInOrder } from "./pane_input.js"
+import { keyFilter, pageKeys, textFilter, pasteFilter, pasteText, writeFrom, writeAfterPaste, pasteInOrder, barOn, gaveUp, releaseHeld, awaitingAfterFlush, takeTypeahead } from "./pane_input.js"
 import { clipboardImage, saveClipboardImage } from "./paste_image.js"
 import { isOpen as panelOpen } from "./panel.js"
 import "./aicontrol.js"
@@ -69,7 +69,9 @@ const early = new Map() // frames that beat pane_open's reply, by pane id
 const focusReports = new FocusReports({
   panes: () => everyPane(),
   focused: () => focused,
-  write: (p, data) => invoke("pane_write", { id: p.id, data }),
+  // An answer, not typing: pane_reply keeps a shell's wait for its first
+  // prompt going (ConPTY turns 1004 on at start).
+  write: (p, data) => invoke("pane_reply", { id: p.id, data }),
   windowFocused: document.hasFocus(),
 })
 focusReports.listen(window)
@@ -249,7 +251,7 @@ class PaneView {
       onLoad: () => this.renderBar(),
     })
     // The shell as the pane reports it; see ShellStatus in crates/term.
-    this.shell = { integrated: false, cwd: "", program: false, prompts: 0 }
+    this.shell = { integrated: false, cwd: "", program: false, prompts: 0, pending: false }
     // Set on Enter until the next prompt: the command owns the keys from
     // the moment it is sent, before the shell's start mark arrives.
     this.awaiting = -1
@@ -309,7 +311,10 @@ class PaneView {
     const ch = new Channel()
     ch.onmessage = (m) => this.onChannel(m)
     this.size = [cols, rows]
-    this.id = await invoke("pane_open", { cols, rows, command: null, from, profile, onFrame: ch })
+    // An Enter in the bar can come before pane_open answers (the shell's
+    // first status may beat it): submit waits for this.
+    this.opened = invoke("pane_open", { cols, rows, command: null, from, profile, onFrame: ch })
+    this.id = await this.opened
     byId.set(this.id, this)
     if (worker) {
       const off = this.canvas.transferControlToOffscreen()
@@ -356,20 +361,26 @@ class PaneView {
     } else if (msg.t === "clip") {
       navigator.clipboard?.writeText(msg.text).catch(() => {})
     } else if (msg.t === "shell") {
+      const gave = gaveUp(this.shell, msg)
       this.shell = msg
       if (this.awaiting >= 0 && msg.prompts > this.awaiting) this.awaiting = -1
+      // No first prompt after all: the bar's text goes to the PTY.
+      if (gave) releaseHeld(this)
       this.renderBar()
+    } else if (msg.t === "typeahead") {
+      takeTypeahead(this, msg.text)
     } else if (msg.t === "progress") {
       this.el.dataset.progress = msg.state ? String(msg.state) : ""
       this.el.style.setProperty("--progress", `${msg.percent}%`)
     }
   }
 
-  // The bar has the keys: a shell with the hooks, at its prompt, on the
-  // main screen. A full-screen app, a running command (Claude Code, ssh, a
-  // build) or a shell without hooks gets the keys directly.
+  // The bar has the keys: a shell with the hooks, at its prompt or on its
+  // way to the first one, on the main screen. A full-screen app, a running
+  // command (Claude Code, ssh, a build) or a shell without hooks gets the
+  // keys directly (pane_input.js barOn).
   barActive() {
-    return this.shell.integrated && !this.shell.program && this.awaiting < 0 && !(this.modes & M_ALT_SCREEN) && !this.exited
+    return barOn(this.shell, { awaiting: this.awaiting, alt: !!(this.modes & M_ALT_SCREEN), exited: this.exited })
   }
 
   barCols() {
@@ -437,7 +448,7 @@ class PaneView {
 
   // A key while the bar has the keys. True when it was the bar's.
   barKeydown(e) {
-    const r = barKey(this.bar, e, { isMac, cols: this.barCols(), fs: this.completionFs() })
+    const r = barKey(this.bar, e, { isMac, cols: this.barCols(), fs: this.completionFs(), held: this.shell.pending })
     if (r === null) {
       // Plain typing: the key's character (Option's composed one on macOS).
       const ctl = e.ctrlKey || (isMac && e.metaKey)
@@ -478,9 +489,13 @@ class PaneView {
   // Enter in the bar (#296): the core draws the command block, hides the
   // shell's echo and sends the line, or queues it while the shell is busy
   // ("queued · N"). A sent line hands the keys to the command until the
-  // shell's next prompt.
+  // shell's next prompt. Before the first prompt the core types the line
+  // into the pane as is (the shell runs it at that prompt, or a start-up
+  // question reads it), and the keys after it go there too, as typeahead.
   async submit(line) {
     if (line.trim() !== "") this.awaiting = this.shell.prompts
+    if (!this.id) await this.opened?.catch(() => {})
+    if (!this.id) return
     if (!this.pendingInput) this.pendingInput = performance.now()
     const r = await invoke("pane_submit", { id: this.id, line }).catch((err) => (log("submit", String(err)), null))
     if (r?.kind === "queued") {
@@ -501,9 +516,10 @@ class PaneView {
     if (this.queueTimer || !this.queued) return
     this.queueTimer = setInterval(async () => {
       if (this.exited) return this.stopQueue()
+      const before = this.shell.prompts
       const left = await invoke("pane_queue_flush", { id: this.id }).catch(() => null)
       if (left == null) return
-      this.awaiting = this.shell.prompts
+      this.awaiting = awaitingAfterFlush(before, this.shell.prompts)
       this.queued = left
       toast(left ? `ran queued · ${left} left` : "ran queued")
       this.renderBar()

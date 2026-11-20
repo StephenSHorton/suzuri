@@ -24,6 +24,13 @@ impl Probe {
         }
         imp::program_running(self)
     }
+
+    /// True while something in the pane reads keys one at a time or without
+    /// echo (a start-up question, a passphrase, a line editor): the tty is
+    /// out of canonical mode or has echo off. Always false on Windows.
+    pub fn reads_keys(&self) -> bool {
+        imp::reads_keys(self)
+    }
 }
 
 #[cfg(unix)]
@@ -34,6 +41,16 @@ mod imp {
         // SAFETY: tcgetpgrp only reads; a closed or reused fd returns -1.
         let pg = unsafe { libc::tcgetpgrp(p.master_fd) };
         pg > 0 && pg as u32 != p.shell_pid
+    }
+
+    pub fn reads_keys(p: &Probe) -> bool {
+        // SAFETY: tcgetattr only fills the struct; a bad fd returns -1. The
+        // master side shows the modes the program set on the slave.
+        let mut t: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(p.master_fd, &mut t) } != 0 {
+            return false;
+        }
+        t.c_lflag & libc::ICANON == 0 || t.c_lflag & libc::ECHO == 0
     }
 }
 
@@ -48,6 +65,11 @@ mod imp {
     pub fn program_running(p: &Probe) -> bool {
         let pairs = processes();
         has_child(&pairs, p.shell_pid)
+    }
+
+    /// ConPTY shows no tty modes.
+    pub fn reads_keys(_: &Probe) -> bool {
+        false
     }
 
     /// (pid, parent pid) for every process. A direct child is enough: a program the shell runs is its child.
@@ -85,5 +107,12 @@ mod tests {
         assert!(!p.program_running());
         let p = super::Probe { shell_pid: 1234, master_fd: -1 };
         assert!(!p.program_running(), "a bad fd reads as no program");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_keys_is_false_for_a_bad_fd() {
+        let p = super::Probe { shell_pid: 1234, master_fd: -1 };
+        assert!(!p.reads_keys());
     }
 }

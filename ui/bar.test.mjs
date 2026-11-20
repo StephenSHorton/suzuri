@@ -133,6 +133,30 @@ test("Ctrl+C clears the bar, or interrupts when it is empty", () => {
   assert.deepEqual(key(b, "l", { ctrlKey: true }), { kind: "pty", data: "\x0c" })
 })
 
+test("before the first prompt Ctrl+C / Ctrl+D act as at a prompt; Ctrl+L waits", () => {
+  const held = { isMac: true, cols: 20, held: true }
+  // Text in the bar: Ctrl+C only clears it, Ctrl+D does nothing; neither
+  // reaches the loading shell (a ^C would cut its start-up files short).
+  const b = bar("half typed")
+  assert.deepEqual(key(b, "c", { ctrlKey: true }, held), { kind: "edit" })
+  assert.equal(b.text(), "")
+  const d = bar("more")
+  assert.deepEqual(key(d, "d", { ctrlKey: true }, held), { kind: "none" })
+  assert.equal(d.text(), "more")
+  // An empty bar: the byte goes through.
+  assert.deepEqual(key(bar(""), "c", { ctrlKey: true }, held), { kind: "pty", data: "\x03" })
+  assert.deepEqual(key(bar(""), "d", { ctrlKey: true }, held), { kind: "pty", data: "\x04" })
+  assert.deepEqual(key(bar("x"), "l", { ctrlKey: true }, held), { kind: "none" })
+  // Other keys edit as usual.
+  const e = bar("ab")
+  assert.deepEqual(key(e, "Backspace", {}, held), { kind: "edit" })
+  assert.equal(e.text(), "a")
+  // Without held the three are as before.
+  assert.deepEqual(key(bar("x"), "c", { ctrlKey: true }), { kind: "edit" })
+  assert.deepEqual(key(bar("x"), "d", { ctrlKey: true }), { kind: "none" })
+  assert.deepEqual(key(bar("x"), "l", { ctrlKey: true }), { kind: "pty", data: "\x0c" })
+})
+
 test("Ctrl+U/K/A/E/W edit the line", () => {
   const b = bar("aa bb\ncc dd", 9)
   key(b, "u", { ctrlKey: true })

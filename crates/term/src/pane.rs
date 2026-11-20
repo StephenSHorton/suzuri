@@ -43,6 +43,9 @@ pub enum Out {
     Shell(ShellStatus),
     /// A command run from the shell finished (shell integration only).
     CommandDone { exit: Option<i32>, command: String },
+    /// Text typed while a command ran that it never read, taken back from
+    /// the tty at the prompt: it goes in the bar, before the prompt's status.
+    Typeahead(String),
     /// The pane is closed; sent once. The exit code if the shell reported one.
     Exit(Option<u32>),
     // Card #288: notices and images.
@@ -65,8 +68,8 @@ pub enum Out {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShellStatus {
     /// The shell runs with suzuri's bootstrap and has reported a prompt. Until
-    /// then (or never, for a custom command or an unknown shell) the bar stays
-    /// off and keys go to the PTY.
+    /// then the bar holds keys only while `pending`; never (a custom command,
+    /// an unknown shell) the bar stays off and keys go to the PTY.
     pub integrated: bool,
     /// The working directory at the last prompt.
     pub cwd: String,
@@ -76,6 +79,10 @@ pub struct ShellStatus {
     /// Prompts seen so far. It counts up at every prompt, so the UI can tell
     /// "the prompt is back" even when nothing else changed.
     pub prompts: u64,
+    /// suzuri's hooks were started and the first prompt has not come yet:
+    /// the bar holds what is typed (until it does, or the wait is given up)
+    /// and Enter types the line into the pane as is.
+    pub pending: bool,
 }
 
 /// The shell state as the reader and the probe see it; `status()` is what
@@ -83,6 +90,11 @@ pub struct ShellStatus {
 #[derive(Default)]
 struct ShellState {
     integrated: bool,
+    /// See ShellStatus::pending. Never set again once cleared.
+    pending: bool,
+    /// Started with suzuri's hooks. Until the first prompt (integrated) a
+    /// bar line is typed into the pane as is: no block, no queue.
+    hooked: bool,
     cwd: String,
     /// Latched by the start mark, cleared by the next prompt.
     started: bool,
@@ -96,11 +108,17 @@ struct ShellState {
     /// A bar line was sent at this prompt count: the command owns the pane
     /// until a later prompt.
     awaiting: Option<u64>,
+    /// Lines typed with Enter before the first prompt that the shell has not
+    /// read yet. They wait in the tty, the shell reads one per prompt, and
+    /// they are meant to run: when the prompt hook takes text back, this
+    /// many whole lines at its start are typed into the pane again, and only
+    /// the rest goes to the bar.
+    run_ahead: usize,
 }
 
 impl ShellState {
     fn status(&self) -> ShellStatus {
-        ShellStatus { integrated: self.integrated, cwd: self.cwd.clone(), program: self.started || self.child || self.foreign, prompts: self.prompts }
+        ShellStatus { integrated: self.integrated, cwd: self.cwd.clone(), program: self.started || self.child || self.foreign, prompts: self.prompts, pending: self.pending }
     }
 
     /// The status to send, if it changed since the last one sent.
@@ -205,6 +223,9 @@ struct Shared {
     echo: Mutex<EchoFilter>,
     /// When the PTY last produced output.
     last_io: Mutex<Instant>,
+    /// Held while a shell status is made and sent, so the UI gets them in
+    /// the order they happened.
+    status_order: Mutex<()>,
 }
 
 impl Shared {
@@ -228,6 +249,7 @@ pub struct Pane {
     /// Bar lines waiting for the shell to be idle: (display, payload).
     queue: Mutex<std::collections::VecDeque<(String, String)>>,
     keep_prompt: bool,
+    sink: Sink,
 }
 
 /// A dropped pane closes its shell. It never joins: the last handle can be
@@ -316,11 +338,13 @@ impl Pane {
         // The input bar's shell hooks, for the user's own shell only.
         let mut boot_env = Vec::new();
         let mut temp_dir = None;
+        let mut hooked = false;
         if cfg.command.is_none() && !cfg.plain_shell {
             if let Some(b) = shell::bootstrap_with(&argv, cfg.keep_prompt) {
                 argv = b.argv;
                 boot_env = b.env;
                 temp_dir = b.temp_dir;
+                hooked = true;
             }
         }
         let mut cmd = CommandBuilder::new(&argv[0]);
@@ -349,6 +373,15 @@ impl Pane {
         let reader = pair.master.try_clone_reader().map_err(|e| io(e.into()))?;
         let writer = pair.master.take_writer().map_err(|e| io(e.into()))?;
 
+        let start_cwd: Option<std::path::PathBuf> = cfg.cwd.clone().map(Into::into).or_else(|| home_dir().map(Into::into));
+        // A hooked shell's first prompt is coming: the bar holds keys for it
+        // (see ShellStatus::pending), in the folder the shell starts in.
+        let shell_state = ShellState {
+            pending: hooked,
+            hooked,
+            cwd: if hooked { start_cwd.as_deref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default() } else { String::new() },
+            ..Default::default()
+        };
         let shared = Arc::new(Shared {
             engine: Mutex::new({
                 // libghostty-vt (#290).
@@ -365,12 +398,13 @@ impl Pane {
             focused: AtomicBool::new(false),
             state: Mutex::new(State::Starting),
             stats: Stats::default(),
-            shell: Mutex::new(ShellState::default()),
+            shell: Mutex::new(shell_state),
             images: Mutex::new(Images::default()),
             cell_px: AtomicU32::new(9 << 16 | 18),
-            cwd: cfg.cwd.clone().map(Into::into).or_else(|| home_dir().map(Into::into)),
+            cwd: start_cwd,
             echo: Mutex::new(EchoFilter::default()),
             last_io: Mutex::new(Instant::now()),
+            status_order: Mutex::new(()),
         });
         let (tx, rx) = unbounded::<Cmd>();
         let mut threads = Vec::new();
@@ -412,17 +446,34 @@ impl Pane {
         // Actor.
         {
             let shared = shared.clone();
+            let sink = sink.clone();
             threads.push(thread("rsz-actor", move || actor_loop(rx, pair.master, writer, killer, shared, sink, (cfg.cols, cfg.rows))));
         }
-        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt })
+        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt, sink })
     }
 
     /// Enter in the input bar (#296, Go suzuri's submitBarLine): the bare-cd
     /// alias, then either a command block plus the line, or a place in the
     /// queue while the shell is busy.
+    /// A hooked shell before its first prompt gets the line as typed at a
+    /// terminal, blank or not: the tty holds it for the shell (it runs at
+    /// the prompt) or for a start-up question that reads a line. It does
+    /// not end the wait for the prompt.
     pub fn submit(&self, line: &str) -> Submit {
         let (display, payload) = block::expand(line, &self.shell_prog);
-        if display.trim().is_empty() && payload.trim().is_empty() {
+        let blank = display.trim().is_empty() && payload.trim().is_empty();
+        let early = {
+            let sh = self.shared.shell.lock();
+            sh.hooked && !sh.integrated
+        };
+        if early {
+            self.shared.shell.lock().run_ahead += 1 + payload.matches('\n').count();
+            self.shared.engine.lock().scroll(i32::MIN);
+            self.shared.kick(|w| w.input_at = Some(Instant::now()));
+            let _ = self.tx.send(Cmd::Write(typed(&payload)));
+            return if blank { Submit::Blank } else { Submit::Sent };
+        }
+        if blank {
             self.write(b"\r".to_vec());
             return Submit::Blank;
         }
@@ -443,6 +494,16 @@ impl Pane {
     /// nothing and says [`Submit::Busy`], so a caller with its own queue
     /// (Irori's runs) keeps rsz-term's empty.
     pub fn try_submit(&self, line: &str) -> Submit {
+        {
+            let sh = self.shared.shell.lock();
+            if sh.pending {
+                return Submit::Busy;
+            }
+            if sh.hooked && !sh.integrated {
+                drop(sh);
+                return self.submit(line);
+            }
+        }
         let (display, payload) = block::expand(line, &self.shell_prog);
         if display.trim().is_empty() && payload.trim().is_empty() {
             self.write(b"\r".to_vec());
@@ -507,9 +568,10 @@ impl Pane {
     /// prompt, one the shell marked as started, a foreground child, or
     /// output that hasn't been quiet for QUEUE_IDLE. A shell without the
     /// bootstrap never reports a prompt, so a sent line can't hold it busy.
+    /// A hooked shell is busy until its first prompt.
     fn busy(&self) -> bool {
         let sh = self.shared.shell.lock();
-        if sh.integrated && sh.awaiting.is_some_and(|n| sh.prompts <= n) || sh.started || sh.child {
+        if sh.pending || sh.integrated && sh.awaiting.is_some_and(|n| sh.prompts <= n) || sh.started || sh.child {
             return true;
         }
         drop(sh);
@@ -549,8 +611,19 @@ impl Pane {
         self.write(line);
     }
 
-    /// Input from the user: snaps the view back to the bottom.
+    /// Input from the user: snaps the view back to the bottom. Before the
+    /// first prompt it ends the wait (the keys go to the PTY from now on).
     pub fn write(&self, bytes: Vec<u8>) {
+        let pending = {
+            let mut sh = self.shared.shell.lock();
+            if sh.hooked && !sh.integrated {
+                sh.run_ahead += bytes.iter().filter(|&&b| b == b'\r').count();
+            }
+            sh.pending
+        };
+        if pending {
+            give_up(&self.shared, &self.sink);
+        }
         self.shared.engine.lock().scroll(i32::MIN);
         self.shared.kick(|w| w.input_at = Some(Instant::now()));
         let _ = self.tx.send(Cmd::Write(bytes));
@@ -712,6 +785,10 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
     let mut clean = Vec::with_capacity(buf.len());
     let mut marks = Vec::new();
     let mut protocols = Protocols::new();
+    // A hooked shell: tell the UI at once, ahead of any mark.
+    if shared.shell.lock().pending {
+        tell(&shared, &sink, |_| {});
+    }
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -731,10 +808,12 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
         let t = Instant::now();
         clean.clear();
         osc.feed(&buf[..n], &mut clean, &mut marks);
-        if !marks.is_empty() {
-            shell_marks(&mut marks, &shared, &sink);
-        }
+        // Before the marks: a submit racing the first prompt sees fresh
+        // output and queues.
         *shared.last_io.lock() = Instant::now();
+        if !marks.is_empty() {
+            shell_marks(&mut marks, &shared, &sink, &tx);
+        }
         // The shell's echo of a bar line goes (#296): the block shows it.
         {
             let mut echo = shared.echo.lock();
@@ -754,6 +833,10 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
         for o in outs {
             sink(o);
         }
+        // A full-screen program before the first prompt has the keys.
+        if shared.shell.lock().pending && shared.engine.lock().alt_screen() {
+            give_up(&shared, &sink);
+        }
         shared.stats.feed_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         shared.stats.bytes_in.fetch_add(n as u64, Ordering::Relaxed);
         dispatch(&mut events, &tx, &sink);
@@ -763,24 +846,40 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
 }
 
 /// Apply the shell's marks to the bar state and tell the UI what changed.
-fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink) {
+fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink, tx: &Sender<Cmd>) {
     let mut done = Vec::new();
+    let mut typed = Vec::new();
+    let _order = shared.status_order.lock();
     let status = {
         let mut sh = shared.shell.lock();
         for m in marks.drain(..) {
             match m {
                 ShellEvent::Start => sh.started = true,
                 ShellEvent::Cwd(cwd) => {
+                    // The shell reads one waiting start-up line at this prompt.
+                    sh.run_ahead = sh.run_ahead.saturating_sub(1);
                     // The echo filter stays armed: ConPTY passes these marks on
                     // before it paints the echo itself. Its byte budget, or the
                     // next submit, ends it.
                     sh.integrated = true;
+                    sh.pending = false;
                     sh.started = false;
                     sh.foreign = false;
                     sh.prompts += 1;
                     sh.cwd = cwd;
                 }
                 ShellEvent::Foreign(running) => sh.foreign = running,
+                ShellEvent::Typeahead(raw) => {
+                    let (again, rest) = split_lines(&raw, sh.run_ahead);
+                    sh.run_ahead = again.iter().filter(|&&b| b == b'\r').count();
+                    if !again.is_empty() {
+                        let _ = tx.send(Cmd::Write(again));
+                    }
+                    let text = shell::clean_typeahead(rest);
+                    if !text.is_empty() {
+                        typed.push(text);
+                    }
+                }
                 ShellEvent::Done { exit, command } => {
                     sh.started = false;
                     sh.foreign = false;
@@ -793,32 +892,91 @@ fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink) {
     for (exit, command) in done {
         sink(Out::CommandDone { exit, command });
     }
+    for text in typed {
+        sink(Out::Typeahead(text));
+    }
     if let Some(st) = status {
         sink(Out::Shell(st));
     }
 }
 
+/// The first `n` whole lines of text the prompt hook took back (the tty
+/// turned their Enter into LF), as typed again (Enter as CR), and the rest.
+fn split_lines(raw: &[u8], n: usize) -> (Vec<u8>, &[u8]) {
+    let mut again = Vec::new();
+    let mut i = 0;
+    for _ in 0..n {
+        let Some(k) = raw[i..].iter().position(|&b| b == b'\n' || b == b'\r') else { break };
+        again.extend_from_slice(&raw[i..i + k]);
+        again.push(b'\r');
+        i += k + 1;
+    }
+    (again, &raw[i..])
+}
+
 /// Poll the foreground program while the pane runs. Only for an integrated
-/// shell: without prompt marks the bar is off anyway.
+/// shell: without prompt marks the bar is off anyway. Before the first
+/// prompt it watches for a start-up that reads keys itself.
 fn fg_loop(probe: Probe, shared: Arc<Shared>, sink: Sink) {
+    let mut reading = 0;
     loop {
         std::thread::sleep(FG_POLL);
         if *shared.state.lock() != State::Running {
             return;
         }
-        if !shared.shell.lock().integrated {
+        let (pending, integrated) = {
+            let sh = shared.shell.lock();
+            (sh.pending, sh.integrated)
+        };
+        if pending {
+            // Something reads keys itself (a question in the rc): two looks
+            // in a row, since zle does too for a moment after the mark.
+            reading = if probe.reads_keys() { reading + 1 } else { 0 };
+            if reading >= 2 {
+                give_up(&shared, &sink);
+            }
+            continue;
+        }
+        if !integrated {
             continue;
         }
         let child = probe.program_running();
-        let status = {
-            let mut sh = shared.shell.lock();
-            sh.child = child;
-            sh.changed()
-        };
-        if let Some(st) = status {
-            sink(Out::Shell(st));
-        }
+        tell(&shared, &sink, |sh| sh.child = child);
     }
+}
+
+/// Change the shell state and send the status if it changed, in order with
+/// every other status.
+fn tell(shared: &Shared, sink: &Sink, f: impl FnOnce(&mut ShellState)) {
+    let _order = shared.status_order.lock();
+    let status = {
+        let mut sh = shared.shell.lock();
+        f(&mut sh);
+        sh.changed()
+    };
+    if let Some(st) = status {
+        sink(Out::Shell(st));
+    }
+}
+
+/// A line as typed at a terminal: newlines as CR, then Enter.
+fn typed(payload: &str) -> Vec<u8> {
+    let mut b = payload.replace("\r\n", "\n").replace('\n', "\r").into_bytes();
+    b.push(b'\r');
+    b
+}
+
+/// The first prompt is not coming (yet): the rc execs another program,
+/// reads keys itself, goes full screen, or someone typed into the PTY. The
+/// bar lets go (the UI types what it holds into the pane).
+fn give_up(shared: &Shared, sink: &Sink) {
+    tell(shared, sink, |sh| {
+        if sh.pending {
+            sh.pending = false;
+            // Only a prompt's cwd is the shell's; splits ask the OS again.
+            sh.cwd.clear();
+        }
+    });
 }
 
 fn trace() -> bool {
@@ -1320,6 +1478,79 @@ mod tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
+    /// bash with the bootstrap by hand (spawn hooks only $SHELL, zsh here):
+    /// text typed while `sleep` runs is taken back from the tty at the next
+    /// prompt and sent for the bar; the Enter in it runs nothing, and the
+    /// shell's own line is left empty (the next command runs clean).
+    #[test]
+    fn bash_hands_typeahead_to_the_bar() {
+        let shell = "/bin/bash";
+        if !std::path::Path::new(shell).exists() {
+            eprintln!("skipped: no {shell}");
+            return;
+        }
+        enum Seen {
+            Shell(ShellStatus),
+            Typed(String),
+        }
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let sink: Sink = Arc::new(move |o| {
+            let seen = match o {
+                Out::Shell(st) => Seen::Shell(st),
+                Out::Typeahead(t) => Seen::Typed(t),
+                _ => return,
+            };
+            let _ = tx.lock().send(seen);
+        });
+        let home = std::env::temp_dir().join(format!("rsz-test-ahead-bash-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let boot = shell::bootstrap(&[shell.to_string()]).unwrap();
+        let mut env = boot.env.clone();
+        env.push(("HOME".into(), home.to_string_lossy().into_owned()));
+        let cfg = PaneConfig { cols: 60, rows: 12, command: Some(boot.argv.clone()), cwd: Some("/tmp".into()), env, ..Default::default() };
+        let pane = Pane::spawn(cfg, sink).unwrap();
+        let typed = std::cell::RefCell::new(Vec::new());
+        let prompts = std::cell::Cell::new(0);
+        let wait = |want: &dyn Fn(&ShellStatus) -> bool, what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Seen::Shell(st)) if want(&st) => return prompts.set(st.prompts),
+                    Ok(Seen::Typed(t)) => typed.borrow_mut().push(t),
+                    _ => {}
+                }
+            }
+            panic!("{shell}: never saw {what}");
+        };
+        // A prompt: the next one, not the status a command's done mark gives.
+        let prompt = |what: &str| {
+            let n = prompts.get();
+            wait(&|s| s.integrated && !s.program && s.prompts > n, what)
+        };
+        prompt("the first prompt");
+        pane.write(b"sleep 1\r".to_vec());
+        wait(&|s| s.program, "the command start");
+        pane.write("echo $((6*7))\rnext \x1b[Aline 日本".as_bytes().to_vec());
+        prompt("the prompt after sleep");
+        assert_eq!(*typed.borrow(), vec!["echo $((6*7))\nnext line 日本".to_string()]);
+        pane.write(b"echo A$((1+2))B\r".to_vec());
+        prompt("the prompt after echo");
+        let screen = pane.screen_text();
+        eprintln!("bash screen:\n{screen}");
+        let lines = lines_of(&screen);
+        assert!(lines.iter().any(|l| l.trim() == "A3B"), "the next command did not run clean: {lines:?}");
+        assert!(!lines.iter().any(|l| l.trim() == "42"), "the typed-ahead line ran: {lines:?}");
+        assert!(!screen.contains("7878") && !screen.contains("typeahead"), "marks leaked: {screen}");
+        assert_eq!(typed.borrow().len(), 1, "{:?}", typed.borrow());
+        pane.close();
+        pane.join();
+        let _ = std::fs::remove_dir_all(home);
+        if let Some(d) = boot.temp_dir {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
     #[test]
     fn shell_exit_gives_one_exit() {
         let (pane, rx) = run(&["/bin/sh", "-c", "printf 'hi\\033]0;t1\\007'; exit 3"]);
@@ -1530,6 +1761,354 @@ mod tests {
         quiet.close();
         quiet.join();
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    /// A pane running the user's zsh with suzuri's hooks and `rc` as the
+    /// user's .zshrc; every status it sends. None when $SHELL is not zsh.
+    struct Hooked {
+        pane: Pane,
+        seen: Arc<Mutex<Vec<ShellStatus>>>,
+        /// Text the prompt hook took back for the bar (Out::Typeahead).
+        typed: Arc<Mutex<Vec<String>>>,
+        home: std::path::PathBuf,
+    }
+
+    impl Hooked {
+        fn open(name: &str, rc: &str, keep_prompt: bool) -> Option<Hooked> {
+            if !std::env::var("SHELL").unwrap_or_default().ends_with("zsh") {
+                eprintln!("skipped: $SHELL is not zsh");
+                return None;
+            }
+            let home = std::env::temp_dir().join(format!("rsz-test-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join(".zshrc"), rc).unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let typed = Arc::new(Mutex::new(Vec::new()));
+            let (s, t) = (seen.clone(), typed.clone());
+            let sink: Sink = Arc::new(move |o| match o {
+                Out::Shell(st) => s.lock().push(st),
+                Out::Typeahead(text) => t.lock().push(text),
+                _ => {}
+            });
+            let cfg = PaneConfig {
+                cols: 80,
+                rows: 20,
+                cwd: Some("/tmp".into()),
+                env: vec![("RSZ_USER_ZDOTDIR".into(), home.to_string_lossy().into_owned())],
+                keep_prompt,
+                ..Default::default()
+            };
+            Some(Hooked { pane: Pane::spawn(cfg, sink).unwrap(), seen, typed, home })
+        }
+
+        fn last(&self) -> ShellStatus {
+            self.seen.lock().last().cloned().unwrap_or_default()
+        }
+
+        fn wait(&self, what: &str, within: Duration, f: impl Fn(&ShellStatus) -> bool) {
+            let deadline = Instant::now() + within;
+            while !self.seen.lock().iter().any(&f) {
+                assert!(Instant::now() < deadline, "never within {within:?}: {what}; saw {:?}", self.seen.lock());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        /// Wait for the prompt after the one counted now.
+        fn next_prompt(&self, what: &str) {
+            let n = self.last().prompts;
+            self.wait(what, Duration::from_secs(10), |s| s.integrated && !s.program && s.prompts > n);
+        }
+
+        fn has_line(&self, want: &str) -> bool {
+            lines_of(&self.pane.screen_text()).iter().any(|l| l == want)
+        }
+    }
+
+    impl Drop for Hooked {
+        fn drop(&mut self) {
+            self.pane.close();
+            self.pane.join();
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
+    fn lines_of(screen: &str) -> Vec<String> {
+        screen.lines().map(|l| l.trim_end().to_string()).collect()
+    }
+
+    /// The bar knows from the start that a prompt is coming, with the
+    /// folder the shell starts in, and the first prompt ends the wait.
+    #[test]
+    fn hooked_shell_is_pending_until_its_first_prompt() {
+        let Some(h) = Hooked::open("pending", "sleep 2\n", false) else { return };
+        h.wait("pending at start", Duration::from_millis(500), |s| s.pending && !s.integrated && s.cwd.ends_with("tmp"));
+        h.wait("the first prompt", Duration::from_secs(10), |s| s.integrated);
+        let seen = h.seen.lock().clone();
+        let first = seen.iter().position(|s| s.integrated).unwrap();
+        assert!(seen[..first].iter().all(|s| s.pending && !s.integrated), "{seen:?}");
+        assert!(seen[first..].iter().all(|s| s.integrated && !s.pending), "{seen:?}");
+    }
+
+    /// Enter in the bar before the first prompt types the line into the
+    /// pane as is (no block, no queue) and the wait goes on; the shell runs
+    /// it at its first prompt, once, and the bar works as usual after.
+    #[test]
+    fn enter_before_the_first_prompt_runs_at_it() {
+        let Some(h) = Hooked::open("early", "sleep 2\n", false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(h.pane.submit("echo early-$((40+2))"), Submit::Sent);
+        assert_eq!(h.pane.queue_len(), 0);
+        assert!(h.last().pending, "the wait goes on");
+        h.wait("the prompt", Duration::from_secs(10), |s| s.integrated && !s.pending);
+        wait_until("the typed line ran", || h.has_line("early-42"));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(lines_of(&h.pane.screen_text()).iter().filter(|l| *l == "early-42").count(), 1, "{}", h.pane.screen_text());
+        wait_until("idle", || !h.pane.is_busy());
+        let r = h.pane.submit("echo after-$((2+3))");
+        assert!(matches!(r, Submit::Sent | Submit::Queued(_)), "{r:?}");
+        wait_until("the bar line runs", || {
+            let _ = h.pane.flush_queue();
+            h.has_line("after-5")
+        });
+        assert!(h.pane.screen_text().contains('❯'), "a block again at the prompt: {}", h.pane.screen_text());
+    }
+
+    /// A start-up question that ends in a newline and reads a line (the
+    /// common "Press Enter" / "Start tmux? (y/n)" shape): a bare Enter and
+    /// a typed answer both reach it at once.
+    #[test]
+    fn a_start_up_question_gets_its_enter_at_once() {
+        let rc = "print 'Press Enter to continue'; read; print continued; sleep 0.3\n";
+        let Some(h) = Hooked::open("enter", rc, false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(h.pane.submit(""), Submit::Blank);
+        let t = Instant::now();
+        wait_until("continued", || h.has_line("continued"));
+        assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+        h.wait("the prompt", Duration::from_secs(5), |s| s.integrated);
+
+        let rc = "print 'Start? (y/n)'; read ans; print \"answer=$ans\"; sleep 0.3\n";
+        let Some(h) = Hooked::open("answer", rc, false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(h.pane.submit("y"), Submit::Sent);
+        let t = Instant::now();
+        wait_until("the answer", || h.has_line("answer=y"));
+        assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+        h.wait("the prompt", Duration::from_secs(5), |s| s.integrated);
+    }
+
+    /// A question without the newline (`read 'ans?continue? '`) too.
+    #[test]
+    fn a_line_question_in_the_rc_gets_its_answer_at_once() {
+        let rc = "read 'ans?continue? '; print \"answer=$ans\"; sleep 0.3\n";
+        let Some(h) = Hooked::open("ask", rc, false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(h.pane.submit("y"), Submit::Sent);
+        wait_until("the answer", || h.pane.screen_text().contains("answer=y"));
+        h.wait("the prompt", Duration::from_secs(5), |s| s.integrated);
+    }
+
+    /// try_submit (an embedder with its own queue) waits for the prompt.
+    #[test]
+    fn try_submit_is_busy_before_the_first_prompt() {
+        let Some(h) = Hooked::open("try", "sleep 2\n", true) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        std::thread::sleep(Duration::from_millis(1000));
+        assert_eq!(h.pane.try_submit("x"), Submit::Busy);
+        assert_eq!(h.pane.try_submit(""), Submit::Busy);
+        assert_eq!(h.pane.queue_len(), 0);
+    }
+
+    /// No prompt comes (the rc execs another program): every Enter is typed
+    /// into the pane as is, in order, never drawn as a block.
+    #[test]
+    fn no_first_prompt_types_lines_in_order() {
+        let rc = "exec /bin/sh -c 'while IFS= read -r l; do echo \"got:$l\"; done'\n";
+        let Some(h) = Hooked::open("noprompt", rc, false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        for l in ["one", "two", "three"] {
+            assert_eq!(h.pane.submit(l), Submit::Sent);
+        }
+        assert_eq!(h.pane.queue_len(), 0);
+        wait_until("the lines", || h.has_line("got:three"));
+        std::thread::sleep(Duration::from_millis(300));
+        let screen = h.pane.screen_text();
+        let lines = lines_of(&screen);
+        let at = |want: &str| {
+            assert_eq!(lines.iter().filter(|l| *l == want).count(), 1, "{want} once: {screen}");
+            lines.iter().position(|l| l == want).unwrap()
+        };
+        assert!(at("got:one") < at("got:two") && at("got:two") < at("got:three"), "{screen}");
+        assert!(!screen.contains('❯'), "no command blocks: {screen}");
+        assert!(h.last().pending, "the bar stays");
+    }
+
+    /// A start-up file that reads single keys gets them at once: the wait
+    /// ends when the shell reads keys itself.
+    #[test]
+    fn a_question_in_the_rc_releases_the_hold() {
+        let rc = "read -k 1 '?go? '; print \"\\nanswer=$REPLY\"; sleep 1\n";
+        let Some(h) = Hooked::open("question", rc, false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        h.wait("the wait given up", Duration::from_millis(1500), |s| !s.pending && !s.integrated);
+        h.pane.write(b"y".to_vec());
+        wait_until("the answer", || h.pane.screen_text().contains("answer=y"));
+        h.wait("the late prompt", Duration::from_secs(10), |s| s.integrated);
+    }
+
+    /// After the wait is given up, an Enter that raced it is typed as is:
+    /// never queued, never drawn as a block on a screen with no prompt.
+    #[test]
+    fn enter_after_giving_up_is_typed_as_is() {
+        let rc = "exec /bin/sh -c 'while IFS= read -r l; do echo \"got:$l\"; done'\n";
+        let Some(h) = Hooked::open("raced", rc, false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        h.pane.write(b"zero\r".to_vec());
+        h.wait("the wait given up", Duration::from_millis(500), |s| !s.pending && !s.integrated);
+        assert_eq!(h.pane.submit("one"), Submit::Sent);
+        h.pane.write(b"two\r".to_vec());
+        assert_eq!(h.pane.queue_len(), 0);
+        wait_until("the lines", || h.has_line("got:two"));
+        let screen = h.pane.screen_text();
+        let lines = lines_of(&screen);
+        let at = |want: &str| lines.iter().position(|l| l == want).unwrap_or(usize::MAX);
+        assert!(at("got:zero") < at("got:one") && at("got:one") < at("got:two"), "{screen}");
+        assert!(!screen.contains('❯'), "no command blocks: {screen}");
+    }
+
+    /// Focus reports (ESC[I / ESC[O) are answers, not typing: they go
+    /// through reply and the wait goes on (ConPTY turns 1004 on at start).
+    #[test]
+    fn a_focus_report_does_not_end_the_wait() {
+        let Some(h) = Hooked::open("focus", "printf '\\033[?1004h'; sleep 1.5\n", false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        std::thread::sleep(Duration::from_millis(300));
+        h.pane.reply(b"\x1b[I".to_vec());
+        std::thread::sleep(Duration::from_millis(300));
+        let last = h.last();
+        assert!(last.pending, "{last:?}");
+        h.wait("the prompt", Duration::from_secs(5), |s| s.integrated);
+    }
+
+    /// A full-screen program before the first prompt has the keys.
+    #[test]
+    fn alt_screen_before_the_first_prompt_gives_up() {
+        let Some(h) = Hooked::open("alt", "printf '\\033[?1049h'; sleep 30\n", false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        h.wait("the wait given up", Duration::from_millis(1500), |s| !s.pending && !s.integrated);
+    }
+
+    /// ^C (or anything else written to the PTY) ends the wait at once, and
+    /// a line typed from the bar before it still goes first.
+    #[test]
+    fn input_written_before_the_first_prompt_ends_the_wait() {
+        let Some(h) = Hooked::open("ctrlc", "sleep 3\n", false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        h.pane.write(b"\x03".to_vec());
+        h.wait("the wait ended", Duration::from_millis(200), |s| !s.pending);
+        drop(h);
+
+        let Some(h) = Hooked::open("order", "sleep 2\n", false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        assert_eq!(h.pane.submit("echo q-$((1+1))"), Submit::Sent);
+        assert!(h.last().pending, "a bar line does not end the wait");
+        h.pane.write(b"echo second-$((2+2))\r".to_vec());
+        h.wait("the wait ended", Duration::from_millis(200), |s| !s.pending);
+        wait_until("both ran", || h.has_line("second-4"));
+        let lines = lines_of(&h.pane.screen_text());
+        let q = lines.iter().position(|l| l == "q-2");
+        let s = lines.iter().position(|l| l == "second-4");
+        assert!(q.is_some() && q < s, "{lines:?}");
+    }
+
+    /// The pane a person opens (the hooked $SHELL, zsh): text typed while
+    /// `sleep` runs and never read is taken back at the next prompt and sent
+    /// for the bar. The Enter in it runs nothing, an arrow key in it is
+    /// dropped, and the shell's own line is left empty.
+    #[test]
+    fn zsh_hands_typeahead_to_the_bar() {
+        let Some(h) = Hooked::open("ahead", "", false) else { return };
+        h.next_prompt("the first prompt");
+        assert!(h.typed.lock().is_empty(), "{:?}", h.typed.lock());
+        wait_until("idle", || !h.pane.is_busy());
+        assert_eq!(h.pane.submit("sleep 1"), Submit::Sent);
+        h.wait("the command start", Duration::from_secs(5), |s| s.program);
+        h.pane.write("echo $((6*7))\rnext \x1b[Aline 日本".as_bytes().to_vec());
+        h.next_prompt("the prompt after sleep");
+        assert_eq!(*h.typed.lock(), vec!["echo $((6*7))\nnext line 日本".to_string()]);
+        wait_until("idle", || !h.pane.is_busy());
+        assert_eq!(h.pane.submit("echo A$((1+2))B"), Submit::Sent);
+        h.next_prompt("the prompt after echo");
+        let screen = h.pane.screen_text();
+        eprintln!("zsh screen:\n{screen}");
+        assert!(h.has_line("A3B"), "the next command did not run clean: {screen}");
+        assert!(!h.has_line("42"), "the typed-ahead line ran: {screen}");
+        // The tty echoed the keys while sleep ran, as any terminal does; the
+        // shell's line editor must not draw them a second time at the prompt.
+        assert_eq!(screen.matches("next ").count(), 1, "the typed text shows twice: {screen}");
+        assert!(!screen.contains("7878") && !screen.contains("typeahead"), "marks leaked: {screen}");
+        assert_eq!(h.typed.lock().len(), 1, "{:?}", h.typed.lock());
+        // A program that reads the keyboard still gets every key: nothing is
+        // left to take back.
+        h.pane.write(b"read x; echo got-$x\r".to_vec());
+        h.wait("read runs", Duration::from_secs(5), |s| s.program);
+        h.pane.write(b"abc\r".to_vec());
+        h.next_prompt("the prompt after read");
+        wait_until("read got the keys", || h.has_line("got-abc"));
+        assert_eq!(h.typed.lock().len(), 1, "nothing more taken back: {:?}", h.typed.lock());
+    }
+
+    /// Lines typed with Enter before the first prompt still all run (the
+    /// hook's take-back types them again), and text typed with no Enter
+    /// while the first of them runs goes to the bar, not the shell's line.
+    #[test]
+    fn startup_lines_run_and_typeahead_after_them_goes_to_the_bar() {
+        let Some(h) = Hooked::open("ahead-startup", "sleep 1\n", false) else { return };
+        h.wait("pending", Duration::from_millis(500), |s| s.pending);
+        assert_eq!(h.pane.submit("sleep 1; echo one-$((0+1))"), Submit::Sent);
+        assert_eq!(h.pane.submit("echo two-$((1+1))"), Submit::Sent);
+        h.wait("the first prompt", Duration::from_secs(10), |s| s.integrated);
+        h.wait("the first line runs", Duration::from_secs(5), |s| s.program);
+        h.pane.write(b"later words".to_vec());
+        wait_until("both lines ran", || h.has_line("two-2"));
+        h.wait("a prompt after both", Duration::from_secs(5), |s| s.integrated && !s.program && s.prompts >= 3);
+        // The tty echoes keys typed during a command, as in any terminal:
+        // "later words" sits on the screen before one-1's output.
+        assert!(h.pane.screen_text().contains("one-1"), "{}", h.pane.screen_text());
+        assert_eq!(*h.typed.lock(), vec!["later words".to_string()], "{}", h.pane.screen_text());
+        wait_until("idle", || !h.pane.is_busy());
+        assert_eq!(h.pane.submit("echo A$((1+2))B"), Submit::Sent);
+        wait_until("the next line ran clean", || h.has_line("A3B"));
+    }
+
+    /// Panes that run a command, and shells without the hooks, never wait.
+    #[test]
+    fn command_and_plain_shells_are_never_pending() {
+        let seen = Arc::new(Mutex::new(Vec::<ShellStatus>::new()));
+        let zdot = std::env::temp_dir().join(format!("rsz-test-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&zdot).unwrap();
+        for cfg in [
+            PaneConfig { command: Some(vec!["/bin/cat".into()]), ..Default::default() },
+            PaneConfig { plain_shell: true, env: vec![("ZDOTDIR".into(), zdot.to_string_lossy().into_owned())], ..Default::default() },
+            PaneConfig { command: Some(vec!["/bin/zsh".into(), "-c".into(), "sleep 5".into()]), ..Default::default() },
+        ] {
+            let s = seen.clone();
+            let sink: Sink = Arc::new(move |o| {
+                if let Out::Shell(st) = o {
+                    s.lock().push(st);
+                }
+            });
+            let pane = Pane::spawn(cfg, sink).unwrap();
+            wait_until("idle", || !pane.is_busy());
+            pane.close();
+            pane.join();
+        }
+        assert!(seen.lock().iter().all(|s| !s.pending), "{:?}", seen.lock());
+        let _ = std::fs::remove_dir_all(zdot);
     }
 
     #[test]

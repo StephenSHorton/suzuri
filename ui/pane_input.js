@@ -47,6 +47,40 @@ export function keyFilter(pane, env) {
   }
 }
 
+// Whether the bar has the keys (PaneView.barActive). shell is the pane's
+// ShellStatus (crates/term): while it is pending, suzuri's hooks are on
+// their way to the first prompt and the bar holds what is typed until an
+// Enter sends a line (the keys after it are the line's, as at a prompt);
+// after that, at a prompt only. Never on the alt screen or an exited pane.
+// ctx: {awaiting, alt, exited}.
+export function barOn(shell, { awaiting, alt, exited }) {
+  if (exited || alt) return false
+  if (shell.pending) return awaiting < 0
+  return shell.integrated && !shell.program && awaiting < 0
+}
+
+// The wait for the first prompt ended without one (the rc read keys, went
+// full screen, or keys went to the PTY): what the bar held goes there too.
+export function gaveUp(prev, next) {
+  return !!prev.pending && !next.pending && !next.integrated
+}
+
+// The bar's "awaiting" after a queued line was flushed: the prompt count it
+// was sent at, unless a prompt already came while the flush call was out
+// (a quick command), which would leave the bar off at a live prompt.
+export function awaitingAfterFlush(before, now) {
+  return now === before ? before : -1
+}
+
+// Type what the bar holds into the pane as is, once.
+export function releaseHeld(pane) {
+  const text = pane.bar.text()
+  pane.bar.clear()
+  if (text) pane.send(text.replace(/\n/g, "\r"))
+  pane.queued = 0
+  pane.stopQueue()
+}
+
 // Keys while no pane's textarea has the keyboard (the page itself focused,
 // e.g. after the focused pane's textarea was moved or removed). With a
 // focused pane (env.pane()) the key is that pane's, as when suzuri's one
@@ -85,6 +119,22 @@ export function writeFrom(pane) {
     pane.keyTime = 0
     pane.send(data, t0 || undefined)
   }
+}
+
+// Text typed while a command ran that it never read: the shell's prompt
+// hook took it back out of the tty (crates/term shell.rs, a "typeahead"
+// message, sent after the command's done status and before the prompt's).
+// It is older than anything typed into the bar since that done status, so it
+// goes first; the caret stays where it was in the newer text. It is editable
+// and never run: an Enter in it is a newline here.
+export function takeTypeahead(pane, text) {
+  if (!text) return
+  const bar = pane.bar
+  const after = [...bar.text()].length - bar.cursor
+  bar.moveDocHome()
+  bar.insert(text)
+  bar.cursor = [...bar.text()].length - after
+  pane.renderBar()
 }
 
 // IME commits and dead keys: into the bar at a prompt.
