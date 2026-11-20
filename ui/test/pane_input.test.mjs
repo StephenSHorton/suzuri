@@ -9,18 +9,19 @@ import assert from "node:assert/strict"
 import { page, recordingHost, key, textarea, viewBody, load } from "../view/test/stub.mjs"
 
 const { mount } = await import("../view/index.js")
-const { keyFilter, pageKeys, textFilter, pasteFilter, pasteText, writeFrom } = await import("../pane_input.js")
+const { keyFilter, pageKeys, textFilter, pasteFilter, pasteText, writeFrom, barOn, gaveUp, releaseHeld, awaitingAfterFlush, takeTypeahead } = await import("../pane_input.js")
+const { InputBar } = await import("../bar.js")
 const { shortcut } = await import("../shortcuts.js")
 const { M_ALT_SCREEN } = await import("../view/frame.js")
 
 // A PaneView's input side, recording what it was asked to do.
-function setup({ isMac = false, bar = false, largeImage = false, copyOrInterrupt } = {}) {
+function setup({ isMac = false, bar = false, largeImage = false, copyOrInterrupt, barActive } = {}) {
   const p = page()
   p.win.performance.now = () => 100_000
   const did = []
   const pane = {
     id: 3, keyTime: 0, bar: { text: "", insert(t) { this.text += t } },
-    barActive: () => bar,
+    barActive: barActive || (() => bar),
     barKeydown: (e) => (did.push(["bar", e.key]), e.key.length === 1),
     renderBar: () => did.push(["renderBar"]),
     clearQueue: () => did.push(["clearQueue"]),
@@ -280,4 +281,95 @@ test("writes wait behind a clipboard paste in flight, in order, and stop waiting
   assert.deepEqual(sent.at(-1), "c")
   writeAfterPaste(pane, () => sent.push("d"))
   assert.deepEqual(sent.at(-1), "d", "settled: written at once again")
+})
+
+test("barOn: a pending shell has the bar from the first key until an Enter", () => {
+  const sh = (o) => ({ integrated: false, program: false, pending: false, ...o })
+  const at = { awaiting: -1, alt: false, exited: false }
+  // Waiting for the first prompt: the bar, whatever program says.
+  assert.equal(barOn(sh({ pending: true }), at), true)
+  assert.equal(barOn(sh({ pending: true, program: true }), at), true)
+  // After an Enter the keys are the line's (typeahead for the program it
+  // starts), as at a prompt: the bar comes back at the first prompt.
+  assert.equal(barOn(sh({ pending: true }), { ...at, awaiting: 0 }), false)
+  // A full-screen program or an exited pane: never.
+  assert.equal(barOn(sh({ pending: true }), { ...at, alt: true }), false)
+  assert.equal(barOn(sh({ pending: true }), { ...at, exited: true }), false)
+  assert.equal(barOn(sh({ integrated: true }), { ...at, alt: true }), false)
+  // At a prompt, as before.
+  assert.equal(barOn(sh({ integrated: true }), at), true)
+  assert.equal(barOn(sh({ integrated: true, program: true }), at), false)
+  assert.equal(barOn(sh({ integrated: true }), { ...at, awaiting: 1 }), false)
+  // No hooks (fish, cmd, a command pane): never.
+  assert.equal(barOn(sh({}), at), false)
+})
+
+test("gaveUp only when the wait ends without a prompt", () => {
+  const sh = (o) => ({ integrated: false, program: false, pending: false, ...o })
+  assert.equal(gaveUp(sh({ pending: true }), sh({})), true)
+  assert.equal(gaveUp(sh({ pending: true }), sh({ integrated: true })), false, "the prompt came")
+  assert.equal(gaveUp(sh({ pending: true }), sh({ pending: true })), false)
+  assert.equal(gaveUp(sh({}), sh({})), false, "never waited")
+  assert.equal(gaveUp(sh({ integrated: true }), sh({})), false)
+})
+
+test("awaitingAfterFlush: a prompt that beat the flush answer leaves the bar on", () => {
+  assert.equal(awaitingAfterFlush(3, 3), 3, "the command is still running")
+  assert.equal(awaitingAfterFlush(3, 4), -1, "its prompt already came")
+})
+
+test("takeTypeahead puts text typed during a command in the bar, editable, never sent", () => {
+  const did = []
+  const pane = { bar: new InputBar(), renderBar: () => did.push("render"), send: (d) => did.push(["send", d]) }
+  takeTypeahead(pane, "")
+  assert.deepEqual(did, [], "nothing typed: nothing to do")
+  takeTypeahead(pane, "ls -la\npwd 日本")
+  assert.equal(pane.bar.text(), "ls -la\npwd 日本", "an Enter typed ahead is a newline in the bar, not a run")
+  assert.equal(pane.bar.cursor, [...pane.bar.text()].length, "caret at the end")
+  pane.bar.backspace()
+  pane.bar.insert("x")
+  assert.equal(pane.bar.text(), "ls -la\npwd 日x", "it edits like typed text")
+  assert.deepEqual(did, ["render"], "rendered, never sent to the shell")
+})
+
+test("takeTypeahead goes before keys typed into the bar after the command finished", () => {
+  const pane = { bar: new InputBar(), renderBar() {} }
+  pane.bar.insert("cd")
+  pane.bar.moveLeft()
+  takeTypeahead(pane, "git ")
+  assert.equal(pane.bar.text(), "git cd", "older text first")
+  pane.bar.insert("X")
+  assert.equal(pane.bar.text(), "git cXd", "the caret kept its place in the newer text")
+})
+
+test("releaseHeld sends what the bar holds once, newlines as CR", () => {
+  const sent = []
+  let stopped = 0
+  const pane = {
+    bar: { t: "ls -la\nabc", text() { return this.t }, clear() { this.t = "" } },
+    send: (d) => sent.push(d),
+    queued: 2,
+    stopQueue: () => stopped++,
+  }
+  releaseHeld(pane)
+  assert.deepEqual(sent, ["ls -la\rabc"])
+  assert.equal(pane.bar.text(), "")
+  assert.equal(pane.queued, 0)
+  assert.equal(stopped, 1)
+  releaseHeld(pane)
+  assert.deepEqual(sent, ["ls -la\rabc"], "an empty bar sends nothing")
+})
+
+test("keys, an IME commit and a paste before the first prompt stay in the bar", () => {
+  const shell = { integrated: false, program: false, pending: true }
+  const { did, press, ta, pane, invoked, host } = setup({ barActive: () => barOn(shell, { awaiting: -1, alt: false, exited: false }) })
+  press({ key: "l", code: "KeyL" })
+  ta.value = "日本"
+  ta.dispatch("compositionend", {})
+  ta.dispatch("paste", { clipboardData: { getData: (t) => (t === "text/plain" ? "pasted" : "") } })
+  assert.deepEqual(did, [["bar", "l"], ["renderBar"], ["renderBar"]])
+  assert.equal(pane.bar.text, "日本pasted")
+  assert.deepEqual(invoked, [])
+  assert.deepEqual(host.of("write"), [])
+  pane.view.unmount()
 })

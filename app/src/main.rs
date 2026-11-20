@@ -68,9 +68,12 @@ enum Msg<'a> {
     Exit { code: Option<u32> },
     /// The input bar's view of the shell (#285).
     #[serde(rename = "shell")]
-    Shell { integrated: bool, cwd: &'a str, program: bool, prompts: u64 },
+    Shell { integrated: bool, cwd: &'a str, program: bool, prompts: u64, pending: bool },
     #[serde(rename = "done")]
     CommandDone { exit: Option<i32>, command: &'a str },
+    /// Text typed while a command ran, for the bar (crates/term shell.rs).
+    #[serde(rename = "typeahead")]
+    Typeahead { text: &'a str },
     // Card #288. An image's bytes (base64), once, before it is placed.
     #[serde(rename = "img")]
     Image { id: u32, name: &'a str, path: Option<&'a str>, format: u32, w: u32, h: u32, z: bool, data: String },
@@ -135,8 +138,9 @@ fn pane_open(
                 }
                 Ok(())
             }
-            Out::Shell(st) => on_frame.send(json(&Msg::Shell { integrated: st.integrated, cwd: &st.cwd, program: st.program, prompts: st.prompts })),
+            Out::Shell(st) => on_frame.send(json(&Msg::Shell { integrated: st.integrated, cwd: &st.cwd, program: st.program, prompts: st.prompts, pending: st.pending })),
             Out::CommandDone { exit, command } => on_frame.send(json(&Msg::CommandDone { exit, command: &command })),
+            Out::Typeahead(text) => on_frame.send(json(&Msg::Typeahead { text: &text })),
             Out::Exit(code) => {
                 panes_ref.map.lock().remove(&id);
                 panes_ref.titles.lock().remove(&id);
@@ -293,6 +297,15 @@ fn pane_queue_clear(panes: State<'_, Arc<Panes>>, id: u32) -> usize {
 fn pane_write(panes: State<'_, Arc<Panes>>, id: u32, data: String) {
     if let Some(p) = panes.get(id) {
         p.write(data.into_bytes());
+    }
+}
+
+/// Bytes that answer the program rather than type into it (focus reports):
+/// the view stays put and a shell's wait for its first prompt goes on.
+#[tauri::command]
+fn pane_reply(panes: State<'_, Arc<Panes>>, id: u32, data: String) {
+    if let Some(p) = panes.get(id) {
+        p.reply(data.into_bytes());
     }
 }
 
@@ -996,6 +1009,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             pane_open,
             pane_write,
+            pane_reply,
             activity::pane_activity,
             activity::activity_notice,
             pane_submit,

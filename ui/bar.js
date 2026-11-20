@@ -370,6 +370,8 @@ export function barKey(bar, e, opts) {
   }
   if (ctrl && !alt && !shift && e.key.length === 1) {
     const k = e.key.toLowerCase()
+    // Before the first prompt (opts.held) Ctrl+L waits for the prompt.
+    if (opts.held && k === "l") return { kind: "none" }
     // Ctrl+C: clear the bar, or interrupt when it is empty.
     if (k === "c") {
       if (bar.runes.length) {

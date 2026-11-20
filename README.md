@@ -49,6 +49,16 @@ with the cwd above it. Enter sends the line; Shift+Enter adds a line; ↑/↓
 walk history; Option/Ctrl+←/→/⌫ work by word; ⌘⌫ clears; Ctrl+C clears the
 bar or interrupts. The bar steps aside for full-screen apps and for any
 running program (Claude Code, ssh, a REPL) and returns at the next prompt.
+It is there from the moment the shell starts: what you type before the first
+prompt waits in the bar, and Enter types the line into the shell as is, as
+typeahead: the shell runs it at its first prompt (no command block), or a
+start-up question reads it as its answer. The keys after that Enter go to
+the shell too, as at a prompt. A start-up that reads single keys or goes
+full screen gets the keys directly, as does Ctrl+C / Ctrl+D on an empty bar.
+Keys typed while a command runs go to it; what it never read (text typed
+during `sleep 3`) is taken back out of the shell at the next prompt and put
+in the bar, editable. An Enter in it is a new line there; it runs nothing
+(zsh and bash; not yet PowerShell).
 `RSZ_NO_BAR=1` keeps the shell's own prompt.
 
 Completion (#295, Go's complete.go): Tab completes the token from the file

@@ -183,6 +183,24 @@ export async function run(name, { invoke, log, first }) {
     say("screen:", JSON.stringify((await screen()).split("\n").filter((l) => l.trim())))
     say("screenshot: blocks")
     await sleep(2500)
+  } else if (name === "typeahead") {
+    // suzuri-2#2: the runner types "sleep 3" + Return through the OS
+    // (keypost) after "ready", then text with a Return in it while sleep
+    // runs. At the next prompt that text is in the bar, not the shell.
+    await sleep(1500)
+    say("bar active:", pane.barActive())
+    say("ready")
+    const bar = () => JSON.stringify(pane.bar.text())
+    for (let t = 0; t < 12; t++) {
+      await sleep(500)
+      say("t", t, "active:", pane.barActive(), "bar:", bar())
+    }
+    say("screen:", JSON.stringify((await screen()).split("\n").filter((l) => l.trim())))
+    say("screenshot: typeahead")
+    await sleep(3000)
+    say("bar after edit:", bar())
+    await sleep(3000)
+    say("screen after run:", JSON.stringify((await screen()).split("\n").filter((l) => l.trim())))
   } else if (name === "ime") {
     // The textarea follows the cursor so the candidate window opens there.
     await type("clear; echo ime test\r")

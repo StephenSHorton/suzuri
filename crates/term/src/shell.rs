@@ -5,7 +5,10 @@
 //! - blanks its prompt (the input bar owns the command line);
 //! - reports the working directory at every prompt: `OSC 7878;cwd=<path> BEL`;
 //! - marks a command starting (`OSC 7879;start BEL`, from preexec) and
-//!   finishing (`OSC 7879;done;<exit>;<base64 command> BEL`, from precmd).
+//!   finishing (`OSC 7879;done;<exit>;<base64 command> BEL`, from precmd);
+//! - after a command, hands the bar what was typed while it ran and nothing
+//!   read: `OSC 7878;typeahead=<base64> BEL`, before the cwd mark. The hook
+//!   reads it out of the tty, so the shell's line editor never gets it.
 //!
 //! [`OscFilter`] takes those sequences out of the PTY stream before the VT
 //! engine sees it, and turns them into [`ShellEvent`]s.
@@ -33,6 +36,10 @@ pub enum ShellEvent {
     /// showed its prompt (false). For the UI only: a C with no D (`exit` in
     /// a remote fish, a dropped ssh) must not hold the pane busy.
     Foreign(bool),
+    /// Keys typed while a command ran that it never read, taken out of the
+    /// tty by the prompt hook, as typed: for the bar, through
+    /// [`clean_typeahead`].
+    Typeahead(Vec<u8>),
 }
 
 /// Removes suzuri's private OSCs (7878, 7879) from a byte stream. Other
@@ -53,7 +60,7 @@ const MAX_OSC: usize = 64 * 1024;
 
 /// Only these forms are ours. `7879;image=` (inline images, #288) and any
 /// other 7879 kind pass through to the next filter.
-const PREFIXES: [&[u8]; 5] = [b"\x1b]7878;cwd=", b"\x1b]7879;start", b"\x1b]7879;done", b"\x1b]133;", b"\x1b]633;"];
+const PREFIXES: [&[u8]; 6] = [b"\x1b]7878;cwd=", b"\x1b]7878;typeahead=", b"\x1b]7879;start", b"\x1b]7879;done", b"\x1b]133;", b"\x1b]633;"];
 
 impl OscFilter {
     /// Filter `input`, appending the bytes for the VT engine to `out` and
@@ -183,6 +190,9 @@ fn parse(s: &str) -> Option<ShellEvent> {
     if let Some(path) = s.strip_prefix("7878;cwd=") {
         return Some(ShellEvent::Cwd(path.to_string()));
     }
+    if let Some(b64) = s.strip_prefix("7878;typeahead=") {
+        return Some(ShellEvent::Typeahead(decode_b64_bytes(b64)));
+    }
     let rest = s.strip_prefix("7879;")?;
     let mut parts = rest.splitn(3, ';');
     match parts.next()? {
@@ -197,6 +207,66 @@ fn parse(s: &str) -> Option<ShellEvent> {
 }
 
 fn decode_b64(s: &str) -> String {
+    String::from_utf8_lossy(&decode_b64_bytes(s)).into_owned()
+}
+
+/// Typed-ahead bytes as text for the bar: escape sequences (arrow keys,
+/// focus reports, terminal replies, bracketed-paste marks) and control
+/// characters are dropped, a CR or CR LF is a newline, and trailing newlines
+/// go (an Enter typed ahead never runs the line: the bar shows it, editable).
+pub fn clean_typeahead(b: &[u8]) -> String {
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            0x1b => {
+                i += 1;
+                match b.get(i) {
+                    // CSI: parameters, then one final byte 0x40..=0x7e.
+                    Some(b'[') => {
+                        i += 1;
+                        while i < b.len() && !(0x40..=0x7e).contains(&b[i]) {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    // OSC, DCS, APC, PM, SOS: up to BEL or ESC \.
+                    Some(b']' | b'P' | b'_' | b'^' | b'X') => {
+                        i += 1;
+                        while i < b.len() && b[i] != 0x07 && !(b[i] == 0x1b && b.get(i + 1) == Some(&b'\\')) {
+                            i += 1;
+                        }
+                        i += if b.get(i) == Some(&0x07) { 1 } else { 2 };
+                    }
+                    // SS3 (ESC O A) and the like: one more byte.
+                    Some(b'O') => i += 2,
+                    // Alt+key: ESC then the key.
+                    Some(_) => i += 1,
+                    None => {}
+                }
+            }
+            b'\r' => {
+                out.push(b'\n');
+                i += if b.get(i + 1) == Some(&b'\n') { 2 } else { 1 };
+            }
+            b'\n' | b'\t' => {
+                out.push(b[i]);
+                i += 1;
+            }
+            c if c < 0x20 || c == 0x7f => i += 1,
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    while out.last() == Some(&b'\n') {
+        out.pop();
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn decode_b64_bytes(s: &str) -> Vec<u8> {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::new();
     let (mut acc, mut bits) = (0u32, 0u32);
@@ -209,7 +279,7 @@ fn decode_b64(s: &str) -> String {
             out.push((acc >> bits) as u8);
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 /// How a shell is started with the bootstrap: extra args, env, and a temp
@@ -317,7 +387,22 @@ _rsz_quiet_prompt() {
 _rsz_preexec() {
   [[ ${_rsz_depth:-0} != 0 ]] && return 0
   _rsz_cmd=$1
+  _rsz_ran=1
   printf '\033]7879;start\007'
+}
+# Keys typed while the command ran that it never read wait in the tty for
+# zle. Read them out (read -k puts the tty in raw mode, so a line with no
+# Enter comes too) and hand them to the bar instead. Only after a command:
+# at the first prompt a line typed with Enter is meant to run. Not with the
+# person's own prompt kept (an embedder with no bar): the keys stay theirs.
+_rsz_typeahead() {
+  [[ -n ${_rsz_ran:-} ]] || return 0
+  _rsz_ran=
+  [[ -z $_rsz_keep && -t 0 ]] || return 0
+  local c buf=
+  while read -s -k 1 -t 0 c 2>/dev/null; do buf+=$c; done
+  [[ -n $buf ]] || return 0
+  printf '\033]7878;typeahead=%s\007' "$(printf '%s' "$buf" | command base64 | tr -d '\n')"
 }
 _rsz_precmd() {
   local ec=$?
@@ -329,6 +414,7 @@ _rsz_precmd() {
     printf '\033]7879;done;%s;%s\007' "$ec" "$b64"
     _rsz_cmd=
   fi
+  _rsz_typeahead
   _rsz_quiet_prompt
   _rsz_depth=0
 }
@@ -357,9 +443,23 @@ _rsz_prompt() {
     b64=$(printf '%s' "$_rsz_cmd" | command base64 | tr -d '\n')
     printf '\033]7879;done;%s;%s\007' "$_rsz_ec" "$b64"
     _rsz_cmd=
+    _rsz_typeahead
   fi
   printf '\033]7878;cwd=%s\007' "$PWD"
   _rsz_in_prompt=
+}
+# Keys typed while the command ran that it never read wait in the tty for
+# readline: read them out and hand them to the bar instead. bash 3.2 (the
+# Mac's) has no read -t 0, so the tty is put in non-canonical mode with no
+# wait (min 0 time 0) and dd takes what is there.
+_rsz_typeahead() {
+  [[ -z $_rsz_keep && -t 0 ]] || return 0
+  local old b64
+  old=$(command stty -g 2>/dev/null) || return 0
+  command stty -icanon -echo min 0 time 0 2>/dev/null
+  b64=$(command dd bs=65536 count=1 2>/dev/null | command base64 | tr -d '\n')
+  command stty "$old" 2>/dev/null
+  [[ -n $b64 ]] && printf '\033]7878;typeahead=%s\007' "$b64"
 }
 _rsz_debug() {
   [[ -n ${_rsz_in_prompt:-} ]] && return
@@ -458,6 +558,29 @@ mod tests {
         // A lone ESC at the end of a read that turns out to be CSI.
         let (out, _) = run(&[b"a\x1b", b"[2Jb"]);
         assert_eq!(out, b"a\x1b[2Jb");
+    }
+
+    #[test]
+    fn typeahead_mark_split_anywhere() {
+        // "ls\rpwd" in base64 is bHMNcHdk
+        let whole: &[u8] = b"x\x1b]7878;typeahead=bHMNcHdk\x07\x1b]7878;cwd=/a\x07y";
+        for cut in 0..whole.len() {
+            let (out, ev) = run(&[&whole[..cut], &whole[cut..]]);
+            assert_eq!(out, b"xy", "cut at {cut}");
+            assert_eq!(ev, vec![ShellEvent::Typeahead(b"ls\rpwd".to_vec()), ShellEvent::Cwd("/a".into())], "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn typeahead_is_cleaned_for_the_bar() {
+        let c = |b: &[u8]| clean_typeahead(b);
+        assert_eq!(c(b"abc def"), "abc def");
+        assert_eq!(c(b"ls\npwd\r\n"), "ls\npwd", "Enter is a newline, trailing ones go");
+        assert_eq!(c(b"a\x1b[Ab\x1bOBc\x1b[1;5Dd"), "abcd", "arrow keys are dropped");
+        assert_eq!(c(b"\x1b[I\x1b[?1;2cx\x1b]11;rgb:0/0/0\x07y\x1b]10;?\x1b\\z"), "xyz", "focus and terminal replies are dropped");
+        assert_eq!(c(b"\x1b[200~p\nq\x1b[201~"), "p\nq", "a paste keeps its text");
+        assert_eq!(c(b"a\x7f\x03\x1bb\tc"), "a\tc", "controls and Alt+key go, Tab stays");
+        assert_eq!(c("日本\x1b[".as_bytes()), "日本", "UTF-8 kept, a cut sequence dropped");
     }
 
     #[test]
