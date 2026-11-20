@@ -2183,3 +2183,132 @@ mod tests {
         pane.join();
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn lines_of(screen: &str) -> Vec<String> {
+        screen.lines().map(|l| l.trim_end().to_string()).collect()
+    }
+
+    fn wait_until(what: &str, f: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !f() {
+            assert!(Instant::now() < deadline, "never: {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// PowerShell under ConPTY (pwsh, from $RSZ_TEST_PWSH or PATH, and
+    /// Windows PowerShell 5.1): keys typed while a command runs wait in the
+    /// console input buffer; the prompt hook reads them out before
+    /// PSReadLine does and sends them for the bar. The Enter in them runs
+    /// nothing, an arrow is dropped, PSReadLine's line is left empty, and a
+    /// program that reads keys itself (cmd, Read-Host) still gets them all.
+    #[test]
+    fn powershell_hands_typeahead_to_the_bar() {
+        let given = std::env::var("RSZ_TEST_PWSH").ok().filter(|s| !s.is_empty());
+        if let Some(p) = &given {
+            assert!(std::path::Path::new(p).is_file(), "RSZ_TEST_PWSH={p} is not a file");
+        }
+        let mut shells: Vec<String> = given.or_else(|| which("pwsh.exe")).into_iter().collect();
+        if shells.is_empty() {
+            eprintln!("skipped pwsh 7: none on PATH and RSZ_TEST_PWSH unset");
+        }
+        shells.push("powershell.exe".into());
+        for exe in shells {
+            powershell_typeahead(&exe);
+        }
+    }
+
+    fn powershell_typeahead(exe: &str) {
+        let seen = Arc::new(Mutex::new(Vec::<ShellStatus>::new()));
+        let typed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (s, t) = (seen.clone(), typed.clone());
+        let sink: Sink = Arc::new(move |o| match o {
+            Out::Shell(st) => s.lock().push(st),
+            Out::Typeahead(text) => t.lock().push(text),
+            _ => {}
+        });
+        let boot = shell::bootstrap(&[exe.to_string(), "-NoLogo".into()]).unwrap();
+        let cfg = PaneConfig { cols: 100, rows: 30, command: Some(boot.argv), ..Default::default() };
+        let pane = Pane::spawn(cfg, sink).unwrap();
+        let last = || seen.lock().last().cloned().unwrap_or_default();
+        let wait = |what: &str, f: &dyn Fn(&ShellStatus) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !seen.lock().iter().any(f) {
+                assert!(Instant::now() < deadline, "{exe}: never saw {what}; saw {:?}\n{}", seen.lock(), pane.screen_text());
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let next_prompt = |what: &str| {
+            let n = last().prompts;
+            wait(what, &|s| s.integrated && !s.program && s.prompts > n);
+        };
+        let has_line = |want: &str| lines_of(&pane.screen_text()).iter().any(|l| l == want);
+        wait("the first prompt", &|s| s.integrated);
+        wait_until("idle", || !pane.is_busy());
+        assert_eq!(pane.submit("Start-Sleep 3"), Submit::Sent);
+        // PowerShell has no start mark: give the command a moment to run.
+        std::thread::sleep(Duration::from_millis(800));
+        pane.write("echo (6*7)\rnext \x1b[Aline 日本".as_bytes().to_vec());
+        next_prompt("the prompt after Start-Sleep");
+        assert_eq!(*typed.lock(), vec!["echo (6*7)\nnext line 日本".to_string()], "{exe}");
+        eprintln!("{exe}: the bar got {:?}", typed.lock());
+        wait_until("idle", || !pane.is_busy());
+        assert_eq!(pane.submit("echo A$(1+2)B"), Submit::Sent);
+        next_prompt("the prompt after echo");
+        wait_until("echo's output", || has_line("A3B"));
+        let screen = pane.screen_text();
+        eprintln!("{exe} screen:\n{screen}");
+        assert!(!has_line("42"), "{exe}: the typed-ahead line ran: {screen}");
+        assert!(!screen.contains("7878") && !screen.contains("typeahead"), "{exe}: marks leaked: {screen}");
+        // Programs that read the keyboard get every key: cmd (a REPL in its
+        // own process) and Read-Host (PowerShell's own).
+        wait_until("idle", || !pane.is_busy());
+        assert_eq!(pane.submit("cmd.exe /d"), Submit::Sent);
+        wait_until("cmd's banner", || pane.screen_text().contains("Microsoft Corporation"));
+        std::thread::sleep(Duration::from_millis(300));
+        pane.write(b"echo got-cmd\rexit\r".to_vec());
+        next_prompt("the prompt after cmd");
+        wait_until("cmd got the keys", || has_line("got-cmd"));
+        wait_until("idle", || !pane.is_busy());
+        assert_eq!(pane.submit("Read-Host | % { \"got-$_\" }"), Submit::Sent);
+        std::thread::sleep(Duration::from_millis(800));
+        pane.write(b"abc\r".to_vec());
+        next_prompt("the prompt after Read-Host");
+        wait_until("Read-Host got the keys", || has_line("got-abc"));
+        assert_eq!(typed.lock().len(), 1, "{exe}: nothing more taken back: {:?}", typed.lock());
+        eprintln!("{exe}: cmd and Read-Host got every key");
+        pane.close();
+        pane.join();
+    }
+
+    /// The pane a person opens (the default PowerShell, hooked by spawn):
+    /// lines typed with Enter before the first prompt all run, the second
+    /// one too (taken back after the first ran and typed again), and none
+    /// reaches the bar.
+    #[test]
+    fn powershell_startup_lines_all_run() {
+        let seen = Arc::new(Mutex::new(Vec::<ShellStatus>::new()));
+        let typed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (s, t) = (seen.clone(), typed.clone());
+        let sink: Sink = Arc::new(move |o| match o {
+            Out::Shell(st) => s.lock().push(st),
+            Out::Typeahead(text) => t.lock().push(text),
+            _ => {}
+        });
+        let pane = Pane::spawn(PaneConfig { cols: 100, rows: 30, ..Default::default() }, sink).unwrap();
+        wait_until("pending", || seen.lock().iter().any(|s| s.pending));
+        assert_eq!(pane.submit("Start-Sleep 1"), Submit::Sent);
+        assert_eq!(pane.submit("echo B$(2+3)C"), Submit::Sent);
+        let has_line = |want: &str| lines_of(&pane.screen_text()).iter().any(|l| l == want);
+        wait_until("the second line ran", || has_line("B5C"));
+        eprintln!("{} screen:
+{}", default_shell()[0], pane.screen_text());
+        assert!(typed.lock().is_empty(), "{:?}", typed.lock());
+        pane.close();
+        pane.join();
+    }
+}

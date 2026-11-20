@@ -481,7 +481,14 @@ const PWSH_KEEP: &str = "$global:RszUserPrompt = $function:prompt; function glob
 /// PowerShell: a prompt function that reports the last command and the cwd
 /// and prints a blank prompt. PowerShell has no preexec, so a command start
 /// is known from the bar's own Enter and from child processes.
-const PWSH_PROMPT: &str = "function global:prompt { $ok=$?; $native=$global:LASTEXITCODE; try { $h=Get-History -Count 1 -ErrorAction SilentlyContinue; if ($h -and $h.Id -ne $global:RszHist) { $global:RszHist=$h.Id; $ec=0; if (-not $ok) { if ($native) { $ec=[int]$native } else { $ec=1 } }; $b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$h.CommandLine)); $e=[char]27; $b=[char]7; [Console]::Out.Write(('{0}]7879;done;{1};{2}{3}' -f $e,$ec,$b64,$b)) }; $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}; ' ' }; Clear-Host";
+///
+/// After a command (a new history entry), keys typed while it ran that it
+/// never read wait in the console input buffer for PSReadLine, which only
+/// reads once the prompt returns: they are read out here and handed to the
+/// bar (Enter comes as CR; keys with no character, like arrows, are
+/// dropped). Not with the person's own prompt kept (`RszUserPrompt` set):
+/// the keys stay theirs.
+const PWSH_PROMPT: &str = "function global:prompt { $ok=$?; $native=$global:LASTEXITCODE; try { $h=Get-History -Count 1 -ErrorAction SilentlyContinue; if ($h -and $h.Id -ne $global:RszHist) { $global:RszHist=$h.Id; $ec=0; if (-not $ok) { if ($native) { $ec=[int]$native } else { $ec=1 } }; $b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$h.CommandLine)); $e=[char]27; $b=[char]7; [Console]::Out.Write(('{0}]7879;done;{1};{2}{3}' -f $e,$ec,$b64,$b)); if (-not $global:RszUserPrompt) { try { $t=''; while ([Console]::KeyAvailable) { $k=[Console]::ReadKey($true); if ($k.KeyChar -ne [char]0) { $t+=$k.KeyChar } }; if ($t) { [Console]::Out.Write(($e+']7878;typeahead='+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($t))+$b)) } } catch {} } }; $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}; ' ' }; Clear-Host";
 
 #[cfg(test)]
 mod tests {
@@ -605,6 +612,8 @@ mod tests {
         assert!(kept.starts_with("$global:RszUserPrompt = $function:prompt; function global:prompt {"), "{kept}");
         assert!(kept.contains("]7878;cwd=") && kept.contains("]7879;done;") && kept.contains("& $global:RszUserPrompt };"), "{kept}");
         assert!(!kept.contains(" ' ' };"), "{kept}");
+        // The typeahead drain is skipped when the person's prompt is kept.
+        assert!(PWSH_PROMPT.contains("if (-not $global:RszUserPrompt) { try { $t=''; while ([Console]::KeyAvailable)"));
         assert_eq!(script(bootstrap(&["pwsh.exe".into()]).unwrap()), PWSH_PROMPT);
         for z in [ZSHRC, BASHRC] {
             assert!(z.contains("unset RSZ_KEEP_PROMPT"), "the flag must not reach child shells");
