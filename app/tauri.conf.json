@@ -48,7 +48,8 @@
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/icon.ico",
+      "icons/icon.png"
     ],
     "createUpdaterArtifacts": true,
     "macOS": {
@@ -60,6 +61,10 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "../packaging/windows/installer-header.bmp",
+        "sidebarImage": "../packaging/windows/installer-sidebar.bmp",
         "installerHooks": "../packaging/windows/installer-hooks.nsh"
       }
     }

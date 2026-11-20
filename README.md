@@ -1,5 +1,7 @@
 # suzuri
 
+<img src="design/logo/lockup.svg" alt="suzuri" height="72">
+
 A spike of suzuri's successor: the terminal core rebuilt in Rust with a Tauri
 UI. It keeps suzuri's Gohu font, takes its look from Astryx's seven themes
 (Neutral dark by default), and the chrome is real UI, not ASCII drawn into
