@@ -18,7 +18,10 @@
 #    Japanese, a box line and a middle dot unbroken and no literal `[2m`;
 #  - card hearth#1025: those two shells report no folder, yet the pane
 #    that had `cd` into work\alpha (plain) or work\beta (cmd) is saved in
-#    that folder and comes back in it after the hard kill.
+#    that folder and comes back in it after the hard kill;
+#  - card hearth#1024: a Cmd tab opened while Default is the active profile
+#    comes back as cmd.exe after a hard kill (the first tab, Default's
+#    shell, comes back as PowerShell).
 #
 # Claude Code is a stand-in claude.exe (compiled here from C#) that writes
 # the session file the real one does (%USERPROFILE%\.claude\sessions\<pid>.json,
@@ -29,10 +32,11 @@
 # RSZ_CONFIG_DIR and keeper folder, so the installed suzuri's files and kept
 # shells are never touched.
 #   cargo build -p suzuri -p rsz-keeper
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\reboot-check.ps1 [-Out <folder for pictures>] [-Keep] [-Cases kept,plain,cmd]
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\reboot-check.ps1 [-Out <folder for pictures>] [-Keep] [-Cases kept,plain,cmd,profile]
 # -Cases: which parts to run (all by default): kept (the kept shells, the
-# hard kill, exit), plain (the plain-shell setting), cmd (a cmd.exe profile).
-param([string]$App = "", [string]$Out = "", [switch]$Keep, [string[]]$Cases = @("kept", "plain", "cmd"))
+# hard kill, exit), plain (the plain-shell setting), cmd (a cmd.exe profile),
+# profile (a Cmd tab beside a Default one keeps its shell).
+param([string]$App = "", [string]$Out = "", [switch]$Keep, [string[]]$Cases = @("kept", "plain", "cmd", "profile"))
 $ErrorActionPreference = "Stop"
 # Its log names Japanese text and box lines: written as UTF-8, not the code page.
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
@@ -302,7 +306,12 @@ function RestoreCase([string]$label, $vars, $config, [string]$fill, [string[]]$w
   if (-not (Test-Path (Join-Path $S "cfg\restore\$($a1.Id)\session.json"))) { Fail "${label}: no session saved" }
   Say "1. before the kill: $($want -join ' / ') on screen"
   if ($dir) {
-    $saved = (Get-Content (Join-Path $S "cfg\restore\$($a1.Id)\session.json") -Raw | ConvertFrom-Json).tabs[0].tree.cwd
+    # A save follows the last output; give it time to name the folder.
+    for ($i = 0; $i -lt 30; $i++) {
+      $saved = (Get-Content (Join-Path $S "cfg\restore\$($a1.Id)\session.json") -Raw | ConvertFrom-Json).tabs[0].tree.cwd
+      if ($saved -eq $dir) { break }
+      Start-Sleep -Milliseconds 500
+    }
     if ($saved -ne $dir) { Fail "${label}: the pane's folder saved as '$saved', not '$dir'" }
     Say "1. folder saved for a reboot: $saved"
   }
@@ -340,9 +349,10 @@ function RestoreCase([string]$label, $vars, $config, [string]$fill, [string[]]$w
   }
   Say "2. after the kill: $($want -join ' / ') back in order, then '$($lines[$marks[0]])' once, no literal [2m, then the prompt '$last'"
   if ($dir) {
-    if ($q.cwd -ne $dir) { Fail "${label}: the new pane is in '$($q.cwd)', not '$dir'" }
-    if (-not $last.Contains($dir)) { Fail "${label}: the new shell's prompt '$last' is not in '$dir'" }
-    Say "2. the new shell starts in the old folder: the pane shows '$($q.cwd)', and the new shell's own prompt '$last'"
+    # The shell's own prompt names where it started (the bridge's cwd is
+    # only what the hooks report, empty here).
+    if ($last.IndexOf($dir, [StringComparison]::OrdinalIgnoreCase) -lt 0) { Fail "${label}: the new shell's prompt '$last' is not in '$dir'; the end:`n$shown" }
+    Say "2. the new shell starts in the old folder: its prompt '$last'"
   }
   Shot $a2 (Join-Path $Out $picture)
   foreach ($n in $nested) { Submit $q.id $n; Start-Sleep -Seconds 3 }
@@ -355,6 +365,66 @@ function RestoreCase([string]$label, $vars, $config, [string]$fill, [string[]]$w
   $w = @($lines | Where-Object { $_ -eq $want[-1] }).Count
   if ($n -ne 1 -or $w -ne 1) { Fail "${label}: after a nested $($nested -join ' and '): $n restored lines and $w of '$($want[-1])', not one each" }
   Say "3. a nested $($nested -join ' and a nested ') printed nothing again (one restored line, one '$($want[-1])')"
+  KillAll $a2
+  foreach ($d in Sessions) { Remove-Item -Recurse -Force $d.FullName }
+  Remove-Item -Force -ErrorAction SilentlyContinue $cfgFile
+}
+
+# Card hearth#1024: with Default the active profile, tab 1 runs Default's
+# shell and tab 2 is opened as the Cmd profile. After a hard kill, tab 2
+# comes back running cmd.exe (not the active profile's PowerShell) and
+# tab 1 still runs PowerShell.
+function ShellName([int]$id) {
+  $k = KeptOne $id
+  if (-not $k) { Fail "pane $id is not a kept shell: $(Kept | ConvertTo-Json -Compress)" }
+  (Get-Process -Id ([int]$k.shell_pid)).ProcessName
+}
+function ProfileCase {
+  $label = "a Cmd tab while Default is the active profile"
+  Say "== $label"
+  foreach ($d in Sessions) { Remove-Item -Recurse -Force $d.FullName }
+  $cfgFile = Join-Path $S "cfg\config.json"
+  [IO.File]::WriteAllText($cfgFile, (@{ active_profile = "Default" } | ConvertTo-Json -Compress))
+  $a1 = StartApp
+  Ready
+  Start-Sleep -Seconds 2
+  $d1 = [int](Call layout).windows[0].tabs[0].panes[0].id
+  $c1 = [int](Call new_tab @{ profile = "Cmd" }).pane_id
+  Start-Sleep -Seconds 3
+  Submit $c1 "cd /d $S\work\beta & echo cmd-tab-before"
+  Start-Sleep -Seconds 5
+  $n1 = ShellName $d1; $n2 = ShellName $c1
+  if ($n1 -notmatch '^(powershell|pwsh)$') { Fail "${label}: the Default tab runs '$n1', not PowerShell" }
+  if ($n2 -ne "cmd") { Fail "${label}: the Cmd tab runs '$n2', not cmd" }
+  Say "1. before the kill: tab 1 (pane $d1) runs $n1.exe, tab 2 (pane $c1, the Cmd profile) runs $n2.exe"
+  $sf = Join-Path $S "cfg\restore\$($a1.Id)\session.json"
+  for ($i = 0; $i -lt 20 -and -not ((Test-Path $sf) -and ((Get-Content $sf -Raw) -match 'cmd-tab|"command"')); $i++) { Start-Sleep -Milliseconds 500 }
+  if (-not (Test-Path $sf)) { Fail "${label}: no session saved" }
+  $sess = Get-Content $sf -Raw | ConvertFrom-Json
+  $saved = @($sess.tabs[1].tree.command)
+  if ($saved[0] -ne "cmd.exe") { Fail "${label}: the Cmd tab's shell not saved: $($sess.tabs[1].tree | ConvertTo-Json -Compress)" }
+  if ($null -ne $sess.tabs[0].tree.command) { Fail "${label}: the Default tab saved a command: $($sess.tabs[0].tree.command)" }
+  Say "   saved: tab 2's command $($saved -join ' '); tab 1 none (the active profile's shell)"
+  KillAll $a1
+  if ((Kept).Count) { Fail "${label}: kept shells left after the kill" }
+  $a2 = StartApp
+  Ready
+  Start-Sleep -Seconds 6
+  $tabs = @((Call layout).windows[0].tabs)
+  if ($tabs.Count -ne 2) { Fail "${label}: 2 tabs after the kill, got $($tabs.Count)" }
+  $e1 = [int]$tabs[0].panes[0].id; $e2 = [int]$tabs[1].panes[0].id
+  $m1 = ShellName $e1; $m2 = ShellName $e2
+  if ($m2 -ne "cmd") { Fail "${label}: the Cmd tab came back running '$m2', not cmd" }
+  if ($m1 -notmatch '^(powershell|pwsh)$') { Fail "${label}: the Default tab came back running '$m1', not PowerShell" }
+  $t = Get_ "/v1/panes/$e2`?lines=200"
+  $lines = @(@($t.tail) + @($t.live) | ForEach-Object { $_.TrimEnd() })
+  if ($lines -notcontains "cmd-tab-before") { Fail "${label}: the Cmd tab's old text not back" }
+  $last = @($lines | Where-Object { $_.Trim() }) | Select-Object -Last 1
+  if ($last -notmatch '^[A-Za-z]:\\.*>$') { Fail "${label}: no cmd prompt in the Cmd tab: '$last'" }
+  Say "2. after the kill: tab 1 (pane $e1) runs $m1.exe, tab 2 (pane $e2) runs $m2.exe with its old text and the prompt '$last'"
+  Call focus @{ pane_id = $e2 } | Out-Null
+  Start-Sleep -Seconds 1
+  Shot $a2 (Join-Path $Out "7-cmd-tab-restored.png")
   KillAll $a2
   foreach ($d in Sessions) { Remove-Item -Recurse -Force $d.FullName }
   Remove-Item -Force -ErrorAction SilentlyContinue $cfgFile
@@ -506,14 +576,16 @@ try {
     RestoreCase "plain-shell setting (RSZ_NO_BAR=1): PowerShell with no hooks" @{ RSZ_NO_BAR = "1" } $null `
       "cd $S\work\alpha; 1..300 | % { `"plain-line-`$_`" }; 'plain $ja'" `
       @("plain-line-1", "plain-line-150", "plain-line-300", "plain $ja") `
-      { param($l) $l -match '^PS .*>$' -or $l -match "$([char]0x276F)\s*`$" -or $l -match '>\s*$' } "5-plain-shell-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile") "$S\work\alpha"
+      { param($l) $l -match '^PS .*>$' -or $l -match "$([char]0x276F)\s*`$" -or $l -match '>\s*$' } "5-plain-shell-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile") -dir "$S\work\alpha"
   }
   if ($Cases -contains "cmd") {
     RestoreCase "a cmd.exe profile (Cmd, the active profile)" @{} @{ active_profile = "Cmd" } `
       "cd /d $S\work\beta & (for /L %i in (1,1,300) do @echo cmd-line-%i) & echo cmd $ja" `
       @("cmd-line-1", "cmd-line-150", "cmd-line-300", "cmd $ja") `
-      { param($l) $l -match '^[A-Za-z]:\\.*>$' } "6-cmd-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile") "$S\work\beta"
+      { param($l) $l -match '^[A-Za-z]:\\.*>$' } "6-cmd-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile") -dir "$S\work\beta"
   }
+
+  if ($Cases -contains "profile") { ProfileCase }
 
   $after = RealStamp
   if ($after -ne $before) { Fail "the installed suzuri's files changed: '$before' -> '$after'" }

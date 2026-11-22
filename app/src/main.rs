@@ -76,6 +76,12 @@ impl Panes {
     pub(crate) fn get(&self, id: u32) -> Option<Arc<Shell>> {
         self.map.lock().get(&id).cloned()
     }
+
+    /// The command pane `id` was started with, when not the login shell (a
+    /// profile's shell, RSZ_CMD): the restore save keeps it (restore.rs).
+    pub(crate) fn launch_of(&self, id: u32) -> Option<Vec<String>> {
+        self.launch.lock().get(&id).cloned()
+    }
 }
 
 #[derive(Serialize)]

@@ -781,9 +781,10 @@ impl Pane {
             return Some(c);
         }
         #[cfg(windows)]
-        return self.unhooked_cwd();
+        let os = self.unhooked_cwd();
         #[cfg(not(windows))]
-        self.pid.and_then(crate::cwd::process_cwd)
+        let os = self.pid.and_then(crate::cwd::process_cwd);
+        os
     }
 
     /// Windows, a shell that reports no folder (the plain-shell setting,

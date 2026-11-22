@@ -18,13 +18,18 @@ export function savedPlan(session) {
       if (!n || typeof n !== "object") return null
       if (n.id != null) {
         ids.push(n.id)
-        return {
+        const leaf = {
           id: n.id,
           title: typeof n.title === "string" ? n.title : "",
           cwd: typeof n.cwd === "string" ? n.cwd : "",
           text: typeof n.text === "string" ? n.text : "",
           claude: resumeOf(n.claude),
         }
+        // The shell it was started with (a Cmd tab's cmd.exe). None in a
+        // save from before (or for the login shell): the active profile's.
+        const command = commandOf(n.command)
+        if (command) leaf.command = command
+        return leaf
       }
       const a = prune(n.a), b = prune(n.b)
       if (!a || !b) return a || b
@@ -44,6 +49,12 @@ export function savedPlan(session) {
     })
   }
   return { tabs, active: Math.min(active, Math.max(0, tabs.length - 1)), savedAt: Number(session?.saved_at) || 0 }
+}
+
+// A saved launch argv: a list of strings, its first not empty.
+function commandOf(c) {
+  if (!Array.isArray(c) || !c.length || !c.every((x) => typeof x === "string") || !c[0].trim()) return null
+  return c
 }
 
 // A Claude Code conversation to offer, when its id is one (it goes on a

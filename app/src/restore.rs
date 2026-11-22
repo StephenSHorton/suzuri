@@ -192,6 +192,13 @@ impl Restore {
                 } else if let Some(n) = name {
                     leaf["program"] = n.into();
                 }
+                // The shell it was started with (a Cmd tab's cmd.exe), so a
+                // reboot brings back that shell, not the active profile's.
+                // None: the login shell, and the restore opens the active
+                // profile's, as before.
+                if let Some(argv) = self.panes.launch_of(id) {
+                    leaf["command"] = argv.into();
+                }
                 let at = shell.last_output_at();
                 if self.written.lock().get(&id) == Some(&at) {
                     return;
