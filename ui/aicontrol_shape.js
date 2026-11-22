@@ -55,6 +55,9 @@ export function paneJSON(p, lines, extra = {}) {
     live,
     // What the input bar holds, not yet run (a restored pane's resume offer).
     input: p.bar?.text?.() ?? "",
+    // The shell as its hooks report it: prompts shown so far (0 until the
+    // first, and always 0 without the hooks), and whether a program runs.
+    shell: { integrated: !!p.shell?.integrated, prompts: p.shell?.prompts ?? 0, program: !!p.shell?.program },
     // Older suzuri builds: focused, alive (was live) and the joined text.
     focused: !!extra.focused,
     alive: !p.exited,
