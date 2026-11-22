@@ -1,7 +1,7 @@
 // node --test ui/test
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { tabTitle, stickyAt, windowTitle, zoomCycle, MAX_TABS, MAX_PANES } from "../tab_rules.js"
+import { tabTitle, stickyAt, windowTitle, zoomCycle, MAX_TABS, MAX_PANES } from "../view/tab_rules.js"
 
 const tab = (o) => ({ name: "", sticky: "", panes: [""], focused: "", alt: false, index: 0, ...o })
 

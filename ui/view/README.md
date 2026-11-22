@@ -2,7 +2,7 @@
 
 suzuri's terminal view as a package. It paints `rsz-term` frames on a canvas and turns keys, IME text, paste, the mouse and the wheel into calls on a `host` object. It has no Tauri code: each app wires the host to its own IPC.
 
-It is plain ESM with hand-written types (`index.d.ts`) and no dependencies. Its version is the same as the `rsz-term` crate's, and both move in one suzuri tag. `feed` checks the frame's length (at least its 32-byte header) and format version (header byte 11). A frame too short or in another version is refused, the view shows why (for a version, "terminal format vN, this app knows vM"), and that frame is not acked.
+It is plain ESM with hand-written types (`index.d.ts`) and no dependencies. Each suzuri release carries it packed as `suzuri-view-<v>.tgz`, at the release's version, so it and `rsz-term` move in one suzuri tag; depend on it by that release URL. `feed` checks the frame's length (at least its 32-byte header) and format version (header byte 11). A frame too short or in another version is refused, the view shows why (for a version, "terminal format vN, this app knows vM"), and that frame is not acked.
 
 Grapheme clusters (👍🏽, 👨‍👩‍👧, 🇯🇵, e + U+0301) come in an optional cluster table after the last row. Header bytes 30-31 hold its entry count (`nclusters` in `decodeHeader`), 0 when there is none, and the frame is then the same bytes as before. Each entry is `u16 y, u16 col, u8 w, u8 n, n × u32` codepoints, and the cell's run still carries the base codepoint (`crates/term/src/frame.rs` has the layout). This is additive, so the format version stays 1. An older suzuri-view ignores the table and draws the base glyph across the cluster's cells, as it always did. This one draws each cluster as one string, and emoji in the system colour-emoji fonts (Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji), shrunk to their cells only when they would overflow.
 
@@ -87,3 +87,18 @@ suzuri 0.10 had one hidden textarea and one paint loop for every pane in `ui/app
 - `fonts/`: the bundled Gohu (GohuFont uni14 Nerd Font Mono) and its license, `COPYING-LICENSE`
 
 The Gohu font ships in `fonts/` (suzuri's own UI loads it from there too). `GOHU_FONT.url` resolves next to `index.js` through `new URL(..., import.meta.url)`, and a bundler that follows that pattern copies the file. `suzuri-view/fonts/*` is also exported for a host that serves the file itself.
+
+## Pane-tree rules
+
+suzuri's tabs and splits follow three DOM-free modules, shipped here so another app splits, closes and tabs panes by the same rules. suzuri imports them from this package too.
+
+- `suzuri-view/layout_ops.js`: the pane tree (`{pane}` leaves, `{dir: "h"|"v", a, b, ratio?}` splits) and its operations: `removePane`, `swapPanes`, `dockBeside`, `adjustRatio`, `equalize`, `rotate`, `swapSides`, `neighbor`, `dropEdge`, `dropChanges`. Each changes the tree in place.
+- `suzuri-view/sash_ops.js`: dragging a divider: `sashRect`, `hitSash`, `ratioAt`, `equalizeRun`, and `resizeGate` to hold PTY resizes back during a drag.
+- `suzuri-view/tab_rules.js`: `MAX_TABS`, `MAX_PANES`, the strip label (`tabTitle`, `stickyAt`), `windowTitle` and the zoomed-pane cycle (`zoomCycle`).
+
+```js
+import { dockBeside, removePane } from "suzuri-view/layout_ops.js"
+let tree = { dir: "h", a: { pane: left }, b: { pane: right } }
+tree = dockBeside(tree, right, left, "bottom") // right goes under left
+tree = removePane(tree, left)                  // null once the last pane closes
+```

@@ -1,7 +1,7 @@
 // AI control's JSON in Go suzuri's shape (internal/ui/ai_apply.go layoutJSON,
 // paneJSON, treeJSON), plus its argument parsing. No DOM or Tauri here, so
 // it is tested under node (ui/test/aicontrol_shape.test.mjs).
-import { shareOf } from "./layout_ops.js"
+import { shareOf } from "./view/layout_ops.js"
 
 // Go's split axis words: "right" puts the new pane beside, "down" below.
 // horizontal/h name the divider, so they mean down. Returns app.js's split

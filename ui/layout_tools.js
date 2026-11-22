@@ -2,7 +2,7 @@
 // move, swap, rotate, grow, shrink and equalize, with Go suzuri's arguments
 // and replies (internal/ui/ai_apply.go): each answers with the new layout.
 import { registerTool, layout } from "./aicontrol.js"
-import * as L from "./layout_ops.js"
+import * as L from "./view/layout_ops.js"
 
 const host = () => window.rszHost
 const byPaneId = (id) => host().allPanes().find((p) => p.id === Number(id))

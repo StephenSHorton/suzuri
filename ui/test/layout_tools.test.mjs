@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import * as L from "../layout_ops.js"
+import * as L from "../view/layout_ops.js"
 
 // AI control's move tool against a small stand-in for app.js's rszHost: tabs
 // with their own trees and focus, and showTab/setFocus/movePaneToTab that
