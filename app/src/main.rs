@@ -28,6 +28,8 @@ mod notices;
 mod toast_look;
 mod update;
 mod ws;
+mod keeper;
+use keeper::Shell;
 use rsz_term::{Link, MouseEvent, MouseKind, Out, Pane, PaneConfig, SelectKind, Sink};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -36,7 +38,7 @@ use tauri::{Manager, State};
 #[derive(Default)]
 pub(crate) struct Panes {
     next: AtomicU32,
-    pub(crate) map: Mutex<HashMap<u32, Arc<Pane>>>,
+    pub(crate) map: Mutex<HashMap<u32, Arc<Shell>>>,
     /// Last OSC title per pane, and the focused pane (for the agent bridge).
     pub(crate) titles: Mutex<HashMap<u32, String>>,
     /// Last size per pane (cols, rows), for the bridge snapshot.
@@ -47,10 +49,26 @@ pub(crate) struct Panes {
     pub(crate) focused: AtomicU32,
     /// Set when RSZ_TRANSPORT=ws: frames go over the socket, not the Channel.
     bus: Option<ws::FrameBus>,
+    /// Kept shells (keeper.rs): new panes' shells run in their own host
+    /// processes in this folder. None: in this process, as before.
+    keeper: Option<std::path::PathBuf>,
+    /// This build's version, which each host it starts reports.
+    version: String,
 }
 
 impl Panes {
-    pub(crate) fn get(&self, id: u32) -> Option<Arc<Pane>> {
+    /// A pane id no kept shell has (another window's may be in the folder).
+    fn new_id(&self) -> u32 {
+        loop {
+            let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+            match &self.keeper {
+                Some(dir) if rsz_keeper::dir::sock_path(dir, id).exists() => continue,
+                _ => return id,
+            }
+        }
+    }
+
+    pub(crate) fn get(&self, id: u32) -> Option<Arc<Shell>> {
         self.map.lock().get(&id).cloned()
     }
 }
@@ -106,7 +124,7 @@ fn pane_open(
     profile: Option<String>,
     on_frame: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
-    let id = panes.next.fetch_add(1, Ordering::Relaxed) + 1;
+    let id = panes.new_id();
     let settings = config::load();
     // A Settings profile (or the default one) gives the shell and folder;
     // RSZ_CMD still wins for the bench.
@@ -114,9 +132,100 @@ fn pane_open(
     let inherited = from.and_then(|f| panes.launch.lock().get(&f).cloned());
     let env_cmd = std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s));
     let command = launch_command(command, env_cmd, profile.is_some(), inherited, prof_cmd);
-    let panes_ref = Arc::clone(&panes);
-    let notes = notes.inner().clone();
-    let sink: Sink = Arc::new(move |o| {
+    let sink = pane_sink(Arc::clone(&panes), id, on_frame, app, notes.inner().clone());
+    // A pane split from another starts in that pane's cwd (Go suzuri's cwd.go).
+    let cwd = from
+        .and_then(|f| panes.get(f))
+        .and_then(|p| p.cwd())
+        .filter(|d| std::path::Path::new(d).is_dir())
+        .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()))
+        .or(prof_cwd);
+    // RSZ_NO_BAR=1: the plain shell with its own prompt, no input bar.
+    let plain_shell = std::env::var_os("RSZ_NO_BAR").is_some();
+    let cursor = config::cursor_code(&settings);
+    panes.sizes.lock().insert(id, (cols, rows));
+    let mut cfg = PaneConfig { cols, rows, command, cwd, plain_shell, cursor, ..Default::default() };
+    if let Some(b) = bridge.as_ref() {
+        cfg.env.extend(b.pane_env(id));
+    }
+    if let Some(n) = std::env::var("RSZ_SCROLLBACK").ok().and_then(|v| v.parse().ok()) {
+        cfg.scrollback = n;
+    }
+    let launched = cfg.command.clone();
+    let shell = match &panes.keeper {
+        Some(dir) => {
+            let kept = keeper::spawn(dir, keeper::Spawn { id, cfg: &cfg, palette: rsz_term::palette::active().pal, version: &panes.version })
+                .and_then(|()| keeper::Kept::attach(dir, id, sink.clone()));
+            match kept {
+                Ok(k) => Shell::Kept(k),
+                // The keeper failed: this pane's shell lives in the app.
+                Err(e) => {
+                    log::warn!("keeper: shell {id} in the app instead: {e}");
+                    Shell::Local(Pane::spawn(cfg, sink).map_err(|e| e.to_string())?)
+                }
+            }
+        }
+        None => Shell::Local(Pane::spawn(cfg, sink).map_err(|e| e.to_string())?),
+    };
+    panes.map.lock().insert(id, Arc::new(shell));
+    if let Some(c) = launched {
+        panes.launch.lock().insert(id, c);
+    }
+    Ok(id)
+}
+
+/// The kept shells nobody shows (left by an app that quit, updated or
+/// crashed), and the tabs and splits it last saved, for the UI to put back.
+#[tauri::command]
+fn kept_list(panes: State<'_, Arc<Panes>>) -> serde_json::Value {
+    let Some(dir) = &panes.keeper else { return serde_json::json!({ "shells": [], "layouts": [] }) };
+    let open = panes.map.lock().keys().copied().collect::<std::collections::HashSet<_>>();
+    let shells: Vec<_> = keeper::live(dir)
+        .into_iter()
+        .filter(|(id, h)| !open.contains(id) && h["viewers"].as_u64() == Some(0) && h["exited"].is_null())
+        .map(|(_, h)| h)
+        .collect();
+    serde_json::json!({ "shells": shells, "layouts": keeper::take_layouts(dir) })
+}
+
+/// Show kept shell `id` in this window: its screen, scrollback and state
+/// come over from its host. Returns its size.
+#[tauri::command]
+fn pane_attach(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, app: tauri::AppHandle, id: u32, on_frame: Channel<InvokeResponseBody>) -> Result<(u16, u16), String> {
+    let dir = panes.keeper.clone().ok_or("kept shells are off")?;
+    if panes.map.lock().contains_key(&id) {
+        return Err(format!("pane {id} is open already"));
+    }
+    panes.next.fetch_max(id, Ordering::Relaxed);
+    let sink = pane_sink(Arc::clone(&panes), id, on_frame, app, notes.inner().clone());
+    let k = keeper::Kept::attach(&dir, id, sink).map_err(|e| e.to_string())?;
+    let size = (k.hello["cols"].as_u64().unwrap_or(80) as u16, k.hello["rows"].as_u64().unwrap_or(24) as u16);
+    if let Some(c) = k.hello["command"].as_array() {
+        panes.launch.lock().insert(id, c.iter().filter_map(|x| x.as_str().map(str::to_string)).collect());
+    }
+    let shell = Shell::Kept(k);
+    shell.palette_changed(&rsz_term::palette::active().pal);
+    shell.set_default_cursor(config::cursor_code(&config::load()));
+    panes.sizes.lock().insert(id, size);
+    panes.map.lock().insert(id, Arc::new(shell));
+    Ok(size)
+}
+
+/// The UI's tabs and splits, by pane id, saved on every change so a crash
+/// loses none of it.
+#[tauri::command]
+fn layout_save(panes: State<'_, Arc<Panes>>, layout: serde_json::Value) {
+    if let Some(dir) = &panes.keeper {
+        if let Err(e) = keeper::save_layout(dir, &layout) {
+            log::warn!("keeper: layout not saved: {e}");
+        }
+    }
+}
+
+/// Where a pane's events go: frames to the socket (or its Channel), the
+/// rest to its Channel, notices to the desktop cards.
+fn pane_sink(panes_ref: Arc<Panes>, id: u32, on_frame: Channel<InvokeResponseBody>, app: tauri::AppHandle, notes: notices::Notices) -> Sink {
+    Arc::new(move |o| {
         let _ = match o {
             Out::Frame(b) => match &panes_ref.bus {
                 Some(bus) => {
@@ -190,32 +299,7 @@ fn pane_open(
                 on_frame.send(json(&Msg::Placements { list }))
             }
         };
-    });
-    // A pane split from another starts in that pane's cwd (Go suzuri's cwd.go).
-    let cwd = from
-        .and_then(|f| panes.get(f))
-        .and_then(|p| p.cwd())
-        .filter(|d| std::path::Path::new(d).is_dir())
-        .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()))
-        .or(prof_cwd);
-    // RSZ_NO_BAR=1: the plain shell with its own prompt, no input bar.
-    let plain_shell = std::env::var_os("RSZ_NO_BAR").is_some();
-    let cursor = config::cursor_code(&settings);
-    panes.sizes.lock().insert(id, (cols, rows));
-    let mut cfg = PaneConfig { cols, rows, command, cwd, plain_shell, cursor, ..Default::default() };
-    if let Some(b) = bridge.as_ref() {
-        cfg.env.extend(b.pane_env(id));
-    }
-    if let Some(n) = std::env::var("RSZ_SCROLLBACK").ok().and_then(|v| v.parse().ok()) {
-        cfg.scrollback = n;
-    }
-    let launched = cfg.command.clone();
-    let pane = Pane::spawn(cfg, sink).map_err(|e| e.to_string())?;
-    panes.map.lock().insert(id, Arc::new(pane));
-    if let Some(c) = launched {
-        panes.launch.lock().insert(id, c);
-    }
-    Ok(id)
+    })
 }
 
 /// What a new pane runs: an explicit command, then RSZ_CMD (the bench), then
@@ -504,7 +588,7 @@ fn png_bytes(img: &arboard::ImageData) -> Option<Vec<u8>> {
 /// Grok) gets a copied image as a file path it can attach, ahead of any
 /// text (Go suzuri). Reads through clip, so never on the main thread for
 /// long; the PNG encode runs on the caller's thread.
-fn clipboard_paste_text(p: &Pane) -> Result<String, String> {
+fn clipboard_paste_text(p: &Shell) -> Result<String, String> {
     let mut got = clip::paste(clip::USER, p.alt_screen())?;
     if let clip::Paste::Image(img) = &got {
         match png_bytes(img) {
@@ -733,15 +817,14 @@ fn stats(panes: State<'_, Arc<Panes>>) -> Vec<PaneStats> {
         .iter()
         .map(|(id, p)| {
             let s = p.stats();
-            let l = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
             PaneStats {
                 id: *id,
-                bytes_in: l(&s.bytes_in),
-                feed_ms: l(&s.feed_ns) as f64 / 1e6,
-                frames: l(&s.frames),
-                frame_bytes: l(&s.frame_bytes),
-                snapshot_ms: l(&s.snapshot_ns) as f64 / 1e6,
-                writes: l(&s.writes),
+                bytes_in: s.bytes_in,
+                feed_ms: s.feed_ns as f64 / 1e6,
+                frames: s.frames,
+                frame_bytes: s.frame_bytes,
+                snapshot_ms: s.snapshot_ns as f64 / 1e6,
+                writes: s.writes,
             }
         })
         .collect();
@@ -853,7 +936,7 @@ fn appearance_set(panes: State<'_, Arc<Panes>>, look: Look) -> Result<(), String
     let cards = toast_look::config_for(&look.card, look.dark)?;
     if rsz_term::palette::set_active(pal) {
         for p in panes.map.lock().values() {
-            p.redraw();
+            p.palette_changed(&pal);
         }
     }
     toast::configure(cards);
@@ -918,6 +1001,11 @@ fn main() {
     if hang::wants_dump(&args) {
         std::process::exit(hang::run_dump(&args[2..]));
     }
+    // A kept shell's host (keeper.rs): no log, no window, no Tauri.
+    #[cfg(unix)]
+    if keeper::host::wants(&args) {
+        std::process::exit(keeper::host::run(&args[2..]));
+    }
     if notify::wants(&args) {
         std::process::exit(notify::run(&args[2..], ctx));
     }
@@ -945,7 +1033,20 @@ fn main() {
         }
     });
     let bus = (std::env::var("RSZ_TRANSPORT").as_deref() != Ok("channel")).then(|| ws::FrameBus::start(on_ack).expect("frame socket"));
-    let panes = Arc::new(Panes { bus, ..Default::default() });
+    let keeper_dir = keeper::enabled().then(keeper::dir).filter(|d| match rsz_keeper::dir::ensure(d) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("keeper: off: {e}");
+            false
+        }
+    });
+    let panes = Arc::new(Panes { bus, keeper: keeper_dir, version: ctx.package_info().version.to_string(), ..Default::default() });
+    // New pane ids go above every kept shell's (they are the shells'
+    // SUZURI_PANE_ID, and the UI puts those shells back under their own).
+    if let Some(d) = &panes.keeper {
+        let top = rsz_keeper::dir::list(d).into_iter().max().unwrap_or(0);
+        panes.next.store(top, Ordering::Relaxed);
+    }
     let _ = PANES.set(Arc::clone(&panes));
     // OSC 52 "?" reads get the clipboard's text, as Go suzuri answered them.
     // The read runs under the pane's engine lock, so it is short and gives
@@ -1030,6 +1131,9 @@ fn main() {
             pane_link,
             open_url,
             debug_pane,
+            kept_list,
+            pane_attach,
+            layout_save,
             pane_cell_px,
             notice_toast,
             notice_history,

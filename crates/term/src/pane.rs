@@ -746,6 +746,11 @@ impl Pane {
         self.pid.and_then(crate::cwd::process_cwd)
     }
 
+    /// The shell's process id.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     pub fn state(&self) -> State {
         *self.shared.state.lock()
     }

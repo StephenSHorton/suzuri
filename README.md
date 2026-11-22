@@ -43,6 +43,21 @@ Closing the last tab (or its last pane) asks "Quit suzuri?"; `exit` in the
 last shell quits. A split runs the same program as the pane it split from.
 Up to 16 tabs and 24 panes.
 
+Kept shells (macOS; built for Linux too but not tried there; card hearth#913): each pane's shell runs in
+its own small host process (`suzuri --keeper-host`), not in the app.
+Quitting, updating (Install and restart) or crashing suzuri leaves the
+shells and their programs running; the next start puts them back in their
+tabs and splits, with screen and scrollback. Closing a pane (or the last
+tab, at "Quit suzuri?") ends its shell; a logout or reboot ends them all. A
+shell opened before an update stays on the version that opened it until it
+ends; new panes get the new one. The hosts' sockets are in
+`<config>/keeper/<pane id>.sock` (0700 folder, this user only), and
+`rsz-keeper` (`crates/keeper`, no Zig needed) lists, reads, types into and
+closes them from any program. `RSZ_KEEPER=0` keeps shells in the app as
+before; Windows does that until its half is built (hearth#923). Checks:
+`cargo test -p suzuri --test keeper`, `scripts/keeper/kill9-check.sh`,
+`scripts/keeper/update-check.sh`.
+
 Input bar (#285, Go suzuri's Warp bar): zsh, bash and PowerShell start
 with a quiet prompt and the command line is an editable bar under each pane,
 with the cwd above it. Enter sends the line; Shift+Enter adds a line; ↑/↓
