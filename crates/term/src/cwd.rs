@@ -1,6 +1,7 @@
 //! A pane's working directory, so a new pane can start where the focused one
-//! is (Go suzuri's cwd.go). The shell's own report (OSC 7 or Go suzuri's
-//! OSC 7878 from the shell hooks, fed in through Pane::set_reported_cwd) wins;
+//! is (Go suzuri's cwd.go). The shell's own report wins: OSC 7878 from
+//! suzuri's hooks, else OSC 7 / OSC 9;9 from a custom prompt (starship,
+//! oh-my-posh; hearth#1028), fed in through Pane::set_reported_cwd;
 //! without one, macOS and Linux ask the OS for the shell process's cwd.
 //! Windows reads no PowerShell folder from the OS (its cd leaves the process
 //! folder alone), so it relies on the report, else the default prompt
@@ -154,6 +155,14 @@ pub fn osc7_path(uri: &str) -> Option<String> {
     Some(s)
 }
 
+/// The folder in a ConEmu OSC 9;9 (what follows `9;9;`): starship and
+/// oh-my-posh quote it. None when empty.
+pub fn osc99_path(s: &str) -> Option<String> {
+    let s = s.trim();
+    let s = s.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(s);
+    (!s.is_empty()).then(|| s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +202,15 @@ mod tests {
         assert_eq!(osc7_path("file://mac.local/Users/me/My%20Dir").as_deref(), Some("/Users/me/My Dir"));
         assert_eq!(osc7_path("file:///tmp").as_deref(), Some("/tmp"));
         assert_eq!(osc7_path("http://x/y"), None);
+        #[cfg(windows)]
+        assert_eq!(osc7_path("file://DESKTOP/C:/Users/me/src").as_deref(), Some("C:\\Users\\me\\src"));
+    }
+
+    #[test]
+    fn osc99_folders() {
+        assert_eq!(osc99_path("\"C:\\Users\\me\"").as_deref(), Some("C:\\Users\\me"));
+        assert_eq!(osc99_path("D:\\x y").as_deref(), Some("D:\\x y"));
+        assert_eq!(osc99_path(" "), None);
+        assert_eq!(osc99_path("\"\""), None);
     }
 }
