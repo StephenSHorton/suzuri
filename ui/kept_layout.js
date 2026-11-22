@@ -5,9 +5,11 @@
 // node tests it (test/kept_layout.test.mjs).
 
 // The layout to save: each tab's tree with {id, title} leaves. A pane with
-// no shell yet (or an ended one) is left out, and its split with it.
+// no shell yet (or an ended one) is left out, and its split with it; so is
+// one showing another program's shell (open_kept): that one is not ours to
+// put back or bring back after a reboot.
 export function layoutOf(tabs, active) {
-  const leaf = (p) => (p && p.id && !p.exited ? { id: p.id, title: p.titleOverride || "" } : null)
+  const leaf = (p) => (p && p.id && !p.exited && !p.borrowed ? { id: p.id, title: p.titleOverride || "" } : null)
   const ser = (n) => {
     if (!n) return null
     if (n.pane) return leaf(n.pane)

@@ -23,6 +23,15 @@ test("a pane with no shell yet, or an ended one, is left out with its split", ()
   assert.deepEqual(l.tabs, [{ name: "", sticky: "", focused: 0, zoomed: 0, tree: { id: 1, title: "" } }])
 })
 
+test("a pane on another program's shell (open_kept) is not saved: it is not ours to put back", () => {
+  const tabs = [
+    { name: "", sticky: "", tree: { dir: "h", a: { pane: pane(1) }, b: { pane: pane(2, { borrowed: true }) } } },
+    { name: "hearth", sticky: "", tree: { pane: pane(3, { borrowed: true }) } },
+  ]
+  const l = layoutOf(tabs, tabs[1])
+  assert.deepEqual(l.tabs.map((t) => t.tree), [{ id: 1, title: "" }])
+})
+
 test("restore puts kept shells back where they were and drops the ended ones", () => {
   const saved = layoutOf(
     [

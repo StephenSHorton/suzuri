@@ -55,6 +55,9 @@ pub(crate) struct Panes {
     keeper: Option<std::path::PathBuf>,
     /// This build's version, which each host it starts reports.
     version: String,
+    /// Panes on a shell another program keeps (Hearth's open_kept): closing
+    /// one lets go of the shell, it never ends it.
+    borrowed: Mutex<std::collections::HashSet<u32>>,
 }
 
 impl Panes {
@@ -217,6 +220,29 @@ fn pane_attach(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>,
     Ok(size)
 }
 
+/// Show the shell another program keeps on `socket` (Hearth's Open in
+/// Suzuri, the open_kept tool) in this window, under a pane id of this
+/// app's own (the host's id is the other program's and may be one of ours).
+/// Closing the pane, or quitting, only lets go: the shell is the other
+/// program's. Returns the id and the host's size.
+#[tauri::command]
+fn pane_borrow(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, app: tauri::AppHandle, socket: String, on_frame: Channel<InvokeResponseBody>) -> Result<(u32, u16, u16), String> {
+    let sock = keeper::foreign_sock(std::path::Path::new(&socket)).map_err(|e| e.to_string())?;
+    let id = panes.new_id();
+    let sink = pane_sink(Arc::clone(&panes), id, on_frame, app, notes.inner().clone());
+    let mut k = keeper::Kept::attach_sock(&sock, sink).map_err(|e| e.to_string())?;
+    k.borrowed = true;
+    let (cols, rows) = (k.hello["cols"].as_u64().unwrap_or(80) as u16, k.hello["rows"].as_u64().unwrap_or(24) as u16);
+    log::info!("keeper: pane {id} shows {} (host {})", sock.display(), k.hello["pid"]);
+    let shell = Shell::Kept(k);
+    shell.palette_changed(&rsz_term::palette::active().pal);
+    shell.set_default_cursor(config::cursor_code(&config::load()));
+    panes.sizes.lock().insert(id, (cols, rows));
+    panes.borrowed.lock().insert(id);
+    panes.map.lock().insert(id, Arc::new(shell));
+    Ok((id, cols, rows))
+}
+
 /// The UI's tabs and splits, by pane id, saved on every change so a crash
 /// loses none of it.
 #[tauri::command]
@@ -277,7 +303,9 @@ fn pane_sink(panes_ref: Arc<Panes>, id: u32, on_frame: Channel<InvokeResponseBod
             Out::Exit(code) => {
                 // No exit code: its host was killed (a logout or shutdown
                 // ending everything), not a shell that ended itself.
-                if code.is_none() {
+                // Another program's shell ending says nothing about ours.
+                let borrowed = panes_ref.borrowed.lock().remove(&id);
+                if code.is_none() && !borrowed {
                     if let Some(r) = restore::get() {
                         r.shell_lost();
                     }
@@ -455,6 +483,13 @@ fn pane_focus(panes: State<'_, Arc<Panes>>, id: u32, focused: bool) {
     }
     if let Some(p) = panes.get(id) {
         p.set_focused(focused);
+        // A kept shell may be shown in another window too (Hearth): the
+        // one that takes the keys sets its size.
+        if focused && matches!(*p, Shell::Kept(_)) {
+            if let Some(&(cols, rows)) = panes.sizes.lock().get(&id) {
+                p.resize(cols, rows);
+            }
+        }
     }
 }
 
@@ -526,7 +561,15 @@ pub fn notice_effects(app: &tauri::AppHandle, effects: Vec<notices::Effect>) {
 #[tauri::command]
 fn pane_close(panes: State<'_, Arc<Panes>>, id: u32) {
     if let Some(p) = panes.get(id) {
+        // Another program's shell (Shell::close only lets go of it): the
+        // pane goes now, as no exit will come for it.
         p.close();
+        if panes.borrowed.lock().remove(&id) {
+            panes.map.lock().remove(&id);
+            panes.titles.lock().remove(&id);
+            panes.sizes.lock().remove(&id);
+            panes.launch.lock().remove(&id);
+        }
     }
 }
 
@@ -1168,6 +1211,7 @@ fn main() {
             debug_pane,
             kept_list,
             pane_attach,
+            pane_borrow,
             layout_save,
             restore_take,
             restore_forget,
@@ -1185,6 +1229,7 @@ fn main() {
             ui_log,
             paste::paste_image_save,
             bridge::aicontrol_reply,
+            bridge::aicontrol_ready,
             complete::complete_list,
             bridge::pane_lines,
             window::new_window,
