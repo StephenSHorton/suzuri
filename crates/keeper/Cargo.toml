@@ -16,7 +16,7 @@ libc = "0.2"
 # Windows 10 1803+ has AF_UNIX sockets: the same folder of sockets as Unix.
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1.2"
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_IO", "Win32_System_Threading"] }
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading"] }
 
 [[bin]]
 name = "rsz-keeper"
