@@ -337,6 +337,23 @@ class PaneView {
     invoke("pane_redraw", { id })
   }
 
+  // Show the shell another program keeps on `socket` (Hearth's Open in
+  // Suzuri, the open_kept tool): a pane id of our own, the host's size
+  // first, then this pane's. Closing it only lets go (pane_close knows).
+  async borrow(socket) {
+    const ch = new Channel()
+    ch.onmessage = (m) => this.onChannel(m)
+    this.borrowed = true
+    this.opened = invoke("pane_borrow", { socket, onFrame: ch }).then(([id, cols, rows]) => {
+      this.size = [cols, rows]
+      return id
+    })
+    this.id = await this.opened
+    this.ready(this.size[0], this.size[1])
+    if (!this.fitSize) this.fit()
+    invoke("pane_redraw", { id: this.id })
+  }
+
   // pane_open or pane_attach answered: the pane has its id.
   ready(cols, rows) {
     byId.set(this.id, this)
@@ -1440,7 +1457,12 @@ document.addEventListener("mousedown", (e) => {
 })
 // Coming back to the window keeps a rename box (pane or tab) that had the keys.
 const renaming = () => !!document.activeElement?.closest?.("input.rename, .rsz-tab-rename")
-window.addEventListener("focus", () => { if (!overlayOpen() && !panelOpen() && !renaming()) focusInput() })
+window.addEventListener("focus", () => {
+  // A kept shell another window shows too (Hearth) takes this window's
+  // size again when this one is the one being typed in (pane_focus).
+  if (focused?.id && !focused.exited) invoke("pane_focus", { id: focused.id, focused: true })
+  if (!overlayOpen() && !panelOpen() && !renaming()) focusInput()
+})
 window.addEventListener("rsz-panel-closed", () => focusInput())
 
 // For #286's AI control (ui/aicontrol.js): the active tab's tree, every
@@ -1460,6 +1482,33 @@ window.rszRegisterTool?.("new_tab", async () => {
   const p = await openTab()
   if (!p) return [400, { error: "could not open a tab" }]
   return [200, { ok: true, tab_id: p.tab.id, pane_id: p.id }]
+})
+// Hearth's Open in Suzuri (card hearth#970): a shell Hearth keeps, in a new
+// tab, as one more window on it. The bridge brings the window up.
+window.rszRegisterTool?.("open_kept", async (a) => {
+  if (typeof a.socket !== "string" || !a.socket) return [400, { error: "socket required" }]
+  if (tabs.length >= MAX_TABS) return [400, { error: "tab limit" }]
+  if (everyPane().length >= MAX_PANES) return [400, { error: "max panes" }]
+  const t = newTab()
+  const p = new PaneView(t)
+  p.tab = t
+  p.borrowed = true
+  if (a.title) p.titleOverride = String(a.title)
+  t.tree = { pane: p }
+  t.focused = p
+  showTab(t)
+  render(t)
+  await new Promise((r) => { requestAnimationFrame(r); setTimeout(r, 100) })
+  try {
+    await p.borrow(a.socket)
+  } catch (e) {
+    log("open_kept", a.from || "", String(e))
+    closePane(p, "ai")
+    return [400, { error: String(e) }]
+  }
+  setFocus(p, true)
+  log("open_kept: pane", p.id, "from", a.from || "?")
+  return [200, { ok: true, pane_id: p.id, tab_id: t.id }]
 })
 window.rszRegisterTool?.("move_to_tab", async (a) => {
   const p = everyPane().find((x) => x.id === Number(a.pane_id))
@@ -1600,6 +1649,9 @@ async function start() {
   const fresh = boot.panes > 1 || boot.bench || boot.ui_test
   const kept = fresh ? null : (await restoreKept()) ?? (await restoreSaved())
   const first = boot.panes > 1 ? await grid(boot.panes) : kept ?? await openTab()
+  // AI control answers 503 until now (app/src/bridge.rs): its tools are in
+  // and the kept shells are back, so an open_kept can't race them.
+  invoke("aicontrol_ready").catch(() => {})
   if (boot.bench) bench(boot, first)
   if (boot.ui_test) {
     const { run } = await import("./selftest.js")

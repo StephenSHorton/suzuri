@@ -127,6 +127,41 @@ fn a_shell_outlives_its_viewer_and_ends_when_closed() {
     assert!(!dir::sock_path(&d.0, 7).exists());
 }
 
+/// Card hearth#970: another program's host (Hearth keeps it in a folder of
+/// its own) with two viewers, Hearth's window and Suzuri's tab. Suzuri's
+/// lets go (its tab closes, or it quits): the shell runs on, and Hearth's
+/// viewer still draws it. Whichever window takes the keys sets the size.
+#[test]
+fn one_host_two_viewers_one_leaves_the_other_still_draws() {
+    let d = Folder::new("two");
+    let host = start_host(&d.0, 1, &["/bin/sh"]);
+    let (hearth, frames_h) = viewer(&d.0, 1);
+    let shell = hearth.hello["shell_pid"].as_u64().unwrap() as u32;
+    let (suzuri, frames_s) = viewer(&d.0, 1);
+    assert_eq!(suzuri.hello["viewers"], 1, "Hearth's viewer is there first");
+    wait_for("both first frames", || frames_h.load(Ordering::Relaxed) > 0 && frames_s.load(Ordering::Relaxed) > 0);
+    let size = || {
+        let h = Conn::connect(&dir::sock_path(&d.0, 1), "control", "t", |_| {}).unwrap().hello.clone();
+        (h["cols"].as_u64().unwrap(), h["rows"].as_u64().unwrap())
+    };
+    hearth.send(&json!({ "t": "resize", "cols": 101, "rows": 31 })).unwrap();
+    wait_for("Hearth's size", || size() == (101, 31));
+    suzuri.send(&json!({ "t": "resize", "cols": 90, "rows": 28 })).unwrap();
+    wait_for("Suzuri's size when it takes the keys", || size() == (90, 28));
+
+    // Suzuri lets go: a detach, never a close.
+    suzuri.detach();
+    drop(suzuri);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(alive(host) && alive(shell), "the shell must outlive Suzuri's viewer");
+    let n = frames_h.load(Ordering::Relaxed);
+    hearth.input(b"echo still-drawn\r").unwrap();
+    wait_for("the shell to answer", || screen(&d.0, 1).contains("still-drawn"));
+    wait_for("Hearth's viewer to draw it", || frames_h.load(Ordering::Relaxed) > n);
+    let h = Conn::connect(&dir::sock_path(&d.0, 1), "control", "t", |_| {}).unwrap().hello.clone();
+    assert_eq!(h["viewers"], 1, "only Hearth's viewer is left");
+}
+
 #[test]
 fn a_host_refuses_an_id_that_is_kept_already() {
     let d = Folder::new("b");

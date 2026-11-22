@@ -315,7 +315,7 @@ impl Shell {
     }
     /// Close the pane: this ends its shell, kept or not.
     pub fn close(&self) {
-        both!(self, p => p.close(), k => k.send(json!({ "t": "close" })))
+        both!(self, p => p.close(), k => if k.borrowed { k.let_go() } else { k.send(json!({ "t": "close" })) })
     }
     pub fn cwd(&self) -> Option<String> {
         both!(self, p => p.cwd(), k => k.call(json!({ "t": "cwd" })).ok().and_then(|v| v.as_str().map(str::to_string)))
@@ -391,6 +391,9 @@ pub struct Kept {
     last_out: Arc<Mutex<Instant>>,
     /// Set when this app lets go on purpose: no Exit for the pane then.
     detached: Arc<AtomicBool>,
+    /// Another program's shell (Hearth's open_kept): closing its pane lets
+    /// go of it, it never sends `close`.
+    pub borrowed: bool,
     pub hello: Value,
 }
 
@@ -425,6 +428,13 @@ impl Kept {
         }
     }
 
+    /// Leave the shell running in its host and stop viewing it.
+    fn let_go(&self) {
+        self.detached.store(true, Ordering::Relaxed);
+        #[cfg(unix)]
+        self.conn.detach();
+    }
+
     /// (screen, the last `lines` of scrollback).
     fn text(&self, lines: usize) -> (String, Vec<String>) {
         let v = self.call(json!({ "t": "text", "lines": lines })).unwrap_or(Value::Null);
@@ -435,11 +445,18 @@ impl Kept {
     /// Attach to host `id` as the app's viewer; its events reach `sink`.
     #[cfg(unix)]
     pub fn attach(dir: &Path, id: u32, sink: Sink) -> std::io::Result<Kept> {
+        Kept::attach_sock(&rsz_keeper::dir::sock_path(dir, id), sink)
+    }
+
+    /// Attach as a viewer to the host serving `sock` (one of ours, or
+    /// another program's: Hearth's open_kept, checked by [`foreign_sock`]).
+    #[cfg(unix)]
+    pub fn attach_sock(sock: &Path, sink: Sink) -> std::io::Result<Kept> {
         let last_out = Arc::new(Mutex::new(Instant::now()));
         let detached = Arc::new(AtomicBool::new(false));
         let exited = Arc::new(AtomicBool::new(false));
         let (lo, de) = (last_out.clone(), detached.clone());
-        let sock = rsz_keeper::dir::sock_path(dir, id);
+        let sock = sock.to_path_buf();
         let ask_sock = sock.clone();
         let conn = rsz_keeper::Conn::connect(&sock, "viewer", "suzuri", move |e| match e {
             rsz_keeper::Event::Frame(f) => {
@@ -467,7 +484,7 @@ impl Kept {
             }
         })?;
         let hello = conn.hello.clone();
-        Ok(Kept { conn, last_out, detached, hello })
+        Ok(Kept { conn, last_out, detached, borrowed: false, hello })
     }
 }
 
@@ -488,9 +505,7 @@ fn answer_clipboard(sock: &Path, n: Value) {
 impl Drop for Kept {
     /// The app lets go of the shell; it keeps running in its host.
     fn drop(&mut self) {
-        self.detached.store(true, Ordering::Relaxed);
-        #[cfg(unix)]
-        self.conn.detach();
+        self.let_go();
     }
 }
 
@@ -560,6 +575,95 @@ pub fn spawn(_: &Path, _: Spawn) -> std::io::Result<()> {
 impl Kept {
     pub fn attach(_: &Path, _: u32, _: Sink) -> std::io::Result<Kept> {
         Err(std::io::Error::other("kept shells are macOS and Linux only"))
+    }
+    pub fn attach_sock(_: &Path, _: Sink) -> std::io::Result<Kept> {
+        Err(std::io::Error::other("kept shells are macOS and Linux only"))
+    }
+}
+
+/// Whether `path` is a socket another program (Hearth) keeps a shell on
+/// that this window may show: an absolute `<id>.sock` that is a socket of
+/// this user's, in a folder of this user's that nobody else can enter
+/// (mode 0700, as rsz_keeper::dir::ensure makes one), not reached through
+/// a symlink, and short enough for a socket address. The folder is only
+/// checked, never changed: it is the other program's.
+#[cfg(unix)]
+pub fn foreign_sock(path: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let bad = |why: String| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why);
+    if !path.is_absolute() {
+        return Err(bad(format!("{} is not an absolute path", path.display())));
+    }
+    let named = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".sock")).is_some_and(|stem| !stem.is_empty());
+    if !named || path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
+        return Err(bad(format!("{} is not a keeper socket (<id>.sock)", path.display())));
+    }
+    if path.as_os_str().len() >= 104 {
+        return Err(bad(format!("{} is too long for a socket", path.display())));
+    }
+    // SAFETY: getuid has no failure mode.
+    let me = unsafe { libc::getuid() };
+    let folder = path.parent().ok_or_else(|| bad("no folder".into()))?;
+    let fm = std::fs::symlink_metadata(folder)?;
+    if !fm.is_dir() || fm.uid() != me {
+        return Err(bad(format!("{} is not a folder of this user's", folder.display())));
+    }
+    if fm.mode() & 0o077 != 0 {
+        return Err(bad(format!("{} is open to other users (mode {:o}, needs 0700)", folder.display(), fm.mode() & 0o777)));
+    }
+    let sm = std::fs::symlink_metadata(path)?;
+    if !sm.file_type().is_socket() || sm.uid() != me {
+        return Err(bad(format!("{} is not a socket of this user's", path.display())));
+    }
+    Ok(path.to_path_buf())
+}
+
+#[cfg(not(unix))]
+pub fn foreign_sock(_: &Path) -> std::io::Result<PathBuf> {
+    Err(std::io::Error::other("showing another program's kept shell is macOS and Linux only for now"))
+}
+
+#[cfg(all(test, unix))]
+mod foreign_tests {
+    use super::foreign_sock;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    fn folder(tag: &str, mode: u32) -> PathBuf {
+        let d = PathBuf::from(format!("/tmp/rszf-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(mode)).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_socket_in_a_private_folder_is_taken() {
+        let d = folder("ok", 0o700);
+        let s = d.join("12.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&s).unwrap();
+        assert_eq!(foreign_sock(&s).unwrap(), s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn anything_else_is_refused() {
+        let d = folder("no", 0o700);
+        let s = d.join("3.sock");
+        let _l = std::os::unix::net::UnixListener::bind(&s).unwrap();
+        // Not absolute, not <id>.sock, a dot-dot, a plain file, a symlink.
+        assert!(foreign_sock(std::path::Path::new("3.sock")).is_err());
+        assert!(foreign_sock(&d.join("3.socket")).is_err());
+        assert!(foreign_sock(&d.join("..").join(d.file_name().unwrap()).join("3.sock")).is_err());
+        std::fs::write(d.join("4.sock"), b"").unwrap();
+        assert!(foreign_sock(&d.join("4.sock")).is_err());
+        std::os::unix::fs::symlink(&s, d.join("5.sock")).unwrap();
+        assert!(foreign_sock(&d.join("5.sock")).is_err());
+        assert!(foreign_sock(&d.join("6.sock")).is_err(), "missing");
+        // A folder others can enter.
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(foreign_sock(&s).is_err());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
 
