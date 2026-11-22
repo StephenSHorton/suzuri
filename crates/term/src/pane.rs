@@ -386,16 +386,29 @@ impl Pane {
             }
         }
         // A restored pane's old text: fed to the screen before the shell
-        // starts, except under Windows' PowerShell, which prints it itself
-        // (ConPTY would paint over it; see shell::PREAMBLE_ENV).
+        // starts, except on Windows, where PowerShell and cmd.exe print it
+        // themselves (ConPTY would paint over it; see shell::PREAMBLE_ENV):
+        // the hooked PowerShell after its Clear-Host, an unhooked one or
+        // cmd.exe from a start shell::print_preamble adds (hearth#972).
         #[cfg_attr(not(windows), allow(unused_mut))]
         let mut preamble = cfg.preamble.clone().filter(|t| !t.is_empty());
         #[cfg(windows)]
-        if let Some((dir, file)) = preamble.as_deref().filter(|_| hooked && reads_ahead).and_then(shell::preamble_file) {
-            preamble = None;
-            boot_env.push((shell::PREAMBLE_ENV.to_string(), file.to_string_lossy().into_owned()));
-            if temp_dir.is_none() {
-                temp_dir = Some(dir);
+        if let Some(text) = preamble.clone() {
+            let print = if hooked && reads_ahead {
+                Some(shell::PrintPreamble { argv: argv.clone(), env: vec![(shell::PREAMBLE_ENV.into(), "{file}".into())], bytes: text.into_bytes() })
+            } else if hooked {
+                None
+            } else {
+                shell::print_preamble(&argv, &text)
+            };
+            if let Some((p, (dir, file))) = print.and_then(|p| shell::preamble_file(&p.bytes).map(|f| (p, f))) {
+                preamble = None;
+                argv = p.argv;
+                let file = file.to_string_lossy().into_owned();
+                boot_env.extend(p.env.into_iter().map(|(k, v)| (k, v.replace("{file}", &file))));
+                if temp_dir.is_none() {
+                    temp_dir = Some(dir);
+                }
             }
         }
         let mut cmd = CommandBuilder::new(&argv[0]);
@@ -2360,14 +2373,12 @@ mod windows_tests {
         }
     }
 
-    /// A restored pane's old text (PaneConfig::preamble, hearth#916) stays
-    /// above PowerShell's first prompt under ConPTY, on screen or in the
-    /// scrollback, though ConPTY and the hook's start clear the screen
-    /// (hearth#950).
-    #[test]
-    fn powershell_keeps_the_restored_text_above_its_prompt() {
-        // The user's own shell (default_shell: pwsh, else Windows PowerShell),
-        // with the bar's hooks, as a restored pane starts.
+    /// A restored pane's old text (PaneConfig::preamble, hearth#916): a
+    /// pane started with `cfg` and the text, once its first prompt is
+    /// up (`ready`), keeps all of it above the prompt under ConPTY, on
+    /// screen or in the scrollback, after resizes too. Only the prompt
+    /// (`prompt_line`: whether a line is it) is under the restored mark.
+    fn keeps_the_restored_text(cfg: PaneConfig, ready: impl Fn(&Pane, &[ShellStatus]) -> bool, prompt_line: impl Fn(&str) -> bool) {
         let seen = Arc::new(Mutex::new(Vec::<ShellStatus>::new()));
         let s = seen.clone();
         let sink: Sink = Arc::new(move |o| {
@@ -2376,25 +2387,25 @@ mod windows_tests {
             }
         });
         let old: String = (1..=2000).map(|i| format!("old-line-{i}\r\n")).collect();
-        let preamble = format!("{old}日本語の行\r\n\x1b[2m─── restored ───\x1b[0m\r\n");
-        let pane = Pane::spawn(PaneConfig { cols: 100, rows: 30, scrollback: 10_000, preamble: Some(preamble), ..Default::default() }, sink).unwrap();
+        let preamble = format!("{old}日本語の行\r\n\x1b[2m─── restored · saved ───\x1b[0m\r\n");
+        let pane = Pane::spawn(PaneConfig { cols: 100, rows: 30, scrollback: 10_000, preamble: Some(preamble), ..cfg }, sink).unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
-        while !seen.lock().iter().any(|s| s.integrated) {
+        while !ready(&pane, &seen.lock()) {
             assert!(Instant::now() < deadline, "never a prompt: {}", pane.screen_text());
             std::thread::sleep(Duration::from_millis(10));
         }
         wait_until("idle", || !pane.is_busy());
         std::thread::sleep(Duration::from_millis(500));
+        let mark = "─── restored · saved ───";
         let check = |when: &str| {
             let all = [pane.history_tail(2100), lines_of(&pane.screen_text())].concat();
             let at = |w: &str| all.iter().position(|l| l.trim_end() == w);
             let shown = || all.iter().rev().take(40).cloned().collect::<Vec<_>>().join("\n");
-            for want in ["old-line-1", "old-line-1000", "old-line-2000", "日本語の行", "─── restored ───"] {
+            for want in ["old-line-1", "old-line-1000", "old-line-2000", "日本語の行", mark] {
                 assert!(at(want).is_some(), "{when}: {want} gone; the end:\n{}", shown());
             }
-            assert!(at("old-line-1") < at("old-line-2000") && at("old-line-2000") < at("日本語の行") && at("日本語の行") < at("─── restored ───"), "{when}: out of order:\n{}", shown());
-            // Only the prompt (blank) is under the restored mark.
-            let below: Vec<_> = all[at("─── restored ───").unwrap() + 1..].iter().filter(|l| !l.trim().is_empty()).collect();
+            assert!(at("old-line-1") < at("old-line-2000") && at("old-line-2000") < at("日本語の行") && at("日本語の行") < at(mark), "{when}: out of order:\n{}", shown());
+            let below: Vec<_> = all[at(mark).unwrap() + 1..].iter().filter(|l| !l.trim().is_empty() && !prompt_line(l)).collect();
             assert!(below.is_empty(), "{when}: under the mark: {below:?}");
         };
         check("after the first prompt");
@@ -2404,6 +2415,38 @@ mod windows_tests {
         pane.resize(80, 20);
         std::thread::sleep(Duration::from_millis(800));
         check("after a smaller resize");
+    }
+
+    /// The user's own shell (default_shell: pwsh, else Windows PowerShell),
+    /// with the bar's hooks, as a restored pane starts: ConPTY and the
+    /// hook's start clear the screen, the hook prints the text (hearth#950).
+    #[test]
+    fn powershell_keeps_the_restored_text_above_its_prompt() {
+        keeps_the_restored_text(PaneConfig::default(), |_, seen| seen.iter().any(|s| s.integrated), |_| false);
+    }
+
+    /// The same shell with the plain-shell setting (RSZ_NO_BAR, no hooks):
+    /// it prints the text from its start command (hearth#972).
+    #[test]
+    fn plain_powershell_keeps_the_restored_text_above_its_prompt() {
+        let is_prompt = |l: &str| l.trim_start().starts_with("PS ") && l.trim_end().ends_with('>');
+        keeps_the_restored_text(
+            PaneConfig { plain_shell: true, ..Default::default() },
+            move |p, _| lines_of(&p.screen_text()).iter().any(|l| is_prompt(l)),
+            is_prompt,
+        );
+    }
+
+    /// cmd.exe as the pane's program (a Settings profile): `/k` prints the
+    /// text with `type` (hearth#972).
+    #[test]
+    fn cmd_keeps_the_restored_text_above_its_prompt() {
+        let is_prompt = |l: &str| l.len() > 2 && l.as_bytes()[1] == b':' && l.trim_end().ends_with('>');
+        keeps_the_restored_text(
+            PaneConfig { command: Some(vec!["cmd.exe".into()]), ..Default::default() },
+            move |p, _| lines_of(&p.screen_text()).iter().any(|l| is_prompt(l)),
+            is_prompt,
+        );
     }
 
     /// PowerShell under ConPTY (pwsh, from $RSZ_TEST_PWSH or PATH, and
