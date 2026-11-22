@@ -62,7 +62,7 @@ impl Panes {
         loop {
             let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
             match &self.keeper {
-                Some(dir) if rsz_keeper::dir::sock_path(dir, id).exists() => continue,
+                Some(dir) if rsz_keeper::dir::has(dir, id) => continue,
                 _ => return id,
             }
         }
@@ -1002,7 +1002,6 @@ fn main() {
         std::process::exit(hang::run_dump(&args[2..]));
     }
     // A kept shell's host (keeper.rs): no log, no window, no Tauri.
-    #[cfg(unix)]
     if keeper::host::wants(&args) {
         std::process::exit(keeper::host::run(&args[2..]));
     }
@@ -1046,6 +1045,7 @@ fn main() {
     if let Some(d) = &panes.keeper {
         let top = rsz_keeper::dir::list(d).into_iter().max().unwrap_or(0);
         panes.next.store(top, Ordering::Relaxed);
+        keeper::prepare(d);
     }
     let _ = PANES.set(Arc::clone(&panes));
     // OSC 52 "?" reads get the clipboard's text, as Go suzuri answered them.

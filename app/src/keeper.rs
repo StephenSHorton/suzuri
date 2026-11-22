@@ -1,7 +1,8 @@
-//! Shells that outlive the app (card hearth#913). On macOS and Linux each
-//! pane's shell runs in its own host process, `suzuri --keeper-host <dir>
-//! <id>`, started in its own session: the host owns the whole `Pane` (PTY,
-//! screen, scrollback) and serves it on `<dir>/<id>.sock`. The app is a
+//! Shells that outlive the app (cards hearth#913, hearth#923 for Windows).
+//! Each pane's shell runs in its own host process, `suzuri --keeper-host
+//! <dir> <id>`, started in its own session (Windows: detached, out of the
+//! app's job and process tree): the host owns the whole `Pane` (PTY or
+//! ConPTY, screen, scrollback) and serves it on `<dir>/<id>.sock`. The app is a
 //! viewer: [`Shell::Kept`] forwards every pane call over the socket and
 //! turns the host's events back into `Out`s for the pane's sink. Quitting,
 //! updating or crashing the app leaves the hosts; the next start lists them
@@ -14,11 +15,15 @@
 //! ([`Kept`]); keep them in step and keep reading what older hosts send:
 //! a host keeps the program it was started with until its shell ends.
 //!
-//! RSZ_KEEPER=0 keeps panes in the app, as before (and Windows, until its
-//! half is built: the console belongs to the process that made it). A
+//! On Windows a running exe can't be replaced, and the update's installer
+//! ends whatever runs `suzuri.exe` from the install folder; so hosts run
+//! from a copy, `<dir>/host/<version>-<size>-<time>/suzuri-keeper.exe`
+//! (with conpty.dll and OpenConsole.exe beside it), made once per build.
+//! A copy no host runs from any more is removed at the next start.
+//!
+//! RSZ_KEEPER=0 keeps panes in the app, as before. A
 //! bench or UI-test launch (RSZ_BENCH, RSZ_PANES, RSZ_UI_TEST, RSZ_CMD) keeps
 //! them in the app too, so it never leaves shells behind.
-#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,10 +42,10 @@ use serde_json::{Value, json};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-/// Kept shells are on: a Unix build, not turned off with RSZ_KEEPER=0.
+/// Kept shells are on: not turned off with RSZ_KEEPER=0.
 pub fn enabled() -> bool {
     let set = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty());
-    cfg!(unix) && std::env::var("RSZ_KEEPER").as_deref() != Ok("0") && !["RSZ_BENCH", "RSZ_PANES", "RSZ_UI_TEST", "RSZ_CMD"].iter().any(|k| set(k))
+    cfg!(any(unix, windows)) && std::env::var("RSZ_KEEPER").as_deref() != Ok("0") && !["RSZ_BENCH", "RSZ_PANES", "RSZ_UI_TEST", "RSZ_CMD"].iter().any(|k| set(k))
 }
 
 pub fn dir() -> PathBuf {
@@ -231,7 +236,6 @@ pub struct StatsSnap {
 /// A pane's shell: in this process, or kept by a host.
 pub enum Shell {
     Local(Pane),
-    #[cfg_attr(not(unix), allow(dead_code))]
     Kept(Kept),
 }
 
@@ -350,45 +354,20 @@ impl Shell {
 
 /// A shell kept by a host, as the app sees it.
 pub struct Kept {
-    #[cfg(unix)]
     conn: rsz_keeper::Conn,
-    #[cfg(not(unix))]
-    conn: NoConn,
     last_out: Arc<Mutex<Instant>>,
     /// Set when this app lets go on purpose: no Exit for the pane then.
     detached: Arc<AtomicBool>,
     pub hello: Value,
 }
 
-#[cfg(not(unix))]
-pub struct NoConn;
-#[cfg(not(unix))]
-impl NoConn {
-    fn input(&self, _: &[u8]) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 impl Kept {
     fn send(&self, v: Value) {
-        #[cfg(unix)]
-        {
-            let _ = self.conn.send(&v);
-        }
-        #[cfg(not(unix))]
-        let _ = v;
+        let _ = self.conn.send(&v);
     }
 
     fn call(&self, v: Value) -> std::io::Result<Value> {
-        #[cfg(unix)]
-        {
-            self.conn.call(v)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = v;
-            Err(std::io::Error::other("no keeper"))
-        }
+        self.conn.call(v)
     }
 
     /// (screen, the last `lines` of scrollback).
@@ -399,7 +378,6 @@ impl Kept {
     }
 
     /// Attach to host `id` as the app's viewer; its events reach `sink`.
-    #[cfg(unix)]
     pub fn attach(dir: &Path, id: u32, sink: Sink) -> std::io::Result<Kept> {
         let last_out = Arc::new(Mutex::new(Instant::now()));
         let detached = Arc::new(AtomicBool::new(false));
@@ -434,7 +412,6 @@ impl Drop for Kept {
     /// The app lets go of the shell; it keeps running in its host.
     fn drop(&mut self) {
         self.detached.store(true, Ordering::Relaxed);
-        #[cfg(unix)]
         self.conn.detach();
     }
 }
@@ -450,13 +427,11 @@ pub struct Spawn<'a> {
 }
 
 /// Start a host for pane `id` and wait until it serves its socket.
-#[cfg(unix)]
 pub fn spawn(dir: &Path, s: Spawn) -> std::io::Result<()> {
     use std::io::{BufRead, Write};
-    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     rsz_keeper::dir::ensure(dir)?;
-    let exe = std::env::current_exe()?;
+    let exe = host_exe(dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{}.log", s.id)))?;
     let c = s.cfg;
     let cfg = json!({
@@ -465,16 +440,9 @@ pub fn spawn(dir: &Path, s: Spawn) -> std::io::Result<()> {
         "palette": palette_json(&s.palette), "version": s.version,
     });
     let mut cmd = Command::new(exe);
-    cmd.arg("--keeper-host").arg(dir).arg(s.id.to_string()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log);
-    // Its own session: no hangup when the app's terminal or process group goes.
-    // SAFETY: setsid is async-signal-safe.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let mut child = cmd.spawn()?;
+    // Its folder, not the app's: a host must not hold the install folder.
+    cmd.arg("--keeper-host").arg(dir).arg(s.id.to_string()).current_dir(dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log);
+    let mut child = detached(&mut cmd)?;
     child.stdin.take().expect("stdin").write_all(cfg.to_string().as_bytes())?;
     let out = child.stdout.take().expect("stdout");
     let (tx, rx) = std::sync::mpsc::channel();
@@ -495,21 +463,141 @@ pub fn spawn(dir: &Path, s: Spawn) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(unix))]
-pub fn spawn(_: &Path, _: Spawn) -> std::io::Result<()> {
-    Err(std::io::Error::other("kept shells are macOS and Linux only"))
+/// Start `cmd` in its own session: no hangup when the app's terminal or
+/// process group goes.
+#[cfg(unix)]
+fn detached(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    cmd.spawn()
 }
 
-#[cfg(not(unix))]
-impl Kept {
-    pub fn attach(_: &Path, _: u32, _: Sink) -> std::io::Result<Kept> {
-        Err(std::io::Error::other("kept shells are macOS and Linux only"))
+/// Start `cmd` with no console, in its own process group and out of the
+/// app's job (when the job allows it), so ending the app or its job leaves
+/// it. The host starts itself once more and that one stays (host::run), so
+/// it is not in the app's process tree either: ending suzuri's tree (Task
+/// Manager's End task) leaves it.
+#[cfg(windows)]
+fn detached(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    win::spawn(cmd)
+}
+
+#[cfg(windows)]
+mod win {
+    use std::os::windows::process::CommandExt;
+
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+    pub fn spawn(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+        match cmd.spawn() {
+            // The job forbids breaking away: still detached, but in the job.
+            Err(e) if e.raw_os_error() == Some(5) => {
+                log::warn!("keeper: the app's job does not let hosts leave it; they end with the job");
+                cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+                cmd.spawn()
+            }
+            r => r,
+        }
     }
+}
+
+/// The host's program file name on Windows: not suzuri.exe, which the
+/// update's installer looks for.
+#[cfg(windows)]
+const HOST_EXE: &str = "suzuri-keeper.exe";
+
+/// This build's own program, which a host runs. On Windows a copy of it in
+/// `<dir>/host/<build>/`, made here once per build: the update can then
+/// replace suzuri.exe while hosts run.
+#[cfg(unix)]
+fn host_exe(_: &Path) -> std::io::Result<PathBuf> {
+    std::env::current_exe()
+}
+
+#[cfg(windows)]
+fn host_exe(dir: &Path) -> std::io::Result<PathBuf> {
+    static COPYING: Mutex<()> = Mutex::new(());
+    let _one = COPYING.lock();
+    let exe = std::env::current_exe()?;
+    let to = dir.join("host").join(build_name(&exe)?);
+    let bin = to.join(HOST_EXE);
+    if bin.is_file() {
+        return Ok(bin);
+    }
+    let tmp = to.with_extension(format!("tmp{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+    let copy = || -> std::io::Result<()> {
+        std::fs::copy(&exe, tmp.join(HOST_EXE))?;
+        // The bundled ConPTY: a host loads conpty.dll from its own folder.
+        for f in ["conpty.dll", "OpenConsole.exe"] {
+            let src = exe.with_file_name(f);
+            if src.is_file() {
+                std::fs::copy(&src, tmp.join(f))?;
+            }
+        }
+        std::fs::rename(&tmp, &to)
+    };
+    if let Err(e) = copy() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Another window made it first.
+        if !bin.is_file() {
+            return Err(e);
+        }
+    }
+    log::info!("keeper: host program {}", bin.display());
+    Ok(bin)
+}
+
+/// `<version>-<size>-<modified>` of this program: a new build, even of the
+/// same version, gets its own copy.
+#[cfg(windows)]
+fn build_name(exe: &Path) -> std::io::Result<String> {
+    let md = std::fs::metadata(exe)?;
+    let t = md.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    Ok(format!("{}-{:x}-{:x}", env!("CARGO_PKG_VERSION"), md.len(), t))
+}
+
+/// At start: make this build's host copy (so the first pane doesn't wait
+/// for it) and remove the copies no host runs from any more (Windows only).
+pub fn prepare(dir: &Path) {
+    #[cfg(windows)]
+    {
+        let dir = dir.to_path_buf();
+        std::thread::spawn(move || {
+            if let Err(e) = host_exe(&dir) {
+                log::warn!("keeper: host program not copied: {e}");
+            }
+            let Ok(mine) = std::env::current_exe().and_then(|exe| build_name(&exe)) else { return };
+            for e in std::fs::read_dir(dir.join("host")).into_iter().flatten().flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name == mine || name.contains(".tmp") {
+                    continue;
+                }
+                // A running host's program can't be removed: then the copy stays.
+                let bin = e.path().join(HOST_EXE);
+                if std::fs::remove_file(&bin).is_ok() || !bin.exists() {
+                    let _ = std::fs::remove_dir_all(e.path());
+                    log::info!("keeper: removed old host program {name}");
+                }
+            }
+        });
+    }
+    #[cfg(not(windows))]
+    let _ = dir;
 }
 
 /// The hosts in `dir` that answer, by id, with their hello. Sockets
 /// nobody answers on are left by a host that was killed: removed.
-#[cfg(unix)]
 pub fn live(dir: &Path) -> Vec<(u32, Value)> {
     let mut out = Vec::new();
     for id in rsz_keeper::dir::list(dir) {
@@ -524,11 +612,6 @@ pub fn live(dir: &Path) -> Vec<(u32, Value)> {
         }
     }
     out
-}
-
-#[cfg(not(unix))]
-pub fn live(_: &Path) -> Vec<(u32, Value)> {
-    Vec::new()
 }
 
 // ---- the saved layout (tabs and splits), per app process
@@ -568,21 +651,31 @@ fn alive(pid: u32) -> bool {
         // SAFETY: signal 0 only checks that the process exists.
         unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid;
-        false
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        // SAFETY: OpenProcess has no preconditions; a null handle is checked.
+        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        // SAFETY: h came from OpenProcess and is closed once.
+        let ok = unsafe { GetExitCodeProcess(h, &mut code) } != 0;
+        unsafe { CloseHandle(h) };
+        ok && code == STILL_ACTIVE as u32
     }
 }
 
 // ---- the host
 
-#[cfg(unix)]
 pub mod host {
     use super::*;
     use std::collections::VecDeque;
     use std::io::{Read, Write};
-    use std::os::unix::net::{UnixListener, UnixStream};
+
+    use rsz_keeper::sock::{UnixListener, UnixStream};
     use std::sync::OnceLock;
     use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 
@@ -868,9 +961,28 @@ pub mod host {
     /// until its shell ends.
     pub fn run(args: &[String]) -> i32 {
         // SAFETY: setting signal dispositions at the start of main.
+        #[cfg(unix)]
         unsafe {
             libc::signal(libc::SIGHUP, libc::SIG_IGN);
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        }
+        // Windows: the app started this one; it starts the real host and
+        // ends, so the host's parent is gone and it is in nobody's process
+        // tree (stdin, stdout and the log pass on to it).
+        #[cfg(windows)]
+        if args.get(2).map(String::as_str) != Some("--detached") {
+            let started = std::env::current_exe().and_then(|me| {
+                let mut cmd = std::process::Command::new(me);
+                cmd.arg("--keeper-host").args(args.iter().take(2)).arg("--detached");
+                super::win::spawn(&mut cmd)
+            });
+            return match started {
+                Ok(_) => 0,
+                Err(e) => {
+                    println!("error start: {e}");
+                    1
+                }
+            };
         }
         let fail = |m: String| {
             println!("error {m}");
@@ -908,7 +1020,7 @@ pub mod host {
             return fail(e.to_string());
         }
         let sock = rsz_keeper::dir::sock_path(&dir, id);
-        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
+        if UnixStream::connect(&sock).is_ok() {
             return fail(format!("shell {id} is kept already"));
         }
         let _ = std::fs::remove_file(&sock);
@@ -916,6 +1028,7 @@ pub mod host {
             Ok(l) => l,
             Err(e) => return fail(format!("bind {}: {e}", sock.display())),
         };
+        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
@@ -946,6 +1059,7 @@ pub mod host {
         println!("ready {}", std::process::id());
         let _ = std::io::stdout().flush();
         // Nothing more on stdout or from stdin: the app may be gone.
+        #[cfg(unix)]
         if let Ok(null) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/null") {
             use std::os::fd::AsRawFd;
             // SAFETY: dup2 onto the standard descriptors.

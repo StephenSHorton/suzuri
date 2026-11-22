@@ -1,7 +1,8 @@
 //! suzuri's shell keeper, the client side.
 //!
-//! Each shell suzuri opens (macOS and Linux) runs in its own small host
-//! process: `suzuri --keeper-host <dir> <id>`, in its own session, holding
+//! Each shell suzuri opens runs in its own small host process: `suzuri
+//! --keeper-host <dir> <id>` (Windows: a copy of suzuri.exe kept in the
+//! folder, so an update can replace suzuri.exe), detached from the app, holding
 //! the whole `rsz_term::Pane` (PTY, screen, scrollback). The app attaches to
 //! it over a Unix socket and draws its frames; quitting, updating or
 //! crashing the app leaves the host and its shell running, and the next
@@ -17,8 +18,10 @@
 //! # The folder
 //! [`dir::default_dir`]: `$RSZ_KEEPER_DIR`, else `$RSZ_CONFIG_DIR/keeper`,
 //! else suzuri's config folder + `keeper` (macOS: `~/Library/Application
-//! Support/suzuri/keeper`). Mode 0700, owned by the user. One socket per
-//! shell, `<id>.sock` (mode 0600), where `id` is the app's pane id (it is
+//! Support/suzuri/keeper`, Windows `%LOCALAPPDATA%\suzuri\keeper`). Mode
+//! 0700, owned by the user (Windows: the user's own folder; both ends check
+//! that the other is this user). One socket per shell, `<id>.sock` (mode
+//! 0600; Windows: an AF_UNIX socket too), where `id` is the app's pane id (it is
 //! the shell's `SUZURI_PANE_ID`); `<id>.log` is the host's own log.
 //!
 //! # The wire format
@@ -48,6 +51,15 @@ pub mod client;
 pub mod dir;
 pub mod wire;
 
+/// The socket types: std's on Unix, uds_windows' (AF_UNIX, Windows 10
+/// 1803+) on Windows, with the same API.
+pub mod sock {
+    #[cfg(unix)]
+    pub use std::os::unix::net::{UnixListener, UnixStream};
+    #[cfg(windows)]
+    pub use uds_windows::{UnixListener, UnixStream};
+}
+
 /// The protocol this side speaks. Bump on a change an older peer would
 /// misread; add `min` on the host for the oldest client it still serves.
 pub const PROTO: u32 = 1;
@@ -56,6 +68,5 @@ pub const K_JSON: u8 = 1;
 pub const K_FRAME: u8 = 2;
 pub const K_INPUT: u8 = 3;
 
-#[cfg(unix)]
 pub use client::Conn;
 pub use client::Event;

@@ -8,19 +8,11 @@
 //!
 //! The folder defaults to suzuri's (see rsz_keeper::dir::default_dir).
 
-#[cfg(not(unix))]
 fn main() {
-    eprintln!("rsz-keeper: kept shells are macOS and Linux only for now");
-    std::process::exit(2);
+    std::process::exit(cli::run());
 }
 
-#[cfg(unix)]
-fn main() {
-    std::process::exit(unix::run());
-}
-
-#[cfg(unix)]
-mod unix {
+mod cli {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
