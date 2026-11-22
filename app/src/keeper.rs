@@ -1121,6 +1121,16 @@ pub mod host {
                 }
             };
         }
+        // Windows starts a process made with CREATE_NEW_PROCESS_GROUP (as
+        // this one is, by win::spawn) with Ctrl+C ignored, and its children
+        // inherit that: the shell under ConPTY would never stop on a typed
+        // Ctrl+C (hearth#1014). Turn it back on before the shell starts. The
+        // host has no console, so no Ctrl+C reaches the host itself.
+        #[cfg(windows)]
+        // SAFETY: a plain Win32 call with no pointers.
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
+        }
         let fail = |m: String| {
             println!("error {m}");
             eprintln!("keeper host: {m}");
