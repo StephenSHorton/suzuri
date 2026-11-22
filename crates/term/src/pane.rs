@@ -277,6 +277,8 @@ pub struct Pane {
     /// PowerShell: PSReadLine reads ahead of a bar line's Enter (see Hold).
     reads_ahead: bool,
     sink: Sink,
+    /// The foreground probe, for the name of the program running now.
+    probe: Probe,
 }
 
 /// A dropped pane closes its shell. It never joins: the last handle can be
@@ -481,7 +483,7 @@ impl Pane {
             let sink = sink.clone();
             threads.push(thread("rsz-actor", move || actor_loop(rx, pair.master, writer, killer, shared, sink, (cfg.cols, cfg.rows))));
         }
-        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt, reads_ahead, sink })
+        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt, reads_ahead, sink, probe })
     }
 
     /// Enter in the input bar (#296, Go suzuri's submitBarLine): the bare-cd
@@ -749,6 +751,20 @@ impl Pane {
     /// The shell's process id.
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    /// What the input bar was last told about the shell (see ShellStatus).
+    pub fn shell_status(&self) -> ShellStatus {
+        self.shared.shell.lock().status()
+    }
+
+    /// The name of the program in front of the shell now ("claude", "vim"),
+    /// if the OS says. None at a prompt, or for a shell builtin.
+    pub fn program_name(&self) -> Option<String> {
+        if *self.shared.state.lock() != State::Running {
+            return None;
+        }
+        self.probe.program_name()
     }
 
     pub fn state(&self) -> State {
@@ -1550,9 +1566,19 @@ mod tests {
         };
         let st = wait(&|s| s.integrated && !s.program, "the first prompt");
         assert!(st.cwd.ends_with("tmp"), "cwd {:?}", st.cwd);
-        pane.write(b"sleep 1\r".to_vec());
+        // What an update asks about: nothing at an idle prompt.
+        assert!(!pane.shell_status().program);
+        assert_eq!(pane.program_name(), None);
+        pane.write(b"sleep 2\r".to_vec());
         wait(&|s| s.program, "the command start");
+        assert!(pane.shell_status().program);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pane.program_name().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(pane.program_name().as_deref(), Some("sleep"), "the program in front is named");
         wait(&|s| s.integrated && !s.program, "the prompt after sleep");
+        assert_eq!(pane.program_name(), None, "back at the prompt");
         let screen = pane.screen_text();
         assert!(!screen.contains("7878") && !screen.contains("7879"), "marks leaked: {screen}");
         pane.close();
