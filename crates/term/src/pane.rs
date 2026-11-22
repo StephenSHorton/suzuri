@@ -2257,17 +2257,25 @@ mod tests {
     /// program (it used to block the frame thread forever).
     #[test]
     fn reply_from_timed_out_sync_block() {
-        let script = "stty raw -echo; printf '\\033[?2026hq\\033[6n'; IFS= read -r -d R x; printf '\\033[?2026l\\r\\ngot reply\\r\\n'; sleep 5";
+        let script = "stty raw -echo; printf '\\033[?2026hq\\033[6n'; IFS= read -r -d R x; printf '\\033[?2026l\\r\\ngot reply\\r\\n'; IFS= read -r -n 1 y; printf 'typed %s\\r\\n' \"$y\"; sleep 5";
         let (pane, rx) = run(&["/bin/bash", "-c", script]);
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while !pane.screen_text().contains("got reply") && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(pane.screen_text().contains("got reply"), "{}", pane.screen_text());
-        // And the frame thread is still alive: frames keep coming.
-        while rx.try_recv().is_ok() {}
+        // And the frame thread is still alive: new output still makes a
+        // frame. Let the frames for what is already on screen go by first
+        // (they wait up to ACK_TIMEOUT for an ack the test never sends), so
+        // the frame counted below is one for output made after this point.
+        while rx.recv_timeout(ACK_TIMEOUT * 3).is_ok() {}
         pane.write(b"x".to_vec());
-        assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut framed = false;
+        while !framed && Instant::now() < deadline {
+            framed = rx.recv_timeout(Duration::from_millis(100)).is_ok_and(|m| m == "frame") && pane.screen_text().contains("typed x");
+        }
+        assert!(framed, "no frame after new output: {}", pane.screen_text());
         pane.close();
         wait_exit(&rx);
         pane.join();
