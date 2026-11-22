@@ -313,6 +313,19 @@ impl Shell {
             }
         }
     }
+    /// The program in front of the shell now (its name and process id),
+    /// and the shell's folder as the OS sees it. A host older than
+    /// hearth#916 does not answer: none, and the last prompt's folder.
+    pub fn program(&self) -> (Option<String>, Option<u32>, Option<String>) {
+        match self {
+            Shell::Local(p) => (p.program_name(), p.program_pid(), p.live_cwd()),
+            Shell::Kept(k) => {
+                let v = k.call(json!({ "t": "program" })).unwrap_or(Value::Null);
+                let cwd = v["cwd"].as_str().map(str::to_string).or_else(|| self.cwd());
+                (v["name"].as_str().map(str::to_string), v["pid"].as_u64().map(|n| n as u32), cwd)
+            }
+        }
+    }
     pub fn screen_text(&self) -> String {
         both!(self, p => p.screen_text(), k => k.text(0).0)
     }
@@ -462,6 +475,7 @@ pub fn spawn(dir: &Path, s: Spawn) -> std::io::Result<()> {
     let cfg = json!({
         "cols": c.cols, "rows": c.rows, "command": c.command, "cwd": c.cwd, "env": c.env, "scrollback": c.scrollback,
         "plain_shell": c.plain_shell, "cursor": c.cursor, "term_program": c.term_program, "keep_prompt": c.keep_prompt,
+        "preamble": c.preamble,
         "palette": palette_json(&s.palette), "version": s.version,
     });
     let mut cmd = Command::new(exe);
@@ -838,6 +852,7 @@ pub mod host {
             "queue_len" => return Some(p.queue_len().into()),
             "is_busy" => return Some(p.is_busy().into()),
             "cwd" => return Some(p.cwd().into()),
+            "program" => return Some(json!({ "name": p.program_name(), "pid": p.program_pid(), "cwd": p.live_cwd() })),
             "state" => return Some(format!("{:?}", p.state()).into()),
             "alt_screen" => return Some(p.alt_screen().into()),
             "selection" => return Some(p.selection_text().into()),
@@ -900,6 +915,7 @@ pub mod host {
             cursor: c["cursor"].as_u64().unwrap_or(1) as u8,
             term_program: c["term_program"].as_str().map(str::to_string),
             keep_prompt: c["keep_prompt"].as_bool().unwrap_or(false),
+            preamble: c["preamble"].as_str().map(str::to_string),
         };
         if let Some(pal) = palette_of(&c["palette"]) {
             rsz_term::palette::set_active(pal);

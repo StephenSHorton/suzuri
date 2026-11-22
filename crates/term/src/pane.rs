@@ -157,11 +157,16 @@ pub struct PaneConfig {
     /// still reports its marks; a submitted line is written as typed, with
     /// no command block and no echo filtering.
     pub keep_prompt: bool,
+    /// Text shown above the shell before it starts (card hearth#916: a
+    /// pane's scrollback from before a reboot). Fed to the screen as
+    /// output, so it scrolls and copies like the rest; the shell never
+    /// sees it.
+    pub preamble: Option<String>,
 }
 
 impl Default for PaneConfig {
     fn default() -> Self {
-        Self { cols: 80, rows: 24, command: None, cwd: None, env: Vec::new(), scrollback: 10_000, plain_shell: false, cursor: 1, term_program: None, keep_prompt: false }
+        Self { cols: 80, rows: 24, command: None, cwd: None, env: Vec::new(), scrollback: 10_000, plain_shell: false, cursor: 1, term_program: None, keep_prompt: false, preamble: None }
     }
 }
 
@@ -423,6 +428,9 @@ impl Pane {
                     e.set_default_cursor(cfg.cursor);
                 }
                 e.set_grow_at_bottom(cfg!(windows));
+                if let Some(text) = cfg.preamble.as_deref().filter(|t| !t.is_empty()) {
+                    e.feed(text.as_bytes(), &mut Vec::new());
+                }
                 e
             }),
             wake: Mutex::new(Wake { dirty: true, force_full: true, input_at: None, stop: false, sent: 0, sent_at: Instant::now(), acked: 0 }),
@@ -748,6 +756,13 @@ impl Pane {
         self.pid.and_then(crate::cwd::process_cwd)
     }
 
+    /// Where the shell process is now, from the OS (macOS, Linux), else
+    /// [`Pane::cwd`]. Unlike the last prompt's report, this follows a `cd`
+    /// on the line of a command still running (hearth#916).
+    pub fn live_cwd(&self) -> Option<String> {
+        self.pid.and_then(crate::cwd::process_cwd).filter(|d| !d.is_empty()).or_else(|| self.cwd())
+    }
+
     /// The shell's process id.
     pub fn pid(&self) -> Option<u32> {
         self.pid
@@ -765,6 +780,15 @@ impl Pane {
             return None;
         }
         self.probe.program_name()
+    }
+
+    /// The process id of the program in front of the shell now, as
+    /// [`Pane::program_name`] names it.
+    pub fn program_pid(&self) -> Option<u32> {
+        if *self.shared.state.lock() != State::Running {
+            return None;
+        }
+        self.probe.program_pid()
     }
 
     pub fn state(&self) -> State {

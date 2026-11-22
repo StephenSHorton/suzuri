@@ -29,6 +29,7 @@ mod toast_look;
 mod update;
 mod ws;
 mod keeper;
+mod restore;
 use keeper::Shell;
 use rsz_term::{Link, MouseEvent, MouseKind, Out, Pane, PaneConfig, SelectKind, Sink};
 use serde::{Deserialize, Serialize};
@@ -122,6 +123,10 @@ fn pane_open(
     command: Option<Vec<String>>,
     from: Option<u32>,
     profile: Option<String>,
+    // A pane brought back after a reboot (restore.rs): its old folder, and
+    // its old text to show above the new shell.
+    cwd: Option<String>,
+    preamble: Option<String>,
     on_frame: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let id = panes.new_id();
@@ -134,17 +139,18 @@ fn pane_open(
     let command = launch_command(command, env_cmd, profile.is_some(), inherited, prof_cmd);
     let sink = pane_sink(Arc::clone(&panes), id, on_frame, app, notes.inner().clone());
     // A pane split from another starts in that pane's cwd (Go suzuri's cwd.go).
-    let cwd = from
+    let restored_cwd = cwd.filter(|d| std::path::Path::new(d).is_dir());
+    let cwd = restored_cwd.or_else(|| from
         .and_then(|f| panes.get(f))
         .and_then(|p| p.cwd())
         .filter(|d| std::path::Path::new(d).is_dir())
         .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()))
-        .or(prof_cwd);
+        .or(prof_cwd));
     // RSZ_NO_BAR=1: the plain shell with its own prompt, no input bar.
     let plain_shell = std::env::var_os("RSZ_NO_BAR").is_some();
     let cursor = config::cursor_code(&settings);
     panes.sizes.lock().insert(id, (cols, rows));
-    let mut cfg = PaneConfig { cols, rows, command, cwd, plain_shell, cursor, ..Default::default() };
+    let mut cfg = PaneConfig { cols, rows, command, cwd, plain_shell, cursor, preamble, ..Default::default() };
     if let Some(b) = bridge.as_ref() {
         cfg.env.extend(b.pane_env(id));
     }
@@ -215,10 +221,28 @@ fn pane_attach(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>,
 /// loses none of it.
 #[tauri::command]
 fn layout_save(panes: State<'_, Arc<Panes>>, layout: serde_json::Value) {
+    if let Some(r) = restore::get() {
+        r.set_layout(layout.clone());
+    }
     if let Some(dir) = &panes.keeper {
         if let Err(e) = keeper::save_layout(dir, &layout) {
             log::warn!("keeper: layout not saved: {e}");
         }
+    }
+}
+
+/// The tabs, splits, folders and text the last run saved (restore.rs), for
+/// a start with no kept shell to put back (after a reboot or a logout).
+#[tauri::command]
+fn restore_take() -> Option<serde_json::Value> {
+    restore::take()
+}
+
+/// The person closed the last pane on purpose: the next start is fresh.
+#[tauri::command]
+fn restore_forget() {
+    if let Some(r) = restore::get() {
+        r.forget();
     }
 }
 
@@ -251,6 +275,13 @@ fn pane_sink(panes_ref: Arc<Panes>, id: u32, on_frame: Channel<InvokeResponseBod
             Out::CommandDone { exit, command } => on_frame.send(json(&Msg::CommandDone { exit, command: &command })),
             Out::Typeahead(text) => on_frame.send(json(&Msg::Typeahead { text: &text })),
             Out::Exit(code) => {
+                // No exit code: its host was killed (a logout or shutdown
+                // ending everything), not a shell that ended itself.
+                if code.is_none() {
+                    if let Some(r) = restore::get() {
+                        r.shell_lost();
+                    }
+                }
                 panes_ref.map.lock().remove(&id);
                 panes_ref.titles.lock().remove(&id);
                 panes_ref.sizes.lock().remove(&id);
@@ -1048,6 +1079,7 @@ fn main() {
         panes.next.store(top, Ordering::Relaxed);
     }
     let _ = PANES.set(Arc::clone(&panes));
+    restore::start(Arc::clone(&panes));
     // OSC 52 "?" reads get the clipboard's text, as Go suzuri answered them.
     // The read runs under the pane's engine lock, so it is short and gives
     // an empty answer when the clipboard's owner doesn't answer (clip).
@@ -1134,6 +1166,8 @@ fn main() {
             kept_list,
             pane_attach,
             layout_save,
+            restore_take,
+            restore_forget,
             pane_cell_px,
             notice_toast,
             notice_history,
@@ -1168,10 +1202,16 @@ fn main() {
         .run(move |_app, ev| {
             if let tauri::RunEvent::ExitRequested { .. } = ev {
                 hang::stop();
+                if let Some(r) = restore::get() {
+                    r.last_save();
+                }
             }
             if let tauri::RunEvent::Exit = ev {
                 hang::stop();
                 window_state::flush();
+                if let Some(r) = restore::get() {
+                    r.last_save();
+                }
                 if let Some(b) = &bridge_exit {
                     b.stop();
                 }
