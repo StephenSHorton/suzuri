@@ -79,8 +79,8 @@ try {
   Say "installed $Product $(Ver) at $loc (suzuri.exe $(Exe-Ver)); the feed offers $New"
 
   $app1 = Start-App (Join-Path $Inst "suzuri.exe") @{ RSZ_UPDATE_AUTO = "1"; RSZ_UPDATE_URL = "http://127.0.0.1:$Port/latest.json" }
-  Start-Sleep 1
-  $k = Kept | Select-Object -First 1
+  $k = $null
+  for ($i = 0; $i -lt 40 -and -not $k; $i++) { Start-Sleep -Milliseconds 500; $k = Kept | Select-Object -First 1 }
   if (-not $k -or $k.error) { Fail "no kept shell: $k" }
   $id = [int]$k.id; $hostPid = [int]$k.pid; $shell = [int]$k.shell_pid
   & $Keeper --dir $KDir type $id '1..400 | ForEach-Object { echo scroll-$_ }; $i = 0; while ($true) { $i++; echo tick-$i; Start-Sleep 1 }\n'
@@ -130,9 +130,13 @@ try {
   Say "PASS"
 } finally {
   Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
-  foreach ($p in (App-From-Inst)) { $script:AppPids += [int]$p.ProcessId }
-  Cleanup
+  foreach ($p in (App-From-Inst)) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+  # Uninstall before Cleanup removes the scratch folder the install is in.
   $u = Join-Path $Inst "uninstall.exe"
-  if (Test-Path $u) { Start-Process $u -ArgumentList "/S" -Wait; Start-Sleep 2 }
-  if (Test-Path $UninstKey) { Say "note: $Product is still in Add/Remove Programs" }
+  if (Test-Path $u) { Start-Process $u -ArgumentList "/S" -Wait; Start-Sleep 3 }
+  Cleanup
+  # Whatever the uninstaller left of the scratch product (never suzuri's own).
+  Remove-Item $UninstKey, "HKCU:\Software\stephenshorton\$Product" -Recurse -ErrorAction SilentlyContinue
+  Remove-Item (Join-Path ([Environment]::GetFolderPath("Programs")) "$Product.lnk"), (Join-Path ([Environment]::GetFolderPath("Desktop")) "$Product.lnk") -ErrorAction SilentlyContinue
+  Remove-Item (Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "com.stephenshorton.suzuri.keepertest") -Recurse -Force -ErrorAction SilentlyContinue
 }

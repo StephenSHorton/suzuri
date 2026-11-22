@@ -1,7 +1,7 @@
 //! The shell keeper end to end, with no window: a host started as the app
 //! starts one (`suzuri --keeper-host`), viewers that come and go, a second
-//! program on the same shell, and a close that ends it (card hearth#913).
-#![cfg(unix)]
+//! program on the same shell, and a close that ends it (cards hearth#913,
+//! hearth#923 for Windows).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,10 @@ use serde_json::json;
 struct Folder(PathBuf);
 impl Folder {
     fn new(tag: &str) -> Folder {
+        #[cfg(unix)]
         let p = PathBuf::from(format!("/tmp/rszk-{tag}-{}", std::process::id()));
+        #[cfg(windows)]
+        let p = std::env::temp_dir().join(format!("rszk-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         dir::ensure(&p).unwrap();
         Folder(p)
@@ -72,9 +75,34 @@ fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+#[cfg(unix)]
 fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
+
+#[cfg(windows)]
+fn alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h.is_null() {
+        return false;
+    }
+    let mut code = 0u32;
+    let ok = unsafe { GetExitCodeProcess(h, &mut code) } != 0;
+    unsafe { CloseHandle(h) };
+    ok && code == STILL_ACTIVE as u32
+}
+
+/// The shell the tests run, and a line that prints line-1 .. line-5.
+#[cfg(unix)]
+const SH: &str = "/bin/sh";
+#[cfg(unix)]
+const FIVE_LINES: &[u8] = b"for i in 1 2 3 4 5; do echo line-$i; done\r";
+#[cfg(windows)]
+const SH: &str = "cmd.exe";
+#[cfg(windows)]
+const FIVE_LINES: &[u8] = b"for %i in (1 2 3 4 5) do @echo line-%i\r";
 
 fn viewer(dir: &Path, id: u32) -> (Conn, Arc<AtomicU64>) {
     let frames = Arc::new(AtomicU64::new(0));
@@ -91,13 +119,13 @@ fn viewer(dir: &Path, id: u32) -> (Conn, Arc<AtomicU64>) {
 #[test]
 fn a_shell_outlives_its_viewer_and_ends_when_closed() {
     let d = Folder::new("a");
-    let host = start_host(&d.0, 7, &["/bin/sh"]);
+    let host = start_host(&d.0, 7, &[SH]);
     let (a, frames_a) = viewer(&d.0, 7);
     assert_eq!(a.hello["version"], "test-1");
     assert_eq!(a.hello["viewers"], 0);
     let shell = a.hello["shell_pid"].as_u64().unwrap() as u32;
     wait_for("a's first frame", || frames_a.load(Ordering::Relaxed) > 0);
-    a.input(b"for i in 1 2 3 4 5; do echo line-$i; done\r").unwrap();
+    a.input(FIVE_LINES).unwrap();
     wait_for("the output", || screen(&d.0, 7).contains("line-5"));
 
     // The viewer goes away without a word (as a kill -9 of the app).
@@ -124,13 +152,13 @@ fn a_shell_outlives_its_viewer_and_ends_when_closed() {
     b.send(&json!({ "t": "close" })).unwrap();
     wait_for("the shell to end", || !alive(shell));
     wait_for("the host to end", || !alive(host));
-    assert!(!dir::sock_path(&d.0, 7).exists());
+    assert!(!dir::has(&d.0, 7));
 }
 
 #[test]
 fn a_host_refuses_an_id_that_is_kept_already() {
     let d = Folder::new("b");
-    start_host(&d.0, 3, &["/bin/sh"]);
+    start_host(&d.0, 3, &[SH]);
     let out = Command::new(env!("CARGO_BIN_EXE_suzuri"))
         .arg("--keeper-host")
         .arg(&d.0)
@@ -146,7 +174,7 @@ fn a_host_refuses_an_id_that_is_kept_already() {
 #[test]
 fn the_host_answers_the_calls_the_app_makes() {
     let d = Folder::new("c");
-    start_host(&d.0, 4, &["/bin/sh"]);
+    start_host(&d.0, 4, &[SH]);
     let c = Conn::connect(&dir::sock_path(&d.0, 4), "control", "test", |_| {}).unwrap();
     assert_eq!(c.call(json!({ "t": "state" })).unwrap(), "Running");
     assert_eq!(c.call(json!({ "t": "alt_screen" })).unwrap(), false);
@@ -160,6 +188,7 @@ fn the_host_answers_the_calls_the_app_makes() {
 /// the app's own process and through a host. Run with --ignored --nocapture.
 #[test]
 #[ignore]
+#[cfg(unix)]
 fn key_to_frame_latency() {
     use std::sync::mpsc::channel;
     let n = 200;
@@ -213,4 +242,63 @@ fn key_to_frame_latency() {
     let (l50, l90) = median(local);
     let (k50, k90) = median(kept);
     println!("key to frame, {n} keys: in the app p50 {l50:.2} ms p90 {l90:.2} ms; through a host p50 {k50:.2} ms p90 {k90:.2} ms");
+}
+
+/// A program that reads the clipboard with OSC 52 and prints what came
+/// back: `sh ask.sh <tag>` prints `GOT-<tag>[<base64>]`.
+#[cfg(unix)]
+const ASK: &str = r#"stty raw -echo
+printf '\033]52;c;?\007'
+bel=$(printf '\007')
+r=''
+while :; do c=$(dd bs=1 count=1 2>/dev/null); [ "$c" = "$bel" ] && break; r="$r$c"; done
+stty sane
+echo "GOT-$1[${r#*;c;}]"
+"#;
+
+/// A viewer that answers the host's clipboard asks with `text`, as the
+/// app does (app/src/keeper.rs, answer_clipboard).
+#[cfg(unix)]
+fn answering_viewer(dir: &Path, id: u32, text: &'static str) -> Conn {
+    let sock = dir::sock_path(dir, id);
+    let s2 = sock.clone();
+    Conn::connect(&sock, "viewer", "test", move |e| {
+        if let Event::Msg(v) = e
+            && v["t"] == "clip_ask"
+        {
+            let c = Conn::connect(&s2, "control", "test", |_| {}).unwrap();
+            c.send(&json!({ "t": "clip_answer", "n": v["n"], "text": text })).unwrap();
+        }
+    })
+    .unwrap()
+}
+
+#[test]
+#[cfg(unix)]
+fn a_clipboard_read_gets_the_clipboard_only_while_a_window_is_attached() {
+    let d = Folder::new("clip");
+    let script = d.0.join("ask.sh");
+    std::fs::write(&script, ASK).unwrap();
+    start_host(&d.0, 5, &[SH]);
+    let ctl = Conn::connect(&dir::sock_path(&d.0, 5), "control", "test", |_| {}).unwrap();
+    let ask = |tag: &str| ctl.input(format!("sh {} {tag}\r", script.display()).as_bytes()).unwrap();
+
+    // No window attached: the program gets an empty answer, not the clipboard.
+    ask("none");
+    wait_for("the read with no window", || screen(&d.0, 5).contains("GOT-none["));
+    assert!(screen(&d.0, 5).contains("GOT-none[]"), "{}", screen(&d.0, 5));
+
+    // A window attached: the program gets the window's clipboard text.
+    let v = answering_viewer(&d.0, 5, "hello-clip 硯");
+    ask("one");
+    wait_for("the read with a window", || screen(&d.0, 5).contains("GOT-one["));
+    // base64("hello-clip 硯")
+    assert!(screen(&d.0, 5).contains("GOT-one[aGVsbG8tY2xpcCDnoa8=]"), "{}", screen(&d.0, 5));
+
+    // The window goes: empty again.
+    drop(v);
+    std::thread::sleep(Duration::from_millis(300));
+    ask("gone");
+    wait_for("the read after the window went", || screen(&d.0, 5).contains("GOT-gone["));
+    assert!(screen(&d.0, 5).contains("GOT-gone[]"), "{}", screen(&d.0, 5));
 }
