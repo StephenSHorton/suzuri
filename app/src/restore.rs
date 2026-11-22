@@ -11,8 +11,12 @@
 //! 0600 files (`session.json`, `<pane id>.txt`); each window is its own app
 //! process and keeps its own. A start takes the sessions of processes that
 //! are gone (or ran before the last boot) and removes them. Closing the last
-//! pane on purpose (the quit dialog, or `exit` in it) clears this process's;
-//! RSZ_RESTORE=0 turns it off.
+//! pane on purpose (the quit dialog, or `exit` in it) clears this process's.
+//! Settings › Session › "Bring back after a reboot" (config key
+//! `restore_sessions`, card hearth#951) turns it off: that clears the whole
+//! restore folder at once, and every window reads the setting before each
+//! write, so none writes again (each clears its own folder if one is left)
+//! until it is turned back on. RSZ_RESTORE=0 turns it off for one run.
 //!
 //! Written every [`TICK`] while the app runs, a pane's text only when it
 //! printed something since, and once more as the app exits.
@@ -35,10 +39,37 @@ const TICK: Duration = Duration::from_secs(3);
 /// the app, and the panes going one by one must not shrink or clear it.
 const HOLD: Duration = Duration::from_secs(10);
 
-pub fn enabled() -> bool {
+/// Not turned off for this run (RSZ_RESTORE=0, benches and tests).
+fn allowed() -> bool {
     let set = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty());
     std::env::var("RSZ_RESTORE").as_deref() != Ok("0") && !["RSZ_BENCH", "RSZ_PANES", "RSZ_UI_TEST", "RSZ_CMD"].iter().any(|k| set(k))
 }
+
+/// The Settings switch (`restore_sessions`), read from the file each time so
+/// a change in any window reaches every one.
+fn setting_on() -> bool {
+    is_on(&crate::config::load())
+}
+
+fn is_on(cfg: &Value) -> bool {
+    cfg["restore_sessions"].as_bool() != Some(false)
+}
+
+pub fn enabled() -> bool {
+    allowed() && setting_on()
+}
+
+/// The Settings switch was turned off: remove every saved session (every
+/// window's), now. This process writes nothing more while it is off
+/// ([`Restore::save`] reads the setting under the same lock).
+pub fn turned_off() {
+    let _g = get().map(|r| r.write.lock());
+    if let Some(r) = get() {
+        r.written.lock().clear();
+    }
+    clear(&dir());
+}
+
 
 /// `<config>/restore`: beside config.json (RSZ_CONFIG_DIR wins).
 pub fn dir() -> PathBuf {
@@ -68,9 +99,10 @@ pub fn get() -> Option<&'static Arc<Restore>> {
     RESTORE.get()
 }
 
-/// Start saving (once, when enabled).
+/// Start saving (once, unless turned off for this run). The thread runs
+/// while the Settings switch is off too, so turning it on saves again.
 pub fn start(panes: Arc<Panes>) {
-    if !enabled() {
+    if !allowed() {
         return;
     }
     let r = Arc::new(Restore { dir: dir().join(std::process::id().to_string()), panes, layout: Mutex::new(None), written: Mutex::default(), off: false.into(), closing: false.into(), lost_at: Mutex::new(None), write: Mutex::new(()) });
@@ -117,13 +149,25 @@ impl Restore {
         self.save();
     }
 
-    /// Write the session as it is now.
+    /// Write the session as it is now, if the Settings switch is on.
     pub fn save(&self) {
+        self.save_if(&setting_on)
+    }
+
+    fn save_if(&self, on: &dyn Fn() -> bool) {
         if self.off.load(std::sync::atomic::Ordering::Relaxed) || self.holding() {
             return;
         }
         let Some(layout) = self.layout.lock().clone() else { return };
         let _g = self.write.lock();
+        if !on() {
+            // Off in Settings (maybe in another window): nothing kept.
+            if self.dir.exists() {
+                clear(&self.dir);
+            }
+            self.written.lock().clear();
+            return;
+        }
         if let Err(e) = self.save_locked(layout) {
             log::warn!("restore: not saved: {e}");
         }
@@ -182,10 +226,16 @@ impl Restore {
 /// The session the last run left, each leaf with its `text`; None when
 /// there is none (or restore is off).
 pub fn take() -> Option<Value> {
-    if !enabled() {
+    take_if(enabled(), &dir())
+}
+
+/// Off: nothing is brought back (the start opens one fresh pane), whatever
+/// is in `root`.
+fn take_if(on: bool, root: &Path) -> Option<Value> {
+    if !on {
         return None;
     }
-    take_from(&dir(), std::process::id(), boot_stamp(), alive)
+    take_from(root, std::process::id(), boot_stamp(), alive)
 }
 
 /// The sessions in `root` left by processes that are gone (not `me`, not
@@ -427,6 +477,49 @@ mod tests {
         assert!(root.join("100").exists() && root.join("200").exists(), "mine and the live window's stay");
         assert!(!root.join("300").exists() && !root.join("400").exists(), "taken ones are removed");
         assert!(take_from(&root, 100, Some(7), alive).is_none(), "taken once");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_switch_off_clears_every_session_and_writes_nothing_until_on() {
+        let root = scratch("switch");
+        let cfg = scratch("switch-cfg").join("config.json");
+        let on = || is_on(&crate::config::load_from(&cfg, &cfg));
+        let set = |v: bool| crate::config::update_at(&cfg, &cfg, json!({ "restore_sessions": v })).unwrap();
+        assert!(on(), "on by default");
+        let d = root.join("7");
+        let r = Restore { dir: d.clone(), panes: Arc::default(), layout: Mutex::new(Some(json!({ "active": 0, "tabs": [{ "name": "t", "tree": { "id": 1 } }] }))), written: Mutex::default(), off: false.into(), closing: false.into(), lost_at: Mutex::new(None), write: Mutex::new(()) };
+        r.save_if(&on);
+        session(&root, 8, 1, 1, "/another-window");
+        assert!(d.join("session.json").exists() && root.join("8").exists(), "on: saved");
+        // Turned off in Settings: config_set saves the key, then turned_off
+        // clears the whole restore folder.
+        set(false);
+        clear(&root);
+        assert!(!root.exists(), "off: everything in restore/ is removed");
+        for _ in 0..3 {
+            r.save_if(&on);
+        }
+        assert!(!root.exists(), "off: nothing more is written");
+        // Off set in another window, with this one's folder still there: its
+        // next tick removes it.
+        ensure(&d).unwrap();
+        r.save_if(&on);
+        assert!(!d.exists(), "off: a window clears its own folder on its next tick");
+        set(true);
+        r.save_if(&on);
+        assert!(d.join("session.json").exists(), "on again: saved on the next tick (every 3 s)");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(cfg.parent().unwrap());
+    }
+
+    #[test]
+    fn the_switch_off_brings_nothing_back() {
+        let root = scratch("take-off");
+        // A session left before a reboot, by a process that is gone.
+        session(&root, u32::MAX - 1, 10, 1, "/before-reboot");
+        assert!(take_if(false, &root).is_none(), "off: one fresh pane");
+        assert!(take_if(true, &root).is_some(), "on: it comes back");
         let _ = std::fs::remove_dir_all(&root);
     }
 

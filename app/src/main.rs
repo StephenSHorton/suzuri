@@ -542,6 +542,9 @@ fn config_get() -> serde_json::Value {
 #[tauri::command]
 fn config_set(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
     let v = config::update(patch.clone()).map_err(|e| e.to_string())?;
+    if patch.get("restore_sessions").and_then(serde_json::Value::as_bool) == Some(false) {
+        restore::turned_off();
+    }
     let shape = config::cursor_code(&v);
     for p in panes.map.lock().values() {
         p.set_default_cursor(shape);
