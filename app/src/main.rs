@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::Mutex;
 
 mod activity;
+mod altmenu;
 mod applog;
 mod bridge;
 mod caffeine;
@@ -1173,6 +1174,7 @@ fn main() {
             }
             window_state::install(app.handle());
             hang::install(app.handle());
+            altmenu::install(app.handle());
             app.manage(notices::Notices::new(app.handle().clone()));
             if let Some(crash) = applog::take_crash(&applog::dir()) {
                 log::info!("last run crashed: {}", crash.display());
