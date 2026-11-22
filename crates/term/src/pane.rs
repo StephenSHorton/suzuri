@@ -2426,12 +2426,19 @@ mod windows_tests {
     }
 
     /// The same shell with the plain-shell setting (RSZ_NO_BAR, no hooks):
-    /// it prints the text from its start command (hearth#972).
+    /// it prints the text from its start command (hearth#972). Started
+    /// with -NoProfile, so the prompt is PowerShell's own `PS ...>`
+    /// whatever this computer's profile sets (a starship prompt, its
+    /// warnings); the profile's place before the text is checked on a
+    /// real restart (scripts/windows/reboot-check.ps1).
     #[test]
     fn plain_powershell_keeps_the_restored_text_above_its_prompt() {
         let is_prompt = |l: &str| l.trim_start().starts_with("PS ") && l.trim_end().ends_with('>');
+        let mut argv = default_shell();
+        argv.push("-NoProfile".into());
+        assert!(shell::print_preamble(&argv, "x").is_some(), "unhooked PowerShell prints the text: {argv:?}");
         keeps_the_restored_text(
-            PaneConfig { plain_shell: true, ..Default::default() },
+            PaneConfig { plain_shell: true, command: Some(argv), ..Default::default() },
             move |p, _| lines_of(&p.screen_text()).iter().any(|l| is_prompt(l)),
             is_prompt,
         );

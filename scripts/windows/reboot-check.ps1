@@ -10,7 +10,12 @@
 #    a fresh shell in each old folder, the old text above it marked
 #    restored, and a pane that was running Claude Code offers
 #    `claude --resume <id>` in its input bar without running it;
-#  - `exit` in the last pane, and the next start opens one fresh pane.
+#  - `exit` in the last pane, and the next start opens one fresh pane;
+#  - card hearth#975 (shells without the PowerShell hooks print the old text
+#    themselves, hearth#972): with the plain-shell setting (RSZ_NO_BAR=1),
+#    and with cmd.exe as the active profile, a hard kill brings back the
+#    old text and the dim restored line above the new prompt, with
+#    Japanese, a box line and a middle dot unbroken and no literal `[2m`.
 #
 # Claude Code is a stand-in claude.exe (compiled here from C#) that writes
 # the session file the real one does (%USERPROFILE%\.claude\sessions\<pid>.json,
@@ -21,9 +26,15 @@
 # RSZ_CONFIG_DIR and keeper folder, so the installed suzuri's files and kept
 # shells are never touched.
 #   cargo build -p suzuri -p rsz-keeper
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\reboot-check.ps1 [-Out <folder for pictures>] [-Keep]
-param([string]$App = "", [string]$Out = "", [switch]$Keep)
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\reboot-check.ps1 [-Out <folder for pictures>] [-Keep] [-Cases kept,plain,cmd]
+# -Cases: which parts to run (all by default): kept (the kept shells, the
+# hard kill, exit), plain (the plain-shell setting), cmd (a cmd.exe profile).
+param([string]$App = "", [string]$Out = "", [switch]$Keep, [string[]]$Cases = @("kept", "plain", "cmd"))
 $ErrorActionPreference = "Stop"
+# Its log names Japanese text and box lines: written as UTF-8, not the code page.
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+# -File hands "plain,cmd" over as one string.
+$Cases = @($Cases | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $R = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $App) { $App = Join-Path $R "target\debug\suzuri.exe" }
 $Keeper = Join-Path (Split-Path -Parent $App) "rsz-keeper.exe"
@@ -111,10 +122,11 @@ function Shot($p, [string]$path) {
 
 # --- the scratch app
 $script:apps = @()
-function StartApp {
+function StartApp($extra = @{}) {
   Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $S "local\suzuri\bridge.json")
   $keep = @{}
   $set = @{ USERPROFILE = "$S\home"; HOME = "$S\home"; LOCALAPPDATA = "$S\local"; RSZ_CONFIG_DIR = "$S\cfg"; RSZ_KEEPER_DIR = $KDir; RSZ_BRIDGE = "1"; RSZ_ALLOW_MULTI = "1"; RSZR_SCRATCH = $S; PATH = "$S\bin;$env:PATH" }
+  foreach ($k in $extra.Keys) { $set[$k] = $extra[$k] }
   foreach ($k in $set.Keys) { $keep[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $set[$k]) }
   try { $p = Start-Process -FilePath $App -PassThru -RedirectStandardError (Join-Path $S "app-err.log") -RedirectStandardOutput (Join-Path $S "app-out.log") }
   finally { foreach ($k in $keep.Keys) { [Environment]::SetEnvironmentVariable($k, $keep[$k]) } }
@@ -128,7 +140,8 @@ function StartApp {
 # No keep-alive: a restarted app takes the same bridge port, and Windows
 # PowerShell 5 would send the next request on the dead app's connection.
 function Get_([string]$path) { Invoke-RestMethod -DisableKeepAlive -TimeoutSec 30 -Uri ($script:bridge.url + $path) -Headers @{ Authorization = "Bearer $($script:bridge.token)" } }
-function Post_([string]$path, $body) { Invoke-RestMethod -DisableKeepAlive -TimeoutSec 30 -Method Post -Uri ($script:bridge.url + $path) -Headers @{ Authorization = "Bearer $($script:bridge.token)" } -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 10 -Compress) }
+# The body as UTF-8 bytes: Windows PowerShell sends a string body as Latin-1.
+function Post_([string]$path, $body) { Invoke-RestMethod -DisableKeepAlive -TimeoutSec 30 -Method Post -Uri ($script:bridge.url + $path) -Headers @{ Authorization = "Bearer $($script:bridge.token)" } -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 10 -Compress))) }
 function Call([string]$tool, $a = @{}) { Post_ "/v1/call" @{ tool = $tool; args = $a } }
 # The window answers once its page has loaded (a debug build's first start,
 # which copies the keeper host, can take a while).
@@ -250,8 +263,91 @@ function CheckRestored([string]$label) {
   @($a, $b, $c)
 }
 
+# Hard-kills an app, everything under it and every kept shell (a reboot).
+function KillAll($p) {
+  $kids = Tree $p.Id
+  Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+  foreach ($k in $kids) { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue }
+  KillKept
+  Start-Sleep -Seconds 1
+}
+
+# Card hearth#975: one pane of a shell without the PowerShell hooks ($label),
+# started with env $vars and the settings in $config, prints lines ($fill); after
+# a hard kill the next start shows each of $want (whole lines, in order),
+# then the restored line, dim (no literal [2m), and nothing of the old text
+# below it; $prompt matches the new shell's prompt line.
+# Then a cmd and a PowerShell started inside it ($nested, then exit from
+# each) print nothing of it again.
+function RestoreCase([string]$label, $vars, $config, [string]$fill, [string[]]$want, [scriptblock]$prompt, [string]$picture, [string[]]$nested) {
+  Say "== $label"
+  foreach ($d in Sessions) { Remove-Item -Recurse -Force $d.FullName }
+  $cfgFile = Join-Path $S "cfg\config.json"
+  Remove-Item -Force -ErrorAction SilentlyContinue $cfgFile
+  if ($config) { [IO.File]::WriteAllText($cfgFile, ($config | ConvertTo-Json -Depth 5 -Compress)) }
+  $a1 = StartApp $vars
+  Ready
+  Start-Sleep -Seconds 3
+  $id = [int](Call layout).windows[0].tabs[0].panes[0].id
+  Submit $id $fill
+  Start-Sleep -Seconds 8
+  $before = Get_ "/v1/panes/$id`?lines=400"
+  $lines = @($before.tail) + @($before.live) | ForEach-Object { $_.TrimEnd() }
+  foreach ($w in $want) { if ($lines -notcontains $w) { Fail "${label}: '$w' never shown before the kill: $(($lines | Select-Object -Last 15) -join ' | ')" } }
+  if (-not (Test-Path (Join-Path $S "cfg\restore\$($a1.Id)\session.json"))) { Fail "${label}: no session saved" }
+  Say "1. before the kill: $($want -join ' / ') on screen"
+  KillAll $a1
+  $a2 = StartApp $vars
+  Ready
+  Start-Sleep -Seconds 6
+  $q = (Call layout).windows[0].tabs[0].panes[0]
+  $t = Get_ "/v1/panes/$($q.id)`?lines=400"
+  $lines = @(@($t.tail) + @($t.live) | ForEach-Object { $_.TrimEnd() })
+  $shown = ($lines | Where-Object { $_ } | Select-Object -Last 12) -join "`n"
+  $at = -1
+  foreach ($w in $want) {
+    $i = [array]::IndexOf($lines, $w)
+    if ($i -lt 0) { Fail "${label}: '$w' not back after the kill; the end:`n$shown" }
+    if ($i -le $at) { Fail "${label}: '$w' out of order; the end:`n$shown" }
+    $at = $i
+  }
+  $markRe = "^$([char]0x2500){3} restored $([char]0xB7) saved .+ $([char]0x2500){3}`$"
+  $marks = @(0..($lines.Count - 1) | Where-Object { $lines[$_] -match $markRe })
+  if ($marks.Count -ne 1) { Fail "${label}: $($marks.Count) restored lines, not one; the end:`n$shown" }
+  if ($marks[0] -le $at) { Fail "${label}: the restored line is above the old text; the end:`n$shown" }
+  if (($lines -join "`n") -match '\[2m|\[0m') { Fail "${label}: a literal [2m or [0m: the dim did not take; the end:`n$shown" }
+  $below = @($lines[($marks[0] + 1)..($lines.Count - 1)] | Where-Object { $_ -and $want -contains $_ })
+  if ($below.Count) { Fail "${label}: old text below the restored line: $below" }
+  $last = @($lines | Where-Object { $_.Trim() }) | Select-Object -Last 1
+  if (-not (& $prompt $last)) { Fail "${label}: no prompt under the restored line: '$last'; the end:`n$shown" }
+  $prof = @(0..($lines.Count - 1) | Where-Object { $lines[$_] -match '^profile-ran-\d+$' })
+  if ($label -match "plain") {
+    if ($prof.Count -ne 2) { Fail "${label}: the scratch PowerShell profile ran $($prof.Count) times in the two starts, not 2; the end:`n$shown" }
+    # The new start's line has the later time; the old text's is the first start's.
+    $new, $old = $prof | Sort-Object { [long]($lines[$_] -replace '\D', '') } -Descending
+    if ($new -gt $old) { Fail "${label}: the profile's output of the new start (line $new) is not above the old text (its first start's line $old); the end:`n$shown" }
+    Say "2. the new start's profile line (line $new) comes before the old text (the first start's profile line, line $old) and the restored line (line $($marks[0]))"
+  }
+  Say "2. after the kill: $($want -join ' / ') back in order, then '$($lines[$marks[0]])' once, no literal [2m, then the prompt '$last'"
+  Shot $a2 (Join-Path $Out $picture)
+  foreach ($n in $nested) { Submit $q.id $n; Start-Sleep -Seconds 3 }
+  Submit $q.id "echo nested-done"
+  foreach ($n in $nested) { Submit $q.id "exit"; Start-Sleep -Seconds 2 }
+  $t = Get_ "/v1/panes/$($q.id)`?lines=600"
+  $lines = @(@($t.tail) + @($t.live) | ForEach-Object { $_.TrimEnd() })
+  if ($lines -notcontains "nested-done") { Fail "${label}: the nested shells never ran a line; the end:`n$(($lines | Where-Object { $_ } | Select-Object -Last 12) -join "`n")" }
+  $n = @($lines | Where-Object { $_ -match $markRe }).Count
+  $w = @($lines | Where-Object { $_ -eq $want[-1] }).Count
+  if ($n -ne 1 -or $w -ne 1) { Fail "${label}: after a nested $($nested -join ' and '): $n restored lines and $w of '$($want[-1])', not one each" }
+  Say "3. a nested $($nested -join ' and a nested ') printed nothing again (one restored line, one '$($want[-1])')"
+  KillAll $a2
+  foreach ($d in Sessions) { Remove-Item -Recurse -Force $d.FullName }
+  Remove-Item -Force -ErrorAction SilentlyContinue $cfgFile
+}
+
 try {
   Say "== scratch: $S (keeper folder $KDir)"
+  if ($Cases -contains "kept") {
   $app1 = StartApp
   Ready
   Start-Sleep -Seconds 2
@@ -379,6 +475,30 @@ try {
   if ($tabs[0].panes[0].input) { Fail "the fresh pane offers '$($tabs[0].panes[0].input)'" }
   Say "5. the next start: one tab, one fresh pane, nothing restored or offered"
   Shot $app4 (Join-Path $Out "4-fresh-after-exit.png")
+  KillAll $app4
+  }
+
+  # Japanese, a box line and a middle dot (nihongo no gyou, U+2500, U+00B7), from char
+  # codes: Windows PowerShell reads this file as ANSI.
+  $ja = (-join ([char[]](0x65E5, 0x672C, 0x8A9E, 0x306E, 0x884C))) + " $([char]0x2500) $([char]0xB7) done"
+  if ($Cases -contains "plain") {
+    # A PowerShell profile in the scratch home that prints a line: its
+    # output comes before the old text, not under the restored line.
+    foreach ($d in "Documents\PowerShell", "Documents\WindowsPowerShell") {
+      New-Item -ItemType Directory -Force (Join-Path $S "home\$d") | Out-Null
+      Set-Content -Encoding ASCII (Join-Path $S "home\$d\Microsoft.PowerShell_profile.ps1") "'profile-ran-' + [DateTime]::Now.Ticks"
+    }
+    RestoreCase "plain-shell setting (RSZ_NO_BAR=1): PowerShell with no hooks" @{ RSZ_NO_BAR = "1" } $null `
+      "cd $S\work\alpha; 1..300 | % { `"plain-line-`$_`" }; 'plain $ja'" `
+      @("plain-line-1", "plain-line-150", "plain-line-300", "plain $ja") `
+      { param($l) $l -match '^PS .*>$' -or $l -match "$([char]0x276F)\s*`$" -or $l -match '>\s*$' } "5-plain-shell-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile")
+  }
+  if ($Cases -contains "cmd") {
+    RestoreCase "a cmd.exe profile (Cmd, the active profile)" @{} @{ active_profile = "Cmd" } `
+      "cd /d $S\work\beta & (for /L %i in (1,1,300) do @echo cmd-line-%i) & echo cmd $ja" `
+      @("cmd-line-1", "cmd-line-150", "cmd-line-300", "cmd $ja") `
+      { param($l) $l -match '^[A-Za-z]:\\.*>$' } "6-cmd-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile")
+  }
 
   $after = RealStamp
   if ($after -ne $before) { Fail "the installed suzuri's files changed: '$before' -> '$after'" }
