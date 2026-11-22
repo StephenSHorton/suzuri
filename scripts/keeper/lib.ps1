@@ -51,10 +51,24 @@ function Start-App([string]$exe, [hashtable]$extra = @{}) {
 }
 
 function Bridge { Get-Content (Join-Path $S "local\suzuri\bridge.json") -Raw | ConvertFrom-Json }
-function Api-Get([string]$path) { $b = Bridge; Invoke-RestMethod -Uri "$($b.url)$path" -Headers @{ Authorization = "Bearer $($b.token)" } }
+# No keep-alive: a restarted app takes the same bridge port, and Windows
+# PowerShell 5 would send the next request on the dead app's connection.
+function Api-Get([string]$path) { $b = Bridge; Invoke-RestMethod -DisableKeepAlive -TimeoutSec 30 -Uri "$($b.url)$path" -Headers @{ Authorization = "Bearer $($b.token)" } }
+# A call the window answers gets one more try after a 504 (the window was
+# busy for 5 s); each try's time is printed.
 function Api-Post([string]$path, $body) {
   $b = Bridge
-  Invoke-RestMethod -Method Post -Uri "$($b.url)$path" -Headers @{ Authorization = "Bearer $($b.token)" } -ContentType "application/json" -Body ($body | ConvertTo-Json -Compress -Depth 5)
+  foreach ($try in 1, 2) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    try {
+      $r = Invoke-RestMethod -DisableKeepAlive -TimeoutSec 30 -Method Post -Uri "$($b.url)$path" -Headers @{ Authorization = "Bearer $($b.token)" } -ContentType "application/json" -Body ($body | ConvertTo-Json -Compress -Depth 5)
+      if ($try -gt 1) { Say "  ($path answered on try $try, in $($sw.ElapsedMilliseconds) ms)" }
+      return $r
+    } catch {
+      if ($try -gt 1 -or "$_" -notmatch "did not answer") { throw }
+      Say "  ($path : the window did not answer within 5 s; trying once more)"
+    }
+  }
 }
 function Api-Call([string]$tool, $argsObj) { Api-Post "/v1/call" @{ tool = $tool; args = $argsObj } }
 

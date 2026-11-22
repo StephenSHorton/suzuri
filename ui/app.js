@@ -12,7 +12,7 @@ import { isOpen as panelOpen } from "./panel.js"
 import "./aicontrol.js"
 import "./layout_tools.js"
 import "./pane_drag.js"
-import { neighbor, swapPanes } from "./layout_ops.js"
+import { neighbor, swapPanes } from "./view/layout_ops.js"
 import { InputBar, PROMPT, barKey, displayPath } from "./bar.js"
 import { shortcut, chordLabel } from "./shortcuts.js"
 import { Palette } from "./palette.js"
@@ -22,7 +22,7 @@ import { hostToast } from "./host_toast.js"
 import { complete, ghostSuffix, DirCache, PENDING } from "./complete.js"
 import { closeLarge } from "./images.js"
 import { cleanTitle } from "./activity_state.js"
-import { tabTitle, stickyAt, windowTitle, zoomCycle, MAX_TABS, MAX_PANES } from "./tab_rules.js"
+import { tabTitle, stickyAt, windowTitle, zoomCycle, MAX_TABS, MAX_PANES } from "./view/tab_rules.js"
 import { confirm, isOpen as confirmOpen } from "./confirm.js"
 import { FocusReports } from "./focus_report.js"
 import { chrome } from "./chrome/store.js"
@@ -30,6 +30,7 @@ import { showToast } from "./chrome/Toasts.jsx"
 import { showHud, hideHud } from "./chrome/Hud.jsx"
 
 import { layoutOf, restorePlan } from "./kept_layout.js"
+import { preamble, resumeCommand, savedPlan } from "./restore_session.js"
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
 window.addEventListener("error", (e) => log("error", e.message, e.filename + ":" + e.lineno))
@@ -259,7 +260,7 @@ class PaneView {
     this.screen = null // the view's Screen (main-thread painting)
     this.queue = [] // the worker's frames that came before pane_open answered
     this.lastModes = 0
-    this.title = "" // the program's title; "" until it sets one (tab_rules.js)
+    this.title = "" // the program's title; "" until it sets one (ui/view/tab_rules.js)
     this.id = 0
     this.size = [0, 0] // the core's (pane_open's, then each pane_resize)
     this.fitSize = null // the view's fit before pane_open answered
@@ -308,13 +309,14 @@ class PaneView {
 
   // from: the pane this one splits from; the new shell starts in its cwd.
   // profile: a Settings profile's shell and folder (new tabs).
-  async open(cols, rows, from = null, profile = null) {
+  // back: a pane brought back after a reboot ({cwd, preamble}; restoreSaved).
+  async open(cols, rows, from = null, profile = null, back = null) {
     const ch = new Channel()
     ch.onmessage = (m) => this.onChannel(m)
     this.size = [cols, rows]
     // An Enter in the bar can come before pane_open answers (the shell's
     // first status may beat it): submit waits for this.
-    this.opened = invoke("pane_open", { cols, rows, command: null, from, profile, onFrame: ch })
+    this.opened = invoke("pane_open", { cols, rows, command: null, from, profile, cwd: back?.cwd || null, preamble: back?.preamble || null, onFrame: ch })
     this.id = await this.opened
     this.ready(cols, rows)
   }
@@ -717,13 +719,13 @@ function newTab(at = tabs.length) {
   const el = document.createElement("div")
   el.className = "tab-root"
   root.appendChild(el)
-  // sticky: the name it froze at on its first split (tab_rules.js).
+  // sticky: the name it froze at on its first split (ui/view/tab_rules.js).
   const t = { id: nextTabId++, name: "", sticky: "", tree: null, focused: null, zoomed: null, el }
   tabs.splice(at, 0, t)
   return t
 }
 
-// The tab's name on the strip (tab_rules.js tabTitle).
+// The tab's name on the strip (ui/view/tab_rules.js tabTitle).
 function tabLabel(t) {
   const panes = allPanes(t.tree)
   return tabTitle({
@@ -741,7 +743,7 @@ function render(tab = activeTab) {
     // repeated splits come out equal instead of halving.
     const span = (n) => (n.pane || n.dir !== node.dir ? 1 : span(n.a) + span(n.b))
     const a = build(node.a), b = build(node.b)
-    // A ratio (set by grow/shrink/equalize, ui/layout_ops.js) wins.
+    // A ratio (set by grow/shrink/equalize, ui/view/layout_ops.js) wins.
     const wa = node.ratio != null ? node.ratio : span(node.a)
     const wb = node.ratio != null ? 1 - node.ratio : span(node.b)
     a.style.flex = `${wa} 1 0`
@@ -844,8 +846,9 @@ async function closePane(pane, how = "user") {
   if (!pane) return
   const last = tabs.length === 1 && allPanes(pane.tab.tree).length === 1 && pane.tab.tree?.pane === pane
   // Closing it ends its shell, as any pane's: a kept shell would outlive the quit.
-  if (last && how === "user") return void ((await askQuit()) ? closeShells([pane]).then(quit) : focusInput())
-  if (last && how === "exit") return quit()
+  // Closed on purpose: nothing to bring back after a reboot (restore.rs).
+  if (last && how === "user") return void ((await askQuit()) ? closeShells([pane]).then(forgetSession).then(quit) : focusInput())
+  if (last && how === "exit") return forgetSession().then(quit)
   if (!pane.exited && pane.id) invoke("pane_close", { id: pane.id })
   pane.exited = true
   pane.dispose()
@@ -928,6 +931,71 @@ async function restoreKept() {
   for (const p of everyPane()) p.fit()
   if (activeTab?.focused) setFocus(activeTab.focused, true)
   log("kept: restored", made.length, "shells")
+  return activeTab?.focused ?? null
+}
+
+// ---- terminals back after a reboot (app/src/restore.rs, ui/restore_session.js)
+function forgetSession() {
+  return invoke("restore_forget").catch(() => {})
+}
+
+// No kept shell was left (a reboot or a logout ended them): build the tabs
+// and splits the last run saved, a fresh shell in each pane's folder under
+// its old text. A pane that was running Claude Code gets the resume command
+// in its input bar; nothing runs until Enter. Returns the focused pane, or
+// null when nothing was saved.
+async function restoreSaved() {
+  const saved = await invoke("restore_take").catch((e) => (log("restore_take", String(e)), null))
+  const plan = savedPlan(saved)
+  if (!plan.tabs.length) return null
+  const made = []
+  for (const st of plan.tabs) {
+    if (tabs.length >= MAX_TABS || everyPane().length + made.length >= MAX_PANES) break
+    const t = newTab()
+    t.name = st.name
+    t.sticky = st.sticky
+    const build = (n) => {
+      if (n.id != null) {
+        const p = new PaneView(t)
+        p.tab = t
+        p.titleOverride = n.title || ""
+        made.push([p, n])
+        if (n.id === st.focused) t.focused = p
+        if (n.id === st.zoomed) t.zoomed = p
+        return { pane: p }
+      }
+      const node = { dir: n.dir, a: build(n.a), b: build(n.b) }
+      if (n.ratio != null) node.ratio = n.ratio
+      return node
+    }
+    t.tree = build(st.tree)
+    t.focused = t.focused ?? allPanes(t.tree)[0]
+  }
+  if (!made.length) return null
+  for (const t of tabs) render(t)
+  showTab(tabs[plan.active] ?? tabs[0])
+  await new Promise((r) => { requestAnimationFrame(r); setTimeout(r, 100) })
+  const { cw, ch } = cellMetrics()
+  await Promise.all(made.map(async ([p, leaf]) => {
+    // A tab not in front has no size yet: 80x24 until it is shown.
+    const w = p.body.clientWidth - 12, h = p.body.clientHeight - 8
+    const cols = w > 0 ? Math.max(2, Math.floor(w / cw)) : 80
+    const rows = h > 0 ? Math.max(1, Math.floor(h / ch)) : 24
+    try {
+      await p.open(cols, rows, null, null, { cwd: leaf.claude?.cwd || leaf.cwd, preamble: preamble(leaf, plan.savedAt) })
+    } catch (e) {
+      log("restore open", String(e))
+      return closePane(p, "ai")
+    }
+    const cmd = resumeCommand(leaf)
+    if (cmd) {
+      p.bar.insert(cmd)
+      p.renderBar()
+    }
+  }))
+  for (const p of everyPane()) p.fit()
+  if (activeTab?.focused) setFocus(activeTab.focused, true)
+  log("restore: brought back", made.length, "panes")
   return activeTab?.focused ?? null
 }
 
@@ -1131,7 +1199,7 @@ function setFocus(p, force = false) {
   focusReports.sync()
 }
 
-// After a layout op (ui/layout_ops.js): rebuild the DOM, keep focus, refit.
+// After a layout op (ui/view/layout_ops.js): rebuild the DOM, keep focus, refit.
 function relayout() {
   render()
   if (focused) setFocus(focused)
@@ -1528,7 +1596,9 @@ async function start() {
   settingsCfg = await invoke("config_get").catch(() => null)
   if (settingsCfg) announce(settingsCfg)
   // Kept shells come back first; a bench or UI test always starts fresh.
-  const kept = boot.panes > 1 || boot.bench || boot.ui_test ? null : await restoreKept()
+  // Else what the last run saved, after a reboot or a logout ended its shells.
+  const fresh = boot.panes > 1 || boot.bench || boot.ui_test
+  const kept = fresh ? null : (await restoreKept()) ?? (await restoreSaved())
   const first = boot.panes > 1 ? await grid(boot.panes) : kept ?? await openTab()
   if (boot.bench) bench(boot, first)
   if (boot.ui_test) {

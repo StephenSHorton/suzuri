@@ -5,7 +5,7 @@
 // builds each split as a box holding its two sides, so the boxes under the
 // tab mirror the tree. PTY resizes during a drag go through a gate that sends
 // at most one per pane every 80 ms, and the last at release.
-import { sashRect, hitSash, ratioAt, equalizeRun, resizeGate, MIN_W, MIN_H } from "./sash_ops.js"
+import { sashRect, hitSash, ratioAt, equalizeRun, resizeGate, MIN_W, MIN_H } from "./view/sash_ops.js"
 
 const host = () => window.rszHost
 const gate = resizeGate(80)

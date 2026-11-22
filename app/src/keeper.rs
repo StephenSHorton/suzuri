@@ -338,6 +338,19 @@ impl Shell {
             }
         }
     }
+    /// The program in front of the shell now (its name and process id),
+    /// and the shell's folder as the OS sees it. A host older than
+    /// hearth#916 does not answer: none, and the last prompt's folder.
+    pub fn program(&self) -> (Option<String>, Option<u32>, Option<String>) {
+        match self {
+            Shell::Local(p) => (p.program_name(), p.program_pid(), p.live_cwd()),
+            Shell::Kept(k) => {
+                let v = k.call(json!({ "t": "program" })).unwrap_or(Value::Null);
+                let cwd = v["cwd"].as_str().map(str::to_string).or_else(|| self.cwd());
+                (v["name"].as_str().map(str::to_string), v["pid"].as_u64().map(|n| n as u32), cwd)
+            }
+        }
+    }
     pub fn screen_text(&self) -> String {
         both!(self, p => p.screen_text(), k => k.text(0).0)
     }
@@ -471,6 +484,7 @@ pub struct Spawn<'a> {
 pub fn spawn(dir: &Path, s: Spawn) -> std::io::Result<()> {
     use std::io::{BufRead, Write};
     use std::process::{Command, Stdio};
+    let t0 = Instant::now();
     rsz_keeper::dir::ensure(dir)?;
     let exe = host_exe(dir)?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{}.log", s.id)))?;
@@ -478,6 +492,7 @@ pub fn spawn(dir: &Path, s: Spawn) -> std::io::Result<()> {
     let cfg = json!({
         "cols": c.cols, "rows": c.rows, "command": c.command, "cwd": c.cwd, "env": c.env, "scrollback": c.scrollback,
         "plain_shell": c.plain_shell, "cursor": c.cursor, "term_program": c.term_program, "keep_prompt": c.keep_prompt,
+        "preamble": c.preamble,
         "palette": palette_json(&s.palette), "version": s.version,
     });
     let mut cmd = Command::new(exe);
@@ -498,7 +513,10 @@ pub fn spawn(dir: &Path, s: Spawn) -> std::io::Result<()> {
         let _ = child.wait();
     });
     match rx.recv_timeout(Duration::from_secs(10)) {
-        Ok(l) if l.starts_with("ready") => Ok(()),
+        Ok(l) if l.starts_with("ready") => {
+            log::info!("keeper: shell {} host ready in {} ms", s.id, t0.elapsed().as_millis());
+            Ok(())
+        }
         Ok(l) => Err(std::io::Error::other(format!("keeper host: {}", l.trim()))),
         Err(_) => Err(std::io::Error::other("keeper host: did not start")),
     }
@@ -1009,6 +1027,7 @@ pub mod host {
             "queue_len" => return Some(p.queue_len().into()),
             "is_busy" => return Some(p.is_busy().into()),
             "cwd" => return Some(p.cwd().into()),
+            "program" => return Some(json!({ "name": p.program_name(), "pid": p.program_pid(), "cwd": p.live_cwd() })),
             "state" => return Some(format!("{:?}", p.state()).into()),
             "alt_screen" => return Some(p.alt_screen().into()),
             "selection" => return Some(p.selection_text().into()),
@@ -1090,6 +1109,7 @@ pub mod host {
             cursor: c["cursor"].as_u64().unwrap_or(1) as u8,
             term_program: c["term_program"].as_str().map(str::to_string),
             keep_prompt: c["keep_prompt"].as_bool().unwrap_or(false),
+            preamble: c["preamble"].as_str().map(str::to_string),
         };
         if let Some(pal) = palette_of(&c["palette"]) {
             rsz_term::palette::set_active(pal);
@@ -1131,6 +1151,17 @@ pub mod host {
         rsz_term::set_clipboard_reader(move || h3.read_clipboard());
         let h2 = host.clone();
         let sink: Sink = Arc::new(move |o| h2.out(o));
+        // Windows: ConPTY's console host inherits every inheritable handle;
+        // it must not get the app's pipes (they would never close) or the log.
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+            use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+            for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                // SAFETY: clearing a flag on this process's own standard handles.
+                unsafe { SetHandleInformation(GetStdHandle(which), HANDLE_FLAG_INHERIT, 0) };
+            }
+        }
         let pane = match Pane::spawn(cfg, sink) {
             Ok(p) => p,
             Err(e) => {

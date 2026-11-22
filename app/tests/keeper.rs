@@ -53,7 +53,9 @@ fn start_host(dir: &Path, id: u32, command: &[&str]) -> u32 {
     let cfg = json!({ "cols": 80, "rows": 24, "command": command, "version": "test-1" });
     child.stdin.take().unwrap().write_all(cfg.to_string().as_bytes()).unwrap();
     let mut out = String::new();
-    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut out).unwrap();
+    // One line, as the app reads it: on Windows ConPTY's console host may
+    // keep the pipe open after the host lets go of it.
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut out).unwrap();
     assert!(out.starts_with("ready"), "host said {out:?}");
     std::thread::spawn(move || child.wait());
     out.split_whitespace().nth(1).unwrap().parse().unwrap()

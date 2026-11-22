@@ -35,6 +35,16 @@ impl Probe {
         imp::program_name(self).map(|n| clean_name(&n)).filter(|n| !n.is_empty())
     }
 
+    /// The process id of the program in front (Unix: the foreground
+    /// group's leader; Windows: the shell's first child), when it is not
+    /// the shell. Claude Code names its session file by it (hearth#916).
+    pub fn program_pid(&self) -> Option<u32> {
+        if self.shell_pid == 0 {
+            return None;
+        }
+        imp::program_pid(self)
+    }
+
     /// True while something in the pane reads keys one at a time or without
     /// echo (a start-up question, a passphrase, a line editor): the tty is
     /// out of canonical mode or has echo off. Always false on Windows.
@@ -59,12 +69,13 @@ mod imp {
     use super::Probe;
 
     pub fn program_name(p: &Probe) -> Option<String> {
+        name_of(program_pid(p)?)
+    }
+
+    pub fn program_pid(p: &Probe) -> Option<u32> {
         // SAFETY: as in program_running.
         let pg = unsafe { libc::tcgetpgrp(p.master_fd) };
-        if pg <= 0 || pg as u32 == p.shell_pid {
-            return None;
-        }
-        name_of(pg as u32)
+        (pg > 0 && pg as u32 != p.shell_pid).then_some(pg as u32)
     }
 
     /// argv[0], as `ps` shows it: the exe path can be a version folder
@@ -144,7 +155,15 @@ mod imp {
     }
 
     pub fn program_name(p: &Probe) -> Option<String> {
-        processes().into_iter().find(|&(pid, ppid, _)| ppid == p.shell_pid && pid != p.shell_pid && pid != 0).map(|(_, _, n)| n)
+        first_child(p).map(|(_, _, n)| n)
+    }
+
+    pub fn program_pid(p: &Probe) -> Option<u32> {
+        first_child(p).map(|(pid, _, _)| pid)
+    }
+
+    fn first_child(p: &Probe) -> Option<(u32, u32, String)> {
+        processes().into_iter().find(|&(pid, ppid, _)| ppid == p.shell_pid && pid != p.shell_pid && pid != 0)
     }
 
     /// ConPTY shows no tty modes.

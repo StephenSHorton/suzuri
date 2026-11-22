@@ -16,8 +16,8 @@ fail() { say "FAIL: $*"; exit 1; }
 
 real_cfg="$HOME/Library/Application Support/suzuri"
 # The installed suzuri's files, to show they were not touched.
-# A keeper/ folder or bridge-last.json there would mean a check leaked into it.
-real_stamp() { stat -f '%N %m' "$real_cfg/bridge.json" "$real_cfg/ai.json" "$real_cfg/keeper" "$real_cfg/bridge-last.json" 2>/dev/null || true; }
+# A keeper/ or restore/ folder or bridge-last.json there would mean a check leaked into it.
+real_stamp() { stat -f '%N %m' "$real_cfg/bridge.json" "$real_cfg/ai.json" "$real_cfg/keeper" "$real_cfg/restore" "$real_cfg/bridge-last.json" 2>/dev/null || true; }
 
 # start_app BINARY [extra env...]: starts it in the scratch env, prints its pid.
 start_app() {

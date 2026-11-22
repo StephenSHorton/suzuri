@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import * as S from "../sash_ops.js"
+import * as S from "../view/sash_ops.js"
 
 test("the divider is the gap between the two sides", () => {
   assert.deepEqual(S.sashRect("h", { x: 0, y: 10, w: 100, h: 50 }, { x: 106, y: 10, w: 94, h: 50 }), { x: 100, y: 10, w: 6, h: 50 })

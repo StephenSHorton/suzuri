@@ -54,7 +54,12 @@ try {
   if (-not $t3 -or -not $first) { Fail "screen or scrollback missing in the new app: $($snap.Substring(0, [Math]::Min(300, $snap.Length)))" }
   if ((Kept-One $id).shell_pid -ne $shell) { Fail "not the same shell" }
   Say "app $app2 shows pane ${id}: same host $((Kept-One $id).pid), same shell $shell; screen at $t3; its last 500 lines start at $first, and the host's history goes back to $oldest"
-  $ctl = ([regex]::Match((Screen $id 1000), "ctl=(http\S+)")).Groups[1].Value
+  # The kept shell came back, and no fresh one from the saved session
+  # (restore.rs, hearth#916) besides it.
+  $panes = (Api-Get "/v1/status").tabs
+  Say "app $app2 has $panes pane(s) open: the kept one only, none restored fresh from the saved session"
+  if ($panes -ne 1) { Fail "expected only the kept pane, found $panes" }
+  $ctl =([regex]::Match((Screen $id 1000), "ctl=(http\S+)")).Groups[1].Value
   Say "the kept shell's SUZURI_CONTROL_URL: $ctl; the new app's bridge: $((Bridge).url)"
   Shot $app2 (Join-Path $Out "kill-after.png")
 

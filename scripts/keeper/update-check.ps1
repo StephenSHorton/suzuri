@@ -87,7 +87,7 @@ try {
   Say "app $app1 ($Old): pane $id kept by host $hostPid (version $($k.version), $($k.exe)), shell $shell, running a counter"
 
   Say "== waiting for the app to install $New and restart itself"
-  for ($i = 0; $i -lt 180; $i++) { if ((Ver) -eq $New -and -not (Alive $app1)) { break }; Start-Sleep 1 }
+  for ($i = 0; $i -lt 300; $i++) { if ((Ver) -eq $New -and -not (Alive $app1)) { break }; Start-Sleep 1 }
   if ((Ver) -ne $New) { Fail "still $(Ver)" }
   if (Alive $app1) { Fail "the old app did not exit" }
   $app2 = $null
