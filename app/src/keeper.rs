@@ -17,7 +17,9 @@
 //! RSZ_KEEPER=0 keeps panes in the app, as before (and Windows, until its
 //! half is built: the console belongs to the process that made it). A
 //! bench or UI-test launch (RSZ_BENCH, RSZ_PANES, RSZ_UI_TEST, RSZ_CMD) keeps
-//! them in the app too, so it never leaves shells behind.
+//! them in the app too, so it never leaves shells behind, unless RSZ_KEEPER=1
+//! asks for kept shells anyway (scripts/bench-mac.sh's kept run, which closes
+//! its hosts itself).
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::collections::HashMap;
@@ -37,10 +39,29 @@ use serde_json::{Value, json};
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
-/// Kept shells are on: a Unix build, not turned off with RSZ_KEEPER=0.
+/// Kept shells are on: a Unix build, not turned off with RSZ_KEEPER=0, and
+/// not a bench or UI-test launch unless RSZ_KEEPER=1 asks for them.
 pub fn enabled() -> bool {
     let set = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty());
-    cfg!(unix) && std::env::var("RSZ_KEEPER").as_deref() != Ok("0") && !["RSZ_BENCH", "RSZ_PANES", "RSZ_UI_TEST", "RSZ_CMD"].iter().any(|k| set(k))
+    cfg!(unix) && wanted(std::env::var("RSZ_KEEPER").ok().as_deref(), ["RSZ_BENCH", "RSZ_PANES", "RSZ_UI_TEST", "RSZ_CMD"].iter().any(|k| set(k)))
+}
+
+/// RSZ_KEEPER's say (`0` off, `1` on), else on unless `dev` (a bench or
+/// UI-test launch).
+fn wanted(keeper: Option<&str>, dev: bool) -> bool {
+    match keeper {
+        Some("0") => false,
+        Some("1") => true,
+        _ => !dev,
+    }
+}
+
+#[test]
+fn rsz_keeper_1_keeps_a_bench_launch_kept() {
+    assert!(wanted(None, false));
+    assert!(!wanted(None, true));
+    assert!(!wanted(Some("0"), false));
+    assert!(wanted(Some("1"), true));
 }
 
 pub fn dir() -> PathBuf {
