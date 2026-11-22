@@ -175,15 +175,18 @@ mod win {
     }
 }
 
-/// A scratch folder for tests whose socket paths fit: the temp folder, or
-/// on Windows the system drive's root when the temp folder's path is too long
-/// (a long user profile or a check runner's own temp folder).
+/// A scratch folder for tests whose socket paths fit: the temp folder, or,
+/// when its path is too long (a long user profile or a check runner's own
+/// temp folder), the system drive's root on Windows and /tmp elsewhere.
 #[doc(hidden)]
 pub fn short_test_dir(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(name);
     let fits = sock_path(&d, u32::MAX).as_os_str().len() < 104;
-    if fits || cfg!(not(windows)) {
+    if fits {
         return d;
+    }
+    if cfg!(not(windows)) {
+        return PathBuf::from("/tmp").join(name);
     }
     let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
     PathBuf::from(format!("{drive}\\")).join(name)
