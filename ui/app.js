@@ -12,7 +12,7 @@ import { isOpen as panelOpen } from "./panel.js"
 import "./aicontrol.js"
 import "./layout_tools.js"
 import "./pane_drag.js"
-import { neighbor, swapPanes } from "./layout_ops.js"
+import { neighbor, swapPanes } from "./view/layout_ops.js"
 import { InputBar, PROMPT, barKey, displayPath } from "./bar.js"
 import { shortcut, chordLabel } from "./shortcuts.js"
 import { Palette } from "./palette.js"
@@ -22,7 +22,7 @@ import { hostToast } from "./host_toast.js"
 import { complete, ghostSuffix, DirCache, PENDING } from "./complete.js"
 import { closeLarge } from "./images.js"
 import { cleanTitle } from "./activity_state.js"
-import { tabTitle, stickyAt, windowTitle, zoomCycle, MAX_TABS, MAX_PANES } from "./tab_rules.js"
+import { tabTitle, stickyAt, windowTitle, zoomCycle, MAX_TABS, MAX_PANES } from "./view/tab_rules.js"
 import { confirm, isOpen as confirmOpen } from "./confirm.js"
 import { FocusReports } from "./focus_report.js"
 import { chrome } from "./chrome/store.js"
@@ -259,7 +259,7 @@ class PaneView {
     this.screen = null // the view's Screen (main-thread painting)
     this.queue = [] // the worker's frames that came before pane_open answered
     this.lastModes = 0
-    this.title = "" // the program's title; "" until it sets one (tab_rules.js)
+    this.title = "" // the program's title; "" until it sets one (ui/view/tab_rules.js)
     this.id = 0
     this.size = [0, 0] // the core's (pane_open's, then each pane_resize)
     this.fitSize = null // the view's fit before pane_open answered
@@ -717,13 +717,13 @@ function newTab(at = tabs.length) {
   const el = document.createElement("div")
   el.className = "tab-root"
   root.appendChild(el)
-  // sticky: the name it froze at on its first split (tab_rules.js).
+  // sticky: the name it froze at on its first split (ui/view/tab_rules.js).
   const t = { id: nextTabId++, name: "", sticky: "", tree: null, focused: null, zoomed: null, el }
   tabs.splice(at, 0, t)
   return t
 }
 
-// The tab's name on the strip (tab_rules.js tabTitle).
+// The tab's name on the strip (ui/view/tab_rules.js tabTitle).
 function tabLabel(t) {
   const panes = allPanes(t.tree)
   return tabTitle({
@@ -741,7 +741,7 @@ function render(tab = activeTab) {
     // repeated splits come out equal instead of halving.
     const span = (n) => (n.pane || n.dir !== node.dir ? 1 : span(n.a) + span(n.b))
     const a = build(node.a), b = build(node.b)
-    // A ratio (set by grow/shrink/equalize, ui/layout_ops.js) wins.
+    // A ratio (set by grow/shrink/equalize, ui/view/layout_ops.js) wins.
     const wa = node.ratio != null ? node.ratio : span(node.a)
     const wb = node.ratio != null ? 1 - node.ratio : span(node.b)
     a.style.flex = `${wa} 1 0`
@@ -1131,7 +1131,7 @@ function setFocus(p, force = false) {
   focusReports.sync()
 }
 
-// After a layout op (ui/layout_ops.js): rebuild the DOM, keep focus, refit.
+// After a layout op (ui/view/layout_ops.js): rebuild the DOM, keep focus, refit.
 function relayout() {
   render()
   if (focused) setFocus(focused)

@@ -21,7 +21,7 @@ function declared(file) {
   return [...names].sort()
 }
 
-for (const [js, dts] of [["index.js", "index.d.ts"], ["frame.js", "frame.d.ts"], ["keys.js", "keys.d.ts"], ["kitty.js", "kitty.d.ts"]]) {
+for (const [js, dts] of [["index.js", "index.d.ts"], ["frame.js", "frame.d.ts"], ["keys.js", "keys.d.ts"], ["kitty.js", "kitty.d.ts"], ["layout_ops.js", "layout_ops.d.ts"], ["sash_ops.js", "sash_ops.d.ts"], ["tab_rules.js", "tab_rules.d.ts"]]) {
   test(`${dts} declares exactly ${js}'s exports`, async () => {
     const mod = await import(here(js))
     assert.deepEqual(declared(dts), Object.keys(mod).sort())

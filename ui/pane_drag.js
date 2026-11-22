@@ -3,7 +3,7 @@
 // is over a pane, the half it would take is lit; dropping where the layout
 // wouldn't change does nothing. A plain click or double-click on the title
 // (rename) never moves anything.
-import { dropEdge, dropChanges, dockBeside } from "./layout_ops.js"
+import { dropEdge, dropChanges, dockBeside } from "./view/layout_ops.js"
 
 const THRESHOLD = 6
 const host = () => window.rszHost

@@ -26,6 +26,12 @@ local feeds (below). At the move:
 | macOS (Apple silicon) | `suzuri_<v>_aarch64.dmg`: signed with Developer ID, notarized and stapled | `suzuri_<v>_aarch64.app.tar.gz` (the stapled app) |
 | Windows x64 | `suzuri_<v>_x64-setup.exe`: NSIS installer, per user (no admin), installs to `%LOCALAPPDATA%\Programs\suzuri`, replacing Go suzuri 0.9.x there (packaging/windows/installer-hooks.nsh: it keeps Tauri's reinstall page from running Go's Uninstall.exe, takes over the `Uninstall\suzuri` key, then removes Go's leftovers; `%LOCALAPPDATA%\suzuri`, the config folder, is never touched). Versions start at 0.10.0 so they sort above Go's 0.9.x | the same setup.exe, run passively by the updater |
 
+suzuri-view (`ui/view`, the terminal view and the pane-tree rules other apps
+embed) is released apart from the app, by `scripts/release/view.sh`: it packs
+`suzuri-view-<v>.tgz` and puts it on its own release tagged `view-v<v>`, the
+version in `ui/view/package.json`. Each version is released once and never
+replaced, so bump that version first. 0.1.0 came out on `term-v0.10.0`.
+
 The Windows install puts OpenConsole's `conpty.dll` and `OpenConsole.exe` next
 to `suzuri.exe`. portable-pty loads that `conpty.dll` before the system
 one. They come from Microsoft's `Microsoft.Windows.Console.ConPTY` NuGet package

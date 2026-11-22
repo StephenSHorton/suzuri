@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import * as L from "../layout_ops.js"
+import * as L from "../view/layout_ops.js"
 
 // A | (B over C)
 const mk = () => ({ dir: "h", a: { pane: "A" }, b: { dir: "v", a: { pane: "B" }, b: { pane: "C" } } })
