@@ -11,6 +11,12 @@
 # Metal layer stops painting); keys go straight to the app's pid.
 #
 # Output: bench/out/<app>-<time>/ with probe.json, summary.json, shot.png.
+#
+# rsz runs on a scratch config folder (HOME, LOCALAPPDATA and RSZ_CONFIG_DIR
+# under the run's folder), so the real settings, logs and kept shells are
+# never touched. Its panes are kept shells (card hearth#913), each in its own
+# `suzuri --keeper-host` process, counted in the CPU and memory figures;
+# RSZ_KEEPER=0 runs them in the app instead, for the comparison.
 set -eu
 APP=${1:?rsz or suzuri}
 SAMPLES=${2:-300}
@@ -37,7 +43,15 @@ BEFORE=$(webkit_pids)
 
 case "$APP" in
 rsz)
-  RSZ_BENCH_OUT="$OUT/inapp.json" RSZ_TRACE=1 RSZ_PANES=8 RSZ_CMD="$WRAP" "$R/target/release/suzuri" > "$OUT/app.log" 2>&1 &
+  H="$OUT/home"
+  mkdir -p "$H/config"
+  KEEPER=${RSZ_KEEPER:-1}
+  # Sockets are capped at 104 bytes, so the kept shells' folder is short.
+  KDIR="/tmp/rszb-$$"
+  rm -rf "$KDIR"
+  echo "rsz: kept shells $([ "$KEEPER" = 0 ] && echo off || echo on), config $H/config"
+  HOME="$H" LOCALAPPDATA="$H/config" RSZ_CONFIG_DIR="$H/config" RSZ_KEEPER_DIR="$KDIR" RSZ_KEEPER="$KEEPER" \
+    RSZ_BENCH_OUT="$OUT/inapp.json" RSZ_TRACE=1 RSZ_PANES=8 RSZ_CMD="$WRAP" "$R/target/release/suzuri" > "$OUT/app.log" 2>&1 &
   PID=$!
   sleep 4
   ;;
@@ -83,7 +97,11 @@ esac
 
 AFTER=$(webkit_pids)
 HELPERS=$(printf '%s\n%s\n' "$BEFORE" "$AFTER" | sort | uniq -u | tr '\n' ' ')
-PIDS="$PID $HELPERS"
+# The kept shells' hosts (none with RSZ_KEEPER=0, or for Go suzuri).
+HOSTS=""
+[ -n "${KDIR:-}" ] && HOSTS=$(pgrep -f -- "--keeper-host $KDIR" | tr '\n' ' ' || true)
+echo "keeper hosts: $(echo $HOSTS | wc -w | tr -d ' ')"
+PIDS="$PID $HELPERS $HOSTS"
 osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $PID) to true" >/dev/null
 echo "warming up 15 s (pids: $PIDS)"
 sleep 15
@@ -120,14 +138,22 @@ W=$("$TOOLS/winid" "$PID")
 screencapture -x -o -l "$W" "$OUT/shot.png" || true
 kill "$PID" 2>/dev/null || true
 sleep 1
+# Kept shells outlive the app by design; this run's go with it.
+if [ -n "$HOSTS" ]; then
+  kill $HOSTS 2>/dev/null || true
+  sleep 1
+  rm -rf "$KDIR"
+fi
 
+KEEPER_HOSTS=$(echo $HOSTS | wc -w | tr -d ' ') KEEPER_ON=$([ -n "$HOSTS" ] && echo 1 || echo 0) \
 python3 - "$OUT" "$APP" "$MEM0" "$MEM1" "$CPU0" "$CPU1" "$T0" "$T1" <<'EOF'
 import json, sys
 out, app, m0, m1, c0, c1, t0, t1 = sys.argv[1:]
 probe = json.load(open(f"{out}/probe.json")) if __import__("os").path.exists(f"{out}/probe.json") else {}
 secs = max(1, int(t1) - int(t0))
 mem = sorted(float(x) for x in open(f"{out}/mem.txt").read().split() if x.strip())
-s = {"app": app, "panes": 8, "probe_ms": probe,
+import os
+s = {"app": app, "panes": 8, "keeper": os.environ.get("KEEPER_ON", "") == "1", "keeper_hosts": int(os.environ.get("KEEPER_HOSTS", "0")), "probe_ms": probe,
      "footprint_mb_samples": {"n": len(mem), "min": mem[0] if mem else 0, "median": mem[len(mem)//2] if mem else 0, "max": mem[-1] if mem else 0},
      "footprint_mb_start": float(m0), "footprint_mb_end": float(m1),
      "cpu_cores_avg": round((float(c1) - float(c0)) / secs, 3), "secs": secs}
