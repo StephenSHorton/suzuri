@@ -2,15 +2,16 @@
 # pane (RSZ_NO_BAR=1, no suzuri hooks) running Windows PowerShell with
 # starship in its profile is `cd`'d into work\alpha; after a hard kill of the
 # app, its keeper hosts and shells (a reboot), the next start's shell is in
-# work\alpha.
+# work\alpha. That restored shell, cd'd to work\beta and killed again, comes
+# back in work\beta.
 #
-# The app runs with RSZ_TRACE, so the reader's log
-# shows whether ConPTY passed a folder report (OSC 7 / OSC 9;9) through: a
+# The app runs with RSZ_TRACE, so the reader's log shows whether ConPTY passed a folder report (OSC 7 / OSC 9;9) through: a
 # kept shell's reader is its keeper host, logging to cfg\keeper\<pane id>.log.
 #
-# -Report (none, osc99, osc7): what the profile adds for starship to report
-# its folder from Invoke-Starship-PreCommand (starship's own hook, the
-# recipe Windows Terminal documents for OSC 9;9). none is stock starship.
+# Stock starship sends no folder report; suzuri gives an unhooked PowerShell
+# running starship the report from starship's own pre-prompt hook,
+# Invoke-Starship-PreCommand (hearth#1031). -Report (none, osc99, osc7): a
+# hook of the profile's own, which must still run (none: stock starship).
 #
 # Everything runs in a scratch folder (its own USERPROFILE, LOCALAPPDATA,
 # RSZ_CONFIG_DIR and keeper folder), as scripts\windows\reboot-check.ps1 does.
@@ -30,7 +31,8 @@ $S = Join-Path $env:TEMP ("rszs-" + $PID)
 if ((Join-Path $S "cfg\keeper\4294967295.sock").Length -ge 100) { $S = Join-Path "$env:SystemDrive\" ("rszs-" + $PID) }
 $KDir = Join-Path $S "cfg\keeper"
 $Dir = Join-Path $S "work\alpha"
-foreach ($d in "home", "local", "cfg", "work\alpha") { New-Item -ItemType Directory -Force (Join-Path $S $d) | Out-Null }
+$Dir2 = Join-Path $S "work\beta"
+foreach ($d in "home", "local", "cfg", "work\alpha", "work\beta") { New-Item -ItemType Directory -Force (Join-Path $S $d) | Out-Null }
 
 function Say([string]$m) { Write-Host $m }
 function Fail([string]$m) { Write-Host "FAIL: $m"; throw $m }
@@ -132,8 +134,26 @@ try {
   $q = [int](Call layout).windows[0].tabs[0].panes[0].id
   $back = ShellLoc $q
   Say "5. after the restart: the restored shell is in $back"
+  if ($back -ne $Dir) { KillAll $a2; Fail "the restored pane started in '$back', not '$Dir'" }
+  # Round two: the restored shell (started with the old text's print) is
+  # cd'd again and killed again.
+  Submit $q "cd '$Dir2'"
+  Start-Sleep -Seconds 3
+  $sj = Join-Path $S "cfg\restore\$($a2.Id)\session.json"
+  for ($i = 0; $i -lt 30; $i++) {
+    if (Test-Path $sj) { $saved = (Get-Content $sj -Raw | ConvertFrom-Json).tabs[0].tree.cwd; if ($saved -eq $Dir2) { break } }
+    Start-Sleep -Milliseconds 500
+  }
+  Say "6. the restored pane cd'd to $Dir2; saved as '$saved'; the reader: $(Seen $q)"
   KillAll $a2
-  if ($back -ne $Dir) { Fail "the restored pane started in '$back', not '$Dir'" }
+  $a3 = StartApp
+  Ready
+  Start-Sleep -Seconds 6
+  $q3 = [int](Call layout).windows[0].tabs[0].panes[0].id
+  $back3 = ShellLoc $q3
+  Say "7. after a second taskkill /F and restart: the shell is in $back3"
+  KillAll $a3
+  if ($back3 -ne $Dir2) { Fail "the twice-restored pane started in '$back3', not '$Dir2'" }
   Say "PASS"
 }
 finally {

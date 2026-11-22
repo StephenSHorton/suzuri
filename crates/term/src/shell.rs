@@ -22,8 +22,8 @@
 //! dropped silently so nothing counts twice.
 //!
 //! A shell's own folder report, OSC 7 (`file://host/path`) or ConEmu's
-//! OSC 9;9 (`9;9;C:\dir`, often quoted), as starship and oh-my-posh send
-//! from a custom prompt, gives [`ShellEvent::Reported`] (hearth#1028): the
+//! OSC 9;9 (`9;9;C:\dir`, often quoted), as oh-my-posh sends from a custom
+//! prompt (and starship once [`PWSH_STARSHIP_REPORT`] gives it the hook), gives [`ShellEvent::Reported`] (hearth#1028): the
 //! folder a plain (unhooked) shell is in, which Windows cannot ask the OS
 //! for. Both are taken out of the stream (a 9;9 would otherwise read as an
 //! OSC 9 notice).
@@ -321,6 +321,55 @@ pub const PREAMBLE_CMD_ENV: &str = "RSZ_PREAMBLE_CMD";
 /// env var. The same lines the hooked start runs after its Clear-Host.
 const PWSH_PRINT: &str = "if ($env:RSZ_PREAMBLE) { try { $Host.UI.Write([IO.File]::ReadAllText($env:RSZ_PREAMBLE, [Text.Encoding]::UTF8)); Remove-Item -LiteralPath $env:RSZ_PREAMBLE -ErrorAction SilentlyContinue } catch {}; Remove-Item Env:RSZ_PREAMBLE -ErrorAction SilentlyContinue }";
 
+/// PowerShell with no Suzuri hooks, running starship's prompt (hearth#1031):
+/// stock starship never reports its folder, so a restored pane could not
+/// start where the shell was. This defines starship's own pre-prompt hook,
+/// `Invoke-Starship-PreCommand`, to send ConEmu's OSC 9;9 (the recipe
+/// Windows Terminal documents), which [`OscFilter`] reads as
+/// [`ShellEvent::Reported`]. A hook the profile already defines still runs,
+/// after the report. Nothing happens when the prompt is not starship's.
+/// Runs after the profile (a `-Command` start), so starship is set up by then.
+/// No double quotes: the line goes through the MSVC argv quoting.
+pub const PWSH_STARSHIP_REPORT: &str = "if ((Test-Path function:prompt) -and (Get-Item function:prompt).ScriptBlock.ToString().Contains('Invoke-Starship-PreCommand')) { $global:__rsz_starship_pre = if (Test-Path function:Invoke-Starship-PreCommand) { (Get-Item function:Invoke-Starship-PreCommand).ScriptBlock } else { $null }; function global:Invoke-Starship-PreCommand { $l = $executionContext.SessionState.Path.CurrentLocation; if ($l.Provider.Name -eq 'FileSystem') { $Host.UI.Write([string][char]27 + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + [char]27 + [char]92) }; if ($global:__rsz_starship_pre) { & $global:__rsz_starship_pre } } }";
+
+/// PowerShell's own run-this args (-c, -com, -e, -ec, -enc, -f, -cwa...,
+/// in any short form it takes), or a script as the first arg. `rest` is
+/// lower-cased.
+fn pwsh_runs(rest: &[String]) -> bool {
+    let flag = |a: &str| a.strip_prefix('-').or_else(|| a.strip_prefix('/')).map(|f| f.split(':').next().unwrap_or(f).to_string());
+    rest.first().is_some_and(|a| flag(a).is_none())
+        || rest.iter().filter_map(|a| flag(a)).any(|f| {
+            !f.is_empty() && (["command", "encodedcommand", "file", "commandwithargs"].iter().any(|w| w.starts_with(f.as_str())) || f == "ec" || f == "cwa")
+        })
+}
+
+/// An unhooked PowerShell started with no command of its own: `argv` with
+/// `-NoExit -Command <line>` added. None for anything else.
+fn pwsh_start(argv: &[String], line: &str) -> Option<Vec<String>> {
+    let exe = argv.first()?;
+    let base = exe.rsplit(['/', '\\']).next().unwrap_or(exe).to_lowercase();
+    if !matches!(base.strip_suffix(".exe").unwrap_or(&base), "pwsh" | "powershell") {
+        return None;
+    }
+    let rest: Vec<String> = argv[1..].iter().map(|a| a.to_lowercase()).collect();
+    if pwsh_runs(&rest) {
+        return None;
+    }
+    let mut a = argv.to_vec();
+    if !rest.iter().any(|x| x == "-noexit" || x == "/noexit") {
+        a.push("-NoExit".into());
+    }
+    a.extend(["-Command".into(), line.into()]);
+    Some(a)
+}
+
+/// An unhooked PowerShell (the plain-shell setting, or a profile that
+/// starts PowerShell) with no command of its own: the start that adds
+/// [`PWSH_STARSHIP_REPORT`]. None for anything else.
+pub fn starship_report(argv: &[String]) -> Option<Vec<String>> {
+    pwsh_start(argv, PWSH_STARSHIP_REPORT)
+}
+
 /// How a shell without Suzuri's hooks prints a restored pane's old text
 /// itself (Windows: ConPTY starts each shell from a blank screen and paints
 /// over text put on ours first, hearth#950/#972).
@@ -339,7 +388,8 @@ pub struct PrintPreamble {
 /// shell's first output. None for anything else (the text is fed to the
 /// screen as before).
 ///
-/// - PowerShell: `-NoExit -Command` with [`PWSH_PRINT`], the file UTF-8.
+/// - PowerShell: `-NoExit -Command` with [`PWSH_PRINT`] (then
+///   [`PWSH_STARSHIP_REPORT`]), the file UTF-8.
 /// - cmd.exe: `/k %RSZ_PREAMBLE_CMD%`, the var holding
 ///   `type "<file>"`. cmd expands the var before it parses the line, so
 ///   the quotes around a path with spaces reach cmd as typed (an argv
@@ -354,22 +404,8 @@ pub fn print_preamble(argv: &[String], text: &str) -> Option<PrintPreamble> {
     let rest: Vec<String> = argv[1..].iter().map(|a| a.to_lowercase()).collect();
     match base {
         "pwsh" | "powershell" => {
-            // PowerShell's own run-this args, in any short form it takes
-            // (-c, -com, -e, -ec, -enc, -f, -cwa...), or a script as the
-            // first arg: as is.
-            let flag = |a: &str| a.strip_prefix('-').or_else(|| a.strip_prefix('/')).map(|f| f.split(':').next().unwrap_or(f).to_string());
-            let runs = rest.first().is_some_and(|a| flag(a).is_none())
-                || rest.iter().filter_map(|a| flag(a)).any(|f| {
-                    !f.is_empty() && (["command", "encodedcommand", "file", "commandwithargs"].iter().any(|w| w.starts_with(f.as_str())) || f == "ec" || f == "cwa")
-                });
-            if runs {
-                return None;
-            }
-            let mut a = argv.to_vec();
-            if !rest.iter().any(|x| x == "-noexit" || x == "/noexit") {
-                a.push("-NoExit".into());
-            }
-            a.extend(["-Command".into(), PWSH_PRINT.into()]);
+            // The print, then starship's folder report ([`starship_report`]).
+            let a = pwsh_start(argv, &format!("{PWSH_PRINT}; {PWSH_STARSHIP_REPORT}"))?;
             Some(PrintPreamble { argv: a, env: vec![(PREAMBLE_ENV.into(), "{file}".into())], bytes: text.as_bytes().to_vec() })
         }
         "cmd" => {
@@ -737,10 +773,11 @@ mod tests {
     fn unhooked_powershell_and_cmd_print_the_restored_text() {
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let text = "old\r\n日本\r\n\x1b[2m─── restored · saved ───\x1b[0m\r\n";
-        // PowerShell: the print runs as its start command, UTF-8.
+        let both = format!("{PWSH_PRINT}; {PWSH_STARSHIP_REPORT}");
+        // PowerShell: the print runs as its start command, UTF-8, then starship's report.
         for exe in ["pwsh.exe", r"C:\Program Files\PowerShell\7\pwsh.exe", "powershell", "PowerShell.EXE"] {
             let p = print_preamble(&v(&[exe, "-NoLogo"]), text).unwrap();
-            assert_eq!(p.argv, v(&[exe, "-NoLogo", "-NoExit", "-Command", PWSH_PRINT]));
+            assert_eq!(p.argv, v(&[exe, "-NoLogo", "-NoExit", "-Command", &both]));
             assert_eq!(p.env, vec![(PREAMBLE_ENV.to_string(), "{file}".to_string())]);
             assert_eq!(p.bytes, text.as_bytes());
         }
@@ -748,7 +785,7 @@ mod tests {
         for a in [&["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass"][..], &["pwsh", "-nop", "-noni"]] {
             assert!(print_preamble(&v(a), text).is_some(), "{a:?}");
         }
-        assert_eq!(print_preamble(&v(&["pwsh", "-NoExit"]), text).unwrap().argv, v(&["pwsh", "-NoExit", "-Command", PWSH_PRINT]), "one -NoExit");
+        assert_eq!(print_preamble(&v(&["pwsh", "-NoExit"]), text).unwrap().argv, v(&["pwsh", "-NoExit", "-Command", &both]), "one -NoExit");
         for a in [
             &["pwsh", "-c", "ls"][..],
             &["pwsh", "-Command", "ls"],
@@ -782,6 +819,28 @@ mod tests {
         for a in [&["wsl.exe"][..], &["bash.exe", "-l"], &["nu"], &["claude"]] {
             assert!(print_preamble(&v(a), text).is_none(), "{a:?}");
         }
+    }
+
+    /// hearth#1031: an unhooked PowerShell with no command of its own gets
+    /// starship's folder report as its start command; nothing else does.
+    #[test]
+    fn unhooked_powershell_gets_the_starship_report() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for exe in ["powershell", r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe", "pwsh.exe"] {
+            assert_eq!(starship_report(&v(&[exe, "-NoLogo"])).unwrap(), v(&[exe, "-NoLogo", "-NoExit", "-Command", PWSH_STARSHIP_REPORT]));
+        }
+        assert_eq!(starship_report(&v(&["pwsh", "-NoExit"])).unwrap(), v(&["pwsh", "-NoExit", "-Command", PWSH_STARSHIP_REPORT]), "one -NoExit");
+        for a in [&["pwsh", "-c", "ls"][..], &["pwsh", "-File", "x.ps1"], &["pwsh", "x.ps1"], &["cmd.exe"], &["claude"], &["/bin/zsh"]] {
+            assert!(starship_report(&v(a)).is_none(), "{a:?}");
+        }
+        // It survives the MSVC argv quoting as one arg, and sends OSC 9;9
+        // with the folder quoted, ended by ST.
+        assert!(!PWSH_STARSHIP_REPORT.contains('"'));
+        assert!(PWSH_STARSHIP_REPORT.contains("[char]27 + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + [char]27 + [char]92"));
+        // A restored pane: the print, then the report, in one start command.
+        let p = print_preamble(&v(&["powershell"]), "x").unwrap();
+        assert_eq!(p.argv[3], format!("{PWSH_PRINT}; {PWSH_STARSHIP_REPORT}"));
+        assert!(starship_report(&p.argv).is_none(), "never added twice");
     }
 
     #[test]
