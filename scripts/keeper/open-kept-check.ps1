@@ -46,7 +46,9 @@ function Open-Kept($argsObj) {
   } catch {
     $resp = $_.Exception.Response
     if (-not $resp) { throw }
-    $text = (New-Object IO.StreamReader $resp.GetResponseStream()).ReadToEnd()
+    # PowerShell 5 has already read the error body into ErrorDetails; the
+    # response stream is empty by then.
+    $text = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $_.ErrorDetails.Message } else { (New-Object IO.StreamReader $resp.GetResponseStream()).ReadToEnd() }
     return @([int]$resp.StatusCode, $text)
   }
 }
@@ -163,7 +165,9 @@ try {
   Start-Sleep 1
   if ((HScreen) -notmatch "after-the-tab-closed") { Fail "the shell stopped" }
   if ($f -le 0) { Fail "the shell no longer draws" }
-  if ($watch.HasExited -or (Get-Content $watchOut -Raw) -match "closed") { Fail "Hearth's viewer lost the shell" }
+  # The viewer prints "closed" alone on a line when it loses the shell; its
+  # event lines carry commands, such as the echo of after-the-tab-closed.
+  if ($watch.HasExited -or (Get-Content $watchOut -Raw) -match "(?m)^closed\r?$") { Fail "Hearth's viewer lost the shell" }
   Say "host $hostPid and shell $shell alive, $(HK viewers) viewer (Hearth's) still attached; the shell still draws ($f frames for one line)"
   Say "Suzuri's panes now: $(((Api-Get '/v1/layout').windows[0].tabs | ForEach-Object { $_.panes } | ForEach-Object { $_.id }) -join ', ')"
 
