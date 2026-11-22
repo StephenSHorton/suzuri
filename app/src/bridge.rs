@@ -507,7 +507,9 @@ Discovery: $SUZURI_CONTROL_URL (in every pane), $SUZURI=1, $SUZURI_PANE_ID,
   GET  /v1/layout          {pid, focus_pane, active_tab, windows:[{surface, tabs:[
                            {id, title, active, focus_pane, tree, panes}]}]}
   GET  /v1/panes/:id       one pane: cwd, cols, rows, agent_state, activity
-                           (working|blocked|idle|dead), tail and live lines
+                           (working|blocked|idle|dead), shell {integrated,
+                           prompts, program} (prompts: how many the shell's
+                           hooks have shown), tail and live lines
                            (?lines=N, default 80)
   GET  /v1/logs            the end of suzuri.log (?lines=N, default 150, max 5000)
   POST /v1/call            {\"tool\":\"<name>\",\"args\":{...}}

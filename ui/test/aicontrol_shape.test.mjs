@@ -38,6 +38,9 @@ test("pane JSON has Go's fields and the old ones", () => {
   assert.equal(j.text, "a\nb\n$ ls")
   const dead = S.paneJSON(pane(4, { exited: true }), null)
   assert.deepEqual([dead.tail, dead.live, dead.activity, dead.alive], [[], [], "dead", false])
+  assert.deepEqual(dead.shell, { integrated: false, prompts: 0, program: false })
+  const busy = S.paneJSON(pane(5, { shell: { integrated: true, cwd: "/tmp", prompts: 2, program: true } }), null)
+  assert.deepEqual(busy.shell, { integrated: true, prompts: 2, program: true })
 })
 
 test("layout in Go's shape: ids in the tree, ratio, panes per tab", () => {

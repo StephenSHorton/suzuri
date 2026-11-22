@@ -154,6 +154,20 @@ function Call([string]$tool, $a = @{}) { Post_ "/v1/call" @{ tool = $tool; args 
 # which copies the keeper host, can take a while).
 function Ready { for ($i = 0; $i -lt 60; $i++) { try { $l = Call layout; if (@($l.windows[0].tabs).Count) { return } } catch { }; Start-Sleep -Milliseconds 500 }; Fail "the window never answered" }
 function Submit($id, [string]$line) { Post_ "/v1/submit" @{ tab_id = $id; line = $line } | Out-Null }
+# Card hearth#1029: waits until pane $id's shell has shown more than $after
+# prompts (its hooks count them) and runs no program; returns the count. A
+# line typed into a new pane before its first prompt can be lost on a cold
+# PC (PowerShell still loading), so every Submit to a new pane waits here.
+function WaitPrompt($id, [int]$after = 0, [int]$seconds = 60) {
+  $t = $null
+  for ($i = 0; $i -lt $seconds * 4; $i++) {
+    try { $t = Get_ "/v1/panes/$id`?lines=20" } catch { $t = $null }
+    if ($t -and $t.shell -and [int]$t.shell.prompts -gt $after -and -not $t.shell.program) { return [int]$t.shell.prompts }
+    Start-Sleep -Milliseconds 250
+  }
+  $end = if ($t) { (@(@($t.tail) + @($t.live) | Where-Object { "$_".Trim() }) | Select-Object -Last 5) -join ' | ' } else { "(no answer)" }
+  Fail "pane ${id}: no prompt after $after within $seconds s; shell: $($t.shell | ConvertTo-Json -Compress); the end: $end"
+}
 function Text($id) { $t = Get_ "/v1/panes/$id`?lines=400"; ($t | ConvertTo-Json -Depth 10) }
 function Leaves($n) { if ($null -ne $n.pane) { , $n.pane } else { (Leaves $n.a) + (Leaves $n.b) } }
 # Processes under a pid (the shells and what they run).
@@ -166,13 +180,16 @@ function Tree([int]$root) {
 # A pane's PATH comes from the registry (portable-pty builds a fresh Windows
 # environment for each shell), not from the app: the stand-ins go on it in
 # the pane, and the check stops unless `claude` there is the stand-in.
+# Waits for the pane's prompt before and after; returns its prompt count.
 function UseStandIns($id) {
   $f = Join-Path $S "which-$id.txt"
+  $n = WaitPrompt $id
   Submit $id "`$env:PATH = '$S\bin;' + `$env:PATH; (Get-Command claude).Source > '$f'"
   for ($i = 0; $i -lt 25 -and -not (Test-Path $f); $i++) { Start-Sleep -Milliseconds 200 }
   $w = if (Test-Path $f) { (Get-Content $f -Raw).Trim() } else { "" }
   if ($w -ne "$S\bin\claude.exe") { Fail "pane $id runs '$w' for claude, not the stand-in" }
   Remove-Item $f
+  WaitPrompt $id $n
 }
 function StandPids { $f = Join-Path $S "stand.pids"; if (Test-Path $f) { @(Get-Content $f | Where-Object { $_ }) } else { @() } }
 function KillStandIns { foreach ($p in StandPids) { Stop-Process -Id ([int]$p) -Force -ErrorAction SilentlyContinue }; Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $S "stand.pids") }
@@ -439,16 +456,14 @@ try {
   $L = Call layout
   $p1 = [int]$L.windows[0].tabs[0].panes[0].id
   if (-not $p1) { Fail "no pane after start" }
-  UseStandIns $p1
+  $null = UseStandIns $p1
   Submit $p1 "cd $S\work\alpha; 1..300 | % { `"alpha-line-`$_`" }"
   Start-Sleep -Seconds 1
   $p2 = [int](Call split @{ pane_id = $p1; axis = "right" }).pane_id
-  Start-Sleep -Seconds 2
-  UseStandIns $p2
+  $null = UseStandIns $p2
   Submit $p2 "cd $S\work\beta; echo beta-before-claude; claude"
   $p3 = [int](Call new_tab).pane_id
-  Start-Sleep -Seconds 2
-  UseStandIns $p3
+  $null = UseStandIns $p3
   Submit $p3 "cd $S\work\gamma; echo gamma-here; devserver"
   Call focus @{ pane_id = $p1 } | Out-Null
   Start-Sleep -Seconds 6
@@ -529,7 +544,7 @@ try {
   Shot $app3 (Join-Path $Out "3-after-kill.png")
 
   Say "== the offered line, submitted in that pane, resumes the conversation"
-  UseStandIns $qb.id
+  $null = UseStandIns $qb.id
   Submit $qb.id "claude --resume $SID"
   Start-Sleep -Seconds 3
   if (-not ((Get-Content (Join-Path $S "resumed.log") -ErrorAction SilentlyContinue) -match "RESUMED $SID")) { Fail "the resume did not run" }
