@@ -605,90 +605,9 @@ mod win {
 }
 
 /// Whether `path` is a socket another program (Hearth) keeps a shell on
-/// that this window may show: an absolute `<id>.sock` that is a socket of
-/// this user's, in a folder of this user's that nobody else can enter
-/// (mode 0700, as rsz_keeper::dir::ensure makes one), not reached through
-/// a symlink, and short enough for a socket address. The folder is only
-/// checked, never changed: it is the other program's.
-#[cfg(unix)]
-pub fn foreign_sock(path: &Path) -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let bad = |why: String| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why);
-    if !path.is_absolute() {
-        return Err(bad(format!("{} is not an absolute path", path.display())));
-    }
-    let named = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".sock")).is_some_and(|stem| !stem.is_empty());
-    if !named || path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
-        return Err(bad(format!("{} is not a keeper socket (<id>.sock)", path.display())));
-    }
-    if path.as_os_str().len() >= 104 {
-        return Err(bad(format!("{} is too long for a socket", path.display())));
-    }
-    // SAFETY: getuid has no failure mode.
-    let me = unsafe { libc::getuid() };
-    let folder = path.parent().ok_or_else(|| bad("no folder".into()))?;
-    let fm = std::fs::symlink_metadata(folder)?;
-    if !fm.is_dir() || fm.uid() != me {
-        return Err(bad(format!("{} is not a folder of this user's", folder.display())));
-    }
-    if fm.mode() & 0o077 != 0 {
-        return Err(bad(format!("{} is open to other users (mode {:o}, needs 0700)", folder.display(), fm.mode() & 0o777)));
-    }
-    let sm = std::fs::symlink_metadata(path)?;
-    if !sm.file_type().is_socket() || sm.uid() != me {
-        return Err(bad(format!("{} is not a socket of this user's", path.display())));
-    }
-    Ok(path.to_path_buf())
-}
-
-#[cfg(not(unix))]
-pub fn foreign_sock(_: &Path) -> std::io::Result<PathBuf> {
-    Err(std::io::Error::other("showing another program's kept shell is macOS and Linux only for now"))
-}
-
-#[cfg(all(test, unix))]
-mod foreign_tests {
-    use super::foreign_sock;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-
-    fn folder(tag: &str, mode: u32) -> PathBuf {
-        let d = PathBuf::from(format!("/tmp/rszf-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(mode)).unwrap();
-        d
-    }
-
-    #[test]
-    fn a_socket_in_a_private_folder_is_taken() {
-        let d = folder("ok", 0o700);
-        let s = d.join("12.sock");
-        let _l = std::os::unix::net::UnixListener::bind(&s).unwrap();
-        assert_eq!(foreign_sock(&s).unwrap(), s);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn anything_else_is_refused() {
-        let d = folder("no", 0o700);
-        let s = d.join("3.sock");
-        let _l = std::os::unix::net::UnixListener::bind(&s).unwrap();
-        // Not absolute, not <id>.sock, a dot-dot, a plain file, a symlink.
-        assert!(foreign_sock(std::path::Path::new("3.sock")).is_err());
-        assert!(foreign_sock(&d.join("3.socket")).is_err());
-        assert!(foreign_sock(&d.join("..").join(d.file_name().unwrap()).join("3.sock")).is_err());
-        std::fs::write(d.join("4.sock"), b"").unwrap();
-        assert!(foreign_sock(&d.join("4.sock")).is_err());
-        std::os::unix::fs::symlink(&s, d.join("5.sock")).unwrap();
-        assert!(foreign_sock(&d.join("5.sock")).is_err());
-        assert!(foreign_sock(&d.join("6.sock")).is_err(), "missing");
-        // A folder others can enter.
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(foreign_sock(&s).is_err());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-}
+/// that this window may show, checked as this user's only (macOS, Linux
+/// and Windows): see [`rsz_keeper::dir::foreign_sock`].
+pub use rsz_keeper::dir::foreign_sock;
 
 /// The host's program file name on Windows: not suzuri.exe, which the
 /// update's installer looks for.

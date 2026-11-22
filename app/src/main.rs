@@ -265,6 +265,19 @@ fn restore_take() -> Option<serde_json::Value> {
     restore::take()
 }
 
+/// Kept shells came back in this window: save its session now, then take
+/// and drop the sessions saved by the windows that left those shells (they
+/// describe the same shells), so a reboot from here brings each tab back
+/// once, with no moment when nothing is saved (hearth#971).
+#[tauri::command]
+fn restore_adopt(layout: serde_json::Value) {
+    if let Some(r) = restore::get() {
+        r.set_layout(layout);
+        r.save();
+    }
+    let _ = restore::take();
+}
+
 /// The person closed the last pane on purpose: the next start is fresh.
 #[tauri::command]
 fn restore_forget() {
@@ -1216,6 +1229,7 @@ fn main() {
             pane_borrow,
             layout_save,
             restore_take,
+            restore_adopt,
             restore_forget,
             pane_cell_px,
             notice_toast,

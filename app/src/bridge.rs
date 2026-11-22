@@ -489,7 +489,7 @@ fn tools() -> Value {
         { "name": "rename", "args": { "pane_id": "u64", "title": "string" }, "doc": "Set the pane title." },
         { "name": "new_tab", "args": {}, "doc": "Open a new tab with a shell." },
         { "name": "report_agent", "args": { "pane_id": "u64", "state": "idle|working|blocked|done|clear" }, "doc": "Explicit agent lifecycle for a pane. Replaces the title and PTY activity guess. blocked means waiting on a person. clear restores the guess." },
-        { "name": "open_kept", "args": { "socket": "path", "title": "string?", "from": "string?" }, "doc": "Show a shell another program keeps (its keeper socket, in a 0700 folder of this user's) in a new tab and bring the window up. Closing the tab only lets go of it. macOS and Linux." },
+        { "name": "open_kept", "args": { "socket": "path", "title": "string?", "from": "string?" }, "doc": "Show a shell another program keeps (its keeper socket, in a folder only this user can enter) in a new tab and bring the window up. Closing the tab only lets go of it." },
     ] })
 }
 
