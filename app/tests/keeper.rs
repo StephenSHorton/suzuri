@@ -20,7 +20,7 @@ impl Folder {
         #[cfg(unix)]
         let p = PathBuf::from(format!("/tmp/rszk-{tag}-{}", std::process::id()));
         #[cfg(windows)]
-        let p = std::env::temp_dir().join(format!("rszk-{tag}-{}", std::process::id()));
+        let p = dir::short_test_dir(&format!("rszk-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         dir::ensure(&p).unwrap();
         Folder(p)
