@@ -434,6 +434,34 @@ pub fn update_note(version: &str, current: &str, install: impl Fn() + Send + Syn
     }
 }
 
+/// What Install asks first when a restart would end running programs (the
+/// version is on the offer this replaces; a longer title is cut): the
+/// panes that have one (`busy`, as "claude in suzuri"), Install anyway (runs
+/// `install`) and Not now (just closes it). It takes the offer's place.
+pub fn update_confirm_note(busy: &[String], install: impl Fn() + Send + Sync + 'static) -> toast::Note {
+    let n = busy.len();
+    let what = if n == 1 { "1 running program".to_string() } else { format!("{n} running programs") };
+    toast::Note {
+        id: UPDATE_CARD.into(),
+        title: format!("Update ends {what}"),
+        body: busy_list(busy),
+        kind: Kind::Warn,
+        sticky: true,
+        actions: vec![toast::Action::new("Install anyway", install), toast::Action::close("Not now")],
+        ..toast::Note::default()
+    }
+}
+
+/// The busy panes for the card's two lines: the first three, then how many more.
+fn busy_list(busy: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let mut s = busy.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(" · ");
+    if busy.len() > SHOWN {
+        s.push_str(&format!(" · {} more", busy.len() - SHOWN));
+    }
+    s
+}
+
 /// Go hostToastID: one card per kind of host message ("" stacks).
 fn host_kind(msg: &str) -> &'static str {
     let s = msg.to_lowercase();
@@ -534,6 +562,23 @@ mod tests {
         assert_eq!(labels, ["Install", "Skip"]);
         assert!(n.actions[0].run.is_some() && n.actions[1].run.is_none());
         assert!(n.on_click.is_none());
+    }
+
+    #[test]
+    fn install_asks_first_naming_the_busy_panes() {
+        let one = update_confirm_note(&["claude in suzuri".into()], || {});
+        assert_eq!(one.id, UPDATE_CARD, "it takes the offer's place");
+        assert_eq!(one.title, "Update ends 1 running program");
+        assert_eq!(one.body, "claude in suzuri");
+        assert_eq!(one.kind, Kind::Warn);
+        assert!(one.sticky);
+        let labels: Vec<_> = one.actions.iter().map(|a| a.label.as_str()).collect();
+        assert_eq!(labels, ["Install anyway", "Not now"]);
+        assert!(one.actions[0].run.is_some() && one.actions[1].run.is_none());
+        let many: Vec<String> = ["claude in suzuri", "npm in web", "vim in ~", "ssh in ~", "top in ~"].map(Into::into).into();
+        let n = update_confirm_note(&many, || {});
+        assert_eq!(n.title, "Update ends 5 running programs");
+        assert_eq!(n.body, "claude in suzuri · npm in web · vim in ~ · 2 more");
     }
 
 
