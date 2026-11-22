@@ -80,11 +80,22 @@ impl Bridge {
                 return Err(std::io::Error::other(format!("another suzuri owns {f} ({url}); leaving it alone")));
             }
         }
-        let server = Server::http("127.0.0.1:0").map_err(std::io::Error::other)?;
+        // The last run's address and token, when its port is free: kept
+        // shells (keeper.rs) outlive the app with SUZURI_CONTROL_URL and
+        // _TOKEN in their environment, and they keep working.
+        let last = config_dir().join("bridge-last.json");
+        let prev = std::fs::read_to_string(&last).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok());
+        let reuse = prev.as_ref().and_then(|v| Some((v.get("port")?.as_u64()? as u16, v.get("token")?.as_str()?.to_string())));
+        let (server, tok) = match reuse.and_then(|(port, t)| Server::http(("127.0.0.1", port)).ok().map(|s| (s, t))) {
+            Some(found) => found,
+            None => (Server::http("127.0.0.1:0").map_err(std::io::Error::other)?, token()),
+        };
         let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
+        let _ = std::fs::create_dir_all(config_dir());
+        write_private(&last, &serde_json::to_vec(&json!({ "port": port, "token": tok })).unwrap_or_default());
         let b = Arc::new(Bridge {
             url: format!("http://127.0.0.1:{port}"),
-            token: token(),
+            token: tok,
             app: Mutex::new(None),
             panes,
             next: AtomicU64::new(0),

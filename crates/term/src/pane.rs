@@ -748,6 +748,11 @@ impl Pane {
         self.pid.and_then(crate::cwd::process_cwd)
     }
 
+    /// The shell's process id.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     /// What the input bar was last told about the shell (see ShellStatus).
     pub fn shell_status(&self) -> ShellStatus {
         self.shared.shell.lock().status()

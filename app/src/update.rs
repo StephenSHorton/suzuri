@@ -93,9 +93,10 @@ pub fn update_offer(app: AppHandle, version: String, current: String) {
     toast::post(crate::notices::update_note(&version, &current, move || install_or_ask(&a)));
 }
 
-/// The offer's Install. A restart ends every shell and the programs in
-/// them (hearth docs/design/21-terminals.md, section 2), so with a program
-/// running in any pane the card first names those panes and asks; with
+/// The offer's Install. A restart ends every shell the app holds itself and
+/// the programs in them (hearth docs/design/21-terminals.md, section 2;
+/// kept shells live on), so with a program running in such a pane the card
+/// first names those panes and asks; with
 /// only idle prompts it installs at once, as before.
 fn install_or_ask(app: &AppHandle) {
     let busy = busy_panes(app);
@@ -113,10 +114,16 @@ fn install_or_ask(app: &AppHandle) {
 /// (not a shell) is that program itself and is not counted.
 fn busy_panes(app: &AppHandle) -> Vec<String> {
     let Some(panes) = app.try_state::<std::sync::Arc<crate::Panes>>() else { return Vec::new() };
-    let mut list: Vec<(u32, std::sync::Arc<rsz_term::Pane>)> = panes.map.lock().iter().map(|(id, p)| (*id, p.clone())).collect();
+    let mut list: Vec<(u32, std::sync::Arc<crate::keeper::Shell>)> = panes.map.lock().iter().map(|(id, p)| (*id, p.clone())).collect();
     list.sort_by_key(|(id, _)| *id);
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    // A kept shell (keeper.rs, hearth#913) runs in its own host and outlives
+    // the restart: only shells in the app itself are ended by it.
     list.iter()
+        .filter_map(|(id, p)| match &**p {
+            crate::keeper::Shell::Local(pane) => Some((*id, pane)),
+            crate::keeper::Shell::Kept(_) => None,
+        })
         .filter(|(_, p)| p.state() == rsz_term::State::Running)
         .filter_map(|(_, p)| {
             let st = p.shell_status();

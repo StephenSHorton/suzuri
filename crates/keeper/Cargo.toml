@@ -1,0 +1,18 @@
+[package]
+name = "rsz-keeper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "suzuri's shell keeper: the wire format and a client for attaching to kept shells (no rsz-term, no Zig)"
+
+[dependencies]
+serde_json = { workspace = true }
+base64 = "0.22"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "rsz-keeper"
+path = "src/bin/rsz-keeper.rs"

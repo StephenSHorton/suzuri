@@ -15,6 +15,7 @@ tauri-build = { workspace = true }
 
 [dependencies]
 rsz-term = { path = "../crates/term" }
+rsz-keeper = { path = "../crates/keeper" }
 tauri = { workspace = true, features = ["macos-private-api"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -31,6 +32,12 @@ log = "0.4"
 # Desktop notice cards (notices.rs); the lib is `toast`.
 rust-toast = { git = "https://github.com/StephenSHorton/rust-toast", tag = "v0.3.0" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-single-instance = "2.5.5"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+libc = "0.2"

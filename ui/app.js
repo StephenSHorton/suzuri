@@ -29,6 +29,7 @@ import { chrome } from "./chrome/store.js"
 import { showToast } from "./chrome/Toasts.jsx"
 import { showHud, hideHud } from "./chrome/Hud.jsx"
 
+import { layoutOf, restorePlan } from "./kept_layout.js"
 const { invoke, Channel } = window.__TAURI__.core
 const log = (...a) => invoke("ui_log", { line: a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ") })
 window.addEventListener("error", (e) => log("error", e.message, e.filename + ":" + e.lineno))
@@ -315,6 +316,27 @@ class PaneView {
     // first status may beat it): submit waits for this.
     this.opened = invoke("pane_open", { cols, rows, command: null, from, profile, onFrame: ch })
     this.id = await this.opened
+    this.ready(cols, rows)
+  }
+
+  // Show kept shell `id` (left running by the app before this one: a quit,
+  // an update or a crash; app/src/keeper.rs). Its host sends the screen,
+  // scrollback and state; then it takes this pane's size.
+  async attach(id) {
+    const ch = new Channel()
+    ch.onmessage = (m) => this.onChannel(m)
+    this.opened = invoke("pane_attach", { id, onFrame: ch }).then((size) => {
+      this.size = size
+      return id
+    })
+    this.id = await this.opened
+    this.ready(this.size[0], this.size[1])
+    if (!this.fitSize) this.fit()
+    invoke("pane_redraw", { id })
+  }
+
+  // pane_open or pane_attach answered: the pane has its id.
+  ready(cols, rows) {
     byId.set(this.id, this)
     if (worker) {
       const off = this.canvas.transferControlToOffscreen()
@@ -334,6 +356,7 @@ class PaneView {
       invoke("pane_resize", { id: this.id, cols: fs[0], rows: fs[1] })
     }
     invoke("pane_focus", { id: this.id, focused: focused === this })
+    saveLayout()
   }
 
   // The pane's Channel: frames and messages.
@@ -820,7 +843,8 @@ async function split(dir, pane = focused, opts = {}) {
 async function closePane(pane, how = "user") {
   if (!pane) return
   const last = tabs.length === 1 && allPanes(pane.tab.tree).length === 1 && pane.tab.tree?.pane === pane
-  if (last && how === "user") return void ((await askQuit()) ? quit() : focusInput())
+  // Closing it ends its shell, as any pane's: a kept shell would outlive the quit.
+  if (last && how === "user") return void ((await askQuit()) ? closeShells([pane]).then(quit) : focusInput())
   if (last && how === "exit") return quit()
   if (!pane.exited && pane.id) invoke("pane_close", { id: pane.id })
   pane.exited = true
@@ -846,6 +870,65 @@ function askQuit() {
 }
 function quit() {
   invoke("app_quit").catch((err) => log("quit", String(err)))
+}
+// End these panes' shells (and wait until the core has the word).
+function closeShells(panes) {
+  return Promise.all(panes.filter((p) => p.id && !p.exited).map((p) => invoke("pane_close", { id: p.id }).catch(() => {})))
+}
+
+// ---- kept shells (app/src/keeper.rs, ui/kept_layout.js)
+// The layout is saved on every change, so a kill -9 loses none of it.
+let layoutTimer = 0
+function saveLayout() {
+  if (layoutTimer) return
+  layoutTimer = setTimeout(() => {
+    layoutTimer = 0
+    invoke("layout_save", { layout: layoutOf(tabs, activeTab) }).catch(() => {})
+  }, 50)
+}
+
+// Put back the shells the last app left running, in their tabs and
+// splits. Returns the focused pane, or null when there were none.
+async function restoreKept() {
+  const kept = await invoke("kept_list").catch((e) => (log("kept_list", String(e)), null))
+  if (!kept?.shells?.length) return null
+  const plan = restorePlan(kept.layouts, kept.shells)
+  const made = []
+  for (const st of plan.tabs) {
+    if (tabs.length >= MAX_TABS || everyPane().length >= MAX_PANES) break
+    const t = newTab()
+    t.name = st.name
+    t.sticky = st.sticky
+    const build = (n) => {
+      if (n.id != null) {
+        const p = new PaneView(t)
+        p.tab = t
+        p.titleOverride = n.title || ""
+        made.push([p, n.id])
+        if (n.id === st.focused) t.focused = p
+        if (n.id === st.zoomed) t.zoomed = p
+        return { pane: p }
+      }
+      const node = { dir: n.dir, a: build(n.a), b: build(n.b) }
+      if (n.ratio != null) node.ratio = n.ratio
+      return node
+    }
+    t.tree = build(st.tree)
+    t.focused = t.focused ?? allPanes(t.tree)[0]
+  }
+  if (!made.length) return null
+  for (const t of tabs) render(t)
+  showTab(tabs[plan.active] ?? tabs[0])
+  await new Promise((r) => { requestAnimationFrame(r); setTimeout(r, 100) })
+  await Promise.all(made.map(([p, id]) => p.attach(id).catch((e) => {
+    log("attach", id, String(e))
+    // Gone meanwhile: the pane goes (the last one makes a fresh shell).
+    closePane(p, "ai")
+  })))
+  for (const p of everyPane()) p.fit()
+  if (activeTab?.focused) setFocus(activeTab.focused, true)
+  log("kept: restored", made.length, "shells")
+  return activeTab?.focused ?? null
 }
 
 // ---- tabs
@@ -880,7 +963,7 @@ function switchTab(delta) {
 }
 
 async function closeTab(t = activeTab) {
-  if (tabs.length === 1) return void ((await askQuit()) ? quit() : focusInput())
+  if (tabs.length === 1) return void ((await askQuit()) ? closeShells(allPanes(t.tree)).then(quit) : focusInput())
   for (const p of allPanes(t.tree)) {
     if (!p.exited && p.id) invoke("pane_close", { id: p.id })
     p.exited = true
@@ -1002,6 +1085,7 @@ function renamePane(p = focused) {
 // The strip's state for the React title bar (chrome/store.js); activity.js
 // adds each tab's mark.
 function renderStrip() {
+  saveLayout()
   const activity = new Map(chrome.get().tabs.map((x) => [x.id, x.activity]))
   chrome.set({
     tabs: tabs.map((t, i) => {
@@ -1443,7 +1527,9 @@ async function start() {
   log("paint:", worker ? "worker" : "main", "transport:", boot.ws ? "socket" : "channel")
   settingsCfg = await invoke("config_get").catch(() => null)
   if (settingsCfg) announce(settingsCfg)
-  const first = boot.panes > 1 ? await grid(boot.panes) : await openTab()
+  // Kept shells come back first; a bench or UI test always starts fresh.
+  const kept = boot.panes > 1 || boot.bench || boot.ui_test ? null : await restoreKept()
+  const first = boot.panes > 1 ? await grid(boot.panes) : kept ?? await openTab()
   if (boot.bench) bench(boot, first)
   if (boot.ui_test) {
     const { run } = await import("./selftest.js")
