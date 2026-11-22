@@ -10,7 +10,9 @@
 //! private to the user: `<config>/restore/<app pid>/`, 0700 folders with
 //! 0600 files (`session.json`, `<pane id>.txt`); each window is its own app
 //! process and keeps its own. A start takes the sessions of processes that
-//! are gone (or ran before the last boot) and removes them. Closing the last
+//! are gone (or ran before the last boot; on Windows, which gives no boot
+//! time, a pid now held by a process started at another time) and removes
+//! them. Closing the last
 //! pane on purpose (the quit dialog, or `exit` in it) clears this process's.
 //! Settings › Session › "Bring back after a reboot" (config key
 //! `restore_sessions`, card hearth#951) turns it off: that clears the whole
@@ -209,6 +211,7 @@ impl Restore {
         }
         layout["v"] = 1.into();
         layout["boot"] = boot_stamp().into();
+        layout["started"] = started(std::process::id()).into();
         layout["saved_at"] = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0).into();
         write_private(&self.dir.join("session.json"), layout.to_string().as_bytes())?;
         // Text of panes that are gone.
@@ -235,14 +238,16 @@ fn take_if(on: bool, root: &Path) -> Option<Value> {
     if !on {
         return None;
     }
-    take_from(root, std::process::id(), boot_stamp(), alive)
+    take_from(root, std::process::id(), boot_stamp(), same_window)
 }
 
 /// The sessions in `root` left by processes that are gone (not `me`, not
-/// alive, or saved before this boot: a pid can be reused after a reboot),
-/// newest first, as one: their tabs in turn, the newest one's tab in front.
-/// Their folders are removed: this process saves its own from now on.
-fn take_from(root: &Path, me: u32, boot: Option<u64>, alive: fn(u32) -> bool) -> Option<Value> {
+/// still running, or saved before this boot: a pid can be reused after a
+/// reboot), newest first, as one: their tabs in turn, the newest one's tab
+/// in front. Their folders are removed: this process saves its own from now
+/// on. `running(pid, started)`: that window is still open, judged by its pid
+/// and, where the session has it, its process's start time.
+fn take_from(root: &Path, me: u32, boot: Option<u64>, running: fn(u32, Option<u64>) -> bool) -> Option<Value> {
     let mut found: Vec<(u64, Value)> = Vec::new();
     for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
         let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
@@ -255,7 +260,7 @@ fn take_from(root: &Path, me: u32, boot: Option<u64>, alive: fn(u32) -> bool) ->
             continue;
         };
         let same_boot = matches!((boot, v["boot"].as_u64()), (Some(a), Some(b)) if a == b) || boot.is_none();
-        if same_boot && alive(pid) {
+        if same_boot && running(pid, v["started"].as_u64()) {
             continue;
         }
         found.push((v["saved_at"].as_u64().unwrap_or(0), v));
@@ -266,6 +271,41 @@ fn take_from(root: &Path, me: u32, boot: Option<u64>, alive: fn(u32) -> bool) ->
     let active = first["active"].as_u64().unwrap_or(0);
     let tabs: Vec<Value> = found.into_iter().flat_map(|(_, v)| v["tabs"].as_array().cloned().unwrap_or_default()).collect();
     Some(json!({ "v": 1, "active": active, "saved_at": saved_at, "tabs": tabs }))
+}
+
+/// Is the window that saved a session still open: process `pid` running and,
+/// when the session says when its process started, started then. Windows
+/// gives no boot time here (see [`boot_stamp`]) and reuses pids, so after a
+/// reboot an unrelated process can hold a saved session's pid (hearth#950).
+fn same_window(pid: u32, saved_start: Option<u64>) -> bool {
+    alive(pid) && saved_start.is_none_or(|s| started(pid).is_none_or(|t| t == s))
+}
+
+/// When process `pid` started (Windows FILETIME ticks); None elsewhere, or
+/// when it cannot be asked.
+fn started(pid: u32) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        // SAFETY: a plain query into local FILETIMEs; the handle is closed.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let (mut c, mut e, mut k, mut u) = (z, z, z, z);
+            let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) != 0;
+            CloseHandle(h);
+            ok.then_some((c.dwHighDateTime as u64) << 32 | c.dwLowDateTime as u64)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 /// Is process `pid` running?
@@ -468,7 +508,7 @@ mod tests {
         session(&root, 300, 30, 7, "/quit");
         session(&root, 400, 40, 6, "/before-reboot");
         // 200 and 400 are running pids; 400's session is from the last boot.
-        let alive = |pid: u32| pid == 200 || pid == 400;
+        let alive = |pid: u32, _: Option<u64>| pid == 200 || pid == 400;
         let v = take_from(&root, 100, Some(7), alive).unwrap();
         let names: Vec<_> = v["tabs"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         assert_eq!(names, ["/before-reboot", "/quit"], "newest first; not mine, not a live window's");
@@ -511,6 +551,45 @@ mod tests {
         assert!(d.join("session.json").exists(), "on again: saved on the next tick (every 3 s)");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(cfg.parent().unwrap());
+    }
+
+    #[test]
+    fn a_reused_pid_is_not_the_window_that_saved() {
+        // Windows: no boot time, so a session is told from a live window by
+        // its process's start time. 500 is running, but a later process than
+        // the one that saved (started 11, not 10); 600 is the same process.
+        let root = scratch("reused");
+        for (pid, started) in [(500u32, 10u64), (600, 20)] {
+            session(&root, pid, pid as u64, 0, &format!("/w{pid}"));
+            let f = root.join(pid.to_string()).join("session.json");
+            let mut v: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+            v["started"] = started.into();
+            v["boot"] = Value::Null;
+            write_private(&f, v.to_string().as_bytes()).unwrap();
+        }
+        fn running(pid: u32, saved: Option<u64>) -> bool {
+            let now = match pid {
+                500 => 11,
+                600 => 20,
+                _ => return false,
+            };
+            saved.is_none_or(|s| s == now)
+        }
+        let v = take_from(&root, 1, None, running).unwrap();
+        assert_eq!(v["tabs"].as_array().unwrap().len(), 1);
+        assert_eq!(v["tabs"][0]["name"], "/w500", "the reused pid's session comes back");
+        assert!(root.join("600").exists(), "the live window's stays");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn this_process_is_its_own_window() {
+        let me = std::process::id();
+        let t = started(me).expect("own start time");
+        assert!(same_window(me, Some(t)));
+        assert!(!same_window(me, Some(t + 1)), "another process with this pid");
+        assert!(same_window(me, None), "an older session without the field: the pid decides");
     }
 
     #[test]

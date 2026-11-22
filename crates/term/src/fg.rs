@@ -150,8 +150,7 @@ mod imp {
     };
 
     pub fn program_running(p: &Probe) -> bool {
-        let pairs: Vec<(u32, u32)> = processes().into_iter().map(|(pid, ppid, _)| (pid, ppid)).collect();
-        has_child(&pairs, p.shell_pid)
+        first_child(p).is_some()
     }
 
     pub fn program_name(p: &Probe) -> Option<String> {
@@ -162,8 +161,38 @@ mod imp {
         first_child(p).map(|(pid, _, _)| pid)
     }
 
+    /// The shell's first child: a process naming the shell as its parent
+    /// and started after it. Windows keeps a process's parent id after the
+    /// parent exits and reuses ids, so a shell can share its pid with the
+    /// long-gone parent of an unrelated process (hearth#950 saw a restored
+    /// pane "running" a game launcher): that one started before the shell.
     fn first_child(p: &Probe) -> Option<(u32, u32, String)> {
-        processes().into_iter().find(|&(pid, ppid, _)| ppid == p.shell_pid && pid != p.shell_pid && pid != 0)
+        pick(processes(), p.shell_pid, created)
+    }
+
+    pub(super) fn pick(list: Vec<(u32, u32, String)>, shell: u32, created: impl Fn(u32) -> Option<u64>) -> Option<(u32, u32, String)> {
+        let born = created(shell)?;
+        list.into_iter()
+            .filter(|&(pid, ppid, _)| has_child(&[(pid, ppid)], shell))
+            .find(|&(pid, _, _)| created(pid).is_some_and(|t| t >= born))
+    }
+
+    /// When process `pid` started (FILETIME ticks), if it can be asked.
+    pub(super) fn created(pid: u32) -> Option<u64> {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        // SAFETY: a plain query into local FILETIMEs; the handle is closed.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let (mut c, mut e, mut k, mut u) = (z, z, z, z);
+            let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) != 0;
+            CloseHandle(h);
+            ok.then_some((c.dwHighDateTime as u64) << 32 | c.dwLowDateTime as u64)
+        }
     }
 
     /// ConPTY shows no tty modes.
@@ -200,6 +229,31 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn a_child_from_before_the_shell_is_not_its_program() {
+        // 7 is the shell, started at 100. 8 names 7 as its parent but started
+        // at 50, under an earlier process that had pid 7; 9 is the shell's own.
+        let list = vec![(8, 7, "EpicGamesLauncher.exe".to_string()), (9, 7, "claude.exe".to_string()), (10, 3, "other.exe".to_string())];
+        let at = |pid: u32| match pid {
+            7 => Some(100),
+            8 => Some(50),
+            9 => Some(120),
+            _ => None,
+        };
+        assert_eq!(super::imp::pick(list.clone(), 7, at).map(|c| c.2), Some("claude.exe".into()));
+        assert_eq!(super::imp::pick(list[..1].to_vec(), 7, at), None, "only the stale one: no program");
+        assert_eq!(super::imp::pick(list, 7, |_| None), None, "a shell we cannot ask: no program");
+        // A real child, started after this process, is its program; this
+        // process (started before itself is not "after") is not its own.
+        let me = std::process::id();
+        let mut c = std::process::Command::new("ping").args(["-n", "5", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let row = vec![(c.id(), me, "PING.EXE".to_string())];
+        let got = super::imp::pick(row, me, super::imp::created);
+        let _ = c.kill();
+        assert_eq!(got.map(|r| r.0), Some(c.id()));
+    }
+
     #[cfg(unix)]
     #[test]
     fn unknown_shell_is_not_a_program() {

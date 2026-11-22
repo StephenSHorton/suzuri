@@ -385,6 +385,19 @@ impl Pane {
                 hooked = true;
             }
         }
+        // A restored pane's old text: fed to the screen before the shell
+        // starts, except under Windows' PowerShell, which prints it itself
+        // (ConPTY would paint over it; see shell::PREAMBLE_ENV).
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut preamble = cfg.preamble.clone().filter(|t| !t.is_empty());
+        #[cfg(windows)]
+        if let Some((dir, file)) = preamble.as_deref().filter(|_| hooked && reads_ahead).and_then(shell::preamble_file) {
+            preamble = None;
+            boot_env.push((shell::PREAMBLE_ENV.to_string(), file.to_string_lossy().into_owned()));
+            if temp_dir.is_none() {
+                temp_dir = Some(dir);
+            }
+        }
         let mut cmd = CommandBuilder::new(&argv[0]);
         cmd.args(&argv[1..]);
         if let Some(cwd) = &cfg.cwd {
@@ -428,7 +441,7 @@ impl Pane {
                     e.set_default_cursor(cfg.cursor);
                 }
                 e.set_grow_at_bottom(cfg!(windows));
-                if let Some(text) = cfg.preamble.as_deref().filter(|t| !t.is_empty()) {
+                if let Some(text) = preamble.as_deref() {
                     e.feed(text.as_bytes(), &mut Vec::new());
                 }
                 e
@@ -758,9 +771,16 @@ impl Pane {
 
     /// Where the shell process is now, from the OS (macOS, Linux), else
     /// [`Pane::cwd`]. Unlike the last prompt's report, this follows a `cd`
-    /// on the line of a command still running (hearth#916).
+    /// on the line of a command still running (hearth#916). Windows cannot
+    /// see a shell's folder that way (PowerShell's `cd` leaves its process
+    /// folder alone), so there it is the folder of the program in front, if
+    /// one runs: the folder it started in, unless it moved itself (hearth#950).
     pub fn live_cwd(&self) -> Option<String> {
-        self.pid.and_then(crate::cwd::process_cwd).filter(|d| !d.is_empty()).or_else(|| self.cwd())
+        #[cfg(windows)]
+        let live = self.program_pid().and_then(crate::cwd::program_cwd);
+        #[cfg(not(windows))]
+        let live = self.pid.and_then(crate::cwd::process_cwd);
+        live.filter(|d| !d.is_empty()).or_else(|| self.cwd())
     }
 
     /// The shell's process id.
@@ -2338,6 +2358,52 @@ mod windows_tests {
             assert!(Instant::now() < deadline, "never: {what}");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// A restored pane's old text (PaneConfig::preamble, hearth#916) stays
+    /// above PowerShell's first prompt under ConPTY, on screen or in the
+    /// scrollback, though ConPTY and the hook's start clear the screen
+    /// (hearth#950).
+    #[test]
+    fn powershell_keeps_the_restored_text_above_its_prompt() {
+        // The user's own shell (default_shell: pwsh, else Windows PowerShell),
+        // with the bar's hooks, as a restored pane starts.
+        let seen = Arc::new(Mutex::new(Vec::<ShellStatus>::new()));
+        let s = seen.clone();
+        let sink: Sink = Arc::new(move |o| {
+            if let Out::Shell(st) = o {
+                s.lock().push(st)
+            }
+        });
+        let old: String = (1..=2000).map(|i| format!("old-line-{i}\r\n")).collect();
+        let preamble = format!("{old}日本語の行\r\n\x1b[2m─── restored ───\x1b[0m\r\n");
+        let pane = Pane::spawn(PaneConfig { cols: 100, rows: 30, scrollback: 10_000, preamble: Some(preamble), ..Default::default() }, sink).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !seen.lock().iter().any(|s| s.integrated) {
+            assert!(Instant::now() < deadline, "never a prompt: {}", pane.screen_text());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        wait_until("idle", || !pane.is_busy());
+        std::thread::sleep(Duration::from_millis(500));
+        let check = |when: &str| {
+            let all = [pane.history_tail(2100), lines_of(&pane.screen_text())].concat();
+            let at = |w: &str| all.iter().position(|l| l.trim_end() == w);
+            let shown = || all.iter().rev().take(40).cloned().collect::<Vec<_>>().join("\n");
+            for want in ["old-line-1", "old-line-1000", "old-line-2000", "日本語の行", "─── restored ───"] {
+                assert!(at(want).is_some(), "{when}: {want} gone; the end:\n{}", shown());
+            }
+            assert!(at("old-line-1") < at("old-line-2000") && at("old-line-2000") < at("日本語の行") && at("日本語の行") < at("─── restored ───"), "{when}: out of order:\n{}", shown());
+            // Only the prompt (blank) is under the restored mark.
+            let below: Vec<_> = all[at("─── restored ───").unwrap() + 1..].iter().filter(|l| !l.trim().is_empty()).collect();
+            assert!(below.is_empty(), "{when}: under the mark: {below:?}");
+        };
+        check("after the first prompt");
+        pane.resize(120, 40);
+        std::thread::sleep(Duration::from_millis(800));
+        check("after a resize");
+        pane.resize(80, 20);
+        std::thread::sleep(Duration::from_millis(800));
+        check("after a smaller resize");
     }
 
     /// PowerShell under ConPTY (pwsh, from $RSZ_TEST_PWSH or PATH, and
