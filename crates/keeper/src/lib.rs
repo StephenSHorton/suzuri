@@ -41,7 +41,12 @@
 //! a control client gets only answers.
 //!
 //! Requests carry `"q": n` and get `{"t":"r","q":n,"v":value}` back
-//! ([`client::Conn::call`]). The app side of the messages is
+//! ([`client::Conn::call`]).
+//!
+//! A program's clipboard read (OSC 52 "?") goes to the viewers as
+//! `{"t":"clip_ask","n":n}`; one answers on a control connection of its own
+//! with `{"t":"clip_answer","n":n,"text":string|null}`. With no viewer, or
+//! none answering in time, the program gets an empty clipboard. The app side of the messages is
 //! app/src/keeper.rs; keep the two in step.
 
 pub mod client;

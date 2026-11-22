@@ -214,3 +214,59 @@ fn key_to_frame_latency() {
     let (k50, k90) = median(kept);
     println!("key to frame, {n} keys: in the app p50 {l50:.2} ms p90 {l90:.2} ms; through a host p50 {k50:.2} ms p90 {k90:.2} ms");
 }
+
+/// A program that reads the clipboard with OSC 52 and prints what came
+/// back: `sh ask.sh <tag>` prints `GOT-<tag>[<base64>]`.
+const ASK: &str = r#"stty raw -echo
+printf '\033]52;c;?\007'
+bel=$(printf '\007')
+r=''
+while :; do c=$(dd bs=1 count=1 2>/dev/null); [ "$c" = "$bel" ] && break; r="$r$c"; done
+stty sane
+echo "GOT-$1[${r#*;c;}]"
+"#;
+
+/// A viewer that answers the host's clipboard asks with `text`, as the
+/// app does (app/src/keeper.rs, answer_clipboard).
+fn answering_viewer(dir: &Path, id: u32, text: &'static str) -> Conn {
+    let sock = dir::sock_path(dir, id);
+    let s2 = sock.clone();
+    Conn::connect(&sock, "viewer", "test", move |e| {
+        if let Event::Msg(v) = e
+            && v["t"] == "clip_ask"
+        {
+            let c = Conn::connect(&s2, "control", "test", |_| {}).unwrap();
+            c.send(&json!({ "t": "clip_answer", "n": v["n"], "text": text })).unwrap();
+        }
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_clipboard_read_gets_the_clipboard_only_while_a_window_is_attached() {
+    let d = Folder::new("clip");
+    let script = d.0.join("ask.sh");
+    std::fs::write(&script, ASK).unwrap();
+    start_host(&d.0, 5, &["/bin/sh"]);
+    let ctl = Conn::connect(&dir::sock_path(&d.0, 5), "control", "test", |_| {}).unwrap();
+    let ask = |tag: &str| ctl.input(format!("sh {} {tag}\r", script.display()).as_bytes()).unwrap();
+
+    // No window attached: the program gets an empty answer, not the clipboard.
+    ask("none");
+    wait_for("the read with no window", || screen(&d.0, 5).contains("GOT-none["));
+    assert!(screen(&d.0, 5).contains("GOT-none[]"), "{}", screen(&d.0, 5));
+
+    // A window attached: the program gets the window's clipboard text.
+    let v = answering_viewer(&d.0, 5, "hello-clip 硯");
+    ask("one");
+    wait_for("the read with a window", || screen(&d.0, 5).contains("GOT-one["));
+    // base64("hello-clip 硯")
+    assert!(screen(&d.0, 5).contains("GOT-one[aGVsbG8tY2xpcCDnoa8=]"), "{}", screen(&d.0, 5));
+
+    // The window goes: empty again.
+    drop(v);
+    std::thread::sleep(Duration::from_millis(300));
+    ask("gone");
+    wait_for("the read after the window went", || screen(&d.0, 5).contains("GOT-gone["));
+    assert!(screen(&d.0, 5).contains("GOT-gone[]"), "{}", screen(&d.0, 5));
+}

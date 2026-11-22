@@ -405,10 +405,17 @@ impl Kept {
         let detached = Arc::new(AtomicBool::new(false));
         let exited = Arc::new(AtomicBool::new(false));
         let (lo, de) = (last_out.clone(), detached.clone());
-        let conn = rsz_keeper::Conn::connect(&rsz_keeper::dir::sock_path(dir, id), "viewer", "suzuri", move |e| match e {
+        let sock = rsz_keeper::dir::sock_path(dir, id);
+        let ask_sock = sock.clone();
+        let conn = rsz_keeper::Conn::connect(&sock, "viewer", "suzuri", move |e| match e {
             rsz_keeper::Event::Frame(f) => {
                 *lo.lock() = Instant::now();
                 sink(Out::Frame(f));
+            }
+            // A program in the shell reads the clipboard: this window answers.
+            rsz_keeper::Event::Msg(v) if v["t"] == "clip_ask" => {
+                let (n, path) = (v["n"].clone(), ask_sock.clone());
+                std::thread::spawn(move || answer_clipboard(&path, n));
             }
             rsz_keeper::Event::Msg(v) => {
                 if let Some(o) = out_of(&v) {
@@ -427,6 +434,20 @@ impl Kept {
         })?;
         let hello = conn.hello.clone();
         Ok(Kept { conn, last_out, detached, hello })
+    }
+}
+
+/// Answer a host's clipboard ask `n` with the clipboard's text (null when
+/// it has none or doesn't answer in time), on a connection of its own: the
+/// viewer's may be waiting on a call the host can't serve until it has this.
+#[cfg(unix)]
+fn answer_clipboard(sock: &Path, n: Value) {
+    let text = crate::clip::text(crate::clip::OSC52).ok();
+    match rsz_keeper::Conn::connect(sock, "control", "suzuri", |_| {}) {
+        Ok(c) => {
+            let _ = c.send(&json!({ "t": "clip_answer", "n": n, "text": text }));
+        }
+        Err(e) => log::warn!("keeper: clipboard answer: {e}"),
     }
 }
 
@@ -627,7 +648,14 @@ pub mod host {
         hub: Mutex<Hub>,
         pane: OnceLock<Pane>,
         hello: Mutex<Value>,
+        /// Clipboard reads waiting for a viewer's answer, by ask number.
+        clip: Mutex<HashMap<u64, SyncSender<Option<String>>>>,
+        clip_next: std::sync::atomic::AtomicU64,
     }
+
+    /// How long a program's clipboard read waits for the viewer's answer:
+    /// the app's own read takes up to clip::OSC52, plus the round trip.
+    const CLIP_WAIT: Duration = Duration::from_millis(600);
 
     impl Host {
         fn broadcast(hub: &mut Hub, msg: Vec<u8>, viewers_only: bool) {
@@ -697,6 +725,30 @@ pub mod host {
                 }
             };
             Self::broadcast(&mut hub, wire::encode_json(&ev), true);
+        }
+
+        /// A program in the shell reads the clipboard (OSC 52 "?"). The host
+        /// has no clipboard of its own: an attached viewer (a Suzuri window)
+        /// is asked, `{"t":"clip_ask","n"}`, and answers on a connection of
+        /// its own, `{"t":"clip_answer","n","text"}`, so a call of its
+        /// waiting behind the engine lock can't hold the answer up. With no
+        /// viewer, or none answering in time, the program gets an empty
+        /// answer. Runs under the pane's engine lock, as the app's reader
+        /// does: ghostty takes the answer only before this returns.
+        fn read_clipboard(&self) -> Option<String> {
+            let (tx, rx) = sync_channel(1);
+            let n = self.clip_next.fetch_add(1, Ordering::Relaxed) + 1;
+            {
+                let mut hub = self.hub.lock();
+                if !hub.clients.iter().any(|c| c.viewer) {
+                    return None;
+                }
+                self.clip.lock().insert(n, tx);
+                Self::broadcast(&mut hub, wire::encode_json(&json!({ "t": "clip_ask", "n": n })), true);
+            }
+            let text = rx.recv_timeout(CLIP_WAIT).ok().flatten();
+            self.clip.lock().remove(&n);
+            text
         }
 
         /// The shell ended: let the viewers read the exit, then go.
@@ -783,6 +835,12 @@ pub mod host {
                     K_INPUT => p.write(body),
                     K_JSON => {
                         let Ok(v) = serde_json::from_slice::<Value>(&body) else { continue };
+                        if v["t"] == "clip_answer" {
+                            if let Some(tx) = v["n"].as_u64().and_then(|n| self.clip.lock().remove(&n)) {
+                                let _ = tx.try_send(v["text"].as_str().map(str::to_string));
+                            }
+                            continue;
+                        }
                         if v["t"] == "resize" {
                             let mut h = self.hello.lock();
                             h["cols"] = v["cols"].clone();
@@ -931,7 +989,13 @@ pub mod host {
                 "id": id, "pid": std::process::id(), "cols": cfg.cols, "rows": cfg.rows,
                 "command": cfg.command, "started": started, "sock": sock.display().to_string(),
             })),
+            clip: Mutex::default(),
+            clip_next: Default::default(),
         });
+        // Before the pane: a terminal answers clipboard reads only when a
+        // reader was set when it was made.
+        let h3 = host.clone();
+        rsz_term::set_clipboard_reader(move || h3.read_clipboard());
         let h2 = host.clone();
         let sink: Sink = Arc::new(move |o| h2.out(o));
         let pane = match Pane::spawn(cfg, sink) {
