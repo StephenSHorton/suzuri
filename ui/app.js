@@ -948,6 +948,11 @@ async function restoreKept() {
   for (const p of everyPane()) p.fit()
   if (activeTab?.focused) setFocus(activeTab.focused, true)
   log("kept: restored", made.length, "shells")
+  // The sessions saved by the windows that left these shells (restore.rs)
+  // describe these same shells: this window saves its own, then drops
+  // theirs, or a reboot from here would bring back their tabs as well as
+  // this window's (hearth#971).
+  await invoke("restore_adopt", { layout: layoutOf(tabs, activeTab) }).catch((e) => log("restore_adopt", String(e)))
   return activeTab?.focused ?? null
 }
 

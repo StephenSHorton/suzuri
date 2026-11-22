@@ -1,31 +1,42 @@
-# Card hearth#950, the Windows side of hearth#916, on a scratch debug build:
-# after quitting suzuri with the window's close button (and again after a
-# hard kill of the app and every shell, as a reboot does), the next start
-# shows the same tabs and splits, a fresh shell in each old folder, the old
-# text above it marked restored, and a pane that was running Claude Code
-# offers `claude --resume <id>` in its input bar without running it. Then
-# `exit` in the last pane, and the next start opens one fresh pane.
-#
-# Windows has no kept shells yet (until hearth#923), so every start with a
-# saved session restores it.
+# Cards hearth#950 and hearth#971, the Windows side of hearth#916, on a
+# scratch debug build with kept shells (hearth#923):
+#  - quitting suzuri with the window's close button leaves its shells
+#    running in their keeper hosts; the next start shows those same shells
+#    (same hosts, same shell pids, Claude Code and the dev server still
+#    running in them), in the same tabs and splits, and restores nothing:
+#    no restored mark, no resume offered;
+#  - a hard kill of the app, every keeper host and every shell (what a
+#    reboot does) brings back, on the next start, the same tabs and splits,
+#    a fresh shell in each old folder, the old text above it marked
+#    restored, and a pane that was running Claude Code offers
+#    `claude --resume <id>` in its input bar without running it;
+#  - `exit` in the last pane, and the next start opens one fresh pane.
 #
 # Claude Code is a stand-in claude.exe (compiled here from C#) that writes
 # the session file the real one does (%USERPROFILE%\.claude\sessions\<pid>.json,
 # pid = the shell's direct child, as the real claude.exe is); a second
 # stand-in, devserver.exe, is a long-running program that is not Claude Code.
 #
-# Everything runs in a scratch folder: its own USERPROFILE/HOME, LOCALAPPDATA
-# and RSZ_CONFIG_DIR, so the installed suzuri's files are never touched.
-#   cargo build -p suzuri
+# Everything runs in a scratch folder: its own USERPROFILE/HOME, LOCALAPPDATA,
+# RSZ_CONFIG_DIR and keeper folder, so the installed suzuri's files and kept
+# shells are never touched.
+#   cargo build -p suzuri -p rsz-keeper
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\reboot-check.ps1 [-Out <folder for pictures>] [-Keep]
 param([string]$App = "", [string]$Out = "", [switch]$Keep)
 $ErrorActionPreference = "Stop"
 $R = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $App) { $App = Join-Path $R "target\debug\suzuri.exe" }
-if (-not (Test-Path $App)) { throw "build first: cargo build -p suzuri" }
+$Keeper = Join-Path (Split-Path -Parent $App) "rsz-keeper.exe"
+if (-not ((Test-Path $App) -and (Test-Path $Keeper))) { throw "build first: cargo build -p suzuri -p rsz-keeper" }
+# The keeper's sockets live in the scratch folder, and a Windows socket path
+# is at most 108 bytes: under a long TEMP (as when Hearth runs this) the
+# scratch folder goes at the system drive's root instead, as the keeper
+# checks' does (scripts\keeper\lib.ps1).
 $S = Join-Path $env:TEMP ("rszr-" + $PID)
+if ((Join-Path $S "cfg\keeper\4294967295.sock").Length -ge 100) { $S = Join-Path "$env:SystemDrive\" ("rszr-" + $PID) }
 if (-not $Out) { $Out = $S }
 $SID = "7f3c2a10-5b6d-4e8f-9a01-23456789abcd"
+$KDir = Join-Path $S "cfg\keeper"
 foreach ($d in "home", "local", "cfg", "bin", "work\alpha", "work\beta", "work\gamma") { New-Item -ItemType Directory -Force (Join-Path $S $d) | Out-Null }
 New-Item -ItemType Directory -Force $Out | Out-Null
 
@@ -103,7 +114,7 @@ $script:apps = @()
 function StartApp {
   Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $S "local\suzuri\bridge.json")
   $keep = @{}
-  $set = @{ USERPROFILE = "$S\home"; HOME = "$S\home"; LOCALAPPDATA = "$S\local"; RSZ_CONFIG_DIR = "$S\cfg"; RSZ_BRIDGE = "1"; RSZ_ALLOW_MULTI = "1"; RSZR_SCRATCH = $S; PATH = "$S\bin;$env:PATH" }
+  $set = @{ USERPROFILE = "$S\home"; HOME = "$S\home"; LOCALAPPDATA = "$S\local"; RSZ_CONFIG_DIR = "$S\cfg"; RSZ_KEEPER_DIR = $KDir; RSZ_BRIDGE = "1"; RSZ_ALLOW_MULTI = "1"; RSZR_SCRATCH = $S; PATH = "$S\bin;$env:PATH" }
   foreach ($k in $set.Keys) { $keep[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $set[$k]) }
   try { $p = Start-Process -FilePath $App -PassThru -RedirectStandardError (Join-Path $S "app-err.log") -RedirectStandardOutput (Join-Path $S "app-out.log") }
   finally { foreach ($k in $keep.Keys) { [Environment]::SetEnvironmentVariable($k, $keep[$k]) } }
@@ -114,9 +125,14 @@ function StartApp {
   $script:bridge = Get-Content $bj -Raw | ConvertFrom-Json
   $p
 }
-function Get_([string]$path) { Invoke-RestMethod -Uri ($script:bridge.url + $path) -Headers @{ Authorization = "Bearer $($script:bridge.token)" } }
-function Post_([string]$path, $body) { Invoke-RestMethod -Method Post -Uri ($script:bridge.url + $path) -Headers @{ Authorization = "Bearer $($script:bridge.token)" } -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 10 -Compress) }
+# No keep-alive: a restarted app takes the same bridge port, and Windows
+# PowerShell 5 would send the next request on the dead app's connection.
+function Get_([string]$path) { Invoke-RestMethod -DisableKeepAlive -TimeoutSec 30 -Uri ($script:bridge.url + $path) -Headers @{ Authorization = "Bearer $($script:bridge.token)" } }
+function Post_([string]$path, $body) { Invoke-RestMethod -DisableKeepAlive -TimeoutSec 30 -Method Post -Uri ($script:bridge.url + $path) -Headers @{ Authorization = "Bearer $($script:bridge.token)" } -ContentType "application/json" -Body ($body | ConvertTo-Json -Depth 10 -Compress) }
 function Call([string]$tool, $a = @{}) { Post_ "/v1/call" @{ tool = $tool; args = $a } }
+# The window answers once its page has loaded (a debug build's first start,
+# which copies the keeper host, can take a while).
+function Ready { for ($i = 0; $i -lt 60; $i++) { try { $l = Call layout; if (@($l.windows[0].tabs).Count) { return } } catch { }; Start-Sleep -Milliseconds 500 }; Fail "the window never answered" }
 function Submit($id, [string]$line) { Post_ "/v1/submit" @{ tab_id = $id; line = $line } | Out-Null }
 function Text($id) { $t = Get_ "/v1/panes/$id`?lines=400"; ($t | ConvertTo-Json -Depth 10) }
 function Leaves($n) { if ($null -ne $n.pane) { , $n.pane } else { (Leaves $n.a) + (Leaves $n.b) } }
@@ -142,11 +158,27 @@ function StandPids { $f = Join-Path $S "stand.pids"; if (Test-Path $f) { @(Get-C
 function KillStandIns { foreach ($p in StandPids) { Stop-Process -Id ([int]$p) -Force -ErrorAction SilentlyContinue }; Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $S "stand.pids") }
 function Sessions { Get-ChildItem (Join-Path $S "cfg\restore") -Directory -ErrorAction SilentlyContinue }
 
-# Checks a restored window against what was open. Returns the three panes.
-function CheckRestored([string]$label) {
+# The kept shells' hellos (rsz-keeper ls), as objects; the live ones only.
+function Kept { @(& $Keeper --dir $KDir ls | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.id -and -not $_.error }) }
+function KeptOne([int]$id) { Kept | Where-Object { $_.id -eq $id } | Select-Object -First 1 }
+function Alive([int]$id) { [bool](Get-Process -Id $id -ErrorAction SilentlyContinue) }
+# Kills every kept shell's host and what runs under it, by pid.
+function KillKept {
+  foreach ($k in Kept) {
+    $kids = Tree ([int]$k.pid)
+    Stop-Process -Id ([int]$k.pid) -Force -ErrorAction SilentlyContinue
+    foreach ($c in $kids) { Stop-Process -Id $c -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+# The tabs and splits that were open: tab 1 split right [a | b], tab 2 [c],
+# tab 1 in front. Returns the three panes.
+# $cwds: each pane's folder as the first window showed it, else the folder
+# its shell was cd'd into.
+function CheckLayout([string]$label, $cwds = $null) {
   $L = Call layout
   $tabs = @($L.windows[0].tabs)
-  if ($tabs.Count -ne 2) { Fail "${label}: 2 tabs, got $($tabs.Count): $($L | ConvertTo-Json -Depth 12 -Compress)" }
+  if ($tabs.Count -ne 2) { Fail "${label}: 2 tabs, got $($tabs.Count): $(($tabs | % { $_.tree | ConvertTo-Json -Depth 8 -Compress }) -join ' ')" }
   $t1 = $tabs[0].tree
   if ($t1.axis -ne "right" -or $null -eq $t1.a.pane -or $null -eq $t1.b.pane) { Fail "${label}: tab 1 is a split right: $($t1 | ConvertTo-Json -Compress)" }
   if ($null -eq $tabs[1].tree.pane) { Fail "${label}: tab 2 is one pane" }
@@ -155,9 +187,48 @@ function CheckRestored([string]$label) {
   $a = $panes[[string]$t1.a.pane]; $b = $panes[[string]$t1.b.pane]; $c = $panes[[string]$tabs[1].tree.pane]
   Say "1. tabs and splits: tab 1 = split right [$($a.id) | $($b.id)], tab 2 = [$($c.id)], tab 1 in front"
   foreach ($x in @(@($a, "alpha"), @($b, "beta"), @($c, "gamma"))) {
-    if (-not ($x[0].cwd -like "*\work\$($x[1])")) { Fail "${label}: pane $($x[0].id) starts in $($x[1]): '$($x[0].cwd)'" }
-    Say "2. pane $($x[0].id): a new shell in $($x[0].cwd)"
+    $want = if ($cwds) { $cwds[[int]$x[0].id] } else { Join-Path $S "work\$($x[1])" }
+    if ($x[0].cwd -ne $want) { Fail "${label}: pane $($x[0].id) is in '$want': '$($x[0].cwd)'" }
   }
+  @($a, $b, $c)
+}
+
+# Checks a window that came back by reattaching to the kept shells: the
+# same shells, programs still running in them, nothing restored.
+function CheckKept([string]$label, $was, $cwds) {
+  $a, $b, $c = CheckLayout $label $cwds
+  foreach ($x in @(@($a, $p1), @($b, $p2), @($c, $p3))) {
+    if ([int]$x[0].id -ne $x[1]) { Fail "${label}: pane $($x[1]) not back in its place (found $($x[0].id))" }
+    $k = KeptOne $x[1]
+    if (-not $k) { Fail "${label}: pane $($x[1]) has no kept shell" }
+    if ([int]$k.pid -ne $was[$x[1]].pid -or [int]$k.shell_pid -ne $was[$x[1]].shell_pid) { Fail "${label}: pane $($x[1]) is not the same shell: host $($k.pid) shell $($k.shell_pid), was $($was[$x[1]].pid) $($was[$x[1]].shell_pid)" }
+    Say "2. pane $($x[1]): the same kept shell (host $($k.pid), shell $($k.shell_pid)) in $($x[0].cwd), $($k.viewers) viewer"
+  }
+  Say "3. input bars: '$($a.input)' '$($b.input)' '$($c.input)'"
+  if ($a.input -or $b.input -or $c.input) { Fail "${label}: something offered in an input bar" }
+  $ta = Text $a.id; $tb = Text $b.id; $tc = Text $c.id
+  if ($ta -notmatch "alpha-line-300" -or $ta -notmatch "alpha-line-1\b") { Fail "${label}: pane $($a.id)'s own text is not there" }
+  if ($tc -notmatch "dev server \(stand-in\) serving") { Fail "${label}: pane $($c.id)'s dev server text is not there" }
+  if ($tb -notmatch "Claude Code \(stand-in\) in") { Fail "${label}: pane $($b.id)'s Claude Code text is not there" }
+  foreach ($t in @(@($a.id, $ta), @($b.id, $tb), @($c.id, $tc))) {
+    if ($t[1] -match "restored .{1,6} saved") { Fail "${label}: pane $($t[0]) shows the restored mark" }
+  }
+  if ($tb -match "Claude Code was running here") { Fail "${label}: pane $($b.id) offers a resume" }
+  Say "4. the live text in each pane (alpha-line-1..300, Claude Code, the dev server), no restored mark, no resume offered"
+  Start-Sleep -Seconds 2
+  if (Test-Path (Join-Path $S "resumed.log")) { Fail "${label}: claude was run: $(Get-Content (Join-Path $S 'resumed.log'))" }
+  $now = @(StandPids)
+  if ($now.Count -ne 2) { Fail "${label}: programs started or ended: $now (was $script:standWas)" }
+  foreach ($sp in $now) { if (-not (Alive ([int]$sp))) { Fail "${label}: program $sp ended" } }
+  Say "4. Claude Code and the dev server still running ($($now -join ', ')); nothing new ran"
+  @($a, $b, $c)
+}
+
+# Checks a window restored after a reboot against what was open. Returns
+# the three panes.
+function CheckRestored([string]$label) {
+  $a, $b, $c = CheckLayout $label
+  foreach ($x in $a, $b, $c) { Say "2. pane $($x.id): a new shell in $($x.cwd)" }
   Say "3. input bar of the Claude Code pane: '$($b.input)' | the others: '$($a.input)' '$($c.input)'"
   if ($b.input -ne "claude --resume $SID") { Fail "${label}: resume not offered: '$($b.input)'" }
   if ($a.input -or $c.input) { Fail "${label}: something offered in another pane" }
@@ -180,26 +251,43 @@ function CheckRestored([string]$label) {
 }
 
 try {
-  Say "== scratch: $S"
+  Say "== scratch: $S (keeper folder $KDir)"
   $app1 = StartApp
-  Start-Sleep -Seconds 3
+  Ready
+  Start-Sleep -Seconds 2
   $L = Call layout
-  $p1 = $L.windows[0].tabs[0].panes[0].id
+  $p1 = [int]$L.windows[0].tabs[0].panes[0].id
   if (-not $p1) { Fail "no pane after start" }
   UseStandIns $p1
   Submit $p1 "cd $S\work\alpha; 1..300 | % { `"alpha-line-`$_`" }"
   Start-Sleep -Seconds 1
-  $p2 = (Call split @{ pane_id = $p1; axis = "right" }).pane_id
+  $p2 = [int](Call split @{ pane_id = $p1; axis = "right" }).pane_id
   Start-Sleep -Seconds 2
   UseStandIns $p2
   Submit $p2 "cd $S\work\beta; echo beta-before-claude; claude"
-  $p3 = (Call new_tab).pane_id
+  $p3 = [int](Call new_tab).pane_id
   Start-Sleep -Seconds 2
   UseStandIns $p3
   Submit $p3 "cd $S\work\gamma; echo gamma-here; devserver"
   Call focus @{ pane_id = $p1 } | Out-Null
   Start-Sleep -Seconds 6
   Say "panes: $p1 | $p2 (Claude Code) in tab 1; $p3 (a dev server) in tab 2"
+  $was = @{}
+  foreach ($id in $p1, $p2, $p3) {
+    $k = KeptOne $id
+    if (-not $k) { Fail "pane $id is not a kept shell: $(Kept | ConvertTo-Json -Compress)" }
+    $was[$id] = @{ pid = [int]$k.pid; shell_pid = [int]$k.shell_pid }
+    if ((Tree $app1.Id) -contains [int]$k.pid) { Fail "pane ${id}'s host $($k.pid) is under the app" }
+    Say "pane ${id}: kept by host $($k.pid), shell $($k.shell_pid), outside the app's process tree"
+  }
+  # Each pane's folder as this window shows it. A pane busy with a program
+  # started on the same line as its cd (Claude Code here) shows the folder
+  # of its last prompt; the saved session has the program's own folder.
+  $cwds = @{}
+  foreach ($t in @((Call layout).windows[0].tabs)) { foreach ($p in $t.panes) { $cwds[[int]$p.id] = $p.cwd } }
+  Say "folders shown: $(($cwds.Keys | Sort-Object | % { "${_}: $($cwds[$_])" }) -join '; ')"
+  $script:standWas = @(StandPids)
+  if ($script:standWas.Count -ne 2) { Fail "Claude Code and the dev server did not both start: $($script:standWas)" }
   $RDIR = Join-Path $S "cfg\restore\$($app1.Id)"
   if (-not (Test-Path "$RDIR\session.json")) { Fail "no session saved in $RDIR" }
   $sess = Get-Content "$RDIR\session.json" -Raw | ConvertFrom-Json
@@ -208,51 +296,66 @@ try {
   if ($tree.b.claude.session -ne $SID) { Fail "the Claude Code pane's conversation not saved: $($tree.b | ConvertTo-Json -Compress)" }
   if (-not ($tree.a.cwd -like "*\work\alpha")) { Fail "pane 1's folder not saved: '$($tree.a.cwd)'" }
   if (-not ($sess.tabs[1].tree.cwd -like "*\work\gamma")) { Fail "pane 3's folder not saved: '$($sess.tabs[1].tree.cwd)'" }
-  Say "saved: $(($sess.tabs | ConvertTo-Json -Depth 8 -Compress).Substring(0, 400))"
+  Say "saved for a reboot: $(($sess.tabs | ConvertTo-Json -Depth 8 -Compress).Substring(0, 300))"
   Shot $app1 (Join-Path $Out "1-before-quit.png")
 
-  Say "== quit with the window's close button"
+  Say "== quit with the window's close button: the shells stay running"
   [RszWin]::PostMessage((Hwnd $app1), 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
   if (-not $app1.WaitForExit(15000)) { Fail "the app did not quit on the close button" }
-  Start-Sleep -Seconds 1
+  Start-Sleep -Seconds 2
+  foreach ($id in $p1, $p2, $p3) {
+    if (-not (Alive $was[$id].pid) -or -not (Alive $was[$id].shell_pid)) { Fail "pane ${id}'s host or shell ended with the app" }
+  }
+  foreach ($sp in $script:standWas) { if (-not (Alive ([int]$sp))) { Fail "program $sp ended with the app" } }
+  Say "1. the app quit; hosts, shells, Claude Code and the dev server all still run; kept: $((Kept | % { "$($_.id):$($_.viewers) viewers" }) -join ' ')"
+  Say "   restore folders: $((Sessions | % Name) -join ' ')"
+
+  Say "== start again: the live shells come back, nothing restored"
+  $app2 = StartApp
+  Ready
+  for ($i = 0; $i -lt 40 -and @(Kept | Where-Object { $_.viewers -eq 1 }).Count -lt 3; $i++) { Start-Sleep -Milliseconds 500 }
+  if (@(Kept | Where-Object { $_.viewers -eq 1 }).Count -lt 3) { Fail "the new app did not attach to all three shells: $(Kept | ConvertTo-Json -Compress)" }
+  Start-Sleep -Seconds 3
+  $null = CheckKept "after the close button" $was $cwds
+  Shot $app2 (Join-Path $Out "2-after-restart.png")
+  # The new window saves its own session (for a reboot from here).
+  Start-Sleep -Seconds 4
+  Say "   restore folders: $((Sessions | % Name) -join ' ')"
+
+  Say "== reboot: the app, every keeper host and every shell killed at once"
+  $kids = Tree $app2.Id
+  Stop-Process -Id $app2.Id -Force
+  foreach ($k in $kids) { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue }
+  KillKept
   KillStandIns
   Remove-Item -Force -ErrorAction SilentlyContinue "$S\home\.claude\sessions\*.json"
-  if (-not (Test-Path "$RDIR\session.json")) { Fail "quitting cleared the saved session" }
-  Say "the app quit; its session is kept: $((Sessions | % Name) -join ' ')"
+  Start-Sleep -Seconds 1
+  foreach ($id in $p1, $p2, $p3) { if ((Alive $was[$id].pid) -or (Alive $was[$id].shell_pid)) { Fail "pane ${id}'s host or shell survived the kill" } }
+  if ((Kept).Count) { Fail "kept shells left: $(Kept | ConvertTo-Json -Compress)" }
   # Windows reuses pids and gives no boot time: after a reboot a saved
-  # session's pid can belong to an unrelated running process. Give this one
-  # the pid of this script (running, started at another time): it must
+  # session's pid can belong to an unrelated running process. Give the last
+  # one the pid of this script (running, started at another time): it must
   # still come back.
-  Rename-Item $RDIR $PID
-  Say "the saved session now names pid $PID (this script: running, not the app that saved it)"
-
-  Say "== start again"
-  $app2 = StartApp
-  Start-Sleep -Seconds 6
-  $pa, $pb, $pc = CheckRestored "after the close button"
-  Shot $app2 (Join-Path $Out "2-after-restart.png")
+  $R2 = Join-Path $S "cfg\restore\$($app2.Id)"
+  if (-not (Test-Path "$R2\session.json")) { Fail "the second window saved no session" }
+  Rename-Item $R2 $PID
+  Say "nothing left running, no kept shell answers; restore folders: $((Sessions | % Name) -join ' ') (the last one renamed to this script's pid $PID)"
+  $app3 = StartApp
+  Ready
+  # Each fresh shell prints its old text once it starts.
+  Start-Sleep -Seconds 5
+  $qa, $qb, $qc = CheckRestored "after a hard kill"
+  Shot $app3 (Join-Path $Out "3-after-kill.png")
 
   Say "== the offered line, submitted in that pane, resumes the conversation"
-  UseStandIns $pb.id
-  Submit $pb.id "claude --resume $SID"
+  UseStandIns $qb.id
+  Submit $qb.id "claude --resume $SID"
   Start-Sleep -Seconds 3
   if (-not ((Get-Content (Join-Path $S "resumed.log") -ErrorAction SilentlyContinue) -match "RESUMED $SID")) { Fail "the resume did not run" }
   Say "ran: $(Get-Content (Join-Path $S 'resumed.log'))"
   Remove-Item (Join-Path $S "resumed.log")
-  Start-Sleep -Seconds 4
-
-  Say "== reboot: the app and every shell killed at once"
-  $kids = Tree $app2.Id
-  Stop-Process -Id $app2.Id -Force
-  foreach ($k in $kids) { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue }
   KillStandIns
-  Remove-Item -Force -ErrorAction SilentlyContinue "$S\home\.claude\sessions\*.json"
-  Start-Sleep -Seconds 1
-  Say "nothing left running; restore folders: $((Sessions | % Name) -join ' ')"
-  $app3 = StartApp
-  Start-Sleep -Seconds 6
-  $qa, $qb, $qc = CheckRestored "after a hard kill"
-  Shot $app3 (Join-Path $Out "3-after-kill.png")
+  Start-Sleep -Seconds 2
 
   Say "== exit in each pane; the last one ends the session"
   foreach ($q in $qc, $qa) { Submit $q.id "exit"; Start-Sleep -Seconds 2 }
@@ -263,24 +366,28 @@ try {
   Start-Sleep -Seconds 1
   $left = @(Sessions)
   if ($left.Count) { Fail "a session is left after exit in the last pane: $($left.Name)" }
-  Say "4. the app closed and no session is left"
+  if ((Kept).Count) { Fail "a kept shell is left after exit in the last pane: $(Kept | ConvertTo-Json -Compress)" }
+  Say "5. the app closed; no session and no kept shell is left"
   $app4 = StartApp
-  Start-Sleep -Seconds 5
+  Ready
+  Start-Sleep -Seconds 3
   $tabs = @((Call layout).windows[0].tabs)
   $leaves = @(Leaves $tabs[0].tree)
   if ($tabs.Count -ne 1 -or $leaves.Count -ne 1) { Fail "not one fresh pane: $($tabs.Count) tabs" }
   $t = Text $leaves[0]
-  if ($t -match "restored .{1,6} saved|alpha-line") { Fail "the fresh pane shows old text" }
-  Say "4. the next start: one tab, one fresh pane, nothing restored"
+  if ($t -match "restored .{1,6} saved|alpha-line|Claude Code|dev server") { Fail "the fresh pane shows old text" }
+  if ($tabs[0].panes[0].input) { Fail "the fresh pane offers '$($tabs[0].panes[0].input)'" }
+  Say "5. the next start: one tab, one fresh pane, nothing restored or offered"
   Shot $app4 (Join-Path $Out "4-fresh-after-exit.png")
 
   $after = RealStamp
   if ($after -ne $before) { Fail "the installed suzuri's files changed: '$before' -> '$after'" }
-  Say "5. scratch build ($App) with USERPROFILE, LOCALAPPDATA and RSZ_CONFIG_DIR under $S; the installed suzuri's files are untouched: $(if ($before) { $before } else { 'none exist' })"
+  Say "6. scratch build ($App) with USERPROFILE, LOCALAPPDATA, RSZ_CONFIG_DIR and RSZ_KEEPER_DIR under $S; the installed suzuri's files are untouched: $(if ($before) { $before } else { 'none exist' })"
   Say "PASS"
 }
 finally {
   foreach ($p in $script:apps) { if (-not $p.HasExited) { $kids = Tree $p.Id; Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; foreach ($k in $kids) { Stop-Process -Id $k -Force -ErrorAction SilentlyContinue } } }
+  try { KillKept } catch { }
   KillStandIns
-  if (-not $Keep) { Start-Sleep -Milliseconds 500; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $S }
+  if (-not $Keep) { Start-Sleep -Milliseconds 800; Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $S }
 }
