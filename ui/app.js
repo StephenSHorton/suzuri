@@ -309,14 +309,15 @@ class PaneView {
 
   // from: the pane this one splits from; the new shell starts in its cwd.
   // profile: a Settings profile's shell and folder (new tabs).
-  // back: a pane brought back after a reboot ({cwd, preamble}; restoreSaved).
+  // back: a pane brought back after a reboot ({cwd, preamble, command}:
+  // the shell it ran, else the active profile's; restoreSaved).
   async open(cols, rows, from = null, profile = null, back = null) {
     const ch = new Channel()
     ch.onmessage = (m) => this.onChannel(m)
     this.size = [cols, rows]
     // An Enter in the bar can come before pane_open answers (the shell's
     // first status may beat it): submit waits for this.
-    this.opened = invoke("pane_open", { cols, rows, command: null, from, profile, cwd: back?.cwd || null, preamble: back?.preamble || null, onFrame: ch })
+    this.opened = invoke("pane_open", { cols, rows, command: back?.command || null, from, profile, cwd: back?.cwd || null, preamble: back?.preamble || null, onFrame: ch })
     this.id = await this.opened
     this.ready(cols, rows)
   }
@@ -1004,7 +1005,7 @@ async function restoreSaved() {
     const cols = w > 0 ? Math.max(2, Math.floor(w / cw)) : 80
     const rows = h > 0 ? Math.max(1, Math.floor(h / ch)) : 24
     try {
-      await p.open(cols, rows, null, null, { cwd: leaf.claude?.cwd || leaf.cwd, preamble: preamble(leaf, plan.savedAt) })
+      await p.open(cols, rows, null, null, { cwd: leaf.claude?.cwd || leaf.cwd, preamble: preamble(leaf, plan.savedAt), command: leaf.command })
     } catch (e) {
       log("restore open", String(e))
       return closePane(p, "ai")
@@ -1481,10 +1482,12 @@ window.rszHost = {
 }
 
 // Go suzuri's AI-control tab tools (internal/aicontrol/server.go).
-window.rszRegisterTool?.("new_tab", async () => {
+// profile: a Settings profile's name, as New tab: <name> in the palette.
+window.rszRegisterTool?.("new_tab", async (a) => {
   if (tabs.length >= MAX_TABS) return [400, { error: "tab limit" }]
   if (everyPane().length >= MAX_PANES) return [400, { error: "max panes" }]
-  const p = await openTab()
+  const profile = typeof a?.profile === "string" && a.profile ? a.profile : undefined
+  const p = await openTab(profile)
   if (!p) return [400, { error: "could not open a tab" }]
   return [200, { ok: true, tab_id: p.tab.id, pane_id: p.id }]
 })

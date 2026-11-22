@@ -64,3 +64,16 @@ test("a Claude Code pane's preamble offers the resume and runs nothing", () => {
   assert.match(out, /Claude Code was running here\. Press Enter to resume the conversation\./)
   assert.ok(!out.includes("claude --resume"), "the command is in the input bar, not typed into the shell")
 })
+
+test("a pane keeps the shell it was started with; an older save without one gets the active profile's", () => {
+  const p = savedPlan({
+    tabs: [
+      { tree: { dir: "h", a: { id: 1, command: ["cmd.exe"] }, b: { id: 2 } } },
+      { tree: { dir: "h", a: { id: 3, command: [] }, b: { id: 4, command: ["", 5] } } },
+    ],
+  })
+  assert.deepEqual(p.tabs[0].tree.a.command, ["cmd.exe"])
+  assert.equal("command" in p.tabs[0].tree.b, false, "no command saved: the active profile's shell")
+  assert.equal("command" in p.tabs[1].tree.a, false, "an empty command is none")
+  assert.equal("command" in p.tabs[1].tree.b, false, "a broken command is none")
+})
