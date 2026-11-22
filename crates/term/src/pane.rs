@@ -412,6 +412,14 @@ impl Pane {
                 }
             }
         }
+        // An unhooked PowerShell running starship: starship's pre-prompt
+        // hook reports the folder (hearth#1031). A restored one got it
+        // with the print above.
+        if !hooked {
+            if let Some(a) = shell::starship_report(&argv) {
+                argv = a;
+            }
+        }
         let mut cmd = CommandBuilder::new(&argv[0]);
         cmd.args(&argv[1..]);
         if let Some(cwd) = &cfg.cwd {
