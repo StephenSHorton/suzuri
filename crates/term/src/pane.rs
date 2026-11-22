@@ -233,6 +233,9 @@ struct Shared {
     status_order: Mutex<()>,
     /// Keys typed right after a bar line, held back from PSReadLine.
     hold: Mutex<Hold>,
+    /// The folder the shell last reported with OSC 7 / OSC 9;9 (a custom
+    /// prompt: starship, oh-my-posh), if any.
+    reported_cwd: Mutex<Option<String>>,
 }
 
 /// PSReadLine reads every key waiting in the console input buffer at once
@@ -272,8 +275,6 @@ pub struct Pane {
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// The shell's process id, for its cwd.
     pid: Option<u32>,
-    /// The cwd the shell last reported (OSC 7 / 7878), if any.
-    reported_cwd: Mutex<Option<String>>,
     /// The shell's program (before suzuri's bootstrap), for the cd alias.
     shell_prog: String,
     /// Bar lines waiting for the shell to be idle: (display, payload).
@@ -472,6 +473,7 @@ impl Pane {
             echo: Mutex::new(EchoFilter::default()),
             last_io: Mutex::new(Instant::now()),
             status_order: Mutex::new(()),
+            reported_cwd: Mutex::new(None),
             hold: Mutex::new(Hold::default()),
         });
         let (tx, rx) = unbounded::<Cmd>();
@@ -517,7 +519,7 @@ impl Pane {
             let sink = sink.clone();
             threads.push(thread("rsz-actor", move || actor_loop(rx, pair.master, writer, killer, shared, sink, (cfg.cols, cfg.rows))));
         }
-        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, reported_cwd: Mutex::new(None), shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt, reads_ahead, sink, probe })
+        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt, reads_ahead, sink, probe })
     }
 
     /// Enter in the input bar (#296, Go suzuri's submitBarLine): the bare-cd
@@ -763,9 +765,10 @@ impl Pane {
         let _ = self.tx.send(Cmd::Close);
     }
 
-    /// Records the cwd the shell reported (OSC 7 or Go suzuri's OSC 7878).
+    /// Records the cwd the shell reported (OSC 7 or OSC 9;9; the reader
+    /// calls this for each one it sees).
     pub fn set_reported_cwd(&self, cwd: String) {
-        *self.reported_cwd.lock() = Some(cwd);
+        *self.shared.reported_cwd.lock() = Some(cwd);
     }
 
     /// Where a new pane split from this one should start: the shell's last
@@ -777,7 +780,7 @@ impl Pane {
         if !hooked.is_empty() {
             return Some(hooked);
         }
-        if let Some(c) = self.reported_cwd.lock().clone() {
+        if let Some(c) = self.shared.reported_cwd.lock().clone() {
             return Some(c);
         }
         #[cfg(windows)]
@@ -1022,6 +1025,13 @@ fn shell_marks(marks: &mut Vec<ShellEvent>, shared: &Shared, sink: &Sink, tx: &S
                     release_hold(shared, tx);
                 }
                 ShellEvent::Foreign(running) => sh.foreign = running,
+                // A custom prompt's folder (hearth#1028). Only a folder on
+                // this computer: an ssh session's remote one is no use.
+                ShellEvent::Reported(dir) => {
+                    if std::path::Path::new(&dir).is_dir() {
+                        *shared.reported_cwd.lock() = Some(dir);
+                    }
+                }
                 ShellEvent::Typeahead(raw) => {
                     let (again, rest) = split_lines(&raw, sh.run_ahead);
                     sh.run_ahead = again.iter().filter(|&&b| b == b'\r').count();
@@ -2329,6 +2339,36 @@ mod tests {
         pane.close();
         wait_exit(&rx);
         pane.join();
+    }
+
+    /// hearth#1028: a custom prompt's OSC 7 / OSC 9;9 sets the pane's
+    /// folder (over the OS's, which on Windows a PowerShell cd never moves),
+    /// and a folder that is not here is ignored.
+    #[cfg(unix)]
+    #[test]
+    fn custom_prompt_folder_reports() {
+        let a = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("rsz-osc-{}", std::process::id()));
+        let b = a.join("b c");
+        std::fs::create_dir_all(&b).unwrap();
+        let (pane, rx) = run(&["/bin/sh"]);
+        let until = |want: &std::path::Path| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while pane.cwd().as_deref().map(std::path::Path::new) != Some(want) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(pane.cwd().as_deref().map(std::path::Path::new), Some(want));
+        };
+        pane.write(format!("printf '\\033]7;file://host{}\\033\\\\'\r", a.display()).into_bytes());
+        until(&a);
+        pane.write(format!("printf '\\033]9;9;\"{}\"\\007'\r", b.display()).into_bytes());
+        until(&b);
+        pane.write(b"printf '\\033]9;9;/no/such/rsz/dir\\007'; echo mark-done\r".to_vec());
+        wait_until("mark-done", || pane.screen_text().matches("mark-done").count() >= 2);
+        assert_eq!(pane.cwd().as_deref().map(std::path::Path::new), Some(b.as_path()), "a missing folder is ignored");
+        pane.close();
+        wait_exit(&rx);
+        pane.join();
+        let _ = std::fs::remove_dir_all(&a);
     }
 
     /// A query inside a DEC 2026 block that never closes: the block times

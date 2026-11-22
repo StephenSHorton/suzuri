@@ -20,6 +20,13 @@
 //! done event, but never a prompt (Cwd): the bar needs suzuri's blank prompt,
 //! so it stays off for them. Once suzuri's own marks are seen, 133/633 are
 //! dropped silently so nothing counts twice.
+//!
+//! A shell's own folder report, OSC 7 (`file://host/path`) or ConEmu's
+//! OSC 9;9 (`9;9;C:\dir`, often quoted), as starship and oh-my-posh send
+//! from a custom prompt, gives [`ShellEvent::Reported`] (hearth#1028): the
+//! folder a plain (unhooked) shell is in, which Windows cannot ask the OS
+//! for. Both are taken out of the stream (a 9;9 would otherwise read as an
+//! OSC 9 notice).
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +47,9 @@ pub enum ShellEvent {
     /// tty by the prompt hook, as typed: for the bar, through
     /// [`clean_typeahead`].
     Typeahead(Vec<u8>),
+    /// The shell reported its folder (OSC 7 or OSC 9;9), as a local path.
+    /// Not a prompt: the bar stays as it is.
+    Reported(String),
 }
 
 /// Removes suzuri's private OSCs (7878, 7879) from a byte stream. Other
@@ -60,7 +70,7 @@ const MAX_OSC: usize = 64 * 1024;
 
 /// Only these forms are ours. `7879;image=` (inline images, #288) and any
 /// other 7879 kind pass through to the next filter.
-const PREFIXES: [&[u8]; 6] = [b"\x1b]7878;cwd=", b"\x1b]7878;typeahead=", b"\x1b]7879;start", b"\x1b]7879;done", b"\x1b]133;", b"\x1b]633;"];
+const PREFIXES: [&[u8]; 8] = [b"\x1b]7878;cwd=", b"\x1b]7878;typeahead=", b"\x1b]7879;start", b"\x1b]7879;done", b"\x1b]133;", b"\x1b]633;", b"\x1b]7;", b"\x1b]9;9;"];
 
 impl OscFilter {
     /// Filter `input`, appending the bytes for the VT engine to `out` and
@@ -134,6 +144,12 @@ fn memchr_esc(b: &[u8]) -> Option<usize> {
 impl OscFilter {
     fn parse(&mut self, payload: &[u8]) -> Option<ShellEvent> {
         let s = String::from_utf8_lossy(payload);
+        if let Some(uri) = s.strip_prefix("7;") {
+            return crate::cwd::osc7_path(uri).filter(|p| !p.is_empty()).map(ShellEvent::Reported);
+        }
+        if let Some(dir) = s.strip_prefix("9;9;") {
+            return crate::cwd::osc99_path(dir).map(ShellEvent::Reported);
+        }
         let Some(mark) = s.strip_prefix("133;").or_else(|| s.strip_prefix("633;")) else {
             self.own = true;
             return parse(&s);
@@ -603,6 +619,28 @@ mod tests {
         let (out, ev) = run(&[b"a\x1b]7878;cwd=/tmp/x y\x07b\x1b[31mc\x1b]0;title\x07d\x1b]7879;start\x1b\\e"]);
         assert_eq!(out, b"ab\x1b[31mc\x1b]0;title\x07de");
         assert_eq!(ev, vec![ShellEvent::Cwd("/tmp/x y".into()), ShellEvent::Start]);
+    }
+
+    #[test]
+    fn folder_reports_from_custom_prompts() {
+        // starship / oh-my-posh: OSC 7 and ConEmu's OSC 9;9, BEL or ST, next
+        // to their 133 marks; an OSC 9 notice still passes.
+        let (out, ev) = run(&[b"\x1b]133;A\x07a\x1b]7;file://box/tmp/My%20Dir\x1b\\b\x1b]9;9;\"C:\\Users\\me\"\x07c\x1b]9;hi\x07"]);
+        assert_eq!(out, b"abc\x1b]9;hi\x07");
+        assert_eq!(ev, vec![ShellEvent::Foreign(false), ShellEvent::Reported("/tmp/My Dir".into()), ShellEvent::Reported("C:\\Users\\me".into())]);
+        // They do not count as suzuri's own marks: later 133s still count.
+        let (_, ev) = run(&[b"\x1b]9;9;D:\\x\x07\x1b]133;C\x07"]);
+        assert_eq!(ev, vec![ShellEvent::Reported("D:\\x".into()), ShellEvent::Foreign(true)]);
+        // Not a file URI, or empty: dropped with no event.
+        let (out, ev) = run(&[b"a\x1b]7;http://x/y\x07\x1b]9;9;\x07b"]);
+        assert_eq!((out.as_slice(), ev.len()), (&b"ab"[..], 0));
+        // Split anywhere.
+        let whole: &[u8] = b"x\x1b]9;9;C:\\a\x1b\\y\x1b]7;file:///b\x07z";
+        for cut in 0..whole.len() {
+            let (out, ev) = run(&[&whole[..cut], &whole[cut..]]);
+            assert_eq!(out, b"xyz", "cut at {cut}");
+            assert_eq!(ev, vec![ShellEvent::Reported("C:\\a".into()), ShellEvent::Reported("/b".into())], "cut at {cut}");
+        }
     }
 
     #[test]
