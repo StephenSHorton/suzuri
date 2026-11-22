@@ -185,6 +185,10 @@ pub fn normalize(v: Value) -> Value {
     let anim = m.get("animate_unfocused").and_then(Value::as_bool).unwrap_or(true);
     m.insert("animate_unfocused".into(), anim.into());
 
+    // Terminals back after a reboot (restore.rs): on unless turned off.
+    let restore = m.get("restore_sessions").and_then(Value::as_bool).unwrap_or(true);
+    m.insert("restore_sessions".into(), restore.into());
+
     let pos = notice_corner(s(&m, "notice_position").as_deref().unwrap_or(""));
     m.insert("notice_position".into(), pos.into());
 
@@ -497,6 +501,13 @@ mod tests {
         assert_eq!(normalize(json!({}))["animate_unfocused"], true);
         assert_eq!(normalize(json!({"animate_unfocused": false}))["animate_unfocused"], false);
         assert_eq!(normalize(json!({"animate_unfocused": "nope"}))["animate_unfocused"], true);
+    }
+
+    #[test]
+    fn restore_sessions_defaults_on() {
+        assert_eq!(normalize(json!({}))["restore_sessions"], true);
+        assert_eq!(normalize(json!({"restore_sessions": false}))["restore_sessions"], false);
+        assert_eq!(normalize(json!({"restore_sessions": "no"}))["restore_sessions"], true);
     }
 
     #[test]
