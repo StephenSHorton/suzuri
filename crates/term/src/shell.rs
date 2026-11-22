@@ -286,13 +286,90 @@ fn decode_b64_bytes(s: &str) -> Vec<u8> {
 pub const PREAMBLE_ENV: &str = "RSZ_PREAMBLE";
 
 /// Writes a restored pane's old text for the shell to print (Windows
-/// PowerShell, see PWSH_PROMPT): a temp folder of this user's, removed with
-/// the shell, and the file in it (the shell also deletes it once printed).
-pub fn preamble_file(text: &str) -> Option<(PathBuf, PathBuf)> {
-    let dir = temp_dir("rsz-pwsh")?;
+/// PowerShell, see PWSH_PROMPT, and [`print_preamble`]): a temp folder of
+/// this user's, removed with the shell, and the file in it (PowerShell also
+/// deletes it once printed).
+pub fn preamble_file(bytes: &[u8]) -> Option<(PathBuf, PathBuf)> {
+    let dir = temp_dir("rsz-restore")?;
     let file = dir.join("restored.txt");
-    std::fs::write(&file, text).ok()?;
+    std::fs::write(&file, bytes).ok()?;
     Some((dir, file))
+}
+
+/// cmd.exe: the env var holding the command that prints a restored pane's
+/// old text (see [`print_preamble`]).
+pub const PREAMBLE_CMD_ENV: &str = "RSZ_PREAMBLE_CMD";
+
+/// PowerShell with no Suzuri hooks (the plain-shell setting, or a profile
+/// that starts PowerShell): print the old text, then drop the file and the
+/// env var. The same lines the hooked start runs after its Clear-Host.
+const PWSH_PRINT: &str = "if ($env:RSZ_PREAMBLE) { try { $Host.UI.Write([IO.File]::ReadAllText($env:RSZ_PREAMBLE, [Text.Encoding]::UTF8)); Remove-Item -LiteralPath $env:RSZ_PREAMBLE -ErrorAction SilentlyContinue } catch {}; Remove-Item Env:RSZ_PREAMBLE -ErrorAction SilentlyContinue }";
+
+/// How a shell without Suzuri's hooks prints a restored pane's old text
+/// itself (Windows: ConPTY starts each shell from a blank screen and paints
+/// over text put on ours first, hearth#950/#972).
+#[derive(Debug, PartialEq)]
+pub struct PrintPreamble {
+    /// The shell's argv with the printing start added.
+    pub argv: Vec<String>,
+    /// Env to set: (name, value); a `{file}` in a value is the file's path.
+    pub env: Vec<(String, String)>,
+    /// The file's bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// For an unhooked PowerShell or cmd.exe started with no command of its
+/// own: the start that prints `text` (a restored pane's old text) as the
+/// shell's first output. None for anything else (the text is fed to the
+/// screen as before).
+///
+/// - PowerShell: `-NoExit -Command` with [`PWSH_PRINT`], the file UTF-8.
+/// - cmd.exe: `/k %RSZ_PREAMBLE_CMD%`, the var holding
+///   `type "<file>"`. cmd expands the var before it parses the line, so
+///   the quotes around a path with spaces reach cmd as typed (an argv
+///   with a space or a quote would be wrapped and backslash-escaped for
+///   MSVC rules, which cmd does not read). The file is UTF-16LE with a
+///   BOM, which `type` prints whatever the code page; the dim restored
+///   line's ESC[2m is read by cmd's console (VT processing on).
+pub fn print_preamble(argv: &[String], text: &str) -> Option<PrintPreamble> {
+    let exe = argv.first()?;
+    let base = exe.rsplit(['/', '\\']).next().unwrap_or(exe).to_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    let rest: Vec<String> = argv[1..].iter().map(|a| a.to_lowercase()).collect();
+    match base {
+        "pwsh" | "powershell" => {
+            // PowerShell's own run-this args, in any short form it takes
+            // (-c, -com, -e, -ec, -enc, -f, -cwa...), or a script as the
+            // first arg: as is.
+            let flag = |a: &str| a.strip_prefix('-').or_else(|| a.strip_prefix('/')).map(|f| f.split(':').next().unwrap_or(f).to_string());
+            let runs = rest.first().is_some_and(|a| flag(a).is_none())
+                || rest.iter().filter_map(|a| flag(a)).any(|f| {
+                    !f.is_empty() && (["command", "encodedcommand", "file", "commandwithargs"].iter().any(|w| w.starts_with(f.as_str())) || f == "ec" || f == "cwa")
+                });
+            if runs {
+                return None;
+            }
+            let mut a = argv.to_vec();
+            if !rest.iter().any(|x| x == "-noexit" || x == "/noexit") {
+                a.push("-NoExit".into());
+            }
+            a.extend(["-Command".into(), PWSH_PRINT.into()]);
+            Some(PrintPreamble { argv: a, env: vec![(PREAMBLE_ENV.into(), "{file}".into())], bytes: text.as_bytes().to_vec() })
+        }
+        "cmd" => {
+            if rest.iter().any(|a| a.starts_with("/c") || a.starts_with("/k") || a.starts_with("/r")) {
+                return None;
+            }
+            let mut a = argv.to_vec();
+            a.extend(["/k".into(), format!("%{PREAMBLE_CMD_ENV}%")]);
+            // Unset first, so a cmd started from this one never prints it again.
+            let line = format!("set \"{PREAMBLE_CMD_ENV}=\" & type \"{{file}}\"");
+            let mut bytes = vec![0xff, 0xfe];
+            bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+            Some(PrintPreamble { argv: a, env: vec![(PREAMBLE_CMD_ENV.into(), line)], bytes })
+        }
+        _ => None,
+    }
 }
 
 /// How a shell is started with the bootstrap: extra args, env, and a temp
@@ -616,6 +693,57 @@ mod tests {
         assert!(bootstrap(&["/bin/zsh".into(), "-c".into(), "ls".into()]).is_none());
         assert!(bootstrap(&["/usr/bin/fish".into()]).is_none());
         assert!(bootstrap(&["claude".into()]).is_none());
+    }
+
+    #[test]
+    fn unhooked_powershell_and_cmd_print_the_restored_text() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let text = "old\r\n日本\r\n\x1b[2m─── restored · saved ───\x1b[0m\r\n";
+        // PowerShell: the print runs as its start command, UTF-8.
+        for exe in ["pwsh.exe", r"C:\Program Files\PowerShell\7\pwsh.exe", "powershell", "PowerShell.EXE"] {
+            let p = print_preamble(&v(&[exe, "-NoLogo"]), text).unwrap();
+            assert_eq!(p.argv, v(&[exe, "-NoLogo", "-NoExit", "-Command", PWSH_PRINT]));
+            assert_eq!(p.env, vec![(PREAMBLE_ENV.to_string(), "{file}".to_string())]);
+            assert_eq!(p.bytes, text.as_bytes());
+        }
+        assert!(PWSH_PROMPT.ends_with(&format!("Clear-Host; {PWSH_PRINT}")), "the same print as the hooked start");
+        for a in [&["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass"][..], &["pwsh", "-nop", "-noni"]] {
+            assert!(print_preamble(&v(a), text).is_some(), "{a:?}");
+        }
+        assert_eq!(print_preamble(&v(&["pwsh", "-NoExit"]), text).unwrap().argv, v(&["pwsh", "-NoExit", "-Command", PWSH_PRINT]), "one -NoExit");
+        for a in [
+            &["pwsh", "-c", "ls"][..],
+            &["pwsh", "-Command", "ls"],
+            &["pwsh", "-NoLogo", "-com", "ls"],
+            &["pwsh", "-e", "AAAA"],
+            &["pwsh", "-ec", "AAAA"],
+            &["pwsh", "-EncodedCommand", "AAAA"],
+            &["pwsh", "-f", "x.ps1"],
+            &["powershell", "/File", "x.ps1"],
+            &["pwsh", "-cwa", "x"],
+            &["pwsh", "x.ps1"],
+        ] {
+            assert!(print_preamble(&v(a), text).is_none(), "{a:?}");
+        }
+        // cmd.exe: no space or quote in its argv (they would be escaped for
+        // MSVC rules); the quoted path comes from the env var.
+        for exe in ["cmd.exe", r"C:\Windows\System32\cmd.exe", "CMD"] {
+            let p = print_preamble(&v(&[exe]), text).unwrap();
+            assert_eq!(p.argv, v(&[exe, "/k", "%RSZ_PREAMBLE_CMD%"]));
+            assert!(p.argv[1..].iter().all(|a| !a.contains([' ', '"'])), "{:?}", p.argv);
+            assert_eq!(p.env, vec![(PREAMBLE_CMD_ENV.to_string(), r#"set "RSZ_PREAMBLE_CMD=" & type "{file}""#.to_string())]);
+            assert_eq!(&p.bytes[..2], &[0xff, 0xfe], "UTF-16LE BOM");
+            let back: Vec<u16> = p.bytes[2..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            assert_eq!(String::from_utf16(&back).unwrap(), text);
+        }
+        assert!(print_preamble(&v(&["cmd.exe", "/d", "/q"]), text).is_some());
+        for a in [&["cmd", "/c", "dir"][..], &["cmd.exe", "/K", "echo hi"], &["cmd", "/s", "/c", "x"]] {
+            assert!(print_preamble(&v(a), text).is_none(), "{a:?}");
+        }
+        // Anything else is fed to the screen as before.
+        for a in [&["wsl.exe"][..], &["bash.exe", "-l"], &["nu"], &["claude"]] {
+            assert!(print_preamble(&v(a), text).is_none(), "{a:?}");
+        }
     }
 
     #[test]
