@@ -81,30 +81,31 @@ function Alive([int]$id) { [bool](Get-Process -Id $id -ErrorAction SilentlyConti
 function Parent-Of([int]$id) { (Get-CimInstance Win32_Process -Filter "ProcessId=$id").ParentProcessId }
 function Children-Of([int]$id) { Get-CimInstance Win32_Process -Filter "ParentProcessId=$id" }
 
-# Shot PID FILE: a picture of that app's window.
-if (-not ("RszkWin" -as [type])) {
+# Shot PID FILE: a picture of that app's window, taken with PrintWindow
+# (PW_RENDERFULLCONTENT, which WebView2 paints for), so the window is never
+# brought to the front and no key is pressed: an Alt tap on a focused
+# suzuri window puts it in Windows' menu mode, where it answers no bridge
+# call until Esc.
+if (-not ("RszkShot" -as [type])) {
   Add-Type -AssemblyName System.Drawing
   Add-Type -TypeDefinition @"
 using System; using System.Runtime.InteropServices;
-public static class RszkWin {
+public static class RszkShot {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
 }
 "@
 }
 function Shot([int]$id, [string]$path) {
   $h = (Get-Process -Id $id).MainWindowHandle
   if ($h -eq [IntPtr]::Zero) { Say "(no picture: no window for $id)"; return }
-  [RszkWin]::keybd_event(0x12, 0, 0, [IntPtr]::Zero); [RszkWin]::keybd_event(0x12, 0, 2, [IntPtr]::Zero)
-  [RszkWin]::ShowWindow($h, 9) | Out-Null; [RszkWin]::SetForegroundWindow($h) | Out-Null
-  Start-Sleep -Milliseconds 1500
-  $r = New-Object RszkWin+RECT; [RszkWin]::GetWindowRect($h, [ref]$r) | Out-Null
+  $r = New-Object RszkShot+RECT; [RszkShot]::GetWindowRect($h, [ref]$r) | Out-Null
   $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
-  $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size); $bmp.Save($path); $g.Dispose(); $bmp.Dispose()
-  Say "picture: $path"
+  $g = [System.Drawing.Graphics]::FromImage($bmp); $dc = $g.GetHdc()
+  $ok = [RszkShot]::PrintWindow($h, $dc, 2)
+  $g.ReleaseHdc($dc); $bmp.Save($path); $g.Dispose(); $bmp.Dispose()
+  if ($ok) { Say "picture: $path" } else { Say "(no picture: PrintWindow failed for $id)" }
 }
 
 function Cleanup {

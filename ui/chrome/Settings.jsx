@@ -183,8 +183,14 @@ function SessionPage({ cfg, meta, onSet, onProfiles, onAddProfile, selectLast })
         <Selector label="New tabs use" options={opts(names)} value={cfg.active_profile} onChange={(v) => onSet({ active_profile: v })} />
         <Selector label="Notice" description="The screen corner notice cards stack in."
           options={opts(meta.notice_positions, meta.notice_labels)} value={cfg.notice_position} onChange={(v) => onSet({ notice_position: v })} />
-        <Switch label="Animate unfocused" description="Off: spinners rest while another app is in front."
-          value={cfg.animate_unfocused !== false} onChange={(on) => onSet({ animate_unfocused: on })} />
+        <FieldRow label="Animate unfocused" description="Off: spinners rest while another app is in front.">
+          <Switch label="Animate unfocused" isLabelHidden
+            value={cfg.animate_unfocused !== false} onChange={(on) => onSet({ animate_unfocused: on })} />
+        </FieldRow>
+        <FieldRow label="Bring back after a reboot" description="Tabs, folders and recent text return after a restart. Off deletes what is saved.">
+          <Switch label="Bring back after a reboot" isLabelHidden
+            value={cfg.restore_sessions !== false} onChange={(on) => onSet({ restore_sessions: on })} />
+        </FieldRow>
       </FormLayout>
       <Divider />
       <VStack gap={2}>
@@ -254,10 +260,11 @@ function ProfileRow({ index, profile, canDelete, select, onSave, onDelete }) {
 // no label of its own (SegmentedControl only takes an aria-label).
 // Not Astryx: the inner div only carries the id Field's label points at;
 // SegmentedControl takes no id prop.
-function FieldRow({ label, children }) {
+function FieldRow({ label, description, children }) {
+  const id = `rsz-settings-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
   return (
-    <Field label={label} inputID={`rsz-settings-${label.toLowerCase()}`} isGroupLabel>
-      <div id={`rsz-settings-${label.toLowerCase()}`}>{children}</div>
+    <Field label={label} description={description} inputID={id} isGroupLabel>
+      <div id={id}>{children}</div>
     </Field>
   )
 }

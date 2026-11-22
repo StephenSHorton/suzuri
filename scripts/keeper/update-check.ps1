@@ -12,7 +12,11 @@
 # (they would pick suzuri's own install folder); the app runs with the
 # scratch LOCALAPPDATA, RSZ_CONFIG_DIR and keeper folder (lib.ps1). A
 # throwaway updater key and an http feed on 127.0.0.1, as in
-# scripts/release/test-update-windows.ps1; nothing is published.
+# scripts/release/test-update-windows.ps1; nothing is published. The update
+# installs quietly (/S, the same installer with no window), so a stuck
+# install never leaves a dialog on the desktop; while it runs, every process
+# that runs a program from the scratch install, and the installer, is
+# printed, so a suzuri.exe the installer could not replace shows who held it.
 #   powershell -ExecutionPolicy Bypass -File scripts\keeper\update-check.ps1 [-Old 0.10.0] [-New 0.10.1] [-Port 8787] [-SkipBuild]
 param([string]$Old = "0.10.0", [string]$New = "0.10.1", [int]$Port = 8787, [switch]$SkipBuild)
 . (Join-Path $PSScriptRoot "lib.ps1")
@@ -35,7 +39,7 @@ if (-not $SkipBuild) {
     productName = $Product; mainBinaryName = "suzuri"; identifier = "com.stephenshorton.suzuri.keepertest"
     bundle = @{ windows = @{ nsis = @{ installerHooks = $null } } }
     plugins = @{ updater = @{ pubkey = (Get-Content "$key.pub" -Raw).Trim(); dangerousInsecureTransportProtocol = $true
-                              windows = @{ installMode = "passive" } } }
+                              windows = @{ installMode = "quiet" } } }
   } | ConvertTo-Json -Depth 8 -Compress
   [IO.File]::WriteAllText((Join-Path $keyDir "overlay.json"), $overlay, $utf8)
   foreach ($v in @($Old, $New)) {
@@ -87,7 +91,17 @@ try {
   Say "app $app1 ($Old): pane $id kept by host $hostPid (version $($k.version), $($k.exe)), shell $shell, running a counter"
 
   Say "== waiting for the app to install $New and restart itself"
-  for ($i = 0; $i -lt 300; $i++) { if ((Ver) -eq $New -and -not (Alive $app1)) { break }; Start-Sleep 1 }
+  $seen = @{}
+  for ($i = 0; $i -lt 300; $i++) {
+    if ((Ver) -eq $New -and -not (Alive $app1)) { break }
+    Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$Inst\*" -or $_.CommandLine -clike "* /UPDATE *" } | ForEach-Object {
+      if (-not $seen[$_.ProcessId]) {
+        $seen[$_.ProcessId] = 1
+        Say "  seen at ${i}s: pid $($_.ProcessId) (parent $($_.ParentProcessId)) $($_.CommandLine)"
+      }
+    }
+    Start-Sleep 1
+  }
   if ((Ver) -ne $New) { Fail "still $(Ver)" }
   if (Alive $app1) { Fail "the old app did not exit" }
   $app2 = $null

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -39,6 +39,10 @@ pub struct Bridge {
     panes: Arc<Panes>,
     next: AtomicU64,
     pending: Mutex<HashMap<u64, Sender<(u16, Value)>>>,
+    /// The UI has its tools and its first tabs (aicontrol_ready): until
+    /// then calls answer 503, which a caller that just started this app
+    /// (Hearth's Open in Suzuri) retries.
+    ready: AtomicBool,
 }
 
 fn config_dir() -> PathBuf {
@@ -100,6 +104,7 @@ impl Bridge {
             panes,
             next: AtomicU64::new(0),
             pending: Mutex::default(),
+            ready: AtomicBool::new(false),
         });
         let dir = config_dir();
         let _ = std::fs::create_dir_all(dir.join("ai"));
@@ -194,7 +199,17 @@ impl Bridge {
             (Method::Post, "/v1/call") => match serde_json::from_str::<Value>(&body) {
                 Ok(v) => {
                     let tool = v.get("tool").and_then(Value::as_str).unwrap_or("").to_string();
-                    self.ui(&tool, v.get("args").cloned().unwrap_or(json!({})))
+                    let args = v.get("args").cloned().unwrap_or(json!({}));
+                    // A socket Suzuri may not show is refused here, before
+                    // the window opens a tab for it.
+                    if let Some(why) = (tool == "open_kept").then(|| open_kept_refused(&args)).flatten() {
+                        return reply(req, 400, json!({ "error": why }));
+                    }
+                    let out = self.ui(&tool, args);
+                    if tool == "open_kept" && out.0 == 200 {
+                        self.to_front();
+                    }
+                    out
                 }
                 Err(e) => (400, json!({ "error": format!("bad json: {e}") })),
             },
@@ -289,7 +304,7 @@ impl Bridge {
 
     /// Ask the webview to run an AI control tool; wait up to 5 s.
     fn ui(&self, tool: &str, args: Value) -> (u16, Value) {
-        let Some(app) = self.app.lock().clone() else {
+        let Some(app) = self.app.lock().clone().filter(|_| self.ready.load(Ordering::Relaxed)) else {
             return (503, json!({ "error": "window not ready" }));
         };
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
@@ -308,11 +323,38 @@ impl Bridge {
         }
     }
 
+    /// Bring the window up (open_kept: the person asked to see it here).
+    fn to_front(&self) {
+        use tauri::Manager;
+        let Some(app) = self.app.lock().clone() else { return };
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        }
+        #[cfg(target_os = "macos")]
+        let _ = app.show();
+    }
+
     fn resolve(&self, id: u64, status: u16, body: Value) {
         if let Some(tx) = self.pending.lock().remove(&id) {
             let _ = tx.send((status, body));
         }
     }
+}
+
+/// The UI is up: its tools are registered and its first tabs are open.
+#[tauri::command]
+pub fn aicontrol_ready(bridge: State<'_, Arc<Bridge>>) {
+    bridge.ready.store(true, Ordering::Relaxed);
+}
+
+/// Why open_kept may not show `args.socket`, or None when it may.
+fn open_kept_refused(args: &Value) -> Option<String> {
+    let Some(sock) = args.get("socket").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        return Some("socket required".into());
+    };
+    crate::keeper::foreign_sock(std::path::Path::new(sock)).err().map(|e| e.to_string())
 }
 
 /// The webview's answer to an `aicontrol` event.
@@ -447,6 +489,7 @@ fn tools() -> Value {
         { "name": "rename", "args": { "pane_id": "u64", "title": "string" }, "doc": "Set the pane title." },
         { "name": "new_tab", "args": {}, "doc": "Open a new tab with a shell." },
         { "name": "report_agent", "args": { "pane_id": "u64", "state": "idle|working|blocked|done|clear" }, "doc": "Explicit agent lifecycle for a pane. Replaces the title and PTY activity guess. blocked means waiting on a person. clear restores the guess." },
+        { "name": "open_kept", "args": { "socket": "path", "title": "string?", "from": "string?" }, "doc": "Show a shell another program keeps (its keeper socket, in a 0700 folder of this user's) in a new tab and bring the window up. Closing the tab only lets go of it. macOS and Linux." },
     ] })
 }
 
@@ -474,7 +517,9 @@ focus {pane_id}; close {pane_id?}; rename {pane_id, title};
 report_agent {pane_id, state: idle|working|blocked|done|clear};
 new_tab; move_to_tab {pane_id, tab_id?} (no tab_id: its own new tab);
 move {pane_id, target_pane_id, edge: left|right|top|bottom} (any tab);
-rotate, swap, grow, shrink, equalize {pane_id?} (the split around the pane).
+rotate, swap, grow, shrink, equalize {pane_id?} (the split around the pane);
+open_kept {socket, title?, from?} (another program's kept shell, in a new
+tab; closing it lets go, the shell keeps running there).
 Changes answer with the new layout.
 ";
 
@@ -501,8 +546,8 @@ mod tests {
     fn tools_lists_all_with_docs() {
         let v = tools();
         let list = v["tools"].as_array().unwrap();
-        assert_eq!(list.len(), 15);
-        for name in ["move", "rotate", "swap", "grow", "shrink", "equalize", "move_to_tab", "new_tab"] {
+        assert_eq!(list.len(), 16);
+        for name in ["move", "rotate", "swap", "grow", "shrink", "equalize", "move_to_tab", "new_tab", "open_kept"] {
             assert!(list.iter().any(|t| t["name"] == name), "{name}");
         }
         assert!(list.iter().all(|t| t["doc"].as_str().is_some_and(|d| !d.is_empty())));

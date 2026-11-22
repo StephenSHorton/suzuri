@@ -282,6 +282,19 @@ fn decode_b64_bytes(s: &str) -> Vec<u8> {
     out
 }
 
+/// PowerShell: the file of old text a restored pane prints at its start.
+pub const PREAMBLE_ENV: &str = "RSZ_PREAMBLE";
+
+/// Writes a restored pane's old text for the shell to print (Windows
+/// PowerShell, see PWSH_PROMPT): a temp folder of this user's, removed with
+/// the shell, and the file in it (the shell also deletes it once printed).
+pub fn preamble_file(text: &str) -> Option<(PathBuf, PathBuf)> {
+    let dir = temp_dir("rsz-pwsh")?;
+    let file = dir.join("restored.txt");
+    std::fs::write(&file, text).ok()?;
+    Some((dir, file))
+}
+
 /// How a shell is started with the bootstrap: extra args, env, and a temp
 /// dir to remove when the pane closes.
 pub struct Bootstrap {
@@ -488,7 +501,12 @@ const PWSH_KEEP: &str = "$global:RszUserPrompt = $function:prompt; function glob
 /// bar (Enter comes as CR; keys with no character, like arrows, are
 /// dropped). Not with the person's own prompt kept (`RszUserPrompt` set):
 /// the keys stay theirs.
-const PWSH_PROMPT: &str = "function global:prompt { $ok=$?; $native=$global:LASTEXITCODE; try { $h=Get-History -Count 1 -ErrorAction SilentlyContinue; if ($h -and $h.Id -ne $global:RszHist) { $global:RszHist=$h.Id; $ec=0; if (-not $ok) { if ($native) { $ec=[int]$native } else { $ec=1 } }; $b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$h.CommandLine)); $e=[char]27; $b=[char]7; [Console]::Out.Write(('{0}]7879;done;{1};{2}{3}' -f $e,$ec,$b64,$b)); if (-not $global:RszUserPrompt) { try { $t=''; while ([Console]::KeyAvailable) { $k=[Console]::ReadKey($true); if ($k.KeyChar -ne [char]0) { $t+=$k.KeyChar } }; if ($t) { [Console]::Out.Write(($e+']7878;typeahead='+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($t))+$b)) } } catch {} } }; $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}; ' ' }; Clear-Host";
+///
+/// A restored pane's old text (hearth#916, #950) is printed by the shell
+/// itself after Clear-Host, from the file [`PREAMBLE_ENV`] names: ConPTY
+/// starts from a blank screen and draws by absolute row, so text put on
+/// our screen before it would be painted over.
+const PWSH_PROMPT: &str = "function global:prompt { $ok=$?; $native=$global:LASTEXITCODE; try { $h=Get-History -Count 1 -ErrorAction SilentlyContinue; if ($h -and $h.Id -ne $global:RszHist) { $global:RszHist=$h.Id; $ec=0; if (-not $ok) { if ($native) { $ec=[int]$native } else { $ec=1 } }; $b64=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$h.CommandLine)); $e=[char]27; $b=[char]7; [Console]::Out.Write(('{0}]7879;done;{1};{2}{3}' -f $e,$ec,$b64,$b)); if (-not $global:RszUserPrompt) { try { $t=''; while ([Console]::KeyAvailable) { $k=[Console]::ReadKey($true); if ($k.KeyChar -ne [char]0) { $t+=$k.KeyChar } }; if ($t) { [Console]::Out.Write(($e+']7878;typeahead='+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($t))+$b)) } } catch {} } }; $p=(Get-Location).ProviderPath; if(-not $p){$p=(Get-Location).Path}; $e=[char]27; $b=[char]7; [Console]::Out.Write(($e+']7878;cwd='+$p+$b)) } catch {}; ' ' }; Clear-Host; if ($env:RSZ_PREAMBLE) { try { $Host.UI.Write([IO.File]::ReadAllText($env:RSZ_PREAMBLE, [Text.Encoding]::UTF8)); Remove-Item -LiteralPath $env:RSZ_PREAMBLE -ErrorAction SilentlyContinue } catch {}; Remove-Item Env:RSZ_PREAMBLE -ErrorAction SilentlyContinue }";
 
 #[cfg(test)]
 mod tests {
@@ -612,6 +630,10 @@ mod tests {
         assert!(kept.starts_with("$global:RszUserPrompt = $function:prompt; function global:prompt {"), "{kept}");
         assert!(kept.contains("]7878;cwd=") && kept.contains("]7879;done;") && kept.contains("& $global:RszUserPrompt };"), "{kept}");
         assert!(!kept.contains(" ' ' };"), "{kept}");
+        // A restored pane's old text is printed after the clear, either way.
+        for s in [&kept, PWSH_PROMPT] {
+            assert!(s.contains("Clear-Host; if ($env:RSZ_PREAMBLE) {"), "{s}");
+        }
         // The typeahead drain is skipped when the person's prompt is kept.
         assert!(PWSH_PROMPT.contains("if (-not $global:RszUserPrompt) { try { $t=''; while ([Console]::KeyAvailable)"));
         assert_eq!(script(bootstrap(&["pwsh.exe".into()]).unwrap()), PWSH_PROMPT);
