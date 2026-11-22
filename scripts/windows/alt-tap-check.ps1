@@ -7,9 +7,11 @@
 #      shortcuts still work), and layout still answers in under 1 s after.
 #   cargo build -p suzuri -p rsz-keeper
 #   powershell -ExecutionPolicy Bypass -File scripts\windows\alt-tap-check.ps1
-# Run against a build of the base branch, it should fail at step 1 (504).
+# Run against a build of the base branch (set RSZ_APP to its suzuri.exe),
+# it should fail at step 1 (504).
 . (Join-Path $PSScriptRoot "..\keeper\lib.ps1")
-$App = Join-Path $Root "target\debug\suzuri.exe"
+# RSZ_APP: another suzuri.exe to check (a base-branch build, to see the bug).
+$App = if ($env:RSZ_APP) { $env:RSZ_APP } else { Join-Path $Root "target\debug\suzuri.exe" }
 if (-not ((Test-Path $App) -and (Test-Path $Keeper))) { Fail "build first: cargo build -p suzuri -p rsz-keeper" }
 if (-not ("AltTap" -as [type])) {
 Add-Type -TypeDefinition @"
@@ -22,7 +24,9 @@ public static class AltTap {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
-  public static void K(ushort vk, bool up) { var i = new INPUT[1]; i[0].type = 1; i[0].ki.wVk = vk; i[0].ki.dwFlags = up ? 2u : 0u; SendInput(1, i, Marshal.SizeOf(typeof(INPUT))); }
+  // Arrows need KEYEVENTF_EXTENDEDKEY, or Windows sends the numpad key
+  // (and Alt+Numpad4 is Alt-code typing, not Alt+Left).
+  public static void K(ushort vk, bool up) { var i = new INPUT[1]; i[0].type = 1; i[0].ki.wVk = vk; uint ext = (vk >= 0x21 && vk <= 0x28) ? 1u : 0u; i[0].ki.dwFlags = (up ? 2u : 0u) | ext; SendInput(1, i, Marshal.SizeOf(typeof(INPUT))); }
   public static uint FgPid() { uint p; GetWindowThreadProcessId(GetForegroundWindow(), out p); return p; }
 }
 "@
