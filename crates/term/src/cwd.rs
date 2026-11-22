@@ -2,9 +2,11 @@
 //! is (Go suzuri's cwd.go). The shell's own report (OSC 7 or Go suzuri's
 //! OSC 7878 from the shell hooks, fed in through Pane::set_reported_cwd) wins;
 //! without one, macOS and Linux ask the OS for the shell process's cwd.
-//! Windows reads no shell folder from the OS (PowerShell's cd leaves its
-//! process folder alone), so it relies on the report; while a program runs,
-//! restore takes that program's folder instead ([`program_cwd`]).
+//! Windows reads no PowerShell folder from the OS (its cd leaves the process
+//! folder alone), so it relies on the report, else the default prompt
+//! ([`powershell_prompt_cwd`]); cmd.exe's cd does move its process folder
+//! ([`program_cwd`] on the shell). While a program runs, restore takes that
+//! program's folder instead ([`program_cwd`]).
 
 /// The current directory of process `pid`, if the OS will say.
 #[cfg(target_os = "macos")]
@@ -107,6 +109,25 @@ pub fn program_cwd(_pid: u32) -> Option<String> {
     None
 }
 
+/// The folder in PowerShell's default prompt (`PS C:\dir> `, one `>` more
+/// per nested prompt) on the lowest screen line that starts one, joined
+/// with the lines below it when a long path wrapped. A Windows path holds
+/// no `>`, so the first one ends it. The caller checks the folder exists.
+pub fn powershell_prompt_cwd(screen: &str) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let at = lines.iter().rposition(|l| l.starts_with("PS ") && l.len() > 3)?;
+    let mut joined = String::new();
+    for l in &lines[at..] {
+        joined.push_str(l);
+        if joined.contains('>') {
+            break;
+        }
+    }
+    let path = &joined[3..joined.find('>')?];
+    let abs = path.as_bytes().get(1) == Some(&b':') || path.starts_with("\\\\");
+    (abs && !path.trim().is_empty()).then(|| path.to_string())
+}
+
 /// The path from an OSC 7 file URI (file://host/path, percent-encoded), or
 /// None for anything else.
 pub fn osc7_path(uri: &str) -> Option<String> {
@@ -152,6 +173,19 @@ mod tests {
             assert_eq!(std::fs::canonicalize(got).unwrap(), std::fs::canonicalize(want).unwrap());
             assert!(program_cwd(u32::MAX - 3).is_none(), "no such process");
         }
+    }
+
+    #[test]
+    fn powershell_prompts() {
+        let f = powershell_prompt_cwd;
+        assert_eq!(f("PS C:\\Users\\me> ").as_deref(), Some("C:\\Users\\me"));
+        assert_eq!(f("PS C:\\> dir").as_deref(), Some("C:\\"));
+        assert_eq!(f("PS C:\\old> cd D:\\new\nout\nPS D:\\new>> \n\n").as_deref(), Some("D:\\new"), "the lowest prompt, nested");
+        assert_eq!(f("PS C:\\a\\very\\long\\pa\nth\\here> ").as_deref(), Some("C:\\a\\very\\long\\path\\here"), "wrapped");
+        assert_eq!(f("PS \\\\srv\\share> ").as_deref(), Some("\\\\srv\\share"));
+        assert_eq!(f("PS HKLM:\\Software> "), None, "not a folder path");
+        assert_eq!(f("C:\\Users\\me>"), None, "cmd's prompt");
+        assert_eq!(f("~/src ❯ "), None);
     }
 
     #[test]

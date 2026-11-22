@@ -769,7 +769,8 @@ impl Pane {
     }
 
     /// Where a new pane split from this one should start: the shell's last
-    /// report, else the shell process's cwd from the OS (macOS, Linux).
+    /// report, else the shell process's cwd from the OS (macOS, Linux), else
+    /// on Windows what an unhooked shell shows ([`Pane::unhooked_cwd`]).
     pub fn cwd(&self) -> Option<String> {
         // The input bar's hooks report the cwd at every prompt (OSC 7878).
         let hooked = self.shared.shell.lock().cwd.clone();
@@ -779,13 +780,34 @@ impl Pane {
         if let Some(c) = self.reported_cwd.lock().clone() {
             return Some(c);
         }
-        self.pid.and_then(crate::cwd::process_cwd)
+        #[cfg(windows)]
+        let os = self.unhooked_cwd();
+        #[cfg(not(windows))]
+        let os = self.pid.and_then(crate::cwd::process_cwd);
+        os
+    }
+
+    /// Windows, a shell that reports no folder (the plain-shell setting,
+    /// cmd.exe; hearth#1025): cmd.exe's `cd` moves its own process folder,
+    /// so the OS has it; PowerShell's does not, so it is read from its
+    /// default prompt (`PS C:\dir>`) on the screen, when that names a
+    /// folder that exists. A custom prompt gives nothing, as before.
+    #[cfg(windows)]
+    fn unhooked_cwd(&self) -> Option<String> {
+        let base = std::path::Path::new(&self.shell_prog).file_name().map(|b| b.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if base.strip_suffix(".exe").unwrap_or(&base) == "cmd" {
+            return self.pid.and_then(crate::cwd::program_cwd);
+        }
+        if self.reads_ahead {
+            return crate::cwd::powershell_prompt_cwd(&self.screen_text()).filter(|d| std::path::Path::new(d).is_dir());
+        }
+        None
     }
 
     /// Where the shell process is now, from the OS (macOS, Linux), else
     /// [`Pane::cwd`]. Unlike the last prompt's report, this follows a `cd`
     /// on the line of a command still running (hearth#916). Windows cannot
-    /// see a shell's folder that way (PowerShell's `cd` leaves its process
+    /// see a PowerShell's folder that way (its `cd` leaves its process
     /// folder alone), so there it is the folder of the program in front, if
     /// one runs: the folder it started in, unless it moved itself (hearth#950).
     pub fn live_cwd(&self) -> Option<String> {

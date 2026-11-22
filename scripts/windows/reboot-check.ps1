@@ -16,6 +16,9 @@
 #    and with cmd.exe as the active profile, a hard kill brings back the
 #    old text and the dim restored line above the new prompt, with
 #    Japanese, a box line and a middle dot unbroken and no literal `[2m`;
+#  - card hearth#1025: those two shells report no folder, yet the pane
+#    that had `cd` into work\alpha (plain) or work\beta (cmd) is saved in
+#    that folder and comes back in it after the hard kill;
 #  - card hearth#1024: a Cmd tab opened while Default is the active profile
 #    comes back as cmd.exe after a hard kill (the first tab, Default's
 #    shell, comes back as PowerShell).
@@ -283,7 +286,9 @@ function KillAll($p) {
 # below it; $prompt matches the new shell's prompt line.
 # Then a cmd and a PowerShell started inside it ($nested, then exit from
 # each) print nothing of it again.
-function RestoreCase([string]$label, $vars, $config, [string]$fill, [string[]]$want, [scriptblock]$prompt, [string]$picture, [string[]]$nested) {
+# $dir (card hearth#1025): the folder $fill moves to. The save names it,
+# though the shell reports no folder, and the new shell starts in it.
+function RestoreCase([string]$label, $vars, $config, [string]$fill, [string[]]$want, [scriptblock]$prompt, [string]$picture, [string[]]$nested, [string]$dir) {
   Say "== $label"
   foreach ($d in Sessions) { Remove-Item -Recurse -Force $d.FullName }
   $cfgFile = Join-Path $S "cfg\config.json"
@@ -300,6 +305,16 @@ function RestoreCase([string]$label, $vars, $config, [string]$fill, [string[]]$w
   foreach ($w in $want) { if ($lines -notcontains $w) { Fail "${label}: '$w' never shown before the kill: $(($lines | Select-Object -Last 15) -join ' | ')" } }
   if (-not (Test-Path (Join-Path $S "cfg\restore\$($a1.Id)\session.json"))) { Fail "${label}: no session saved" }
   Say "1. before the kill: $($want -join ' / ') on screen"
+  if ($dir) {
+    # A save follows the last output; give it time to name the folder.
+    for ($i = 0; $i -lt 30; $i++) {
+      $saved = (Get-Content (Join-Path $S "cfg\restore\$($a1.Id)\session.json") -Raw | ConvertFrom-Json).tabs[0].tree.cwd
+      if ($saved -eq $dir) { break }
+      Start-Sleep -Milliseconds 500
+    }
+    if ($saved -ne $dir) { Fail "${label}: the pane's folder saved as '$saved', not '$dir'" }
+    Say "1. folder saved for a reboot: $saved"
+  }
   KillAll $a1
   $a2 = StartApp $vars
   Ready
@@ -333,6 +348,12 @@ function RestoreCase([string]$label, $vars, $config, [string]$fill, [string[]]$w
     Say "2. the new start's profile line (line $new) comes before the old text (the first start's profile line, line $old) and the restored line (line $($marks[0]))"
   }
   Say "2. after the kill: $($want -join ' / ') back in order, then '$($lines[$marks[0]])' once, no literal [2m, then the prompt '$last'"
+  if ($dir) {
+    # The shell's own prompt names where it started (the bridge's cwd is
+    # only what the hooks report, empty here).
+    if ($last.IndexOf($dir, [StringComparison]::OrdinalIgnoreCase) -lt 0) { Fail "${label}: the new shell's prompt '$last' is not in '$dir'; the end:`n$shown" }
+    Say "2. the new shell starts in the old folder: its prompt '$last'"
+  }
   Shot $a2 (Join-Path $Out $picture)
   foreach ($n in $nested) { Submit $q.id $n; Start-Sleep -Seconds 3 }
   Submit $q.id "echo nested-done"
@@ -555,13 +576,13 @@ try {
     RestoreCase "plain-shell setting (RSZ_NO_BAR=1): PowerShell with no hooks" @{ RSZ_NO_BAR = "1" } $null `
       "cd $S\work\alpha; 1..300 | % { `"plain-line-`$_`" }; 'plain $ja'" `
       @("plain-line-1", "plain-line-150", "plain-line-300", "plain $ja") `
-      { param($l) $l -match '^PS .*>$' -or $l -match "$([char]0x276F)\s*`$" -or $l -match '>\s*$' } "5-plain-shell-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile")
+      { param($l) $l -match '^PS .*>$' -or $l -match "$([char]0x276F)\s*`$" -or $l -match '>\s*$' } "5-plain-shell-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile") -dir "$S\work\alpha"
   }
   if ($Cases -contains "cmd") {
     RestoreCase "a cmd.exe profile (Cmd, the active profile)" @{} @{ active_profile = "Cmd" } `
       "cd /d $S\work\beta & (for /L %i in (1,1,300) do @echo cmd-line-%i) & echo cmd $ja" `
       @("cmd-line-1", "cmd-line-150", "cmd-line-300", "cmd $ja") `
-      { param($l) $l -match '^[A-Za-z]:\\.*>$' } "6-cmd-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile")
+      { param($l) $l -match '^[A-Za-z]:\\.*>$' } "6-cmd-restored.png" @("cmd.exe /d", "powershell -NoLogo -NoProfile") -dir "$S\work\beta"
   }
 
   if ($Cases -contains "profile") { ProfileCase }
