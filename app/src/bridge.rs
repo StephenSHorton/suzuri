@@ -487,7 +487,7 @@ fn tools() -> Value {
         { "name": "equalize", "args": { "pane_id": "u64?" }, "doc": "50/50 the split." },
         { "name": "close", "args": { "pane_id": "u64?" }, "doc": "Close pane (or its tab if last pane)." },
         { "name": "rename", "args": { "pane_id": "u64", "title": "string" }, "doc": "Set the pane title." },
-        { "name": "new_tab", "args": {}, "doc": "Open a new tab with a shell." },
+        { "name": "new_tab", "args": { "profile": "string?" }, "doc": "Open a new tab with a shell: a Settings profile's, else the active profile's." },
         { "name": "report_agent", "args": { "pane_id": "u64", "state": "idle|working|blocked|done|clear" }, "doc": "Explicit agent lifecycle for a pane. Replaces the title and PTY activity guess. blocked means waiting on a person. clear restores the guess." },
         { "name": "open_kept", "args": { "socket": "path", "title": "string?", "from": "string?" }, "doc": "Show a shell another program keeps (its keeper socket, in a folder only this user can enter) in a new tab and bring the window up. Closing the tab only lets go of it." },
     ] })
@@ -515,7 +515,7 @@ Discovery: $SUZURI_CONTROL_URL (in every pane), $SUZURI=1, $SUZURI_PANE_ID,
 Tools: layout; pane {pane_id, lines?}; split {pane_id?, axis: right|down};
 focus {pane_id}; close {pane_id?}; rename {pane_id, title};
 report_agent {pane_id, state: idle|working|blocked|done|clear};
-new_tab; move_to_tab {pane_id, tab_id?} (no tab_id: its own new tab);
+new_tab {profile?}; move_to_tab {pane_id, tab_id?} (no tab_id: its own new tab);
 move {pane_id, target_pane_id, edge: left|right|top|bottom} (any tab);
 rotate, swap, grow, shrink, equalize {pane_id?} (the split around the pane);
 open_kept {socket, title?, from?} (another program's kept shell, in a new
