@@ -53,6 +53,8 @@ export function paneJSON(p, lines, extra = {}) {
     activity: activityName(extra.activity, p.exited),
     tail,
     live,
+    // What the input bar holds, not yet run (a restored pane's resume offer).
+    input: p.bar?.text?.() ?? "",
     // Older suzuri builds: focused, alive (was live) and the joined text.
     focused: !!extra.focused,
     alive: !p.exited,
