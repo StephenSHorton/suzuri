@@ -1,7 +1,5 @@
 //! Attaching to a kept shell.
-#[cfg(unix)]
 use std::io;
-#[cfg(unix)]
 use std::path::Path;
 use std::time::Duration;
 
@@ -21,20 +19,18 @@ pub enum Event {
 /// must not hang the app.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[cfg(unix)]
 pub use imp::Conn;
 
-#[cfg(unix)]
 mod imp {
     use super::*;
     use std::collections::HashMap;
-    use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc::{Sender, channel};
 
     use parking_lot_free::Mutex;
 
+    use crate::sock::UnixStream;
     use crate::{K_FRAME, K_INPUT, K_JSON, PROTO, wire};
 
     /// One connection to a host.

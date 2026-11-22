@@ -43,7 +43,8 @@ Closing the last tab (or its last pane) asks "Quit suzuri?"; `exit` in the
 last shell quits. A split runs the same program as the pane it split from.
 Up to 16 tabs and 24 panes.
 
-Kept shells (macOS; built for Linux too but not tried there; card hearth#913): each pane's shell runs in
+Kept shells (macOS and Windows; built for Linux too but not tried there; cards hearth#913,
+hearth#923): each pane's shell runs in
 its own small host process (`suzuri --keeper-host`), not in the app.
 Quitting, updating (Install and restart) or crashing suzuri leaves the
 shells and their programs running; the next start puts them back in their
@@ -51,12 +52,16 @@ tabs and splits, with screen and scrollback. Closing a pane (or the last
 tab, at "Quit suzuri?") ends its shell; a logout or reboot ends them all. A
 shell opened before an update stays on the version that opened it until it
 ends; new panes get the new one. The hosts' sockets are in
-`<config>/keeper/<pane id>.sock` (0700 folder, this user only), and
+`<config>/keeper/<pane id>.sock` (0700 folder, this user only; AF_UNIX
+sockets on Windows too, each end checking the other is this user). On
+Windows the hosts run from a copy of suzuri.exe in `<config>/keeper/host/`,
+so the installer can replace suzuri.exe while they run, and they are started
+detached, outside the app's job and process tree. And
 `rsz-keeper` (`crates/keeper`, no Zig needed) lists, reads, types into and
 closes them from any program. `RSZ_KEEPER=0` keeps shells in the app as
-before; Windows does that until its half is built (hearth#923). Checks:
-`cargo test -p suzuri --test keeper`, `scripts/keeper/kill9-check.sh`,
-`scripts/keeper/update-check.sh`.
+before. Checks: `cargo test -p suzuri --test keeper`,
+`scripts/keeper/kill9-check.sh`, `scripts/keeper/update-check.sh` (Mac),
+`scripts/keeper/kill-check.ps1`, `scripts/keeper/update-check.ps1` (Windows).
 
 Input bar (#285, Go suzuri's Warp bar): zsh, bash and PowerShell start
 with a quiet prompt and the command line is an editable bar under each pane,

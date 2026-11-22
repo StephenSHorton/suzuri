@@ -34,7 +34,18 @@ fn feed_override() -> Option<String> {
 }
 
 async fn check(app: &AppHandle) -> Result<Option<Available>, String> {
-    let mut b = app.updater_builder();
+    // On Windows the updater starts the installer and ends the app with
+    // process::exit, so RunEvent::Exit never comes: do its part here. The
+    // hang watchdog above all must stop, or a stall while the app goes
+    // could start its dump helper, which runs suzuri.exe itself and keeps
+    // the installer from replacing it.
+    let mut b = app.updater_builder().on_before_exit(|| {
+        crate::hang::stop();
+        crate::window_state::flush();
+        if let Some(r) = crate::restore::get() {
+            r.last_save();
+        }
+    });
     if let Some(url) = feed_override() {
         let url = url.parse().map_err(|e| format!("RSZ_UPDATE_URL: {e}"))?;
         b = b.endpoints(vec![url]).map_err(|e| e.to_string())?;
