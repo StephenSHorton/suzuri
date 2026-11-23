@@ -16,6 +16,7 @@ tauri-build = { workspace = true }
 [dependencies]
 rsz-term = { path = "../crates/term" }
 rsz-keeper = { path = "../crates/keeper" }
+rsz-caffeine = { path = "../crates/caffeine", features = ["serde"] }
 tauri = { workspace = true, features = ["macos-private-api"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

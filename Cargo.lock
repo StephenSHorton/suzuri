@@ -3283,6 +3283,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsz-caffeine"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "rsz-keeper"
 version = "0.10.0"
 dependencies = [
@@ -3960,6 +3967,7 @@ dependencies = [
  "log",
  "parking_lot",
  "png",
+ "rsz-caffeine",
  "rsz-keeper",
  "rsz-term",
  "rust-toast",

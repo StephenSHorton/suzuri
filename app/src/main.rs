@@ -1205,7 +1205,7 @@ fn main() {
         .manage(bridge)
         .manage(panes)
         .manage(update::Pending::default())
-        .manage(caffeine::Caffeine::new())
+        .manage(caffeine::new())
         .invoke_handler(tauri::generate_handler![
             pane_open,
             pane_write,

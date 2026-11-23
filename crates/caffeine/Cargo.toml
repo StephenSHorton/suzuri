@@ -1,0 +1,11 @@
+[package]
+name = "rsz-caffeine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Keep the computer awake (macOS IOPMAssertion, Windows SetThreadExecutionState): indefinitely or for a while, on its own or as one switch shared by several programs"
+
+# No other dependencies: std only. `serde` adds Serialize to Status.
+[dependencies]
+serde = { workspace = true, optional = true }
