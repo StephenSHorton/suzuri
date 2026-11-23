@@ -3325,8 +3325,8 @@ dependencies = [
 
 [[package]]
 name = "rust-toast"
-version = "0.3.0"
-source = "git+https://github.com/StephenSHorton/rust-toast?tag=v0.3.0#8bb855e3b5335cf54acc4582cd05634578ddb821"
+version = "0.6.0"
+source = "git+https://github.com/StephenSHorton/rust-toast?tag=v0.6.0#5e168799c051fc04c0503975933954ad31358ed3"
 dependencies = [
  "block2",
  "dispatch2",

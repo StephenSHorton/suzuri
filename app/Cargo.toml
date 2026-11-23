@@ -32,7 +32,7 @@ getrandom = "0.3"
 tauri-plugin-updater = "2"
 log = "0.4"
 # Desktop notice cards (notices.rs); the lib is `toast`.
-rust-toast = { git = "https://github.com/StephenSHorton/rust-toast", tag = "v0.3.0" }
+rust-toast = { git = "https://github.com/StephenSHorton/rust-toast", tag = "v0.6.0" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
