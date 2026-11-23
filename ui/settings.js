@@ -11,12 +11,18 @@ import { flushSync } from "react-dom"
 import { hostToast } from "./host_toast.js"
 import { mountOverlay, unmountOverlay } from "./chrome/overlays.js"
 import { SettingsView } from "./chrome/Settings.jsx"
+import { foldOutside } from "./settings_follow.js"
 
 const { invoke } = window.__TAURI__.core
 
 export function announce(cfg) {
   window.dispatchEvent(new CustomEvent("rsz:config", { detail: cfg }))
 }
+
+// Settings another program changed (another window, Hearth, a hand edit):
+// the shared file's watch (app/src/config.rs) sends them, and every part
+// applies them as after a save here.
+window.__TAURI__.event.listen("rsz-config", ({ payload }) => announce(payload))
 
 export class Settings {
   // host is the old #overlays element; the screen now renders through the
@@ -27,6 +33,13 @@ export class Settings {
     this.page = "look"
     this.status = ""
     this.selectLast = false
+    // An open screen shows changes made elsewhere too.
+    window.addEventListener("rsz:config", (e) => {
+      if (!this.open_ || e.detail === this.cfg) return
+      this.snap = foldOutside(this.snap, this.cfg, e.detail)
+      this.cfg = e.detail
+      this.render()
+    })
   }
 
   get isOpen() { return this.open_ }

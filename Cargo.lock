@@ -3301,6 +3301,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsz-settings"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "rsz-term"
 version = "0.10.0"
 dependencies = [
@@ -3969,6 +3976,7 @@ dependencies = [
  "png",
  "rsz-caffeine",
  "rsz-keeper",
+ "rsz-settings",
  "rsz-term",
  "rust-toast",
  "serde",

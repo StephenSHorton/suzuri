@@ -145,7 +145,7 @@ fn pane_open(
     // RSZ_CMD still wins for the bench.
     let (prof_cmd, prof_cwd) = config::profile_launch(&settings, profile.as_deref());
     let inherited = from.and_then(|f| panes.launch.lock().get(&f).cloned());
-    let env_cmd = std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| split_args(&s));
+    let env_cmd = std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| config::split_args(&s));
     let command = launch_command(command, env_cmd, profile.is_some(), inherited, prof_cmd);
     let sink = pane_sink(Arc::clone(&panes), id, on_frame, app, notes.inner().clone());
     // A pane split from another starts in that pane's cwd (Go suzuri's cwd.go).
@@ -398,37 +398,6 @@ fn launch_command(
     first.or(inherited).or(profile)
 }
 
-/// Split a command line on spaces, keeping "double-quoted parts" together
-/// (Windows paths with spaces).
-fn split_args(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quoted = false;
-    let mut any = false;
-    for c in s.chars() {
-        match c {
-            '"' => {
-                quoted = !quoted;
-                any = true;
-            }
-            c if c.is_whitespace() && !quoted => {
-                if any {
-                    out.push(std::mem::take(&mut cur));
-                    any = false;
-                }
-            }
-            c => {
-                cur.push(c);
-                any = true;
-            }
-        }
-    }
-    if any {
-        out.push(cur);
-    }
-    out
-}
-
 /// Enter in the input bar (#296): a command block and the line, or a place
 /// in the queue while the shell is busy. Returns {kind: "sent" | "blank" |
 /// "queued", n: queue length}.
@@ -619,22 +588,7 @@ fn config_set(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, 
 /// What the Settings screen offers and where the file is.
 #[tauri::command]
 fn config_meta() -> serde_json::Value {
-    serde_json::json!({
-        "path": config::path().to_string_lossy(),
-        "ui_themes": config::UI_THEMES,
-        "ui_theme_labels": config::UI_THEMES.iter().zip(config::UI_THEME_LABELS).collect::<HashMap<_, _>>(),
-        "ui_modes": config::UI_MODES,
-        "ui_mode_labels": config::UI_MODES.iter().zip(config::UI_MODE_LABELS).collect::<HashMap<_, _>>(),
-        "cursors": config::CURSORS,
-        "font_min": config::FONT_SIZE_MIN,
-        "font_max": config::FONT_SIZE_MAX,
-        "font_default": config::FONT_SIZE_DEFAULT,
-        "fonts": config::mono_font_faces(),
-        "notice_positions": config::NOTICE_POSITIONS,
-        "notice_labels": config::NOTICE_POSITIONS.iter().zip(config::NOTICE_POSITION_LABELS).collect::<HashMap<_, _>>(),
-        "text_sizes": config::TEXT_SIZES,
-        "text_size_labels": config::TEXT_SIZES.iter().zip(config::TEXT_SIZE_LABELS).collect::<HashMap<_, _>>(),
-    })
+    config::meta()
 }
 
 fn clip_write(text: &str) -> Result<(), String> {
@@ -1072,12 +1026,6 @@ mod tests {
         assert_eq!(super::launch_command(v("top"), v("bench"), false, v("pwsh"), None), v("top"));
         assert_eq!(super::launch_command(None, v("bench"), false, v("pwsh"), None), v("bench"));
     }
-
-    #[test]
-    fn split_args_keeps_quotes() {
-        assert_eq!(super::split_args(r#""C:\Program Files\x.exe" --a "b c""#), vec![r"C:\Program Files\x.exe", "--a", "b c"]);
-        assert_eq!(super::split_args("claude"), vec!["claude"]);
-    }
 }
 
 /// Go suzuri subcommands this app does not serve (#330).
@@ -1188,6 +1136,7 @@ fn main() {
             }
             update::start(app.handle());
             caffeine::install(app.handle(), &app.state::<Arc<caffeine::Caffeine>>());
+            config::follow(app.handle());
             if let Some(b) = &bridge_setup {
                 b.attach(app.handle().clone());
                 app.manage(Arc::clone(b));

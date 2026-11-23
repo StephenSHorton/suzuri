@@ -35,7 +35,7 @@ export function onFirstLine(value, caret) {
 }
 
 // The settings cursor name for the notes caret. Unknown names are a block,
-// as config.rs's cursor_code.
+// as rsz-settings's cursor_code.
 export function caretShape(cursor) {
   return cursor === "underline" || cursor === "bar" ? cursor : "block"
 }

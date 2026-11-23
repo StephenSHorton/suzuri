@@ -154,8 +154,8 @@ test("Settings' theme swatches are the themes' own colours", () => {
   }
 })
 
-test("the themes Settings offers (config.rs) are the ones the UI can load", () => {
-  const rs = readFileSync(join(root, "app/src/config.rs"), "utf8")
+test("the themes Settings offers (crates/settings) are the ones the UI can load", () => {
+  const rs = readFileSync(join(root, "crates/settings/src/lib.rs"), "utf8")
   const ids = [.../UI_THEMES: &\[&str\] = &\[([^\]]*)\]/.exec(rs)[1].matchAll(/"([a-z0-9]+)"/g)].map((m) => m[1])
   assert.deepEqual(ids, THEME_IDS)
   const js = readFileSync(join(root, "ui/chrome/themes.js"), "utf8")

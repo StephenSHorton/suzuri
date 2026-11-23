@@ -1,571 +1,103 @@
-//! Settings: one JSON file, the same keys as Go suzuri's config.json
-//! (internal/config/config.go), so a user's settings carry over.
+//! Settings: Suzuri's side of the `rsz-settings` crate (crates/settings),
+//! which holds the keys, defaults, limits and the file itself (Go suzuri's
+//! config.json keys, in Suzuri's config folder). Hearth and any other
+//! program using the crate share that one file.
 //!
-//! The file is Go suzuri's own config.json, in the same folder under the OS
-//! config dir (Windows %LOCALAPPDATA%\suzuri, macOS ~/Library/Application
-//! Support/suzuri, Linux ~/.config/suzuri), so both apps read and write one
-//! file. Keys this app does not use yet (intro, ambient, glass...)
-//! are kept as they are, so nothing is lost on save. RSZ_CONFIG_DIR
-//! overrides the folder (tests, screenshots); there, Go's file is looked
-//! for in a go-suzuri subfolder and copied on first run.
+//! Suzuri follows changes others make (another window's process, Hearth, a
+//! hand edit): the running panes take the new cursor, the notice cards
+//! their corner, and the UI gets the settings on its `rsz-config` event (the
+//! window's `rsz:config`, as after its own save).
 
-use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
+use tauri::{AppHandle, Emitter, Manager};
 
-pub const FONT_SIZE_DEFAULT: i64 = 14;
-pub const FONT_SIZE_MIN: i64 = 10;
-pub const FONT_SIZE_MAX: i64 = 36;
-pub const FONT_FACE_DEFAULT: &str = "GohuFont uni14 Nerd Font Mono";
+pub use rsz_settings::*;
 
-/// The look: one of Astryx's seven themes (npm @astryxdesign/theme-<id>),
-/// for the whole window, the terminal's colours and the notice cards
-/// (ui/appearance.js). The first is the default.
-pub const UI_THEMES: &[&str] = &["neutral", "stone", "matcha", "chocolate", "butter", "gothic", "y2k"];
-/// The Settings labels, in the same order.
-pub const UI_THEME_LABELS: &[&str] = &["Neutral", "Stone", "Matcha", "Chocolate", "Butter", "Gothic", "Y2K"];
-/// Its mode; "system" follows the OS. The first is the default.
-pub const UI_MODES: &[&str] = &["dark", "light", "system"];
-pub const UI_MODE_LABELS: &[&str] = &["Dark", "Light", "System"];
-/// Go suzuri's terminal theme and ANSI map, replaced by ui_theme: dropped
-/// from the file on load.
-const RETIRED_KEYS: &[&str] = &["theme", "shell_ansi_map"];
-/// Go's MonoFontFaces: the settings list, bundled face first.
-pub fn mono_font_faces() -> Vec<&'static str> {
-    if cfg!(target_os = "macos") {
-        vec![FONT_FACE_DEFAULT, "Menlo", "SF Mono", "Monaco", "JetBrains Mono", "Fira Code", "Source Code Pro", "Courier New"]
-    } else {
-        vec![
-            FONT_FACE_DEFAULT,
-            "Cascadia Mono",
-            "Cascadia Code",
-            "Consolas",
-            "Lucida Console",
-            "Courier New",
-            "JetBrains Mono",
-            "Fira Code",
-            "Source Code Pro",
-        ]
-    }
+/// The shared file, one store for this process.
+pub fn store() -> &'static Store {
+    static STORE: OnceLock<Store> = OnceLock::new();
+    STORE.get_or_init(Store::shared)
 }
 
-pub const CURSORS: &[&str] = &["block", "underline", "bar"];
-
-/// The UI's text size (Settings › Look), in Astryx's text-size categories
-/// (iOS Dynamic Type's standard sizes; ui/text_size.js applies them). Only
-/// the window chrome's text follows it; the terminal keeps font_size_px.
-pub const TEXT_SIZES: &[&str] = &["xs", "s", "m", "l", "xl", "xxl", "xxxl"];
-/// The Settings labels, in the same order. "l" is Astryx's own default.
-pub const TEXT_SIZE_LABELS: &[&str] = &["Smallest", "Smaller", "Small", "Standard", "Large", "Larger", "Largest"];
-/// suzuri's default: one step above Astryx's, so the chrome's text isn't
-/// small against its controls.
-pub const TEXT_SIZE_DEFAULT: &str = "xl";
-
-/// Where notice cards sit: the four screen corners rust-toast stacks cards
-/// in (toast::CORNER_*). The first is the default.
-pub const NOTICE_POSITIONS: &[&str] = &["bottom-left", "bottom-right", "top-left", "top-right"];
-/// The Settings labels, in the same order.
-pub const NOTICE_POSITION_LABELS: &[&str] = &["Bottom left", "Bottom right", "Top left", "Top right"];
-
-/// Go's nine anchors (and anything else) to the nearest corner: the middle
-/// row goes to the bottom, the center column to the right (a tie either
-/// way; rust-toast's own default side is the right).
-fn notice_corner(p: &str) -> &'static str {
-    match p {
-        "bottom-left" | "center-left" => "bottom-left",
-        "bottom-right" | "bottom-center" | "center-right" | "center" => "bottom-right",
-        "top-left" => "top-left",
-        "top-right" | "top-center" => "top-right",
-        _ => NOTICE_POSITIONS[0],
-    }
-}
-
-/// The folder settings live in, named `name` under the OS config dir.
-fn dir_named(name: &str) -> PathBuf {
-    if let Some(d) = std::env::var_os("RSZ_CONFIG_DIR").filter(|d| !d.is_empty()) {
-        let d = PathBuf::from(d);
-        return if name == "suzuri" {
-            d.join("go-suzuri")
-        } else {
-            d
-        };
-    }
-    // Same order as Go suzuri's config.Dir.
-    if let Some(base) = std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()) {
-        return PathBuf::from(base).join(name);
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    if cfg!(target_os = "macos") {
-        if let Some(h) = home {
-            return h.join("Library/Application Support").join(name);
-        }
-    } else if let Some(x) = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
-        return PathBuf::from(x).join(name);
-    } else if let Some(h) = home {
-        return h.join(".config").join(name);
-    }
-    std::env::temp_dir().join(name)
-}
-
-pub fn path() -> PathBuf {
-    if let Some(d) = std::env::var_os("RSZ_CONFIG_DIR").filter(|d| !d.is_empty()) {
-        return PathBuf::from(d).join("config.json");
-    }
-    dir_named("suzuri").join("config.json")
-}
-
-/// Go suzuri's config.json, imported on first run. Outside RSZ_CONFIG_DIR
-/// this is [`path`] itself, so there is nothing to import.
-pub fn go_path() -> PathBuf {
-    dir_named("suzuri").join("config.json")
-}
-
-pub fn default_profiles() -> Value {
-    if cfg!(windows) {
-        json!([
-            {"name": "Default"},
-            {"name": "PowerShell", "shell": "powershell.exe -NoLogo -NoProfile"},
-            {"name": "Cmd", "shell": "cmd.exe"},
-        ])
-    } else {
-        json!([
-            {"name": "Default"},
-            {"name": "Zsh", "shell": "/bin/zsh"},
-            {"name": "Bash", "shell": "/bin/bash"},
-        ])
-    }
-}
-
-/// Fill defaults and clamp known keys, as Go's config.Normalize does.
-/// Unknown keys pass through untouched.
-pub fn normalize(v: Value) -> Value {
-    let mut m = match v {
-        Value::Object(m) => m,
-        _ => Map::new(),
-    };
-    let s = |m: &Map<String, Value>, k: &str| {
-        m.get(k)
-            .and_then(Value::as_str)
-            .map(|s| s.trim().to_lowercase())
-    };
-
-    let face = m
-        .get("font_face")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|f| !f.is_empty());
-    let face = face.unwrap_or(FONT_FACE_DEFAULT).to_string();
-    m.insert("font_face".into(), face.into());
-
-    let size = m
-        .get("font_size_px")
-        .and_then(Value::as_i64)
-        .unwrap_or(FONT_SIZE_DEFAULT);
-    m.insert(
-        "font_size_px".into(),
-        size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX).into(),
-    );
-
-    let cursor = s(&m, "cursor")
-        .filter(|c| CURSORS.contains(&c.as_str()))
-        .unwrap_or_else(|| "block".into());
-    m.insert("cursor".into(), cursor.into());
-
-    // The old 16 terminal themes are gone; whoever had one starts on the
-    // default look (Neutral, dark).
-    for k in RETIRED_KEYS {
-        m.remove(*k);
-    }
-    let theme = s(&m, "ui_theme").filter(|t| UI_THEMES.contains(&t.as_str())).unwrap_or_else(|| UI_THEMES[0].into());
-    m.insert("ui_theme".into(), theme.into());
-    let mode = s(&m, "ui_mode").filter(|t| UI_MODES.contains(&t.as_str())).unwrap_or_else(|| UI_MODES[0].into());
-    m.insert("ui_mode".into(), mode.into());
-
-    // Go's Bg anim: keep animating while another app has focus.
-    let anim = m.get("animate_unfocused").and_then(Value::as_bool).unwrap_or(true);
-    m.insert("animate_unfocused".into(), anim.into());
-
-    // Terminals back after a reboot (restore.rs): on unless turned off.
-    let restore = m.get("restore_sessions").and_then(Value::as_bool).unwrap_or(true);
-    m.insert("restore_sessions".into(), restore.into());
-
-    let pos = notice_corner(s(&m, "notice_position").as_deref().unwrap_or(""));
-    m.insert("notice_position".into(), pos.into());
-
-    let size = s(&m, "ui_text_size").map(|v| v.trim().to_lowercase()).unwrap_or_default();
-    let size = TEXT_SIZES.iter().find(|t| **t == size).copied().unwrap_or(TEXT_SIZE_DEFAULT);
-    m.insert("ui_text_size".into(), size.into());
-
-    // Profiles: unique, non-empty names (case-insensitive), never empty.
-    let mut seen = std::collections::HashSet::new();
-    let mut profiles: Vec<Value> = m
-        .get("profiles")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|p| {
-            let mut p = p.as_object()?.clone();
-            let name = p.get("name").and_then(Value::as_str)?.trim().to_string();
-            if name.is_empty() || !seen.insert(name.to_lowercase()) {
-                return None;
-            }
-            p.insert("name".into(), name.into());
-            Some(Value::Object(p))
-        })
-        .collect();
-    if profiles.is_empty() {
-        profiles = default_profiles().as_array().cloned().unwrap_or_default();
-    }
-    let names: Vec<String> = profiles
-        .iter()
-        .filter_map(|p| p["name"].as_str().map(str::to_string))
-        .collect();
-    let active = m
-        .get("active_profile")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let active = names
-        .iter()
-        .find(|n| n.eq_ignore_ascii_case(active))
-        .unwrap_or(&names[0])
-        .clone();
-    m.insert("profiles".into(), Value::Array(profiles));
-    m.insert("active_profile".into(), active.into());
-    Value::Object(m)
-}
-
-/// Read the settings, importing Go suzuri's on first run (RSZ_CONFIG_DIR). A missing or
-/// broken file gives the defaults (a broken one is left on disk as is).
+/// The settings, normalized, importing Go suzuri's on first run.
 pub fn load() -> Value {
-    load_from(&path(), &go_path())
+    store().load()
 }
 
-pub fn load_from(path: &Path, go: &Path) -> Value {
-    let read = |p: &Path| {
-        std::fs::read(p)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            .filter(Value::is_object)
-    };
-    if let Some(v) = read(path) {
-        return normalize(v);
-    }
-    if !path.exists()
-        && let Some(v) = read(go)
-    {
-        let v = normalize(v);
-        let _ = save_to(path, &v);
-        return v;
-    }
-    normalize(Value::Object(Map::new()))
-}
-
-/// Merge `patch`'s keys into the file, normalize and save. Returns what was
-/// saved.
+/// Merge `patch` into the file and save it; returns the whole settings.
 pub fn update(patch: Value) -> std::io::Result<Value> {
-    // One writer at a time: Settings and the window frame (window_state.rs)
-    // both read, merge and write the file, and every window is its own
-    // process, so the mutex covers this process and a file lock the rest.
-    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
-    let _g = LOCK.lock();
-    let path = path();
-    let _f = lock_file(&path);
-    update_at(&path, &go_path(), patch)
-}
-
-/// An OS lock on `config.json.lock` next to the file, held until dropped.
-/// None if it can't be had; the write goes ahead unlocked then.
-fn lock_file(path: &Path) -> Option<std::fs::File> {
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d).ok()?;
-    }
-    let f = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path.with_extension("json.lock"))
-        .ok()?;
-    f.lock().ok()?;
-    Some(f)
-}
-
-pub fn update_at(path: &Path, go: &Path, patch: Value) -> std::io::Result<Value> {
-    let mut cur = match load_from(path, go) {
-        Value::Object(m) => m,
-        _ => Map::new(),
-    };
-    if let Value::Object(p) = patch {
-        for (k, v) in p {
-            cur.insert(k, v);
-        }
-    }
-    let v = normalize(Value::Object(cur));
-    save_to(path, &v)?;
+    let v = store().update(patch)?;
+    is_news(&LAST, &v);
     Ok(v)
 }
 
-/// Atomic write: a temp file of its own (pid and a counter, so two windows
-/// saving at once never share one), then rename over the old file. The old
-/// file is never deleted first: a failed rename leaves it as it was.
-fn save_to(path: &Path, v: &Value) -> std::io::Result<()> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
+/// The settings as this process last applied them, window frame aside:
+/// set by its own saves and by each outside change it follows.
+static LAST: Mutex<Option<Value>> = Mutex::new(None);
+
+/// The settings without the window frame: each window process saves its
+/// own frame (window_state.rs), which is no news to the others.
+fn without_window(v: &Value) -> Value {
+    let mut v = v.clone();
+    if let Some(m) = v.as_object_mut() {
+        m.remove("window");
     }
-    let mut text = serde_json::to_string_pretty(v).map_err(std::io::Error::other)?;
-    text.push('\n');
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
-    std::fs::write(&tmp, text)?;
-    // Windows replaces the target too, but fails while another process has
-    // it open (a reader, antivirus); try again for a moment.
-    let mut tries = if cfg!(windows) { 10 } else { 0 };
-    let res = loop {
-        match std::fs::rename(&tmp, path) {
-            Err(_) if tries > 0 => {
-                tries -= 1;
-                std::thread::sleep(std::time::Duration::from_millis(20));
+    v
+}
+
+/// Whether `v` differs from what was last applied (window frame aside),
+/// and from now on is what was.
+fn is_news(last: &Mutex<Option<Value>>, v: &Value) -> bool {
+    let now = without_window(v);
+    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+    if last.as_ref() == Some(&now) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// Follow changes made outside this process, for as long as it runs.
+pub fn follow(app: &AppHandle) {
+    is_news(&LAST, &load());
+    let app = app.clone();
+    store()
+        .watch(move |v| {
+            if !is_news(&LAST, &v) {
+                return;
             }
-            r => break r,
-        }
-    };
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    res
-}
-
-/// A profile's launch: argv (None = the user's shell) and cwd.
-pub fn profile_launch(cfg: &Value, name: Option<&str>) -> (Option<Vec<String>>, Option<String>) {
-    let want = name
-        .or_else(|| cfg["active_profile"].as_str())
-        .unwrap_or("");
-    let p = cfg["profiles"].as_array().and_then(|ps| {
-        ps.iter().find(|p| {
-            p["name"]
-                .as_str()
-                .is_some_and(|n| n.eq_ignore_ascii_case(want))
+            // On the main thread, as a save from Settings (config_set) is.
+            let a = app.clone();
+            let _ = app.run_on_main_thread(move || {
+                let shape = cursor_code(&v);
+                for p in a.state::<Arc<crate::Panes>>().map.lock().values() {
+                    p.set_default_cursor(shape);
+                }
+                // An empty patch: the corner moves, without the sample card
+                // the window that made the change shows.
+                if let Some(n) = a.try_state::<crate::notices::Notices>() {
+                    n.apply_config(&v, &json!({}));
+                }
+                let _ = a.emit("rsz-config", v);
+            });
         })
-    });
-    let Some(p) = p else { return (None, None) };
-    let shell = p["shell"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(crate::split_args);
-    let cwd = p["cwd"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(expand_home);
-    (shell, cwd)
-}
-
-fn expand_home(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix('~') {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_default();
-        return format!("{home}{rest}");
-    }
-    p.to_string()
-}
-
-/// Settings cursor name to the engine's shape code.
-pub fn cursor_code(cfg: &Value) -> u8 {
-    match cfg["cursor"].as_str() {
-        Some("underline") => 2,
-        Some("bar") => 3,
-        _ => 1,
-    }
+        .forever();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rsz-config-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
     #[test]
-    fn defaults_when_nothing_exists() {
-        let d = tmp("defaults");
-        let v = load_from(&d.join("rs/config.json"), &d.join("go/config.json"));
-        assert_eq!(v["font_size_px"], 14);
-        assert_eq!(v["cursor"], "block");
-        assert_eq!(v["ui_theme"], "neutral");
-        assert_eq!(v["ui_mode"], "dark");
-        assert!(v.get("theme").is_none());
-        assert_eq!(v["active_profile"], "Default");
-        assert!(v["profiles"].as_array().unwrap().len() >= 3);
-    }
-
-    #[test]
-    fn imports_go_suzuri_once_and_keeps_unknown_keys() {
-        let d = tmp("import");
-        let go = d.join("go/config.json");
-        std::fs::create_dir_all(go.parent().unwrap()).unwrap();
-        std::fs::write(
-            &go,
-            r#"{"font_size_px": 16, "cursor": "bar", "theme": "Nord", "intro": "matrix",
-                "glass_blur": 48, "profiles": [{"name": "Default"}, {"name": "Work", "cwd": "/tmp"}],
-                "active_profile": "work", "window": {"x": 0, "y": 65, "width": 1728, "height": 1052}}"#,
-        )
-        .unwrap();
-        let rs = d.join("rs/config.json");
-        let v = load_from(&rs, &go);
-        assert_eq!(v["font_size_px"], 16);
-        assert_eq!(v["cursor"], "bar");
-        // Go's terminal theme doesn't carry over: the default look does.
-        assert!(v.get("theme").is_none());
-        assert_eq!(v["ui_theme"], "neutral");
-        assert_eq!(v["active_profile"], "Work");
-        assert_eq!(v["intro"], "matrix");
-        assert_eq!(v["window"]["width"], 1728);
-        assert!(rs.exists(), "the import is saved as our own file");
-        // Later changes to Go's file don't leak in: ours exists now.
-        std::fs::write(&go, r#"{"font_size_px": 20}"#).unwrap();
-        assert_eq!(load_from(&rs, &go)["font_size_px"], 16);
-    }
-
-    #[test]
-    fn update_merges_clamps_and_persists() {
-        let d = tmp("update");
-        let (rs, go) = (d.join("rs/config.json"), d.join("go/config.json"));
-        let v = update_at(
-            &rs,
-            &go,
-            json!({"font_size_px": 99, "ui_theme": "nope", "extra": 1}),
-        )
-        .unwrap();
-        assert_eq!(v["font_size_px"], 36);
-        assert_eq!(v["ui_theme"], "neutral");
-        assert_eq!(v["extra"], 1);
-        let v = update_at(&rs, &go, json!({"cursor": "underline"})).unwrap();
-        assert_eq!(v["extra"], 1, "earlier keys kept");
-        assert_eq!(load_from(&rs, &go)["cursor"], "underline");
-    }
-
-    #[test]
-    fn ui_theme_and_mode_are_astryx_ones_and_the_old_theme_keys_go() {
-        let v = normalize(json!({"theme": "dracula", "shell_ansi_map": "full", "intro": "matrix"}));
-        assert!(v.get("theme").is_none());
-        assert!(v.get("shell_ansi_map").is_none());
-        assert_eq!(v["intro"], "matrix", "unknown keys stay");
-        assert_eq!((v["ui_theme"].as_str(), v["ui_mode"].as_str()), (Some("neutral"), Some("dark")));
-        let v = normalize(json!({"ui_theme": " Y2K ", "ui_mode": "System"}));
-        assert_eq!((v["ui_theme"].as_str(), v["ui_mode"].as_str()), (Some("y2k"), Some("system")));
-        let v = normalize(json!({"ui_theme": "dracula", "ui_mode": "dim"}));
-        assert_eq!((v["ui_theme"].as_str(), v["ui_mode"].as_str()), (Some("neutral"), Some("dark")));
-        assert_eq!(UI_THEMES.len(), UI_THEME_LABELS.len());
-        assert_eq!(UI_MODES.len(), UI_MODE_LABELS.len());
-    }
-
-    #[test]
-    fn ui_text_size_is_a_category() {
-        assert_eq!(normalize(json!({}))["ui_text_size"], TEXT_SIZE_DEFAULT);
-        assert_eq!(normalize(json!({"ui_text_size": " XXL "}))["ui_text_size"], "xxl");
-        assert_eq!(normalize(json!({"ui_text_size": "huge"}))["ui_text_size"], TEXT_SIZE_DEFAULT);
-        assert_eq!(TEXT_SIZES.len(), TEXT_SIZE_LABELS.len());
-    }
-
-    #[test]
-    fn notice_position_is_one_of_go_anchors() {
-        assert_eq!(normalize(json!({}))["notice_position"], "bottom-left");
-        assert_eq!(normalize(json!({"notice_position": " Top-Right "}))["notice_position"], "top-right");
-        assert_eq!(normalize(json!({"notice_position": "upstairs"}))["notice_position"], "bottom-left");
-        // Go's other anchors move to the nearest corner.
-        for (from, to) in [
-            ("bottom-center", "bottom-right"),
-            ("center-left", "bottom-left"),
-            ("center", "bottom-right"),
-            ("center-right", "bottom-right"),
-            ("top-center", "top-right"),
-            ("top-left", "top-left"),
-            ("bottom-right", "bottom-right"),
-        ] {
-            assert_eq!(normalize(json!({"notice_position": from}))["notice_position"], to, "{from}");
-        }
-        for p in NOTICE_POSITIONS {
-            assert_eq!(notice_corner(p), *p);
-        }
-    }
-
-    #[test]
-    fn animate_unfocused_defaults_on() {
-        assert_eq!(normalize(json!({}))["animate_unfocused"], true);
-        assert_eq!(normalize(json!({"animate_unfocused": false}))["animate_unfocused"], false);
-        assert_eq!(normalize(json!({"animate_unfocused": "nope"}))["animate_unfocused"], true);
-    }
-
-    #[test]
-    fn restore_sessions_defaults_on() {
-        assert_eq!(normalize(json!({}))["restore_sessions"], true);
-        assert_eq!(normalize(json!({"restore_sessions": false}))["restore_sessions"], false);
-        assert_eq!(normalize(json!({"restore_sessions": "no"}))["restore_sessions"], true);
-    }
-
-    #[test]
-    fn profiles_are_unique_and_launch() {
-        let v = normalize(json!({
-            "profiles": [{"name": " Dev ", "shell": "\"/bin/my shell\" -l", "cwd": "~/src"}, {"name": "dev"}, {"name": ""}],
-            "active_profile": "missing"
-        }));
-        let ps = v["profiles"].as_array().unwrap();
-        assert_eq!(ps.len(), 1);
-        assert_eq!(v["active_profile"], "Dev");
-        let (argv, cwd) = profile_launch(&v, None);
-        assert_eq!(argv.unwrap(), vec!["/bin/my shell", "-l"]);
-        assert!(cwd.unwrap().ends_with("/src"));
-        assert_eq!(profile_launch(&v, Some("nothing")), (None, None));
-    }
-
-    #[test]
-    fn broken_file_gives_defaults_and_is_not_replaced_by_import() {
-        let d = tmp("broken");
-        let (rs, go) = (d.join("rs/config.json"), d.join("go/config.json"));
-        std::fs::create_dir_all(rs.parent().unwrap()).unwrap();
-        std::fs::write(&rs, "{ not json").unwrap();
-        std::fs::create_dir_all(go.parent().unwrap()).unwrap();
-        std::fs::write(&go, r#"{"font_size_px": 20}"#).unwrap();
-        assert_eq!(load_from(&rs, &go)["font_size_px"], 14);
-        assert_eq!(std::fs::read_to_string(&rs).unwrap(), "{ not json");
-    }
-
-    #[test]
-    fn writers_at_once_never_lose_the_file_or_a_key() {
-        // Each thread stands in for a window's process: its own file lock,
-        // then read, merge and write a key of its own.
-        let d = tmp("race");
-        let (rs, go) = (d.join("rs/config.json"), d.join("go/config.json"));
-        let hs: Vec<_> = (0..8)
-            .map(|i| {
-                let (rs, go) = (rs.clone(), go.clone());
-                std::thread::spawn(move || {
-                    for j in 0..10 {
-                        let _f = lock_file(&rs).expect("lock");
-                        update_at(&rs, &go, json!({format!("k{i}"): j})).unwrap();
-                    }
-                })
-            })
-            .collect();
-        for h in hs {
-            h.join().unwrap();
-        }
-        let v = load_from(&rs, &go);
-        for i in 0..8 {
-            assert_eq!(v[format!("k{i}")], 9);
-        }
-        let left: Vec<_> = std::fs::read_dir(rs.parent().unwrap())
-            .unwrap()
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .filter(|n| n.ends_with(".tmp"))
-            .collect();
-        assert!(left.is_empty(), "temp files left: {left:?}");
+    fn news_is_any_change_but_the_window_frame_even_back_to_an_old_value() {
+        let last = Mutex::new(None);
+        assert!(is_news(&last, &json!({"font_size_px": 14})));
+        assert!(!is_news(&last, &json!({"font_size_px": 14, "window": {"x": 5}})), "only the frame moved");
+        // This process saves 18 (update), then another program puts 14 back.
+        assert!(is_news(&last, &json!({"font_size_px": 18})));
+        assert!(is_news(&last, &json!({"font_size_px": 14})), "back to the old value is still news");
+        assert!(!is_news(&last, &json!({"font_size_px": 14})));
     }
 }
