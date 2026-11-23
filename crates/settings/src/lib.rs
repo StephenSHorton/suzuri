@@ -538,16 +538,22 @@ impl Store {
                     // A file that is gone or not (yet) a JSON object is
                     // skipped, not taken as the defaults; the next look
                     // tries again.
-                    let Some(m) = read_raw(&path) else { continue };
-                    stamp = now;
-                    let v = normalize(Value::Object(m));
-                    {
+                    //
+                    // Read under `seen`, which a save holds until its write
+                    // is in place: read first and lock after, and a save
+                    // landing in between makes the older read look like
+                    // someone else's change.
+                    let v = {
                         let mut s = lock(&seen);
+                        let Some(m) = read_raw(&path) else { continue };
+                        stamp = now;
+                        let v = normalize(Value::Object(m));
                         if s.as_ref() == Some(&v) {
                             continue;
                         }
                         *s = Some(v.clone());
-                    }
+                        v
+                    };
                     f(v);
                 }
             })
