@@ -70,7 +70,16 @@ const MAX_OSC: usize = 64 * 1024;
 
 /// Only these forms are ours. `7879;image=` (inline images, #288) and any
 /// other 7879 kind pass through to the next filter.
-const PREFIXES: [&[u8]; 8] = [b"\x1b]7878;cwd=", b"\x1b]7878;typeahead=", b"\x1b]7879;start", b"\x1b]7879;done", b"\x1b]133;", b"\x1b]633;", b"\x1b]7;", b"\x1b]9;9;"];
+const PREFIXES: [&[u8]; 8] = [
+    b"\x1b]7878;cwd=",
+    b"\x1b]7878;typeahead=",
+    b"\x1b]7879;start",
+    b"\x1b]7879;done",
+    b"\x1b]133;",
+    b"\x1b]633;",
+    b"\x1b]7;",
+    b"\x1b]9;9;",
+];
 
 impl OscFilter {
     /// Filter `input`, appending the bytes for the VT engine to `out` and
@@ -85,7 +94,13 @@ impl OscFilter {
         }
     }
 
-    fn feed_from(&mut self, buf: &[u8], mut i: usize, out: &mut Vec<u8>, events: &mut Vec<ShellEvent>) {
+    fn feed_from(
+        &mut self,
+        buf: &[u8],
+        mut i: usize,
+        out: &mut Vec<u8>,
+        events: &mut Vec<ShellEvent>,
+    ) {
         while i < buf.len() {
             let Some(k) = memchr_esc(&buf[i..]) else {
                 out.extend_from_slice(&buf[i..]);
@@ -145,7 +160,9 @@ impl OscFilter {
     fn parse(&mut self, payload: &[u8]) -> Option<ShellEvent> {
         let s = String::from_utf8_lossy(payload);
         if let Some(uri) = s.strip_prefix("7;") {
-            return crate::cwd::osc7_path(uri).filter(|p| !p.is_empty()).map(ShellEvent::Reported);
+            return crate::cwd::osc7_path(uri)
+                .filter(|p| !p.is_empty())
+                .map(ShellEvent::Reported);
         }
         if let Some(dir) = s.strip_prefix("9;9;") {
             return crate::cwd::osc99_path(dir).map(ShellEvent::Reported);
@@ -167,7 +184,10 @@ impl OscFilter {
             }
             "D" => {
                 let exit = parts.next().and_then(|e| e.trim().parse().ok());
-                Some(ShellEvent::Done { exit, command: std::mem::take(&mut self.command) })
+                Some(ShellEvent::Done {
+                    exit,
+                    command: std::mem::take(&mut self.command),
+                })
             }
             _ => None,
         }
@@ -184,7 +204,10 @@ fn unescape_633(s: &str) -> String {
             out.push(b'\\');
             i += 2;
         } else if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
-            match s.get(i + 2..i + 4).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+            match s
+                .get(i + 2..i + 4)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
                 Some(v) => {
                     out.push(v);
                     i += 4;
@@ -249,7 +272,10 @@ pub fn clean_typeahead(b: &[u8]) -> String {
                     // OSC, DCS, APC, PM, SOS: up to BEL or ESC \.
                     Some(b']' | b'P' | b'_' | b'^' | b'X') => {
                         i += 1;
-                        while i < b.len() && b[i] != 0x07 && !(b[i] == 0x1b && b.get(i + 1) == Some(&b'\\')) {
+                        while i < b.len()
+                            && b[i] != 0x07
+                            && !(b[i] == 0x1b && b.get(i + 1) == Some(&b'\\'))
+                        {
                             i += 1;
                         }
                         i += if b.get(i) == Some(&0x07) { 1 } else { 2 };
@@ -287,7 +313,9 @@ fn decode_b64_bytes(s: &str) -> Vec<u8> {
     let mut out = Vec::new();
     let (mut acc, mut bits) = (0u32, 0u32);
     for c in s.bytes() {
-        let Some(v) = T.iter().position(|&t| t == c) else { continue };
+        let Some(v) = T.iter().position(|&t| t == c) else {
+            continue;
+        };
         acc = (acc << 6) | v as u32;
         bits += 6;
         if bits >= 8 {
@@ -336,10 +364,19 @@ pub const PWSH_STARSHIP_REPORT: &str = "if ((Test-Path function:prompt) -and (Ge
 /// in any short form it takes), or a script as the first arg. `rest` is
 /// lower-cased.
 fn pwsh_runs(rest: &[String]) -> bool {
-    let flag = |a: &str| a.strip_prefix('-').or_else(|| a.strip_prefix('/')).map(|f| f.split(':').next().unwrap_or(f).to_string());
+    let flag = |a: &str| {
+        a.strip_prefix('-')
+            .or_else(|| a.strip_prefix('/'))
+            .map(|f| f.split(':').next().unwrap_or(f).to_string())
+    };
     rest.first().is_some_and(|a| flag(a).is_none())
         || rest.iter().filter_map(|a| flag(a)).any(|f| {
-            !f.is_empty() && (["command", "encodedcommand", "file", "commandwithargs"].iter().any(|w| w.starts_with(f.as_str())) || f == "ec" || f == "cwa")
+            !f.is_empty()
+                && (["command", "encodedcommand", "file", "commandwithargs"]
+                    .iter()
+                    .any(|w| w.starts_with(f.as_str()))
+                    || f == "ec"
+                    || f == "cwa")
         })
 }
 
@@ -348,7 +385,10 @@ fn pwsh_runs(rest: &[String]) -> bool {
 fn pwsh_start(argv: &[String], line: &str) -> Option<Vec<String>> {
     let exe = argv.first()?;
     let base = exe.rsplit(['/', '\\']).next().unwrap_or(exe).to_lowercase();
-    if !matches!(base.strip_suffix(".exe").unwrap_or(&base), "pwsh" | "powershell") {
+    if !matches!(
+        base.strip_suffix(".exe").unwrap_or(&base),
+        "pwsh" | "powershell"
+    ) {
         return None;
     }
     let rest: Vec<String> = argv[1..].iter().map(|a| a.to_lowercase()).collect();
@@ -406,10 +446,17 @@ pub fn print_preamble(argv: &[String], text: &str) -> Option<PrintPreamble> {
         "pwsh" | "powershell" => {
             // The print, then starship's folder report ([`starship_report`]).
             let a = pwsh_start(argv, &format!("{PWSH_PRINT}; {PWSH_STARSHIP_REPORT}"))?;
-            Some(PrintPreamble { argv: a, env: vec![(PREAMBLE_ENV.into(), "{file}".into())], bytes: text.as_bytes().to_vec() })
+            Some(PrintPreamble {
+                argv: a,
+                env: vec![(PREAMBLE_ENV.into(), "{file}".into())],
+                bytes: text.as_bytes().to_vec(),
+            })
         }
         "cmd" => {
-            if rest.iter().any(|a| a.starts_with("/c") || a.starts_with("/k") || a.starts_with("/r")) {
+            if rest
+                .iter()
+                .any(|a| a.starts_with("/c") || a.starts_with("/k") || a.starts_with("/r"))
+            {
                 return None;
             }
             let mut a = argv.to_vec();
@@ -418,7 +465,11 @@ pub fn print_preamble(argv: &[String], text: &str) -> Option<PrintPreamble> {
             let line = format!("set \"{PREAMBLE_CMD_ENV}=\" & type \"{{file}}\"");
             let mut bytes = vec![0xff, 0xfe];
             bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
-            Some(PrintPreamble { argv: a, env: vec![(PREAMBLE_CMD_ENV.into(), line)], bytes })
+            Some(PrintPreamble {
+                argv: a,
+                env: vec![(PREAMBLE_CMD_ENV.into(), line)],
+                bytes,
+            })
         }
         _ => None,
     }
@@ -446,13 +497,24 @@ pub fn bootstrap(argv: &[String]) -> Option<Bootstrap> {
 /// marks are the same either way; with `keep_prompt` the prompt is left as
 /// the user's files set it, and PowerShell's is wrapped instead of replaced.
 pub fn bootstrap_with(argv: &[String], keep_prompt: bool) -> Option<Bootstrap> {
-    let keep = || if keep_prompt { vec![("RSZ_KEEP_PROMPT".to_string(), "1".to_string())] } else { vec![] };
+    let keep = || {
+        if keep_prompt {
+            vec![("RSZ_KEEP_PROMPT".to_string(), "1".to_string())]
+        } else {
+            vec![]
+        }
+    };
     let exe = argv.first()?;
     let base = Path::new(exe).file_name()?.to_string_lossy().to_lowercase();
     let base = base.strip_suffix(".exe").unwrap_or(&base).to_string();
     let rest: Vec<String> = argv[1..].iter().map(|a| a.to_lowercase()).collect();
     let custom = rest.iter().any(|a| {
-        a == "-c" || a == "-command" || a.contains("rcfile") || a.contains("norc") || a.contains("noprofile") || a == "-file"
+        a == "-c"
+            || a == "-command"
+            || a.contains("rcfile")
+            || a.contains("norc")
+            || a.contains("noprofile")
+            || a == "-file"
     });
     if custom {
         return None;
@@ -462,13 +524,20 @@ pub fn bootstrap_with(argv: &[String], keep_prompt: bool) -> Option<Bootstrap> {
             let dir = temp_dir("rsz-zdot")?;
             std::fs::write(dir.join(".zshrc"), ZSHRC).ok()?;
             std::fs::write(dir.join(".zshenv"), "# suzuri\n").ok()?;
-            let user = std::env::var("ZDOTDIR").ok().filter(|s| !s.is_empty()).or_else(home).unwrap_or_default();
+            let user = std::env::var("ZDOTDIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(home)
+                .unwrap_or_default();
             Some(Bootstrap {
                 argv: argv.to_vec(),
-                env: [("ZDOTDIR".to_string(), dir.to_string_lossy().into_owned()), ("RSZ_USER_ZDOTDIR".into(), user)]
-                    .into_iter()
-                    .chain(keep())
-                    .collect(),
+                env: [
+                    ("ZDOTDIR".to_string(), dir.to_string_lossy().into_owned()),
+                    ("RSZ_USER_ZDOTDIR".into(), user),
+                ]
+                .into_iter()
+                .chain(keep())
+                .collect(),
                 temp_dir: Some(dir),
             })
         }
@@ -478,28 +547,58 @@ pub fn bootstrap_with(argv: &[String], keep_prompt: bool) -> Option<Bootstrap> {
             std::fs::write(&rc, BASHRC).ok()?;
             // --rcfile is ignored by a login shell, so run interactive and let
             // the rc file load the user's login files itself.
-            let mut a = vec![exe.clone(), "--rcfile".into(), rc.to_string_lossy().into_owned(), "-i".into()];
-            a.extend(argv[1..].iter().filter(|x| *x != "-l" && *x != "--login").cloned());
-            Some(Bootstrap { argv: a, env: keep(), temp_dir: Some(dir) })
+            let mut a = vec![
+                exe.clone(),
+                "--rcfile".into(),
+                rc.to_string_lossy().into_owned(),
+                "-i".into(),
+            ];
+            a.extend(
+                argv[1..]
+                    .iter()
+                    .filter(|x| *x != "-l" && *x != "--login")
+                    .cloned(),
+            );
+            Some(Bootstrap {
+                argv: a,
+                env: keep(),
+                temp_dir: Some(dir),
+            })
         }
         "pwsh" | "powershell" => {
             let mut a = argv.to_vec();
-            let script = if keep_prompt { PWSH_PROMPT.replacen("function global:prompt {", PWSH_KEEP, 1).replace(" ' ' };", " & $global:RszUserPrompt };") } else { PWSH_PROMPT.into() };
+            let script = if keep_prompt {
+                PWSH_PROMPT
+                    .replacen("function global:prompt {", PWSH_KEEP, 1)
+                    .replace(" ' ' };", " & $global:RszUserPrompt };")
+            } else {
+                PWSH_PROMPT.into()
+            };
             a.extend(["-NoExit".into(), "-Command".into(), script]);
-            Some(Bootstrap { argv: a, env: vec![], temp_dir: None })
+            Some(Bootstrap {
+                argv: a,
+                env: vec![],
+                temp_dir: None,
+            })
         }
         _ => None,
     }
 }
 
 fn home() -> Option<String> {
-    std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())
+    std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
 }
 
 fn temp_dir(prefix: &str) -> Option<PathBuf> {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let dir = std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
@@ -652,9 +751,13 @@ mod tests {
 
     #[test]
     fn strips_ours_and_keeps_the_rest() {
-        let (out, ev) = run(&[b"a\x1b]7878;cwd=/tmp/x y\x07b\x1b[31mc\x1b]0;title\x07d\x1b]7879;start\x1b\\e"]);
+        let (out, ev) =
+            run(&[b"a\x1b]7878;cwd=/tmp/x y\x07b\x1b[31mc\x1b]0;title\x07d\x1b]7879;start\x1b\\e"]);
         assert_eq!(out, b"ab\x1b[31mc\x1b]0;title\x07de");
-        assert_eq!(ev, vec![ShellEvent::Cwd("/tmp/x y".into()), ShellEvent::Start]);
+        assert_eq!(
+            ev,
+            vec![ShellEvent::Cwd("/tmp/x y".into()), ShellEvent::Start]
+        );
     }
 
     #[test]
@@ -663,10 +766,23 @@ mod tests {
         // to their 133 marks; an OSC 9 notice still passes.
         let (out, ev) = run(&[b"\x1b]133;A\x07a\x1b]7;file://box/tmp/My%20Dir\x1b\\b\x1b]9;9;\"C:\\Users\\me\"\x07c\x1b]9;hi\x07"]);
         assert_eq!(out, b"abc\x1b]9;hi\x07");
-        assert_eq!(ev, vec![ShellEvent::Foreign(false), ShellEvent::Reported("/tmp/My Dir".into()), ShellEvent::Reported("C:\\Users\\me".into())]);
+        assert_eq!(
+            ev,
+            vec![
+                ShellEvent::Foreign(false),
+                ShellEvent::Reported("/tmp/My Dir".into()),
+                ShellEvent::Reported("C:\\Users\\me".into())
+            ]
+        );
         // They do not count as suzuri's own marks: later 133s still count.
         let (_, ev) = run(&[b"\x1b]9;9;D:\\x\x07\x1b]133;C\x07"]);
-        assert_eq!(ev, vec![ShellEvent::Reported("D:\\x".into()), ShellEvent::Foreign(true)]);
+        assert_eq!(
+            ev,
+            vec![
+                ShellEvent::Reported("D:\\x".into()),
+                ShellEvent::Foreign(true)
+            ]
+        );
         // Not a file URI, or empty: dropped with no event.
         let (out, ev) = run(&[b"a\x1b]7;http://x/y\x07\x1b]9;9;\x07b"]);
         assert_eq!((out.as_slice(), ev.len()), (&b"ab"[..], 0));
@@ -675,13 +791,24 @@ mod tests {
         for cut in 0..whole.len() {
             let (out, ev) = run(&[&whole[..cut], &whole[cut..]]);
             assert_eq!(out, b"xyz", "cut at {cut}");
-            assert_eq!(ev, vec![ShellEvent::Reported("C:\\a".into()), ShellEvent::Reported("/b".into())], "cut at {cut}");
+            assert_eq!(
+                ev,
+                vec![
+                    ShellEvent::Reported("C:\\a".into()),
+                    ShellEvent::Reported("/b".into())
+                ],
+                "cut at {cut}"
+            );
         }
     }
 
     #[test]
     fn other_7879_kinds_pass_through() {
-        let (out, ev) = run(&[b"a\x1b]7879;image=/tmp/a.png\x07b", b"\x1b]7879;sta", b"rt\x07"]);
+        let (out, ev) = run(&[
+            b"a\x1b]7879;image=/tmp/a.png\x07b",
+            b"\x1b]7879;sta",
+            b"rt\x07",
+        ]);
         assert_eq!(out, b"a\x1b]7879;image=/tmp/a.png\x07b");
         assert_eq!(ev, vec![ShellEvent::Start]);
     }
@@ -700,12 +827,21 @@ mod tests {
                 ShellEvent::Foreign(false),
                 ShellEvent::Foreign(false),
                 ShellEvent::Foreign(true),
-                ShellEvent::Done { exit: Some(1), command: "ls; echo a\\b".into() }
+                ShellEvent::Done {
+                    exit: Some(1),
+                    command: "ls; echo a\\b".into()
+                }
             ]
         );
         // A D with no command (the first prompt) has no exit.
         let (_, ev) = run(&[b"\x1b]133;D\x07"]);
-        assert_eq!(ev, vec![ShellEvent::Done { exit: None, command: String::new() }]);
+        assert_eq!(
+            ev,
+            vec![ShellEvent::Done {
+                exit: None,
+                command: String::new()
+            }]
+        );
     }
 
     #[test]
@@ -720,7 +856,13 @@ mod tests {
         // "ls -la" in base64 is bHMgLWxh
         let (out, ev) = run(&[b"\x1b]7879;done;2;bHMgLWxh\x07"]);
         assert!(out.is_empty());
-        assert_eq!(ev, vec![ShellEvent::Done { exit: Some(2), command: "ls -la".into() }]);
+        assert_eq!(
+            ev,
+            vec![ShellEvent::Done {
+                exit: Some(2),
+                command: "ls -la".into()
+            }]
+        );
     }
 
     #[test]
@@ -729,7 +871,11 @@ mod tests {
         for cut in 0..whole.len() {
             let (out, ev) = run(&[&whole[..cut], &whole[cut..]]);
             assert_eq!(out, b"xyz", "cut at {cut}");
-            assert_eq!(ev, vec![ShellEvent::Cwd("/a".into()), ShellEvent::Start], "cut at {cut}");
+            assert_eq!(
+                ev,
+                vec![ShellEvent::Cwd("/a".into()), ShellEvent::Start],
+                "cut at {cut}"
+            );
         }
         // A lone ESC at the end of a read that turns out to be CSI.
         let (out, _) = run(&[b"a\x1b", b"[2Jb"]);
@@ -743,7 +889,14 @@ mod tests {
         for cut in 0..whole.len() {
             let (out, ev) = run(&[&whole[..cut], &whole[cut..]]);
             assert_eq!(out, b"xy", "cut at {cut}");
-            assert_eq!(ev, vec![ShellEvent::Typeahead(b"ls\rpwd".to_vec()), ShellEvent::Cwd("/a".into())], "cut at {cut}");
+            assert_eq!(
+                ev,
+                vec![
+                    ShellEvent::Typeahead(b"ls\rpwd".to_vec()),
+                    ShellEvent::Cwd("/a".into())
+                ],
+                "cut at {cut}"
+            );
         }
     }
 
@@ -751,18 +904,47 @@ mod tests {
     fn typeahead_is_cleaned_for_the_bar() {
         let c = |b: &[u8]| clean_typeahead(b);
         assert_eq!(c(b"abc def"), "abc def");
-        assert_eq!(c(b"ls\npwd\r\n"), "ls\npwd", "Enter is a newline, trailing ones go");
-        assert_eq!(c(b"a\x1b[Ab\x1bOBc\x1b[1;5Dd"), "abcd", "arrow keys are dropped");
-        assert_eq!(c(b"\x1b[I\x1b[?1;2cx\x1b]11;rgb:0/0/0\x07y\x1b]10;?\x1b\\z"), "xyz", "focus and terminal replies are dropped");
-        assert_eq!(c(b"\x1b[200~p\nq\x1b[201~"), "p\nq", "a paste keeps its text");
-        assert_eq!(c(b"a\x7f\x03\x1bb\tc"), "a\tc", "controls and Alt+key go, Tab stays");
-        assert_eq!(c("日本\x1b[".as_bytes()), "日本", "UTF-8 kept, a cut sequence dropped");
+        assert_eq!(
+            c(b"ls\npwd\r\n"),
+            "ls\npwd",
+            "Enter is a newline, trailing ones go"
+        );
+        assert_eq!(
+            c(b"a\x1b[Ab\x1bOBc\x1b[1;5Dd"),
+            "abcd",
+            "arrow keys are dropped"
+        );
+        assert_eq!(
+            c(b"\x1b[I\x1b[?1;2cx\x1b]11;rgb:0/0/0\x07y\x1b]10;?\x1b\\z"),
+            "xyz",
+            "focus and terminal replies are dropped"
+        );
+        assert_eq!(
+            c(b"\x1b[200~p\nq\x1b[201~"),
+            "p\nq",
+            "a paste keeps its text"
+        );
+        assert_eq!(
+            c(b"a\x7f\x03\x1bb\tc"),
+            "a\tc",
+            "controls and Alt+key go, Tab stays"
+        );
+        assert_eq!(
+            c("日本\x1b[".as_bytes()),
+            "日本",
+            "UTF-8 kept, a cut sequence dropped"
+        );
     }
 
     #[test]
     fn bootstrap_only_for_known_shells_without_custom_args() {
         assert!(bootstrap(&["/bin/zsh".into(), "-l".into()]).is_some());
-        assert!(bootstrap(&["/bin/bash".into(), "-l".into()]).unwrap().argv.contains(&"--rcfile".to_string()));
+        assert!(
+            bootstrap(&["/bin/bash".into(), "-l".into()])
+                .unwrap()
+                .argv
+                .contains(&"--rcfile".to_string())
+        );
         assert!(bootstrap(&["pwsh.exe".into(), "-NoLogo".into()]).is_some());
         assert!(bootstrap(&["/bin/zsh".into(), "-c".into(), "ls".into()]).is_none());
         assert!(bootstrap(&["/usr/bin/fish".into()]).is_none());
@@ -775,17 +957,35 @@ mod tests {
         let text = "old\r\n日本\r\n\x1b[2m─── restored · saved ───\x1b[0m\r\n";
         let both = format!("{PWSH_PRINT}; {PWSH_STARSHIP_REPORT}");
         // PowerShell: the print runs as its start command, UTF-8, then starship's report.
-        for exe in ["pwsh.exe", r"C:\Program Files\PowerShell\7\pwsh.exe", "powershell", "PowerShell.EXE"] {
+        for exe in [
+            "pwsh.exe",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            "powershell",
+            "PowerShell.EXE",
+        ] {
             let p = print_preamble(&v(&[exe, "-NoLogo"]), text).unwrap();
             assert_eq!(p.argv, v(&[exe, "-NoLogo", "-NoExit", "-Command", &both]));
-            assert_eq!(p.env, vec![(PREAMBLE_ENV.to_string(), "{file}".to_string())]);
+            assert_eq!(
+                p.env,
+                vec![(PREAMBLE_ENV.to_string(), "{file}".to_string())]
+            );
             assert_eq!(p.bytes, text.as_bytes());
         }
-        assert!(PWSH_PROMPT.ends_with(&format!("Clear-Host; {PWSH_PRINT}")), "the same print as the hooked start");
-        for a in [&["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass"][..], &["pwsh", "-nop", "-noni"]] {
+        assert!(
+            PWSH_PROMPT.ends_with(&format!("Clear-Host; {PWSH_PRINT}")),
+            "the same print as the hooked start"
+        );
+        for a in [
+            &["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass"][..],
+            &["pwsh", "-nop", "-noni"],
+        ] {
             assert!(print_preamble(&v(a), text).is_some(), "{a:?}");
         }
-        assert_eq!(print_preamble(&v(&["pwsh", "-NoExit"]), text).unwrap().argv, v(&["pwsh", "-NoExit", "-Command", &both]), "one -NoExit");
+        assert_eq!(
+            print_preamble(&v(&["pwsh", "-NoExit"]), text).unwrap().argv,
+            v(&["pwsh", "-NoExit", "-Command", &both]),
+            "one -NoExit"
+        );
         for a in [
             &["pwsh", "-c", "ls"][..],
             &["pwsh", "-Command", "ls"],
@@ -805,14 +1005,31 @@ mod tests {
         for exe in ["cmd.exe", r"C:\Windows\System32\cmd.exe", "CMD"] {
             let p = print_preamble(&v(&[exe]), text).unwrap();
             assert_eq!(p.argv, v(&[exe, "/k", "%RSZ_PREAMBLE_CMD%"]));
-            assert!(p.argv[1..].iter().all(|a| !a.contains([' ', '"'])), "{:?}", p.argv);
-            assert_eq!(p.env, vec![(PREAMBLE_CMD_ENV.to_string(), r#"set "RSZ_PREAMBLE_CMD=" & type "{file}""#.to_string())]);
+            assert!(
+                p.argv[1..].iter().all(|a| !a.contains([' ', '"'])),
+                "{:?}",
+                p.argv
+            );
+            assert_eq!(
+                p.env,
+                vec![(
+                    PREAMBLE_CMD_ENV.to_string(),
+                    r#"set "RSZ_PREAMBLE_CMD=" & type "{file}""#.to_string()
+                )]
+            );
             assert_eq!(&p.bytes[..2], &[0xff, 0xfe], "UTF-16LE BOM");
-            let back: Vec<u16> = p.bytes[2..].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let back: Vec<u16> = p.bytes[2..]
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
             assert_eq!(String::from_utf16(&back).unwrap(), text);
         }
         assert!(print_preamble(&v(&["cmd.exe", "/d", "/q"]), text).is_some());
-        for a in [&["cmd", "/c", "dir"][..], &["cmd.exe", "/K", "echo hi"], &["cmd", "/s", "/c", "x"]] {
+        for a in [
+            &["cmd", "/c", "dir"][..],
+            &["cmd.exe", "/K", "echo hi"],
+            &["cmd", "/s", "/c", "x"],
+        ] {
             assert!(print_preamble(&v(a), text).is_none(), "{a:?}");
         }
         // Anything else is fed to the screen as before.
@@ -826,17 +1043,37 @@ mod tests {
     #[test]
     fn unhooked_powershell_gets_the_starship_report() {
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        for exe in ["powershell", r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe", "pwsh.exe"] {
-            assert_eq!(starship_report(&v(&[exe, "-NoLogo"])).unwrap(), v(&[exe, "-NoLogo", "-NoExit", "-Command", PWSH_STARSHIP_REPORT]));
+        for exe in [
+            "powershell",
+            r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe",
+            "pwsh.exe",
+        ] {
+            assert_eq!(
+                starship_report(&v(&[exe, "-NoLogo"])).unwrap(),
+                v(&[exe, "-NoLogo", "-NoExit", "-Command", PWSH_STARSHIP_REPORT])
+            );
         }
-        assert_eq!(starship_report(&v(&["pwsh", "-NoExit"])).unwrap(), v(&["pwsh", "-NoExit", "-Command", PWSH_STARSHIP_REPORT]), "one -NoExit");
-        for a in [&["pwsh", "-c", "ls"][..], &["pwsh", "-File", "x.ps1"], &["pwsh", "x.ps1"], &["cmd.exe"], &["claude"], &["/bin/zsh"]] {
+        assert_eq!(
+            starship_report(&v(&["pwsh", "-NoExit"])).unwrap(),
+            v(&["pwsh", "-NoExit", "-Command", PWSH_STARSHIP_REPORT]),
+            "one -NoExit"
+        );
+        for a in [
+            &["pwsh", "-c", "ls"][..],
+            &["pwsh", "-File", "x.ps1"],
+            &["pwsh", "x.ps1"],
+            &["cmd.exe"],
+            &["claude"],
+            &["/bin/zsh"],
+        ] {
             assert!(starship_report(&v(a)).is_none(), "{a:?}");
         }
         // It survives the MSVC argv quoting as one arg, and sends OSC 9;9
         // with the folder quoted, ended by ST.
         assert!(!PWSH_STARSHIP_REPORT.contains('"'));
-        assert!(PWSH_STARSHIP_REPORT.contains("[char]27 + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + [char]27 + [char]92"));
+        assert!(PWSH_STARSHIP_REPORT.contains(
+            "[char]27 + ']9;9;' + [char]34 + $l.ProviderPath + [char]34 + [char]27 + [char]92"
+        ));
         // A restored pane: the print, then the report, in one start command.
         let p = print_preamble(&v(&["powershell"]), "x").unwrap();
         assert_eq!(p.argv[3], format!("{PWSH_PRINT}; {PWSH_STARSHIP_REPORT}"));
@@ -845,25 +1082,45 @@ mod tests {
 
     #[test]
     fn keep_prompt_keeps_the_marks_and_the_users_prompt() {
-        let env = |b: &Bootstrap| b.env.iter().any(|(k, v)| k == "RSZ_KEEP_PROMPT" && v == "1");
+        let env = |b: &Bootstrap| {
+            b.env
+                .iter()
+                .any(|(k, v)| k == "RSZ_KEEP_PROMPT" && v == "1")
+        };
         let z = bootstrap_with(&["/bin/zsh".into()], true).unwrap();
         assert!(env(&z));
         assert!(!env(&bootstrap(&["/bin/zsh".into()]).unwrap()));
         assert!(env(&bootstrap_with(&["/bin/bash".into()], true).unwrap()));
         let script = |b: Bootstrap| b.argv.last().unwrap().clone();
         let kept = script(bootstrap_with(&["pwsh.exe".into()], true).unwrap());
-        assert!(kept.starts_with("$global:RszUserPrompt = $function:prompt; function global:prompt {"), "{kept}");
-        assert!(kept.contains("]7878;cwd=") && kept.contains("]7879;done;") && kept.contains("& $global:RszUserPrompt };"), "{kept}");
+        assert!(
+            kept.starts_with("$global:RszUserPrompt = $function:prompt; function global:prompt {"),
+            "{kept}"
+        );
+        assert!(
+            kept.contains("]7878;cwd=")
+                && kept.contains("]7879;done;")
+                && kept.contains("& $global:RszUserPrompt };"),
+            "{kept}"
+        );
         assert!(!kept.contains(" ' ' };"), "{kept}");
         // A restored pane's old text is printed after the clear, either way.
         for s in [&kept, PWSH_PROMPT] {
             assert!(s.contains("Clear-Host; if ($env:RSZ_PREAMBLE) {"), "{s}");
         }
         // The typeahead drain is skipped when the person's prompt is kept.
-        assert!(PWSH_PROMPT.contains("if (-not $global:RszUserPrompt) { try { $t=''; while ([Console]::KeyAvailable)"));
-        assert_eq!(script(bootstrap(&["pwsh.exe".into()]).unwrap()), PWSH_PROMPT);
+        assert!(PWSH_PROMPT.contains(
+            "if (-not $global:RszUserPrompt) { try { $t=''; while ([Console]::KeyAvailable)"
+        ));
+        assert_eq!(
+            script(bootstrap(&["pwsh.exe".into()]).unwrap()),
+            PWSH_PROMPT
+        );
         for z in [ZSHRC, BASHRC] {
-            assert!(z.contains("unset RSZ_KEEP_PROMPT"), "the flag must not reach child shells");
+            assert!(
+                z.contains("unset RSZ_KEEP_PROMPT"),
+                "the flag must not reach child shells"
+            );
         }
     }
 }

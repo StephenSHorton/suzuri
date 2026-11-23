@@ -8,14 +8,14 @@ pub mod engine;
 pub mod fg;
 pub mod frame;
 pub mod ghostty;
-pub mod input;
 pub mod images;
+pub mod input;
 pub mod palette;
 pub mod pane;
-pub mod shell;
 pub mod protocols;
+pub mod shell;
 
 pub use engine::{Engine, EngineEvent, Link, SelectKind};
-pub use ghostty::{set_clipboard_reader, Ghostty};
+pub use ghostty::{Ghostty, set_clipboard_reader};
 pub use input::{MouseEvent, MouseKind};
 pub use pane::{Out, Pane, PaneConfig, Sink, State, Submit};

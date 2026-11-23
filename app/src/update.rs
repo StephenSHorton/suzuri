@@ -30,7 +30,9 @@ const RECHECK: Duration = Duration::from_secs(6 * 60 * 60);
 const DEV_BUILD: &str = "dev build: updates are off";
 
 fn feed_override() -> Option<String> {
-    std::env::var("RSZ_UPDATE_URL").ok().filter(|s| !s.is_empty())
+    std::env::var("RSZ_UPDATE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 async fn check(app: &AppHandle) -> Result<Option<Available>, String> {
@@ -50,7 +52,12 @@ async fn check(app: &AppHandle) -> Result<Option<Available>, String> {
         let url = url.parse().map_err(|e| format!("RSZ_UPDATE_URL: {e}"))?;
         b = b.endpoints(vec![url]).map_err(|e| e.to_string())?;
     }
-    let found = b.build().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
+    let found = b
+        .build()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
     let info = found.as_ref().map(|u| Available {
         version: u.version.clone(),
         current: u.current_version.clone(),
@@ -72,7 +79,11 @@ pub fn start(app: &AppHandle) {
         loop {
             match tauri::async_runtime::block_on(check(&app)) {
                 Ok(Some(info)) => {
-                    log::info!("update: {} available (running {})", info.version, info.current);
+                    log::info!(
+                        "update: {} available (running {})",
+                        info.version,
+                        info.current
+                    );
                     let _ = app.emit("update", info);
                     if std::env::var("RSZ_UPDATE_AUTO").is_ok_and(|v| v == "1") {
                         install_pending(&app);
@@ -101,7 +112,9 @@ pub async fn update_check(app: AppHandle) -> Result<Option<Available>, String> {
 #[tauri::command]
 pub fn update_offer(app: AppHandle, version: String, current: String) {
     let a = app.clone();
-    toast::post(crate::notices::update_note(&version, &current, move || install_or_ask(&a)));
+    toast::post(crate::notices::update_note(&version, &current, move || {
+        install_or_ask(&a)
+    }));
 }
 
 /// The offer's Install. A restart ends every shell the app holds itself and
@@ -114,9 +127,14 @@ fn install_or_ask(app: &AppHandle) {
     if busy.is_empty() {
         return install_from_card(app);
     }
-    log::info!("update: asking first, {} pane(s) running a program", busy.len());
+    log::info!(
+        "update: asking first, {} pane(s) running a program",
+        busy.len()
+    );
     let a = app.clone();
-    toast::post(crate::notices::update_confirm_note(&busy, move || install_from_card(&a)));
+    toast::post(crate::notices::update_confirm_note(&busy, move || {
+        install_from_card(&a)
+    }));
 }
 
 /// Each pane with a program running (ShellStatus::program, or one in front
@@ -124,10 +142,19 @@ fn install_or_ask(app: &AppHandle) {
 /// program", and the pane's folder. A pane started with its own command
 /// (not a shell) is that program itself and is not counted.
 fn busy_panes(app: &AppHandle) -> Vec<String> {
-    let Some(panes) = app.try_state::<std::sync::Arc<crate::Panes>>() else { return Vec::new() };
-    let mut list: Vec<(u32, std::sync::Arc<crate::keeper::Shell>)> = panes.map.lock().iter().map(|(id, p)| (*id, p.clone())).collect();
+    let Some(panes) = app.try_state::<std::sync::Arc<crate::Panes>>() else {
+        return Vec::new();
+    };
+    let mut list: Vec<(u32, std::sync::Arc<crate::keeper::Shell>)> = panes
+        .map
+        .lock()
+        .iter()
+        .map(|(id, p)| (*id, p.clone()))
+        .collect();
     list.sort_by_key(|(id, _)| *id);
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
     // A kept shell (keeper.rs, hearth#913) runs in its own host and outlives
     // the restart: only shells in the app itself are ended by it.
     list.iter()
@@ -144,7 +171,11 @@ fn busy_panes(app: &AppHandle) -> Vec<String> {
             if !st.program && name.is_none() {
                 return None;
             }
-            let cwd = if st.cwd.is_empty() { p.cwd().unwrap_or_default() } else { st.cwd };
+            let cwd = if st.cwd.is_empty() {
+                p.cwd().unwrap_or_default()
+            } else {
+                st.cwd
+            };
             Some(busy_label(name.as_deref(), &cwd, &home))
         })
         .collect()
@@ -162,7 +193,11 @@ fn busy_label(program: Option<&str>, cwd: &str, home: &str) -> String {
     let folder = if !home.is_empty() && trimmed == home {
         "~"
     } else {
-        trimmed.rsplit(['/', '\\']).next().filter(|s| !s.is_empty()).unwrap_or("/")
+        trimmed
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("/")
     };
     format!("{name} in {folder}")
 }
@@ -180,9 +215,17 @@ fn install_from_card(app: &AppHandle) {
         say("Installing update…");
         let a = app.clone();
         let res = tauri::async_runtime::block_on(async move {
-            let update = a.state::<Pending>().0.lock().take().ok_or("no update pending".to_string())?;
+            let update = a
+                .state::<Pending>()
+                .0
+                .lock()
+                .take()
+                .ok_or("no update pending".to_string())?;
             log::info!("update: installing {}", update.version);
-            update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())
+            update
+                .download_and_install(|_, _| {}, || {})
+                .await
+                .map_err(|e| e.to_string())
         });
         match res {
             Ok(()) => app.restart(),
@@ -202,23 +245,38 @@ fn install_from_card(app: &AppHandle) {
 /// in a pane it refuses and names the panes, unless `force` (the person
 /// already said yes).
 #[tauri::command]
-pub async fn update_install(app: AppHandle, pending: State<'_, Pending>, force: Option<bool>) -> Result<(), String> {
+pub async fn update_install(
+    app: AppHandle,
+    pending: State<'_, Pending>,
+    force: Option<bool>,
+) -> Result<(), String> {
     let busy = busy_panes(&app);
     if !force.unwrap_or(false) && !busy.is_empty() {
         return Err(format!("programs running: {}", busy.join(", ")));
     }
     let update = pending.0.lock().take().ok_or("no update pending")?;
     log::info!("update: installing {}", update.version);
-    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
     app.restart();
 }
 
 fn install_pending(app: &AppHandle) {
     let app2 = app.clone();
     let res = tauri::async_runtime::block_on(async move {
-        let update = app2.state::<Pending>().0.lock().take().ok_or("no update pending".to_string())?;
+        let update = app2
+            .state::<Pending>()
+            .0
+            .lock()
+            .take()
+            .ok_or("no update pending".to_string())?;
         log::info!("update: installing {}", update.version);
-        update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())
+        update
+            .download_and_install(|_, _| {}, || {})
+            .await
+            .map_err(|e| e.to_string())
     });
     match res {
         Ok(()) => app.restart(),
@@ -232,11 +290,17 @@ mod tests {
 
     #[test]
     fn a_busy_pane_reads_as_its_program_and_folder() {
-        assert_eq!(busy_label(Some("claude"), "/Users/s/projects/suzuri", "/Users/s"), "claude in suzuri");
+        assert_eq!(
+            busy_label(Some("claude"), "/Users/s/projects/suzuri", "/Users/s"),
+            "claude in suzuri"
+        );
         assert_eq!(busy_label(Some("vim"), "/Users/s/", "/Users/s"), "vim in ~");
         assert_eq!(busy_label(None, "/tmp/x", "/Users/s"), "a program in x");
         assert_eq!(busy_label(Some(""), "", "/Users/s"), "a program");
         assert_eq!(busy_label(Some("top"), "/", "/Users/s"), "top in /");
-        assert_eq!(busy_label(Some("node"), "C:\\Users\\s\\web", "C:\\Users\\s"), "node in web");
+        assert_eq!(
+            busy_label(Some("node"), "C:\\Users\\s\\web", "C:\\Users\\s"),
+            "node in web"
+        );
     }
 }

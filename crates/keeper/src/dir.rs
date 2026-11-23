@@ -73,7 +73,10 @@ pub fn ensure(dir: &Path) -> io::Result<()> {
         // SAFETY: getuid has no failure mode.
         let me = unsafe { libc::getuid() };
         if !md.is_dir() || md.uid() != me {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("keeper: {} is not a folder of this user's", dir.display())));
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("keeper: {} is not a folder of this user's", dir.display()),
+            ));
         }
         if md.mode() & 0o077 != 0 {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
@@ -81,7 +84,10 @@ pub fn ensure(dir: &Path) -> io::Result<()> {
     }
     let longest = sock_path(dir, u32::MAX);
     if longest.as_os_str().len() >= 104 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("keeper: socket path too long: {}", longest.display())));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("keeper: socket path too long: {}", longest.display()),
+        ));
     }
     Ok(())
 }
@@ -91,7 +97,12 @@ pub fn ensure(dir: &Path) -> io::Result<()> {
 pub fn peer_uid(s: &std::os::unix::net::UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd;
     let fd = s.as_raw_fd();
-    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
     {
         let (mut uid, mut gid) = (0, 0);
         // SAFETY: fd is an open socket; the out pointers are valid.
@@ -103,7 +114,15 @@ pub fn peer_uid(s: &std::os::unix::net::UnixStream) -> Option<u32> {
         let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         // SAFETY: fd is an open socket; cred and len are valid for writing.
-        let r = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut libc::c_void, &mut len) };
+        let r = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
         (r == 0).then_some(cred.uid)
     }
 }
@@ -125,7 +144,17 @@ pub fn peer_is_me(s: &crate::sock::UnixStream) -> bool {
     let mut got: u32 = 0;
     // SAFETY: an open socket; the out buffer is a u32 and its size is given.
     let r = unsafe {
-        WSAIoctl(s.as_raw_socket() as usize, SIO_AF_UNIX_GETPEERPID, std::ptr::null(), 0, (&mut pid as *mut u32).cast(), 4, &mut got, std::ptr::null_mut(), None)
+        WSAIoctl(
+            s.as_raw_socket() as usize,
+            SIO_AF_UNIX_GETPEERPID,
+            std::ptr::null(),
+            0,
+            (&mut pid as *mut u32).cast(),
+            4,
+            &mut got,
+            std::ptr::null_mut(),
+            None,
+        )
     };
     // It fills pid but may leave the byte count at 0.
     r == 0 && pid != 0 && win::same_user(pid)
@@ -137,17 +166,24 @@ pub(crate) mod win {
     use std::path::Path;
 
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree};
-    use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, GetSecurityInfo, SE_FILE_OBJECT,
+    };
     use windows_sys::Win32::Security::{
-        ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetTokenInformation, INHERIT_ONLY_ACE,
-        IsWellKnownSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser, WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid,
-        WinLocalSystemSid,
+        ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION,
+        EqualSid, GetAce, GetAclInformation, GetTokenInformation, INHERIT_ONLY_ACE, IsWellKnownSid,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+        WinBuiltinAdministratorsSid, WinCreatorOwnerRightsSid, WinLocalSystemSid,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_EXISTING, READ_CONTROL,
+        CreateFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
+        READ_CONTROL,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     /// A process's token user (the SID bytes, in a TOKEN_USER buffer).
     fn token_user(process: HANDLE) -> Option<Vec<u64>> {
@@ -159,7 +195,15 @@ pub(crate) mod win {
         let mut buf = vec![0u64; 64];
         let mut len = 0u32;
         // SAFETY: buf is 512 bytes, 8-aligned, and its size is given.
-        let ok = unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32, &mut len) };
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 8) as u32,
+                &mut len,
+            )
+        };
         // SAFETY: token came from OpenProcessToken.
         unsafe { CloseHandle(token) };
         (ok != 0).then_some(buf)
@@ -178,7 +222,10 @@ pub(crate) mod win {
         let mine = token_user(unsafe { GetCurrentProcess() });
         match (theirs, mine) {
             (Some(a), Some(b)) => {
-                let (a, b) = (a.as_ptr() as *const TOKEN_USER, b.as_ptr() as *const TOKEN_USER);
+                let (a, b) = (
+                    a.as_ptr() as *const TOKEN_USER,
+                    b.as_ptr() as *const TOKEN_USER,
+                );
                 // SAFETY: both are TOKEN_USER buffers GetTokenInformation filled.
                 unsafe { EqualSid((*a).User.Sid, (*b).User.Sid) != 0 }
             }
@@ -215,15 +262,33 @@ pub(crate) mod win {
                 std::ptr::null_mut(),
             )
         };
-        if h == INVALID_HANDLE_VALUE { Err(io::Error::last_os_error()) } else { Ok(Handle(h)) }
+        if h == INVALID_HANDLE_VALUE {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Handle(h))
+        }
     }
 
     /// (attributes, reparse tag).
     fn attributes(h: &Handle) -> io::Result<(u32, u32)> {
-        let mut info = FILE_ATTRIBUTE_TAG_INFO { FileAttributes: 0, ReparseTag: 0 };
+        let mut info = FILE_ATTRIBUTE_TAG_INFO {
+            FileAttributes: 0,
+            ReparseTag: 0,
+        };
         // SAFETY: info is a FILE_ATTRIBUTE_TAG_INFO and its size is given.
-        let ok = unsafe { GetFileInformationByHandleEx(h.0, FileAttributeTagInfo, (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(), std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32) };
-        if ok == 0 { Err(io::Error::last_os_error()) } else { Ok((info.FileAttributes, info.ReparseTag)) }
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                h.0,
+                FileAttributeTagInfo,
+                (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        };
+        if ok == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok((info.FileAttributes, info.ReparseTag))
+        }
     }
 
     /// A security descriptor GetSecurityInfo made, with the owner and the
@@ -241,18 +306,36 @@ pub(crate) mod win {
     }
 
     fn security(h: &Handle) -> io::Result<Security> {
-        let mut s = Security { sd: std::ptr::null_mut(), owner: std::ptr::null_mut(), dacl: std::ptr::null_mut() };
+        let mut s = Security {
+            sd: std::ptr::null_mut(),
+            owner: std::ptr::null_mut(),
+            dacl: std::ptr::null_mut(),
+        };
         // SAFETY: an open handle with READ_CONTROL; the out pointers are valid.
         let r = unsafe {
-            GetSecurityInfo(h.0, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &mut s.owner, std::ptr::null_mut(), &mut s.dacl, std::ptr::null_mut(), &mut s.sd)
+            GetSecurityInfo(
+                h.0,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut s.owner,
+                std::ptr::null_mut(),
+                &mut s.dacl,
+                std::ptr::null_mut(),
+                &mut s.sd,
+            )
         };
-        if r != 0 { Err(io::Error::from_raw_os_error(r as i32)) } else { Ok(s) }
+        if r != 0 {
+            Err(io::Error::from_raw_os_error(r as i32))
+        } else {
+            Ok(s)
+        }
     }
 
     /// This process's user, as a TOKEN_USER buffer.
     fn me() -> io::Result<Vec<u64>> {
         // SAFETY: the pseudo handle needs no closing.
-        token_user(unsafe { GetCurrentProcess() }).ok_or_else(|| io::Error::other("keeper: this process's user is unknown"))
+        token_user(unsafe { GetCurrentProcess() })
+            .ok_or_else(|| io::Error::other("keeper: this process's user is unknown"))
     }
 
     fn sid_of(user: &[u64]) -> PSID {
@@ -299,9 +382,21 @@ pub(crate) mod win {
         if dacl.is_null() {
             return Some("has no access list: it is open to everyone".into());
         }
-        let mut info = ACL_SIZE_INFORMATION { AceCount: 0, AclBytesInUse: 0, AclBytesFree: 0 };
+        let mut info = ACL_SIZE_INFORMATION {
+            AceCount: 0,
+            AclBytesInUse: 0,
+            AclBytesFree: 0,
+        };
         // SAFETY: dacl points into a live descriptor; info and its size match.
-        if unsafe { GetAclInformation(dacl, (&mut info as *mut ACL_SIZE_INFORMATION).cast(), std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32, AclSizeInformation) } == 0 {
+        if unsafe {
+            GetAclInformation(
+                dacl,
+                (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+                std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            )
+        } == 0
+        {
             return Some("has an access list that cannot be read".into());
         }
         for i in 0..info.AceCount {
@@ -342,15 +437,25 @@ pub(crate) mod win {
             return Ok(Some("is not a folder".into()));
         }
         if attr & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Ok(Some("is a junction or a link, not a folder of its own".into()));
+            return Ok(Some(
+                "is a junction or a link, not a folder of its own".into(),
+            ));
         }
         let me = me()?;
         let s = security(&h)?;
         // SAFETY: both are valid SIDs.
         if s.owner.is_null() || unsafe { EqualSid(s.owner, sid_of(&me)) } == 0 {
-            return Ok(Some(format!("is not a folder of this user's (its owner is {})", if s.owner.is_null() { "nobody".into() } else { sid_text(s.owner) })));
+            return Ok(Some(format!(
+                "is not a folder of this user's (its owner is {})",
+                if s.owner.is_null() {
+                    "nobody".into()
+                } else {
+                    sid_text(s.owner)
+                }
+            )));
         }
-        Ok(lets_others_in(s.dacl, sid_of(&me)).map(|why| format!("is open to other users: it {why}")))
+        Ok(lets_others_in(s.dacl, sid_of(&me))
+            .map(|why| format!("is open to other users: it {why}")))
     }
 
     /// Why `path` is not a socket of this user's, or None.
@@ -387,14 +492,32 @@ pub fn foreign_sock(path: &Path) -> io::Result<PathBuf> {
     if !path.is_absolute() {
         return Err(bad(format!("{} is not an absolute path", path.display())));
     }
-    let named = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".sock")).is_some_and(|stem| !stem.is_empty());
-    if !named || path.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)) {
-        return Err(bad(format!("{} is not a keeper socket (<id>.sock)", path.display())));
+    let named = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(".sock"))
+        .is_some_and(|stem| !stem.is_empty());
+    if !named
+        || path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(bad(format!(
+            "{} is not a keeper socket (<id>.sock)",
+            path.display()
+        )));
     }
     // A plain C:\... path: no \\?\, \\.\ or share (AF_UNIX takes none).
     #[cfg(windows)]
-    if !matches!(path.components().next(), Some(std::path::Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::Disk(_))) {
-        return Err(bad(format!("{} is not a path on a drive (C:\\...)", path.display())));
+    if !matches!(path.components().next(), Some(std::path::Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::Disk(_)))
+    {
+        return Err(bad(format!(
+            "{} is not a path on a drive (C:\\...)",
+            path.display()
+        )));
     }
     // sun_path: 104 bytes on macOS, 108 on Linux and Windows; 104 for all.
     if path.as_os_str().len() >= 104 {
@@ -408,14 +531,24 @@ pub fn foreign_sock(path: &Path) -> io::Result<PathBuf> {
         let me = unsafe { libc::getuid() };
         let fm = std::fs::symlink_metadata(folder)?;
         if !fm.is_dir() || fm.uid() != me {
-            return Err(bad(format!("{} is not a folder of this user's", folder.display())));
+            return Err(bad(format!(
+                "{} is not a folder of this user's",
+                folder.display()
+            )));
         }
         if fm.mode() & 0o077 != 0 {
-            return Err(bad(format!("{} is open to other users (mode {:o}, needs 0700)", folder.display(), fm.mode() & 0o777)));
+            return Err(bad(format!(
+                "{} is open to other users (mode {:o}, needs 0700)",
+                folder.display(),
+                fm.mode() & 0o777
+            )));
         }
         let sm = std::fs::symlink_metadata(path)?;
         if !sm.file_type().is_socket() || sm.uid() != me {
-            return Err(bad(format!("{} is not a socket of this user's", path.display())));
+            return Err(bad(format!(
+                "{} is not a socket of this user's",
+                path.display()
+            )));
         }
     }
     #[cfg(windows)]
@@ -521,7 +654,12 @@ mod foreign_tests {
     use std::process::Command;
 
     fn icacls(d: &Path, args: &[&str]) {
-        let st = Command::new("icacls").arg(d).args(args).arg("/Q").status().unwrap();
+        let st = Command::new("icacls")
+            .arg(d)
+            .args(args)
+            .arg("/Q")
+            .status()
+            .unwrap();
         assert!(st.success(), "icacls {args:?}");
     }
 
@@ -530,7 +668,16 @@ mod foreign_tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let me = format!("*{}:(OI)(CI)F", super::win::my_sid_text());
-        icacls(&d, &["/inheritance:r", "/grant:r", &me, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"]);
+        icacls(
+            &d,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                &me,
+                "*S-1-5-18:(OI)(CI)F",
+                "*S-1-5-32-544:(OI)(CI)F",
+            ],
+        );
         d
     }
 
@@ -550,7 +697,9 @@ mod foreign_tests {
     #[test]
     fn a_plain_folder_in_the_users_app_data_is_taken() {
         for var in ["LOCALAPPDATA", "APPDATA"] {
-            let base = std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| panic!("no %{var}%"));
+            let base = std::env::var_os(var)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("no %{var}%"));
             let d = base.join(format!("rszf-plain-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
             super::ensure(&d).unwrap();
@@ -577,12 +726,20 @@ mod foreign_tests {
         let e = foreign_sock(&d.join("4.sock")).unwrap_err();
         assert!(e.to_string().contains("not a socket"), "{e}");
         std::fs::create_dir(d.join("5.sock")).unwrap();
-        assert!(foreign_sock(&d.join("5.sock")).is_err(), "a folder named 5.sock");
+        assert!(
+            foreign_sock(&d.join("5.sock")).is_err(),
+            "a folder named 5.sock"
+        );
         assert!(foreign_sock(&d.join("6.sock")).is_err(), "missing");
         // The folder reached through a junction.
         let j = PathBuf::from(format!("{}-j", d.display()));
         let _ = std::fs::remove_dir(&j);
-        let st = Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&j).arg(&d).status().unwrap();
+        let st = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&j)
+            .arg(&d)
+            .status()
+            .unwrap();
         assert!(st.success(), "mklink /J");
         let e = foreign_sock(&j.join("3.sock")).unwrap_err();
         assert!(e.to_string().contains("junction"), "{e}");
@@ -592,7 +749,11 @@ mod foreign_tests {
         let e = foreign_sock(&s).unwrap_err();
         assert!(e.to_string().contains("open to other users"), "{e}");
         icacls(&d, &["/remove:g", "*S-1-5-11"]);
-        assert!(foreign_sock(&s).is_ok(), "private again: {:?}", foreign_sock(&s));
+        assert!(
+            foreign_sock(&s).is_ok(),
+            "private again: {:?}",
+            foreign_sock(&s)
+        );
         icacls(&d, &["/grant", "*S-1-1-0:(R)"]);
         assert!(foreign_sock(&s).is_err(), "Everyone may read");
         drop(_l);

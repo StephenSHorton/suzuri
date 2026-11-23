@@ -20,7 +20,13 @@ fn main() {
     } else {
         Caffeine::solo("rsz-caffeine example")
     };
-    c.on_change(|s| println!("caffeine: {} {}", if s.active { "on" } else { "off" }, s.label));
+    c.on_change(|s| {
+        println!(
+            "caffeine: {} {}",
+            if s.active { "on" } else { "off" },
+            s.label
+        )
+    });
     if !shared || minutes.is_some() {
         c.activate(minutes);
     }

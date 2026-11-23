@@ -16,7 +16,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::time::{Duration, Instant};
 
-use crate::engine::{Engine, EngineEvent, Link, SelectKind, MARK_URI};
+use crate::engine::{Engine, EngineEvent, Link, MARK_URI, SelectKind};
 use crate::frame::{self, CellOut, FrameHeader};
 use crate::input::{self, MouseEvent, MouseModes};
 use crate::palette;
@@ -125,7 +125,12 @@ unsafe fn shared<'a>(ud: *mut c_void) -> &'a mut Shared {
     unsafe { &mut *(ud as *mut Shared) }
 }
 
-unsafe extern "C" fn on_write_pty(_t: GhosttyTerminal, ud: *mut c_void, data: *const u8, len: usize) {
+unsafe extern "C" fn on_write_pty(
+    _t: GhosttyTerminal,
+    ud: *mut c_void,
+    data: *const u8,
+    len: usize,
+) {
     let s = unsafe { shared(ud) };
     let bytes = unsafe { std::slice::from_raw_parts(data, len) };
     // Consecutive replies in one feed go out as one write.
@@ -144,16 +149,26 @@ unsafe extern "C" fn on_title(_t: GhosttyTerminal, ud: *mut c_void) {
     unsafe { shared(ud) }.title_changed = true;
 }
 
-unsafe extern "C" fn on_clipboard(_t: GhosttyTerminal, ud: *mut c_void, w: *const GhosttyClipboardWrite) {
+unsafe extern "C" fn on_clipboard(
+    _t: GhosttyTerminal,
+    ud: *mut c_void,
+    w: *const GhosttyClipboardWrite,
+) {
     let s = unsafe { shared(ud) };
     let w = unsafe { &*w };
-    let contents = if w.contents.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(w.contents, w.contents_len) } };
+    let contents = if w.contents.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(w.contents, w.contents_len) }
+    };
     let text = contents.iter().find(|c| {
         let mime = unsafe { gstr(&c.mime) };
         mime.is_empty() || mime.starts_with(b"text/plain")
     });
     if let Some(c) = text {
-        s.events.push(EngineEvent::Clipboard(String::from_utf8_lossy(unsafe { gstr(&c.data) }).into_owned()));
+        s.events.push(EngineEvent::Clipboard(
+            String::from_utf8_lossy(unsafe { gstr(&c.data) }).into_owned(),
+        ));
     }
     if let Some(reply) = w.reply {
         let mut r: GhosttyClipboardWriteReply = unsafe { sized() };
@@ -167,7 +182,8 @@ unsafe extern "C" fn on_clipboard(_t: GhosttyTerminal, ud: *mut c_void, w: *cons
 /// One per process, set by the app before it opens panes (Go suzuri's
 /// clipRead); a terminal made while none is set ignores reads, as before.
 pub type ClipboardReader = dyn Fn() -> Option<String> + Send + Sync;
-static CLIPBOARD_READER: std::sync::RwLock<Option<std::sync::Arc<ClipboardReader>>> = std::sync::RwLock::new(None);
+static CLIPBOARD_READER: std::sync::RwLock<Option<std::sync::Arc<ClipboardReader>>> =
+    std::sync::RwLock::new(None);
 
 /// Answer clipboard reads with `f` in every terminal made from now on.
 pub fn set_clipboard_reader(f: impl Fn() -> Option<String> + Send + Sync + 'static) {
@@ -175,20 +191,46 @@ pub fn set_clipboard_reader(f: impl Fn() -> Option<String> + Send + Sync + 'stat
 }
 
 fn clipboard_reader() -> Option<std::sync::Arc<ClipboardReader>> {
-    CLIPBOARD_READER.read().unwrap_or_else(|e| e.into_inner()).clone()
+    CLIPBOARD_READER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 const TEXT_PLAIN: &[u8] = b"text/plain";
 
-unsafe extern "C" fn on_clipboard_read(_t: GhosttyTerminal, _ud: *mut c_void, r: *const GhosttyClipboardRead) {
+unsafe extern "C" fn on_clipboard_read(
+    _t: GhosttyTerminal,
+    _ud: *mut c_void,
+    r: *const GhosttyClipboardRead,
+) {
     let r = unsafe { &*r };
     let Some(reply) = r.reply else { return };
-    let mimes = if r.mimes.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(r.mimes, r.mimes_len) } };
+    let mimes = if r.mimes.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(r.mimes, r.mimes_len) }
+    };
     // Text is all suzuri reads; OSC 52 asks for text/plain.
-    let wants_text = mimes.iter().any(|m| unsafe { gstr(m) }.starts_with(TEXT_PLAIN));
-    let text = if wants_text { clipboard_reader().and_then(|f| f()) } else { None };
-    let mime = GhosttyString { ptr: TEXT_PLAIN.as_ptr(), len: TEXT_PLAIN.len() };
-    let content = text.as_ref().map(|t| GhosttyClipboardContent { mime, data: GhosttyString { ptr: t.as_ptr(), len: t.len() } });
+    let wants_text = mimes
+        .iter()
+        .any(|m| unsafe { gstr(m) }.starts_with(TEXT_PLAIN));
+    let text = if wants_text {
+        clipboard_reader().and_then(|f| f())
+    } else {
+        None
+    };
+    let mime = GhosttyString {
+        ptr: TEXT_PLAIN.as_ptr(),
+        len: TEXT_PLAIN.len(),
+    };
+    let content = text.as_ref().map(|t| GhosttyClipboardContent {
+        mime,
+        data: GhosttyString {
+            ptr: t.as_ptr(),
+            len: t.len(),
+        },
+    });
     let mut out: GhosttyClipboardReadReply = unsafe { sized() };
     out.result = GHOSTTY_CLIPBOARD_READ_RESULT_SUCCESS;
     if let Some(c) = content.as_ref() {
@@ -203,7 +245,11 @@ unsafe extern "C" fn on_clipboard_read(_t: GhosttyTerminal, _ud: *mut c_void, r:
     unsafe { reply(r, &out) };
 }
 
-unsafe extern "C" fn on_size(_t: GhosttyTerminal, ud: *mut c_void, out: *mut GhosttySizeReportSize) -> bool {
+unsafe extern "C" fn on_size(
+    _t: GhosttyTerminal,
+    ud: *mut c_void,
+    out: *mut GhosttySizeReportSize,
+) -> bool {
     let s = unsafe { shared(ud) };
     unsafe {
         (*out).rows = s.rows;
@@ -214,7 +260,11 @@ unsafe extern "C" fn on_size(_t: GhosttyTerminal, ud: *mut c_void, out: *mut Gho
     true
 }
 
-unsafe extern "C" fn on_device_attributes(_t: GhosttyTerminal, _ud: *mut c_void, out: *mut GhosttyDeviceAttributes) -> bool {
+unsafe extern "C" fn on_device_attributes(
+    _t: GhosttyTerminal,
+    _ud: *mut c_void,
+    out: *mut GhosttyDeviceAttributes,
+) -> bool {
     // A VT220 with ANSI colour, as ghostty itself answers.
     let a = unsafe { &mut *out };
     a.primary.conformance_level = GHOSTTY_DA_CONFORMANCE_VT220 as u16;
@@ -244,7 +294,11 @@ const _: () = {
 };
 
 unsafe fn gstr(s: &GhosttyString) -> &[u8] {
-    if s.ptr.is_null() || s.len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(s.ptr, s.len) } }
+    if s.ptr.is_null() || s.len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(s.ptr, s.len) }
+    }
 }
 
 /// Where a cell selection starts: a cell of the screen (scrollback
@@ -322,38 +376,74 @@ macro_rules! ok {
 impl Ghostty {
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
         let (cols, rows) = (cols.max(2), rows.max(1));
-        let mut shared = Box::new(Shared { cols, rows, ..Default::default() });
+        let mut shared = Box::new(Shared {
+            cols,
+            rows,
+            ..Default::default()
+        });
         unsafe {
             let mut t: GhosttyTerminal = ptr::null_mut();
             ok!(ghostty_terminal_new(ptr::null(), &mut t, cols, rows));
             let ud = &mut *shared as *mut Shared as *mut c_void;
-            let set = |opt: GhosttyTerminalOption, v: *const c_void| ok!(ghostty_terminal_set(t, opt, v));
+            let set =
+                |opt: GhosttyTerminalOption, v: *const c_void| ok!(ghostty_terminal_set(t, opt, v));
             set(GHOSTTY_TERMINAL_OPT_USERDATA, ud);
-            set(GHOSTTY_TERMINAL_OPT_WRITE_PTY, on_write_pty as *const c_void);
+            set(
+                GHOSTTY_TERMINAL_OPT_WRITE_PTY,
+                on_write_pty as *const c_void,
+            );
             set(GHOSTTY_TERMINAL_OPT_BELL, on_bell as *const c_void);
-            set(GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, on_title as *const c_void);
-            set(GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, on_clipboard as *const c_void);
+            set(
+                GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
+                on_title as *const c_void,
+            );
+            set(
+                GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
+                on_clipboard as *const c_void,
+            );
             if clipboard_reader().is_some() {
-                set(GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ, on_clipboard_read as *const c_void);
+                set(
+                    GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ,
+                    on_clipboard_read as *const c_void,
+                );
             }
             set(GHOSTTY_TERMINAL_OPT_SIZE, on_size as *const c_void);
-            set(GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES, on_device_attributes as *const c_void);
-            set(GHOSTTY_TERMINAL_OPT_RENDER_HOLD, on_render_hold as *const c_void);
+            set(
+                GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES,
+                on_device_attributes as *const c_void,
+            );
+            set(
+                GHOSTTY_TERMINAL_OPT_RENDER_HOLD,
+                on_render_hold as *const c_void,
+            );
             // ghostty prunes whole pages (a few hundred lines) once past the
             // limit, so it can keep fewer lines than asked; a page more
             // keeps at least `scrollback` lines, as alacritty does.
-            let lines = if scrollback == 0 { 0 } else { scrollback as u64 + 1024 };
-            set(GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &lines as *const u64 as *const c_void);
+            let lines = if scrollback == 0 {
+                0
+            } else {
+                scrollback as u64 + 1024
+            };
+            set(
+                GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+                &lines as *const u64 as *const c_void,
+            );
             // The line limit is the only limit, as alacritty's: ghostty's
             // default byte limit otherwise caps the history at a few hundred
             // lines of 100 columns.
             // SIZE_MAX is "no byte limit"; NULL would restore the default.
             let no_byte_limit = usize::MAX;
-            set(GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &no_byte_limit as *const usize as *const c_void);
+            set(
+                GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                &no_byte_limit as *const usize as *const c_void,
+            );
             // Kitty graphics stay on suzuri's path (protocols.rs takes the
             // APCs before the engine sees them); ghostty keeps none itself.
             let kitty_limit = 0u64;
-            set(GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &kitty_limit as *const u64 as *const c_void);
+            set(
+                GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT,
+                &kitty_limit as *const u64 as *const c_void,
+            );
             ok!(ghostty_terminal_resize(t, cols, rows, 8, 16));
 
             let mut rs = ptr::null_mut();
@@ -369,10 +459,23 @@ impl Ghostty {
             // A 1x1 cell grid of 1px cells is all the probe needs; report
             // every motion, not only cell changes.
             let mut sz: GhosttyMouseEncoderSize = sized();
-            (sz.screen_width, sz.screen_height, sz.cell_width, sz.cell_height) = (4, 4, 1, 1);
-            ghostty_mouse_encoder_set(menc, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &sz as *const _ as *const c_void);
+            (
+                sz.screen_width,
+                sz.screen_height,
+                sz.cell_width,
+                sz.cell_height,
+            ) = (4, 4, 1, 1);
+            ghostty_mouse_encoder_set(
+                menc,
+                GHOSTTY_MOUSE_ENCODER_OPT_SIZE,
+                &sz as *const _ as *const c_void,
+            );
             let track = false;
-            ghostty_mouse_encoder_set(menc, GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL, &track as *const bool as *const c_void);
+            ghostty_mouse_encoder_set(
+                menc,
+                GHOSTTY_MOUSE_ENCODER_OPT_TRACK_LAST_CELL,
+                &track as *const bool as *const c_void,
+            );
             ghostty_mouse_event_set_position(mev, GhosttyMousePosition { x: 1.5, y: 1.5 });
             let mut g = Ghostty {
                 t,
@@ -404,8 +507,14 @@ impl Ghostty {
             // codepoint, so editing a line holding 👍🏽 can redraw off by a few
             // columns until the line is redrawn.
             if std::env::var("RSZ_GRAPHEME_CLUSTER").as_deref() != Ok("0") {
-                let m = GhosttyTerminalModeConfig { mode: mode(GRAPHEME_CLUSTER_MODE, false), value: true };
-                g.set(GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, &m as *const _ as *const c_void);
+                let m = GhosttyTerminalModeConfig {
+                    mode: mode(GRAPHEME_CLUSTER_MODE, false),
+                    value: true,
+                };
+                g.set(
+                    GHOSTTY_TERMINAL_OPT_MODE_DEFAULT,
+                    &m as *const _ as *const c_void,
+                );
             }
             // Kitty keyboard flags are kept per screen by the terminal.
             g
@@ -417,11 +526,16 @@ impl Ghostty {
     }
 
     fn get<T>(&self, data: GhosttyTerminalData, out: &mut T) -> bool {
-        unsafe { ghostty_terminal_get(self.t, data, out as *mut T as *mut c_void) == GHOSTTY_SUCCESS }
+        unsafe {
+            ghostty_terminal_get(self.t, data, out as *mut T as *mut c_void) == GHOSTTY_SUCCESS
+        }
     }
 
     fn mode(&self, value: u16) -> bool {
-        let mut m = GhosttyTerminalModeConfig { mode: mode(value, false), value: false };
+        let mut m = GhosttyTerminalModeConfig {
+            mode: mode(value, false),
+            value: false,
+        };
         self.get(GHOSTTY_TERMINAL_DATA_MODE, &mut m) && m.value
     }
 
@@ -439,18 +553,42 @@ impl Ghostty {
             let (r, g, b) = palette::xterm256(&ansi, i as u8);
             *c = GhosttyColorRgb { r, g, b };
         }
-        self.set(GHOSTTY_TERMINAL_OPT_COLOR_PALETTE, p.as_ptr() as *const c_void);
+        self.set(
+            GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+            p.as_ptr() as *const c_void,
+        );
         let c = &self.pal.pal;
-        let fg = GhosttyColorRgb { r: c.fg.0, g: c.fg.1, b: c.fg.2 };
-        let bg = GhosttyColorRgb { r: c.bg.0, g: c.bg.1, b: c.bg.2 };
-        self.set(GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, &fg as *const _ as *const c_void);
-        self.set(GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, &bg as *const _ as *const c_void);
+        let fg = GhosttyColorRgb {
+            r: c.fg.0,
+            g: c.fg.1,
+            b: c.fg.2,
+        };
+        let bg = GhosttyColorRgb {
+            r: c.bg.0,
+            g: c.bg.1,
+            b: c.bg.2,
+        };
+        self.set(
+            GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND,
+            &fg as *const _ as *const c_void,
+        );
+        self.set(
+            GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND,
+            &bg as *const _ as *const c_void,
+        );
     }
 
     fn drain(&mut self, events: &mut Vec<EngineEvent>) {
         if std::mem::take(&mut self.shared.title_changed) {
-            let mut s = GhosttyString { ptr: ptr::null(), len: 0 };
-            let title = if self.get(GHOSTTY_TERMINAL_DATA_TITLE, &mut s) { String::from_utf8_lossy(unsafe { gstr(&s) }).into_owned() } else { String::new() };
+            let mut s = GhosttyString {
+                ptr: ptr::null(),
+                len: 0,
+            };
+            let title = if self.get(GHOSTTY_TERMINAL_DATA_TITLE, &mut s) {
+                String::from_utf8_lossy(unsafe { gstr(&s) }).into_owned()
+            } else {
+                String::new()
+            };
             // The title event goes where it happened relative to replies:
             // after them is close enough, nobody orders the two.
             self.shared.events.push(EngineEvent::Title(title));
@@ -459,7 +597,11 @@ impl Ghostty {
     }
 
     fn scrollbar(&self) -> GhosttyTerminalScrollbar {
-        let mut sb = GhosttyTerminalScrollbar { total: 0, offset: 0, len: 0 };
+        let mut sb = GhosttyTerminalScrollbar {
+            total: 0,
+            offset: 0,
+            len: 0,
+        };
         self.get(GHOSTTY_TERMINAL_DATA_SCROLLBAR, &mut sb);
         sb
     }
@@ -475,7 +617,12 @@ impl Ghostty {
     fn grid_ref(&self, tag: GhosttyPointTag, x: u16, y: u32) -> Option<GhosttyGridRef> {
         unsafe {
             let mut r: GhosttyGridRef = zeroed();
-            let p = GhosttyPoint { tag, value: GhosttyPointValue { coordinate: GhosttyPointCoordinate { x, y } } };
+            let p = GhosttyPoint {
+                tag,
+                value: GhosttyPointValue {
+                    coordinate: GhosttyPointCoordinate { x, y },
+                },
+            };
             (ghostty_terminal_grid_ref(self.t, p, &mut r) == GHOSTTY_SUCCESS).then_some(r)
         }
     }
@@ -504,7 +651,11 @@ impl Ghostty {
                 res = ghostty_grid_ref_graphemes(r, big.as_mut_ptr(), big.len(), &mut n);
             }
             if res == GHOSTTY_SUCCESS && n > 0 {
-                let cps = if big.is_empty() { &buf[..n.min(buf.len())] } else { &big[..n.min(big.len())] };
+                let cps = if big.is_empty() {
+                    &buf[..n.min(buf.len())]
+                } else {
+                    &big[..n.min(big.len())]
+                };
                 out.extend(cps.iter().filter_map(|&c| char::from_u32(c)));
                 return true;
             }
@@ -543,7 +694,11 @@ impl Ghostty {
         unsafe {
             let mut buf = [0u8; 2048];
             let mut n = 0usize;
-            if ghostty_grid_ref_hyperlink_uri(r, buf.as_mut_ptr(), buf.len(), &mut n) == GHOSTTY_SUCCESS && n > 0 && n <= buf.len() {
+            if ghostty_grid_ref_hyperlink_uri(r, buf.as_mut_ptr(), buf.len(), &mut n)
+                == GHOSTTY_SUCCESS
+                && n > 0
+                && n <= buf.len()
+            {
                 return Some(String::from_utf8_lossy(&buf[..n]).into_owned());
             }
         }
@@ -559,7 +714,11 @@ impl Ghostty {
     fn colors(&self) -> GhosttyRenderStateColors {
         unsafe {
             let mut c: GhosttyRenderStateColors = sized();
-            ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_COLORS, &mut c as *mut _ as *mut c_void);
+            ghostty_render_state_get(
+                self.rs,
+                GHOSTTY_RENDER_STATE_DATA_COLORS,
+                &mut c as *mut _ as *mut c_void,
+            );
             c
         }
     }
@@ -568,18 +727,37 @@ impl Ghostty {
     fn bg_override(&self) -> Option<palette::Rgb> {
         let mut a = GhosttyColorRgb { r: 0, g: 0, b: 0 };
         let mut d = a;
-        if self.get(GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND, &mut a) && self.get(GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND_DEFAULT, &mut d) && (a.r, a.g, a.b) != (d.r, d.g, d.b) {
+        if self.get(GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND, &mut a)
+            && self.get(GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND_DEFAULT, &mut d)
+            && (a.r, a.g, a.b) != (d.r, d.g, d.b)
+        {
             return Some((a.r, a.g, a.b));
         }
         None
     }
 
-    fn encode_row(&mut self, y: u16, out: &mut Vec<u8>, colors: &GhosttyRenderStateColors, bg_over: Option<palette::Rgb>) {
+    fn encode_row(
+        &mut self,
+        y: u16,
+        out: &mut Vec<u8>,
+        colors: &GhosttyRenderStateColors,
+        bg_over: Option<palette::Rgb>,
+    ) {
         self.row_scratch.clear();
         let mut sel = unsafe { sized::<GhosttyRenderStateRowSelection>() };
-        let has_sel = unsafe { ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION, &mut sel as *mut _ as *mut c_void) } == GHOSTTY_SUCCESS;
+        let has_sel = unsafe {
+            ghostty_render_state_row_get(
+                self.rows_it,
+                GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
+                &mut sel as *mut _ as *mut c_void,
+            )
+        } == GHOSTTY_SUCCESS;
         unsafe {
-            ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &mut self.cells as *mut _ as *mut c_void);
+            ghostty_render_state_row_get(
+                self.rows_it,
+                GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,
+                &mut self.cells as *mut _ as *mut c_void,
+            );
         }
         let c = self.pal.pal;
         let term_bg = pack(palette::term_bg(&c));
@@ -587,18 +765,30 @@ impl Ghostty {
             let p = colors.palette[i as usize];
             (p.r, p.g, p.b)
         };
-        let default_fg = (colors.foreground.r, colors.foreground.g, colors.foreground.b);
+        let default_fg = (
+            colors.foreground.r,
+            colors.foreground.g,
+            colors.foreground.b,
+        );
         let mut x: u16 = 0;
         while unsafe { ghostty_render_state_row_cells_next(self.cells) } {
-            let get = |d: GhosttyRenderStateRowCellsData, out: *mut c_void| unsafe { ghostty_render_state_row_cells_get(self.cells, d, out) };
+            let get = |d: GhosttyRenderStateRowCellsData, out: *mut c_void| unsafe {
+                ghostty_render_state_row_cells_get(self.cells, d, out)
+            };
             let mut n = 0u32;
-            get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &mut n as *mut _ as *mut c_void);
+            get(
+                GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN,
+                &mut n as *mut _ as *mut c_void,
+            );
             let cp = if n > 0 {
                 let mut buf = [0u32; frame::CLUSTER_MAX_CPS];
                 let mut big: Vec<u32>;
                 let fill = |ptr: *mut u32, cap: usize| {
                     let mut b = GhosttyCodepointBuffer { ptr, cap, len: 0 };
-                    get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, &mut b as *mut _ as *mut c_void);
+                    get(
+                        GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
+                        &mut b as *mut _ as *mut c_void,
+                    );
                     b.len.min(cap)
                 };
                 let cps: &[u32] = if n as usize <= buf.len() {
@@ -614,8 +804,18 @@ impl Ghostty {
                 if n >= 2 && self.nclusters < u16::MAX {
                     let mut raw: GhosttyCell = 0;
                     let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
-                    if get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &mut raw as *mut _ as *mut c_void) == GHOSTTY_SUCCESS {
-                        unsafe { ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void) };
+                    if get(
+                        GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+                        &mut raw as *mut _ as *mut c_void,
+                    ) == GHOSTTY_SUCCESS
+                    {
+                        unsafe {
+                            ghostty_cell_get(
+                                raw,
+                                GHOSTTY_CELL_DATA_WIDE,
+                                &mut wide as *mut _ as *mut c_void,
+                            )
+                        };
                     }
                     let w = if wide == GHOSTTY_CELL_WIDE_WIDE { 2 } else { 1 };
                     frame::encode_cluster(&mut self.cluster_table, y, x, w, cps);
@@ -627,16 +827,36 @@ impl Ghostty {
                 // character is 0, as the alacritty engine sent them.
                 let mut raw: GhosttyCell = 0;
                 let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
-                if get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &mut raw as *mut _ as *mut c_void) == GHOSTTY_SUCCESS {
-                    unsafe { ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void) };
+                if get(
+                    GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW,
+                    &mut raw as *mut _ as *mut c_void,
+                ) == GHOSTTY_SUCCESS
+                {
+                    unsafe {
+                        ghostty_cell_get(
+                            raw,
+                            GHOSTTY_CELL_DATA_WIDE,
+                            &mut wide as *mut _ as *mut c_void,
+                        )
+                    };
                 }
-                if wide == GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == GHOSTTY_CELL_WIDE_SPACER_HEAD { 0 } else { ' ' as u32 }
+                if wide == GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == GHOSTTY_CELL_WIDE_SPACER_HEAD {
+                    0
+                } else {
+                    ' ' as u32
+                }
             };
             let mut styled = false;
-            get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING, &mut styled as *mut _ as *mut c_void);
+            get(
+                GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_HAS_STYLING,
+                &mut styled as *mut _ as *mut c_void,
+            );
             let mut st: GhosttyStyle = unsafe { zeroed() };
             if styled {
-                get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE, &mut st as *mut _ as *mut c_void);
+                get(
+                    GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
+                    &mut st as *mut _ as *mut c_void,
+                );
             }
             let bold = style_has(&st, STYLE_BOLD);
             let default_ink = st.fg_color.tag == COLOR_NONE;
@@ -653,7 +873,11 @@ impl Ghostty {
             };
             let mut bgc = GhosttyColorRgb { r: 0, g: 0, b: 0 };
             let mut bg = if styled || n == 0 {
-                if get(GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &mut bgc as *mut _ as *mut c_void) == GHOSTTY_SUCCESS {
+                if get(
+                    GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR,
+                    &mut bgc as *mut _ as *mut c_void,
+                ) == GHOSTTY_SUCCESS
+                {
                     pack((bgc.r, bgc.g, bgc.b))
                 } else {
                     bg_over.map(pack).unwrap_or(frame::DEFAULT_BG)
@@ -665,7 +889,11 @@ impl Ghostty {
             // see the alacritty engine for the measurements behind them.
             if style_has(&st, STYLE_FAINT) {
                 let d = palette::faint_ink(unpack(fg), &c);
-                fg = if c.dark && default_ink && (d.0 as u32 + d.1 as u32 + d.2 as u32) < 80 { pack((140, 140, 140)) } else { pack(d) };
+                fg = if c.dark && default_ink && (d.0 as u32 + d.1 as u32 + d.2 as u32) < 80 {
+                    pack((140, 140, 140))
+                } else {
+                    pack(d)
+                };
             }
             if bold {
                 fg = pack(palette::bold_ink(unpack(fg), &c));
@@ -720,24 +948,34 @@ impl Ghostty {
     fn view_point(&self, col: u16, row: u16) -> (u16, u32) {
         let (cols, rows) = (self.shared.cols, self.shared.rows);
         let sb = self.scrollbar();
-        (col.min(cols - 1), sb.offset as u32 + row.min(rows - 1) as u32)
+        (
+            col.min(cols - 1),
+            sb.offset as u32 + row.min(rows - 1) as u32,
+        )
     }
 
     fn tracked_screen_point(r: GhosttyTrackedGridRef) -> Option<(u16, u32)> {
         unsafe {
             let mut p = GhosttyPointCoordinate { x: 0, y: 0 };
-            (ghostty_tracked_grid_ref_point(r, GHOSTTY_POINT_TAG_SCREEN, &mut p) == GHOSTTY_SUCCESS).then_some((p.x, p.y))
+            (ghostty_tracked_grid_ref_point(r, GHOSTTY_POINT_TAG_SCREEN, &mut p) == GHOSTTY_SUCCESS)
+                .then_some((p.x, p.y))
         }
     }
 
     fn set_selection(&mut self, a: (u16, u32), b: (u16, u32)) -> bool {
-        let (Some(s), Some(e)) = (self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, a.0, a.1), self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, b.0, b.1)) else {
+        let (Some(s), Some(e)) = (
+            self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, a.0, a.1),
+            self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, b.0, b.1),
+        ) else {
             return false;
         };
         let mut sel: GhosttySelection = unsafe { zeroed() };
         sel.start = s;
         sel.end = e;
-        self.set(GHOSTTY_TERMINAL_OPT_SELECTION, &sel as *const _ as *const c_void);
+        self.set(
+            GHOSTTY_TERMINAL_OPT_SELECTION,
+            &sel as *const _ as *const c_void,
+        );
         true
     }
 
@@ -747,14 +985,27 @@ impl Ghostty {
 
     fn current_selection(&self) -> Option<GhosttySelection> {
         let mut sel: GhosttySelection = unsafe { zeroed() };
-        self.get(GHOSTTY_TERMINAL_DATA_SELECTION, &mut sel).then_some(sel)
+        self.get(GHOSTTY_TERMINAL_DATA_SELECTION, &mut sel)
+            .then_some(sel)
     }
 
     fn selection_points(&self, sel: &GhosttySelection) -> Option<((u16, u32), (u16, u32))> {
         unsafe {
             let mut a = GhosttyPointCoordinate { x: 0, y: 0 };
             let mut b = a;
-            if ghostty_terminal_point_from_grid_ref(self.t, &sel.start, GHOSTTY_POINT_TAG_SCREEN, &mut a) != GHOSTTY_SUCCESS || ghostty_terminal_point_from_grid_ref(self.t, &sel.end, GHOSTTY_POINT_TAG_SCREEN, &mut b) != GHOSTTY_SUCCESS {
+            if ghostty_terminal_point_from_grid_ref(
+                self.t,
+                &sel.start,
+                GHOSTTY_POINT_TAG_SCREEN,
+                &mut a,
+            ) != GHOSTTY_SUCCESS
+                || ghostty_terminal_point_from_grid_ref(
+                    self.t,
+                    &sel.end,
+                    GHOSTTY_POINT_TAG_SCREEN,
+                    &mut b,
+                ) != GHOSTTY_SUCCESS
+            {
                 return None;
             }
             Some(((a.x, a.y), (b.x, b.y)))
@@ -808,7 +1059,11 @@ impl Ghostty {
             modes |= frame::M_ALT_SCREEN;
         }
         let (click, drag, motion) = self.mouse_tracking();
-        for (on, bit) in [(click, frame::M_MOUSE_CLICK), (drag, frame::M_MOUSE_DRAG), (motion, frame::M_MOUSE_MOTION)] {
+        for (on, bit) in [
+            (click, frame::M_MOUSE_CLICK),
+            (drag, frame::M_MOUSE_DRAG),
+            (motion, frame::M_MOUSE_MOTION),
+        ] {
             if on {
                 modes |= bit;
             }
@@ -833,7 +1088,11 @@ impl Ghostty {
         unsafe {
             ghostty_mouse_encoder_set_from_terminal(self.menc, self.t);
             let reports = |action: GhosttyMouseAction, pressed: bool| {
-                ghostty_mouse_encoder_set(self.menc, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed as *const bool as *const c_void);
+                ghostty_mouse_encoder_set(
+                    self.menc,
+                    GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED,
+                    &pressed as *const bool as *const c_void,
+                );
                 ghostty_mouse_event_set_action(self.mev, action);
                 if pressed {
                     ghostty_mouse_event_set_button(self.mev, GHOSTTY_MOUSE_BUTTON_LEFT);
@@ -842,7 +1101,14 @@ impl Ghostty {
                 }
                 let mut buf = [0u8; 32];
                 let mut n = 0usize;
-                ghostty_mouse_encoder_encode(self.menc, self.mev, buf.as_mut_ptr() as *mut _, buf.len(), &mut n) == GHOSTTY_SUCCESS && n > 0
+                ghostty_mouse_encoder_encode(
+                    self.menc,
+                    self.mev,
+                    buf.as_mut_ptr() as *mut _,
+                    buf.len(),
+                    &mut n,
+                ) == GHOSTTY_SUCCESS
+                    && n > 0
             };
             if reports(GHOSTTY_MOUSE_ACTION_MOTION, false) {
                 (false, false, true)
@@ -859,19 +1125,33 @@ impl Ghostty {
     fn rs_size(&self) -> (u16, u16) {
         let (mut c, mut r) = (self.shared.cols, self.shared.rows);
         unsafe {
-            ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_COLS, &mut c as *mut _ as *mut c_void);
-            ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_ROWS, &mut r as *mut _ as *mut c_void);
+            ghostty_render_state_get(
+                self.rs,
+                GHOSTTY_RENDER_STATE_DATA_COLS,
+                &mut c as *mut _ as *mut c_void,
+            );
+            ghostty_render_state_get(
+                self.rs,
+                GHOSTTY_RENDER_STATE_DATA_ROWS,
+                &mut r as *mut _ as *mut c_void,
+            );
         }
         (c, r)
     }
 
     fn mode_ansi(&self, value: u16) -> bool {
-        let mut m = GhosttyTerminalModeConfig { mode: mode(value, true), value: false };
+        let mut m = GhosttyTerminalModeConfig {
+            mode: mode(value, true),
+            value: false,
+        };
         self.get(GHOSTTY_TERMINAL_DATA_MODE, &mut m) && m.value
     }
 
     fn set_mode(&mut self, value: u16, on: bool) {
-        let m = GhosttyTerminalModeConfig { mode: mode(value, true), value: on };
+        let m = GhosttyTerminalModeConfig {
+            mode: mode(value, true),
+            value: on,
+        };
         self.set(GHOSTTY_TERMINAL_OPT_MODE, &m as *const _ as *const c_void);
     }
 
@@ -886,7 +1166,9 @@ impl Ghostty {
             if ghostty_tracked_grid_ref_snapshot(r, &mut g) != GHOSTTY_SUCCESS {
                 return false;
             }
-            Self::hyperlink(&g).and_then(|u| u.strip_prefix(MARK_URI).and_then(|t| t.parse::<u32>().ok())) == Some(tag)
+            Self::hyperlink(&g)
+                .and_then(|u| u.strip_prefix(MARK_URI).and_then(|t| t.parse::<u32>().ok()))
+                == Some(tag)
         }
     }
 
@@ -904,11 +1186,19 @@ impl Ghostty {
 
     /// A screen row is the soft-wrapped continuation of the row above.
     fn wraps_from_above(&self, y: u32) -> bool {
-        let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else { return false };
+        let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else {
+            return false;
+        };
         unsafe {
             let mut row: GhosttyRow = 0;
             let mut cont = false;
-            ghostty_grid_ref_row(&r, &mut row) == GHOSTTY_SUCCESS && ghostty_row_get(row, GHOSTTY_ROW_DATA_WRAP_CONTINUATION, &mut cont as *mut _ as *mut c_void) == GHOSTTY_SUCCESS && cont
+            ghostty_grid_ref_row(&r, &mut row) == GHOSTTY_SUCCESS
+                && ghostty_row_get(
+                    row,
+                    GHOSTTY_ROW_DATA_WRAP_CONTINUATION,
+                    &mut cont as *mut _ as *mut c_void,
+                ) == GHOSTTY_SUCCESS
+                && cont
         }
     }
 
@@ -931,11 +1221,19 @@ impl Ghostty {
                 // alacritty's rule: the anchor's cell is in when the press
                 // was in its left half, the free end's when the pointer is
                 // in its right half.
-                let ((s, s_right), (e, e_right)) = if ord(ap) <= ord(p) { ((ap, a.right), (p, right)) } else { ((p, right), (ap, a.right)) };
+                let ((s, s_right), (e, e_right)) = if ord(ap) <= ord(p) {
+                    ((ap, a.right), (p, right))
+                } else {
+                    ((p, right), (ap, a.right))
+                };
                 let cols = self.shared.cols;
                 let step = |q: (u16, u32), fwd: bool| -> Option<(u16, u32)> {
                     if fwd {
-                        if q.0 + 1 < cols { Some((q.0 + 1, q.1)) } else { Some((0, q.1 + 1)) }
+                        if q.0 + 1 < cols {
+                            Some((q.0 + 1, q.1))
+                        } else {
+                            Some((0, q.1 + 1))
+                        }
                     } else if q.0 > 0 {
                         Some((q.0 - 1, q.1))
                     } else if q.1 > 0 {
@@ -954,7 +1252,9 @@ impl Ghostty {
                 }
             }
             kind => {
-                let (Some(u1), Some(u2)) = (self.unit_at(kind, ap), self.unit_at(kind, p)) else { return };
+                let (Some(u1), Some(u2)) = (self.unit_at(kind, ap), self.unit_at(kind, p)) else {
+                    return;
+                };
                 let start = if ord(u1.0) <= ord(u2.0) { u1.0 } else { u2.0 };
                 let end = if ord(u1.1) >= ord(u2.1) { u1.1 } else { u2.1 };
                 self.set_selection(start, end);
@@ -972,15 +1272,23 @@ impl Ghostty {
         // mode 2027 is on, else one codepoint at a time (marks join the
         // previous cell either way).
         let clustered = self.mode(GRAPHEME_CLUSTER_MODE);
-        let cps: Vec<u32> = text.chars().filter(|c| !c.is_control()).map(|c| c as u32).collect();
+        let cps: Vec<u32> = text
+            .chars()
+            .filter(|c| !c.is_control())
+            .map(|c| c as u32)
+            .collect();
         let (mut x, mut i) = (0, 0);
         while i < cps.len() {
             let (used, w) = if clustered {
                 let mut w = 0u8;
-                let used = unsafe { ghostty_unicode_grapheme_width(cps[i..].as_ptr(), cps.len() - i, &mut w) }.max(1);
+                let used = unsafe {
+                    ghostty_unicode_grapheme_width(cps[i..].as_ptr(), cps.len() - i, &mut w)
+                }
+                .max(1);
                 (used, w as usize)
             } else {
-                (1, unsafe { ghostty_unicode_codepoint_width(cps[i]) } as usize)
+                (1, unsafe { ghostty_unicode_codepoint_width(cps[i]) }
+                    as usize)
             };
             // Stop short of the last column: a character there would arm the
             // wrap, and the line must not spill onto the next.
@@ -991,7 +1299,12 @@ impl Ghostty {
             if w > 0 || x > 0 {
                 for &c in &cps[i..(i + used).min(cps.len())] {
                     let mut buf = [0u8; 4];
-                    out.extend_from_slice(char::from_u32(c).unwrap_or(' ').encode_utf8(&mut buf).as_bytes());
+                    out.extend_from_slice(
+                        char::from_u32(c)
+                            .unwrap_or(' ')
+                            .encode_utf8(&mut buf)
+                            .as_bytes(),
+                    );
                 }
             }
             x += w;
@@ -1010,7 +1323,10 @@ impl Engine for Ghostty {
         // Most updates end in the read they began in (Claude Code wraps every
         // frame in one), and then no frame can see the hold: only a BSU with
         // no ESU after it in this read needs the update.
-        match (self.shared.held_since.is_none()).then(|| open_bsu(bytes)).flatten() {
+        match (self.shared.held_since.is_none())
+            .then(|| open_bsu(bytes))
+            .flatten()
+        {
             Some(i) => {
                 self.feed_internal(&bytes[..i]);
                 unsafe { ok!(ghostty_render_state_update(self.rs, self.t)) };
@@ -1031,7 +1347,10 @@ impl Engine for Ghostty {
         // A resize ends a synchronized update: the program draws again for
         // the new size, and the held frame is the old size's.
         if self.shared.held_since.take().is_some() {
-            let m = GhosttyTerminalModeConfig { mode: mode(2026, false), value: false };
+            let m = GhosttyTerminalModeConfig {
+                mode: mode(2026, false),
+                value: false,
+            };
             self.set(GHOSTTY_TERMINAL_OPT_MODE, &m as *const _ as *const c_void);
         }
         unsafe { ok!(ghostty_terminal_resize(self.t, cols, rows, 8, 16)) };
@@ -1042,7 +1361,10 @@ impl Engine for Ghostty {
         // Growing taller normally brings history lines back down; ConPTY
         // adds blank rows at the bottom instead (#296).
         let pull = !on;
-        self.set(GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK, &pull as *const bool as *const c_void);
+        self.set(
+            GHOSTTY_TERMINAL_OPT_RESIZE_PULL_SCROLLBACK,
+            &pull as *const bool as *const c_void,
+        );
     }
 
     fn snapshot(&mut self, out: &mut Vec<u8>, seq: u32, force_full: bool) -> bool {
@@ -1066,7 +1388,13 @@ impl Engine for Ghostty {
         let full = force_full || self.full_next || has_sel || self.sel_shown;
         self.sel_shown = has_sel;
         let mut dirty: GhosttyRenderStateDirty = GHOSTTY_RENDER_STATE_DIRTY_FALSE;
-        unsafe { ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_DIRTY, &mut dirty as *mut _ as *mut c_void) };
+        unsafe {
+            ghostty_render_state_get(
+                self.rs,
+                GHOSTTY_RENDER_STATE_DATA_DIRTY,
+                &mut dirty as *mut _ as *mut c_void,
+            )
+        };
         if held && !full {
             return false;
         }
@@ -1077,10 +1405,24 @@ impl Engine for Ghostty {
         let bg_over = self.bg_override();
         // A held frame is the render state's: its size and cursor, and the
         // modes and history of the last frame before the hold.
-        let (cols, rows) = if held { self.rs_size() } else { (self.shared.cols, self.shared.rows) };
-        let (history, offset) = if held { self.last_hist } else { self.history_and_offset() };
+        let (cols, rows) = if held {
+            self.rs_size()
+        } else {
+            (self.shared.cols, self.shared.rows)
+        };
+        let (history, offset) = if held {
+            self.last_hist
+        } else {
+            self.history_and_offset()
+        };
         let mut cur = unsafe { sized::<GhosttyRenderStateCursor>() };
-        unsafe { ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_CURSOR, &mut cur as *mut _ as *mut c_void) };
+        unsafe {
+            ghostty_render_state_get(
+                self.rs,
+                GHOSTTY_RENDER_STATE_DATA_CURSOR,
+                &mut cur as *mut _ as *mut c_void,
+            )
+        };
         let shape = if !cur.visible || offset != 0 {
             0
         } else {
@@ -1092,7 +1434,11 @@ impl Engine for Ghostty {
                 _ => 1,
             }
         };
-        let (cx, cy) = if cur.viewport_has_value && offset == 0 { (cur.viewport_x, cur.viewport_y) } else { self.cursor() };
+        let (cx, cy) = if cur.viewport_has_value && offset == 0 {
+            (cur.viewport_x, cur.viewport_y)
+        } else {
+            self.cursor()
+        };
         let modes = if held { self.last_modes } else { self.modes() };
         self.last_modes = modes;
         self.last_hist = (history, offset);
@@ -1103,12 +1449,22 @@ impl Engine for Ghostty {
         self.cluster_table.clear();
         self.nclusters = 0;
         unsafe {
-            ghostty_render_state_get(self.rs, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &mut self.rows_it as *mut _ as *mut c_void);
+            ghostty_render_state_get(
+                self.rs,
+                GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
+                &mut self.rows_it as *mut _ as *mut c_void,
+            );
         }
         let mut y: u16 = 0;
         while unsafe { ghostty_render_state_row_iterator_next(self.rows_it) } {
             let mut row_dirty = false;
-            unsafe { ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY, &mut row_dirty as *mut _ as *mut c_void) };
+            unsafe {
+                ghostty_render_state_row_get(
+                    self.rows_it,
+                    GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY,
+                    &mut row_dirty as *mut _ as *mut c_void,
+                )
+            };
             if full || (dirty != GHOSTTY_RENDER_STATE_DIRTY_FALSE && row_dirty) {
                 self.encode_row(y, &mut body, &colors, bg_over);
                 nrows += 1;
@@ -1161,7 +1517,10 @@ impl Engine for Ghostty {
 
     fn stop_sync(&mut self, events: &mut Vec<EngineEvent>) {
         if self.shared.held_since.take().is_some() {
-            let m = GhosttyTerminalModeConfig { mode: mode(2026, false), value: false };
+            let m = GhosttyTerminalModeConfig {
+                mode: mode(2026, false),
+                value: false,
+            };
             self.set(GHOSTTY_TERMINAL_OPT_MODE, &m as *const _ as *const c_void);
             self.full_next = true;
         }
@@ -1184,7 +1543,9 @@ impl Engine for Ghostty {
     fn history_tail(&self, lines: usize) -> Vec<String> {
         let (history, _) = self.history_and_offset();
         let n = lines.min(history);
-        (history - n..history).map(|y| self.row_text(GHOSTTY_POINT_TAG_HISTORY, y as u32, self.shared.cols)).collect()
+        (history - n..history)
+            .map(|y| self.row_text(GHOSTTY_POINT_TAG_HISTORY, y as u32, self.shared.cols))
+            .collect()
     }
 
     fn size(&self) -> (u16, u16) {
@@ -1198,13 +1559,24 @@ impl Engine for Ghostty {
             3 => GHOSTTY_CURSOR_STYLE_BAR,
             _ => GHOSTTY_CURSOR_STYLE_BLOCK,
         };
-        self.set(GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE, &style as *const _ as *const c_void);
+        self.set(
+            GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE,
+            &style as *const _ as *const c_void,
+        );
         let blink = false;
-        self.set(GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK, &blink as *const bool as *const c_void);
+        self.set(
+            GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK,
+            &blink as *const bool as *const c_void,
+        );
         self.full_next = true;
     }
 
-    fn insert_block(&mut self, above: &[(String, palette::Rgb)], on_line: &(String, palette::Rgb), keep_cursor_line: bool) {
+    fn insert_block(
+        &mut self,
+        above: &[(String, palette::Rgb)],
+        on_line: &(String, palette::Rgb),
+        keep_cursor_line: bool,
+    ) {
         self.scroll(i32::MIN);
         self.drop_anchor();
         self.clear_selection();
@@ -1260,7 +1632,12 @@ impl Engine for Ghostty {
         self.drop_anchor();
         let p = self.view_point(col, row);
         let mut at: GhosttyTrackedGridRef = ptr::null_mut();
-        let pt = GhosttyPoint { tag: GHOSTTY_POINT_TAG_SCREEN, value: GhosttyPointValue { coordinate: GhosttyPointCoordinate { x: p.0, y: p.1 } } };
+        let pt = GhosttyPoint {
+            tag: GHOSTTY_POINT_TAG_SCREEN,
+            value: GhosttyPointValue {
+                coordinate: GhosttyPointCoordinate { x: p.0, y: p.1 },
+            },
+        };
         if unsafe { ghostty_terminal_grid_ref_track(self.t, pt, &mut at) } != GHOSTTY_SUCCESS {
             return;
         }
@@ -1299,13 +1676,31 @@ impl Engine for Ghostty {
             }
             let emit: GhosttyFormatterFormat = GHOSTTY_FORMATTER_FORMAT_PLAIN;
             let on = true;
-            let set_ok = ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_EMIT, &emit as *const _ as *const c_void) == GHOSTTY_SUCCESS
-                && ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_UNWRAP, &on as *const bool as *const c_void) == GHOSTTY_SUCCESS
-                && ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_TRIM, &on as *const bool as *const c_void) == GHOSTTY_SUCCESS
-                && ghostty_formatter_set(f, GHOSTTY_FORMATTER_OPT_SELECTION, &sel as *const _ as *const c_void) == GHOSTTY_SUCCESS;
+            let set_ok = ghostty_formatter_set(
+                f,
+                GHOSTTY_FORMATTER_OPT_EMIT,
+                &emit as *const _ as *const c_void,
+            ) == GHOSTTY_SUCCESS
+                && ghostty_formatter_set(
+                    f,
+                    GHOSTTY_FORMATTER_OPT_UNWRAP,
+                    &on as *const bool as *const c_void,
+                ) == GHOSTTY_SUCCESS
+                && ghostty_formatter_set(
+                    f,
+                    GHOSTTY_FORMATTER_OPT_TRIM,
+                    &on as *const bool as *const c_void,
+                ) == GHOSTTY_SUCCESS
+                && ghostty_formatter_set(
+                    f,
+                    GHOSTTY_FORMATTER_OPT_SELECTION,
+                    &sel as *const _ as *const c_void,
+                ) == GHOSTTY_SUCCESS;
             let mut p: *mut u8 = ptr::null_mut();
             let mut n = 0usize;
-            let got = set_ok && ghostty_formatter_format_alloc(f, ptr::null(), &mut p, &mut n) == GHOSTTY_SUCCESS;
+            let got = set_ok
+                && ghostty_formatter_format_alloc(f, ptr::null(), &mut p, &mut n)
+                    == GHOSTTY_SUCCESS;
             ghostty_formatter_free(f);
             if !got || p.is_null() {
                 return None;
@@ -1325,10 +1720,16 @@ impl Engine for Ghostty {
             let end = if (a.1, a.0) <= (b.1, b.0) { b } else { a };
             let start_x = if (a.1, a.0) <= (b.1, b.0) { a } else { b };
             let x0 = if start_x.1 == end.1 { start_x.0 } else { 0 };
-            let ch = |x: u16| self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, x, end.1).and_then(|r| Self::cell_char(&r));
+            let ch = |x: u16| {
+                self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, x, end.1)
+                    .and_then(|r| Self::cell_char(&r))
+            };
             let text_after = (end.0 + 1..self.shared.cols).any(|x| ch(x).is_some_and(|c| c != ' '));
             if text_after {
-                let spaces = (x0..=end.0).rev().take_while(|&x| ch(x) == Some(' ')).count();
+                let spaces = (x0..=end.0)
+                    .rev()
+                    .take_while(|&x| ch(x) == Some(' '))
+                    .count();
                 // Only spaces taken on the last row: the trim emptied that
                 // row and the pop above took its line break, unless the row
                 // continues the one before it (unwrapped, no break).
@@ -1350,7 +1751,8 @@ impl Engine for Ghostty {
         // An OSC 8 hyperlink: the run of cells carrying the same link.
         // (An image mark, #288, is not a link.)
         if let Some(uri) = Self::hyperlink(&r).filter(|u| !u.starts_with(MARK_URI)) {
-            let same = |x: u16| at(x).and_then(|r| Self::hyperlink(&r)).as_deref() == Some(uri.as_str());
+            let same =
+                |x: u16| at(x).and_then(|r| Self::hyperlink(&r)).as_deref() == Some(uri.as_str());
             let mut x0 = col;
             while x0 > 0 && same(x0 - 1) {
                 x0 -= 1;
@@ -1359,7 +1761,13 @@ impl Engine for Ghostty {
             while x1 < cols && same(x1) {
                 x1 += 1;
             }
-            return Some(Link { url: uri, row, x0, x1, osc8: true });
+            return Some(Link {
+                url: uri,
+                row,
+                x0,
+                x1,
+                osc8: true,
+            });
         }
         let line: Vec<char> = (0..cols)
             .map(|x| match at(x) {
@@ -1374,12 +1782,24 @@ impl Engine for Ghostty {
         input::find_urls(&line)
             .into_iter()
             .find(|u| (u.x0..u.x1).contains(&(col as usize)))
-            .map(|u| Link { url: u.url, row, x0: u.x0 as u16, x1: u.x1 as u16, osc8: false })
+            .map(|u| Link {
+                url: u.url,
+                row,
+                x0: u.x0 as u16,
+                x1: u.x1 as u16,
+                osc8: false,
+            })
     }
 
     fn mouse_report(&self, ev: MouseEvent) -> Option<Vec<u8>> {
         let (click, drag, motion) = self.mouse_tracking();
-        let modes = MouseModes { click, drag, motion, sgr: self.mode(1006), utf8: self.mode(1005) };
+        let modes = MouseModes {
+            click,
+            drag,
+            motion,
+            sgr: self.mode(1006),
+            utf8: self.mode(1005),
+        };
         input::mouse_report(modes, ev)
     }
 
@@ -1408,7 +1828,9 @@ impl Engine for Ghostty {
         // replaces the cell instead of shifting the row.
         self.prune_marks();
         let (x, y) = self.cursor();
-        let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_ACTIVE, x, y as u32) else { return };
+        let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_ACTIVE, x, y as u32) else {
+            return;
+        };
         let wide = Self::cell_wide(&r);
         if wide == GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == GHOSTTY_CELL_WIDE_SPACER_HEAD {
             // Half of a wide character, or the gap before one that wrapped:
@@ -1440,7 +1862,12 @@ impl Engine for Ghostty {
         if insert {
             self.set_mode(4, true);
         }
-        let pt = GhosttyPoint { tag: GHOSTTY_POINT_TAG_ACTIVE, value: GhosttyPointValue { coordinate: GhosttyPointCoordinate { x, y: y as u32 } } };
+        let pt = GhosttyPoint {
+            tag: GHOSTTY_POINT_TAG_ACTIVE,
+            value: GhosttyPointValue {
+                coordinate: GhosttyPointCoordinate { x, y: y as u32 },
+            },
+        };
         let mut at: GhosttyTrackedGridRef = ptr::null_mut();
         if unsafe { ghostty_terminal_grid_ref_track(self.t, pt, &mut at) } == GHOSTTY_SUCCESS {
             self.marks.push((tag, at));
@@ -1456,7 +1883,9 @@ impl Engine for Ghostty {
         let offset = self.scrollbar().offset as i64;
         let mut out = Vec::new();
         for &(tag, r) in &self.marks {
-            let Some((x, sy)) = Self::tracked_screen_point(r) else { continue };
+            let Some((x, sy)) = Self::tracked_screen_point(r) else {
+                continue;
+            };
             let row = sy as i64 - offset;
             if row < -(above as i64) || row >= rows || !Self::mark_alive(r, tag) {
                 continue;
@@ -1472,7 +1901,16 @@ impl Engine for Ghostty {
 /// SGR that sets a cell's style from scratch.
 fn sgr_bytes(st: &GhosttyStyle, b: &mut Vec<u8>) {
     let mut p: Vec<String> = vec!["0".into()];
-    for (flag, code) in [(STYLE_BOLD, "1"), (STYLE_FAINT, "2"), (STYLE_ITALIC, "3"), (STYLE_BLINK, "5"), (STYLE_INVERSE, "7"), (STYLE_INVISIBLE, "8"), (STYLE_STRIKETHROUGH, "9"), (STYLE_OVERLINE, "53")] {
+    for (flag, code) in [
+        (STYLE_BOLD, "1"),
+        (STYLE_FAINT, "2"),
+        (STYLE_ITALIC, "3"),
+        (STYLE_BLINK, "5"),
+        (STYLE_INVERSE, "7"),
+        (STYLE_INVISIBLE, "8"),
+        (STYLE_STRIKETHROUGH, "9"),
+        (STYLE_OVERLINE, "53"),
+    ] {
         if style_has(st, flag) {
             p.push(code.into());
         }
@@ -1527,7 +1965,17 @@ mod tests {
         let mut e = Ghostty::new(20, 4, 100);
         let mut ev = Vec::new();
         e.feed(b"\x1b]52;c;?\x07", &mut ev);
-        let out: Vec<u8> = ev.iter().filter_map(|x| if let EngineEvent::PtyWrite(b) = x { Some(b.clone()) } else { None }).flatten().collect();
+        let out: Vec<u8> = ev
+            .iter()
+            .filter_map(|x| {
+                if let EngineEvent::PtyWrite(b) = x {
+                    Some(b.clone())
+                } else {
+                    None
+                }
+            })
+            .flatten()
+            .collect();
         let s = String::from_utf8_lossy(&out);
         // base64("hi 硯")
         assert!(s.starts_with("\x1b]52;c;aGkg56Gv"), "{s:?}");

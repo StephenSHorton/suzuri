@@ -48,10 +48,10 @@ pub struct EchoFilter {
 enum Esc {
     #[default]
     None,
-    Esc,
+    Escape,
     Csi,
     Osc,
-    OscEsc,
+    OscEscape,
 }
 
 impl EchoFilter {
@@ -79,7 +79,10 @@ impl EchoFilter {
 
     pub fn disarm(&mut self) {
         let held = std::mem::take(&mut self.held);
-        *self = EchoFilter { held, ..EchoFilter::default() };
+        *self = EchoFilter {
+            held,
+            ..EchoFilter::default()
+        };
     }
 
     /// Filter `input` into `out`.
@@ -168,7 +171,9 @@ impl EchoFilter {
     }
 
     fn char_bytes(&mut self, bytes: &[u8], out: &mut Vec<u8>) {
-        let c = std::str::from_utf8(bytes).ok().and_then(|s| s.chars().next());
+        let c = std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|s| s.chars().next());
         let rewound = std::mem::take(&mut self.rewound);
         let fresh = std::mem::take(&mut self.cup_fresh);
         if self.pos == 0 && c.is_some() && c == self.want.first().copied() && fresh {
@@ -222,22 +227,25 @@ impl EchoFilter {
         if let Some((r, c)) = cup(&seq) {
             // A move back into the echo's cells: the shell redraws from
             // there. Held (or dropped after the match), never shown.
-            if let Some((or, oc)) = self.origin {
-                if r == or && c >= oc && ((c - oc) as usize) <= self.want.len() && (self.pos > 0 || self.to_newline) {
-                    let at = (c - oc) as usize;
-                    self.redraw = true;
-                    self.cup_fresh = false;
-                    if self.to_newline && at == self.want.len() {
-                        return;
-                    }
-                    if self.to_newline {
-                        self.to_newline = false;
-                        self.held.clear();
-                    }
-                    self.pos = at;
-                    self.held.extend_from_slice(&seq);
+            if let Some((or, oc)) = self.origin
+                && r == or
+                && c >= oc
+                && ((c - oc) as usize) <= self.want.len()
+                && (self.pos > 0 || self.to_newline)
+            {
+                let at = (c - oc) as usize;
+                self.redraw = true;
+                self.cup_fresh = false;
+                if self.to_newline && at == self.want.len() {
                     return;
                 }
+                if self.to_newline {
+                    self.to_newline = false;
+                    self.held.clear();
+                }
+                self.pos = at;
+                self.held.extend_from_slice(&seq);
+                return;
             }
             self.last_cup = Some((r, c));
             self.cup_fresh = true;
@@ -246,7 +254,9 @@ impl EchoFilter {
             // ConPTY may end the echo's line with a cursor move instead of a
             // newline: the move ends it, and goes on, so nothing after it is
             // lost.
-            if seq.starts_with(b"\x1b[") && matches!(seq.last(), Some(b'H' | b'f' | b'B' | b'E' | b'd')) {
+            if seq.starts_with(b"\x1b[")
+                && matches!(seq.last(), Some(b'H' | b'f' | b'B' | b'E' | b'd'))
+            {
                 self.held.clear();
                 self.armed = false;
                 out.extend_from_slice(&seq);
@@ -255,7 +265,9 @@ impl EchoFilter {
             // Colours of the echo go; a mode change (zsh's bracketed-paste
             // off, a cursor show) must still reach the engine.
             // OSCs other than a title (images and notices, #288) pass.
-            let title = [b"\x1b]0;".as_slice(), b"\x1b]1;", b"\x1b]2;"].iter().any(|p| seq.starts_with(p));
+            let title = [b"\x1b]0;".as_slice(), b"\x1b]1;", b"\x1b]2;"]
+                .iter()
+                .any(|p| seq.starts_with(p));
             if !seq.ends_with(b"m") && !title {
                 out.extend_from_slice(&seq);
             }
@@ -263,7 +275,10 @@ impl EchoFilter {
         }
         if let Some(n) = cursor_forward(&seq) {
             let end = self.pos + n;
-            if end <= self.want.len() && self.want[self.pos..end].iter().all(|&c| c == ' ') && (self.pos > 0 || n < self.want.len()) {
+            if end <= self.want.len()
+                && self.want[self.pos..end].iter().all(|&c| c == ' ')
+                && (self.pos > 0 || n < self.want.len())
+            {
                 if self.pos == 0 && self.want[0] != ' ' {
                     out.append(&mut self.held);
                     out.extend_from_slice(&seq);
@@ -300,16 +315,16 @@ impl EchoFilter {
 
     fn step_esc(&mut self, b: u8) {
         self.esc = match (self.esc, b) {
-            (Esc::None, 0x1b) => Esc::Esc,
-            (Esc::Esc, b'[') => Esc::Csi,
-            (Esc::Esc, b']') => Esc::Osc,
-            (Esc::Esc, _) => Esc::None,
+            (Esc::None, 0x1b) => Esc::Escape,
+            (Esc::Escape, b'[') => Esc::Csi,
+            (Esc::Escape, b']') => Esc::Osc,
+            (Esc::Escape, _) => Esc::None,
             (Esc::Csi, 0x40..=0x7e) => Esc::None,
             (Esc::Csi, _) => Esc::Csi,
             (Esc::Osc, 0x07) => Esc::None,
-            (Esc::Osc, 0x1b) => Esc::OscEsc,
+            (Esc::Osc, 0x1b) => Esc::OscEscape,
             (Esc::Osc, _) => Esc::Osc,
-            (Esc::OscEsc, _) => Esc::None,
+            (Esc::OscEscape, _) => Esc::None,
             (Esc::None, _) => Esc::None,
         };
     }
@@ -318,7 +333,9 @@ impl EchoFilter {
 /// `CSI row;col H` / `f`: (row, column), 1-based.
 fn cup(seq: &[u8]) -> Option<(u32, u32)> {
     let body = seq.strip_prefix(b"\x1b[")?;
-    let body = body.strip_suffix(b"H").or_else(|| body.strip_suffix(b"f"))?;
+    let body = body
+        .strip_suffix(b"H")
+        .or_else(|| body.strip_suffix(b"f"))?;
     let body = std::str::from_utf8(body).ok()?;
     let mut it = body.split(';');
     let n = |s: Option<&str>| -> Option<u32> {
@@ -334,7 +351,9 @@ fn cup(seq: &[u8]) -> Option<(u32, u32)> {
 
 /// `CSI row;col H` / `f`, or `CSI col G`: an absolute cursor move.
 fn is_cursor_move(seq: &[u8]) -> bool {
-    seq.starts_with(b"\x1b[") && matches!(seq.last(), Some(b'H' | b'f' | b'G')) && !seq[2..seq.len() - 1].contains(&b'?')
+    seq.starts_with(b"\x1b[")
+        && matches!(seq.last(), Some(b'H' | b'f' | b'G'))
+        && !seq[2..seq.len() - 1].contains(&b'?')
 }
 
 /// `ESC [ n C`: how many columns it moves right.
@@ -376,8 +395,15 @@ mod tests {
     #[test]
     fn suppresses_highlighted_powershell_echo() {
         // ConPTY + Windows PowerShell -NoProfile (Go's capture).
-        let (out, armed) = run("Write-Output hello", &[b"\x1b[?25l\x1b[93mWrite-Output \x1b[37mhello\r\n\x1b[?25h\x1b[mhello\r\n "]);
-        assert!(!has(&out, b"Write-Output"), "{:?}", String::from_utf8_lossy(&out));
+        let (out, armed) = run(
+            "Write-Output hello",
+            &[b"\x1b[?25l\x1b[93mWrite-Output \x1b[37mhello\r\n\x1b[?25h\x1b[mhello\r\n "],
+        );
+        assert!(
+            !has(&out, b"Write-Output"),
+            "{:?}",
+            String::from_utf8_lossy(&out)
+        );
         assert!(has(&out, b"hello"));
         assert!(!armed);
     }
@@ -385,7 +411,10 @@ mod tests {
     #[test]
     fn conpty_cursor_forward_counts_as_spaces() {
         // ConPTY sends the blank in "echo hi" as CSI C between colour runs.
-        let (out, armed) = run("echo hi", &[b"\x1b[93mecho\x1b[C\x1b[37mhi\x1b[m\r\nhi\r\n"]);
+        let (out, armed) = run(
+            "echo hi",
+            &[b"\x1b[93mecho\x1b[C\x1b[37mhi\x1b[m\r\nhi\r\n"],
+        );
         assert_eq!(out, b"\r\nhi\r\n", "{:?}", String::from_utf8_lossy(&out));
         assert!(!armed);
         let (out, _) = run("a   b", &[b"a\x1b[3Cb\r\nout\r\n"]);
@@ -399,14 +428,22 @@ mod tests {
     fn a_cursor_move_ends_the_echo() {
         // No LF after the echo: the move ends it and the output after stays.
         let (out, armed) = run("echo hi", &[b"echo hi\x1b[2;1Hhi\x1b[3;1Hnext"]);
-        assert_eq!(out, b"\x1b[2;1Hhi\x1b[3;1Hnext", "{:?}", String::from_utf8_lossy(&out));
+        assert_eq!(
+            out,
+            b"\x1b[2;1Hhi\x1b[3;1Hnext",
+            "{:?}",
+            String::from_utf8_lossy(&out)
+        );
         assert!(!armed);
     }
 
     #[test]
     fn conpty_repaint_from_home() {
         // kestrel's PC trace (#296): the echo inside a repaint from CSI H.
-        let (out, armed) = run("echo hi", &[b"\x1b[?25l\x1b[H \x1b[93mecho \x1b[37mhi\x1b[K\x1b[m\r\nhi\x1b[K\r\n"]);
+        let (out, armed) = run(
+            "echo hi",
+            &[b"\x1b[?25l\x1b[H \x1b[93mecho \x1b[37mhi\x1b[K\x1b[m\r\nhi\x1b[K\r\n"],
+        );
         assert!(!has(&out, b"echo"), "{:?}", String::from_utf8_lossy(&out));
         assert!(has(&out, b"\x1b[H"));
         assert!(has(&out, b"hi\x1b[K\r\n"));
@@ -443,7 +480,8 @@ mod tests {
         // argument's column, not from the line's start. A frame held when
         // that happens must not be printed (it left "echo aft" on the header).
         let f = |col: u32, text: &str, end: u32| {
-            format!("\x1b[?25l\x1b[9;{col}H\x1b[93m{text}\x1b[39;49m\x1b[0m\x1b[9;{end}H\x1b[?25h").into_bytes()
+            format!("\x1b[?25l\x1b[9;{col}H\x1b[93m{text}\x1b[39;49m\x1b[0m\x1b[9;{end}H\x1b[?25h")
+                .into_bytes()
         };
         let mut t = Vec::new();
         t.extend(f(2, "e", 3));
@@ -455,7 +493,10 @@ mod tests {
         for cut in 0..t.len() {
             let (out, armed) = run("echo after-small", &[&t[..cut], &t[cut..]]);
             let s = String::from_utf8_lossy(&out);
-            assert!(!has(&out, b"echo") && !has(&out, b"aft\x1b"), "cut {cut}: {s:?}");
+            assert!(
+                !has(&out, b"echo") && !has(&out, b"aft\x1b"),
+                "cut {cut}: {s:?}"
+            );
             assert!(has(&out, b"\r\nafter-small\r\n"), "cut {cut}: {s:?}");
             assert!(!armed, "cut {cut}");
         }
@@ -475,8 +516,16 @@ mod tests {
         assert_eq!(out, b"\r\nhi\r\n");
         // zle: the first character, a backspace over it, the line, then
         // bracketed paste off, which must still reach the engine.
-        let (out, armed) = run("echo one", &[b"e\x08ec", b"ho one\x1b[?2004l\r\r\n", b"one\r\n"]);
-        assert_eq!(out, b"\x1b[?2004l\r\none\r\n", "{:?}", String::from_utf8_lossy(&out));
+        let (out, armed) = run(
+            "echo one",
+            &[b"e\x08ec", b"ho one\x1b[?2004l\r\r\n", b"one\r\n"],
+        );
+        assert_eq!(
+            out,
+            b"\x1b[?2004l\r\none\r\n",
+            "{:?}",
+            String::from_utf8_lossy(&out)
+        );
         assert!(!armed);
     }
 
@@ -485,14 +534,25 @@ mod tests {
         let whole: &[u8] = b"\x1b[?25l\x1b[93mecho \x1b[37mhi\r\n\x1b[?25h\x1b[mhi\r\n ";
         for cut in 0..whole.len() {
             let (out, _) = run("echo hi", &[&whole[..cut], &whole[cut..]]);
-            assert!(!has(&out, b"echo"), "cut {cut}: {:?}", String::from_utf8_lossy(&out));
-            assert!(has(&out, b"hi\r\n "), "cut {cut}: {:?}", String::from_utf8_lossy(&out));
+            assert!(
+                !has(&out, b"echo"),
+                "cut {cut}: {:?}",
+                String::from_utf8_lossy(&out)
+            );
+            assert!(
+                has(&out, b"hi\r\n "),
+                "cut {cut}: {:?}",
+                String::from_utf8_lossy(&out)
+            );
         }
     }
 
     #[test]
     fn leading_output_passes() {
-        let (out, _) = run("Get-Date", &[b"NOTICE\r\n\x1b[93mGet-Date\r\n\x1b[mthedate\r\n"]);
+        let (out, _) = run(
+            "Get-Date",
+            &[b"NOTICE\r\n\x1b[93mGet-Date\r\n\x1b[mthedate\r\n"],
+        );
         assert!(has(&out, b"NOTICE"));
         assert!(!has(&out, b"Get-Date"));
         assert!(has(&out, b"thedate"));
@@ -556,7 +616,7 @@ mod osc288 {
     use super::*;
     fn osc(n: usize) -> Vec<u8> {
         let mut v = b"\x1b]1337;File=inline=1:".to_vec();
-        v.extend(std::iter::repeat(b'A').take(n));
+        v.extend(std::iter::repeat_n(b'A', n));
         v.push(0x07);
         v
     }
@@ -565,15 +625,25 @@ mod osc288 {
         f.arm("py -3 show.py inline");
         let mut out = Vec::new();
         for c in chunks {
-            if f.active() { f.feed(c, &mut out) } else { out.extend_from_slice(c) }
+            if f.active() {
+                f.feed(c, &mut out)
+            } else {
+                out.extend_from_slice(c)
+            }
         }
         out
     }
-    fn has(out: &[u8], big: &[u8]) -> bool { out.windows(big.len()).any(|w| w == big) }
+    fn has(out: &[u8], big: &[u8]) -> bool {
+        out.windows(big.len()).any(|w| w == big)
+    }
     #[test]
     fn after_echo() {
         let big = osc(30000);
-        let out = run(&[b"py -3 show.py inline\r\nlabel:\r\n".to_vec(), big.clone(), b"\r\n".to_vec()]);
+        let out = run(&[
+            b"py -3 show.py inline\r\nlabel:\r\n".to_vec(),
+            big.clone(),
+            b"\r\n".to_vec(),
+        ]);
         assert!(has(&out, &big));
     }
     #[test]

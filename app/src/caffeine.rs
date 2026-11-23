@@ -37,7 +37,11 @@ pub fn new() -> Arc<Caffeine> {
 }
 
 fn switch_path() -> Option<std::path::PathBuf> {
-    if cfg!(any(target_os = "macos", windows)) { rsz_caffeine::shared_switch_path() } else { None }
+    if cfg!(any(target_os = "macos", windows)) {
+        rsz_caffeine::shared_switch_path()
+    } else {
+        None
+    }
 }
 
 /// What launch does (see the module notes): on indefinitely when the switch
@@ -92,7 +96,8 @@ mod tests {
 
     #[cfg(any(target_os = "macos", windows))]
     fn temp_switch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("suzuri-caffeine-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("suzuri-caffeine-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("switch")
     }
@@ -101,7 +106,10 @@ mod tests {
     fn wait_for(c: &Arc<Caffeine>, active: bool) -> Duration {
         let start = Instant::now();
         while c.status().active != active {
-            assert!(start.elapsed() < Duration::from_secs(3), "switch did not follow within 3s");
+            assert!(
+                start.elapsed() < Duration::from_secs(3),
+                "switch did not follow within 3s"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         start.elapsed()
@@ -114,7 +122,15 @@ mod tests {
     fn launch_is_on_indefinitely_and_a_click_turns_it_off() {
         let c = Caffeine::solo(NAME);
         let s = launch(&c, None);
-        assert_eq!(s, Status { active: true, remaining_s: None, label: "∞".into(), error: None });
+        assert_eq!(
+            s,
+            Status {
+                active: true,
+                remaining_s: None,
+                label: "∞".into(),
+                error: None
+            }
+        );
         assert!(!c.toggle().active);
         assert_eq!(c.toggle().label, "∞");
         c.deactivate();
@@ -133,12 +149,18 @@ mod tests {
         drop(first);
 
         let off = Caffeine::shared(NAME, &path);
-        assert!(!launch(&off, Some(&path)).active, "an off switch stays off at launch");
+        assert!(
+            !launch(&off, Some(&path)).active,
+            "an off switch stays off at launch"
+        );
         off.activate(None);
         drop(off);
 
         let on = Caffeine::shared(NAME, &path);
-        assert!(launch(&on, Some(&path)).active, "an on switch stays on at launch");
+        assert!(
+            launch(&on, Some(&path)).active,
+            "an on switch stays on at launch"
+        );
         on.deactivate();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -162,12 +184,20 @@ mod tests {
 
         b.deactivate();
         assert!(wait_for(&a, false) < Duration::from_secs(1));
-        assert_eq!(rx.recv_timeout(Duration::from_secs(1)), Ok(false), "a's ☕ got the change event");
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)),
+            Ok(false),
+            "a's ☕ got the change event"
+        );
 
         b.activate(Some(15));
         assert!(wait_for(&a, true) < Duration::from_secs(1));
         // b's timer, end time and all: a little under 15 minutes left.
-        assert!(matches!(a.status().remaining_s, Some(880..=900)), "{:?}", a.status());
+        assert!(
+            matches!(a.status().remaining_s, Some(880..=900)),
+            "{:?}",
+            a.status()
+        );
         b.deactivate();
         wait_for(&a, false);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

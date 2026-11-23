@@ -35,7 +35,10 @@ pub fn save_image(dir: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let path = dir.join(format!("clip-{nanos}.{ext}"));
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path)

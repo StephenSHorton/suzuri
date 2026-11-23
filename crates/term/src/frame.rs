@@ -134,12 +134,19 @@ pub fn encode_row(out: &mut Vec<u8>, y: u16, x0: u16, cells: &[CellOut]) {
     while i < cells.len() {
         let c = cells[i];
         let mut j = i + 1;
-        while j < cells.len() && cells[j].fg == c.fg && cells[j].bg == c.bg && cells[j].attrs == c.attrs {
+        while j < cells.len()
+            && cells[j].fg == c.fg
+            && cells[j].bg == c.bg
+            && cells[j].attrs == c.attrs
+        {
             j += 1;
         }
         // Trailing blank run on the default background: the UI clears the
         // range first, so it need not be sent.
-        let blank_tail = j == cells.len() && c.bg == DEFAULT_BG && c.attrs & (A_UNDERLINE | A_STRIKE) == 0 && cells[i..j].iter().all(|c| c.cp == b' ' as u32);
+        let blank_tail = j == cells.len()
+            && c.bg == DEFAULT_BG
+            && c.attrs & (A_UNDERLINE | A_STRIKE) == 0
+            && cells[i..j].iter().all(|c| c.cp == b' ' as u32);
         if !blank_tail {
             out.extend_from_slice(&(x0 + i as u16).to_le_bytes());
             out.extend_from_slice(&((j - i) as u16).to_le_bytes());
@@ -187,8 +194,13 @@ pub fn decode_clusters(b: &[u8]) -> Vec<(u16, u16, u8, Vec<u32>)> {
     if b.len() < HEADER_LEN {
         return v;
     }
-    let u16_at = |i: usize| b.get(i..i + 2).map(|s| u16::from_le_bytes([s[0], s[1]]) as usize);
-    let (Some(nrows), Some(count)) = (u16_at(28), u16_at(30)) else { return v };
+    let u16_at = |i: usize| {
+        b.get(i..i + 2)
+            .map(|s| u16::from_le_bytes([s[0], s[1]]) as usize)
+    };
+    let (Some(nrows), Some(count)) = (u16_at(28), u16_at(30)) else {
+        return v;
+    };
     let mut p = HEADER_LEN;
     for _ in 0..nrows {
         let Some(nruns) = u16_at(p + 2) else { return v };
@@ -199,9 +211,22 @@ pub fn decode_clusters(b: &[u8]) -> Vec<(u16, u16, u8, Vec<u32>)> {
         }
     }
     for _ in 0..count {
-        let (Some(y), Some(col), Some(&w), Some(&n)) = (u16_at(p), u16_at(p + 2), b.get(p + 4), b.get(p + 5)) else { return v };
-        let Some(cps) = b.get(p + 6..p + 6 + 4 * n as usize) else { return v };
-        v.push((y as u16, col as u16, w, cps.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()));
+        let (Some(y), Some(col), Some(&w), Some(&n)) =
+            (u16_at(p), u16_at(p + 2), b.get(p + 4), b.get(p + 5))
+        else {
+            return v;
+        };
+        let Some(cps) = b.get(p + 6..p + 6 + 4 * n as usize) else {
+            return v;
+        };
+        v.push((
+            y as u16,
+            col as u16,
+            w,
+            cps.chunks(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ));
         p += 6 + 4 * n as usize;
     }
     v
@@ -237,7 +262,12 @@ mod tests {
 
     #[test]
     fn runs_merge_and_drop_blank_tail() {
-        let c = |cp: char, fg| CellOut { cp: cp as u32, fg, bg: DEFAULT_BG, attrs: 0 };
+        let c = |cp: char, fg| CellOut {
+            cp: cp as u32,
+            fg,
+            bg: DEFAULT_BG,
+            attrs: 0,
+        };
         let cells = [c('a', 1), c('b', 1), c('c', 2), c(' ', 2), c(' ', 2)];
         let mut out = Vec::new();
         encode_row(&mut out, 5, 0, &cells);
@@ -251,12 +281,39 @@ mod tests {
 
     #[test]
     fn cluster_table_roundtrip() {
-        let h = FrameHeader { full: true, cols: 4, rows: 2, cursor_x: 0, cursor_y: 0, cursor_shape: 1, modes: 0, display_offset: 0, history: 0, seq: 1, nrows: 2 };
-        let c = |cp: u32| CellOut { cp, fg: 1, bg: DEFAULT_BG, attrs: 0 };
+        let h = FrameHeader {
+            full: true,
+            cols: 4,
+            rows: 2,
+            cursor_x: 0,
+            cursor_y: 0,
+            cursor_shape: 1,
+            modes: 0,
+            display_offset: 0,
+            history: 0,
+            seq: 1,
+            nrows: 2,
+        };
+        let c = |cp: u32| CellOut {
+            cp,
+            fg: 1,
+            bg: DEFAULT_BG,
+            attrs: 0,
+        };
         let mut out = Vec::new();
         encode_header(&mut out, &h);
-        encode_row(&mut out, 0, 0, &[c(0x1F44D), c(0), c('x' as u32), c(' ' as u32)]);
-        encode_row(&mut out, 1, 0, &[c('e' as u32), c(' ' as u32), c(' ' as u32), c(' ' as u32)]);
+        encode_row(
+            &mut out,
+            0,
+            0,
+            &[c(0x1F44D), c(0), c('x' as u32), c(' ' as u32)],
+        );
+        encode_row(
+            &mut out,
+            1,
+            0,
+            &[c('e' as u32), c(' ' as u32), c(' ' as u32), c(' ' as u32)],
+        );
         let plain = out.clone();
         // No entries: the frame is unchanged and bytes 30-31 stay 0.
         finish_clusters(&mut out, 0, 0, &[]);
@@ -268,16 +325,30 @@ mod tests {
         encode_cluster(&mut table, 1, 0, 1, &['e' as u32, 0x301]);
         finish_clusters(&mut out, 0, 2, &table);
         assert_eq!(decode_header(&out), Some(h));
-        assert_eq!(decode_clusters(&out), vec![(0, 0, 2, vec![0x1F44D, 0x1F3FD]), (1, 0, 1, vec!['e' as u32, 0x301])]);
+        assert_eq!(
+            decode_clusters(&out),
+            vec![
+                (0, 0, 2, vec![0x1F44D, 0x1F3FD]),
+                (1, 0, 1, vec!['e' as u32, 0x301])
+            ]
+        );
         // A long cluster is cut to the limit.
         let mut t = Vec::new();
         encode_cluster(&mut t, 0, 0, 1, &[0x301; 70]);
-        assert_eq!((t[5] as usize, t.len()), (CLUSTER_MAX_CPS, 6 + 4 * CLUSTER_MAX_CPS));
+        assert_eq!(
+            (t[5] as usize, t.len()),
+            (CLUSTER_MAX_CPS, 6 + 4 * CLUSTER_MAX_CPS)
+        );
     }
 
     #[test]
     fn column_range() {
-        let c = |cp: char| CellOut { cp: cp as u32, fg: 1, bg: DEFAULT_BG, attrs: 0 };
+        let c = |cp: char| CellOut {
+            cp: cp as u32,
+            fg: 1,
+            bg: DEFAULT_BG,
+            attrs: 0,
+        };
         let mut out = Vec::new();
         encode_row(&mut out, 3, 7, &[c('a'), c('b')]);
         let u = |i: usize| u16::from_le_bytes([out[i], out[i + 1]]);

@@ -32,7 +32,9 @@ impl Probe {
         if self.shell_pid == 0 {
             return None;
         }
-        imp::program_name(self).map(|n| clean_name(&n)).filter(|n| !n.is_empty())
+        imp::program_name(self)
+            .map(|n| clean_name(&n))
+            .filter(|n| !n.is_empty())
     }
 
     /// The process id of the program in front (Unix: the foreground
@@ -59,7 +61,9 @@ pub(crate) fn clean_name(raw: &str) -> String {
     let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
     let base = base.strip_prefix('-').unwrap_or(base);
     match base.len().checked_sub(4) {
-        Some(i) if base.is_char_boundary(i) && base[i..].eq_ignore_ascii_case(".exe") => base[..i].to_string(),
+        Some(i) if base.is_char_boundary(i) && base[i..].eq_ignore_ascii_case(".exe") => {
+            base[..i].to_string()
+        }
         _ => base.to_string(),
     }
 }
@@ -86,13 +90,28 @@ mod imp {
         let mut buf = vec![0u8; 64 * 1024];
         let mut len = buf.len();
         // SAFETY: sysctl writes at most len bytes and sets len to what it wrote.
-        let ok = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0) } == 0;
+        let ok = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buf.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        } == 0;
         if let Some(a) = ok.then(|| argv0(&buf[..len])).flatten() {
             return Some(a);
         }
         let mut buf = [0u8; 256];
         // SAFETY: proc_name fills at most the given length.
-        let n = unsafe { libc::proc_name(pid as libc::c_int, buf.as_mut_ptr().cast(), buf.len() as u32) };
+        let n = unsafe {
+            libc::proc_name(
+                pid as libc::c_int,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+            )
+        };
         (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
     }
 
@@ -117,11 +136,17 @@ mod imp {
     #[cfg(not(target_os = "macos"))]
     fn name_of(pid: u32) -> Option<String> {
         let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-        let a = cmd.split(|&c| c == 0).next().map(|a| String::from_utf8_lossy(a).into_owned()).unwrap_or_default();
+        let a = cmd
+            .split(|&c| c == 0)
+            .next()
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .unwrap_or_default();
         if !a.is_empty() {
             return Some(a);
         }
-        std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string())
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 
     pub fn program_running(p: &Probe) -> bool {
@@ -146,7 +171,8 @@ mod imp {
     use super::Probe;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
     };
 
     pub fn program_running(p: &Probe) -> bool {
@@ -170,7 +196,11 @@ mod imp {
         pick(processes(), p.shell_pid, created)
     }
 
-    pub(super) fn pick(list: Vec<(u32, u32, String)>, shell: u32, created: impl Fn(u32) -> Option<u64>) -> Option<(u32, u32, String)> {
+    pub(super) fn pick(
+        list: Vec<(u32, u32, String)>,
+        shell: u32,
+        created: impl Fn(u32) -> Option<u64>,
+    ) -> Option<(u32, u32, String)> {
         let born = created(shell)?;
         list.into_iter()
             .filter(|&(pid, ppid, _)| has_child(&[(pid, ppid)], shell))
@@ -180,14 +210,19 @@ mod imp {
     /// When process `pid` started (FILETIME ticks), if it can be asked.
     pub(super) fn created(pid: u32) -> Option<u64> {
         use windows_sys::Win32::Foundation::FILETIME;
-        use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         // SAFETY: a plain query into local FILETIMEs; the handle is closed.
         unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if h.is_null() {
                 return None;
             }
-            let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let z = FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            };
             let (mut c, mut e, mut k, mut u) = (z, z, z, z);
             let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) != 0;
             CloseHandle(h);
@@ -213,8 +248,16 @@ mod imp {
             e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
             let mut ok = Process32FirstW(snap, &mut e) != 0;
             while ok {
-                let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
-                out.push((e.th32ProcessID, e.th32ParentProcessID, String::from_utf16_lossy(&e.szExeFile[..len])));
+                let len = e
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(e.szExeFile.len());
+                out.push((
+                    e.th32ProcessID,
+                    e.th32ParentProcessID,
+                    String::from_utf16_lossy(&e.szExeFile[..len]),
+                ));
                 ok = Process32NextW(snap, &mut e) != 0;
             }
             CloseHandle(snap);
@@ -223,7 +266,9 @@ mod imp {
     }
 
     pub(super) fn has_child(pairs: &[(u32, u32)], root: u32) -> bool {
-        pairs.iter().any(|&(pid, ppid)| ppid == root && pid != root && pid != 0)
+        pairs
+            .iter()
+            .any(|&(pid, ppid)| ppid == root && pid != root && pid != 0)
     }
 }
 
@@ -234,20 +279,39 @@ mod tests {
     fn a_child_from_before_the_shell_is_not_its_program() {
         // 7 is the shell, started at 100. 8 names 7 as its parent but started
         // at 50, under an earlier process that had pid 7; 9 is the shell's own.
-        let list = vec![(8, 7, "EpicGamesLauncher.exe".to_string()), (9, 7, "claude.exe".to_string()), (10, 3, "other.exe".to_string())];
+        let list = vec![
+            (8, 7, "EpicGamesLauncher.exe".to_string()),
+            (9, 7, "claude.exe".to_string()),
+            (10, 3, "other.exe".to_string()),
+        ];
         let at = |pid: u32| match pid {
             7 => Some(100),
             8 => Some(50),
             9 => Some(120),
             _ => None,
         };
-        assert_eq!(super::imp::pick(list.clone(), 7, at).map(|c| c.2), Some("claude.exe".into()));
-        assert_eq!(super::imp::pick(list[..1].to_vec(), 7, at), None, "only the stale one: no program");
-        assert_eq!(super::imp::pick(list, 7, |_| None), None, "a shell we cannot ask: no program");
+        assert_eq!(
+            super::imp::pick(list.clone(), 7, at).map(|c| c.2),
+            Some("claude.exe".into())
+        );
+        assert_eq!(
+            super::imp::pick(list[..1].to_vec(), 7, at),
+            None,
+            "only the stale one: no program"
+        );
+        assert_eq!(
+            super::imp::pick(list, 7, |_| None),
+            None,
+            "a shell we cannot ask: no program"
+        );
         // A real child, started after this process, is its program; this
         // process (started before itself is not "after") is not its own.
         let me = std::process::id();
-        let mut c = std::process::Command::new("ping").args(["-n", "5", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let mut c = std::process::Command::new("ping")
+            .args(["-n", "5", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
         let row = vec![(c.id(), me, "PING.EXE".to_string())];
         let got = super::imp::pick(row, me, super::imp::created);
         let _ = c.kill();
@@ -257,9 +321,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unknown_shell_is_not_a_program() {
-        let p = super::Probe { shell_pid: 0, master_fd: -1 };
+        let p = super::Probe {
+            shell_pid: 0,
+            master_fd: -1,
+        };
         assert!(!p.program_running());
-        let p = super::Probe { shell_pid: 1234, master_fd: -1 };
+        let p = super::Probe {
+            shell_pid: 1234,
+            master_fd: -1,
+        };
         assert!(!p.program_running(), "a bad fd reads as no program");
     }
 
@@ -287,7 +357,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_running_program_is_named_by_argv0() {
-        let mut c = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let mut c = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
         let n = super::imp::name_of_for_test(c.id());
         let _ = c.kill();
         let _ = c.wait();
@@ -297,13 +370,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_bad_fd_has_no_program_name() {
-        assert_eq!(super::Probe { shell_pid: 1234, master_fd: -1 }.program_name(), None);
+        assert_eq!(
+            super::Probe {
+                shell_pid: 1234,
+                master_fd: -1
+            }
+            .program_name(),
+            None
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn reads_keys_is_false_for_a_bad_fd() {
-        let p = super::Probe { shell_pid: 1234, master_fd: -1 };
+        let p = super::Probe {
+            shell_pid: 1234,
+            master_fd: -1,
+        };
         assert!(!p.reads_keys());
     }
 }

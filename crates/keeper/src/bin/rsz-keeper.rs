@@ -22,7 +22,9 @@ mod cli {
     use serde_json::json;
 
     fn usage() -> i32 {
-        eprintln!("usage: rsz-keeper [--dir D] ls | screen ID [LINES] | type ID TEXT | watch ID [SECS] | close ID");
+        eprintln!(
+            "usage: rsz-keeper [--dir D] ls | screen ID [LINES] | type ID TEXT | watch ID [SECS] | close ID"
+        );
         2
     }
 
@@ -33,9 +35,18 @@ mod cli {
             folder = PathBuf::from(args.remove(1));
             args.remove(0);
         }
-        let Some(cmd) = args.first().cloned() else { return usage() };
+        let Some(cmd) = args.first().cloned() else {
+            return usage();
+        };
         let id = || args.get(1).and_then(|s| s.parse::<u32>().ok());
-        let control = |id: u32| Conn::connect(&dir::sock_path(&folder, id), "control", "rsz-keeper", |_| {});
+        let control = |id: u32| {
+            Conn::connect(
+                &dir::sock_path(&folder, id),
+                "control",
+                "rsz-keeper",
+                |_| {},
+            )
+        };
         match cmd.as_str() {
             "ls" => {
                 for id in dir::list(&folder) {
@@ -65,7 +76,9 @@ mod cli {
                 }
             }
             "type" => {
-                let (Some(id), Some(text)) = (id(), args.get(2)) else { return usage() };
+                let (Some(id), Some(text)) = (id(), args.get(2)) else {
+                    return usage();
+                };
                 let c = match control(id) {
                     Ok(c) => c,
                     Err(e) => return fail(e),
@@ -84,20 +97,29 @@ mod cli {
                 let frames = Arc::new(AtomicU64::new(0));
                 let bytes = Arc::new(AtomicU64::new(0));
                 let (f2, b2) = (frames.clone(), bytes.clone());
-                let c = match Conn::connect(&dir::sock_path(&folder, id), "viewer", "rsz-keeper watch", move |e| match e {
-                    Event::Frame(f) => {
-                        f2.fetch_add(1, Ordering::Relaxed);
-                        b2.fetch_add(f.len() as u64, Ordering::Relaxed);
-                    }
-                    Event::Msg(m) => println!("event {m}"),
-                    Event::Closed => println!("closed"),
-                }) {
+                let c = match Conn::connect(
+                    &dir::sock_path(&folder, id),
+                    "viewer",
+                    "rsz-keeper watch",
+                    move |e| match e {
+                        Event::Frame(f) => {
+                            f2.fetch_add(1, Ordering::Relaxed);
+                            b2.fetch_add(f.len() as u64, Ordering::Relaxed);
+                        }
+                        Event::Msg(m) => println!("event {m}"),
+                        Event::Closed => println!("closed"),
+                    },
+                ) {
                     Ok(c) => c,
                     Err(e) => return fail(e),
                 };
                 println!("hello {}", c.hello);
                 std::thread::sleep(Duration::from_secs_f64(secs));
-                println!("{} frames, {} bytes in {secs} s", frames.load(Ordering::Relaxed), bytes.load(Ordering::Relaxed));
+                println!(
+                    "{} frames, {} bytes in {secs} s",
+                    frames.load(Ordering::Relaxed),
+                    bytes.load(Ordering::Relaxed)
+                );
                 0
             }
             "close" => {

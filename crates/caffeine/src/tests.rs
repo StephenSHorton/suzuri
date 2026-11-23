@@ -66,7 +66,15 @@ fn toggle_holds_once_and_releases() {
     let f = Fake::default();
     let c = Caffeine::custom(f.clone(), None);
     assert!(!c.is_shared());
-    assert_eq!(c.status(), Status { active: false, remaining_s: None, label: "".into(), error: None });
+    assert_eq!(
+        c.status(),
+        Status {
+            active: false,
+            remaining_s: None,
+            label: "".into(),
+            error: None
+        }
+    );
     let s = c.toggle();
     assert!(s.active && s.label == "∞");
     // A timed activation on top keeps the one hold and adds a deadline.
@@ -85,13 +93,25 @@ fn on_indefinitely_then_toggle_off_and_on() {
     let f = Fake::default();
     let c = Caffeine::custom(f.clone(), None);
     let s = c.activate(None);
-    assert_eq!(s, Status { active: true, remaining_s: None, label: "∞".into(), error: None });
+    assert_eq!(
+        s,
+        Status {
+            active: true,
+            remaining_s: None,
+            label: "∞".into(),
+            error: None
+        }
+    );
     assert_eq!(f.held(), 1);
     assert!(!c.toggle().active);
     assert_eq!(f.held(), 0);
     assert_eq!(c.toggle().label, "∞");
     assert_eq!(f.held(), 1);
-    assert_eq!(c.activate(Some(0)).label, "∞", "0 minutes means indefinitely");
+    assert_eq!(
+        c.activate(Some(0)).label,
+        "∞",
+        "0 minutes means indefinitely"
+    );
 }
 
 #[test]
@@ -147,7 +167,10 @@ fn switch_file_round_trips() {
     assert_eq!(parse_switch(&switch_text(true, None)), Some((true, None)));
     let t = UNIX_EPOCH + Duration::from_millis(1_800_000_000_123);
     assert_eq!(switch_text(true, Some(t)), "on 1800000000123\n");
-    assert_eq!(parse_switch(&switch_text(true, Some(t))), Some((true, Some(t))));
+    assert_eq!(
+        parse_switch(&switch_text(true, Some(t))),
+        Some((true, Some(t)))
+    );
     assert_eq!(parse_switch(""), None);
     assert_eq!(parse_switch("maybe"), None);
     assert_eq!(parse_switch("on soon"), None);
@@ -178,7 +201,10 @@ fn shared_switch_is_one_switch_for_every_program() {
     b.activate(Some(15));
     assert!(eventually(|| a.status().label == "15m" && fa.held() == 1));
 
-    assert_eq!(*lock(&b_seen), vec!["∞".to_string(), "".into(), "15m".into()]);
+    assert_eq!(
+        *lock(&b_seen),
+        vec!["∞".to_string(), "".into(), "15m".into()]
+    );
     let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
 }
 
@@ -236,14 +262,24 @@ fn unwritable_shared_switch_is_reported() {
     let c = Caffeine::build(f.clone(), Some(dir.clone()), POLL);
     let s = c.activate(None);
     assert!(s.active);
-    assert!(s.error.as_deref().unwrap_or("").starts_with("shared switch"), "{s:?}");
+    assert!(
+        s.error
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("shared switch"),
+        "{s:?}"
+    );
     let _ = std::fs::remove_dir_all(parent.parent().unwrap());
 }
 
 #[test]
 fn shared_switch_path_is_per_user() {
     if let Some(p) = shared_switch_path() {
-        assert!(p.ends_with("rsz-caffeine/switch") || p.ends_with("rsz-caffeine\\switch"), "{}", p.display());
+        assert!(
+            p.ends_with("rsz-caffeine/switch") || p.ends_with("rsz-caffeine\\switch"),
+            "{}",
+            p.display()
+        );
     }
 }
 
@@ -252,10 +288,15 @@ fn shared_switch_path_is_per_user() {
 #[test]
 fn macos_assertion_is_visible_to_pmset() {
     let held = || {
-        let out = std::process::Command::new("pmset").args(["-g", "assertions"]).output().unwrap();
+        let out = std::process::Command::new("pmset")
+            .args(["-g", "assertions"])
+            .output()
+            .unwrap();
         // Only this test process's own assertion: another program may hold one too.
         let me = format!("pid {}(", std::process::id());
-        String::from_utf8_lossy(&out.stdout).lines().any(|l| l.contains(&me) && l.contains("rsz-caffeine test"))
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l.contains(&me) && l.contains("rsz-caffeine test"))
     };
     let c = Caffeine::solo("rsz-caffeine test");
     assert!(c.activate(None).active);

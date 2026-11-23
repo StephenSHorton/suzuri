@@ -41,10 +41,22 @@ pub const NEUTRAL_DARK: Palette = Palette {
     panel: hex(0x262626),
     accent: hex(0xf1f1f1),
     ansi16: [
-        hex(0x303030), hex(0xfd736d), hex(0x71b972), hex(0xc79f18),
-        hex(0x67a7f8), hex(0xd17fe4), hex(0x51b4cb), hex(0x9e9e9e),
-        hex(0x6c6c6c), hex(0xffaba3), hex(0x96d896), hex(0xe7c04b),
-        hex(0x9ec7fd), hex(0xeba6fb), hex(0x7dd3e8), hex(0xffffff),
+        hex(0x303030),
+        hex(0xfd736d),
+        hex(0x71b972),
+        hex(0xc79f18),
+        hex(0x67a7f8),
+        hex(0xd17fe4),
+        hex(0x51b4cb),
+        hex(0x9e9e9e),
+        hex(0x6c6c6c),
+        hex(0xffaba3),
+        hex(0x96d896),
+        hex(0xe7c04b),
+        hex(0x9ec7fd),
+        hex(0xeba6fb),
+        hex(0x7dd3e8),
+        hex(0xffffff),
     ],
 };
 
@@ -56,7 +68,10 @@ pub struct Active {
     pub pal: Palette,
 }
 
-static ACTIVE: RwLock<Active> = RwLock::new(Active { generation: 0, pal: NEUTRAL_DARK });
+static ACTIVE: RwLock<Active> = RwLock::new(Active {
+    generation: 0,
+    pal: NEUTRAL_DARK,
+});
 
 pub fn active() -> Active {
     *ACTIVE.read()
@@ -94,13 +109,21 @@ pub fn bg_shows_through(rgb: Rgb, p: &Palette) -> bool {
     if !p.dark {
         return false;
     }
-    if cfg!(target_os = "macos") { rgb.0 < 42 && rgb.1 < 42 && rgb.2 < 42 } else { rgb == (0, 0, 0) }
+    if cfg!(target_os = "macos") {
+        rgb.0 < 42 && rgb.1 < 42 && rgb.2 < 42
+    } else {
+        rgb == (0, 0, 0)
+    }
 }
 
 /// Bold ink: Go's brightenBoldRGB (~35% toward white) on a dark
 /// background; the same amount toward black on a light one.
 pub fn bold_ink(c: Rgb, p: &Palette) -> Rgb {
-    if p.dark { brighten_bold(c) } else { darken_bold(c) }
+    if p.dark {
+        brighten_bold(c)
+    } else {
+        darken_bold(c)
+    }
 }
 
 /// Faint ink: Go's dimRGB on a dark background; on a light one, 45% of the
@@ -192,7 +215,11 @@ mod tests {
 
     #[test]
     fn light_backgrounds_bold_darker_and_faint_toward_the_background() {
-        let light = Palette { dark: false, bg: (240, 240, 240), ..NEUTRAL_DARK };
+        let light = Palette {
+            dark: false,
+            bg: (240, 240, 240),
+            ..NEUTRAL_DARK
+        };
         assert_eq!(bold_ink((255, 128, 0), &light), (165, 83, 0));
         assert_eq!(faint_ink((0, 0, 0), &light), (108, 108, 108));
     }
@@ -201,7 +228,11 @@ mod tests {
     fn only_dark_backgrounds_erase_black_bands() {
         assert!(bg_shows_through(NEUTRAL_DARK.bg, &NEUTRAL_DARK));
         assert!(bg_shows_through((0, 0, 0), &NEUTRAL_DARK));
-        let light = Palette { dark: false, bg: (240, 240, 240), ..NEUTRAL_DARK };
+        let light = Palette {
+            dark: false,
+            bg: (240, 240, 240),
+            ..NEUTRAL_DARK
+        };
         assert!(bg_shows_through((240, 240, 240), &light));
         assert!(!bg_shows_through((0, 0, 0), &light));
     }
@@ -210,10 +241,16 @@ mod tests {
     fn set_active_bumps_the_generation_only_on_change() {
         // On a local Active: the process-wide one is shared with the
         // engine tests running alongside.
-        let mut a = Active { generation: 0, pal: NEUTRAL_DARK };
+        let mut a = Active {
+            generation: 0,
+            pal: NEUTRAL_DARK,
+        };
         assert!(!swap(&mut a, NEUTRAL_DARK));
         assert_eq!(a.generation, 0);
-        let other = Palette { accent: (1, 2, 3), ..NEUTRAL_DARK };
+        let other = Palette {
+            accent: (1, 2, 3),
+            ..NEUTRAL_DARK
+        };
         assert!(swap(&mut a, other));
         assert!(!swap(&mut a, other));
         assert_eq!(a.generation, 1);

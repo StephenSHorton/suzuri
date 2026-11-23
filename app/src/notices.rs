@@ -29,7 +29,10 @@ const GONE_GRACE: Duration = Duration::from_millis(300);
 /// config::NOTICE_POSITIONS (normalize keeps it one of them).
 fn anchor_of(cfg: &serde_json::Value) -> usize {
     let id = cfg["notice_position"].as_str().unwrap_or("");
-    crate::config::NOTICE_POSITIONS.iter().position(|a| *a == id).unwrap_or(0)
+    crate::config::NOTICE_POSITIONS
+        .iter()
+        .position(|a| *a == id)
+        .unwrap_or(0)
 }
 
 /// Whether a settings patch sets the notice position (null resets it).
@@ -41,8 +44,18 @@ fn sets_position(patch: &serde_json::Value) -> bool {
 /// as the old webview's audio played), no confetti. The positions are
 /// rust-toast's corner names.
 fn options(anchor: usize) -> toast::Options {
-    let corner = crate::config::NOTICE_POSITIONS.get(anchor).copied().unwrap_or(toast::CORNER_BOTTOM_LEFT);
-    toast::Options { enabled: true, sound: true, volume: 1.0, corner: corner.into(), confetti: false }.normalized()
+    let corner = crate::config::NOTICE_POSITIONS
+        .get(anchor)
+        .copied()
+        .unwrap_or(toast::CORNER_BOTTOM_LEFT);
+    toast::Options {
+        enabled: true,
+        sound: true,
+        volume: 1.0,
+        corner: corner.into(),
+        confetti: false,
+    }
+    .normalized()
 }
 
 struct Live {
@@ -96,13 +109,21 @@ impl Notices {
         let anchor = anchor_of(&crate::config::load());
         toast::configure(crate::toast_look::config());
         toast::set_options(options(anchor));
-        let n = Self { inner: Arc::new(Mutex::new(Inner { anchor, ..Default::default() })), app };
+        let n = Self {
+            inner: Arc::new(Mutex::new(Inner {
+                anchor,
+                ..Default::default()
+            })),
+            app,
+        };
         let tick = n.clone();
         std::thread::Builder::new()
             .name("rsz-notices".into())
-            .spawn(move || loop {
-                std::thread::sleep(Duration::from_millis(100));
-                tick.expire();
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(100));
+                    tick.expire();
+                }
             })
             .expect("notice thread");
         n
@@ -143,7 +164,13 @@ impl Notices {
             if history {
                 remember(&mut g, pane, &n);
             }
-            let same = if n.id.is_empty() { None } else { g.live.iter().position(|l| l.note.id == n.id && l.pane == pane) };
+            let same = if n.id.is_empty() {
+                None
+            } else {
+                g.live
+                    .iter()
+                    .position(|l| l.note.id == n.id && l.pane == pane)
+            };
             if let Some(at) = same {
                 let l = &mut g.live[at];
                 l.note = n;
@@ -162,7 +189,15 @@ impl Notices {
                 }
                 g.next += 1;
                 let key = g.next;
-                g.live.push(Live { key, pane, note: n, expire, until, shown: None, gone: None });
+                g.live.push(Live {
+                    key,
+                    pane,
+                    note: n,
+                    expire,
+                    until,
+                    shown: None,
+                    gone: None,
+                });
                 let l = g.live.last_mut().expect("just pushed");
                 self.show(l, false);
             }
@@ -221,7 +256,11 @@ impl Notices {
             body: String::new(),
             sound: sound.into(),
             // The accent matches the sound: red for a failure, amber for a warning.
-            icon: if sound == "info" { String::new() } else { sound.into() },
+            icon: if sound == "info" {
+                String::new()
+            } else {
+                sound.into()
+            },
             urgency: 1,
             occasion: "always".into(),
             expire_ms: host_long(msg).then_some(4000),
@@ -246,13 +285,20 @@ impl Notices {
     /// OSC 99 p=alive: the ids of this pane's notices still showing.
     pub fn alive_reply(&self, pane: u32, id: &str) -> Vec<u8> {
         let g = self.inner.lock();
-        let ids: Vec<String> = g.live.iter().filter(|l| l.pane == Some(pane) && !l.note.id.is_empty()).map(|l| l.note.id.clone()).collect();
+        let ids: Vec<String> = g
+            .live
+            .iter()
+            .filter(|l| l.pane == Some(pane) && !l.note.id.is_empty())
+            .map(|l| l.note.id.clone())
+            .collect();
         protocols::alive_reply(id, &ids)
     }
 
     /// A left click on a card (Go activateNotice).
     pub fn activate(&self, key: u64) -> Vec<Effect> {
-        let Some(l) = self.take(key) else { return Vec::new() };
+        let Some(l) = self.take(key) else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         if l.note.focus {
             out.push(Effect::Focus(l.pane));
@@ -268,7 +314,9 @@ impl Notices {
 
     /// A right click or the x on a card (Go dismissNoticeAt).
     pub fn dismiss(&self, key: u64) -> Vec<Effect> {
-        self.take(key).map(|l| close_event(&l).into_iter().collect()).unwrap_or_default()
+        self.take(key)
+            .map(|l| close_event(&l).into_iter().collect())
+            .unwrap_or_default()
     }
 
     /// Saved settings (config_set): move the cards to the notice position.
@@ -282,7 +330,10 @@ impl Notices {
         if !moved {
             return;
         }
-        toast::set_options(toast::Options { corner: options(anchor).corner, ..toast::current_options() });
+        toast::set_options(toast::Options {
+            corner: options(anchor).corner,
+            ..toast::current_options()
+        });
         if sets_position(patch) {
             let label = crate::config::NOTICE_POSITION_LABELS[anchor];
             let _ = self.post_as(None, sample(label), false);
@@ -341,9 +392,11 @@ impl Notices {
                 l.gone.get_or_insert(now);
             }
         }
-        let (dead, keep): (Vec<Live>, Vec<Live>) = std::mem::take(&mut g.live)
-            .into_iter()
-            .partition(|l| l.gone.is_some_and(|t| now.saturating_duration_since(t) >= GONE_GRACE));
+        let (dead, keep): (Vec<Live>, Vec<Live>) =
+            std::mem::take(&mut g.live).into_iter().partition(|l| {
+                l.gone
+                    .is_some_and(|t| now.saturating_duration_since(t) >= GONE_GRACE)
+            });
         g.live = keep;
         drop(g);
         if dead.is_empty() {
@@ -354,7 +407,9 @@ impl Notices {
     }
 
     fn window_state(&self) -> (bool, bool) {
-        let Some(w) = self.app.get_webview_window("main") else { return (false, false) };
+        let Some(w) = self.app.get_webview_window("main") else {
+            return (false, false);
+        };
         let focused = w.is_focused().unwrap_or(false);
         let visible = w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false);
         (focused, visible)
@@ -399,7 +454,9 @@ fn card(key: u64, n: &Notice, expire: Option<Duration>) -> (toast::Note, Option<
     let kind = kind_of(n);
     let (silent, extra) = match sound_kind(n) {
         None => (true, None),
-        Some(k) if toast::sound::sound_for(k, false) == toast::sound::sound_for(kind, false) => (false, None),
+        Some(k) if toast::sound::sound_for(k, false) == toast::sound::sound_for(kind, false) => {
+            (false, None)
+        }
         Some(k) => (true, Some(k)),
     };
     let note = toast::Note {
@@ -421,15 +478,30 @@ pub const UPDATE_CARD: &str = "suzuri-update";
 /// The update offer: a card that stays until answered, with Install (runs
 /// `install`) and Skip (just closes it). Neither a body click nor a right
 /// click installs anything; the buttons are the only answers.
-pub fn update_note(version: &str, current: &str, install: impl Fn() + Send + Sync + 'static) -> toast::Note {
+pub fn update_note(
+    version: &str,
+    current: &str,
+    install: impl Fn() + Send + Sync + 'static,
+) -> toast::Note {
     let v = |s: &str| format!("v{}", s.trim_start_matches('v'));
     toast::Note {
         id: UPDATE_CARD.into(),
-        title: if version.is_empty() { "Update available".into() } else { format!("Update to {}", v(version)) },
-        body: if current.is_empty() { String::new() } else { format!("You have {}", v(current)) },
+        title: if version.is_empty() {
+            "Update available".into()
+        } else {
+            format!("Update to {}", v(version))
+        },
+        body: if current.is_empty() {
+            String::new()
+        } else {
+            format!("You have {}", v(current))
+        },
         kind: Kind::Info,
         sticky: true,
-        actions: vec![toast::Action::new("Install", install), toast::Action::close("Skip")],
+        actions: vec![
+            toast::Action::new("Install", install),
+            toast::Action::close("Skip"),
+        ],
         ..toast::Note::default()
     }
 }
@@ -438,16 +510,26 @@ pub fn update_note(version: &str, current: &str, install: impl Fn() + Send + Syn
 /// version is on the offer this replaces; a longer title is cut): the
 /// panes that have one (`busy`, as "claude in suzuri"), Install anyway (runs
 /// `install`) and Not now (just closes it). It takes the offer's place.
-pub fn update_confirm_note(busy: &[String], install: impl Fn() + Send + Sync + 'static) -> toast::Note {
+pub fn update_confirm_note(
+    busy: &[String],
+    install: impl Fn() + Send + Sync + 'static,
+) -> toast::Note {
     let n = busy.len();
-    let what = if n == 1 { "1 running program".to_string() } else { format!("{n} running programs") };
+    let what = if n == 1 {
+        "1 running program".to_string()
+    } else {
+        format!("{n} running programs")
+    };
     toast::Note {
         id: UPDATE_CARD.into(),
         title: format!("Update ends {what}"),
         body: busy_list(busy),
         kind: Kind::Warn,
         sticky: true,
-        actions: vec![toast::Action::new("Install anyway", install), toast::Action::close("Not now")],
+        actions: vec![
+            toast::Action::new("Install anyway", install),
+            toast::Action::close("Not now"),
+        ],
         ..toast::Note::default()
     }
 }
@@ -455,7 +537,12 @@ pub fn update_confirm_note(busy: &[String], install: impl Fn() + Send + Sync + '
 /// The busy panes for the card's two lines: the first three, then how many more.
 fn busy_list(busy: &[String]) -> String {
     const SHOWN: usize = 3;
-    let mut s = busy.iter().take(SHOWN).cloned().collect::<Vec<_>>().join(" · ");
+    let mut s = busy
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" · ");
     if busy.len() > SHOWN {
         s.push_str(&format!(" · {} more", busy.len() - SHOWN));
     }
@@ -472,9 +559,20 @@ fn host_kind(msg: &str) -> &'static str {
         "host-font"
     } else if pre("queued") || pre("ran queued") || pre("cleared ") {
         "host-queue"
-    } else if s.contains("update") || s.contains("up to date") || pre("installing") || s.contains("available") {
+    } else if s.contains("update")
+        || s.contains("up to date")
+        || pre("installing")
+        || s.contains("available")
+    {
         "host-update"
-    } else if pre("split ") || pre("fork ") || s.ends_with(" panes") || s.ends_with(" tabs") || s == "1 tab" || s == "tab limit" || pre("max ") {
+    } else if pre("split ")
+        || pre("fork ")
+        || s.ends_with(" panes")
+        || s.ends_with(" tabs")
+        || s == "1 tab"
+        || s == "tab limit"
+        || pre("max ")
+    {
         "host-layout"
     } else if pre("transfer") || pre("send:") || pre("receive:") || pre("ticket ") {
         "host-transfer"
@@ -490,9 +588,29 @@ fn host_kind(msg: &str) -> &'static str {
 /// Go hostToastSound: error, warn or info.
 fn host_sound(msg: &str) -> &'static str {
     let s = msg.to_lowercase();
-    if ["fail", "not found", "unavailable", "not allowlisted", "missing session"].iter().any(|w| s.contains(w)) {
+    if [
+        "fail",
+        "not found",
+        "unavailable",
+        "not allowlisted",
+        "missing session",
+    ]
+    .iter()
+    .any(|w| s.contains(w))
+    {
         "error"
-    } else if ["ignored", "limit", "empty", "deferred", "already off", "fallback"].iter().any(|w| s.contains(w)) || s.starts_with("max ") {
+    } else if [
+        "ignored",
+        "limit",
+        "empty",
+        "deferred",
+        "already off",
+        "fallback",
+    ]
+    .iter()
+    .any(|w| s.contains(w))
+        || s.starts_with("max ")
+    {
         "warn"
     } else {
         "info"
@@ -502,7 +620,9 @@ fn host_sound(msg: &str) -> &'static str {
 /// Go hostToastLong: update news and opened links stay 4 s.
 fn host_long(msg: &str) -> bool {
     let s = msg.to_lowercase();
-    ["update", "up to date", "installing", "opened"].iter().any(|w| s.contains(w))
+    ["update", "up to date", "installing", "opened"]
+        .iter()
+        .any(|w| s.contains(w))
 }
 
 /// Go previewNoticeAnchor: a silent card at the new spot.
@@ -523,17 +643,31 @@ fn sample(label: &str) -> Notice {
 }
 
 fn remember(g: &mut Inner, pane: Option<u32>, n: &Notice) {
-    let at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
     if !n.id.is_empty() {
         g.history.retain(|h| h.id != n.id);
     }
-    g.history.insert(0, Played { title: n.title.trim().into(), body: n.body.trim().into(), at, pane, id: n.id.clone() });
+    g.history.insert(
+        0,
+        Played {
+            title: n.title.trim().into(),
+            body: n.body.trim().into(),
+            at,
+            pane,
+            id: n.id.clone(),
+        },
+    );
     g.history.truncate(MAX_HISTORY);
     g.unread += 1;
 }
 
 fn close_event(l: &Live) -> Option<Effect> {
-    let pane = l.pane.filter(|_| l.note.close_event && !l.note.id.is_empty())?;
+    let pane = l
+        .pane
+        .filter(|_| l.note.close_event && !l.note.id.is_empty())?;
     Some(Effect::Reply(pane, protocols::close_report(&l.note.id)))
 }
 
@@ -575,12 +709,19 @@ mod tests {
         let labels: Vec<_> = one.actions.iter().map(|a| a.label.as_str()).collect();
         assert_eq!(labels, ["Install anyway", "Not now"]);
         assert!(one.actions[0].run.is_some() && one.actions[1].run.is_none());
-        let many: Vec<String> = ["claude in suzuri", "npm in web", "vim in ~", "ssh in ~", "top in ~"].map(Into::into).into();
+        let many: Vec<String> = [
+            "claude in suzuri",
+            "npm in web",
+            "vim in ~",
+            "ssh in ~",
+            "top in ~",
+        ]
+        .map(Into::into)
+        .into();
         let n = update_confirm_note(&many, || {});
         assert_eq!(n.title, "Update ends 5 running programs");
         assert_eq!(n.body, "claude in suzuri · npm in web · vim in ~ · 2 more");
     }
-
 
     fn notice(sound: &str, icon: &str, urgency: u8) -> Notice {
         Notice {
@@ -607,14 +748,20 @@ mod tests {
         assert_eq!((c.expire, c.sticky), (Duration::from_millis(3200), false));
         assert!(c.actions.is_empty());
         let (c, extra) = card(1, &notice("error", "error", 1), None);
-        assert_eq!((c.kind, c.silent, extra, c.sticky), (Kind::Error, false, None, true));
+        assert_eq!(
+            (c.kind, c.silent, extra, c.sticky),
+            (Kind::Error, false, None, true)
+        );
         let (c, extra) = card(1, &notice("warn", "warn", 1), None);
         assert_eq!((c.kind, c.silent, extra), (Kind::Warn, false, None));
         let (c, extra) = card(1, &notice("silent", "error", 2), None);
         assert_eq!((c.kind, c.silent, extra), (Kind::Error, true, None));
         // A sound that is not the kind's own plays beside a silent card.
         let (c, extra) = card(1, &notice("question", "", 1), None);
-        assert_eq!((c.kind, c.silent, extra), (Kind::Info, true, Some(Kind::Warn)));
+        assert_eq!(
+            (c.kind, c.silent, extra),
+            (Kind::Info, true, Some(Kind::Warn))
+        );
     }
 
     #[test]
@@ -646,7 +793,10 @@ mod tests {
         assert_eq!(host_sound("font 36px (limit)"), "warn");
         assert_eq!(host_sound("copied"), "info");
         assert_eq!(sound_for(host_sound("copied"), 1), Some("success"));
-        assert_eq!(sound_for(host_sound("caffeine already off"), 1), Some("published"));
+        assert_eq!(
+            sound_for(host_sound("caffeine already off"), 1),
+            Some("published")
+        );
     }
 
     #[test]

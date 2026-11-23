@@ -64,7 +64,14 @@ fn truncate(s: &str, n: usize) -> String {
 
 /// The block's lines with their colours: an optional spacer, the rule, then
 /// the command (continuation lines indented under it).
-pub fn block_lines(display: &str, cwd: &str, home: &str, cols: u16, spacer: bool, primary: Rgb) -> Vec<(String, Rgb)> {
+pub fn block_lines(
+    display: &str,
+    cwd: &str,
+    home: &str,
+    cols: u16,
+    spacer: bool,
+    primary: Rgb,
+) -> Vec<(String, Rgb)> {
     let cols = cols.max(12) as usize;
     let rule = (primary.0 / 2 + 40, primary.1 / 2 + 40, primary.2 / 2 + 40);
     let mut out = Vec::new();
@@ -100,8 +107,14 @@ mod tests {
     #[test]
     fn bare_cd_per_shell() {
         assert_eq!(expand("cd", "/bin/zsh"), ("cd".into(), "cd".into()));
-        assert_eq!(expand(" CD ", r"C:\Program Files\PowerShell\7\pwsh.exe"), ("cd ~".into(), "Set-Location ~".into()));
-        assert_eq!(expand("cd", r"C:\Windows\System32\cmd.exe"), ("cd ~".into(), "cd /d \"%USERPROFILE%\"".into()));
+        assert_eq!(
+            expand(" CD ", r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            ("cd ~".into(), "Set-Location ~".into())
+        );
+        assert_eq!(
+            expand("cd", r"C:\Windows\System32\cmd.exe"),
+            ("cd ~".into(), "cd /d \"%USERPROFILE%\"".into())
+        );
         assert_eq!(expand("cd src", "pwsh"), ("cd src".into(), "cd src".into()));
         assert_eq!(expand("ls -la", "bash"), ("ls -la".into(), "ls -la".into()));
     }
@@ -117,18 +130,28 @@ mod tests {
     #[test]
     fn block_draws_rule_and_command() {
         let l = block_lines("echo hi", "/h/u/src", "/h/u", 20, true, (200, 100, 50));
-        assert_eq!(l, vec![
-            (String::new(), (200, 100, 50)),
-            ("─".repeat(20), (140, 90, 65)),
-            ("~/src ❯ echo hi".to_string(), (200, 100, 50)),
-        ]);
+        assert_eq!(
+            l,
+            vec![
+                (String::new(), (200, 100, 50)),
+                ("─".repeat(20), (140, 90, 65)),
+                ("~/src ❯ echo hi".to_string(), (200, 100, 50)),
+            ]
+        );
         // A blank line already above: no spacer.
         assert_eq!(block_lines("x", "", "", 20, false, (0, 0, 0)).len(), 2);
     }
 
     #[test]
     fn multi_line_and_long_path() {
-        let l = block_lines("a\nb", "/very/long/path/to/somewhere/deep", "", 24, false, (1, 2, 3));
+        let l = block_lines(
+            "a\nb",
+            "/very/long/path/to/somewhere/deep",
+            "",
+            24,
+            false,
+            (1, 2, 3),
+        );
         // Path budget is at most half the width; the end of the path stays.
         assert_eq!(l[1].0, "…ewhere/deep ❯ a");
         assert_eq!(l[2].0, "  b");

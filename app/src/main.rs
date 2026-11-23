@@ -14,23 +14,23 @@ mod altmenu;
 mod applog;
 mod bridge;
 mod caffeine;
-mod clip;
 mod cli;
-mod notes;
-mod notify;
+mod clip;
 mod complete;
-mod paste;
 mod config;
 mod hang;
-mod sidecar;
-mod window;
-mod window_state;
+mod keeper;
+mod notes;
 mod notices;
+mod notify;
+mod paste;
+mod restore;
+mod sidecar;
 mod toast_look;
 mod update;
+mod window;
+mod window_state;
 mod ws;
-mod keeper;
-mod restore;
 use keeper::Shell;
 use rsz_term::{Link, MouseEvent, MouseKind, Out, Pane, PaneConfig, SelectKind, Sink};
 use serde::{Deserialize, Serialize};
@@ -97,7 +97,13 @@ enum Msg<'a> {
     Exit { code: Option<u32> },
     /// The input bar's view of the shell (#285).
     #[serde(rename = "shell")]
-    Shell { integrated: bool, cwd: &'a str, program: bool, prompts: u64, pending: bool },
+    Shell {
+        integrated: bool,
+        cwd: &'a str,
+        program: bool,
+        prompts: u64,
+        pending: bool,
+    },
     #[serde(rename = "done")]
     CommandDone { exit: Option<i32>, command: &'a str },
     /// Text typed while a command ran, for the bar (crates/term shell.rs).
@@ -105,7 +111,16 @@ enum Msg<'a> {
     Typeahead { text: &'a str },
     // Card #288. An image's bytes (base64), once, before it is placed.
     #[serde(rename = "img")]
-    Image { id: u32, name: &'a str, path: Option<&'a str>, format: u32, w: u32, h: u32, z: bool, data: String },
+    Image {
+        id: u32,
+        name: &'a str,
+        path: Option<&'a str>,
+        format: u32,
+        w: u32,
+        h: u32,
+        z: bool,
+        data: String,
+    },
     #[serde(rename = "imgdrop")]
     ImageDrop { ids: &'a [u32] },
     /// Images on screen: [image, row, col, cols, rows, z, inline, crop x, y, w, h].
@@ -122,7 +137,9 @@ fn json(m: &Msg) -> InvokeResponseBody {
     InvokeResponseBody::Json(serde_json::to_string(m).unwrap_or_default())
 }
 
+// A Tauri command: its arguments are the fields the UI sends.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn pane_open(
     panes: State<'_, Arc<Panes>>,
     bridge: State<'_, Option<Arc<bridge::Bridge>>>,
@@ -145,33 +162,57 @@ fn pane_open(
     // RSZ_CMD still wins for the bench.
     let (prof_cmd, prof_cwd) = config::profile_launch(&settings, profile.as_deref());
     let inherited = from.and_then(|f| panes.launch.lock().get(&f).cloned());
-    let env_cmd = std::env::var("RSZ_CMD").ok().filter(|s| !s.is_empty()).map(|s| config::split_args(&s));
+    let env_cmd = std::env::var("RSZ_CMD")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| config::split_args(&s));
     let command = launch_command(command, env_cmd, profile.is_some(), inherited, prof_cmd);
     let sink = pane_sink(Arc::clone(&panes), id, on_frame, app, notes.inner().clone());
     // A pane split from another starts in that pane's cwd (Go suzuri's cwd.go).
     let restored_cwd = cwd.filter(|d| std::path::Path::new(d).is_dir());
-    let cwd = restored_cwd.or_else(|| from
-        .and_then(|f| panes.get(f))
-        .and_then(|p| p.cwd())
-        .filter(|d| std::path::Path::new(d).is_dir())
-        .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()))
-        .or(prof_cwd));
+    let cwd = restored_cwd.or_else(|| {
+        from.and_then(|f| panes.get(f))
+            .and_then(|p| p.cwd())
+            .filter(|d| std::path::Path::new(d).is_dir())
+            .or_else(|| std::env::var("RSZ_CWD").ok().filter(|s| !s.is_empty()))
+            .or(prof_cwd)
+    });
     // RSZ_NO_BAR=1: the plain shell with its own prompt, no input bar.
     let plain_shell = std::env::var_os("RSZ_NO_BAR").is_some();
     let cursor = config::cursor_code(&settings);
     panes.sizes.lock().insert(id, (cols, rows));
-    let mut cfg = PaneConfig { cols, rows, command, cwd, plain_shell, cursor, preamble, ..Default::default() };
+    let mut cfg = PaneConfig {
+        cols,
+        rows,
+        command,
+        cwd,
+        plain_shell,
+        cursor,
+        preamble,
+        ..Default::default()
+    };
     if let Some(b) = bridge.as_ref() {
         cfg.env.extend(b.pane_env(id));
     }
-    if let Some(n) = std::env::var("RSZ_SCROLLBACK").ok().and_then(|v| v.parse().ok()) {
+    if let Some(n) = std::env::var("RSZ_SCROLLBACK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         cfg.scrollback = n;
     }
     let launched = cfg.command.clone();
     let shell = match &panes.keeper {
         Some(dir) => {
-            let kept = keeper::spawn(dir, keeper::Spawn { id, cfg: &cfg, palette: rsz_term::palette::active().pal, version: &panes.version })
-                .and_then(|()| keeper::Kept::attach(dir, id, sink.clone()));
+            let kept = keeper::spawn(
+                dir,
+                keeper::Spawn {
+                    id,
+                    cfg: &cfg,
+                    palette: rsz_term::palette::active().pal,
+                    version: &panes.version,
+                },
+            )
+            .and_then(|()| keeper::Kept::attach(dir, id, sink.clone()));
             match kept {
                 Ok(k) => Shell::Kept(k),
                 // The keeper failed: this pane's shell lives in the app.
@@ -194,11 +235,20 @@ fn pane_open(
 /// crashed), and the tabs and splits it last saved, for the UI to put back.
 #[tauri::command]
 fn kept_list(panes: State<'_, Arc<Panes>>) -> serde_json::Value {
-    let Some(dir) = &panes.keeper else { return serde_json::json!({ "shells": [], "layouts": [] }) };
-    let open = panes.map.lock().keys().copied().collect::<std::collections::HashSet<_>>();
+    let Some(dir) = &panes.keeper else {
+        return serde_json::json!({ "shells": [], "layouts": [] });
+    };
+    let open = panes
+        .map
+        .lock()
+        .keys()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
     let shells: Vec<_> = keeper::live(dir)
         .into_iter()
-        .filter(|(id, h)| !open.contains(id) && h["viewers"].as_u64() == Some(0) && h["exited"].is_null())
+        .filter(|(id, h)| {
+            !open.contains(id) && h["viewers"].as_u64() == Some(0) && h["exited"].is_null()
+        })
         .map(|(_, h)| h)
         .collect();
     serde_json::json!({ "shells": shells, "layouts": keeper::take_layouts(dir) })
@@ -207,7 +257,13 @@ fn kept_list(panes: State<'_, Arc<Panes>>) -> serde_json::Value {
 /// Show kept shell `id` in this window: its screen, scrollback and state
 /// come over from its host. Returns its size.
 #[tauri::command]
-fn pane_attach(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, app: tauri::AppHandle, id: u32, on_frame: Channel<InvokeResponseBody>) -> Result<(u16, u16), String> {
+fn pane_attach(
+    panes: State<'_, Arc<Panes>>,
+    notes: State<'_, notices::Notices>,
+    app: tauri::AppHandle,
+    id: u32,
+    on_frame: Channel<InvokeResponseBody>,
+) -> Result<(u16, u16), String> {
     let dir = panes.keeper.clone().ok_or("kept shells are off")?;
     if panes.map.lock().contains_key(&id) {
         return Err(format!("pane {id} is open already"));
@@ -215,9 +271,17 @@ fn pane_attach(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>,
     panes.next.fetch_max(id, Ordering::Relaxed);
     let sink = pane_sink(Arc::clone(&panes), id, on_frame, app, notes.inner().clone());
     let k = keeper::Kept::attach(&dir, id, sink).map_err(|e| e.to_string())?;
-    let size = (k.hello["cols"].as_u64().unwrap_or(80) as u16, k.hello["rows"].as_u64().unwrap_or(24) as u16);
+    let size = (
+        k.hello["cols"].as_u64().unwrap_or(80) as u16,
+        k.hello["rows"].as_u64().unwrap_or(24) as u16,
+    );
     if let Some(c) = k.hello["command"].as_array() {
-        panes.launch.lock().insert(id, c.iter().filter_map(|x| x.as_str().map(str::to_string)).collect());
+        panes.launch.lock().insert(
+            id,
+            c.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect(),
+        );
     }
     let shell = Shell::Kept(k);
     shell.palette_changed(&rsz_term::palette::active().pal);
@@ -233,14 +297,27 @@ fn pane_attach(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>,
 /// Closing the pane, or quitting, only lets go: the shell is the other
 /// program's. Returns the id and the host's size.
 #[tauri::command]
-fn pane_borrow(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, app: tauri::AppHandle, socket: String, on_frame: Channel<InvokeResponseBody>) -> Result<(u32, u16, u16), String> {
+fn pane_borrow(
+    panes: State<'_, Arc<Panes>>,
+    notes: State<'_, notices::Notices>,
+    app: tauri::AppHandle,
+    socket: String,
+    on_frame: Channel<InvokeResponseBody>,
+) -> Result<(u32, u16, u16), String> {
     let sock = keeper::foreign_sock(std::path::Path::new(&socket)).map_err(|e| e.to_string())?;
     let id = panes.new_id();
     let sink = pane_sink(Arc::clone(&panes), id, on_frame, app, notes.inner().clone());
     let mut k = keeper::Kept::attach_sock(&sock, sink).map_err(|e| e.to_string())?;
     k.borrowed = true;
-    let (cols, rows) = (k.hello["cols"].as_u64().unwrap_or(80) as u16, k.hello["rows"].as_u64().unwrap_or(24) as u16);
-    log::info!("keeper: pane {id} shows {} (host {})", sock.display(), k.hello["pid"]);
+    let (cols, rows) = (
+        k.hello["cols"].as_u64().unwrap_or(80) as u16,
+        k.hello["rows"].as_u64().unwrap_or(24) as u16,
+    );
+    log::info!(
+        "keeper: pane {id} shows {} (host {})",
+        sock.display(),
+        k.hello["pid"]
+    );
     let shell = Shell::Kept(k);
     shell.palette_changed(&rsz_term::palette::active().pal);
     shell.set_default_cursor(config::cursor_code(&config::load()));
@@ -257,10 +334,10 @@ fn layout_save(panes: State<'_, Arc<Panes>>, layout: serde_json::Value) {
     if let Some(r) = restore::get() {
         r.set_layout(layout.clone());
     }
-    if let Some(dir) = &panes.keeper {
-        if let Err(e) = keeper::save_layout(dir, &layout) {
-            log::warn!("keeper: layout not saved: {e}");
-        }
+    if let Some(dir) = &panes.keeper
+        && let Err(e) = keeper::save_layout(dir, &layout)
+    {
+        log::warn!("keeper: layout not saved: {e}");
     }
 }
 
@@ -294,7 +371,13 @@ fn restore_forget() {
 
 /// Where a pane's events go: frames to the socket (or its Channel), the
 /// rest to its Channel, notices to the desktop cards.
-fn pane_sink(panes_ref: Arc<Panes>, id: u32, on_frame: Channel<InvokeResponseBody>, app: tauri::AppHandle, notes: notices::Notices) -> Sink {
+fn pane_sink(
+    panes_ref: Arc<Panes>,
+    id: u32,
+    on_frame: Channel<InvokeResponseBody>,
+    app: tauri::AppHandle,
+    notes: notices::Notices,
+) -> Sink {
     Arc::new(move |o| {
         let _ = match o {
             Out::Frame(b) => match &panes_ref.bus {
@@ -317,18 +400,28 @@ fn pane_sink(panes_ref: Arc<Panes>, id: u32, on_frame: Channel<InvokeResponseBod
                 }
                 Ok(())
             }
-            Out::Shell(st) => on_frame.send(json(&Msg::Shell { integrated: st.integrated, cwd: &st.cwd, program: st.program, prompts: st.prompts, pending: st.pending })),
-            Out::CommandDone { exit, command } => on_frame.send(json(&Msg::CommandDone { exit, command: &command })),
+            Out::Shell(st) => on_frame.send(json(&Msg::Shell {
+                integrated: st.integrated,
+                cwd: &st.cwd,
+                program: st.program,
+                prompts: st.prompts,
+                pending: st.pending,
+            })),
+            Out::CommandDone { exit, command } => on_frame.send(json(&Msg::CommandDone {
+                exit,
+                command: &command,
+            })),
             Out::Typeahead(text) => on_frame.send(json(&Msg::Typeahead { text: &text })),
             Out::Exit(code) => {
                 // No exit code: its host was killed (a logout or shutdown
                 // ending everything), not a shell that ended itself.
                 // Another program's shell ending says nothing about ours.
                 let borrowed = panes_ref.borrowed.lock().remove(&id);
-                if code.is_none() && !borrowed {
-                    if let Some(r) = restore::get() {
-                        r.shell_lost();
-                    }
+                if code.is_none()
+                    && !borrowed
+                    && let Some(r) = restore::get()
+                {
+                    r.shell_lost();
                 }
                 panes_ref.map.lock().remove(&id);
                 panes_ref.titles.lock().remove(&id);
@@ -351,7 +444,9 @@ fn pane_sink(panes_ref: Arc<Panes>, id: u32, on_frame: Channel<InvokeResponseBod
                 }
                 Ok(())
             }
-            Out::Progress { state, percent } => on_frame.send(json(&Msg::Progress { state, percent })),
+            Out::Progress { state, percent } => {
+                on_frame.send(json(&Msg::Progress { state, percent }))
+            }
             Out::ImageData(d) => {
                 use base64::Engine as _;
                 let data = base64::engine::general_purpose::STANDARD.encode(&d.data);
@@ -372,7 +467,19 @@ fn pane_sink(panes_ref: Arc<Panes>, id: u32, on_frame: Channel<InvokeResponseBod
                     .iter()
                     .map(|p| {
                         let (cx, cy, cw, ch) = p.crop;
-                        [p.image as i64, p.row as i64, p.col as i64, p.cols as i64, p.rows as i64, p.z as i64, p.inline as i64, cx as i64, cy as i64, cw as i64, ch as i64]
+                        [
+                            p.image as i64,
+                            p.row as i64,
+                            p.col as i64,
+                            p.cols as i64,
+                            p.rows as i64,
+                            p.z as i64,
+                            p.inline as i64,
+                            cx as i64,
+                            cy as i64,
+                            cw as i64,
+                            ch as i64,
+                        ]
                     })
                     .collect();
                 on_frame.send(json(&Msg::Placements { list }))
@@ -403,7 +510,9 @@ fn launch_command(
 /// "queued", n: queue length}.
 #[tauri::command]
 fn pane_submit(panes: State<'_, Arc<Panes>>, id: u32, line: String) -> serde_json::Value {
-    let Some(p) = panes.get(id) else { return serde_json::Value::Null };
+    let Some(p) = panes.get(id) else {
+        return serde_json::Value::Null;
+    };
     match p.submit(&line) {
         rsz_term::Submit::Sent => serde_json::json!({ "kind": "sent", "n": 0 }),
         rsz_term::Submit::Blank => serde_json::json!({ "kind": "blank", "n": 0 }),
@@ -474,10 +583,11 @@ fn pane_focus(panes: State<'_, Arc<Panes>>, id: u32, focused: bool) {
         p.set_focused(focused);
         // A kept shell may be shown in another window too (Hearth): the
         // one that takes the keys sets its size.
-        if focused && matches!(*p, Shell::Kept(_)) {
-            if let Some(&(cols, rows)) = panes.sizes.lock().get(&id) {
-                p.resize(cols, rows);
-            }
+        if focused
+            && matches!(*p, Shell::Kept(_))
+            && let Some(&(cols, rows)) = panes.sizes.lock().get(&id)
+        {
+            p.resize(cols, rows);
         }
     }
 }
@@ -572,9 +682,17 @@ fn config_get() -> serde_json::Value {
 /// Live parts reach running panes here (the cursor); the UI applies the rest
 /// on its `rsz:config` event.
 #[tauri::command]
-fn config_set(panes: State<'_, Arc<Panes>>, notes: State<'_, notices::Notices>, patch: serde_json::Value) -> Result<serde_json::Value, String> {
+fn config_set(
+    panes: State<'_, Arc<Panes>>,
+    notes: State<'_, notices::Notices>,
+    patch: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let v = config::update(patch.clone()).map_err(|e| e.to_string())?;
-    if patch.get("restore_sessions").and_then(serde_json::Value::as_bool) == Some(false) {
+    if patch
+        .get("restore_sessions")
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
         restore::turned_off();
     }
     let shape = config::cursor_code(&v);
@@ -613,7 +731,9 @@ fn pane_select(panes: State<'_, Arc<Panes>>, id: u32, op: String, col: u16, row:
 /// one. Async, like every clipboard command: off the main thread (see clip).
 #[tauri::command(async)]
 fn pane_copy(panes: State<'_, Arc<Panes>>, id: u32) -> Result<bool, String> {
-    let Some(text) = panes.get(id).and_then(|p| p.selection_text()) else { return Ok(false) };
+    let Some(text) = panes.get(id).and_then(|p| p.selection_text()) else {
+        return Ok(false);
+    };
     clip::set_text(clip::USER, text)?;
     Ok(true)
 }
@@ -643,7 +763,11 @@ fn clipboard_paste_text(p: &Shell) -> Result<String, String> {
     let mut got = clip::paste(clip::USER, p.alt_screen())?;
     if let clip::Paste::Image(img) = &got {
         match png_bytes(img) {
-            Some(png) => return Ok(paste::save_image(&std::env::temp_dir(), &png)?.to_string_lossy().into_owned()),
+            Some(png) => {
+                return Ok(paste::save_image(&std::env::temp_dir(), &png)?
+                    .to_string_lossy()
+                    .into_owned());
+            }
             None => got = clip::Paste::Text(clip::text(clip::USER)?),
         }
     }
@@ -659,7 +783,9 @@ fn clipboard_paste_text(p: &Shell) -> Result<String, String> {
 /// thread).
 #[tauri::command]
 fn pane_paste(panes: State<'_, Arc<Panes>>, id: u32, text: String) -> Result<(), String> {
-    let Some(p) = panes.get(id) else { return Ok(()) };
+    let Some(p) = panes.get(id) else {
+        return Ok(());
+    };
     if !text.is_empty() {
         p.paste(&text);
     }
@@ -671,7 +797,9 @@ fn pane_paste(panes: State<'_, Arc<Panes>>, id: u32, text: String) -> Result<(),
 /// thread.
 #[tauri::command(async)]
 fn pane_paste_clipboard(panes: State<'_, Arc<Panes>>, id: u32) -> Result<(), String> {
-    let Some(p) = panes.get(id) else { return Ok(()) };
+    let Some(p) = panes.get(id) else {
+        return Ok(());
+    };
     let text = clipboard_paste_text(&p)?;
     if !text.is_empty() {
         p.paste(&text);
@@ -705,7 +833,15 @@ fn pane_mouse(panes: State<'_, Arc<Panes>>, id: u32, ev: MouseIn) -> bool {
         "wheeldown" => MouseKind::WheelDown,
         _ => return false,
     };
-    let me = MouseEvent { kind, button: ev.button, col: ev.col, row: ev.row, shift: ev.shift, alt: ev.alt, ctrl: ev.ctrl };
+    let me = MouseEvent {
+        kind,
+        button: ev.button,
+        col: ev.col,
+        row: ev.row,
+        shift: ev.shift,
+        alt: ev.alt,
+        ctrl: ev.ctrl,
+    };
     panes.get(id).is_some_and(|p| p.mouse(me))
 }
 
@@ -720,7 +856,9 @@ struct LinkOut {
 /// The link (OSC 8 or a URL in the text) at a visible cell, if any.
 #[tauri::command]
 fn pane_link(panes: State<'_, Arc<Panes>>, id: u32, col: u16, row: u16) -> Option<LinkOut> {
-    let Link { url, row, x0, x1, .. } = panes.get(id)?.link_at(col, row)?;
+    let Link {
+        url, row, x0, x1, ..
+    } = panes.get(id)?.link_at(col, row)?;
     Some(LinkOut { url, row, x0, x1 })
 }
 
@@ -743,7 +881,9 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, MenuItemKind};
     let menu = Menu::default(app.handle())?;
     for item in menu.items()? {
-        let MenuItemKind::Submenu(sub) = item else { continue };
+        let MenuItemKind::Submenu(sub) = item else {
+            continue;
+        };
         for (i, it) in sub.items()?.into_iter().enumerate() {
             if let MenuItemKind::Predefined(p) = &it {
                 let (id, key) = match p.text()?.as_str() {
@@ -767,16 +907,25 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
 #[tauri::command]
 fn open_url(url: String) -> Result<Option<String>, String> {
     if !rsz_term::input::openable(&url) {
-        return Err(format!("not opening {url}: only http, https, mailto and file links open"));
+        return Err(format!(
+            "not opening {url}: only http, https, mailto and file links open"
+        ));
     }
-    if url.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("file://")) {
+    if url
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case("file://"))
+    {
         // Local paths only: another host would be a network share.
         let Some(path) = rsz_term::input::file_url_path(&url) else {
             return Err(format!("not opening {url}: not a local file"));
         };
         let real = std::fs::canonicalize(&path).map_err(|e| format!("{path}: {e}"))?;
         #[cfg(windows)]
-        let real = std::path::PathBuf::from(real.to_string_lossy().trim_start_matches(r"\\?\").to_string());
+        let real = std::path::PathBuf::from(
+            real.to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_string(),
+        );
         if runs_when_opened(&path, &real) {
             reveal(&real)?;
             return Ok(Some(format!("revealed {}, not run", real.display())));
@@ -796,7 +945,9 @@ fn runs_when_opened(link: &str, real: &std::path::Path) -> bool {
     if launches(link) || launches(&real.to_string_lossy()) {
         return true;
     }
-    let Ok(meta) = std::fs::metadata(real) else { return true };
+    let Ok(meta) = std::fs::metadata(real) else {
+        return true;
+    };
     if meta.is_dir() {
         // Packages (.app, .xpc, ...) are directories with an extension.
         return cfg!(target_os = "macos") && real.extension().is_some();
@@ -847,7 +998,10 @@ fn system_open(target: &str) -> Result<(), String> {
     };
     #[cfg(not(any(target_os = "macos", windows)))]
     let mut cmd = std::process::Command::new("xdg-open");
-    cmd.arg(target).spawn().map(|_| ()).map_err(|e| e.to_string())
+    cmd.arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -914,17 +1068,32 @@ struct Boot {
 
 #[tauri::command]
 fn boot(panes: State<'_, Arc<Panes>>) -> Boot {
-    let n = |k: &str, d: u32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let n = |k: &str, d: u32| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
     Boot {
         panes: n("RSZ_PANES", 1).clamp(1, 16),
         bench: std::env::var("RSZ_BENCH").is_ok_and(|v| v == "1"),
         bench_secs: n("RSZ_BENCH_SECS", 60),
         bench_probe: std::env::var("RSZ_BENCH_PROBE").unwrap_or_else(|_| "internal".into()),
         platform: std::env::consts::OS,
-        ws: panes.bus.as_ref().map(|b| format!("{}/{}", b.port, b.token)).unwrap_or_default(),
+        ws: panes
+            .bus
+            .as_ref()
+            .map(|b| format!("{}/{}", b.port, b.token))
+            .unwrap_or_default(),
         trace: std::env::var_os("RSZ_TRACE").is_some(),
-        home: std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
-        ui_test: if cfg!(debug_assertions) { std::env::var("RSZ_UI_TEST").unwrap_or_default() } else { String::new() },
+        home: std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default(),
+        ui_test: if cfg!(debug_assertions) {
+            std::env::var("RSZ_UI_TEST").unwrap_or_default()
+        } else {
+            String::new()
+        },
         paint: std::env::var("RSZ_PAINT").unwrap_or_else(|_| "main".into()),
     }
 }
@@ -966,7 +1135,10 @@ struct Look {
 }
 
 fn terminal_palette(dark: bool, t: &TerminalLook) -> Result<rsz_term::palette::Palette, String> {
-    let c = |name: &str, s: &str| rsz_term::palette::parse_hex(s).ok_or_else(|| format!("terminal {name}: not #rrggbb: {s:?}"));
+    let c = |name: &str, s: &str| {
+        rsz_term::palette::parse_hex(s)
+            .ok_or_else(|| format!("terminal {name}: not #rrggbb: {s:?}"))
+    };
     if t.ansi.len() != 16 {
         return Err(format!("terminal ansi: {} colours, want 16", t.ansi.len()));
     }
@@ -974,7 +1146,14 @@ fn terminal_palette(dark: bool, t: &TerminalLook) -> Result<rsz_term::palette::P
     for (i, s) in t.ansi.iter().enumerate() {
         ansi16[i] = c("ansi", s)?;
     }
-    Ok(rsz_term::palette::Palette { dark, bg: c("bg", &t.bg)?, fg: c("fg", &t.fg)?, panel: c("panel", &t.panel)?, accent: c("accent", &t.accent)?, ansi16 })
+    Ok(rsz_term::palette::Palette {
+        dark,
+        bg: c("bg", &t.bg)?,
+        fg: c("fg", &t.fg)?,
+        panel: c("panel", &t.panel)?,
+        accent: c("accent", &t.accent)?,
+        ansi16,
+    })
 }
 
 /// The active theme's colours, from the UI whenever the theme, its mode or
@@ -1010,24 +1189,6 @@ fn ui_log(line: String) {
     log::info!(target: "ui", "{line}");
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_split_runs_the_program_it_split_from() {
-        let v = |s: &str| Some(vec![s.to_string()]);
-        // A split (no profile named): the source pane's program beats the active profile's.
-        assert_eq!(super::launch_command(None, None, false, v("pwsh"), v("zsh")), v("pwsh"));
-        // A source on the login shell: the active profile's, as before.
-        assert_eq!(super::launch_command(None, None, false, None, v("zsh")), v("zsh"));
-        // A named profile (New tab: X) wins over what it split from.
-        assert_eq!(super::launch_command(None, None, true, v("pwsh"), v("fish")), v("fish"));
-        assert_eq!(super::launch_command(None, None, true, v("pwsh"), None), None);
-        // An explicit command and RSZ_CMD win over both.
-        assert_eq!(super::launch_command(v("top"), v("bench"), false, v("pwsh"), None), v("top"));
-        assert_eq!(super::launch_command(None, v("bench"), false, v("pwsh"), None), v("bench"));
-    }
-}
-
 /// Go suzuri subcommands this app does not serve (#330).
 const GO_ONLY_SUBCOMMANDS: &[&str] = &["mcp", "workspace-sync", "guest", "chrome"];
 
@@ -1056,7 +1217,10 @@ fn main() {
     // Go suzuri's other subcommands aren't served here (#330: the workspace
     // and its `suzuri mcp` server were dropped). Say so and exit instead of
     // opening a window for a caller that expects a stdio tool.
-    if let Some(sub) = args.get(1).filter(|a| GO_ONLY_SUBCOMMANDS.contains(&a.as_str())) {
+    if let Some(sub) = args
+        .get(1)
+        .filter(|a| GO_ONLY_SUBCOMMANDS.contains(&a.as_str()))
+    {
         eprintln!("suzuri {sub}: not available in this version of suzuri");
         std::process::exit(2);
     }
@@ -1076,15 +1240,24 @@ fn main() {
             p.ack(seq);
         }
     });
-    let bus = (std::env::var("RSZ_TRANSPORT").as_deref() != Ok("channel")).then(|| ws::FrameBus::start(on_ack).expect("frame socket"));
-    let keeper_dir = keeper::enabled().then(keeper::dir).filter(|d| match rsz_keeper::dir::ensure(d) {
-        Ok(()) => true,
-        Err(e) => {
-            log::warn!("keeper: off: {e}");
-            false
-        }
+    let bus = (std::env::var("RSZ_TRANSPORT").as_deref() != Ok("channel"))
+        .then(|| ws::FrameBus::start(on_ack).expect("frame socket"));
+    let keeper_dir =
+        keeper::enabled()
+            .then(keeper::dir)
+            .filter(|d| match rsz_keeper::dir::ensure(d) {
+                Ok(()) => true,
+                Err(e) => {
+                    log::warn!("keeper: off: {e}");
+                    false
+                }
+            });
+    let panes = Arc::new(Panes {
+        bus,
+        keeper: keeper_dir,
+        version: ctx.package_info().version.to_string(),
+        ..Default::default()
     });
-    let panes = Arc::new(Panes { bus, keeper: keeper_dir, version: ctx.package_info().version.to_string(), ..Default::default() });
     // New pane ids go above every kept shell's (they are the shells'
     // SUZURI_PANE_ID, and the UI puts those shells back under their own).
     if let Some(d) = &panes.keeper {
@@ -1111,8 +1284,13 @@ fn main() {
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
     #[cfg(windows)]
-    if window::wants_single_instance(std::env::var(window::NEW_WINDOW_ENV).ok().as_deref(), std::env::var("RSZ_ALLOW_MULTI").ok().as_deref()) {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| window::focus_main(app)));
+    if window::wants_single_instance(
+        std::env::var(window::NEW_WINDOW_ENV).ok().as_deref(),
+        std::env::var("RSZ_ALLOW_MULTI").ok().as_deref(),
+    ) {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            window::focus_main(app)
+        }));
     }
     builder
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1132,7 +1310,9 @@ fn main() {
             app.manage(notices::Notices::new(app.handle().clone()));
             if let Some(crash) = applog::take_crash(&applog::dir()) {
                 log::info!("last run crashed: {}", crash.display());
-                let _ = app.state::<notices::Notices>().post(None, applog::crash_notice(&crash));
+                let _ = app
+                    .state::<notices::Notices>()
+                    .post(None, applog::crash_notice(&crash));
             }
             update::start(app.handle());
             caffeine::install(app.handle(), &app.state::<Arc<caffeine::Caffeine>>());
@@ -1236,4 +1416,40 @@ fn main() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_split_runs_the_program_it_split_from() {
+        let v = |s: &str| Some(vec![s.to_string()]);
+        // A split (no profile named): the source pane's program beats the active profile's.
+        assert_eq!(
+            super::launch_command(None, None, false, v("pwsh"), v("zsh")),
+            v("pwsh")
+        );
+        // A source on the login shell: the active profile's, as before.
+        assert_eq!(
+            super::launch_command(None, None, false, None, v("zsh")),
+            v("zsh")
+        );
+        // A named profile (New tab: X) wins over what it split from.
+        assert_eq!(
+            super::launch_command(None, None, true, v("pwsh"), v("fish")),
+            v("fish")
+        );
+        assert_eq!(
+            super::launch_command(None, None, true, v("pwsh"), None),
+            None
+        );
+        // An explicit command and RSZ_CMD win over both.
+        assert_eq!(
+            super::launch_command(v("top"), v("bench"), false, v("pwsh"), None),
+            v("top")
+        );
+        assert_eq!(
+            super::launch_command(None, v("bench"), false, v("pwsh"), None),
+            v("bench")
+        );
+    }
 }

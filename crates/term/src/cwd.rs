@@ -16,7 +16,13 @@ pub fn process_cwd(pid: u32) -> Option<String> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
     let n = unsafe {
-        libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDVNODEPATHINFO, 0, (&mut info as *mut libc::proc_vnodepathinfo).cast(), size)
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+            size,
+        )
     };
     if n != size {
         return None;
@@ -28,7 +34,9 @@ pub fn process_cwd(pid: u32) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 pub fn process_cwd(pid: u32) -> Option<String> {
-    std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned())
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -46,7 +54,9 @@ pub fn program_cwd(pid: u32) -> Option<String> {
     use std::ffi::c_void;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
 
     #[repr(C)]
     struct BasicInfo {
@@ -59,7 +69,13 @@ pub fn program_cwd(pid: u32) -> Option<String> {
     }
     #[link(name = "ntdll")]
     unsafe extern "system" {
-        fn NtQueryInformationProcess(h: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
+        fn NtQueryInformationProcess(
+            h: HANDLE,
+            class: u32,
+            info: *mut c_void,
+            len: u32,
+            ret: *mut u32,
+        ) -> i32;
     }
     // x64 layout: PEB.ProcessParameters at 0x20; in RTL_USER_PROCESS_PARAMETERS,
     // CurrentDirectory.DosPath (a UNICODE_STRING: length, max, buffer at +8) at 0x38.
@@ -72,10 +88,20 @@ pub fn program_cwd(pid: u32) -> Option<String> {
         if h.is_null() {
             return None;
         }
-        let read = |at: usize, buf: *mut c_void, len: usize| ReadProcessMemory(h, at as *const c_void, buf, len, std::ptr::null_mut()) != 0;
+        let read = |at: usize, buf: *mut c_void, len: usize| {
+            ReadProcessMemory(h, at as *const c_void, buf, len, std::ptr::null_mut()) != 0
+        };
         let got = (|| {
             let mut bi: BasicInfo = std::mem::zeroed();
-            if NtQueryInformationProcess(h, 0, (&mut bi as *mut BasicInfo).cast(), std::mem::size_of::<BasicInfo>() as u32, std::ptr::null_mut()) != 0 || bi.peb == 0 {
+            if NtQueryInformationProcess(
+                h,
+                0,
+                (&mut bi as *mut BasicInfo).cast(),
+                std::mem::size_of::<BasicInfo>() as u32,
+                std::ptr::null_mut(),
+            ) != 0
+                || bi.peb == 0
+            {
                 return None;
             }
             let mut params = 0usize;
@@ -97,7 +123,10 @@ pub fn program_cwd(pid: u32) -> Option<String> {
             }
             let s = String::from_utf16(&w).ok()?;
             // "C:\dir\" -> "C:\dir"; a drive's root keeps its slash.
-            let t = s.strip_suffix('\\').filter(|t| !t.ends_with(':')).unwrap_or(&s);
+            let t = s
+                .strip_suffix('\\')
+                .filter(|t| !t.ends_with(':'))
+                .unwrap_or(&s);
             Some(t.to_string())
         })();
         CloseHandle(h);
@@ -116,7 +145,9 @@ pub fn program_cwd(_pid: u32) -> Option<String> {
 /// no `>`, so the first one ends it. The caller checks the folder exists.
 pub fn powershell_prompt_cwd(screen: &str) -> Option<String> {
     let lines: Vec<&str> = screen.lines().collect();
-    let at = lines.iter().rposition(|l| l.starts_with("PS ") && l.len() > 3)?;
+    let at = lines
+        .iter()
+        .rposition(|l| l.starts_with("PS ") && l.len() > 3)?;
     let mut joined = String::new();
     for l in &lines[at..] {
         joined.push_str(l);
@@ -138,12 +169,15 @@ pub fn osc7_path(uri: &str) -> Option<String> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Some(b) = std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(b);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Some(b) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(b);
+            i += 3;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -151,7 +185,11 @@ pub fn osc7_path(uri: &str) -> Option<String> {
     let s = String::from_utf8(out).ok()?;
     // file:///C:/Users/... on Windows.
     #[cfg(windows)]
-    let s = if s.len() > 2 && s.as_bytes()[2] == b':' { s[1..].replace('/', "\\") } else { s };
+    let s = if s.len() > 2 && s.as_bytes()[2] == b':' {
+        s[1..].replace('/', "\\")
+    } else {
+        s
+    };
     Some(s)
 }
 
@@ -159,7 +197,10 @@ pub fn osc7_path(uri: &str) -> Option<String> {
 /// oh-my-posh quote it. None when empty.
 pub fn osc99_path(s: &str) -> Option<String> {
     let s = s.trim();
-    let s = s.strip_prefix('"').and_then(|t| t.strip_suffix('"')).unwrap_or(s);
+    let s = s
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .unwrap_or(s);
     (!s.is_empty()).then(|| s.to_string())
 }
 
@@ -173,13 +214,19 @@ mod tests {
         {
             let got = process_cwd(std::process::id()).unwrap();
             let want = std::env::current_dir().unwrap();
-            assert_eq!(std::fs::canonicalize(got).unwrap(), std::fs::canonicalize(want).unwrap());
+            assert_eq!(
+                std::fs::canonicalize(got).unwrap(),
+                std::fs::canonicalize(want).unwrap()
+            );
         }
         #[cfg(all(windows, target_pointer_width = "64"))]
         {
             let got = program_cwd(std::process::id()).unwrap();
             let want = std::env::current_dir().unwrap();
-            assert_eq!(std::fs::canonicalize(got).unwrap(), std::fs::canonicalize(want).unwrap());
+            assert_eq!(
+                std::fs::canonicalize(got).unwrap(),
+                std::fs::canonicalize(want).unwrap()
+            );
             assert!(program_cwd(u32::MAX - 3).is_none(), "no such process");
         }
     }
@@ -189,8 +236,16 @@ mod tests {
         let f = powershell_prompt_cwd;
         assert_eq!(f("PS C:\\Users\\me> ").as_deref(), Some("C:\\Users\\me"));
         assert_eq!(f("PS C:\\> dir").as_deref(), Some("C:\\"));
-        assert_eq!(f("PS C:\\old> cd D:\\new\nout\nPS D:\\new>> \n\n").as_deref(), Some("D:\\new"), "the lowest prompt, nested");
-        assert_eq!(f("PS C:\\a\\very\\long\\pa\nth\\here> ").as_deref(), Some("C:\\a\\very\\long\\path\\here"), "wrapped");
+        assert_eq!(
+            f("PS C:\\old> cd D:\\new\nout\nPS D:\\new>> \n\n").as_deref(),
+            Some("D:\\new"),
+            "the lowest prompt, nested"
+        );
+        assert_eq!(
+            f("PS C:\\a\\very\\long\\pa\nth\\here> ").as_deref(),
+            Some("C:\\a\\very\\long\\path\\here"),
+            "wrapped"
+        );
         assert_eq!(f("PS \\\\srv\\share> ").as_deref(), Some("\\\\srv\\share"));
         assert_eq!(f("PS HKLM:\\Software> "), None, "not a folder path");
         assert_eq!(f("C:\\Users\\me>"), None, "cmd's prompt");
@@ -199,16 +254,25 @@ mod tests {
 
     #[test]
     fn osc7_uris() {
-        assert_eq!(osc7_path("file://mac.local/Users/me/My%20Dir").as_deref(), Some("/Users/me/My Dir"));
+        assert_eq!(
+            osc7_path("file://mac.local/Users/me/My%20Dir").as_deref(),
+            Some("/Users/me/My Dir")
+        );
         assert_eq!(osc7_path("file:///tmp").as_deref(), Some("/tmp"));
         assert_eq!(osc7_path("http://x/y"), None);
         #[cfg(windows)]
-        assert_eq!(osc7_path("file://DESKTOP/C:/Users/me/src").as_deref(), Some("C:\\Users\\me\\src"));
+        assert_eq!(
+            osc7_path("file://DESKTOP/C:/Users/me/src").as_deref(),
+            Some("C:\\Users\\me\\src")
+        );
     }
 
     #[test]
     fn osc99_folders() {
-        assert_eq!(osc99_path("\"C:\\Users\\me\"").as_deref(), Some("C:\\Users\\me"));
+        assert_eq!(
+            osc99_path("\"C:\\Users\\me\"").as_deref(),
+            Some("C:\\Users\\me")
+        );
         assert_eq!(osc99_path("D:\\x y").as_deref(), Some("D:\\x y"));
         assert_eq!(osc99_path(" "), None);
         assert_eq!(osc99_path("\"\""), None);

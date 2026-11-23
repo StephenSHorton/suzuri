@@ -37,8 +37,8 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use rsz_term::images::{ImageData, Placement};
 use rsz_term::palette::{Palette, Rgb};
-use rsz_term::protocols::Notice;
 use rsz_term::pane::ShellStatus;
+use rsz_term::protocols::Notice;
 use rsz_term::{Link, MouseEvent, MouseKind, Out, Pane, SelectKind, Sink, Submit};
 use serde_json::{Value, json};
 
@@ -48,7 +48,13 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 /// not a bench or UI-test launch unless RSZ_KEEPER=1 asks for them.
 pub fn enabled() -> bool {
     let set = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty());
-    cfg!(any(unix, windows)) && wanted(std::env::var("RSZ_KEEPER").ok().as_deref(), ["RSZ_BENCH", "RSZ_PANES", "RSZ_UI_TEST", "RSZ_CMD"].iter().any(|k| set(k)))
+    cfg!(any(unix, windows))
+        && wanted(
+            std::env::var("RSZ_KEEPER").ok().as_deref(),
+            ["RSZ_BENCH", "RSZ_PANES", "RSZ_UI_TEST", "RSZ_CMD"]
+                .iter()
+                .any(|k| set(k)),
+        )
 }
 
 /// RSZ_KEEPER's say (`0` off, `1` on), else on unless `dev` (a bench or
@@ -81,7 +87,11 @@ fn rgb(c: Rgb) -> Value {
 
 fn rgb_of(v: &Value) -> Option<Rgb> {
     let a = v.as_array()?;
-    Some((a.first()?.as_u64()? as u8, a.get(1)?.as_u64()? as u8, a.get(2)?.as_u64()? as u8))
+    Some((
+        a.first()?.as_u64()? as u8,
+        a.get(1)?.as_u64()? as u8,
+        a.get(2)?.as_u64()? as u8,
+    ))
 }
 
 pub fn palette_json(p: &Palette) -> Value {
@@ -95,7 +105,14 @@ fn palette_of(v: &Value) -> Option<Palette> {
     for (i, c) in a.iter().take(16).enumerate() {
         ansi16[i] = rgb_of(c)?;
     }
-    Some(Palette { dark: v["dark"].as_bool()?, bg: rgb_of(&v["bg"])?, fg: rgb_of(&v["fg"])?, panel: rgb_of(&v["panel"])?, accent: rgb_of(&v["accent"])?, ansi16 })
+    Some(Palette {
+        dark: v["dark"].as_bool()?,
+        bg: rgb_of(&v["bg"])?,
+        fg: rgb_of(&v["fg"])?,
+        panel: rgb_of(&v["panel"])?,
+        accent: rgb_of(&v["accent"])?,
+        ansi16,
+    })
 }
 
 fn shell_json(st: &ShellStatus) -> Value {
@@ -109,7 +126,12 @@ fn image_json(d: &ImageData) -> Value {
 fn placements_json(list: &[Placement]) -> Value {
     let list: Vec<Value> = list
         .iter()
-        .map(|p| json!([p.image, p.row, p.col, p.cols, p.rows, p.z, p.inline, p.crop.0, p.crop.1, p.crop.2, p.crop.3]))
+        .map(|p| {
+            json!([
+                p.image, p.row, p.col, p.cols, p.rows, p.z, p.inline, p.crop.0, p.crop.1, p.crop.2,
+                p.crop.3
+            ])
+        })
         .collect();
     json!({ "t": "imgpos", "list": list })
 }
@@ -128,8 +150,17 @@ fn out_of(v: &Value) -> Option<Out> {
         "title" => Out::Title(s("title")),
         "bell" => Out::Bell,
         "clip" => Out::Clipboard(s("text")),
-        "shell" => Out::Shell(ShellStatus { integrated: b("integrated"), cwd: s("cwd"), program: b("program"), prompts: u("prompts"), pending: b("pending") }),
-        "done" => Out::CommandDone { exit: v["exit"].as_i64().map(|x| x as i32), command: s("command") },
+        "shell" => Out::Shell(ShellStatus {
+            integrated: b("integrated"),
+            cwd: s("cwd"),
+            program: b("program"),
+            prompts: u("prompts"),
+            pending: b("pending"),
+        }),
+        "done" => Out::CommandDone {
+            exit: v["exit"].as_i64().map(|x| x as i32),
+            command: s("command"),
+        },
         "typeahead" => Out::Typeahead(s("text")),
         "exit" => Out::Exit(v["code"].as_u64().map(|x| x as u32)),
         "notice" => Out::Notice(Notice {
@@ -147,7 +178,10 @@ fn out_of(v: &Value) -> Option<Out> {
         }),
         "notice_close" => Out::NoticeClose(s("id")),
         "notice_alive" => Out::NoticeAlive(s("id")),
-        "progress" => Out::Progress { state: u("state") as u8, percent: u("percent") as u8 },
+        "progress" => Out::Progress {
+            state: u("state") as u8,
+            percent: u("percent") as u8,
+        },
         "img" => Out::ImageData(ImageData {
             id: u("id") as u32,
             name: s("name"),
@@ -158,7 +192,13 @@ fn out_of(v: &Value) -> Option<Out> {
             compressed: b("z"),
             data: B64.decode(v["data"].as_str().unwrap_or("")).ok()?,
         }),
-        "imgdrop" => Out::ImageDrop(v["ids"].as_array()?.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect()),
+        "imgdrop" => Out::ImageDrop(
+            v["ids"]
+                .as_array()?
+                .iter()
+                .filter_map(|x| x.as_u64().map(|x| x as u32))
+                .collect(),
+        ),
         "imgpos" => Out::Placements(
             v["list"]
                 .as_array()?
@@ -204,7 +244,15 @@ fn mouse_of(v: &Value) -> Option<MouseEvent> {
         _ => return None,
     };
     let b = |k: &str| v[k].as_bool().unwrap_or(false);
-    Some(MouseEvent { kind, button: v["button"].as_u64()? as u8, col: v["col"].as_u64()? as u16, row: v["row"].as_u64()? as u16, shift: b("shift"), alt: b("alt"), ctrl: b("ctrl") })
+    Some(MouseEvent {
+        kind,
+        button: v["button"].as_u64()? as u8,
+        col: v["col"].as_u64()? as u16,
+        row: v["row"].as_u64()? as u16,
+        shift: b("shift"),
+        alt: b("alt"),
+        ctrl: b("ctrl"),
+    })
 }
 
 fn select_kind(s: &str) -> SelectKind {
@@ -329,12 +377,26 @@ impl Shell {
             Shell::Local(p) => {
                 let s = p.stats();
                 let l = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
-                StatsSnap { bytes_in: l(&s.bytes_in), feed_ns: l(&s.feed_ns), frames: l(&s.frames), frame_bytes: l(&s.frame_bytes), snapshot_ns: l(&s.snapshot_ns), writes: l(&s.writes) }
+                StatsSnap {
+                    bytes_in: l(&s.bytes_in),
+                    feed_ns: l(&s.feed_ns),
+                    frames: l(&s.frames),
+                    frame_bytes: l(&s.frame_bytes),
+                    snapshot_ns: l(&s.snapshot_ns),
+                    writes: l(&s.writes),
+                }
             }
             Shell::Kept(k) => {
                 let v = k.call(json!({ "t": "stats" })).unwrap_or(Value::Null);
                 let n = |f: &str| v[f].as_u64().unwrap_or(0);
-                StatsSnap { bytes_in: n("bytes_in"), feed_ns: n("feed_ns"), frames: n("frames"), frame_bytes: n("frame_bytes"), snapshot_ns: n("snapshot_ns"), writes: n("writes") }
+                StatsSnap {
+                    bytes_in: n("bytes_in"),
+                    feed_ns: n("feed_ns"),
+                    frames: n("frames"),
+                    frame_bytes: n("frame_bytes"),
+                    snapshot_ns: n("snapshot_ns"),
+                    writes: n("writes"),
+                }
             }
         }
     }
@@ -347,7 +409,11 @@ impl Shell {
             Shell::Kept(k) => {
                 let v = k.call(json!({ "t": "program" })).unwrap_or(Value::Null);
                 let cwd = v["cwd"].as_str().map(str::to_string).or_else(|| self.cwd());
-                (v["name"].as_str().map(str::to_string), v["pid"].as_u64().map(|n| n as u32), cwd)
+                (
+                    v["name"].as_str().map(str::to_string),
+                    v["pid"].as_u64().map(|n| n as u32),
+                    cwd,
+                )
             }
         }
     }
@@ -415,8 +481,17 @@ impl Kept {
 
     /// (screen, the last `lines` of scrollback).
     fn text(&self, lines: usize) -> (String, Vec<String>) {
-        let v = self.call(json!({ "t": "text", "lines": lines })).unwrap_or(Value::Null);
-        let tail = v["tail"].as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let v = self
+            .call(json!({ "t": "text", "lines": lines }))
+            .unwrap_or(Value::Null);
+        let tail = v["tail"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         (v["screen"].as_str().unwrap_or("").to_string(), tail)
     }
 
@@ -460,7 +535,13 @@ impl Kept {
             }
         })?;
         let hello = conn.hello.clone();
-        Ok(Kept { conn, last_out, detached, borrowed: false, hello })
+        Ok(Kept {
+            conn,
+            last_out,
+            detached,
+            borrowed: false,
+            hello,
+        })
     }
 }
 
@@ -514,7 +595,10 @@ fn spawn_once(dir: &Path, s: &Spawn) -> std::io::Result<()> {
     rsz_keeper::dir::ensure(dir)?;
     let exe = host_exe(dir)?;
     let log_path = dir.join(format!("{}.log", s.id));
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
     let c = s.cfg;
     let cfg = json!({
         "cols": c.cols, "rows": c.rows, "command": c.command, "cwd": c.cwd, "env": c.env, "scrollback": c.scrollback,
@@ -524,9 +608,19 @@ fn spawn_once(dir: &Path, s: &Spawn) -> std::io::Result<()> {
     });
     let mut cmd = Command::new(exe);
     // Its folder, not the app's: a host must not hold the install folder.
-    cmd.arg("--keeper-host").arg(dir).arg(s.id.to_string()).current_dir(dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(log);
+    cmd.arg("--keeper-host")
+        .arg(dir)
+        .arg(s.id.to_string())
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(log);
     let mut child = detached(&mut cmd)?;
-    child.stdin.take().expect("stdin").write_all(cfg.to_string().as_bytes())?;
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(cfg.to_string().as_bytes())?;
     let out = child.stdout.take().expect("stdout");
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -538,19 +632,43 @@ fn spawn_once(dir: &Path, s: &Spawn) -> std::io::Result<()> {
     // is gone it is init's. (Windows: this is the short-lived first one.)
     let (st_tx, st_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = st_tx.send(child.wait().map(|st| st.to_string()).unwrap_or_else(|e| e.to_string()));
+        let _ = st_tx.send(
+            child
+                .wait()
+                .map(|st| st.to_string())
+                .unwrap_or_else(|e| e.to_string()),
+        );
     });
     match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(l) if l.starts_with("ready") => {
-            log::info!("keeper: shell {} host ready in {} ms", s.id, t0.elapsed().as_millis());
+            log::info!(
+                "keeper: shell {} host ready in {} ms",
+                s.id,
+                t0.elapsed().as_millis()
+            );
             Ok(())
         }
         Ok(l) if l.trim().is_empty() => {
             // Ended without a word: say how, and what it logged.
-            let st = st_rx.recv_timeout(Duration::from_secs(1)).unwrap_or_else(|_| "still running".into());
+            let st = st_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap_or_else(|_| "still running".into());
             let tail = std::fs::read_to_string(&log_path).unwrap_or_default();
-            let tail: String = tail.chars().rev().take(400).collect::<Vec<_>>().into_iter().rev().collect();
-            Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, format!("keeper host ended before it was ready ({st}); its log: {}", tail.trim())))
+            let tail: String = tail
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "keeper host ended before it was ready ({st}); its log: {}",
+                    tail.trim()
+                ),
+            ))
         }
         Ok(l) => Err(std::io::Error::other(format!("keeper host: {}", l.trim()))),
         Err(_) => Err(std::io::Error::other("keeper host: did not start")),
@@ -595,7 +713,9 @@ mod win {
         match cmd.spawn() {
             // The job forbids breaking away: still detached, but in the job.
             Err(e) if e.raw_os_error() == Some(5) => {
-                log::warn!("keeper: the app's job does not let hosts leave it; they end with the job");
+                log::warn!(
+                    "keeper: the app's job does not let hosts leave it; they end with the job"
+                );
                 cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
                 cmd.spawn()
             }
@@ -662,8 +782,17 @@ fn host_exe(dir: &Path) -> std::io::Result<PathBuf> {
 #[cfg(windows)]
 fn build_name(exe: &Path) -> std::io::Result<String> {
     let md = std::fs::metadata(exe)?;
-    let t = md.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    Ok(format!("{}-{:x}-{:x}", env!("CARGO_PKG_VERSION"), md.len(), t))
+    let t = md
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok(format!(
+        "{}-{:x}-{:x}",
+        env!("CARGO_PKG_VERSION"),
+        md.len(),
+        t
+    ))
 }
 
 /// At start: make this build's host copy (so the first pane doesn't wait
@@ -676,8 +805,14 @@ pub fn prepare(dir: &Path) {
             if let Err(e) = host_exe(&dir) {
                 log::warn!("keeper: host program not copied: {e}");
             }
-            let Ok(mine) = std::env::current_exe().and_then(|exe| build_name(&exe)) else { return };
-            for e in std::fs::read_dir(dir.join("host")).into_iter().flatten().flatten() {
+            let Ok(mine) = std::env::current_exe().and_then(|exe| build_name(&exe)) else {
+                return;
+            };
+            for e in std::fs::read_dir(dir.join("host"))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
                 let name = e.file_name().to_string_lossy().into_owned();
                 if name == mine || name.contains(".tmp") {
                     continue;
@@ -703,7 +838,12 @@ pub fn live(dir: &Path) -> Vec<(u32, Value)> {
         let path = rsz_keeper::dir::sock_path(dir, id);
         match rsz_keeper::Conn::connect(&path, "control", "suzuri", |_| {}) {
             Ok(c) => out.push((id, c.hello.clone())),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) =>
+            {
                 let _ = std::fs::remove_file(&path);
                 let _ = std::fs::remove_file(dir.join(format!("{id}.log")));
             }
@@ -730,17 +870,29 @@ pub fn take_layouts(dir: &Path) -> Vec<Value> {
     let mut found: Vec<(std::time::SystemTime, Value)> = Vec::new();
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        let Some(pid) = name.strip_prefix("layout-").and_then(|n| n.strip_suffix(".json")).and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Some(pid) = name
+            .strip_prefix("layout-")
+            .and_then(|n| n.strip_suffix(".json"))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
         if pid == std::process::id() || alive(pid) {
             continue;
         }
-        let when = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
-        if let Some(v) = std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+        let when = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if let Some(v) = std::fs::read(e.path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+        {
             found.push((when, v));
         }
         let _ = std::fs::remove_file(e.path());
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|f| std::cmp::Reverse(f.0));
     found.into_iter().map(|(_, v)| v).collect()
 }
 
@@ -748,12 +900,17 @@ fn alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // SAFETY: signal 0 only checks that the process exists.
-        unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+        unsafe {
+            libc::kill(pid as i32, 0) == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
     }
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         // SAFETY: OpenProcess has no preconditions; a null handle is checked.
         let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
         if h.is_null() {
@@ -860,7 +1017,9 @@ pub mod host {
                     hub.cache.shell = Some(v.clone());
                     v
                 }
-                Out::CommandDone { exit, command } => json!({ "t": "done", "exit": exit, "command": command }),
+                Out::CommandDone { exit, command } => {
+                    json!({ "t": "done", "exit": exit, "command": command })
+                }
                 Out::Typeahead(t) => json!({ "t": "typeahead", "text": t }),
                 Out::Exit(code) => {
                     hub.cache.exited = Some(code);
@@ -915,7 +1074,11 @@ pub mod host {
                     return None;
                 }
                 self.clip.lock().insert(n, tx);
-                Self::broadcast(&mut hub, wire::encode_json(&json!({ "t": "clip_ask", "n": n })), true);
+                Self::broadcast(
+                    &mut hub,
+                    wire::encode_json(&json!({ "t": "clip_ask", "n": n })),
+                    true,
+                );
             }
             let text = rx.recv_timeout(CLIP_WAIT).ok().flatten();
             self.clip.lock().remove(&n);
@@ -941,7 +1104,11 @@ pub mod host {
             let hub = self.hub.lock();
             h["viewers"] = hub.clients.iter().filter(|c| c.viewer).count().into();
             h["title"] = hub.cache.title.clone().into();
-            h["exited"] = hub.cache.exited.map(|c| json!({ "code": c })).unwrap_or(Value::Null);
+            h["exited"] = hub
+                .cache
+                .exited
+                .map(|c| json!({ "code": c }))
+                .unwrap_or(Value::Null);
             h
         }
 
@@ -950,13 +1117,17 @@ pub mod host {
                 return;
             }
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-            let Ok(hi) = wire::read(&mut stream).and_then(|(k, b)| wire::json(k, &b)) else { return };
+            let Ok(hi) = wire::read(&mut stream).and_then(|(k, b)| wire::json(k, &b)) else {
+                return;
+            };
             if hi["t"] != "hello" {
                 return;
             }
             let _ = stream.set_read_timeout(None);
             let viewer = hi["role"] == "viewer";
-            let Ok(mut out) = stream.try_clone() else { return };
+            let Ok(mut out) = stream.try_clone() else {
+                return;
+            };
             let (tx, rx) = sync_channel::<Arc<Vec<u8>>>(BEHIND_MAX);
             std::thread::spawn(move || {
                 while let Ok(m) = rx.recv() {
@@ -992,22 +1163,28 @@ pub mod host {
                 let Ok(s2) = stream.try_clone() else { return };
                 hub.next += 1;
                 me = hub.next;
-                hub.clients.push(Client { n: me, tx: tx.clone(), viewer, stream: s2 });
+                hub.clients.push(Client {
+                    n: me,
+                    tx: tx.clone(),
+                    viewer,
+                    stream: s2,
+                });
             }
-            if viewer {
-                if let Some(p) = self.pane.get() {
-                    p.redraw();
-                }
+            if viewer && let Some(p) = self.pane.get() {
+                p.redraw();
             }
-            loop {
-                let Ok((kind, body)) = wire::read(&mut stream) else { break };
+            while let Ok((kind, body)) = wire::read(&mut stream) {
                 let Some(p) = self.pane.get() else { continue };
                 match kind {
                     K_INPUT => p.write(body),
                     K_JSON => {
-                        let Ok(v) = serde_json::from_slice::<Value>(&body) else { continue };
+                        let Ok(v) = serde_json::from_slice::<Value>(&body) else {
+                            continue;
+                        };
                         if v["t"] == "clip_answer" {
-                            if let Some(tx) = v["n"].as_u64().and_then(|n| self.clip.lock().remove(&n)) {
+                            if let Some(tx) =
+                                v["n"].as_u64().and_then(|n| self.clip.lock().remove(&n))
+                            {
                                 let _ = tx.try_send(v["text"].as_str().map(str::to_string));
                             }
                             continue;
@@ -1017,10 +1194,12 @@ pub mod host {
                             h["cols"] = v["cols"].clone();
                             h["rows"] = v["rows"].clone();
                         }
-                        if let Some(ans) = handle(p, &v) {
-                            if let Some(q) = v["q"].as_u64() {
-                                let _ = tx.try_send(Arc::new(wire::encode_json(&json!({ "t": "r", "q": q, "v": ans }))));
-                            }
+                        if let Some(ans) = handle(p, &v)
+                            && let Some(q) = v["q"].as_u64()
+                        {
+                            let _ = tx.try_send(Arc::new(wire::encode_json(
+                                &json!({ "t": "r", "q": q, "v": ans }),
+                            )));
                         }
                     }
                     _ => {}
@@ -1046,17 +1225,22 @@ pub mod host {
             "cell_px" => p.set_cell_px(u("w") as u16, u("h") as u16),
             "cursor" => p.set_default_cursor(u("shape") as u8),
             "palette" => {
-                if let Some(pal) = palette_of(v) {
-                    if rsz_term::palette::set_active(pal) {
-                        p.redraw();
-                    }
+                if let Some(pal) = palette_of(v)
+                    && rsz_term::palette::set_active(pal)
+                {
+                    p.redraw();
                 }
             }
             "close" => p.close(),
             "reply" => p.reply(B64.decode(s("data")).unwrap_or_default()),
             "paste" => p.paste(s("text")),
             "select" => match s("op") {
-                "start" => p.select_start(u("col") as u16, u("row") as u16, b("right"), select_kind(s("kind"))),
+                "start" => p.select_start(
+                    u("col") as u16,
+                    u("row") as u16,
+                    b("right"),
+                    select_kind(s("kind")),
+                ),
                 "extend" => p.select_extend(u("col") as u16, u("row") as u16, b("right")),
                 _ => p.select_clear(),
             },
@@ -1067,18 +1251,28 @@ pub mod host {
             "queue_len" => return Some(p.queue_len().into()),
             "is_busy" => return Some(p.is_busy().into()),
             "cwd" => return Some(p.cwd().into()),
-            "program" => return Some(json!({ "name": p.program_name(), "pid": p.program_pid(), "cwd": p.live_cwd() })),
+            "program" => {
+                return Some(
+                    json!({ "name": p.program_name(), "pid": p.program_pid(), "cwd": p.live_cwd() }),
+                );
+            }
             "state" => return Some(format!("{:?}", p.state()).into()),
             "alt_screen" => return Some(p.alt_screen().into()),
             "selection" => return Some(p.selection_text().into()),
             "text" => {
                 let lines = u("lines") as usize;
-                let tail = if lines > 0 { p.history_tail(lines) } else { Vec::new() };
+                let tail = if lines > 0 {
+                    p.history_tail(lines)
+                } else {
+                    Vec::new()
+                };
                 return Some(json!({ "screen": p.screen_text(), "tail": tail }));
             }
             "link" => {
                 return Some(match p.link_at(u("col") as u16, u("row") as u16) {
-                    Some(l) => json!({ "url": l.url, "row": l.row, "x0": l.x0, "x1": l.x1, "osc8": l.osc8 }),
+                    Some(l) => {
+                        json!({ "url": l.url, "row": l.row, "x0": l.x0, "x1": l.x1, "osc8": l.osc8 })
+                    }
                     None => Value::Null,
                 });
             }
@@ -1086,7 +1280,9 @@ pub mod host {
             "stats" => {
                 let st = p.stats();
                 let l = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
-                return Some(json!({ "bytes_in": l(&st.bytes_in), "feed_ns": l(&st.feed_ns), "frames": l(&st.frames), "frame_bytes": l(&st.frame_bytes), "snapshot_ns": l(&st.snapshot_ns), "writes": l(&st.writes) }));
+                return Some(
+                    json!({ "bytes_in": l(&st.bytes_in), "feed_ns": l(&st.feed_ns), "frames": l(&st.frames), "frame_bytes": l(&st.frame_bytes), "snapshot_ns": l(&st.snapshot_ns), "writes": l(&st.writes) }),
+                );
             }
             _ => {}
         }
@@ -1110,7 +1306,9 @@ pub mod host {
         if args.get(2).map(String::as_str) != Some("--detached") {
             let started = std::env::current_exe().and_then(|me| {
                 let mut cmd = std::process::Command::new(me);
-                cmd.arg("--keeper-host").args(args.iter().take(2)).arg("--detached");
+                cmd.arg("--keeper-host")
+                    .args(args.iter().take(2))
+                    .arg("--detached");
                 super::win::spawn(&mut cmd)
             });
             return match started {
@@ -1136,7 +1334,10 @@ pub mod host {
             eprintln!("keeper host: {m}");
             1
         };
-        let (Some(dir), Some(id)) = (args.first().map(PathBuf::from), args.get(1).and_then(|s| s.parse::<u32>().ok())) else {
+        let (Some(dir), Some(id)) = (
+            args.first().map(PathBuf::from),
+            args.get(1).and_then(|s| s.parse::<u32>().ok()),
+        ) else {
             return fail("usage: suzuri --keeper-host <dir> <id>".into());
         };
         let mut input = String::new();
@@ -1144,7 +1345,13 @@ pub mod host {
             return fail(format!("stdin: {e}"));
         }
         let c: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
-        let strs = |v: &Value| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>());
+        let strs = |v: &Value| {
+            v.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+        };
         let cfg = PaneConfig {
             cols: c["cols"].as_u64().unwrap_or(80) as u16,
             rows: c["rows"].as_u64().unwrap_or(24) as u16,
@@ -1152,7 +1359,16 @@ pub mod host {
             cwd: c["cwd"].as_str().map(str::to_string),
             env: c["env"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|kv| Some((kv.get(0)?.as_str()?.to_string(), kv.get(1)?.as_str()?.to_string()))).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|kv| {
+                            Some((
+                                kv.get(0)?.as_str()?.to_string(),
+                                kv.get(1)?.as_str()?.to_string(),
+                            ))
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
             scrollback: c["scrollback"].as_u64().unwrap_or(10_000) as usize,
             plain_shell: c["plain_shell"].as_bool().unwrap_or(false),
@@ -1181,7 +1397,10 @@ pub mod host {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
         }
-        let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let host = Arc::new(Host {
             hub: Mutex::default(),
             pane: OnceLock::new(),
@@ -1206,7 +1425,9 @@ pub mod host {
         #[cfg(windows)]
         {
             use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
-            use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+            use windows_sys::Win32::System::Console::{
+                GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            };
             for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
                 // SAFETY: clearing a flag on this process's own standard handles.
                 unsafe { SetHandleInformation(GetStdHandle(which), HANDLE_FLAG_INHERIT, 0) };
@@ -1225,7 +1446,11 @@ pub mod host {
         let _ = std::io::stdout().flush();
         // Nothing more on stdout or from stdin: the app may be gone.
         #[cfg(unix)]
-        if let Ok(null) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/null") {
+        if let Ok(null) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+        {
             use std::os::fd::AsRawFd;
             // SAFETY: dup2 onto the standard descriptors.
             unsafe {
@@ -1235,10 +1460,16 @@ pub mod host {
         }
         // Windows: the same, so the app's end of the pipes sees them close.
         #[cfg(windows)]
-        if let Ok(null) = std::fs::OpenOptions::new().read(true).write(true).open("NUL") {
+        if let Ok(null) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+        {
             use std::os::windows::io::IntoRawHandle;
             use windows_sys::Win32::Foundation::CloseHandle;
-            use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
+            use windows_sys::Win32::System::Console::{
+                GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+            };
             let null = null.into_raw_handle();
             for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE] {
                 // SAFETY: swapping a standard handle for NUL (kept open for
@@ -1246,7 +1477,8 @@ pub mod host {
                 unsafe {
                     let old = GetStdHandle(which);
                     SetStdHandle(which, null);
-                    if !old.is_null() && old != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                    if !old.is_null() && old != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
+                    {
                         CloseHandle(old);
                     }
                 }

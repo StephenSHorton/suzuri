@@ -52,7 +52,10 @@ fn config_dir() -> PathBuf {
 fn token() -> String {
     let mut b = [0u8; 16];
     if getrandom::fill(&mut b).is_err() {
-        let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let t = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         b.copy_from_slice(&(t ^ ((std::process::id() as u128) << 64)).to_le_bytes());
     }
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -63,10 +66,16 @@ fn write_private(path: &PathBuf, body: &[u8]) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let _ = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).and_then(|mut f| {
-            use std::io::Write;
-            f.write_all(body)
-        });
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(body)
+            });
     }
     #[cfg(not(unix))]
     let _ = std::fs::write(&tmp, body);
@@ -81,22 +90,39 @@ impl Bridge {
         }
         for f in ["bridge.json", "ai.json"] {
             if let Some(url) = live_owner(&config_dir().join(f)) {
-                return Err(std::io::Error::other(format!("another suzuri owns {f} ({url}); leaving it alone")));
+                return Err(std::io::Error::other(format!(
+                    "another suzuri owns {f} ({url}); leaving it alone"
+                )));
             }
         }
         // The last run's address and token, when its port is free: kept
         // shells (keeper.rs) outlive the app with SUZURI_CONTROL_URL and
         // _TOKEN in their environment, and they keep working.
         let last = config_dir().join("bridge-last.json");
-        let prev = std::fs::read_to_string(&last).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok());
-        let reuse = prev.as_ref().and_then(|v| Some((v.get("port")?.as_u64()? as u16, v.get("token")?.as_str()?.to_string())));
-        let (server, tok) = match reuse.and_then(|(port, t)| Server::http(("127.0.0.1", port)).ok().map(|s| (s, t))) {
+        let prev = std::fs::read_to_string(&last)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+        let reuse = prev.as_ref().and_then(|v| {
+            Some((
+                v.get("port")?.as_u64()? as u16,
+                v.get("token")?.as_str()?.to_string(),
+            ))
+        });
+        let (server, tok) = match reuse
+            .and_then(|(port, t)| Server::http(("127.0.0.1", port)).ok().map(|s| (s, t)))
+        {
             Some(found) => found,
-            None => (Server::http("127.0.0.1:0").map_err(std::io::Error::other)?, token()),
+            None => (
+                Server::http("127.0.0.1:0").map_err(std::io::Error::other)?,
+                token(),
+            ),
         };
         let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
         let _ = std::fs::create_dir_all(config_dir());
-        write_private(&last, &serde_json::to_vec(&json!({ "port": port, "token": tok })).unwrap_or_default());
+        write_private(
+            &last,
+            &serde_json::to_vec(&json!({ "port": port, "token": tok })).unwrap_or_default(),
+        );
         let b = Arc::new(Bridge {
             url: format!("http://127.0.0.1:{port}"),
             token: tok,
@@ -109,19 +135,22 @@ impl Bridge {
         let dir = config_dir();
         let _ = std::fs::create_dir_all(dir.join("ai"));
         let pid = std::process::id();
-        let ep = serde_json::to_vec_pretty(&json!({ "pid": pid, "url": b.url, "token": b.token })).unwrap_or_default();
+        let ep = serde_json::to_vec_pretty(&json!({ "pid": pid, "url": b.url, "token": b.token }))
+            .unwrap_or_default();
         write_private(&dir.join("bridge.json"), &ep);
         let ai = serde_json::to_vec(&json!({ "url": b.url, "token": b.token, "pid": pid, "help": "/help", "tools": "/tools" })).unwrap_or_default();
         write_private(&dir.join("ai").join(format!("{pid}.json")), &ai);
         write_private(&dir.join("ai.json"), &ai);
         let srv = Arc::clone(&b);
-        std::thread::Builder::new().name("bridge".into()).spawn(move || {
-            for req in server.incoming_requests() {
-                let b = Arc::clone(&srv);
-                // Calls into the webview block; don't hold up the next request.
-                std::thread::spawn(move || b.handle(req));
-            }
-        })?;
+        std::thread::Builder::new()
+            .name("bridge".into())
+            .spawn(move || {
+                for req in server.incoming_requests() {
+                    let b = Arc::clone(&srv);
+                    // Calls into the webview block; don't hold up the next request.
+                    std::thread::spawn(move || b.handle(req));
+                }
+            })?;
         log::info!("bridge: {} ({})", b.url, dir.join("bridge.json").display());
         Ok(b)
     }
@@ -159,11 +188,16 @@ impl Bridge {
 
     fn authorized(&self, req: &Request) -> bool {
         let want = &self.token;
-        let hdr = |name: &'static str| req.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string());
-        if let Some(a) = hdr("Authorization") {
-            if a.strip_prefix("Bearer ").is_some_and(|t| t == want) {
-                return true;
-            }
+        let hdr = |name: &'static str| {
+            req.headers()
+                .iter()
+                .find(|h| h.field.equiv(name))
+                .map(|h| h.value.as_str().to_string())
+        };
+        if let Some(a) = hdr("Authorization")
+            && a.strip_prefix("Bearer ").is_some_and(|t| t == want)
+        {
+            return true;
         }
         if hdr("X-Suzuri-Token").as_deref() == Some(want.as_str()) {
             return true;
@@ -184,13 +218,19 @@ impl Bridge {
             (Method::Get, "/tools") => (200, tools()),
             (Method::Get, "/v1/status") => (200, self.status()),
             (Method::Get, "/v1/snapshot" | "/v1/diag") => (200, self.snapshot()),
-            (Method::Get, "/v1/logs") => (200, logs(query(req.url(), "lines").and_then(|v| v.parse().ok()))),
+            (Method::Get, "/v1/logs") => (
+                200,
+                logs(query(req.url(), "lines").and_then(|v| v.parse().ok())),
+            ),
             (Method::Post, "/v1/submit") => self.submit(&body),
             (Method::Get, "/v1/layout") => self.ui("layout", json!({})),
             (Method::Get, p) if p.starts_with("/v1/panes/") => {
                 match p.trim_start_matches("/v1/panes/").parse::<u64>() {
                     Ok(id) => {
-                        let lines = query(req.url(), "lines").and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0).unwrap_or(80);
+                        let lines = query(req.url(), "lines")
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .filter(|n| *n > 0)
+                            .unwrap_or(80);
                         self.ui("pane", json!({ "pane_id": id, "lines": lines }))
                     }
                     Err(_) => (400, json!({ "error": "bad pane id" })),
@@ -198,11 +238,18 @@ impl Bridge {
             }
             (Method::Post, "/v1/call") => match serde_json::from_str::<Value>(&body) {
                 Ok(v) => {
-                    let tool = v.get("tool").and_then(Value::as_str).unwrap_or("").to_string();
+                    let tool = v
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                     let args = v.get("args").cloned().unwrap_or(json!({}));
                     // A socket Suzuri may not show is refused here, before
                     // the window opens a tab for it.
-                    if let Some(why) = (tool == "open_kept").then(|| open_kept_refused(&args)).flatten() {
+                    if let Some(why) = (tool == "open_kept")
+                        .then(|| open_kept_refused(&args))
+                        .flatten()
+                    {
                         return reply(req, 400, json!({ "error": why }));
                     }
                     let out = self.ui(&tool, args);
@@ -214,7 +261,10 @@ impl Bridge {
                 Err(e) => (400, json!({ "error": format!("bad json: {e}") })),
             },
             // notes and workspace: 404 so `suzuri mcp` uses Go's store on disk.
-            _ => (404, json!({ "error": format!("{path} is not served by suzuri") })),
+            _ => (
+                404,
+                json!({ "error": format!("{path} is not served by suzuri") }),
+            ),
         };
         reply(req, status, out)
     }
@@ -227,7 +277,11 @@ impl Bridge {
 
     fn active(&self) -> u32 {
         let f = self.panes.focused.load(Ordering::Relaxed);
-        if f != 0 && self.panes.get(f).is_some() { f } else { self.pane_ids().first().copied().unwrap_or(0) }
+        if f != 0 && self.panes.get(f).is_some() {
+            f
+        } else {
+            self.pane_ids().first().copied().unwrap_or(0)
+        }
     }
 
     fn status(&self) -> Value {
@@ -272,7 +326,13 @@ impl Bridge {
             .collect();
         let first = tabs.first();
         // Go reports the active tab's grid size.
-        let (cols, rows) = self.panes.sizes.lock().get(&self.active()).copied().unwrap_or((0, 0));
+        let (cols, rows) = self
+            .panes
+            .sizes
+            .lock()
+            .get(&self.active())
+            .copied()
+            .unwrap_or((0, 0));
         let _ = first;
         json!({
             "pid": std::process::id(),
@@ -289,12 +349,28 @@ impl Bridge {
     fn submit(&self, body: &str) -> (u16, Value) {
         let v: Value = match serde_json::from_str(body) {
             Ok(v) => v,
-            Err(e) => return (400, json!({ "ok": false, "error": format!("bad json: {e}") })),
+            Err(e) => {
+                return (
+                    400,
+                    json!({ "ok": false, "error": format!("bad json: {e}") }),
+                );
+            }
         };
-        let line = v.get("line").and_then(Value::as_str).unwrap_or("").to_string();
-        let id = v.get("tab_id").and_then(Value::as_u64).map(|x| x as u32).unwrap_or_else(|| self.active());
+        let line = v
+            .get("line")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let id = v
+            .get("tab_id")
+            .and_then(Value::as_u64)
+            .map(|x| x as u32)
+            .unwrap_or_else(|| self.active());
         let Some(p) = self.panes.get(id) else {
-            return (200, json!({ "ok": false, "tab_id": id, "line": line, "error": format!("no pane {id}") }));
+            return (
+                200,
+                json!({ "ok": false, "tab_id": id, "line": line, "error": format!("no pane {id}") }),
+            );
         };
         let mut bytes = line.replace('\n', "\r").into_bytes();
         bytes.push(b'\r');
@@ -304,13 +380,21 @@ impl Bridge {
 
     /// Ask the webview to run an AI control tool; wait up to 5 s.
     fn ui(&self, tool: &str, args: Value) -> (u16, Value) {
-        let Some(app) = self.app.lock().clone().filter(|_| self.ready.load(Ordering::Relaxed)) else {
+        let Some(app) = self
+            .app
+            .lock()
+            .clone()
+            .filter(|_| self.ready.load(Ordering::Relaxed))
+        else {
             return (503, json!({ "error": "window not ready" }));
         };
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel();
         self.pending.lock().insert(id, tx);
-        if app.emit("aicontrol", json!({ "id": id, "tool": tool, "args": args })).is_err() {
+        if app
+            .emit("aicontrol", json!({ "id": id, "tool": tool, "args": args }))
+            .is_err()
+        {
             self.pending.lock().remove(&id);
             return (503, json!({ "error": "window not reachable" }));
         }
@@ -318,7 +402,10 @@ impl Bridge {
             Ok((status, body)) => (status, with_pid(body)),
             Err(_) => {
                 self.pending.lock().remove(&id);
-                (504, json!({ "error": "the window did not answer within 5 s" }))
+                (
+                    504,
+                    json!({ "error": "the window did not answer within 5 s" }),
+                )
             }
         }
     }
@@ -326,7 +413,9 @@ impl Bridge {
     /// Bring the window up (open_kept: the person asked to see it here).
     fn to_front(&self) {
         use tauri::Manager;
-        let Some(app) = self.app.lock().clone() else { return };
+        let Some(app) = self.app.lock().clone() else {
+            return;
+        };
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.show();
             let _ = w.unminimize();
@@ -351,10 +440,16 @@ pub fn aicontrol_ready(bridge: State<'_, Arc<Bridge>>) {
 
 /// Why open_kept may not show `args.socket`, or None when it may.
 fn open_kept_refused(args: &Value) -> Option<String> {
-    let Some(sock) = args.get("socket").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+    let Some(sock) = args
+        .get("socket")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
         return Some("socket required".into());
     };
-    crate::keeper::foreign_sock(std::path::Path::new(sock)).err().map(|e| e.to_string())
+    crate::keeper::foreign_sock(std::path::Path::new(sock))
+        .err()
+        .map(|e| e.to_string())
 }
 
 /// The webview's answer to an `aicontrol` event.
@@ -384,10 +479,11 @@ fn live_lines(screen: &str) -> Vec<String> {
 
 /// Go puts the window's pid on every layout reply; the webview can't know it.
 fn with_pid(mut body: Value) -> Value {
-    if let Some(o) = body.as_object_mut() {
-        if o.contains_key("windows") && !o.contains_key("pid") {
-            o.insert("pid".into(), json!(std::process::id()));
-        }
+    if let Some(o) = body.as_object_mut()
+        && o.contains_key("windows")
+        && !o.contains_key("pid")
+    {
+        o.insert("pid".into(), json!(std::process::id()));
     }
     body
 }
@@ -407,14 +503,21 @@ fn off_reason(env: Option<&str>, dev: bool) -> Option<String> {
     match env {
         Some("1") => None,
         Some("0") => Some("off (RSZ_BRIDGE=0)".into()),
-        _ if dev => Some("off in dev builds; RSZ_BRIDGE=1 with LOCALAPPDATA=<scratch dir> turns it on".into()),
+        _ if dev => Some(
+            "off in dev builds; RSZ_BRIDGE=1 with LOCALAPPDATA=<scratch dir> turns it on".into(),
+        ),
         _ => None,
     }
 }
 
 /// Variables a pane would inherit from the suzuri that started this process.
 /// Removed at startup so a pane never points at another window's control API.
-pub const INHERITED: [&str; 4] = ["SUZURI", "SUZURI_CONTROL_URL", "SUZURI_CONTROL_TOKEN", "SUZURI_PANE_ID"];
+pub const INHERITED: [&str; 4] = [
+    "SUZURI",
+    "SUZURI_CONTROL_URL",
+    "SUZURI_CONTROL_TOKEN",
+    "SUZURI_PANE_ID",
+];
 
 /// The URL in an existing bridge.json, if something still listens there
 /// (Go suzuri or another suzuri). A stale file from a crash is ignored.
@@ -439,7 +542,11 @@ fn query(url: &str, key: &str) -> Option<String> {
 
 fn reply(req: Request, status: u16, body: Value) {
     let ct = Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap();
-    let _ = req.respond(Response::from_string(body.to_string()).with_status_code(status).with_header(ct));
+    let _ = req.respond(
+        Response::from_string(body.to_string())
+            .with_status_code(status)
+            .with_header(ct),
+    );
 }
 
 fn reply_text(req: Request, text: &str) {
@@ -448,7 +555,10 @@ fn reply_text(req: Request, text: &str) {
 }
 
 pub fn rfc3339_now() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil-from-days (Howard Hinnant)
     let z = days + 719_468;
@@ -460,14 +570,23 @@ pub fn rfc3339_now() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 /// The tail of suzuri.log, in Go's LogsResult shape (`suzuri mcp` reads it).
 fn logs(n: Option<usize>) -> Value {
     match crate::applog::tail(n) {
-        (path, Ok(lines)) => json!({ "ok": true, "path": path, "count": lines.len(), "lines": lines }),
-        (path, Err(e)) => json!({ "ok": false, "path": path, "lines": [], "count": 0, "error": e.to_string() }),
+        (path, Ok(lines)) => {
+            json!({ "ok": true, "path": path, "count": lines.len(), "lines": lines })
+        }
+        (path, Err(e)) => {
+            json!({ "ok": false, "path": path, "lines": [], "count": 0, "error": e.to_string() })
+        }
     }
 }
 
@@ -531,8 +650,14 @@ mod tests {
 
     #[test]
     fn query_finds_keys() {
-        assert_eq!(query("/v1/panes/3?lines=40&token=ab", "token").as_deref(), Some("ab"));
-        assert_eq!(query("/v1/panes/3?lines=40", "lines").as_deref(), Some("40"));
+        assert_eq!(
+            query("/v1/panes/3?lines=40&token=ab", "token").as_deref(),
+            Some("ab")
+        );
+        assert_eq!(
+            query("/v1/panes/3?lines=40", "lines").as_deref(),
+            Some("40")
+        );
         assert_eq!(query("/v1/layout", "token"), None);
     }
 
@@ -549,10 +674,23 @@ mod tests {
         let v = tools();
         let list = v["tools"].as_array().unwrap();
         assert_eq!(list.len(), 16);
-        for name in ["move", "rotate", "swap", "grow", "shrink", "equalize", "move_to_tab", "new_tab", "open_kept"] {
+        for name in [
+            "move",
+            "rotate",
+            "swap",
+            "grow",
+            "shrink",
+            "equalize",
+            "move_to_tab",
+            "new_tab",
+            "open_kept",
+        ] {
             assert!(list.iter().any(|t| t["name"] == name), "{name}");
         }
-        assert!(list.iter().all(|t| t["doc"].as_str().is_some_and(|d| !d.is_empty())));
+        assert!(
+            list.iter()
+                .all(|t| t["doc"].as_str().is_some_and(|d| !d.is_empty()))
+        );
         assert!(v.get("not_yet").is_none());
     }
 

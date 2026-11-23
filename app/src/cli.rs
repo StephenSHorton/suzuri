@@ -4,7 +4,10 @@
 
 /// Whether argv asks for the version (Go accepts all three spellings).
 pub fn wants_version(args: &[String]) -> bool {
-    matches!(args.get(1).map(String::as_str), Some("version" | "-version" | "--version"))
+    matches!(
+        args.get(1).map(String::as_str),
+        Some("version" | "-version" | "--version")
+    )
 }
 
 /// Whether the subcommand prints to a terminal and needs its console.
@@ -12,7 +15,16 @@ pub fn wants_version(args: &[String]) -> bool {
 pub fn wants_console(args: &[String]) -> bool {
     matches!(
         args.get(1).map(String::as_str),
-        Some("version" | "-version" | "--version" | "notify" | "sound" | "workspace-sync" | "guest" | "chrome")
+        Some(
+            "version"
+                | "-version"
+                | "--version"
+                | "notify"
+                | "sound"
+                | "workspace-sync"
+                | "guest"
+                | "chrome"
+        )
     )
 }
 
@@ -23,13 +35,26 @@ pub fn wants_console(args: &[String]) -> bool {
 /// there is no parent console (started from Explorer).
 #[cfg(windows)]
 pub fn attach_parent_console() {
-    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType, OPEN_EXISTING,
+    use windows_sys::Win32::Foundation::{
+        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
-    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_CHAR, FILE_TYPE_DISK,
+        FILE_TYPE_PIPE, GetFileType, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        SetStdHandle,
+    };
 
-    let usable = |h: HANDLE| !h.is_null() && h != INVALID_HANDLE_VALUE && matches!(unsafe { GetFileType(h) }, FILE_TYPE_DISK | FILE_TYPE_PIPE | FILE_TYPE_CHAR);
+    let usable = |h: HANDLE| {
+        !h.is_null()
+            && h != INVALID_HANDLE_VALUE
+            && matches!(
+                unsafe { GetFileType(h) },
+                FILE_TYPE_DISK | FILE_TYPE_PIPE | FILE_TYPE_CHAR
+            )
+    };
     // SAFETY: plain Win32 calls on handles we own or just got.
     unsafe {
         if usable(GetStdHandle(STD_OUTPUT_HANDLE)) {
@@ -41,7 +66,15 @@ pub fn attach_parent_console() {
         // Rust's stdout looks the handle up on every write, so setting it here
         // is enough. GetStdHandle alone is often still unusable after attaching.
         let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
-        let out = CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut());
+        let out = CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        );
         if out != INVALID_HANDLE_VALUE {
             let _ = SetStdHandle(STD_OUTPUT_HANDLE, out);
             let _ = SetStdHandle(STD_ERROR_HANDLE, out);
@@ -58,7 +91,10 @@ mod tests {
     use super::*;
 
     fn argv(a: &[&str]) -> Vec<String> {
-        std::iter::once("suzuri").chain(a.iter().copied()).map(String::from).collect()
+        std::iter::once("suzuri")
+            .chain(a.iter().copied())
+            .map(String::from)
+            .collect()
     }
 
     #[test]

@@ -25,7 +25,13 @@ pub fn new_window() -> Result<(), String> {
     let mut cmd = std::process::Command::new(&exe);
     cmd.env(NEW_WINDOW_ENV, "1");
     // The child is independent, never a pane: don't hand it the panes' env.
-    for k in ["RSZ_CMD", "RSZ_PANES", "RSZ_BENCH", "RSZ_BENCH_SECS", "RSZ_BENCH_PROBE"] {
+    for k in [
+        "RSZ_CMD",
+        "RSZ_PANES",
+        "RSZ_BENCH",
+        "RSZ_BENCH_SECS",
+        "RSZ_BENCH_PROBE",
+    ] {
         cmd.env_remove(k);
     }
     if let Some(dir) = exe.parent() {
