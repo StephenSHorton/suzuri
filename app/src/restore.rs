@@ -44,7 +44,10 @@ const HOLD: Duration = Duration::from_secs(10);
 /// Not turned off for this run (RSZ_RESTORE=0, benches and tests).
 fn allowed() -> bool {
     let set = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty());
-    std::env::var("RSZ_RESTORE").as_deref() != Ok("0") && !["RSZ_BENCH", "RSZ_PANES", "RSZ_UI_TEST", "RSZ_CMD"].iter().any(|k| set(k))
+    std::env::var("RSZ_RESTORE").as_deref() != Ok("0")
+        && !["RSZ_BENCH", "RSZ_PANES", "RSZ_UI_TEST", "RSZ_CMD"]
+            .iter()
+            .any(|k| set(k))
 }
 
 /// The Settings switch (`restore_sessions`), read from the file each time so
@@ -72,10 +75,13 @@ pub fn turned_off() {
     clear(&dir());
 }
 
-
 /// `<config>/restore`: beside config.json (RSZ_CONFIG_DIR wins).
 pub fn dir() -> PathBuf {
-    crate::config::path().parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir).join("restore")
+    crate::config::path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("restore")
 }
 
 pub struct Restore {
@@ -107,15 +113,26 @@ pub fn start(panes: Arc<Panes>) {
     if !allowed() {
         return;
     }
-    let r = Arc::new(Restore { dir: dir().join(std::process::id().to_string()), panes, layout: Mutex::new(None), written: Mutex::default(), off: false.into(), closing: false.into(), lost_at: Mutex::new(None), write: Mutex::new(()) });
+    let r = Arc::new(Restore {
+        dir: dir().join(std::process::id().to_string()),
+        panes,
+        layout: Mutex::new(None),
+        written: Mutex::default(),
+        off: false.into(),
+        closing: false.into(),
+        lost_at: Mutex::new(None),
+        write: Mutex::new(()),
+    });
     if RESTORE.set(Arc::clone(&r)).is_err() {
         return;
     }
     std::thread::Builder::new()
         .name("rsz-restore".into())
-        .spawn(move || loop {
-            std::thread::sleep(TICK);
-            r.save();
+        .spawn(move || {
+            loop {
+                std::thread::sleep(TICK);
+                r.save();
+            }
         })
         .ok();
 }
@@ -147,7 +164,8 @@ impl Restore {
 
     /// The app is exiting: write the session one last time.
     pub fn last_save(&self) {
-        self.closing.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.closing
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.save();
     }
 
@@ -160,7 +178,9 @@ impl Restore {
         if self.off.load(std::sync::atomic::Ordering::Relaxed) || self.holding() {
             return;
         }
-        let Some(layout) = self.layout.lock().clone() else { return };
+        let Some(layout) = self.layout.lock().clone() else {
+            return;
+        };
         let _g = self.write.lock();
         if !on() {
             // Off in Settings (maybe in another window): nothing kept.
@@ -180,8 +200,12 @@ impl Restore {
         let mut ids = Vec::new();
         for t in layout["tabs"].as_array_mut().into_iter().flatten() {
             leaves(&mut t["tree"], &mut |leaf| {
-                let Some(id) = leaf["id"].as_u64().map(|n| n as u32) else { return };
-                let Some(shell) = self.panes.get(id) else { return };
+                let Some(id) = leaf["id"].as_u64().map(|n| n as u32) else {
+                    return;
+                };
+                let Some(shell) = self.panes.get(id) else {
+                    return;
+                };
                 ids.push(id);
                 let (name, pid, cwd) = shell.program();
                 if let Some(cwd) = cwd {
@@ -219,8 +243,15 @@ impl Restore {
         layout["v"] = 1.into();
         layout["boot"] = boot_stamp().into();
         layout["started"] = started(std::process::id()).into();
-        layout["saved_at"] = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0).into();
-        write_private(&self.dir.join("session.json"), layout.to_string().as_bytes())?;
+        layout["saved_at"] = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+            .into();
+        write_private(
+            &self.dir.join("session.json"),
+            layout.to_string().as_bytes(),
+        )?;
         // Text of panes that are gone.
         let keep: HashSet<u32> = ids.into_iter().collect();
         self.written.lock().retain(|id, _| keep.contains(id));
@@ -254,10 +285,17 @@ fn take_if(on: bool, root: &Path) -> Option<Value> {
 /// in front. Their folders are removed: this process saves its own from now
 /// on. `running(pid, started)`: that window is still open, judged by its pid
 /// and, where the session has it, its process's start time.
-fn take_from(root: &Path, me: u32, boot: Option<u64>, running: fn(u32, Option<u64>) -> bool) -> Option<Value> {
+fn take_from(
+    root: &Path,
+    me: u32,
+    boot: Option<u64>,
+    running: fn(u32, Option<u64>) -> bool,
+) -> Option<Value> {
     let mut found: Vec<(u64, Value)> = Vec::new();
     for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
         if pid == me {
             continue;
         }
@@ -266,17 +304,21 @@ fn take_from(root: &Path, me: u32, boot: Option<u64>, running: fn(u32, Option<u6
             let _ = std::fs::remove_dir_all(&path);
             continue;
         };
-        let same_boot = matches!((boot, v["boot"].as_u64()), (Some(a), Some(b)) if a == b) || boot.is_none();
+        let same_boot =
+            matches!((boot, v["boot"].as_u64()), (Some(a), Some(b)) if a == b) || boot.is_none();
         if same_boot && running(pid, v["started"].as_u64()) {
             continue;
         }
         found.push((v["saved_at"].as_u64().unwrap_or(0), v));
         let _ = std::fs::remove_dir_all(&path);
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|f| std::cmp::Reverse(f.0));
     let (saved_at, first) = found.first()?.clone();
     let active = first["active"].as_u64().unwrap_or(0);
-    let tabs: Vec<Value> = found.into_iter().flat_map(|(_, v)| v["tabs"].as_array().cloned().unwrap_or_default()).collect();
+    let tabs: Vec<Value> = found
+        .into_iter()
+        .flat_map(|(_, v)| v["tabs"].as_array().cloned().unwrap_or_default())
+        .collect();
     Some(json!({ "v": 1, "active": active, "saved_at": saved_at, "tabs": tabs }))
 }
 
@@ -294,14 +336,19 @@ fn started(pid: u32) -> Option<u64> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-        use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         // SAFETY: a plain query into local FILETIMEs; the handle is closed.
         unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if h.is_null() {
                 return None;
             }
-            let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+            let z = FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            };
             let (mut c, mut e, mut k, mut u) = (z, z, z, z);
             let ok = GetProcessTimes(h, &mut c, &mut e, &mut k, &mut u) != 0;
             CloseHandle(h);
@@ -320,12 +367,17 @@ fn alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // SAFETY: signal 0 only checks that the process exists.
-        unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
+        unsafe {
+            libc::kill(pid as i32, 0) == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
     }
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
         // SAFETY: a plain query; the handle is closed.
         unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -348,13 +400,23 @@ fn boot_stamp() -> Option<u64> {
         let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
         let mut len = std::mem::size_of::<libc::timeval>();
         // SAFETY: sysctlbyname fills at most len bytes of tv.
-        let ok = unsafe { libc::sysctlbyname(c"kern.boottime".as_ptr(), (&mut tv as *mut libc::timeval).cast(), &mut len, std::ptr::null_mut(), 0) } == 0;
+        let ok = unsafe {
+            libc::sysctlbyname(
+                c"kern.boottime".as_ptr(),
+                (&mut tv as *mut libc::timeval).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        } == 0;
         ok.then_some(tv.tv_sec as u64)
     }
     #[cfg(target_os = "linux")]
     {
         let stat = std::fs::read_to_string("/proc/stat").ok()?;
-        stat.lines().find_map(|l| l.strip_prefix("btime ")).and_then(|v| v.trim().parse().ok())
+        stat.lines()
+            .find_map(|l| l.strip_prefix("btime "))
+            .and_then(|v| v.trim().parse().ok())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -363,15 +425,16 @@ fn boot_stamp() -> Option<u64> {
 }
 
 pub fn load(dir: &Path) -> Option<Value> {
-    let mut v: Value = serde_json::from_slice(&std::fs::read(dir.join("session.json")).ok()?).ok()?;
+    let mut v: Value =
+        serde_json::from_slice(&std::fs::read(dir.join("session.json")).ok()?).ok()?;
     let mut any = false;
     for t in v["tabs"].as_array_mut().into_iter().flatten() {
         leaves(&mut t["tree"], &mut |leaf| {
             any = true;
-            if let Some(id) = leaf["id"].as_u64() {
-                if let Ok(text) = std::fs::read_to_string(dir.join(format!("{id}.txt"))) {
-                    leaf["text"] = text.into();
-                }
+            if let Some(id) = leaf["id"].as_u64()
+                && let Ok(text) = std::fs::read_to_string(dir.join(format!("{id}.txt")))
+            {
+                leaf["text"] = text.into();
             }
         });
     }
@@ -395,7 +458,11 @@ fn tail_text(mut lines: Vec<String>, max: usize) -> String {
         lines.pop();
     }
     let from = lines.len().saturating_sub(max);
-    lines[from..].iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n")
+    lines[from..]
+        .iter()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Claude Code's own record of process `pid`: `~/.claude/sessions/<pid>.json`
@@ -404,12 +471,17 @@ fn claude_session(pid: u32) -> Option<Value> {
     let base = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| PathBuf::from(h).join(".claude")))?;
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| PathBuf::from(h).join(".claude"))
+        })?;
     claude_session_in(&base.join("sessions"), pid)
 }
 
 fn claude_session_in(dir: &Path, pid: u32) -> Option<Value> {
-    let v: Value = serde_json::from_slice(&std::fs::read(dir.join(format!("{pid}.json"))).ok()?).ok()?;
+    let v: Value =
+        serde_json::from_slice(&std::fs::read(dir.join(format!("{pid}.json"))).ok()?).ok()?;
     let id = v["sessionId"].as_str().filter(|s| is_session_id(s))?;
     Some(json!({ "session": id, "cwd": v["cwd"].as_str() }))
 }
@@ -477,7 +549,10 @@ mod tests {
 
     #[test]
     fn tail_keeps_the_last_lines_without_trailing_blanks() {
-        let lines = (1..=10).map(|i| format!("l{i}  ")).chain(["".into(), "  ".into()]).collect();
+        let lines = (1..=10)
+            .map(|i| format!("l{i}  "))
+            .chain(["".into(), "  ".into()])
+            .collect();
         assert_eq!(tail_text(lines, 3), "l8\nl9\nl10");
         assert_eq!(tail_text(vec![], 3), "");
     }
@@ -517,13 +592,31 @@ mod tests {
         // 200 and 400 are running pids; 400's session is from the last boot.
         let alive = |pid: u32, _: Option<u64>| pid == 200 || pid == 400;
         let v = take_from(&root, 100, Some(7), alive).unwrap();
-        let names: Vec<_> = v["tabs"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names, ["/before-reboot", "/quit"], "newest first; not mine, not a live window's");
+        let names: Vec<_> = v["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["/before-reboot", "/quit"],
+            "newest first; not mine, not a live window's"
+        );
         assert_eq!(v["tabs"][1]["tree"]["text"], "/quit");
         assert_eq!(v["saved_at"], 40);
-        assert!(root.join("100").exists() && root.join("200").exists(), "mine and the live window's stay");
-        assert!(!root.join("300").exists() && !root.join("400").exists(), "taken ones are removed");
-        assert!(take_from(&root, 100, Some(7), alive).is_none(), "taken once");
+        assert!(
+            root.join("100").exists() && root.join("200").exists(),
+            "mine and the live window's stay"
+        );
+        assert!(
+            !root.join("300").exists() && !root.join("400").exists(),
+            "taken ones are removed"
+        );
+        assert!(
+            take_from(&root, 100, Some(7), alive).is_none(),
+            "taken once"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -532,13 +625,29 @@ mod tests {
         let root = scratch("switch");
         let cfg = scratch("switch-cfg").join("config.json");
         let on = || is_on(&crate::config::load_from(&cfg, &cfg));
-        let set = |v: bool| crate::config::update_at(&cfg, &cfg, json!({ "restore_sessions": v })).unwrap();
+        let set = |v: bool| {
+            crate::config::update_at(&cfg, &cfg, json!({ "restore_sessions": v })).unwrap()
+        };
         assert!(on(), "on by default");
         let d = root.join("7");
-        let r = Restore { dir: d.clone(), panes: Arc::default(), layout: Mutex::new(Some(json!({ "active": 0, "tabs": [{ "name": "t", "tree": { "id": 1 } }] }))), written: Mutex::default(), off: false.into(), closing: false.into(), lost_at: Mutex::new(None), write: Mutex::new(()) };
+        let r = Restore {
+            dir: d.clone(),
+            panes: Arc::default(),
+            layout: Mutex::new(Some(
+                json!({ "active": 0, "tabs": [{ "name": "t", "tree": { "id": 1 } }] }),
+            )),
+            written: Mutex::default(),
+            off: false.into(),
+            closing: false.into(),
+            lost_at: Mutex::new(None),
+            write: Mutex::new(()),
+        };
         r.save_if(&on);
         session(&root, 8, 1, 1, "/another-window");
-        assert!(d.join("session.json").exists() && root.join("8").exists(), "on: saved");
+        assert!(
+            d.join("session.json").exists() && root.join("8").exists(),
+            "on: saved"
+        );
         // Turned off in Settings: config_set saves the key, then turned_off
         // clears the whole restore folder.
         set(false);
@@ -552,10 +661,16 @@ mod tests {
         // next tick removes it.
         ensure(&d).unwrap();
         r.save_if(&on);
-        assert!(!d.exists(), "off: a window clears its own folder on its next tick");
+        assert!(
+            !d.exists(),
+            "off: a window clears its own folder on its next tick"
+        );
         set(true);
         r.save_if(&on);
-        assert!(d.join("session.json").exists(), "on again: saved on the next tick (every 3 s)");
+        assert!(
+            d.join("session.json").exists(),
+            "on again: saved on the next tick (every 3 s)"
+        );
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(cfg.parent().unwrap());
     }
@@ -584,7 +699,10 @@ mod tests {
         }
         let v = take_from(&root, 1, None, running).unwrap();
         assert_eq!(v["tabs"].as_array().unwrap().len(), 1);
-        assert_eq!(v["tabs"][0]["name"], "/w500", "the reused pid's session comes back");
+        assert_eq!(
+            v["tabs"][0]["name"], "/w500",
+            "the reused pid's session comes back"
+        );
         assert!(root.join("600").exists(), "the live window's stays");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -595,8 +713,14 @@ mod tests {
         let me = std::process::id();
         let t = started(me).expect("own start time");
         assert!(same_window(me, Some(t)));
-        assert!(!same_window(me, Some(t + 1)), "another process with this pid");
-        assert!(same_window(me, None), "an older session without the field: the pid decides");
+        assert!(
+            !same_window(me, Some(t + 1)),
+            "another process with this pid"
+        );
+        assert!(
+            same_window(me, None),
+            "an older session without the field: the pid decides"
+        );
     }
 
     #[test]
@@ -637,12 +761,23 @@ mod tests {
     fn claude_session_is_read_by_pid_and_checked() {
         let d = scratch("claude");
         std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("42.json"), r#"{"pid":42,"sessionId":"093417ed-34d5-48b1-8e1a-f7698077b897","cwd":"/w"}"#).unwrap();
-        std::fs::write(d.join("43.json"), r#"{"pid":43,"sessionId":"x; rm -rf ~","cwd":"/w"}"#).unwrap();
+        std::fs::write(
+            d.join("42.json"),
+            r#"{"pid":42,"sessionId":"093417ed-34d5-48b1-8e1a-f7698077b897","cwd":"/w"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("43.json"),
+            r#"{"pid":43,"sessionId":"x; rm -rf ~","cwd":"/w"}"#,
+        )
+        .unwrap();
         let c = claude_session_in(&d, 42).unwrap();
         assert_eq!(c["session"], "093417ed-34d5-48b1-8e1a-f7698077b897");
         assert_eq!(c["cwd"], "/w");
-        assert!(claude_session_in(&d, 43).is_none(), "not an id: never offered");
+        assert!(
+            claude_session_in(&d, 43).is_none(),
+            "not an id: never offered"
+        );
         assert!(claude_session_in(&d, 44).is_none());
         let _ = std::fs::remove_dir_all(&d);
     }

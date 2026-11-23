@@ -46,52 +46,79 @@ mod imp {
     impl Conn {
         /// Connect as `role` ("viewer": events and frames; "control":
         /// answers only). `on` runs on the connection's reader thread.
-        pub fn connect(path: &Path, role: &str, client: &str, on: impl Fn(Event) + Send + 'static) -> io::Result<Conn> {
+        pub fn connect(
+            path: &Path,
+            role: &str,
+            client: &str,
+            on: impl Fn(Event) + Send + 'static,
+        ) -> io::Result<Conn> {
             let mut stream = UnixStream::connect(path)?;
             if !crate::dir::peer_is_me(&stream) {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "keeper: the socket's host is another user's"));
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "keeper: the socket's host is another user's",
+                ));
             }
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-            let hi = serde_json::json!({ "t": "hello", "proto": PROTO, "role": role, "client": client });
+            let hi =
+                serde_json::json!({ "t": "hello", "proto": PROTO, "role": role, "client": client });
             wire::write(&mut stream, K_JSON, hi.to_string().as_bytes())?;
             let (k, b) = wire::read(&mut stream)?;
             let hello = wire::json(k, &b)?;
             if hello["t"] != "hello" {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "keeper: no hello"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "keeper: no hello",
+                ));
             }
             let min = hello["min"].as_u64().unwrap_or(1);
             if min > PROTO as u64 {
-                return Err(io::Error::new(io::ErrorKind::Unsupported, format!("keeper: the host needs protocol {min}, this is {PROTO}")));
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("keeper: the host needs protocol {min}, this is {PROTO}"),
+                ));
             }
             stream.set_read_timeout(None)?;
             let pending: Arc<Mutex<HashMap<u64, Sender<Value>>>> = Arc::default();
             let mut reader = stream.try_clone()?;
             {
                 let pending = pending.clone();
-                std::thread::Builder::new().name("rsz-keeper-read".into()).spawn(move || {
-                    loop {
-                        match wire::read(&mut reader) {
-                            Ok((K_FRAME, b)) => on(Event::Frame(b)),
-                            Ok((K_JSON, b)) => {
-                                let Ok(v) = serde_json::from_slice::<Value>(&b) else { continue };
-                                if v["t"] == "r" {
-                                    if let Some(tx) = v["q"].as_u64().and_then(|q| pending.lock().remove(&q)) {
-                                        let _ = tx.send(v["v"].clone());
+                std::thread::Builder::new()
+                    .name("rsz-keeper-read".into())
+                    .spawn(move || {
+                        loop {
+                            match wire::read(&mut reader) {
+                                Ok((K_FRAME, b)) => on(Event::Frame(b)),
+                                Ok((K_JSON, b)) => {
+                                    let Ok(v) = serde_json::from_slice::<Value>(&b) else {
+                                        continue;
+                                    };
+                                    if v["t"] == "r" {
+                                        if let Some(tx) =
+                                            v["q"].as_u64().and_then(|q| pending.lock().remove(&q))
+                                        {
+                                            let _ = tx.send(v["v"].clone());
+                                        }
+                                    } else {
+                                        on(Event::Msg(v));
                                     }
-                                } else {
-                                    on(Event::Msg(v));
                                 }
+                                Ok(_) => {}
+                                Err(_) => break,
                             }
-                            Ok(_) => {}
-                            Err(_) => break,
                         }
-                    }
-                    pending.lock().clear();
-                    on(Event::Closed);
-                })?;
+                        pending.lock().clear();
+                        on(Event::Closed);
+                    })?;
             }
             let writer = Mutex::new(stream.try_clone()?);
-            Ok(Conn { stream, writer, pending, next: AtomicU64::new(1), hello })
+            Ok(Conn {
+                stream,
+                writer,
+                pending,
+                next: AtomicU64::new(1),
+                hello,
+            })
         }
 
         pub fn send(&self, v: &Value) -> io::Result<()> {

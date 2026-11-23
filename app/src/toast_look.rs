@@ -52,7 +52,11 @@ pub fn palette() -> Palette {
 /// The app-level toast setup: suzuri's name, solid cards (Astryx's
 /// surfaces are opaque, so no glass), visible to screen capture.
 fn base(palette: Palette, dark: bool, corner_radius: f64) -> Config {
-    let (light, dark_pal, scheme) = if dark { (Palette::default(), palette, Scheme::Dark) } else { (palette, Palette::default(), Scheme::Light) };
+    let (light, dark_pal, scheme) = if dark {
+        (Palette::default(), palette, Scheme::Dark)
+    } else {
+        (palette, Palette::default(), Scheme::Light)
+    };
     Config {
         app_name: "suzuri".into(),
         light,
@@ -93,7 +97,8 @@ pub struct CardLook {
 }
 
 fn color(name: &str, s: &str) -> Result<Color, String> {
-    let (r, g, b) = rsz_term::palette::parse_hex(s).ok_or_else(|| format!("card {name}: not #rrggbb: {s:?}"))?;
+    let (r, g, b) = rsz_term::palette::parse_hex(s)
+        .ok_or_else(|| format!("card {name}: not #rrggbb: {s:?}"))?;
     Ok(rgb(r, g, b))
 }
 
@@ -115,7 +120,11 @@ pub fn config_for(look: &CardLook, dark: bool) -> Result<Config, String> {
         on_primary: color("on_accent", &look.on_accent)?,
         ..Palette::default()
     };
-    let radius = if look.radius.is_finite() { look.radius.clamp(0.0, 32.0) } else { CORNER_RADIUS };
+    let radius = if look.radius.is_finite() {
+        look.radius.clamp(0.0, 32.0)
+    } else {
+        CORNER_RADIUS
+    };
     Ok(base(p, dark, radius))
 }
 

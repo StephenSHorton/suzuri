@@ -18,7 +18,10 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use tauri::{LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, WindowEvent};
+use tauri::{
+    LogicalPosition, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Position, Size,
+    WebviewWindow, WindowEvent,
+};
 
 /// Points on macOS, physical pixels elsewhere.
 const LOGICAL: bool = cfg!(target_os = "macos");
@@ -72,7 +75,12 @@ impl Placement {
     }
 
     fn rect(&self) -> Rect {
-        Rect { x: self.x as f64, y: self.y as f64, w: self.width as f64, h: self.height as f64 }
+        Rect {
+            x: self.x as f64,
+            y: self.y as f64,
+            w: self.width as f64,
+            h: self.height as f64,
+        }
     }
 }
 
@@ -108,9 +116,23 @@ impl Rect {
 /// the default size is centered on the primary. `cascade` steps it down and
 /// right, back to the monitor's corner once it would run off. None: no
 /// monitors known, leave the window where the OS put it.
-pub fn place(saved: Option<Placement>, monitors: &[Rect], primary: usize, default: (f64, f64), cascade: bool) -> Option<Rect> {
+pub fn place(
+    saved: Option<Placement>,
+    monitors: &[Rect],
+    primary: usize,
+    default: (f64, f64),
+    cascade: bool,
+) -> Option<Rect> {
     let pm = monitors.get(primary).or(monitors.first())?;
-    let centered = |w: f64, h: f64| Rect { x: pm.x + (pm.w - w) / 2.0, y: pm.y + (pm.h - h) / 2.0, w, h }.clamp_into(pm);
+    let centered = |w: f64, h: f64| {
+        Rect {
+            x: pm.x + (pm.w - w) / 2.0,
+            y: pm.y + (pm.h - h) / 2.0,
+            w,
+            h,
+        }
+        .clamp_into(pm)
+    };
     let Some(p) = saved else {
         return Some(centered(default.0, default.1));
     };
@@ -138,12 +160,25 @@ pub fn place(saved: Option<Placement>, monitors: &[Rect], primary: usize, defaul
 /// What to save for the window's state now. A maximized or fullscreen
 /// window keeps its last normal frame (`normal`), so leaving that state
 /// later goes back to a real size, as Go did for fullscreen.
-pub fn frame_for(now: Placement, maximized: bool, fullscreen: bool, normal: Option<Placement>) -> Placement {
+pub fn frame_for(
+    now: Placement,
+    maximized: bool,
+    fullscreen: bool,
+    normal: Option<Placement>,
+) -> Placement {
     if !maximized && !fullscreen {
-        return Placement { maximized: false, fullscreen: false, ..now };
+        return Placement {
+            maximized: false,
+            fullscreen: false,
+            ..now
+        };
     }
     let base = normal.unwrap_or(now);
-    Placement { maximized: maximized && !fullscreen, fullscreen, ..base }
+    Placement {
+        maximized: maximized && !fullscreen,
+        fullscreen,
+        ..base
+    }
 }
 
 #[derive(Default)]
@@ -162,8 +197,14 @@ struct Tracker {
     due: Option<Instant>,
 }
 
-static TRACKER: Mutex<Tracker> =
-    Mutex::new(Tracker { normal: None, pending: None, saved: None, last: None, closed: false, due: None });
+static TRACKER: Mutex<Tracker> = Mutex::new(Tracker {
+    normal: None,
+    pending: None,
+    saved: None,
+    last: None,
+    closed: false,
+    due: None,
+});
 static TIMER: AtomicBool = AtomicBool::new(false);
 
 fn units(v: f64, scale: f64) -> f64 {
@@ -197,12 +238,19 @@ fn capture(w: &WebviewWindow) -> Option<(Placement, bool, bool)> {
         maximized: false,
         fullscreen: false,
     };
-    Some((p, w.is_maximized().unwrap_or(false), w.is_fullscreen().unwrap_or(false)))
+    Some((
+        p,
+        w.is_maximized().unwrap_or(false),
+        w.is_fullscreen().unwrap_or(false),
+    ))
 }
 
 fn set_frame(w: &WebviewWindow, r: Rect) {
     let (size, pos): (Size, Position) = if LOGICAL {
-        (LogicalSize::new(r.w, r.h).into(), LogicalPosition::new(r.x, r.y).into())
+        (
+            LogicalSize::new(r.w, r.h).into(),
+            LogicalPosition::new(r.x, r.y).into(),
+        )
     } else {
         (
             PhysicalSize::new(r.w.round() as u32, r.h.round() as u32).into(),
@@ -223,13 +271,19 @@ fn set_frame(w: &WebviewWindow, r: Rect) {
 /// Put the main window where it was, show it, and start saving its frame.
 /// Called once from setup; the window is shown even if nothing was saved.
 pub fn install(app: &tauri::AppHandle) {
-    let Some(w) = app.get_webview_window("main") else { return };
+    let Some(w) = app.get_webview_window("main") else {
+        return;
+    };
     let saved = Placement::from_value(&crate::config::load()["window"]);
     let cascade = std::env::var(crate::window::NEW_WINDOW_ENV).is_ok_and(|v| !v.is_empty());
     let monitors = w.available_monitors().unwrap_or_default();
     let primary = w.primary_monitor().ok().flatten();
     let pi = primary
-        .and_then(|p| monitors.iter().position(|m| m.position() == p.position() && m.size() == p.size()))
+        .and_then(|p| {
+            monitors
+                .iter()
+                .position(|m| m.position() == p.position() && m.size() == p.size())
+        })
         .unwrap_or(0);
     let rects: Vec<Rect> = monitors.iter().map(monitor_rect).collect();
     let s = w.scale_factor().unwrap_or(1.0);
@@ -242,9 +296,20 @@ pub fn install(app: &tauri::AppHandle) {
     if let Some(r) = place(saved, &rects, pi, default, cascade) {
         set_frame(&w, r);
         let mut t = TRACKER.lock();
-        let n = Placement { x: r.x as i32, y: r.y as i32, width: r.w as i32, height: r.h as i32, ..Default::default() };
+        let n = Placement {
+            x: r.x as i32,
+            y: r.y as i32,
+            width: r.w as i32,
+            height: r.h as i32,
+            ..Default::default()
+        };
         t.normal = Some(n);
-        t.last = Some(Placement { maximized: restore_max, fullscreen: restore_fs, ..n }).filter(Placement::valid);
+        t.last = Some(Placement {
+            maximized: restore_max,
+            fullscreen: restore_fs,
+            ..n
+        })
+        .filter(Placement::valid);
         t.saved = saved;
     }
     if restore_max {
@@ -266,7 +331,9 @@ pub fn install(app: &tauri::AppHandle) {
 /// Capture the frame now (on the event thread) and write it after a pause,
 /// or at once.
 fn note(w: &WebviewWindow, now: bool) {
-    let Some((p, max, fs)) = capture(w) else { return };
+    let Some((p, max, fs)) = capture(w) else {
+        return;
+    };
     {
         let mut t = TRACKER.lock();
         if !max && !fs && p.valid() {
@@ -341,11 +408,27 @@ mod tests {
     use super::*;
 
     fn p(x: i32, y: i32, w: i32, h: i32) -> Placement {
-        Placement { x, y, width: w, height: h, ..Default::default() }
+        Placement {
+            x,
+            y,
+            width: w,
+            height: h,
+            ..Default::default()
+        }
     }
 
-    const MAIN: Rect = Rect { x: 0.0, y: 25.0, w: 1728.0, h: 1052.0 };
-    const LEFT: Rect = Rect { x: -1920.0, y: 0.0, w: 1920.0, h: 1080.0 };
+    const MAIN: Rect = Rect {
+        x: 0.0,
+        y: 25.0,
+        w: 1728.0,
+        h: 1052.0,
+    };
+    const LEFT: Rect = Rect {
+        x: -1920.0,
+        y: 0.0,
+        w: 1920.0,
+        h: 1080.0,
+    };
 
     #[test]
     fn reads_go_placements_and_rejects_bad_ones() {
@@ -353,58 +436,151 @@ mod tests {
         assert_eq!(Placement::from_value(&v), Some(p(0, 65, 1728, 1052)));
         let v = json!({"x": -1500, "y": 10, "width": 900, "height": 600, "maximized": true});
         assert!(Placement::from_value(&v).unwrap().maximized);
-        assert_eq!(Placement::from_value(&json!({"x": 0, "y": 0, "width": 0, "height": 0})), None);
-        assert_eq!(Placement::from_value(&json!({"x": 0, "y": 0, "width": 100, "height": 900})), None);
-        assert_eq!(Placement::from_value(&json!({"width": 900, "height": 600})), None);
+        assert_eq!(
+            Placement::from_value(&json!({"x": 0, "y": 0, "width": 0, "height": 0})),
+            None
+        );
+        assert_eq!(
+            Placement::from_value(&json!({"x": 0, "y": 0, "width": 100, "height": 900})),
+            None
+        );
+        assert_eq!(
+            Placement::from_value(&json!({"width": 900, "height": 600})),
+            None
+        );
         assert_eq!(Placement::from_value(&Value::Null), None);
     }
 
     #[test]
     fn round_trips_through_json() {
-        let a = Placement { fullscreen: true, ..p(-1800, 40, 1000, 700) };
+        let a = Placement {
+            fullscreen: true,
+            ..p(-1800, 40, 1000, 700)
+        };
         assert_eq!(Placement::from_value(&a.to_value()), Some(a));
         assert!(p(1, 2, 400, 300).to_value().get("maximized").is_none());
     }
 
     #[test]
     fn restores_on_the_saved_monitor() {
-        let r = place(Some(p(-1500, 100, 900, 600)), &[MAIN, LEFT], 0, (1200.0, 800.0), false).unwrap();
-        assert_eq!(r, Rect { x: -1500.0, y: 100.0, w: 900.0, h: 600.0 });
+        let r = place(
+            Some(p(-1500, 100, 900, 600)),
+            &[MAIN, LEFT],
+            0,
+            (1200.0, 800.0),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            Rect {
+                x: -1500.0,
+                y: 100.0,
+                w: 900.0,
+                h: 600.0
+            }
+        );
     }
 
     #[test]
     fn clamps_a_frame_hanging_off_its_monitor() {
         // Mostly on the main display, sticking out right and above the menu bar.
-        let r = place(Some(p(1400, 0, 900, 600)), &[MAIN], 0, (1200.0, 800.0), false).unwrap();
-        assert_eq!(r, Rect { x: 1728.0 - 900.0, y: 25.0, w: 900.0, h: 600.0 });
+        let r = place(
+            Some(p(1400, 0, 900, 600)),
+            &[MAIN],
+            0,
+            (1200.0, 800.0),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            Rect {
+                x: 1728.0 - 900.0,
+                y: 25.0,
+                w: 900.0,
+                h: 600.0
+            }
+        );
         // Bigger than the display: shrunk to it.
-        let r = place(Some(p(10, 30, 3000, 2000)), &[MAIN], 0, (1200.0, 800.0), false).unwrap();
+        let r = place(
+            Some(p(10, 30, 3000, 2000)),
+            &[MAIN],
+            0,
+            (1200.0, 800.0),
+            false,
+        )
+        .unwrap();
         assert_eq!(r, MAIN);
     }
 
     #[test]
     fn centers_on_primary_when_its_monitor_is_gone() {
         // Saved on the left display, which is unplugged now.
-        let r = place(Some(p(-1500, 100, 900, 600)), &[MAIN], 0, (1200.0, 800.0), false).unwrap();
-        assert_eq!(r, Rect { x: (1728.0 - 900.0) / 2.0, y: 25.0 + (1052.0 - 600.0) / 2.0, w: 900.0, h: 600.0 });
+        let r = place(
+            Some(p(-1500, 100, 900, 600)),
+            &[MAIN],
+            0,
+            (1200.0, 800.0),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            Rect {
+                x: (1728.0 - 900.0) / 2.0,
+                y: 25.0 + (1052.0 - 600.0) / 2.0,
+                w: 900.0,
+                h: 600.0
+            }
+        );
         // A sliver under 80x40 doesn't count as still on screen.
-        let r = place(Some(p(1700, 100, 900, 600)), &[MAIN], 0, (1200.0, 800.0), false).unwrap();
+        let r = place(
+            Some(p(1700, 100, 900, 600)),
+            &[MAIN],
+            0,
+            (1200.0, 800.0),
+            false,
+        )
+        .unwrap();
         assert_eq!(r.x, (1728.0 - 900.0) / 2.0);
     }
 
     #[test]
     fn nothing_saved_centers_the_default_on_primary() {
         let r = place(None, &[LEFT, MAIN], 1, (1200.0, 800.0), false).unwrap();
-        assert_eq!(r, Rect { x: 264.0, y: 25.0 + 126.0, w: 1200.0, h: 800.0 });
+        assert_eq!(
+            r,
+            Rect {
+                x: 264.0,
+                y: 25.0 + 126.0,
+                w: 1200.0,
+                h: 800.0
+            }
+        );
         assert_eq!(place(None, &[], 0, (1200.0, 800.0), false), None);
     }
 
     #[test]
     fn new_windows_cascade_and_wrap() {
-        let r = place(Some(p(100, 100, 900, 600)), &[MAIN], 0, (1200.0, 800.0), true).unwrap();
+        let r = place(
+            Some(p(100, 100, 900, 600)),
+            &[MAIN],
+            0,
+            (1200.0, 800.0),
+            true,
+        )
+        .unwrap();
         assert_eq!((r.x, r.y), (128.0, 128.0));
         // At the bottom-right corner the next one goes back to the top-left.
-        let r = place(Some(p(828, 477, 900, 600)), &[MAIN], 0, (1200.0, 800.0), true).unwrap();
+        let r = place(
+            Some(p(828, 477, 900, 600)),
+            &[MAIN],
+            0,
+            (1200.0, 800.0),
+            true,
+        )
+        .unwrap();
         assert_eq!((r.x, r.y), (MAIN.x, MAIN.y));
     }
 
@@ -413,10 +589,28 @@ mod tests {
         let normal = p(100, 100, 900, 600);
         let zoomed = p(0, 25, 1728, 1052);
         assert_eq!(frame_for(zoomed, false, false, Some(normal)), zoomed);
-        assert_eq!(frame_for(zoomed, true, false, Some(normal)), Placement { maximized: true, ..normal });
-        assert_eq!(frame_for(zoomed, true, true, Some(normal)), Placement { fullscreen: true, ..normal });
+        assert_eq!(
+            frame_for(zoomed, true, false, Some(normal)),
+            Placement {
+                maximized: true,
+                ..normal
+            }
+        );
+        assert_eq!(
+            frame_for(zoomed, true, true, Some(normal)),
+            Placement {
+                fullscreen: true,
+                ..normal
+            }
+        );
         // No normal frame seen yet: the current one stands in.
-        assert_eq!(frame_for(zoomed, true, false, None), Placement { maximized: true, ..zoomed });
+        assert_eq!(
+            frame_for(zoomed, true, false, None),
+            Placement {
+                maximized: true,
+                ..zoomed
+            }
+        );
     }
 
     #[test]

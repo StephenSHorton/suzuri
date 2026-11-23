@@ -35,7 +35,12 @@ pub fn wants_dump(args: &[String]) -> bool {
 /// after DUMP_ARG). The exit code.
 #[cfg(windows)]
 pub fn run_dump(args: &[String]) -> i32 {
-    let (Some(pid), Some(path)) = (args.first().and_then(|p| p.parse::<u32>().ok()), args.get(1)) else { return 2 };
+    let (Some(pid), Some(path)) = (
+        args.first().and_then(|p| p.parse::<u32>().ok()),
+        args.get(1),
+    ) else {
+        return 2;
+    };
     match win::write_dump(pid, std::path::Path::new(path)) {
         Ok(()) => 0,
         Err(e) => {
@@ -84,10 +89,12 @@ pub fn install(app: &tauri::AppHandle) {
         dump_gap: Duration::from_secs(600),
         dump: std::sync::Arc::new(move |path: &std::path::Path| win::dump_by_helper(&exe, path)),
     };
-    let spawned = std::thread::Builder::new().name("rsz-hang-watch".into()).spawn(move || {
-        let say: win::Say = std::sync::Arc::new(|line: String| log::warn!("{line}"));
-        watch.run(&STOP, &say);
-    });
+    let spawned = std::thread::Builder::new()
+        .name("rsz-hang-watch".into())
+        .spawn(move || {
+            let say: win::Say = std::sync::Arc::new(|line: String| log::warn!("{line}"));
+            watch.run(&STOP, &say);
+        });
     if let Err(e) = spawned {
         log::warn!("hang watchdog: not started: {e}");
     }
@@ -105,25 +112,32 @@ mod win {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LocalFree,
+    };
     use windows_sys::Win32::System::Diagnostics::Debug::{
-        MINIDUMP_TYPE, MiniDumpWithHandleData, MiniDumpWithIndirectlyReferencedMemory, MiniDumpWithThreadInfo,
-        MiniDumpWithUnloadedModules, MiniDumpWriteDump,
+        MINIDUMP_TYPE, MiniDumpWithHandleData, MiniDumpWithIndirectlyReferencedMemory,
+        MiniDumpWithThreadInfo, MiniDumpWithUnloadedModules, MiniDumpWriteDump,
     };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_NO_WINDOW, GetCurrentProcessId, GetThreadDescription, OpenProcess, OpenThread, PROCESS_DUP_HANDLE,
-        PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, THREAD_QUERY_LIMITED_INFORMATION,
+        CREATE_NO_WINDOW, GetCurrentProcessId, GetThreadDescription, OpenProcess, OpenThread,
+        PROCESS_DUP_HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        THREAD_QUERY_LIMITED_INFORMATION,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_NULL};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsWindow, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_NULL,
+    };
 
     /// Every thread's stack and state, the memory their stacks point at,
     /// and the handles (what a blocked thread waits on), without the heap:
     /// a few MB.
-    const DUMP: MINIDUMP_TYPE =
-        MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithUnloadedModules | MiniDumpWithHandleData;
+    const DUMP: MINIDUMP_TYPE = MiniDumpWithThreadInfo
+        | MiniDumpWithIndirectlyReferencedMemory
+        | MiniDumpWithUnloadedModules
+        | MiniDumpWithHandleData;
 
     /// Logs a line (log::warn! in the app).
     pub type Say = Arc<dyn Fn(String) + Send + Sync>;
@@ -145,12 +159,14 @@ mod win {
     fn say_all(say: &Say, lines: Vec<String>) {
         let (tx, rx) = crossbeam_channel::bounded::<()>(1);
         let say = Arc::clone(say);
-        let spawned = std::thread::Builder::new().name("rsz-hang-log".into()).spawn(move || {
-            for l in lines {
-                say(l);
-            }
-            let _ = tx.send(());
-        });
+        let spawned = std::thread::Builder::new()
+            .name("rsz-hang-log".into())
+            .spawn(move || {
+                for l in lines {
+                    say(l);
+                }
+                let _ = tx.send(());
+            });
         if spawned.is_ok() {
             let _ = rx.recv_timeout(SAY_WAIT);
         }
@@ -188,10 +204,18 @@ mod win {
                 }
                 let mut res = 0usize;
                 // SAFETY: plain Win32 call; an invalid handle just fails.
-                let answered = unsafe { SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, timeout_ms, &mut res) } != 0;
+                let answered = unsafe {
+                    SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, timeout_ms, &mut res)
+                } != 0;
                 if answered {
                     if stalled {
-                        say_all(say, vec![format!("ui stall ended after {:.1} s", last_ok.elapsed().as_secs_f64())]);
+                        say_all(
+                            say,
+                            vec![format!(
+                                "ui stall ended after {:.1} s",
+                                last_ok.elapsed().as_secs_f64()
+                            )],
+                        );
                         stalled = false;
                     }
                     last_ok = Instant::now();
@@ -213,7 +237,11 @@ mod win {
         }
 
         fn report(&self, quiet: Duration, say: &Say, last_dump: &mut Option<Instant>) {
-            let mut lines = vec![format!("ui stall: main thread not answering for {:.1} s (at {})", quiet.as_secs_f64(), crate::bridge::rfc3339_now())];
+            let mut lines = vec![format!(
+                "ui stall: main thread not answering for {:.1} s (at {})",
+                quiet.as_secs_f64(),
+                crate::bridge::rfc3339_now()
+            )];
             let mut unnamed = Vec::new();
             for (id, name) in thread_names() {
                 let ui = if id == self.ui_thread { " (ui)" } else { "" };
@@ -229,7 +257,10 @@ mod win {
             if let Some(at) = *last_dump
                 && at.elapsed() < self.dump_gap
             {
-                lines.push(format!("ui stall: no dump (the last was {} s ago)", at.elapsed().as_secs()));
+                lines.push(format!(
+                    "ui stall: no dump (the last was {} s ago)",
+                    at.elapsed().as_secs()
+                ));
                 say_all(say, lines);
                 return;
             }
@@ -314,10 +345,17 @@ mod win {
         let end = Instant::now() + DUMP_WAIT;
         loop {
             if let Some(st) = child.try_wait()? {
-                return if st.success() { Ok(()) } else { Err(io::Error::other(format!("dump helper failed ({st})"))) };
+                return if st.success() {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(format!("dump helper failed ({st})")))
+                };
             }
             if Instant::now() >= end {
-                return Err(io::Error::other(format!("dump helper still running after {} s; left to finish", DUMP_WAIT.as_secs())));
+                return Err(io::Error::other(format!(
+                    "dump helper still running after {} s; left to finish",
+                    DUMP_WAIT.as_secs()
+                )));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -335,7 +373,11 @@ mod win {
         // SAFETY: plain Win32 calls; the process handle is closed below and
         // the file handle outlives the dump call.
         unsafe {
-            let h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE, 0, pid);
+            let h = OpenProcess(
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE,
+                0,
+                pid,
+            );
             if h.is_null() {
                 return Err(io::Error::last_os_error());
             }
@@ -346,7 +388,15 @@ mod win {
                     return Err(e);
                 }
             };
-            let ok = MiniDumpWriteDump(h, pid, file.as_raw_handle() as HANDLE, DUMP, std::ptr::null(), std::ptr::null(), std::ptr::null()) != 0;
+            let ok = MiniDumpWriteDump(
+                h,
+                pid,
+                file.as_raw_handle() as HANDLE,
+                DUMP,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            ) != 0;
             let e = io::Error::last_os_error();
             CloseHandle(h);
             if ok {
@@ -360,11 +410,17 @@ mod win {
 
     /// Keep the newest `keep` hang-*.dmp in `dir` (names sort by time).
     pub fn prune(dir: &Path, keep: usize) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         let mut dumps: Vec<PathBuf> = rd
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("hang-") && n.ends_with(".dmp")))
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("hang-") && n.ends_with(".dmp"))
+            })
             .collect();
         dumps.sort();
         let extra = dumps.len().saturating_sub(keep);
@@ -414,7 +470,12 @@ mod win {
         #[test]
         fn dump_helper_args() {
             let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-            assert!(crate::hang::wants_dump(&a(&["suzuri", crate::hang::DUMP_ARG, "1", "x"])));
+            assert!(crate::hang::wants_dump(&a(&[
+                "suzuri",
+                crate::hang::DUMP_ARG,
+                "1",
+                "x"
+            ])));
             assert!(!crate::hang::wants_dump(&a(&["suzuri", "version"])));
             assert_eq!(crate::hang::run_dump(&a(&["nope", "x"])), 2);
             assert_eq!(crate::hang::run_dump(&a(&[])), 2);
@@ -423,23 +484,45 @@ mod win {
         #[test]
         fn lists_rust_thread_names() {
             let (tx, rx) = crossbeam_channel::bounded::<()>(0);
-            let t = std::thread::Builder::new().name("rsz-test-named".into()).spawn(move || rx.recv()).unwrap();
+            let t = std::thread::Builder::new()
+                .name("rsz-test-named".into())
+                .spawn(move || rx.recv())
+                .unwrap();
             let names = thread_names();
             tx.send(()).unwrap();
             t.join().unwrap().unwrap();
-            assert!(names.iter().any(|(_, n)| n.as_deref() == Some("rsz-test-named")), "{names:?}");
+            assert!(
+                names
+                    .iter()
+                    .any(|(_, n)| n.as_deref() == Some("rsz-test-named")),
+                "{names:?}"
+            );
         }
 
         #[test]
         fn keeps_the_newest_three() {
             let d = temp("prune");
-            for n in ["hang-1.dmp", "hang-2.dmp", "hang-3.dmp", "hang-4.dmp", "hang-5.dmp", "suzuri.log"] {
+            for n in [
+                "hang-1.dmp",
+                "hang-2.dmp",
+                "hang-3.dmp",
+                "hang-4.dmp",
+                "hang-5.dmp",
+                "suzuri.log",
+            ] {
                 std::fs::write(d.join(n), b"x").unwrap();
             }
             prune(&d, 3);
-            let mut left: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+            let mut left: Vec<String> = std::fs::read_dir(&d)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
             left.sort();
-            assert_eq!(left, ["hang-3.dmp", "hang-4.dmp", "hang-5.dmp", "suzuri.log"]);
+            assert_eq!(
+                left,
+                ["hang-3.dmp", "hang-4.dmp", "hang-5.dmp", "suzuri.log"]
+            );
             let _ = std::fs::remove_dir_all(&d);
         }
 
@@ -465,7 +548,11 @@ mod win {
             watch.report(Duration::from_secs(3), &say, &mut None);
             assert!(t.elapsed() < Duration::from_secs(5));
             drop(release);
-            let dumps = std::fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".dmp")).count();
+            let dumps = std::fs::read_dir(&d)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".dmp"))
+                .count();
             assert_eq!(dumps, 1);
             let _ = std::fs::remove_dir_all(&d);
         }
@@ -496,7 +583,14 @@ mod win {
             watch.report(Duration::from_secs(3), &say, &mut last);
             watch.report(Duration::from_secs(3), &say, &mut last);
             assert_eq!(n.load(Ordering::Acquire), 1);
-            assert!(lines.lock().iter().any(|l| l.starts_with("ui stall: no dump")), "{:?}", lines.lock());
+            assert!(
+                lines
+                    .lock()
+                    .iter()
+                    .any(|l| l.starts_with("ui stall: no dump")),
+                "{:?}",
+                lines.lock()
+            );
             let _ = std::fs::remove_dir_all(&d);
         }
 
@@ -505,7 +599,8 @@ mod win {
         #[test]
         fn catches_a_stall_and_its_end() {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                CreateWindowExW, DestroyWindow, DispatchMessageW, HWND_MESSAGE, MSG, PM_REMOVE, PeekMessageW,
+                CreateWindowExW, DestroyWindow, DispatchMessageW, HWND_MESSAGE, MSG, PM_REMOVE,
+                PeekMessageW,
             };
             let pump = |for_: Duration| {
                 let end = Instant::now() + for_;
@@ -525,7 +620,20 @@ mod win {
                 let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
                 // SAFETY: a message-only STATIC window owned by this thread.
                 let hwnd = unsafe {
-                    CreateWindowExW(0, class.as_ptr(), std::ptr::null(), 0, 0, 0, 0, 0, HWND_MESSAGE, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null())
+                    CreateWindowExW(
+                        0,
+                        class.as_ptr(),
+                        std::ptr::null(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        HWND_MESSAGE,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                    )
                 };
                 assert!(!hwnd.is_null());
                 htx.send(hwnd as isize).unwrap();
@@ -555,10 +663,29 @@ mod win {
             watch.run(&stop, &say);
             ui.join().unwrap();
             let lines = lines.lock().clone();
-            assert_eq!(lines.iter().filter(|l| l.starts_with("ui stall: main thread not answering")).count(), 1, "{lines:?}");
-            assert!(lines.iter().any(|l| l.starts_with("ui stall ended after")), "{lines:?}");
-            assert!(lines.iter().any(|l| l.contains("rsz-hang") || l.starts_with("ui stall thread") || l.starts_with("ui stall unnamed")), "{lines:?}");
-            let dumps = std::fs::read_dir(&d).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".dmp")).count();
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|l| l.starts_with("ui stall: main thread not answering"))
+                    .count(),
+                1,
+                "{lines:?}"
+            );
+            assert!(
+                lines.iter().any(|l| l.starts_with("ui stall ended after")),
+                "{lines:?}"
+            );
+            assert!(
+                lines.iter().any(|l| l.contains("rsz-hang")
+                    || l.starts_with("ui stall thread")
+                    || l.starts_with("ui stall unnamed")),
+                "{lines:?}"
+            );
+            let dumps = std::fs::read_dir(&d)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".dmp"))
+                .count();
             assert_eq!(dumps, 1);
             let _ = std::fs::remove_dir_all(&d);
         }

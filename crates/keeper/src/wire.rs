@@ -29,7 +29,10 @@ pub fn read(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     r.read_exact(&mut len)?;
     let len = u32::from_le_bytes(len) as usize;
     if len == 0 || len > MAX_MSG {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("keeper: bad message length {len}")));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("keeper: bad message length {len}"),
+        ));
     }
     let mut kind = [0u8; 1];
     r.read_exact(&mut kind)?;
@@ -41,7 +44,10 @@ pub fn read(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
 /// A JSON message's object, or an error for any other kind.
 pub fn json(kind: u8, body: &[u8]) -> io::Result<serde_json::Value> {
     if kind != crate::K_JSON {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("keeper: expected JSON, got kind {kind}")));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("keeper: expected JSON, got kind {kind}"),
+        ));
     }
     serde_json::from_slice(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }

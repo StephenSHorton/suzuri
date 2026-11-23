@@ -51,11 +51,20 @@ fn start_host(dir: &Path, id: u32, command: &[&str]) -> u32 {
         .spawn()
         .unwrap();
     let cfg = json!({ "cols": 80, "rows": 24, "command": command, "version": "test-1" });
-    child.stdin.take().unwrap().write_all(cfg.to_string().as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(cfg.to_string().as_bytes())
+        .unwrap();
     let mut out = String::new();
     // One line, as the app reads it: on Windows ConPTY's console host may
     // keep the pipe open after the host lets go of it.
-    std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut out).unwrap();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+        &mut out,
+    )
+    .unwrap();
     assert!(out.starts_with("ready"), "host said {out:?}");
     std::thread::spawn(move || child.wait());
     out.split_whitespace().nth(1).unwrap().parse().unwrap()
@@ -64,7 +73,12 @@ fn start_host(dir: &Path, id: u32, command: &[&str]) -> u32 {
 fn screen(dir: &Path, id: u32) -> String {
     let c = Conn::connect(&dir::sock_path(dir, id), "control", "test", |_| {}).unwrap();
     let v = c.call(json!({ "t": "text", "lines": 200 })).unwrap();
-    let mut s: Vec<String> = v["tail"].as_array().unwrap().iter().map(|l| l.as_str().unwrap().to_string()).collect();
+    let mut s: Vec<String> = v["tail"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap().to_string())
+        .collect();
     s.push(v["screen"].as_str().unwrap().to_string());
     s.join("\n")
 }
@@ -85,7 +99,9 @@ fn alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if h.is_null() {
         return false;
@@ -133,7 +149,10 @@ fn a_shell_outlives_its_viewer_and_ends_when_closed() {
     // The viewer goes away without a word (as a kill -9 of the app).
     drop(a);
     std::thread::sleep(Duration::from_millis(300));
-    assert!(alive(host) && alive(shell), "the shell must outlive its viewer");
+    assert!(
+        alive(host) && alive(shell),
+        "the shell must outlive its viewer"
+    );
 
     // A new viewer gets the same shell, its screen and a full frame.
     let (b, frames_b) = viewer(&d.0, 7);
@@ -145,10 +164,15 @@ fn a_shell_outlives_its_viewer_and_ends_when_closed() {
     let (c, frames_c) = viewer(&d.0, 7);
     assert_eq!(c.hello["viewers"], 1);
     wait_for("c's frame", || frames_c.load(Ordering::Relaxed) > 0);
-    let (nb, nc) = (frames_b.load(Ordering::Relaxed), frames_c.load(Ordering::Relaxed));
+    let (nb, nc) = (
+        frames_b.load(Ordering::Relaxed),
+        frames_c.load(Ordering::Relaxed),
+    );
     c.input(b"echo typed-by-c\r").unwrap();
     wait_for("c's typing", || screen(&d.0, 7).contains("typed-by-c"));
-    wait_for("frames to both", || frames_b.load(Ordering::Relaxed) > nb && frames_c.load(Ordering::Relaxed) > nc);
+    wait_for("frames to both", || {
+        frames_b.load(Ordering::Relaxed) > nb && frames_c.load(Ordering::Relaxed) > nc
+    });
 
     // Closing ends the shell and its host, and the socket goes.
     b.send(&json!({ "t": "close" })).unwrap();
@@ -169,26 +193,47 @@ fn one_host_two_viewers_one_leaves_the_other_still_draws() {
     let shell = hearth.hello["shell_pid"].as_u64().unwrap() as u32;
     let (suzuri, frames_s) = viewer(&d.0, 1);
     assert_eq!(suzuri.hello["viewers"], 1, "Hearth's viewer is there first");
-    wait_for("both first frames", || frames_h.load(Ordering::Relaxed) > 0 && frames_s.load(Ordering::Relaxed) > 0);
+    wait_for("both first frames", || {
+        frames_h.load(Ordering::Relaxed) > 0 && frames_s.load(Ordering::Relaxed) > 0
+    });
     let size = || {
-        let h = Conn::connect(&dir::sock_path(&d.0, 1), "control", "t", |_| {}).unwrap().hello.clone();
+        let h = Conn::connect(&dir::sock_path(&d.0, 1), "control", "t", |_| {})
+            .unwrap()
+            .hello
+            .clone();
         (h["cols"].as_u64().unwrap(), h["rows"].as_u64().unwrap())
     };
-    hearth.send(&json!({ "t": "resize", "cols": 101, "rows": 31 })).unwrap();
+    hearth
+        .send(&json!({ "t": "resize", "cols": 101, "rows": 31 }))
+        .unwrap();
     wait_for("Hearth's size", || size() == (101, 31));
-    suzuri.send(&json!({ "t": "resize", "cols": 90, "rows": 28 })).unwrap();
-    wait_for("Suzuri's size when it takes the keys", || size() == (90, 28));
+    suzuri
+        .send(&json!({ "t": "resize", "cols": 90, "rows": 28 }))
+        .unwrap();
+    wait_for("Suzuri's size when it takes the keys", || {
+        size() == (90, 28)
+    });
 
     // Suzuri lets go: a detach, never a close.
     suzuri.detach();
     drop(suzuri);
     std::thread::sleep(Duration::from_millis(300));
-    assert!(alive(host) && alive(shell), "the shell must outlive Suzuri's viewer");
+    assert!(
+        alive(host) && alive(shell),
+        "the shell must outlive Suzuri's viewer"
+    );
     let n = frames_h.load(Ordering::Relaxed);
     hearth.input(b"echo still-drawn\r").unwrap();
-    wait_for("the shell to answer", || screen(&d.0, 1).contains("still-drawn"));
-    wait_for("Hearth's viewer to draw it", || frames_h.load(Ordering::Relaxed) > n);
-    let h = Conn::connect(&dir::sock_path(&d.0, 1), "control", "t", |_| {}).unwrap().hello.clone();
+    wait_for("the shell to answer", || {
+        screen(&d.0, 1).contains("still-drawn")
+    });
+    wait_for("Hearth's viewer to draw it", || {
+        frames_h.load(Ordering::Relaxed) > n
+    });
+    let h = Conn::connect(&dir::sock_path(&d.0, 1), "control", "t", |_| {})
+        .unwrap()
+        .hello
+        .clone();
     assert_eq!(h["viewers"], 1, "only Hearth's viewer is left");
 }
 
@@ -204,7 +249,11 @@ fn a_host_refuses_an_id_that_is_kept_already() {
         .stderr(Stdio::null())
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("error"), "{:?}", out);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("error"),
+        "{:?}",
+        out
+    );
     assert_eq!(dir::list(&d.0), vec![3]);
 }
 
@@ -215,10 +264,24 @@ fn the_host_answers_the_calls_the_app_makes() {
     let c = Conn::connect(&dir::sock_path(&d.0, 4), "control", "test", |_| {}).unwrap();
     assert_eq!(c.call(json!({ "t": "state" })).unwrap(), "Running");
     assert_eq!(c.call(json!({ "t": "alt_screen" })).unwrap(), false);
-    assert_eq!(c.call(json!({ "t": "selection" })).unwrap(), serde_json::Value::Null);
+    assert_eq!(
+        c.call(json!({ "t": "selection" })).unwrap(),
+        serde_json::Value::Null
+    );
     assert!(c.call(json!({ "t": "stats" })).unwrap()["bytes_in"].is_u64());
-    c.send(&json!({ "t": "resize", "cols": 100, "rows": 30 })).unwrap();
-    wait_for("the resize", || Conn::connect(&dir::sock_path(&d.0, 4), "control", "t", |_| {}).unwrap().call(json!({ "t": "text" })).unwrap()["screen"].as_str().unwrap().lines().count() <= 30);
+    c.send(&json!({ "t": "resize", "cols": 100, "rows": 30 }))
+        .unwrap();
+    wait_for("the resize", || {
+        Conn::connect(&dir::sock_path(&d.0, 4), "control", "t", |_| {})
+            .unwrap()
+            .call(json!({ "t": "text" }))
+            .unwrap()["screen"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .count()
+            <= 30
+    });
 }
 
 /// What the extra hop costs: a key typed to the frame that shows it, in
@@ -241,7 +304,14 @@ fn key_to_frame_latency() {
             let _ = tx.lock().unwrap().send(());
         }
     });
-    let pane = rsz_term::Pane::spawn(rsz_term::PaneConfig { command: Some(vec!["/bin/cat".into()]), ..Default::default() }, sink).unwrap();
+    let pane = rsz_term::Pane::spawn(
+        rsz_term::PaneConfig {
+            command: Some(vec!["/bin/cat".into()]),
+            ..Default::default()
+        },
+        sink,
+    )
+    .unwrap();
     std::thread::sleep(Duration::from_millis(500));
     let mut local = Vec::new();
     for i in 0..n {
@@ -278,7 +348,9 @@ fn key_to_frame_latency() {
     }
     let (l50, l90) = median(local);
     let (k50, k90) = median(kept);
-    println!("key to frame, {n} keys: in the app p50 {l50:.2} ms p90 {l90:.2} ms; through a host p50 {k50:.2} ms p90 {k90:.2} ms");
+    println!(
+        "key to frame, {n} keys: in the app p50 {l50:.2} ms p90 {l90:.2} ms; through a host p50 {k50:.2} ms p90 {k90:.2} ms"
+    );
 }
 
 /// A program that reads the clipboard with OSC 52 and prints what came
@@ -304,7 +376,8 @@ fn answering_viewer(dir: &Path, id: u32, text: &'static str) -> Conn {
             && v["t"] == "clip_ask"
         {
             let c = Conn::connect(&s2, "control", "test", |_| {}).unwrap();
-            c.send(&json!({ "t": "clip_answer", "n": v["n"], "text": text })).unwrap();
+            c.send(&json!({ "t": "clip_answer", "n": v["n"], "text": text }))
+                .unwrap();
         }
     })
     .unwrap()
@@ -318,24 +391,45 @@ fn a_clipboard_read_gets_the_clipboard_only_while_a_window_is_attached() {
     std::fs::write(&script, ASK).unwrap();
     start_host(&d.0, 5, &[SH]);
     let ctl = Conn::connect(&dir::sock_path(&d.0, 5), "control", "test", |_| {}).unwrap();
-    let ask = |tag: &str| ctl.input(format!("sh {} {tag}\r", script.display()).as_bytes()).unwrap();
+    let ask = |tag: &str| {
+        ctl.input(format!("sh {} {tag}\r", script.display()).as_bytes())
+            .unwrap()
+    };
 
     // No window attached: the program gets an empty answer, not the clipboard.
     ask("none");
-    wait_for("the read with no window", || screen(&d.0, 5).contains("GOT-none["));
-    assert!(screen(&d.0, 5).contains("GOT-none[]"), "{}", screen(&d.0, 5));
+    wait_for("the read with no window", || {
+        screen(&d.0, 5).contains("GOT-none[")
+    });
+    assert!(
+        screen(&d.0, 5).contains("GOT-none[]"),
+        "{}",
+        screen(&d.0, 5)
+    );
 
     // A window attached: the program gets the window's clipboard text.
     let v = answering_viewer(&d.0, 5, "hello-clip 硯");
     ask("one");
-    wait_for("the read with a window", || screen(&d.0, 5).contains("GOT-one["));
+    wait_for("the read with a window", || {
+        screen(&d.0, 5).contains("GOT-one[")
+    });
     // base64("hello-clip 硯")
-    assert!(screen(&d.0, 5).contains("GOT-one[aGVsbG8tY2xpcCDnoa8=]"), "{}", screen(&d.0, 5));
+    assert!(
+        screen(&d.0, 5).contains("GOT-one[aGVsbG8tY2xpcCDnoa8=]"),
+        "{}",
+        screen(&d.0, 5)
+    );
 
     // The window goes: empty again.
     drop(v);
     std::thread::sleep(Duration::from_millis(300));
     ask("gone");
-    wait_for("the read after the window went", || screen(&d.0, 5).contains("GOT-gone["));
-    assert!(screen(&d.0, 5).contains("GOT-gone[]"), "{}", screen(&d.0, 5));
+    wait_for("the read after the window went", || {
+        screen(&d.0, 5).contains("GOT-gone[")
+    });
+    assert!(
+        screen(&d.0, 5).contains("GOT-gone[]"),
+        "{}",
+        screen(&d.0, 5)
+    );
 }

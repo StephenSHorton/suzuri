@@ -34,7 +34,11 @@ pub fn dir() -> PathBuf {
     if let Some(d) = std::env::var_os("RSZ_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(d).join("logs");
     }
-    let env = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(PathBuf::from);
+    let env = |k: &str| {
+        std::env::var_os(k)
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from)
+    };
     if cfg!(windows) {
         if let Some(base) = env("LOCALAPPDATA") {
             return base.join("suzuri").join("logs");
@@ -69,8 +73,15 @@ pub fn level_from(suzuri: Option<&str>, rsz: Option<&str>) -> LevelFilter {
 /// Other crates (tauri, wry, tao) log a lot; let their warnings through
 /// and the rest only at trace.
 fn allowed(level: LevelFilter, target: &str, at: Level) -> bool {
-    let ours = target == "suzuri" || target.starts_with("suzuri::") || target == "ui" || target.starts_with("rsz");
-    if ours || level == LevelFilter::Trace { at <= level } else { at <= level.min(LevelFilter::Warn) }
+    let ours = target == "suzuri"
+        || target.starts_with("suzuri::")
+        || target == "ui"
+        || target.starts_with("rsz");
+    if ours || level == LevelFilter::Trace {
+        at <= level
+    } else {
+        at <= level.min(LevelFilter::Warn)
+    }
 }
 
 struct Sink {
@@ -85,8 +96,16 @@ impl Sink {
         let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
         rotate_if_big(path, MAX_BYTES);
         let file = OpenOptions::new().create(true).append(true).open(path).ok();
-        let written = file.as_ref().and_then(|f| f.metadata().ok()).map_or(0, |m| m.len());
-        Self { file, path: path.to_path_buf(), written, trail: VecDeque::new() }
+        let written = file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .map_or(0, |m| m.len());
+        Self {
+            file,
+            path: path.to_path_buf(),
+            written,
+            trail: VecDeque::new(),
+        }
     }
 
     fn write(&mut self, line: &str) {
@@ -135,7 +154,12 @@ impl Log for Logger {
         if !self.enabled(r.metadata()) {
             return;
         }
-        let line = format_line(&crate::bridge::rfc3339_now(), r.level(), r.target(), &r.args().to_string());
+        let line = format_line(
+            &crate::bridge::rfc3339_now(),
+            r.level(),
+            r.target(),
+            &r.args().to_string(),
+        );
         if self.stderr {
             eprint!("{line}");
         }
@@ -151,14 +175,24 @@ impl Log for Logger {
 
 pub fn format_line(at: &str, level: Level, target: &str, msg: &str) -> String {
     let target = target.strip_prefix("suzuri::").unwrap_or(target);
-    format!("{at} {level:<5} pid={} {target}: {msg}\n", std::process::id())
+    format!(
+        "{at} {level:<5} pid={} {target}: {msg}\n",
+        std::process::id()
+    )
 }
 
 /// Open the log and install the logger and the panic hook. Call once, first
 /// thing in main. Without a writable log dir it logs to stderr only.
 pub fn init() {
-    let level = level_from(std::env::var("SUZURI_LOG_LEVEL").ok().as_deref(), std::env::var("RSZ_LOG_LEVEL").ok().as_deref());
-    let logger = Logger { level, stderr: std::io::stderr().is_terminal(), sink: Mutex::new(Sink::open(&path())) };
+    let level = level_from(
+        std::env::var("SUZURI_LOG_LEVEL").ok().as_deref(),
+        std::env::var("RSZ_LOG_LEVEL").ok().as_deref(),
+    );
+    let logger = Logger {
+        level,
+        stderr: std::io::stderr().is_terminal(),
+        sink: Mutex::new(Sink::open(&path())),
+    };
     let opened = logger.sink.lock().file.is_some();
     if LOGGER.set(logger).is_err() {
         return;
@@ -168,9 +202,18 @@ pub fn init() {
     }
     install_panic_hook();
     if opened {
-        log::info!("suzuri {} on {}/{}, log {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, path().display());
+        log::info!(
+            "suzuri {} on {}/{}, log {}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            path().display()
+        );
     } else {
-        eprintln!("suzuri: can't open {}; logging to stderr only", path().display());
+        eprintln!(
+            "suzuri: can't open {}; logging to stderr only",
+            path().display()
+        );
     }
 }
 
@@ -183,13 +226,24 @@ fn install_panic_hook() {
             .map(|s| s.to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "(no message)".into());
-        let at = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_default();
-        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+        let at = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_default();
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string();
         let bt = std::backtrace::Backtrace::force_capture().to_string();
         // try_lock: the panic may have happened while logging.
         let trail = match LOGGER.get().and_then(|l| l.sink.try_lock()) {
             Some(mut s) => {
-                s.write(&format_line(&crate::bridge::rfc3339_now(), Level::Error, "panic", &format!("thread '{thread}' panicked at {at}: {msg}")));
+                s.write(&format_line(
+                    &crate::bridge::rfc3339_now(),
+                    Level::Error,
+                    "panic",
+                    &format!("thread '{thread}' panicked at {at}: {msg}"),
+                ));
                 if let Some(f) = &s.file {
                     let _ = f.sync_data();
                 }
@@ -197,17 +251,41 @@ fn install_panic_hook() {
             }
             None => Vec::new(),
         };
-        let report = crash_report(&crate::bridge::rfc3339_now(), &thread, &msg, &at, &bt, &trail);
+        let report = crash_report(
+            &crate::bridge::rfc3339_now(),
+            &thread,
+            &msg,
+            &at,
+            &bt,
+            &trail,
+        );
         let _ = write_crash(&dir(), &report);
         prev(info);
     }));
 }
 
-pub fn crash_report(at: &str, thread: &str, msg: &str, location: &str, backtrace: &str, trail: &[String]) -> String {
+pub fn crash_report(
+    at: &str,
+    thread: &str,
+    msg: &str,
+    location: &str,
+    backtrace: &str,
+    trail: &[String],
+) -> String {
     let mut s = String::new();
-    s.push_str(&format!("suzuri {} panicked at {at}\n", env!("CARGO_PKG_VERSION")));
-    s.push_str(&format!("os: {} {}\npid: {}\nthread: {thread}\n", std::env::consts::OS, std::env::consts::ARCH, std::process::id()));
-    s.push_str(&format!("panic: {msg}\nat: {location}\n\nbacktrace:\n{backtrace}\n"));
+    s.push_str(&format!(
+        "suzuri {} panicked at {at}\n",
+        env!("CARGO_PKG_VERSION")
+    ));
+    s.push_str(&format!(
+        "os: {} {}\npid: {}\nthread: {thread}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::process::id()
+    ));
+    s.push_str(&format!(
+        "panic: {msg}\nat: {location}\n\nbacktrace:\n{backtrace}\n"
+    ));
     s.push_str(&format!("\nlast {} log lines:\n", trail.len()));
     for l in trail {
         s.push_str(l);
@@ -221,7 +299,12 @@ pub fn write_crash(dir: &Path, report: &str) -> std::io::Result<()> {
     static WROTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let again = WROTE.swap(true, std::sync::atomic::Ordering::Relaxed);
     let _ = std::fs::create_dir_all(dir);
-    let mut f = OpenOptions::new().create(true).write(true).append(again).truncate(!again).open(dir.join(CRASH))?;
+    let mut f = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(again)
+        .truncate(!again)
+        .open(dir.join(CRASH))?;
     if again {
         f.write_all(b"\n----\n\n")?;
     }
@@ -238,7 +321,11 @@ pub fn take_crash(dir: &Path) -> Option<PathBuf> {
     }
     let to = dir.join(CRASH_SEEN);
     let _ = std::fs::remove_file(&to);
-    Some(if std::fs::rename(&from, &to).is_ok() { to } else { from })
+    Some(if std::fs::rename(&from, &to).is_ok() {
+        to
+    } else {
+        from
+    })
 }
 
 /// The threads that panicked, from a crash file's "thread:" lines.
@@ -259,9 +346,19 @@ pub fn crash_notice(file: &Path) -> rsz_term::protocols::Notice {
     let threads = panic_threads(&std::fs::read_to_string(file).unwrap_or_default());
     let fatal = threads.is_empty() || threads.iter().any(|t| t == "main");
     let (title, body) = if fatal {
-        ("suzuri crashed last time".to_string(), format!("Crash report: {}", file.display()))
+        (
+            "suzuri crashed last time".to_string(),
+            format!("Crash report: {}", file.display()),
+        )
     } else {
-        ("suzuri hit an error last time".to_string(), format!("Panic in thread {}. Report: {}", threads.join(", "), file.display()))
+        (
+            "suzuri hit an error last time".to_string(),
+            format!(
+                "Panic in thread {}. Report: {}",
+                threads.join(", "),
+                file.display()
+            ),
+        )
     };
     rsz_term::protocols::Notice {
         id: "suzuri-crash".into(),
@@ -296,7 +393,10 @@ pub fn tail_file(path: &Path, n: usize) -> std::io::Result<Vec<String>> {
         lines.pop();
     }
     let from = lines.len().saturating_sub(n);
-    Ok(lines[from..].iter().map(|l| l.trim_end_matches('\r').to_string()).collect())
+    Ok(lines[from..]
+        .iter()
+        .map(|l| l.trim_end_matches('\r').to_string())
+        .collect())
 }
 
 #[cfg(test)]
@@ -331,7 +431,12 @@ mod tests {
 
     #[test]
     fn line_shape() {
-        let l = format_line("2026-11-09T10:00:00Z", Level::Info, "suzuri::update", "up to date");
+        let l = format_line(
+            "2026-11-09T10:00:00Z",
+            Level::Info,
+            "suzuri::update",
+            "up to date",
+        );
         assert!(l.starts_with("2026-11-09T10:00:00Z INFO  pid="), "{l}");
         assert!(l.ends_with(" update: up to date\n"), "{l}");
     }
@@ -357,7 +462,10 @@ mod tests {
         assert!(!rotate_if_big(&p, 10));
         assert!(rotate_if_big(&p, 9));
         assert!(!p.exists());
-        assert_eq!(std::fs::read_to_string(d.join("suzuri.log.1")).unwrap(), "0123456789");
+        assert_eq!(
+            std::fs::read_to_string(d.join("suzuri.log.1")).unwrap(),
+            "0123456789"
+        );
     }
 
     #[test]
@@ -369,15 +477,30 @@ mod tests {
         }
         assert_eq!(s.trail.len(), TRAIL);
         assert_eq!(s.trail.front().unwrap(), "line 3\n");
-        assert_eq!(tail_file(&d.join(FILE), 1).unwrap(), vec![format!("line {}", TRAIL + 2)]);
+        assert_eq!(
+            tail_file(&d.join(FILE), 1).unwrap(),
+            vec![format!("line {}", TRAIL + 2)]
+        );
     }
 
     #[test]
     fn crash_file_reported_once() {
         let d = tmp("crash");
         assert!(take_crash(&d).is_none());
-        let r = crash_report("T", "main", "boom", "src/x.rs:1:2", "bt", &["last\n".into()]);
-        assert!(r.contains("panic: boom\nat: src/x.rs:1:2") && r.contains("thread: main") && r.ends_with("last\n"), "{r}");
+        let r = crash_report(
+            "T",
+            "main",
+            "boom",
+            "src/x.rs:1:2",
+            "bt",
+            &["last\n".into()],
+        );
+        assert!(
+            r.contains("panic: boom\nat: src/x.rs:1:2")
+                && r.contains("thread: main")
+                && r.ends_with("last\n"),
+            "{r}"
+        );
         write_crash(&d, &r).unwrap();
         let seen = take_crash(&d).unwrap();
         assert_eq!(seen, d.join(CRASH_SEEN));
@@ -392,16 +515,33 @@ mod tests {
     fn worker_panic_is_an_error_not_a_crash() {
         let d = tmp("worker-panic");
         let a = crash_report("T", "bridge-req", "boom", "src/x.rs:1:2", "bt", &[]);
-        let b = crash_report("T", "tokio-runtime-worker", "bang", "src/y.rs:1:2", "bt", &[]);
+        let b = crash_report(
+            "T",
+            "tokio-runtime-worker",
+            "bang",
+            "src/y.rs:1:2",
+            "bt",
+            &[],
+        );
         write_crash(&d, &a).unwrap();
         write_crash(&d, &b).unwrap();
         let seen = take_crash(&d).unwrap();
-        assert_eq!(panic_threads(&std::fs::read_to_string(&seen).unwrap()), vec!["bridge-req", "tokio-runtime-worker"]);
+        assert_eq!(
+            panic_threads(&std::fs::read_to_string(&seen).unwrap()),
+            vec!["bridge-req", "tokio-runtime-worker"]
+        );
         let n = crash_notice(&seen);
         assert_eq!(n.title, "suzuri hit an error last time");
-        assert!(n.body.contains("bridge-req, tokio-runtime-worker") && n.body.contains(CRASH_SEEN), "{}", n.body);
+        assert!(
+            n.body.contains("bridge-req, tokio-runtime-worker") && n.body.contains(CRASH_SEEN),
+            "{}",
+            n.body
+        );
         // A main-thread panic in the same file still counts as a crash.
         write_crash(&d, &crash_report("T", "main", "x", "", "", &[])).unwrap();
-        assert_eq!(crash_notice(&take_crash(&d).unwrap()).title, "suzuri crashed last time");
+        assert_eq!(
+            crash_notice(&take_crash(&d).unwrap()).title,
+            "suzuri crashed last time"
+        );
     }
 }

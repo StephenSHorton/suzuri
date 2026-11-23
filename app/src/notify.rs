@@ -52,7 +52,15 @@ pub fn sound_args(args: &[String]) -> Result<Vec<&'static str>, String> {
     Ok(out)
 }
 
-fn note(title: &str, body: &str, sound: &str, icon: &str, urgency: u8, expire_ms: u32, id: &str) -> Notice {
+fn note(
+    title: &str,
+    body: &str,
+    sound: &str,
+    icon: &str,
+    urgency: u8,
+    expire_ms: u32,
+    id: &str,
+) -> Notice {
     Notice {
         id: id.into(),
         title: title.into(),
@@ -72,7 +80,9 @@ fn note(title: &str, body: &str, sound: &str, icon: &str, urgency: u8, expire_ms
 fn sample(kind: &str, title: &str, body: &str) -> Notice {
     match kind {
         "fail" | "error" => note(title, body, "error", "error", 2, 4000, ""),
-        "published" | "warn" | "warning" | "question" => note(title, body, "question", "", 1, 4000, ""),
+        "published" | "warn" | "warning" | "question" => {
+            note(title, body, "question", "", 1, 4000, "")
+        }
         _ => note(title, body, "info", "", 1, 4000, ""),
     }
 }
@@ -89,7 +99,9 @@ pub fn show_args(args: &[String]) -> Result<Vec<Notice>, String> {
     let (mut title, mut body) = match kind.as_str() {
         "success" | "info" | "system" => ("Build finished".to_string(), "3 targets".to_string()),
         "fail" | "error" => ("Compile failed".into(), "main.go:12".into()),
-        "published" | "warn" | "warning" | "question" => ("Published".into(), "workshop item is live".into()),
+        "published" | "warn" | "warning" | "question" => {
+            ("Published".into(), "workshop item is live".into())
+        }
         _ => return Err(format!("unknown notification {:?}", args[0])),
     };
     if let Some(t) = args.get(1) {
@@ -103,7 +115,11 @@ pub fn show_args(args: &[String]) -> Result<Vec<Notice>, String> {
 
 /// Runs the CLI; returns the process exit code.
 pub fn run(args: &[String], ctx: tauri::Context) -> i32 {
-    if let Some(rest) = args.first().filter(|a| matches!(a.as_str(), "show" | "toast")).map(|_| &args[1..]) {
+    if let Some(rest) = args
+        .first()
+        .filter(|a| matches!(a.as_str(), "show" | "toast"))
+        .map(|_| &args[1..])
+    {
         if rest.first().is_some_and(|k| k == "update") {
             return show_update(rest.get(1).map(String::as_str).unwrap_or(""), ctx);
         }
@@ -161,7 +177,9 @@ fn show_update(version: &str, mut ctx: tauri::Context) -> i32 {
             let handle = app.handle().clone();
             let current = handle.package_info().version.to_string();
             std::thread::spawn(move || {
-                toast::post(crate::notices::update_note(&version, &current, || println!("  Install (a sample: nothing installs)")));
+                toast::post(crate::notices::update_note(&version, &current, || {
+                    println!("  Install (a sample: nothing installs)")
+                }));
                 let end = Instant::now() + Duration::from_secs(120);
                 std::thread::sleep(Duration::from_millis(500));
                 while Instant::now() < end && !toast::card_keys().is_empty() {
@@ -194,7 +212,10 @@ fn show_update(version: &str, mut ctx: tauri::Context) -> i32 {
 /// Shows the cards on the desktop (#288) with no terminal window,
 /// then exits once they are gone (or 2 min for a card that never expires).
 fn show(notes: Vec<Notice>, mut ctx: tauri::Context) -> i32 {
-    println!("showing {} notification(s) — click to dismiss, or wait", notes.len());
+    println!(
+        "showing {} notification(s) — click to dismiss, or wait",
+        notes.len()
+    );
     // No windows at all: the cards are rust-toast's (notices.rs). Tauri
     // still runs, for the AppKit main thread the Mac's cards need.
     ctx.config_mut().app.windows.clear();
@@ -255,7 +276,9 @@ fn play_sync(wav: &[u8]) -> Result<(), String> {
     // afplay is on every Mac; Go uses AppKit's NSSound for the same files.
     let path = std::env::temp_dir().join(format!("rsz-notify-{}.wav", std::process::id()));
     std::fs::write(&path, wav).map_err(|e| e.to_string())?;
-    let r = std::process::Command::new("/usr/bin/afplay").arg(&path).status();
+    let r = std::process::Command::new("/usr/bin/afplay")
+        .arg(&path)
+        .status();
     let _ = std::fs::remove_file(&path);
     match r {
         Ok(s) if s.success() => Ok(()),
@@ -274,7 +297,14 @@ fn play_sync(wav: &[u8]) -> Result<(), String> {
         fn PlaySoundW(sound: *const u8, module: *mut std::ffi::c_void, flags: u32) -> i32;
     }
     // SND_MEMORY: the pointer is the WAV image itself.
-    if unsafe { PlaySoundW(wav.as_ptr(), std::ptr::null_mut(), SND_MEMORY | SND_SYNC | SND_NODEFAULT) } == 0 {
+    if unsafe {
+        PlaySoundW(
+            wav.as_ptr(),
+            std::ptr::null_mut(),
+            SND_MEMORY | SND_SYNC | SND_NODEFAULT,
+        )
+    } == 0
+    {
         return Err("PlaySound failed".into());
     }
     Ok(())
@@ -303,22 +333,38 @@ mod tests {
 
     #[test]
     fn sound_args_match_go() {
-        assert_eq!(sound_args(&[]).unwrap(), vec!["success", "fail", "published"]);
-        assert_eq!(sound_args(&s(&["error", "Warn", "system"])).unwrap(), vec!["fail", "published", "success"]);
+        assert_eq!(
+            sound_args(&[]).unwrap(),
+            vec!["success", "fail", "published"]
+        );
+        assert_eq!(
+            sound_args(&s(&["error", "Warn", "system"])).unwrap(),
+            vec!["fail", "published", "success"]
+        );
         assert_eq!(sound_args(&s(&["all"])).unwrap().len(), 3);
         assert_eq!(sound_args(&s(&["--help"])).unwrap_err(), "help");
-        assert!(sound_args(&s(&["boop"])).unwrap_err().contains("unknown sound"));
+        assert!(
+            sound_args(&s(&["boop"]))
+                .unwrap_err()
+                .contains("unknown sound")
+        );
     }
 
     #[test]
     fn show_args_match_go() {
         let three = show_args(&[]).unwrap();
-        assert_eq!(three.iter().map(|n| n.sound.as_str()).collect::<Vec<_>>(), vec!["info", "error", "question"]);
+        assert_eq!(
+            three.iter().map(|n| n.sound.as_str()).collect::<Vec<_>>(),
+            vec!["info", "error", "question"]
+        );
         assert_eq!(three[1].urgency, 2);
         assert_eq!(three[1].icon, "error");
         assert!(three.iter().all(|n| n.expire_ms == Some(4000)));
         let one = show_args(&s(&["fail", "Compile failed", "main.go:12", "and", "more"])).unwrap();
-        assert_eq!((one[0].title.as_str(), one[0].body.as_str()), ("Compile failed", "main.go:12 and more"));
+        assert_eq!(
+            (one[0].title.as_str(), one[0].body.as_str()),
+            ("Compile failed", "main.go:12 and more")
+        );
         // "update" is the action card (notices::update_note), not a Notice.
         assert!(show_args(&s(&["update"])).is_err());
         assert!(show_args(&s(&["nope"])).is_err());

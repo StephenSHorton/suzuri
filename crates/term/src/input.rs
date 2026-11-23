@@ -68,7 +68,11 @@ pub fn mouse_report(mode: MouseModes, ev: MouseEvent) -> Option<Vec<u8>> {
     }
     let (col, row) = (ev.col as u32 + 1, ev.row as u32 + 1);
     if mode.sgr {
-        let end = if ev.kind == MouseKind::Release { 'm' } else { 'M' };
+        let end = if ev.kind == MouseKind::Release {
+            'm'
+        } else {
+            'M'
+        };
         return Some(format!("\x1b[<{code};{col};{row}{end}").into_bytes());
     }
     // Normal (X10) encoding: a release has no button, only "3".
@@ -119,7 +123,10 @@ fn url_char(c: char) -> bool {
 }
 
 fn trail_punct(c: char) -> bool {
-    matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ']' | '}' | '\'' | '"' | '»' | '›') || c.is_whitespace()
+    matches!(
+        c,
+        '.' | ',' | ';' | ':' | '!' | '?' | ']' | '}' | '\'' | '"' | '»' | '›'
+    ) || c.is_whitespace()
 }
 
 /// http(s):// and www. URLs in `line` (one char per cell, '\0' for the
@@ -128,7 +135,11 @@ fn trail_punct(c: char) -> bool {
 /// unbalanced closing paren are left off, www. gets https:// in front.
 pub fn find_urls(line: &[char]) -> Vec<UrlSpan> {
     let lower: Vec<char> = line.iter().map(|c| c.to_ascii_lowercase()).collect();
-    let starts_at = |i: usize, pat: &str| pat.chars().enumerate().all(|(k, p)| lower.get(i + k) == Some(&p));
+    let starts_at = |i: usize, pat: &str| {
+        pat.chars()
+            .enumerate()
+            .all(|(k, p)| lower.get(i + k) == Some(&p))
+    };
     let mut out = Vec::new();
     let mut i = 0;
     while i < line.len() {
@@ -162,8 +173,16 @@ pub fn find_urls(line: &[char]) -> Vec<UrlSpan> {
         let rest = &raw[if prefix == 4 { 0 } else { prefix }..];
         let ok = end - i > prefix && !rest.starts_with('/') && !rest.is_empty();
         if ok {
-            let url = if prefix == 4 { format!("https://{raw}") } else { raw };
-            out.push(UrlSpan { x0: i, x1: end, url });
+            let url = if prefix == 4 {
+                format!("https://{raw}")
+            } else {
+                raw
+            };
+            out.push(UrlSpan {
+                x0: i,
+                x1: end,
+                url,
+            });
         }
         i = j.max(i + 1);
     }
@@ -192,7 +211,7 @@ pub fn file_url_path(url: &str) -> Option<String> {
     if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
         return None;
     }
-    let raw = rest[slash..].as_bytes();
+    let raw = &rest.as_bytes()[slash..];
     let mut out = Vec::with_capacity(raw.len());
     let mut i = 0;
     while i < raw.len() {
@@ -222,12 +241,62 @@ pub fn file_url_path(url: &str) -> Option<String> {
 /// in the file manager instead, since its visible text can say anything.
 const LAUNCHES: &[&str] = &[
     // Mac
-    "app", "command", "tool", "terminal", "webloc", "inetloc", "fileloc", "workflow", "action",
-    "scpt", "scptd", "applescript", "shortcut", "pkg", "mpkg", "prefpane", "saver", "osax",
-    "kext", "plugin", "bundle", "jar", "sh", "zsh", "bash", "csh", "ksh", "py", "pl", "rb",
+    "app",
+    "command",
+    "tool",
+    "terminal",
+    "webloc",
+    "inetloc",
+    "fileloc",
+    "workflow",
+    "action",
+    "scpt",
+    "scptd",
+    "applescript",
+    "shortcut",
+    "pkg",
+    "mpkg",
+    "prefpane",
+    "saver",
+    "osax",
+    "kext",
+    "plugin",
+    "bundle",
+    "jar",
+    "sh",
+    "zsh",
+    "bash",
+    "csh",
+    "ksh",
+    "py",
+    "pl",
+    "rb",
     // Windows
-    "exe", "bat", "cmd", "com", "lnk", "msi", "msp", "ps1", "psm1", "vbs", "vbe", "js", "jse",
-    "wsf", "wsh", "scr", "pif", "hta", "cpl", "reg", "url", "appref-ms", "msc", "inf", "gadget",
+    "exe",
+    "bat",
+    "cmd",
+    "com",
+    "lnk",
+    "msi",
+    "msp",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "scr",
+    "pif",
+    "hta",
+    "cpl",
+    "reg",
+    "url",
+    "appref-ms",
+    "msc",
+    "inf",
+    "gadget",
 ];
 
 /// Whether a file name ends in one of LAUNCHES (case-insensitive).
@@ -235,7 +304,9 @@ pub fn launches(name: &str) -> bool {
     let base = name.trim_end_matches(['/', '\\']);
     let base = base.rsplit(['/', '\\']).next().unwrap_or(base);
     match base.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => LAUNCHES.iter().any(|e| e.eq_ignore_ascii_case(ext)),
+        Some((stem, ext)) if !stem.is_empty() => {
+            LAUNCHES.iter().any(|e| e.eq_ignore_ascii_case(ext))
+        }
         _ => false,
     }
 }
@@ -244,26 +315,64 @@ pub fn launches(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    const CLICK: MouseModes = MouseModes { click: true, drag: false, motion: false, sgr: false, utf8: false };
+    const CLICK: MouseModes = MouseModes {
+        click: true,
+        drag: false,
+        motion: false,
+        sgr: false,
+        utf8: false,
+    };
     const SGR: MouseModes = MouseModes { sgr: true, ..CLICK };
 
     fn ev(kind: MouseKind, button: u8, col: u16, row: u16) -> MouseEvent {
-        MouseEvent { kind, button, col, row, shift: false, alt: false, ctrl: false }
+        MouseEvent {
+            kind,
+            button,
+            col,
+            row,
+            shift: false,
+            alt: false,
+            ctrl: false,
+        }
     }
 
     #[test]
     fn no_report_without_mouse_mode() {
-        assert_eq!(mouse_report(MouseModes { click: false, ..SGR }, ev(MouseKind::Press, 0, 1, 1)), None);
+        assert_eq!(
+            mouse_report(
+                MouseModes {
+                    click: false,
+                    ..SGR
+                },
+                ev(MouseKind::Press, 0, 1, 1)
+            ),
+            None
+        );
     }
 
     #[test]
     fn sgr_press_release_wheel() {
         let m = SGR;
-        assert_eq!(mouse_report(m, ev(MouseKind::Press, 0, 4, 9)).unwrap(), b"\x1b[<0;5;10M");
-        assert_eq!(mouse_report(m, ev(MouseKind::Release, 0, 4, 9)).unwrap(), b"\x1b[<0;5;10m");
-        assert_eq!(mouse_report(m, ev(MouseKind::Press, 2, 0, 0)).unwrap(), b"\x1b[<2;1;1M");
-        assert_eq!(mouse_report(m, ev(MouseKind::WheelUp, 0, 0, 0)).unwrap(), b"\x1b[<64;1;1M");
-        assert_eq!(mouse_report(m, ev(MouseKind::WheelDown, 0, 0, 0)).unwrap(), b"\x1b[<65;1;1M");
+        assert_eq!(
+            mouse_report(m, ev(MouseKind::Press, 0, 4, 9)).unwrap(),
+            b"\x1b[<0;5;10M"
+        );
+        assert_eq!(
+            mouse_report(m, ev(MouseKind::Release, 0, 4, 9)).unwrap(),
+            b"\x1b[<0;5;10m"
+        );
+        assert_eq!(
+            mouse_report(m, ev(MouseKind::Press, 2, 0, 0)).unwrap(),
+            b"\x1b[<2;1;1M"
+        );
+        assert_eq!(
+            mouse_report(m, ev(MouseKind::WheelUp, 0, 0, 0)).unwrap(),
+            b"\x1b[<64;1;1M"
+        );
+        assert_eq!(
+            mouse_report(m, ev(MouseKind::WheelDown, 0, 0, 0)).unwrap(),
+            b"\x1b[<65;1;1M"
+        );
         let mut e = ev(MouseKind::Press, 0, 0, 0);
         e.ctrl = true;
         e.shift = true;
@@ -273,23 +382,54 @@ mod tests {
     #[test]
     fn motion_follows_1000_1002_1003() {
         let click = SGR;
-        assert_eq!(mouse_report(click, ev(MouseKind::Motion(Some(0)), 0, 1, 1)), None);
-        let drag = MouseModes { drag: true, ..click };
-        assert_eq!(mouse_report(drag, ev(MouseKind::Motion(Some(0)), 0, 1, 1)).unwrap(), b"\x1b[<32;2;2M");
-        assert_eq!(mouse_report(drag, ev(MouseKind::Motion(None), 0, 1, 1)), None);
-        let any = MouseModes { motion: true, ..click };
-        assert_eq!(mouse_report(any, ev(MouseKind::Motion(None), 0, 1, 1)).unwrap(), b"\x1b[<35;2;2M");
+        assert_eq!(
+            mouse_report(click, ev(MouseKind::Motion(Some(0)), 0, 1, 1)),
+            None
+        );
+        let drag = MouseModes {
+            drag: true,
+            ..click
+        };
+        assert_eq!(
+            mouse_report(drag, ev(MouseKind::Motion(Some(0)), 0, 1, 1)).unwrap(),
+            b"\x1b[<32;2;2M"
+        );
+        assert_eq!(
+            mouse_report(drag, ev(MouseKind::Motion(None), 0, 1, 1)),
+            None
+        );
+        let any = MouseModes {
+            motion: true,
+            ..click
+        };
+        assert_eq!(
+            mouse_report(any, ev(MouseKind::Motion(None), 0, 1, 1)).unwrap(),
+            b"\x1b[<35;2;2M"
+        );
     }
 
     #[test]
     fn x10_and_utf8_encodings() {
         let m = CLICK;
-        assert_eq!(mouse_report(m, ev(MouseKind::Press, 0, 0, 0)).unwrap(), b"\x1b[M !!");
+        assert_eq!(
+            mouse_report(m, ev(MouseKind::Press, 0, 0, 0)).unwrap(),
+            b"\x1b[M !!"
+        );
         // Release has no button in X10: 3.
-        assert_eq!(mouse_report(m, ev(MouseKind::Release, 0, 0, 0)).unwrap(), b"\x1b[M#!!");
+        assert_eq!(
+            mouse_report(m, ev(MouseKind::Release, 0, 0, 0)).unwrap(),
+            b"\x1b[M#!!"
+        );
         // Past 223 columns X10 clamps; UTF-8 mode goes further.
-        assert_eq!(mouse_report(m, ev(MouseKind::Press, 0, 300, 0)).unwrap(), [0x1b, b'[', b'M', 32, 255, 33]);
-        let u = mouse_report(MouseModes { utf8: true, ..m }, ev(MouseKind::Press, 0, 300, 0)).unwrap();
+        assert_eq!(
+            mouse_report(m, ev(MouseKind::Press, 0, 300, 0)).unwrap(),
+            [0x1b, b'[', b'M', 32, 255, 33]
+        );
+        let u = mouse_report(
+            MouseModes { utf8: true, ..m },
+            ev(MouseKind::Press, 0, 300, 0),
+        )
+        .unwrap();
         assert_eq!(&u[..4], b"\x1b[M ");
         assert_eq!(std::str::from_utf8(&u[4..]).unwrap(), "\u{14d}!");
     }
@@ -299,22 +439,49 @@ mod tests {
         assert_eq!(paste_bytes("a\nb\r\nc", false), b"a\rb\rc");
         assert_eq!(paste_bytes("a\nb", true), b"\x1b[200~a\rb\x1b[201~");
         // An embedded end marker can't end the paste early.
-        assert_eq!(paste_bytes("x\x1b[201~rm -rf\n", true), b"\x1b[200~xrm -rf\r\x1b[201~");
+        assert_eq!(
+            paste_bytes("x\x1b[201~rm -rf\n", true),
+            b"\x1b[200~xrm -rf\r\x1b[201~"
+        );
     }
 
     fn urls(s: &str) -> Vec<(usize, usize, String)> {
         let v: Vec<char> = s.chars().collect();
-        find_urls(&v).into_iter().map(|u| (u.x0, u.x1, u.url)).collect()
+        find_urls(&v)
+            .into_iter()
+            .map(|u| (u.x0, u.x1, u.url))
+            .collect()
     }
 
     #[test]
     fn finds_urls_like_go_suzuri() {
-        assert_eq!(urls("see https://example.com/a?b=1."), vec![(4, 29, "https://example.com/a?b=1".into())]);
-        assert_eq!(urls("(see https://x.com/y)"), vec![(5, 20, "https://x.com/y".into())]);
-        assert_eq!(urls("go to www.rust-lang.org, now"), vec![(6, 23, "https://www.rust-lang.org".into())]);
-        assert_eq!(urls("HTTP://A.B and http:// and xhttps://no"), vec![(0, 10, "HTTP://A.B".into())]);
-        assert_eq!(urls("硯\0 https://例\0え\0.jp/パ\0ス\0 end"), vec![(3, 23, "https://例え.jp/パス".into())]);
-        assert_eq!(urls("two: http://a.io http://b.io"), vec![(5, 16, "http://a.io".into()), (17, 28, "http://b.io".into())]);
+        assert_eq!(
+            urls("see https://example.com/a?b=1."),
+            vec![(4, 29, "https://example.com/a?b=1".into())]
+        );
+        assert_eq!(
+            urls("(see https://x.com/y)"),
+            vec![(5, 20, "https://x.com/y".into())]
+        );
+        assert_eq!(
+            urls("go to www.rust-lang.org, now"),
+            vec![(6, 23, "https://www.rust-lang.org".into())]
+        );
+        assert_eq!(
+            urls("HTTP://A.B and http:// and xhttps://no"),
+            vec![(0, 10, "HTTP://A.B".into())]
+        );
+        assert_eq!(
+            urls("硯\0 https://例\0え\0.jp/パ\0ス\0 end"),
+            vec![(3, 23, "https://例え.jp/パス".into())]
+        );
+        assert_eq!(
+            urls("two: http://a.io http://b.io"),
+            vec![
+                (5, 16, "http://a.io".into()),
+                (17, 28, "http://b.io".into())
+            ]
+        );
         assert!(urls("https:///nohost").is_empty());
     }
 
@@ -334,9 +501,18 @@ mod tests {
 
     #[test]
     fn file_url_paths() {
-        assert_eq!(file_url_path("file:///Users/me/a%20b.txt").as_deref(), Some("/Users/me/a b.txt"));
-        assert_eq!(file_url_path("FILE://localhost/tmp/x?q#f").as_deref(), Some("/tmp/x"));
-        assert_eq!(file_url_path("file:///C:/Users/x.exe").as_deref(), Some("C:/Users/x.exe"));
+        assert_eq!(
+            file_url_path("file:///Users/me/a%20b.txt").as_deref(),
+            Some("/Users/me/a b.txt")
+        );
+        assert_eq!(
+            file_url_path("FILE://localhost/tmp/x?q#f").as_deref(),
+            Some("/tmp/x")
+        );
+        assert_eq!(
+            file_url_path("file:///C:/Users/x.exe").as_deref(),
+            Some("C:/Users/x.exe")
+        );
         assert_eq!(file_url_path("file://other/tmp/x"), None);
         assert_eq!(file_url_path("file:///tmp/%zz"), None);
         assert_eq!(file_url_path("file:///tmp/%00x"), None);

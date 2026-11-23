@@ -16,7 +16,12 @@ const BLUE: u32 = 0x3355cc;
 const WHITE: u32 = 0xdddddd;
 
 fn cell(cp: char, fg: u32, bg: u32, attrs: u16) -> CellOut {
-    CellOut { cp: cp as u32, fg, bg, attrs }
+    CellOut {
+        cp: cp as u32,
+        fg,
+        bg,
+        attrs,
+    }
 }
 
 fn text(s: &str, fg: u32, bg: u32, attrs: u16) -> Vec<CellOut> {
@@ -56,7 +61,15 @@ fn full() -> Vec<u8> {
     encode_row(&mut out, 1, 0, &r1);
     // Row 2: a wide glyph and its right half (0), a box line, an
     // underlined "u", then blanks.
-    let mut r2 = vec![cell('漢', WHITE, DEFAULT_BG, 0), CellOut { cp: 0, fg: WHITE, bg: DEFAULT_BG, attrs: 0 }];
+    let mut r2 = vec![
+        cell('漢', WHITE, DEFAULT_BG, 0),
+        CellOut {
+            cp: 0,
+            fg: WHITE,
+            bg: DEFAULT_BG,
+            attrs: 0,
+        },
+    ];
     r2.push(cell('─', WHITE, DEFAULT_BG, 0));
     r2.push(cell('u', WHITE, DEFAULT_BG, A_UNDERLINE));
     r2.extend(text("      ", WHITE, DEFAULT_BG, 0));
@@ -77,7 +90,12 @@ fn partial() -> Vec<u8> {
 fn clusters() -> Vec<u8> {
     let mut out = Vec::new();
     encode_header(&mut out, &header(true, 1, 9));
-    let spacer = CellOut { cp: 0, fg: WHITE, bg: DEFAULT_BG, attrs: 0 };
+    let spacer = CellOut {
+        cp: 0,
+        fg: WHITE,
+        bg: DEFAULT_BG,
+        attrs: 0,
+    };
     let groups = ["👍🏽", "e\u{301}", "🇯🇵", "👨‍👩‍👧"];
     let mut row = Vec::new();
     let mut table = Vec::new();
@@ -85,7 +103,12 @@ fn clusters() -> Vec<u8> {
         let cps: Vec<u32> = g.chars().map(|c| c as u32).collect();
         let w = if cps[0] == 'e' as u32 { 1 } else { 2 };
         encode_cluster(&mut table, 0, row.len() as u16, w, &cps);
-        row.push(CellOut { cp: cps[0], fg: WHITE, bg: DEFAULT_BG, attrs: 0 });
+        row.push(CellOut {
+            cp: cps[0],
+            fg: WHITE,
+            bg: DEFAULT_BG,
+            attrs: 0,
+        });
         if w == 2 {
             row.push(spacer);
         }
@@ -103,14 +126,26 @@ fn dir() -> PathBuf {
 #[test]
 fn fixtures_match_the_encoder() {
     let regen = std::env::var_os("SUZURI_REGEN_FIXTURES").is_some();
-    for (name, bytes) in [("full.bin", full()), ("partial.bin", partial()), ("clusters.bin", clusters())] {
+    for (name, bytes) in [
+        ("full.bin", full()),
+        ("partial.bin", partial()),
+        ("clusters.bin", clusters()),
+    ] {
         let path = dir().join(name);
         if regen {
             std::fs::create_dir_all(dir()).unwrap();
             std::fs::write(&path, &bytes).unwrap();
             continue;
         }
-        let have = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}; regenerate (see the top of this file)", path.display()));
-        assert!(have == bytes, "{name} no longer matches the encoder; regenerate (see the top of this file) and update ui/test/frame.test.mjs");
+        let have = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "{}: {e}; regenerate (see the top of this file)",
+                path.display()
+            )
+        });
+        assert!(
+            have == bytes,
+            "{name} no longer matches the encoder; regenerate (see the top of this file) and update ui/test/frame.test.mjs"
+        );
     }
 }

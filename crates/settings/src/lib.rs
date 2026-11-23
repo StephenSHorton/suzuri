@@ -32,9 +32,25 @@ pub const FONT_FACE_DEFAULT: &str = "GohuFont uni14 Nerd Font Mono";
 /// The look: one of Astryx's seven themes (npm @astryxdesign/theme-<id>),
 /// for the whole window, the terminal's colours and the notice cards. The
 /// first is the default.
-pub const UI_THEMES: &[&str] = &["neutral", "stone", "matcha", "chocolate", "butter", "gothic", "y2k"];
+pub const UI_THEMES: &[&str] = &[
+    "neutral",
+    "stone",
+    "matcha",
+    "chocolate",
+    "butter",
+    "gothic",
+    "y2k",
+];
 /// The Settings labels, in the same order.
-pub const UI_THEME_LABELS: &[&str] = &["Neutral", "Stone", "Matcha", "Chocolate", "Butter", "Gothic", "Y2K"];
+pub const UI_THEME_LABELS: &[&str] = &[
+    "Neutral",
+    "Stone",
+    "Matcha",
+    "Chocolate",
+    "Butter",
+    "Gothic",
+    "Y2K",
+];
 /// Its mode; "system" follows the OS. The first is the default.
 pub const UI_MODES: &[&str] = &["dark", "light", "system"];
 pub const UI_MODE_LABELS: &[&str] = &["Dark", "Light", "System"];
@@ -44,7 +60,16 @@ const RETIRED_KEYS: &[&str] = &["theme", "shell_ansi_map"];
 /// Go's MonoFontFaces: the settings list, bundled face first.
 pub fn mono_font_faces() -> Vec<&'static str> {
     if cfg!(target_os = "macos") {
-        vec![FONT_FACE_DEFAULT, "Menlo", "SF Mono", "Monaco", "JetBrains Mono", "Fira Code", "Source Code Pro", "Courier New"]
+        vec![
+            FONT_FACE_DEFAULT,
+            "Menlo",
+            "SF Mono",
+            "Monaco",
+            "JetBrains Mono",
+            "Fira Code",
+            "Source Code Pro",
+            "Courier New",
+        ]
     } else {
         vec![
             FONT_FACE_DEFAULT,
@@ -68,7 +93,9 @@ pub const CURSORS: &[&str] = &["block", "underline", "bar"];
 /// follows it; the terminal keeps font_size_px.
 pub const TEXT_SIZES: &[&str] = &["xs", "s", "m", "l", "xl", "xxl", "xxxl"];
 /// The Settings labels, in the same order. "l" is Astryx's own default.
-pub const TEXT_SIZE_LABELS: &[&str] = &["Smallest", "Smaller", "Small", "Standard", "Large", "Larger", "Largest"];
+pub const TEXT_SIZE_LABELS: &[&str] = &[
+    "Smallest", "Smaller", "Small", "Standard", "Large", "Larger", "Largest",
+];
 /// Suzuri's default: one step above Astryx's, so the chrome's text isn't
 /// small against its controls.
 pub const TEXT_SIZE_DEFAULT: &str = "xl";
@@ -77,7 +104,8 @@ pub const TEXT_SIZE_DEFAULT: &str = "xl";
 /// in (toast::CORNER_*). The first is the default.
 pub const NOTICE_POSITIONS: &[&str] = &["bottom-left", "bottom-right", "top-left", "top-right"];
 /// The Settings labels, in the same order.
-pub const NOTICE_POSITION_LABELS: &[&str] = &["Bottom left", "Bottom right", "Top left", "Top right"];
+pub const NOTICE_POSITION_LABELS: &[&str] =
+    &["Bottom left", "Bottom right", "Top left", "Top right"];
 
 /// Go's nine anchors (and anything else) to the nearest corner: the middle
 /// row goes to the bottom, the center column to the right (a tie either
@@ -97,7 +125,12 @@ fn notice_corner(p: &str) -> &'static str {
 /// `path` is the shared file.
 pub fn meta() -> Value {
     let labels = |ids: &[&str], labels: &[&str]| -> Value {
-        Value::Object(ids.iter().zip(labels).map(|(i, l)| ((*i).to_string(), Value::from(*l))).collect())
+        Value::Object(
+            ids.iter()
+                .zip(labels)
+                .map(|(i, l)| ((*i).to_string(), Value::from(*l)))
+                .collect(),
+        )
     };
     json!({
         "path": path().to_string_lossy(),
@@ -123,7 +156,11 @@ pub fn meta() -> Value {
 fn dir_named(name: &str) -> PathBuf {
     if let Some(d) = std::env::var_os("RSZ_CONFIG_DIR").filter(|d| !d.is_empty()) {
         let d = PathBuf::from(d);
-        return if name == "suzuri" { d.join("go-suzuri") } else { d };
+        return if name == "suzuri" {
+            d.join("go-suzuri")
+        } else {
+            d
+        };
     }
     // Same order as Go suzuri's config.Dir.
     if let Some(base) = std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()) {
@@ -181,16 +218,32 @@ pub fn normalize(v: Value) -> Value {
         Value::Object(m) => m,
         _ => Map::new(),
     };
-    let s = |m: &Map<String, Value>, k: &str| m.get(k).and_then(Value::as_str).map(|s| s.trim().to_lowercase());
+    let s = |m: &Map<String, Value>, k: &str| {
+        m.get(k)
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_lowercase())
+    };
 
-    let face = m.get("font_face").and_then(Value::as_str).map(str::trim).filter(|f| !f.is_empty());
+    let face = m
+        .get("font_face")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|f| !f.is_empty());
     let face = face.unwrap_or(FONT_FACE_DEFAULT).to_string();
     m.insert("font_face".into(), face.into());
 
-    let size = m.get("font_size_px").and_then(Value::as_i64).unwrap_or(FONT_SIZE_DEFAULT);
-    m.insert("font_size_px".into(), size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX).into());
+    let size = m
+        .get("font_size_px")
+        .and_then(Value::as_i64)
+        .unwrap_or(FONT_SIZE_DEFAULT);
+    m.insert(
+        "font_size_px".into(),
+        size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX).into(),
+    );
 
-    let cursor = s(&m, "cursor").filter(|c| CURSORS.contains(&c.as_str())).unwrap_or_else(|| CURSORS[0].into());
+    let cursor = s(&m, "cursor")
+        .filter(|c| CURSORS.contains(&c.as_str()))
+        .unwrap_or_else(|| CURSORS[0].into());
     m.insert("cursor".into(), cursor.into());
 
     // The old 16 terminal themes are gone; whoever had one starts on the
@@ -198,24 +251,38 @@ pub fn normalize(v: Value) -> Value {
     for k in RETIRED_KEYS {
         m.remove(*k);
     }
-    let theme = s(&m, "ui_theme").filter(|t| UI_THEMES.contains(&t.as_str())).unwrap_or_else(|| UI_THEMES[0].into());
+    let theme = s(&m, "ui_theme")
+        .filter(|t| UI_THEMES.contains(&t.as_str()))
+        .unwrap_or_else(|| UI_THEMES[0].into());
     m.insert("ui_theme".into(), theme.into());
-    let mode = s(&m, "ui_mode").filter(|t| UI_MODES.contains(&t.as_str())).unwrap_or_else(|| UI_MODES[0].into());
+    let mode = s(&m, "ui_mode")
+        .filter(|t| UI_MODES.contains(&t.as_str()))
+        .unwrap_or_else(|| UI_MODES[0].into());
     m.insert("ui_mode".into(), mode.into());
 
     // Go's Bg anim: keep animating while another app has focus.
-    let anim = m.get("animate_unfocused").and_then(Value::as_bool).unwrap_or(true);
+    let anim = m
+        .get("animate_unfocused")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     m.insert("animate_unfocused".into(), anim.into());
 
     // Terminals back after a reboot: on unless turned off.
-    let restore = m.get("restore_sessions").and_then(Value::as_bool).unwrap_or(true);
+    let restore = m
+        .get("restore_sessions")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     m.insert("restore_sessions".into(), restore.into());
 
     let pos = notice_corner(s(&m, "notice_position").as_deref().unwrap_or(""));
     m.insert("notice_position".into(), pos.into());
 
     let size = s(&m, "ui_text_size").unwrap_or_default();
-    let size = TEXT_SIZES.iter().find(|t| **t == size).copied().unwrap_or(TEXT_SIZE_DEFAULT);
+    let size = TEXT_SIZES
+        .iter()
+        .find(|t| **t == size)
+        .copied()
+        .unwrap_or(TEXT_SIZE_DEFAULT);
     m.insert("ui_text_size".into(), size.into());
 
     // Profiles: unique, non-empty names (case-insensitive), never empty.
@@ -238,9 +305,19 @@ pub fn normalize(v: Value) -> Value {
     if profiles.is_empty() {
         profiles = default_profiles().as_array().cloned().unwrap_or_default();
     }
-    let names: Vec<String> = profiles.iter().filter_map(|p| p["name"].as_str().map(str::to_string)).collect();
-    let active = m.get("active_profile").and_then(Value::as_str).unwrap_or("");
-    let active = names.iter().find(|n| n.eq_ignore_ascii_case(active)).unwrap_or(&names[0]).clone();
+    let names: Vec<String> = profiles
+        .iter()
+        .filter_map(|p| p["name"].as_str().map(str::to_string))
+        .collect();
+    let active = m
+        .get("active_profile")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let active = names
+        .iter()
+        .find(|n| n.eq_ignore_ascii_case(active))
+        .unwrap_or(&names[0])
+        .clone();
     m.insert("profiles".into(), Value::Array(profiles));
     m.insert("active_profile".into(), active.into());
     Value::Object(m)
@@ -286,7 +363,10 @@ pub fn update_at(path: &Path, go: &Path, patch: Value) -> std::io::Result<Value>
         return Ok(normalize(Value::Object(raw)));
     };
     let mut keys: Vec<String> = patch.keys().cloned().collect();
-    if keys.iter().any(|k| k == "profiles" || k == "active_profile") {
+    if keys
+        .iter()
+        .any(|k| k == "profiles" || k == "active_profile")
+    {
         keys.extend(["profiles".into(), "active_profile".into()]);
     }
     raw.extend(patch);
@@ -389,7 +469,12 @@ impl Store {
 
     /// The file at `path`, importing `go` when `path` does not exist yet.
     pub fn with_import(path: impl Into<PathBuf>, go: impl Into<PathBuf>) -> Self {
-        Self { path: path.into(), go: go.into(), write: Mutex::new(()), seen: Arc::new(Mutex::new(None)) }
+        Self {
+            path: path.into(),
+            go: go.into(),
+            write: Mutex::new(()),
+            seen: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -467,7 +552,10 @@ impl Store {
                 }
             })
             .expect("spawn settings watch");
-        Watch { stop: Some(stop), thread: Some(thread) }
+        Watch {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
     }
 }
 
@@ -509,13 +597,27 @@ impl Drop for Watch {
 /// A profile's launch: argv (None = the user's shell) and cwd. `name` None
 /// is the active profile.
 pub fn profile_launch(cfg: &Value, name: Option<&str>) -> (Option<Vec<String>>, Option<String>) {
-    let want = name.or_else(|| cfg["active_profile"].as_str()).unwrap_or("");
-    let p = cfg["profiles"]
-        .as_array()
-        .and_then(|ps| ps.iter().find(|p| p["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(want))));
+    let want = name
+        .or_else(|| cfg["active_profile"].as_str())
+        .unwrap_or("");
+    let p = cfg["profiles"].as_array().and_then(|ps| {
+        ps.iter().find(|p| {
+            p["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case(want))
+        })
+    });
     let Some(p) = p else { return (None, None) };
-    let shell = p["shell"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(split_args);
-    let cwd = p["cwd"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(expand_home);
+    let shell = p["shell"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(split_args);
+    let cwd = p["cwd"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(expand_home);
     (shell, cwd)
 }
 
@@ -552,7 +654,9 @@ pub fn split_args(s: &str) -> Vec<String> {
 
 fn expand_home(p: &str) -> String {
     if let Some(rest) = p.strip_prefix('~') {
-        let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
         return format!("{home}{rest}");
     }
     p.to_string()

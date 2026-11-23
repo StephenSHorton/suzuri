@@ -25,7 +25,10 @@ const MAX_STUCK: usize = 4;
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// Run `f` on a clipboard thread and wait up to `limit` for its answer.
-pub fn run<T: Send + 'static>(limit: Duration, f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+pub fn run<T: Send + 'static>(
+    limit: Duration,
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
     run_with(&IN_FLIGHT, MAX_STUCK, limit, f)
 }
 
@@ -40,11 +43,13 @@ fn run_with<T: Send + 'static>(
         return Err("clipboard busy (another app is not answering)".into());
     }
     let (tx, rx) = crossbeam_channel::bounded(1);
-    let spawned = std::thread::Builder::new().name("rsz-clipboard".into()).spawn(move || {
-        let out = f();
-        in_flight.fetch_sub(1, Ordering::AcqRel);
-        let _ = tx.send(out);
-    });
+    let spawned = std::thread::Builder::new()
+        .name("rsz-clipboard".into())
+        .spawn(move || {
+            let out = f();
+            in_flight.fetch_sub(1, Ordering::AcqRel);
+            let _ = tx.send(out);
+        });
     if let Err(e) = spawned {
         in_flight.fetch_sub(1, Ordering::AcqRel);
         return Err(format!("clipboard thread: {e}"));
@@ -69,7 +74,9 @@ pub fn text(limit: Duration) -> Result<String, String> {
 
 /// Put `text` on the clipboard.
 pub fn set_text(limit: Duration, text: String) -> Result<(), String> {
-    run(limit, move || clipboard()?.set_text(text).map_err(|e| e.to_string()))
+    run(limit, move || {
+        clipboard()?.set_text(text).map_err(|e| e.to_string())
+    })
 }
 
 /// What a paste takes from the clipboard.
@@ -98,7 +105,10 @@ mod tests {
     fn answers_in_time() {
         static N: AtomicUsize = AtomicUsize::new(0);
         assert_eq!(run_with(&N, 2, Duration::from_secs(5), || Ok(7)), Ok(7));
-        assert_eq!(run_with::<u8>(&N, 2, Duration::from_secs(5), || Err("no".into())), Err("no".into()));
+        assert_eq!(
+            run_with::<u8>(&N, 2, Duration::from_secs(5), || Err("no".into())),
+            Err("no".into())
+        );
         assert_eq!(N.load(Ordering::Acquire), 0);
     }
 

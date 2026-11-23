@@ -98,7 +98,11 @@ impl Caffeine {
         Self::build(hold, shared, SHARED_POLL)
     }
 
-    fn build(mut hold: impl OsHold + Send + 'static, shared: Option<PathBuf>, poll: Duration) -> Arc<Self> {
+    fn build(
+        mut hold: impl OsHold + Send + 'static,
+        shared: Option<PathBuf>,
+        poll: Duration,
+    ) -> Arc<Self> {
         let (tx, rx) = channel::<bool>();
         let (res_tx, res_rx) = channel();
         std::thread::Builder::new()
@@ -116,7 +120,10 @@ impl Caffeine {
             hold: tx,
             hold_result: Mutex::new(res_rx),
             on_change: Mutex::new(None),
-            shared: shared.map(|path| Shared { path, seen: Mutex::new(None) }),
+            shared: shared.map(|path| Shared {
+                path,
+                seen: Mutex::new(None),
+            }),
         });
         if me.shared.is_some() {
             me.follow_file();
@@ -147,7 +154,11 @@ impl Caffeine {
 
     /// On for `minutes`, or indefinitely with None (or 0).
     pub fn activate(self: &Arc<Self>, minutes: Option<u32>) -> Status {
-        self.activate_for(minutes.filter(|&m| m > 0).map(|m| Duration::from_secs(m as u64 * 60)))
+        self.activate_for(
+            minutes
+                .filter(|&m| m > 0)
+                .map(|m| Duration::from_secs(m as u64 * 60)),
+        )
     }
 
     /// On for `dur`, or indefinitely with None. On top of a hold it keeps the
@@ -162,13 +173,18 @@ impl Caffeine {
 
     /// Off when on (timed or not), else on indefinitely.
     pub fn toggle(self: &Arc<Self>) -> Status {
-        if lock(&self.inner).active { self.deactivate() } else { self.activate(None) }
+        if lock(&self.inner).active {
+            self.deactivate()
+        } else {
+            self.activate(None)
+        }
     }
 
     fn os(&self, want: bool) -> Result<(), String> {
         let rx = lock(&self.hold_result);
         self.hold.send(want).map_err(|e| e.to_string())?;
-        rx.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| Err("caffeine thread did not answer".into()))
+        rx.recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|_| Err("caffeine thread did not answer".into()))
     }
 
     /// Makes the switch `on` (until `until`, or indefinitely) here, and with
@@ -235,14 +251,18 @@ impl Caffeine {
         let text = {
             // Read under `seen` (see apply); let go before applying.
             let mut seen = lock(&sh.seen);
-            let Ok(text) = std::fs::read_to_string(&sh.path) else { return };
+            let Ok(text) = std::fs::read_to_string(&sh.path) else {
+                return;
+            };
             if seen.as_deref() == Some(text.as_str()) {
                 return;
             }
             *seen = Some(text.clone());
             text
         };
-        let Some((on, until)) = parse_switch(&text) else { return };
+        let Some((on, until)) = parse_switch(&text) else {
+            return;
+        };
         let expired = until.is_some_and(|u| u <= SystemTime::now());
         let on = on && !expired;
         // Off and already off: nothing changes, so no change event.
@@ -262,11 +282,18 @@ fn watch(weak: Weak<Caffeine>, poll: Duration) {
 }
 
 fn status_at(inner: &Inner, now: Instant) -> Status {
-    let remaining = inner.until.filter(|_| inner.active).map(|u| u.saturating_duration_since(now));
+    let remaining = inner
+        .until
+        .filter(|_| inner.active)
+        .map(|u| u.saturating_duration_since(now));
     Status {
         active: inner.active,
         remaining_s: remaining.map(|d| (d.as_millis() as u64).div_ceil(1000)),
-        label: if inner.active { label(remaining) } else { String::new() },
+        label: if inner.active {
+            label(remaining)
+        } else {
+            String::new()
+        },
         error: inner.error.clone(),
     }
 }
@@ -274,7 +301,9 @@ fn status_at(inner: &Inner, now: Instant) -> Status {
 /// "∞" indefinite, else "1h", "1h5", "12m" or "40s" (rounded to the nearest
 /// second).
 pub fn label(remaining: Option<Duration>) -> String {
-    let Some(d) = remaining else { return "∞".into() };
+    let Some(d) = remaining else {
+        return "∞".into();
+    };
     let sec = (d.as_millis() as u64 + 500) / 1000;
     match sec {
         s if s >= 3600 => match (s % 3600) / 60 {
@@ -287,7 +316,9 @@ pub fn label(remaining: Option<Duration>) -> String {
 }
 
 fn instant_at(t: SystemTime) -> Instant {
-    Instant::now() + t.duration_since(SystemTime::now()).unwrap_or(Duration::ZERO)
+    Instant::now()
+        + t.duration_since(SystemTime::now())
+            .unwrap_or(Duration::ZERO)
 }
 
 // ---- The shared switch file: one line, `off`, `on`, or `on <unix ms>` (on
@@ -298,7 +329,10 @@ fn switch_text(on: bool, until: Option<SystemTime>) -> String {
     match (on, until) {
         (false, _) => "off\n".into(),
         (true, None) => "on\n".into(),
-        (true, Some(t)) => format!("on {}\n", t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()),
+        (true, Some(t)) => format!(
+            "on {}\n",
+            t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
+        ),
     }
 }
 
@@ -307,7 +341,10 @@ fn parse_switch(text: &str) -> Option<(bool, Option<SystemTime>)> {
     match (words.next()?, words.next()) {
         ("off", _) => Some((false, None)),
         ("on", None) => Some((true, None)),
-        ("on", Some(ms)) => Some((true, Some(UNIX_EPOCH + Duration::from_millis(ms.parse().ok()?)))),
+        ("on", Some(ms)) => Some((
+            true,
+            Some(UNIX_EPOCH + Duration::from_millis(ms.parse().ok()?)),
+        )),
         _ => None,
     }
 }
@@ -343,7 +380,11 @@ fn write_switch(path: &Path, text: &str) -> std::io::Result<()> {
 /// `$XDG_STATE_HOME` or `~/.local/state`. None when the home folder is
 /// unknown.
 pub fn shared_switch_path() -> Option<PathBuf> {
-    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let env = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
     let base = if cfg!(target_os = "macos") {
         env("HOME")?.join("Library/Application Support")
     } else if cfg!(windows) {
@@ -365,7 +406,10 @@ pub struct SystemHold {
 impl SystemHold {
     /// `name`: what the OS shows for the hold (macOS `pmset -g assertions`).
     pub fn new(name: &str) -> Self {
-        Self { name: name.to_owned(), held: Default::default() }
+        Self {
+            name: name.to_owned(),
+            held: Default::default(),
+        }
     }
 }
 
@@ -379,12 +423,21 @@ mod platform {
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
-        fn CFStringCreateWithCString(alloc: *const c_void, s: *const c_char, enc: u32) -> CFStringRef;
+        fn CFStringCreateWithCString(
+            alloc: *const c_void,
+            s: *const c_char,
+            enc: u32,
+        ) -> CFStringRef;
         fn CFRelease(cf: *const c_void);
     }
     #[link(name = "IOKit", kind = "framework")]
     unsafe extern "C" {
-        fn IOPMAssertionCreateWithName(kind: CFStringRef, level: u32, name: CFStringRef, id: *mut u32) -> i32;
+        fn IOPMAssertionCreateWithName(
+            kind: CFStringRef,
+            level: u32,
+            name: CFStringRef,
+            id: *mut u32,
+        ) -> i32;
         fn IOPMAssertionRelease(id: u32) -> i32;
     }
 
@@ -442,7 +495,10 @@ mod platform {
             if self.held {
                 return Ok(());
             }
-            if unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED) } == 0 {
+            if unsafe {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)
+            } == 0
+            {
                 return Err("SetThreadExecutionState failed".into());
             }
             self.held = true;

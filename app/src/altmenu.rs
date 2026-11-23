@@ -52,7 +52,14 @@ mod win {
         unsafe { SetWindowSubclass(hwnd, Some(proc_), ID, 0) != 0 }
     }
 
-    unsafe extern "system" fn proc_(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    unsafe extern "system" fn proc_(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
         if super::swallows(msg, wparam, lparam) {
             return 0;
         }

@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
+use tungstenite::handshake::server::{Request, Response};
 use tungstenite::protocol::Role;
 use tungstenite::{Message, WebSocket};
-use tungstenite::handshake::server::{Request, Response};
 
 pub struct FrameBus {
     tx: Sender<(u32, Vec<u8>)>,
@@ -26,10 +26,19 @@ impl FrameBus {
     pub fn start(on_ack: Arc<dyn Fn(u32, u32) + Send + Sync>) -> std::io::Result<FrameBus> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let token = format!("{:016x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64 ^ (std::process::id() as u64) << 32);
+        let token = format!(
+            "{:016x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64
+                ^ (std::process::id() as u64) << 32
+        );
         let (tx, rx) = unbounded::<(u32, Vec<u8>)>();
         let want = format!("/?t={token}");
-        std::thread::Builder::new().name("rsz-ws".into()).spawn(move || serve(listener, rx, want, on_ack))?;
+        std::thread::Builder::new()
+            .name("rsz-ws".into())
+            .spawn(move || serve(listener, rx, want, on_ack))?;
         Ok(FrameBus { tx, port, token })
     }
 
@@ -38,40 +47,56 @@ impl FrameBus {
     }
 }
 
-fn serve(listener: TcpListener, rx: Receiver<(u32, Vec<u8>)>, want: String, on_ack: Arc<dyn Fn(u32, u32) + Send + Sync>) {
+// The handshake callback's error type is tungstenite's own response.
+#[allow(clippy::result_large_err)]
+fn serve(
+    listener: TcpListener,
+    rx: Receiver<(u32, Vec<u8>)>,
+    want: String,
+    on_ack: Arc<dyn Fn(u32, u32) + Send + Sync>,
+) {
     for stream in listener.incoming().flatten() {
         let _ = stream.set_nodelay(true);
         let check = |req: &Request, resp: Response| {
             if req.uri().to_string() == want {
                 Ok(resp)
             } else {
-                Err(tungstenite::http::Response::builder().status(403).body(None).unwrap())
+                Err(tungstenite::http::Response::builder()
+                    .status(403)
+                    .body(None)
+                    .unwrap())
             }
         };
-        let Ok(mut ws) = tungstenite::accept_hdr(stream, check) else { continue };
+        let Ok(mut ws) = tungstenite::accept_hdr(stream, check) else {
+            continue;
+        };
         // Acks are read on their own thread with plain blocking reads: no
         // short timeouts anywhere, because on Windows those round up to the
         // ~15.6 ms system tick and a frame waited out one (+7 ms p50).
-        let Ok(read_half) = ws.get_ref().try_clone() else { continue };
+        let Ok(read_half) = ws.get_ref().try_clone() else {
+            continue;
+        };
         let closed = Arc::new(AtomicBool::new(false));
         {
             let closed = closed.clone();
             let on_ack = on_ack.clone();
             let mut reader = WebSocket::from_raw_socket(read_half, Role::Server, None);
-            let _ = std::thread::Builder::new().name("rsz-ws-acks".into()).spawn(move || {
-                loop {
-                    match reader.read() {
-                        Ok(Message::Binary(b)) if b.len() == 8 => {
-                            let id = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                            let seq = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
-                            on_ack(id, seq);
+            let _ = std::thread::Builder::new()
+                .name("rsz-ws-acks".into())
+                .spawn(move || {
+                    loop {
+                        match reader.read() {
+                            Ok(Message::Binary(b)) if b.len() == 8 => {
+                                let id = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                                let seq = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+                                on_ack(id, seq);
+                            }
+                            Ok(Message::Close(_)) | Err(_) => break,
+                            Ok(_) => {}
                         }
-                        Ok(Message::Close(_)) | Err(_) => break,
-                        Ok(_) => {}
                     }
-                }
-                closed.store(true, Ordering::Relaxed);
-            });
+                    closed.store(true, Ordering::Relaxed);
+                });
         }
         // One window, one socket: frames go out as soon as they're queued
         // (recv wakes on send; the timeout only notices a closed socket),

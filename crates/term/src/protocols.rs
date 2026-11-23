@@ -54,7 +54,15 @@ pub enum Kitty {
     /// f=100, raw pixels for f=24 (RGB) and f=32 (RGBA) at `width` x
     /// `height`, zlib-compressed when `compressed` (o=z). `place` is set for
     /// a=T: show it at the cursor right away.
-    Image { id: u32, format: u32, width: u32, height: u32, compressed: bool, data: Vec<u8>, place: Option<KittyPlace> },
+    Image {
+        id: u32,
+        format: u32,
+        width: u32,
+        height: u32,
+        compressed: bool,
+        data: Vec<u8>,
+        place: Option<KittyPlace>,
+    },
     /// a=p: show image `id` at the cursor.
     Place { id: u32, place: KittyPlace },
     /// a=d: delete one image and its placements, or all (`id` None).
@@ -89,9 +97,15 @@ pub enum ProtoEvent {
     Reply(Vec<u8>),
     /// ConEmu OSC 9;4: state 0 none, 1 normal, 2 error, 3 indeterminate,
     /// 4 paused; percent 0-100.
-    Progress { state: u8, percent: u8 },
+    Progress {
+        state: u8,
+        percent: u8,
+    },
     /// An inline image's file bytes (OSC 1337) and its name.
-    InlineImage { name: String, data: Vec<u8> },
+    InlineImage {
+        name: String,
+        data: Vec<u8>,
+    },
     /// An image path to load (OSC 7879, or printed as text), unresolved.
     ImagePath(String),
     Kitty(Kitty),
@@ -142,7 +156,10 @@ enum Seq {
 
 impl Protocols {
     pub fn new() -> Self {
-        Self { scan_paths: cfg!(windows), ..Default::default() }
+        Self {
+            scan_paths: cfg!(windows),
+            ..Default::default()
+        }
     }
 
     pub fn feed(&mut self, input: &[u8], sink: &mut impl ProtoSink) {
@@ -359,14 +376,21 @@ impl Protocols {
             None => (body, &[][..]),
         };
         let kv = parse_kitty_kv(&String::from_utf8_lossy(header));
-        let get = |k: &str| kv.iter().rev().find(|(kk, _)| kk == k).map(|(_, v)| v.as_str());
+        let get = |k: &str| {
+            kv.iter()
+                .rev()
+                .find(|(kk, _)| kk == k)
+                .map(|(_, v)| v.as_str())
+        };
         let num = |k: &str, def: i64| get(k).and_then(|v| v.parse::<i64>().ok()).unwrap_or(def);
         let id = num("i", 0).clamp(0, u32::MAX as i64) as u32;
         let more = get("m") == Some("1");
         let action = get("a").unwrap_or("");
         if action.is_empty() {
             // A continuation chunk of the open transmission.
-            let Some(open) = self.kitty_open.as_mut() else { return };
+            let Some(open) = self.kitty_open.as_mut() else {
+                return;
+            };
             if open.buf.len() + payload.len() > MAX_HELD {
                 self.kitty_open = None;
                 return;
@@ -395,7 +419,11 @@ impl Protocols {
                     return;
                 }
                 if more {
-                    self.kitty_open = Some(KittyOpen { id, meta, buf: payload.to_vec() });
+                    self.kitty_open = Some(KittyOpen {
+                        id,
+                        meta,
+                        buf: payload.to_vec(),
+                    });
                 } else {
                     self.kitty_open = None;
                     finish_kitty(id, payload, meta, sink);
@@ -416,7 +444,9 @@ impl Protocols {
             }
             "d" => {
                 let all = get("d") == Some("A") || (get("d").unwrap_or("").is_empty() && id == 0);
-                sink.event(ProtoEvent::Kitty(Kitty::Delete { id: if all { None } else { Some(id) } }));
+                sink.event(ProtoEvent::Kitty(Kitty::Delete {
+                    id: if all { None } else { Some(id) },
+                }));
             }
             _ => {}
         }
@@ -469,16 +499,26 @@ fn osc_is_ours(body: &[u8]) -> bool {
 
 /// Could this unfinished OSC body still turn out to be one of ours?
 fn osc_may_be_ours(partial: &[u8]) -> bool {
-    OURS.iter().any(|p| p.starts_with(partial) || partial.starts_with(p))
+    OURS.iter()
+        .any(|p| p.starts_with(partial) || partial.starts_with(p))
 }
 
 fn take_osc9(rest: &str, sink: &mut impl ProtoSink) {
     if let Some(prog) = rest.strip_prefix("4;") {
         let mut parts = prog.split(';');
-        let st = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-        let pct = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+        let st = parts
+            .next()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
+        let pct = parts
+            .next()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
         let st = if (0..=4).contains(&st) { st } else { 0 };
-        sink.event(ProtoEvent::Progress { state: st as u8, percent: pct.clamp(0, 100) as u8 });
+        sink.event(ProtoEvent::Progress {
+            state: st as u8,
+            percent: pct.clamp(0, 100) as u8,
+        });
         return;
     }
     let msg = rest.trim();
@@ -507,7 +547,10 @@ fn take_osc777(rest: &str, sink: &mut impl ProtoSink) {
     if body.is_empty() {
         return;
     }
-    sink.event(ProtoEvent::Notice(simple_notice(&clip(title, 80), clip(body, 200))));
+    sink.event(ProtoEvent::Notice(simple_notice(
+        &clip(title, 80),
+        clip(body, 200),
+    )));
 }
 
 fn simple_notice(title: &str, body: String) -> Notice {
@@ -558,16 +601,24 @@ impl Osc99Buf {
     }
 
     fn apply(&mut self, kv: &[(char, String)]) {
-        if let Some(n) = last(kv, 'u').and_then(|u| u.parse::<u8>().ok()).filter(|n| *n <= 2) {
+        if let Some(n) = last(kv, 'u')
+            .and_then(|u| u.parse::<u8>().ok())
+            .filter(|n| *n <= 2)
+        {
             self.urgency = n;
         }
-        if let Some(o) = last(kv, 'o').filter(|o| matches!(*o, "always" | "unfocused" | "invisible")) {
+        if let Some(o) =
+            last(kv, 'o').filter(|o| matches!(*o, "always" | "unfocused" | "invisible"))
+        {
             self.occasion = o.to_string();
         }
         if let Some(s) = last(kv, 's').and_then(|s| named(s, is_sound_name)) {
             self.sound = s;
         }
-        if let Some(n) = last(kv, 'w').and_then(|w| w.parse::<i32>().ok()).filter(|n| (-1..600_000).contains(n)) {
+        if let Some(n) = last(kv, 'w')
+            .and_then(|w| w.parse::<i32>().ok())
+            .filter(|n| (-1..600_000).contains(n))
+        {
             self.expire_ms = n;
         }
         if let Some(c) = last(kv, 'c') {
@@ -584,7 +635,11 @@ impl Osc99Buf {
                 }
             }
         }
-        if let Some(icon) = kv.iter().filter(|(k, _)| *k == 'n').find_map(|(_, v)| named(v, is_icon_name)) {
+        if let Some(icon) = kv
+            .iter()
+            .filter(|(k, _)| *k == 'n')
+            .find_map(|(_, v)| named(v, is_icon_name))
+        {
             self.icon = icon;
         }
     }
@@ -618,7 +673,10 @@ fn parse_osc99_meta(meta: &str) -> Vec<(char, String)> {
 }
 
 fn last(kv: &[(char, String)], k: char) -> Option<&str> {
-    kv.iter().rev().find(|(kk, _)| *kk == k).map(|(_, v)| v.as_str())
+    kv.iter()
+        .rev()
+        .find(|(kk, _)| *kk == k)
+        .map(|(_, v)| v.as_str())
 }
 
 fn named(raw: &str, ok: fn(&str) -> bool) -> Option<String> {
@@ -630,31 +688,43 @@ fn named(raw: &str, ok: fn(&str) -> bool) -> Option<String> {
 }
 
 fn is_sound_name(s: &str) -> bool {
-    matches!(s, "system" | "silent" | "error" | "warn" | "warning" | "info" | "question")
+    matches!(
+        s,
+        "system" | "silent" | "error" | "warn" | "warning" | "info" | "question"
+    )
 }
 
 fn is_icon_name(s: &str) -> bool {
-    matches!(s, "error" | "warn" | "warning" | "info" | "question" | "help")
+    matches!(
+        s,
+        "error" | "warn" | "warning" | "info" | "question" | "help"
+    )
 }
 
 fn decode_osc99_payload(s: &str, b64: bool) -> String {
     if !b64 {
         return strip_controls(s);
     }
-    let Some(mut raw) = decode_b64(s.as_bytes()) else { return String::new() };
+    let Some(mut raw) = decode_b64(s.as_bytes()) else {
+        return String::new();
+    };
     raw.truncate(8192);
     strip_controls(&String::from_utf8_lossy(&raw))
 }
 
 fn strip_controls(s: &str) -> String {
-    s.chars().filter(|&c| !(c < ' ' || c == '\x7f' || ('\u{80}'..='\u{9f}').contains(&c))).collect()
+    s.chars()
+        .filter(|&c| !(c < ' ' || c == '\x7f' || ('\u{80}'..='\u{9f}').contains(&c)))
+        .collect()
 }
 
 fn sanitize_notice_id(id: &str) -> String {
     if id.is_empty() || id == "0" {
         return String::new();
     }
-    id.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '.')).collect()
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '.'))
+        .collect()
 }
 
 fn osc99_query_reply(id: &str) -> Vec<u8> {
@@ -715,8 +785,15 @@ fn parse_iterm_file(rest: &str) -> Option<(String, Vec<u8>)> {
 }
 
 fn decode_b64(b: &[u8]) -> Option<Vec<u8>> {
-    let clean: Vec<u8> = b.iter().copied().filter(|c| !matches!(c, b'\n' | b'\r' | b' ' | b'\t')).collect();
-    STANDARD.decode(&clean).or_else(|_| STANDARD_NO_PAD.decode(&clean)).ok()
+    let clean: Vec<u8> = b
+        .iter()
+        .copied()
+        .filter(|c| !matches!(c, b'\n' | b'\r' | b' ' | b'\t'))
+        .collect();
+    STANDARD
+        .decode(&clean)
+        .or_else(|_| STANDARD_NO_PAD.decode(&clean))
+        .ok()
 }
 
 fn parse_kitty_kv(header: &str) -> Vec<(String, String)> {
@@ -763,13 +840,20 @@ fn image_path_re() -> &'static regex::Regex {
 /// Image paths printed in `s` (Go findImagePathsInText), at most 12.
 pub fn find_image_paths(s: &str) -> Vec<String> {
     let low = s.to_ascii_lowercase();
-    if ![".png", ".jpg", ".jpeg", ".gif", ".webp"].iter().any(|e| low.contains(e)) {
+    if ![".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|e| low.contains(e))
+    {
         return Vec::new();
     }
     image_path_re()
         .find_iter(s)
         .take(12)
-        .map(|m| m.as_str().trim_matches(|c| "\"'()[]".contains(c)).to_string())
+        .map(|m| {
+            m.as_str()
+                .trim_matches(|c| "\"'()[]".contains(c))
+                .to_string()
+        })
         .filter(|m| !m.is_empty())
         .collect()
 }
@@ -797,7 +881,10 @@ mod tests {
     }
 
     fn run(chunks: &[&[u8]]) -> Rec {
-        let mut p = Protocols { scan_paths: true, ..Protocols::new() };
+        let mut p = Protocols {
+            scan_paths: true,
+            ..Protocols::new()
+        };
         let mut r = Rec::default();
         for c in chunks {
             p.feed(c, &mut r);
@@ -806,7 +893,16 @@ mod tests {
     }
 
     fn notice(r: &Rec) -> &Notice {
-        r.events.iter().find_map(|e| if let ProtoEvent::Notice(n) = e { Some(n) } else { None }).expect("a notice")
+        r.events
+            .iter()
+            .find_map(|e| {
+                if let ProtoEvent::Notice(n) = e {
+                    Some(n)
+                } else {
+                    None
+                }
+            })
+            .expect("a notice")
     }
 
     #[test]
@@ -822,9 +918,18 @@ mod tests {
         let r = run(&[b"x\x1b]9;build done \x07y"]);
         assert_eq!(r.text, b"xy");
         let n = notice(&r);
-        assert_eq!((n.title.as_str(), n.body.as_str(), n.sound.as_str()), ("Suzuri", "build done", "info"));
+        assert_eq!(
+            (n.title.as_str(), n.body.as_str(), n.sound.as_str()),
+            ("Suzuri", "build done", "info")
+        );
         let r = run(&[b"\x1b]9;4;1;150\x1b\\"]);
-        assert_eq!(r.events, vec![ProtoEvent::Progress { state: 1, percent: 100 }]);
+        assert_eq!(
+            r.events,
+            vec![ProtoEvent::Progress {
+                state: 1,
+                percent: 100
+            }]
+        );
     }
 
     #[test]
@@ -833,7 +938,10 @@ mod tests {
         let n = notice(&r);
         assert_eq!((n.title.as_str(), n.body.as_str()), ("Claude", "needs you"));
         let r = run(&[b"\x1b]777;notify;only title\x07"]);
-        assert_eq!((notice(&r).title.as_str(), notice(&r).body.as_str()), ("Suzuri", "only title"));
+        assert_eq!(
+            (notice(&r).title.as_str(), notice(&r).body.as_str()),
+            ("Suzuri", "only title")
+        );
         assert!(run(&[b"\x1b]777;other;x\x07"]).events.is_empty());
     }
 
@@ -845,8 +953,14 @@ mod tests {
         ]);
         let n = notice(&r);
         assert_eq!(n.id, "job");
-        assert_eq!((n.title.as_str(), n.body.as_str()), ("Build", "failed at step 3"));
-        assert_eq!((n.urgency, n.sound.as_str(), n.icon.as_str()), (2, "error", "error"));
+        assert_eq!(
+            (n.title.as_str(), n.body.as_str()),
+            ("Build", "failed at step 3")
+        );
+        assert_eq!(
+            (n.urgency, n.sound.as_str(), n.icon.as_str()),
+            (2, "error", "error")
+        );
         assert!(n.report && !n.focus);
         assert_eq!(r.events.len(), 1);
 
@@ -858,7 +972,8 @@ mod tests {
 
     #[test]
     fn osc99_query_alive_close() {
-        let r = run(&[b"\x1b]99;i=a:p=?;\x1b\\\x1b]99;i=b:p=alive;\x1b\\\x1b]99;i=c:p=close;\x1b\\"]);
+        let r =
+            run(&[b"\x1b]99;i=a:p=?;\x1b\\\x1b]99;i=b:p=alive;\x1b\\\x1b]99;i=c:p=close;\x1b\\"]);
         assert!(matches!(&r.events[0], ProtoEvent::Reply(b) if b.starts_with(b"\x1b]99;i=a:p=?;")));
         assert_eq!(r.events[1], ProtoEvent::AliveQuery("b".into()));
         assert_eq!(r.events[2], ProtoEvent::CloseNotice("c".into()));
@@ -868,10 +983,19 @@ mod tests {
     fn iterm_inline_image() {
         let png = b"\x89PNG\r\n\x1a\nfake";
         let name = STANDARD.encode("cat.png");
-        let seq = format!("\x1b]1337;File=name={name};size=12;inline=1:{}\x07", STANDARD.encode(png));
+        let seq = format!(
+            "\x1b]1337;File=name={name};size=12;inline=1:{}\x07",
+            STANDARD.encode(png)
+        );
         let r = run(&[b"before", seq.as_bytes(), b"after"]);
         assert_eq!(r.text, b"beforeafter");
-        assert_eq!(r.events, vec![ProtoEvent::InlineImage { name: "cat.png".into(), data: png.to_vec() }]);
+        assert_eq!(
+            r.events,
+            vec![ProtoEvent::InlineImage {
+                name: "cat.png".into(),
+                data: png.to_vec()
+            }]
+        );
         let off = format!("\x1b]1337;File=inline=0:{}\x07", STANDARD.encode(png));
         assert!(run(&[off.as_bytes()]).events.is_empty());
         // Other 1337 sequences are not ours.
@@ -906,7 +1030,13 @@ mod tests {
         assert_eq!(r.text, b"xy");
         assert_eq!(r.order, vec!["t:x", "e", "t:y"]);
         match &r.events[0] {
-            ProtoEvent::Kitty(Kitty::Image { id, format, data, place, .. }) => {
+            ProtoEvent::Kitty(Kitty::Image {
+                id,
+                format,
+                data,
+                place,
+                ..
+            }) => {
                 assert_eq!((*id, *format), (7, 100));
                 assert_eq!(data, b"\x89PNG\r\n\x1a\n0123456789");
                 assert_eq!(place.map(|p| (p.cols, p.rows)), Some((4, 2)));
@@ -914,9 +1044,23 @@ mod tests {
             e => panic!("{e:?}"),
         }
         let r = run(&[b"\x1b_Ga=p,i=7\x1b\\\x1b_Ga=d,d=A\x1b\\\x1b_Ga=d,i=3\x1b\\"]);
-        assert_eq!(r.events[0], ProtoEvent::Kitty(Kitty::Place { id: 7, place: KittyPlace { cols: 1, rows: 1, z: 1, ..Default::default() } }));
+        assert_eq!(
+            r.events[0],
+            ProtoEvent::Kitty(Kitty::Place {
+                id: 7,
+                place: KittyPlace {
+                    cols: 1,
+                    rows: 1,
+                    z: 1,
+                    ..Default::default()
+                }
+            })
+        );
         assert_eq!(r.events[1], ProtoEvent::Kitty(Kitty::Delete { id: None }));
-        assert_eq!(r.events[2], ProtoEvent::Kitty(Kitty::Delete { id: Some(3) }));
+        assert_eq!(
+            r.events[2],
+            ProtoEvent::Kitty(Kitty::Delete { id: Some(3) })
+        );
     }
 
     #[test]
@@ -929,8 +1073,14 @@ mod tests {
 
     #[test]
     fn image_paths_in_text() {
-        assert_eq!(find_image_paths("saved to /Users/me/out/cat.PNG ok"), vec!["/Users/me/out/cat.PNG"]);
-        assert_eq!(find_image_paths(r"C:\Users\me\.grok\x.jpeg."), vec![r"C:\Users\me\.grok\x.jpeg"]);
+        assert_eq!(
+            find_image_paths("saved to /Users/me/out/cat.PNG ok"),
+            vec!["/Users/me/out/cat.PNG"]
+        );
+        assert_eq!(
+            find_image_paths(r"C:\Users\me\.grok\x.jpeg."),
+            vec![r"C:\Users\me\.grok\x.jpeg"]
+        );
         assert_eq!(find_image_paths("images/1.jpg"), vec!["images/1.jpg"]);
         assert!(find_image_paths("cat.png").is_empty());
         let r = run(&[b"\x1b]7879;image=/tmp/x.png\x07"]);

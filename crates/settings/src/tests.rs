@@ -86,7 +86,12 @@ fn broken_file_gives_defaults_and_is_not_replaced_by_import() {
 fn update_merges_clamps_and_persists() {
     let d = tmp("update");
     let (rs, go) = (d.join("rs/config.json"), d.join("go/config.json"));
-    let v = update_at(&rs, &go, json!({"font_size_px": 99, "ui_theme": "nope", "extra": 1})).unwrap();
+    let v = update_at(
+        &rs,
+        &go,
+        json!({"font_size_px": 99, "ui_theme": "nope", "extra": 1}),
+    )
+    .unwrap();
     assert_eq!(v["font_size_px"], 36);
     assert_eq!(v["ui_theme"], "neutral");
     assert_eq!(v["extra"], 1);
@@ -110,7 +115,10 @@ fn saving_keeps_unknown_keys_and_values_it_does_not_know() {
     assert_eq!(v["font_size_px"], 18);
     let disk = on_disk(&p);
     assert_eq!(disk["font_size_px"], 18);
-    assert_eq!(disk["ui_theme"], "aurora", "an unpatched value is never reset");
+    assert_eq!(
+        disk["ui_theme"], "aurora",
+        "an unpatched value is never reset"
+    );
     assert_eq!(disk["future_key"], json!({"a": [1, 2]}));
     assert_eq!(disk["intro"], "matrix");
     assert!(disk.get("theme").is_none(), "retired keys go");
@@ -120,10 +128,20 @@ fn saving_keeps_unknown_keys_and_values_it_does_not_know() {
 fn profiles_and_active_profile_save_together() {
     let d = tmp("profiles");
     let p = d.join("config.json");
-    std::fs::write(&p, r#"{"profiles": [{"name": "Dev"}, {"name": "Ops"}], "active_profile": "Ops"}"#).unwrap();
-    let v = Store::at(&p).update(json!({"profiles": [{"name": "Dev"}]})).unwrap();
+    std::fs::write(
+        &p,
+        r#"{"profiles": [{"name": "Dev"}, {"name": "Ops"}], "active_profile": "Ops"}"#,
+    )
+    .unwrap();
+    let v = Store::at(&p)
+        .update(json!({"profiles": [{"name": "Dev"}]}))
+        .unwrap();
     assert_eq!(v["active_profile"], "Dev");
-    assert_eq!(on_disk(&p)["active_profile"], "Dev", "the file never names a profile that is gone");
+    assert_eq!(
+        on_disk(&p)["active_profile"],
+        "Dev",
+        "the file never names a profile that is gone"
+    );
 }
 
 #[test]
@@ -178,7 +196,8 @@ fn a_change_is_seen_by_a_second_reader() {
     let (one, two) = (Store::at(&p), Store::at(&p));
     assert_eq!(two.load()["font_size_px"], 14);
     let (_w, rx) = watching(&two);
-    one.update(json!({"font_size_px": 20, "cursor": "bar"})).unwrap();
+    one.update(json!({"font_size_px": 20, "cursor": "bar"}))
+        .unwrap();
     let v = rx.recv_timeout(WAIT).expect("the second reader is told");
     assert_eq!(v["font_size_px"], 20);
     assert_eq!(v["cursor"], "bar");
@@ -196,7 +215,10 @@ fn a_programs_own_saves_do_not_come_back_to_it() {
     let (_w, rx) = watching(&s);
     s.update(json!({"font_size_px": 22})).unwrap();
     s.update(json!({"cursor": "underline"})).unwrap();
-    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "no callback for our own saves");
+    assert!(
+        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        "no callback for our own saves"
+    );
     // A hand edit does.
     std::fs::write(&p, r#"{"font_size_px": 12}"#).unwrap();
     assert_eq!(rx.recv_timeout(WAIT).unwrap()["font_size_px"], 12);
@@ -210,7 +232,10 @@ fn a_broken_file_is_skipped_not_taken_as_the_defaults() {
     s.update(json!({"font_size_px": 22})).unwrap();
     let (_w, rx) = watching(&s);
     std::fs::write(&p, r#"{"font_size_px": 2"#).unwrap();
-    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "half a file is not a change");
+    assert!(
+        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        "half a file is not a change"
+    );
     std::fs::write(&p, r#"{"font_size_px": 24}"#).unwrap();
     assert_eq!(rx.recv_timeout(WAIT).unwrap()["font_size_px"], 24);
 }
@@ -234,11 +259,20 @@ fn ui_theme_and_mode_are_astryx_ones_and_the_old_theme_keys_go() {
     assert!(v.get("theme").is_none());
     assert!(v.get("shell_ansi_map").is_none());
     assert_eq!(v["intro"], "matrix", "unknown keys stay");
-    assert_eq!((v["ui_theme"].as_str(), v["ui_mode"].as_str()), (Some("neutral"), Some("dark")));
+    assert_eq!(
+        (v["ui_theme"].as_str(), v["ui_mode"].as_str()),
+        (Some("neutral"), Some("dark"))
+    );
     let v = normalize(json!({"ui_theme": " Y2K ", "ui_mode": "System"}));
-    assert_eq!((v["ui_theme"].as_str(), v["ui_mode"].as_str()), (Some("y2k"), Some("system")));
+    assert_eq!(
+        (v["ui_theme"].as_str(), v["ui_mode"].as_str()),
+        (Some("y2k"), Some("system"))
+    );
     let v = normalize(json!({"ui_theme": "dracula", "ui_mode": "dim"}));
-    assert_eq!((v["ui_theme"].as_str(), v["ui_mode"].as_str()), (Some("neutral"), Some("dark")));
+    assert_eq!(
+        (v["ui_theme"].as_str(), v["ui_mode"].as_str()),
+        (Some("neutral"), Some("dark"))
+    );
     assert_eq!(UI_THEMES.len(), UI_THEME_LABELS.len());
     assert_eq!(UI_MODES.len(), UI_MODE_LABELS.len());
 }
@@ -246,16 +280,28 @@ fn ui_theme_and_mode_are_astryx_ones_and_the_old_theme_keys_go() {
 #[test]
 fn ui_text_size_is_a_category() {
     assert_eq!(normalize(json!({}))["ui_text_size"], TEXT_SIZE_DEFAULT);
-    assert_eq!(normalize(json!({"ui_text_size": " XXL "}))["ui_text_size"], "xxl");
-    assert_eq!(normalize(json!({"ui_text_size": "huge"}))["ui_text_size"], TEXT_SIZE_DEFAULT);
+    assert_eq!(
+        normalize(json!({"ui_text_size": " XXL "}))["ui_text_size"],
+        "xxl"
+    );
+    assert_eq!(
+        normalize(json!({"ui_text_size": "huge"}))["ui_text_size"],
+        TEXT_SIZE_DEFAULT
+    );
     assert_eq!(TEXT_SIZES.len(), TEXT_SIZE_LABELS.len());
 }
 
 #[test]
 fn notice_position_is_one_of_go_anchors() {
     assert_eq!(normalize(json!({}))["notice_position"], "bottom-left");
-    assert_eq!(normalize(json!({"notice_position": " Top-Right "}))["notice_position"], "top-right");
-    assert_eq!(normalize(json!({"notice_position": "upstairs"}))["notice_position"], "bottom-left");
+    assert_eq!(
+        normalize(json!({"notice_position": " Top-Right "}))["notice_position"],
+        "top-right"
+    );
+    assert_eq!(
+        normalize(json!({"notice_position": "upstairs"}))["notice_position"],
+        "bottom-left"
+    );
     // Go's other anchors move to the nearest corner.
     for (from, to) in [
         ("bottom-center", "bottom-right"),
@@ -266,7 +312,11 @@ fn notice_position_is_one_of_go_anchors() {
         ("top-left", "top-left"),
         ("bottom-right", "bottom-right"),
     ] {
-        assert_eq!(normalize(json!({"notice_position": from}))["notice_position"], to, "{from}");
+        assert_eq!(
+            normalize(json!({"notice_position": from}))["notice_position"],
+            to,
+            "{from}"
+        );
     }
     for p in NOTICE_POSITIONS {
         assert_eq!(notice_corner(p), *p);
@@ -299,7 +349,10 @@ fn profiles_are_unique_and_launch() {
 
 #[test]
 fn split_args_keeps_quotes() {
-    assert_eq!(split_args(r#""C:\Program Files\x.exe" --a "b c""#), vec![r"C:\Program Files\x.exe", "--a", "b c"]);
+    assert_eq!(
+        split_args(r#""C:\Program Files\x.exe" --a "b c""#),
+        vec![r"C:\Program Files\x.exe", "--a", "b c"]
+    );
     assert_eq!(split_args("claude"), vec!["claude"]);
 }
 
@@ -313,7 +366,12 @@ fn cursor_codes() {
 #[test]
 fn meta_lists_every_choice_with_its_label() {
     let m = meta();
-    for (ids, labels) in [("ui_themes", "ui_theme_labels"), ("ui_modes", "ui_mode_labels"), ("notice_positions", "notice_labels"), ("text_sizes", "text_size_labels")] {
+    for (ids, labels) in [
+        ("ui_themes", "ui_theme_labels"),
+        ("ui_modes", "ui_mode_labels"),
+        ("notice_positions", "notice_labels"),
+        ("text_sizes", "text_size_labels"),
+    ] {
         for id in m[ids].as_array().unwrap() {
             assert!(m[labels][id.as_str().unwrap()].is_string(), "{ids}: {id}");
         }

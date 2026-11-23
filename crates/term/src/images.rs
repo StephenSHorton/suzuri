@@ -104,7 +104,14 @@ impl Images {
 
     /// An inline image placed at a new mark; returns its id. Same file again
     /// moves it to the newest place (Go imageStore.addAt).
-    pub fn add_inline(&mut self, key: &str, mark: u32, cols: u32, rows: u32, out: &mut Changes) -> u32 {
+    pub fn add_inline(
+        &mut self,
+        key: &str,
+        mark: u32,
+        cols: u32,
+        rows: u32,
+        out: &mut Changes,
+    ) -> u32 {
         let canon = canon_key(key);
         if let Some(at) = self.inline.iter().position(|(_, k)| *k == canon) {
             let (old, _) = self.inline.remove(at);
@@ -112,7 +119,15 @@ impl Images {
         }
         let id = self.id();
         self.inline.push((id, canon));
-        self.shown.push(Shown { image: id, anchor: Anchor::Mark(mark), cols, rows, z: 0, crop: (0, 0, 0, 0), inline: true });
+        self.shown.push(Shown {
+            image: id,
+            anchor: Anchor::Mark(mark),
+            cols,
+            rows,
+            z: 0,
+            crop: (0, 0, 0, 0),
+            inline: true,
+        });
         while self.inline.len() > MAX_INLINE {
             let (old, _) = self.inline.remove(0);
             self.forget(old, out);
@@ -137,8 +152,16 @@ impl Images {
 
     /// Show Kitty image `kid` (a=T or a=p), replacing its other placement.
     /// `mark` on the main screen, else the screen cell.
-    pub fn kitty_place(&mut self, kid: u32, place: KittyPlace, mark: Option<u32>, cell: (u16, u16)) {
-        let Some(&(_, id, _, _)) = self.kitty.iter().find(|k| k.0 == kid) else { return };
+    pub fn kitty_place(
+        &mut self,
+        kid: u32,
+        place: KittyPlace,
+        mark: Option<u32>,
+        cell: (u16, u16),
+    ) {
+        let Some(&(_, id, _, _)) = self.kitty.iter().find(|k| k.0 == kid) else {
+            return;
+        };
         self.shown.retain(|s| s.image != id);
         let anchor = match mark {
             Some(t) => Anchor::Mark(t),
@@ -157,7 +180,12 @@ impl Images {
 
     /// Kitty a=d: one image (by Kitty id) or all of them.
     pub fn kitty_delete(&mut self, kid: Option<u32>, out: &mut Changes) {
-        let gone: Vec<u32> = self.kitty.iter().filter(|k| kid.is_none_or(|kid| k.0 == kid)).map(|k| k.1).collect();
+        let gone: Vec<u32> = self
+            .kitty
+            .iter()
+            .filter(|k| kid.is_none_or(|kid| k.0 == kid))
+            .map(|k| k.1)
+            .collect();
         self.kitty.retain(|k| !gone.contains(&k.1));
         for id in gone {
             self.forget(id, out);
@@ -175,7 +203,8 @@ impl Images {
     /// since the last call.
     pub fn placements(&mut self, marks: &[(u32, i32, u16)], alt: bool) -> Option<Vec<Placement>> {
         if !alt {
-            self.shown.retain(|s| !matches!(s.anchor, Anchor::Screen(..)));
+            self.shown
+                .retain(|s| !matches!(s.anchor, Anchor::Screen(..)));
         }
         let mut now = Vec::new();
         for s in &self.shown {
@@ -189,7 +218,16 @@ impl Images {
             if row + (s.rows as i32) <= 0 {
                 continue;
             }
-            now.push(Placement { image: s.image, row, col, cols: s.cols, rows: s.rows, z: s.z, crop: s.crop, inline: s.inline });
+            now.push(Placement {
+                image: s.image,
+                row,
+                col,
+                cols: s.cols,
+                rows: s.rows,
+                z: s.z,
+                crop: s.crop,
+                inline: s.inline,
+            });
         }
         if now == self.last {
             return None;
@@ -235,7 +273,10 @@ fn fit(w: u32, h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
         return (w, h);
     }
     let s = (max_w as f64 / w as f64).min(max_h as f64 / h as f64);
-    (((w as f64 * s) as u32).max(1), ((h as f64 * s) as u32).max(1))
+    (
+        ((w as f64 * s) as u32).max(1),
+        ((h as f64 * s) as u32).max(1),
+    )
 }
 
 /// The pixel size of an encoded image, from its header.
@@ -268,28 +309,38 @@ pub fn resolve_path(cwd: Option<&Path>, home: Option<&Path>, reference: &str) ->
     }
     let sessions = home?.join(".grok").join("sessions");
     if let Some((uuid, base)) = session_image(&r) {
-        let hit = std::fs::read_dir(&sessions).ok()?.flatten().map(|e| e.path().join(&uuid).join("images").join(&base)).find(|p| p.is_file());
+        let hit = std::fs::read_dir(&sessions)
+            .ok()?
+            .flatten()
+            .map(|e| e.path().join(&uuid).join("images").join(&base))
+            .find(|p| p.is_file());
         if hit.is_some() {
             return hit;
         }
     }
     let base = rp.file_name()?.to_string_lossy().into_owned();
-    is_image_name(&base).then(|| find_under(&sessions, &base, 5)).flatten()
+    is_image_name(&base)
+        .then(|| find_under(&sessions, &base, 5))
+        .flatten()
 }
 
 fn file_uri_path(u: &str) -> Option<String> {
     let rest = &u[5..];
-    let rest = rest.strip_prefix("//").map(|r| r.find('/').map_or("", |i| &r[i..])).unwrap_or(rest);
+    let rest = rest
+        .strip_prefix("//")
+        .map(|r| r.find('/').map_or("", |i| &r[i..]))
+        .unwrap_or(rest);
     let mut out = Vec::new();
     let b = rest.as_bytes();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(&rest[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
         }
         out.push(b[i]);
         i += 1;
@@ -332,7 +383,9 @@ fn session_image(r: &str) -> Option<(String, String)> {
     let start = uuid_at(r)?;
     let uuid = &r[start..start + 36];
     let rest = r[start + 36..].trim_start_matches(['\\', '/']);
-    let rest = rest.strip_prefix("images").or_else(|| rest.strip_prefix("IMAGES"))?;
+    let rest = rest
+        .strip_prefix("images")
+        .or_else(|| rest.strip_prefix("IMAGES"))?;
     let file = rest.trim_start_matches(['\\', '/']);
     (!file.is_empty() && !file.contains(['\\', '/'])).then(|| (uuid.to_string(), file.to_string()))
 }
@@ -342,10 +395,16 @@ fn session_image(r: &str) -> Option<(String, String)> {
 fn fix_grok_session_path(p: &str) -> String {
     let q = p.replace('/', "\\");
     let marker = ".grok\\sessions\\";
-    let Some(i) = q.to_lowercase().find(marker) else { return p.to_string() };
+    let Some(i) = q.to_lowercase().find(marker) else {
+        return p.to_string();
+    };
     let (prefix, rest) = q.split_at(i + marker.len());
-    let Some((uuid, file)) = session_image(rest) else { return p.to_string() };
-    let Some(j) = rest.to_lowercase().find(&uuid.to_lowercase()) else { return p.to_string() };
+    let Some((uuid, file)) = session_image(rest) else {
+        return p.to_string();
+    };
+    let Some(j) = rest.to_lowercase().find(&uuid.to_lowercase()) else {
+        return p.to_string();
+    };
     let ws = rest[..j].trim_end_matches('\\');
     if ws.is_empty() {
         return p.to_string();
@@ -356,7 +415,9 @@ fn fix_grok_session_path(p: &str) -> String {
 
 fn is_image_name(n: &str) -> bool {
     let n = n.to_ascii_lowercase();
-    [".png", ".jpg", ".jpeg", ".gif", ".webp"].iter().any(|e| n.ends_with(e))
+    [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|e| n.ends_with(e))
 }
 
 fn find_under(root: &Path, base: &str, depth: usize) -> Option<PathBuf> {
@@ -426,7 +487,16 @@ mod tests {
         // Scrolled so its bottom row is just off the top: gone.
         assert!(im.placements(&[(7, -3, 0)], false).unwrap().is_empty());
         let k = im.kitty_image(9, 10, 10, &mut ch);
-        im.kitty_place(9, KittyPlace { cols: 2, rows: 2, ..Default::default() }, None, (3, 4));
+        im.kitty_place(
+            9,
+            KittyPlace {
+                cols: 2,
+                rows: 2,
+                ..Default::default()
+            },
+            None,
+            (3, 4),
+        );
         let p = im.placements(&[], true).unwrap();
         assert_eq!((p[0].image, p[0].row, p[0].col), (k, 4, 3));
         assert!(im.placements(&[], false).unwrap().is_empty());
@@ -435,10 +505,18 @@ mod tests {
     #[test]
     fn grok_paths() {
         assert_eq!(
-            fix_grok_session_path(r"C:\Users\me\.grok\sessions\C:\Users\me\proj\0123abcd-0000-1111-2222-333344445555\images\1.jpg"),
+            fix_grok_session_path(
+                r"C:\Users\me\.grok\sessions\C:\Users\me\proj\0123abcd-0000-1111-2222-333344445555\images\1.jpg"
+            ),
             r"C:\Users\me\.grok\sessions\C%3A%5CUsers%5Cme%5Cproj\0123abcd-0000-1111-2222-333344445555\images\1.jpg"
         );
-        assert_eq!(file_uri_path("file:///tmp/a%20b.png").as_deref(), Some("/tmp/a b.png"));
-        assert_eq!(file_uri_path("file:///C:/x.png").as_deref(), Some("C:/x.png"));
+        assert_eq!(
+            file_uri_path("file:///tmp/a%20b.png").as_deref(),
+            Some("/tmp/a b.png")
+        );
+        assert_eq!(
+            file_uri_path("file:///C:/x.png").as_deref(),
+            Some("C:/x.png")
+        );
     }
 }

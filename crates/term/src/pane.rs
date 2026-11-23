@@ -22,16 +22,16 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use parking_lot::{Condvar, Mutex};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-use crate::engine::{Engine, EngineEvent, Link, SelectKind};
-use crate::ghostty::Ghostty;
-use crate::fg::Probe;
-use crate::input::MouseEvent;
-use crate::shell::{self, OscFilter, ShellEvent};
 use crate::block;
-use crate::palette;
 use crate::echo::EchoFilter;
+use crate::engine::{Engine, EngineEvent, Link, SelectKind};
+use crate::fg::Probe;
+use crate::ghostty::Ghostty;
 use crate::images::{self, Changes, ImageData, Images, MARK_REACH, Placement};
+use crate::input::MouseEvent;
+use crate::palette;
 use crate::protocols::{Kitty, KittyPlace, Notice, ProtoEvent, ProtoSink, Protocols};
+use crate::shell::{self, OscFilter, ShellEvent};
 
 /// What a pane sends to its owner.
 pub enum Out {
@@ -42,7 +42,10 @@ pub enum Out {
     /// The shell's state for the input bar changed (#285).
     Shell(ShellStatus),
     /// A command run from the shell finished (shell integration only).
-    CommandDone { exit: Option<i32>, command: String },
+    CommandDone {
+        exit: Option<i32>,
+        command: String,
+    },
     /// Text typed while a command ran that it never read, taken back from
     /// the tty at the prompt: it goes in the bar, before the prompt's status.
     Typeahead(String),
@@ -55,7 +58,10 @@ pub enum Out {
     /// OSC 99 p=alive: answer with Pane::reply(protocols::alive_reply(..)).
     NoticeAlive(String),
     /// ConEmu OSC 9;4.
-    Progress { state: u8, percent: u8 },
+    Progress {
+        state: u8,
+        percent: u8,
+    },
     /// An image's bytes, sent once before any placement shows it.
     ImageData(ImageData),
     /// Images the UI can forget.
@@ -118,7 +124,13 @@ struct ShellState {
 
 impl ShellState {
     fn status(&self) -> ShellStatus {
-        ShellStatus { integrated: self.integrated, cwd: self.cwd.clone(), program: self.started || self.child || self.foreign, prompts: self.prompts, pending: self.pending }
+        ShellStatus {
+            integrated: self.integrated,
+            cwd: self.cwd.clone(),
+            program: self.started || self.child || self.foreign,
+            prompts: self.prompts,
+            pending: self.pending,
+        }
     }
 
     /// The status to send, if it changed since the last one sent.
@@ -166,7 +178,19 @@ pub struct PaneConfig {
 
 impl Default for PaneConfig {
     fn default() -> Self {
-        Self { cols: 80, rows: 24, command: None, cwd: None, env: Vec::new(), scrollback: 10_000, plain_shell: false, cursor: 1, term_program: None, keep_prompt: false, preamble: None }
+        Self {
+            cols: 80,
+            rows: 24,
+            command: None,
+            cwd: None,
+            env: Vec::new(),
+            scrollback: 10_000,
+            plain_shell: false,
+            cursor: 1,
+            term_program: None,
+            keep_prompt: false,
+            preamble: None,
+        }
     }
 }
 
@@ -348,7 +372,10 @@ pub fn default_shell() -> Vec<String> {
     #[cfg(windows)]
     {
         let pwsh = which("pwsh.exe");
-        vec![pwsh.unwrap_or_else(|| "powershell.exe".into()), "-NoLogo".into()]
+        vec![
+            pwsh.unwrap_or_else(|| "powershell.exe".into()),
+            "-NoLogo".into(),
+        ]
     }
     #[cfg(not(windows))]
     {
@@ -360,31 +387,48 @@ pub fn default_shell() -> Vec<String> {
 #[cfg(windows)]
 fn which(exe: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|p| p.join(exe)).find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
+    std::env::split_paths(&path)
+        .map(|p| p.join(exe))
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 impl Pane {
     pub fn spawn(cfg: PaneConfig, sink: Sink) -> std::io::Result<Pane> {
         let io = |e: anyhow_like::E| std::io::Error::other(e.0);
-        let size = PtySize { rows: cfg.rows, cols: cfg.cols, pixel_width: 0, pixel_height: 0 };
-        let pair = native_pty_system().openpty(size).map_err(|e| io(e.into()))?;
+        let size = PtySize {
+            rows: cfg.rows,
+            cols: cfg.cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let pair = native_pty_system()
+            .openpty(size)
+            .map_err(|e| io(e.into()))?;
         let mut argv = cfg.command.clone().unwrap_or_else(default_shell);
         let shell_prog = argv.first().cloned().unwrap_or_default();
         let reads_ahead = {
-            let base = std::path::Path::new(&shell_prog).file_name().map(|b| b.to_string_lossy().to_lowercase()).unwrap_or_default();
-            matches!(base.strip_suffix(".exe").unwrap_or(&base), "pwsh" | "powershell")
+            let base = std::path::Path::new(&shell_prog)
+                .file_name()
+                .map(|b| b.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            matches!(
+                base.strip_suffix(".exe").unwrap_or(&base),
+                "pwsh" | "powershell"
+            )
         };
         // The input bar's shell hooks, for the user's own shell only.
         let mut boot_env = Vec::new();
         let mut temp_dir = None;
         let mut hooked = false;
-        if cfg.command.is_none() && !cfg.plain_shell {
-            if let Some(b) = shell::bootstrap_with(&argv, cfg.keep_prompt) {
-                argv = b.argv;
-                boot_env = b.env;
-                temp_dir = b.temp_dir;
-                hooked = true;
-            }
+        if cfg.command.is_none()
+            && !cfg.plain_shell
+            && let Some(b) = shell::bootstrap_with(&argv, cfg.keep_prompt)
+        {
+            argv = b.argv;
+            boot_env = b.env;
+            temp_dir = b.temp_dir;
+            hooked = true;
         }
         // A restored pane's old text: fed to the screen before the shell
         // starts, except on Windows, where PowerShell and cmd.exe print it
@@ -396,17 +440,27 @@ impl Pane {
         #[cfg(windows)]
         if let Some(text) = preamble.clone() {
             let print = if hooked && reads_ahead {
-                Some(shell::PrintPreamble { argv: argv.clone(), env: vec![(shell::PREAMBLE_ENV.into(), "{file}".into())], bytes: text.into_bytes() })
+                Some(shell::PrintPreamble {
+                    argv: argv.clone(),
+                    env: vec![(shell::PREAMBLE_ENV.into(), "{file}".into())],
+                    bytes: text.into_bytes(),
+                })
             } else if hooked {
                 None
             } else {
                 shell::print_preamble(&argv, &text)
             };
-            if let Some((p, (dir, file))) = print.and_then(|p| shell::preamble_file(&p.bytes).map(|f| (p, f))) {
+            if let Some((p, (dir, file))) =
+                print.and_then(|p| shell::preamble_file(&p.bytes).map(|f| (p, f)))
+            {
                 preamble = None;
                 argv = p.argv;
                 let file = file.to_string_lossy().into_owned();
-                boot_env.extend(p.env.into_iter().map(|(k, v)| (k, v.replace("{file}", &file))));
+                boot_env.extend(
+                    p.env
+                        .into_iter()
+                        .map(|(k, v)| (k, v.replace("{file}", &file))),
+                );
                 if temp_dir.is_none() {
                     temp_dir = Some(dir);
                 }
@@ -415,10 +469,8 @@ impl Pane {
         // An unhooked PowerShell running starship: starship's pre-prompt
         // hook reports the folder (hearth#1031). A restored one got it
         // with the print above.
-        if !hooked {
-            if let Some(a) = shell::starship_report(&argv) {
-                argv = a;
-            }
+        if !hooked && let Some(a) = shell::starship_report(&argv) {
+            argv = a;
         }
         let mut cmd = CommandBuilder::new(&argv[0]);
         cmd.args(&argv[1..]);
@@ -429,7 +481,10 @@ impl Pane {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", cfg.term_program.as_deref().unwrap_or("suzuri"));
+        cmd.env(
+            "TERM_PROGRAM",
+            cfg.term_program.as_deref().unwrap_or("suzuri"),
+        );
         scrub_claude_session_env(&mut cmd);
         for (k, v) in boot_env.iter().chain(&cfg.env) {
             cmd.env(k, v);
@@ -446,19 +501,31 @@ impl Pane {
         let reader = pair.master.try_clone_reader().map_err(|e| io(e.into()))?;
         let writer = pair.master.take_writer().map_err(|e| io(e.into()))?;
 
-        let start_cwd: Option<std::path::PathBuf> = cfg.cwd.clone().map(Into::into).or_else(|| home_dir().map(Into::into));
+        let start_cwd: Option<std::path::PathBuf> = cfg
+            .cwd
+            .clone()
+            .map(Into::into)
+            .or_else(|| home_dir().map(Into::into));
         // A hooked shell's first prompt is coming: the bar holds keys for it
         // (see ShellStatus::pending), in the folder the shell starts in.
         let shell_state = ShellState {
             pending: hooked,
             hooked,
-            cwd: if hooked { start_cwd.as_deref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default() } else { String::new() },
+            cwd: if hooked {
+                start_cwd
+                    .as_deref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            },
             ..Default::default()
         };
         let shared = Arc::new(Shared {
             engine: Mutex::new({
                 // libghostty-vt (#290).
-                let mut e: Box<dyn Engine> = Box::new(Ghostty::new(cfg.cols, cfg.rows, cfg.scrollback));
+                let mut e: Box<dyn Engine> =
+                    Box::new(Ghostty::new(cfg.cols, cfg.rows, cfg.scrollback));
                 if cfg.cursor != 1 {
                     e.set_default_cursor(cfg.cursor);
                 }
@@ -468,7 +535,15 @@ impl Pane {
                 }
                 e
             }),
-            wake: Mutex::new(Wake { dirty: true, force_full: true, input_at: None, stop: false, sent: 0, sent_at: Instant::now(), acked: 0 }),
+            wake: Mutex::new(Wake {
+                dirty: true,
+                force_full: true,
+                input_at: None,
+                stop: false,
+                sent: 0,
+                sent_at: Instant::now(),
+                acked: 0,
+            }),
             cv: Condvar::new(),
             resize_slot: Mutex::new(None),
             focused: AtomicBool::new(false),
@@ -495,7 +570,9 @@ impl Pane {
             let shared = shared.clone();
             let tx = tx.clone();
             let sink = sink.clone();
-            threads.push(thread("rsz-reader", move || reader_loop(reader, shared, tx, sink)));
+            threads.push(thread("rsz-reader", move || {
+                reader_loop(reader, shared, tx, sink)
+            }));
         }
         // Waiter: the shell's exit becomes an actor input.
         {
@@ -525,9 +602,30 @@ impl Pane {
         {
             let shared = shared.clone();
             let sink = sink.clone();
-            threads.push(thread("rsz-actor", move || actor_loop(rx, pair.master, writer, killer, shared, sink, (cfg.cols, cfg.rows))));
+            threads.push(thread("rsz-actor", move || {
+                actor_loop(
+                    rx,
+                    pair.master,
+                    writer,
+                    killer,
+                    shared,
+                    sink,
+                    (cfg.cols, cfg.rows),
+                )
+            }));
         }
-        Ok(Pane { tx, shared, threads: Mutex::new(threads), pid, shell_prog, queue: Mutex::default(), keep_prompt: cfg.keep_prompt, reads_ahead, sink, probe })
+        Ok(Pane {
+            tx,
+            shared,
+            threads: Mutex::new(threads),
+            pid,
+            shell_prog,
+            queue: Mutex::default(),
+            keep_prompt: cfg.keep_prompt,
+            reads_ahead,
+            sink,
+            probe,
+        })
     }
 
     /// Enter in the input bar (#296, Go suzuri's submitBarLine): the bare-cd
@@ -614,7 +712,10 @@ impl Pane {
             let mut sh = self.shared.shell.lock();
             sh.awaiting = Some(sh.prompts);
         }
-        let mut line = payload.replace("\r\n", "\n").replace('\n', "\r").into_bytes();
+        let mut line = payload
+            .replace("\r\n", "\n")
+            .replace('\n', "\r")
+            .into_bytes();
         line.push(b'\r');
         self.write(line);
     }
@@ -649,7 +750,11 @@ impl Pane {
     /// A hooked shell is busy until its first prompt.
     fn busy(&self) -> bool {
         let sh = self.shared.shell.lock();
-        if sh.pending || sh.integrated && sh.awaiting.is_some_and(|n| sh.prompts <= n) || sh.started || sh.child {
+        if sh.pending
+            || sh.integrated && sh.awaiting.is_some_and(|n| sh.prompts <= n)
+            || sh.started
+            || sh.child
+        {
             return true;
         }
         drop(sh);
@@ -674,17 +779,32 @@ impl Pane {
             let keep = !row(cy);
             let spacer = !(cy == 0 || if keep { false } else { row(cy - 1) });
             let home = home_dir().unwrap_or_default();
-            let mut lines = block::block_lines(display, &cwd, &home, cols, spacer, palette::active().pal.accent);
+            let mut lines = block::block_lines(
+                display,
+                &cwd,
+                &home,
+                cols,
+                spacer,
+                palette::active().pal.accent,
+            );
             // The command's last line goes on the cursor's row: the shell's
             // echo would have been there, and its newline still follows.
             let on_line = lines.pop().unwrap_or_default();
             eng.insert_block(&lines, &on_line, keep);
             if trace() {
-                eprintln!("rsz: block cy={cy} above={} keep={keep} spacer={spacer} rows={} cursor after={:?}", lines.len(), eng.size().1, eng.cursor());
+                eprintln!(
+                    "rsz: block cy={cy} above={} keep={keep} spacer={spacer} rows={} cursor after={:?}",
+                    lines.len(),
+                    eng.size().1,
+                    eng.cursor()
+                );
             }
         }
         self.shared.echo.lock().arm(payload);
-        let mut line = payload.replace("\r\n", "\n").replace('\n', "\r").into_bytes();
+        let mut line = payload
+            .replace("\r\n", "\n")
+            .replace('\n', "\r")
+            .into_bytes();
         line.push(b'\r');
         self.typing(&line);
         let mut h = self.shared.hold.lock();
@@ -747,7 +867,9 @@ impl Pane {
 
     /// The UI's cell size in pixels, for sizing inline images.
     pub fn set_cell_px(&self, w: u16, h: u16) {
-        self.shared.cell_px.store((w.max(1) as u32) << 16 | h.max(1) as u32, Ordering::Relaxed);
+        self.shared
+            .cell_px
+            .store((w.max(1) as u32) << 16 | h.max(1) as u32, Ordering::Relaxed);
     }
 
     pub fn set_focused(&self, focused: bool) {
@@ -805,12 +927,16 @@ impl Pane {
     /// folder that exists. A custom prompt gives nothing, as before.
     #[cfg(windows)]
     fn unhooked_cwd(&self) -> Option<String> {
-        let base = std::path::Path::new(&self.shell_prog).file_name().map(|b| b.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let base = std::path::Path::new(&self.shell_prog)
+            .file_name()
+            .map(|b| b.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
         if base.strip_suffix(".exe").unwrap_or(&base) == "cmd" {
             return self.pid.and_then(crate::cwd::program_cwd);
         }
         if self.reads_ahead {
-            return crate::cwd::powershell_prompt_cwd(&self.screen_text()).filter(|d| std::path::Path::new(d).is_dir());
+            return crate::cwd::powershell_prompt_cwd(&self.screen_text())
+                .filter(|d| std::path::Path::new(d).is_dir());
         }
         None
     }
@@ -876,7 +1002,10 @@ impl Pane {
 
     /// Start a selection at a visible cell (see Engine::select_start).
     pub fn select_start(&self, col: u16, row: u16, right: bool, kind: SelectKind) {
-        self.shared.engine.lock().select_start(col, row, right, kind);
+        self.shared
+            .engine
+            .lock()
+            .select_start(col, row, right, kind);
         self.shared.kick(|w| w.dirty = true);
     }
 
@@ -930,11 +1059,16 @@ impl Pane {
 }
 
 fn thread(name: &str, f: impl FnOnce() + Send + 'static) -> JoinHandle<()> {
-    std::thread::Builder::new().name(name.into()).spawn(f).expect("spawn thread")
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(f)
+        .expect("spawn thread")
 }
 
 fn home_dir() -> Option<String> {
-    std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())
+    std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
 }
 
 fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender<Cmd>, sink: Sink) {
@@ -954,10 +1088,20 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
             Ok(n) => n,
         };
         if trace() {
-            eprintln!("rsz: read {n} {:?}", String::from_utf8_lossy(&buf[..n.min(2000)]));
+            eprintln!(
+                "rsz: read {n} {:?}",
+                String::from_utf8_lossy(&buf[..n.min(2000)])
+            );
             // #288: do image and notice sequences reach the reader (ConPTY
             // may drop or rewrite them)?
-            for (name, pat) in [("osc1337", &b"\x1b]1337;"[..]), ("osc7879", b"\x1b]7879;"), ("osc9", b"\x1b]9;"), ("osc777", b"\x1b]777;"), ("osc99", b"\x1b]99;"), ("apcG", b"\x1b_G")] {
+            for (name, pat) in [
+                ("osc1337", &b"\x1b]1337;"[..]),
+                ("osc7879", b"\x1b]7879;"),
+                ("osc9", b"\x1b]9;"),
+                ("osc777", b"\x1b]777;"),
+                ("osc99", b"\x1b]99;"),
+                ("apcG", b"\x1b_G"),
+            ] {
                 let hits = buf[..n].windows(pat.len()).filter(|w| *w == pat).count();
                 if hits > 0 {
                     eprintln!("rsz: read has {hits} x {name}");
@@ -989,7 +1133,12 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
         // the engine.
         let outs = {
             let mut eng = shared.engine.lock();
-            let mut f = Feeder { eng: &mut **eng, events: &mut events, shared: &shared, outs: Vec::new() };
+            let mut f = Feeder {
+                eng: &mut **eng,
+                events: &mut events,
+                shared: &shared,
+                outs: Vec::new(),
+            };
             protocols.feed(&clean, &mut f);
             f.outs
         };
@@ -1000,7 +1149,10 @@ fn reader_loop(mut reader: Box<dyn Read + Send>, shared: Arc<Shared>, tx: Sender
         if shared.shell.lock().pending && shared.engine.lock().alt_screen() {
             give_up(&shared, &sink);
         }
-        shared.stats.feed_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        shared
+            .stats
+            .feed_ns
+            .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         shared.stats.bytes_in.fetch_add(n as u64, Ordering::Relaxed);
         dispatch(&mut events, &tx, &sink);
         shared.kick(|w| w.dirty = true);
@@ -1077,7 +1229,9 @@ fn split_lines(raw: &[u8], n: usize) -> (Vec<u8>, &[u8]) {
     let mut again = Vec::new();
     let mut i = 0;
     for _ in 0..n {
-        let Some(k) = raw[i..].iter().position(|&b| b == b'\n' || b == b'\r') else { break };
+        let Some(k) = raw[i..].iter().position(|&b| b == b'\n' || b == b'\r') else {
+            break;
+        };
         again.extend_from_slice(&raw[i..i + k]);
         again.push(b'\r');
         i += k + 1;
@@ -1132,7 +1286,10 @@ fn tell(shared: &Shared, sink: &Sink, f: impl FnOnce(&mut ShellState)) {
 
 /// A line as typed at a terminal: newlines as CR, then Enter.
 fn typed(payload: &str) -> Vec<u8> {
-    let mut b = payload.replace("\r\n", "\n").replace('\n', "\r").into_bytes();
+    let mut b = payload
+        .replace("\r\n", "\n")
+        .replace('\n', "\r")
+        .into_bytes();
     b.push(b'\r');
     b
 }
@@ -1176,7 +1333,9 @@ impl ProtoSink for Feeder<'_> {
             ProtoEvent::CloseNotice(id) => self.outs.push(Out::NoticeClose(id)),
             ProtoEvent::AliveQuery(id) => self.outs.push(Out::NoticeAlive(id)),
             ProtoEvent::Reply(b) => self.events.push(EngineEvent::PtyWrite(b)),
-            ProtoEvent::Progress { state, percent } => self.outs.push(Out::Progress { state, percent }),
+            ProtoEvent::Progress { state, percent } => {
+                self.outs.push(Out::Progress { state, percent })
+            }
             ProtoEvent::InlineImage { name, data } => self.inline(name, None, data),
             ProtoEvent::ImagePath(r) => {
                 if self.eng.alt_screen() {
@@ -1185,9 +1344,17 @@ impl ProtoSink for Feeder<'_> {
                 let home = home_dir().map(std::path::PathBuf::from);
                 // The cwd the shell hooks report (#285), else where it started.
                 let hooked = self.shared.shell.lock().cwd.clone();
-                let cwd = if hooked.is_empty() { self.shared.cwd.clone() } else { Some(hooked.into()) };
-                let Some(path) = images::resolve_path(cwd.as_deref(), home.as_deref(), &r) else { return };
-                let Some(data) = images::read_image(&path) else { return };
+                let cwd = if hooked.is_empty() {
+                    self.shared.cwd.clone()
+                } else {
+                    Some(hooked.into())
+                };
+                let Some(path) = images::resolve_path(cwd.as_deref(), home.as_deref(), &r) else {
+                    return;
+                };
+                let Some(data) = images::read_image(&path) else {
+                    return;
+                };
                 let p = path.to_string_lossy().into_owned();
                 self.inline(p.clone(), Some(p), data);
             }
@@ -1216,7 +1383,9 @@ impl Feeder<'_> {
         if self.eng.alt_screen() {
             return;
         }
-        let Some(px) = images::pixel_size(&data) else { return };
+        let Some(px) = images::pixel_size(&data) else {
+            return;
+        };
         self.settle();
         if self.eng.cursor().0 > 0 {
             self.eng.feed(b"\r\n", self.events);
@@ -1224,7 +1393,8 @@ impl Feeder<'_> {
         let (cols, rows) = images::inline_cells(px, self.cell(), self.eng.size().0 as u32);
         // Go's caption row comes first: "img <name>".
         let label: String = name.chars().filter(|c| !c.is_control()).take(200).collect();
-        self.eng.feed(format!("img {label}\r\n").as_bytes(), self.events);
+        self.eng
+            .feed(format!("img {label}\r\n").as_bytes(), self.events);
         let mut ch = Changes::default();
         let id = {
             let mut im = self.shared.images.lock();
@@ -1250,8 +1420,20 @@ impl Feeder<'_> {
     fn kitty(&mut self, k: Kitty) {
         let mut ch = Changes::default();
         match k {
-            Kitty::Image { id: kid, format, width, height, compressed, data, place } => {
-                let id = self.shared.images.lock().kitty_image(kid, width, height, &mut ch);
+            Kitty::Image {
+                id: kid,
+                format,
+                width,
+                height,
+                compressed,
+                data,
+                place,
+            } => {
+                let id = self
+                    .shared
+                    .images
+                    .lock()
+                    .kitty_image(kid, width, height, &mut ch);
                 self.send(ch);
                 self.outs.push(Out::ImageData(ImageData {
                     id,
@@ -1360,7 +1542,11 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
         };
         // Pace: let output accumulate unless the user is waiting on an echo.
         if !input {
-            let interval = if shared.focused.load(Ordering::Relaxed) { FOCUSED_INTERVAL } else { UNFOCUSED_INTERVAL };
+            let interval = if shared.focused.load(Ordering::Relaxed) {
+                FOCUSED_INTERVAL
+            } else {
+                UNFOCUSED_INTERVAL
+            };
             let since = last.elapsed();
             if since < interval {
                 std::thread::sleep(interval - since);
@@ -1392,7 +1578,11 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
             seq = seq.wrapping_add(1);
             let sent = eng.snapshot(&mut out, seq, force_full);
             let mut im = shared.images.lock();
-            let marks = if im.is_empty() { Vec::new() } else { eng.marks(MARK_REACH) };
+            let marks = if im.is_empty() {
+                Vec::new()
+            } else {
+                eng.marks(MARK_REACH)
+            };
             placements = im.placements(&marks, eng.alt_screen());
             sent
         };
@@ -1400,9 +1590,15 @@ fn frame_loop(shared: Arc<Shared>, sink: Sink, tx: Sender<Cmd>) {
         // go to the actor like any other.
         dispatch(&mut events, &tx, &sink);
         if sent {
-            shared.stats.snapshot_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            shared
+                .stats
+                .snapshot_ns
+                .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
             shared.stats.frames.fetch_add(1, Ordering::Relaxed);
-            shared.stats.frame_bytes.fetch_add(out.len() as u64, Ordering::Relaxed);
+            shared
+                .stats
+                .frame_bytes
+                .fetch_add(out.len() as u64, Ordering::Relaxed);
             {
                 let mut w = shared.wake.lock();
                 w.sent = seq;
@@ -1447,7 +1643,7 @@ fn actor_loop(
                 Err(RecvTimeoutError::Timeout) => {
                     // PowerShell never showed taking the line: the keys go.
                     let mut h = shared.hold.lock();
-                    if !h.until.is_some_and(|u| u <= Instant::now()) {
+                    if h.until.is_none_or(|u| u > Instant::now()) {
                         continue;
                     }
                     h.until = None;
@@ -1469,7 +1665,10 @@ fn actor_loop(
                 let Some(w) = writer.as_mut() else { continue };
                 shared.stats.writes.fetch_add(1, Ordering::Relaxed);
                 if trace() {
-                    eprintln!("rsz: write {:?}", String::from_utf8_lossy(&bytes[..bytes.len().min(80)]));
+                    eprintln!(
+                        "rsz: write {:?}",
+                        String::from_utf8_lossy(&bytes[..bytes.len().min(80)])
+                    );
                 }
                 // Chunked so a close waits at most one chunk behind a paste.
                 let mut failed = false;
@@ -1486,7 +1685,9 @@ fn actor_loop(
                 }
             }
             Cmd::Resize => {
-                let Some(size) = shared.resize_slot.lock().take() else { continue };
+                let Some(size) = shared.resize_slot.lock().take() else {
+                    continue;
+                };
                 if state != State::Running || size == applied {
                     continue;
                 }
@@ -1498,10 +1699,23 @@ fn actor_loop(
                         let before = (eng.size(), eng.cursor());
                         eng.resize(size.0, size.1);
                         if trace() {
-                            eprintln!("rsz: resize {:?} -> {:?}, cursor {:?} -> {:?}", before.0, size, before.1, eng.cursor());
+                            eprintln!(
+                                "rsz: resize {:?} -> {:?}, cursor {:?} -> {:?}",
+                                before.0,
+                                size,
+                                before.1,
+                                eng.cursor()
+                            );
                         }
                     }
-                    if m.resize(PtySize { rows: size.1, cols: size.0, pixel_width: 0, pixel_height: 0 }).is_ok() {
+                    if m.resize(PtySize {
+                        rows: size.1,
+                        cols: size.0,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .is_ok()
+                    {
                         applied = size;
                         shared.stats.resizes_applied.fetch_add(1, Ordering::Relaxed);
                     }
@@ -1543,11 +1757,8 @@ fn actor_loop(
         }
         // A close with a child that ignores the kill: give up after a while.
         if *shared.state.lock() == State::Closing && reader_done && !child_done {
-            match rx.recv_timeout(Duration::from_secs(3)) {
-                Ok(Cmd::ChildExit(code)) => {
-                    exit_code = code;
-                }
-                _ => {}
+            if let Ok(Cmd::ChildExit(code)) = rx.recv_timeout(Duration::from_secs(3)) {
+                exit_code = code;
             }
             break;
         }
@@ -1586,7 +1797,10 @@ mod tests {
         for k in CLAUDE_SESSION_ENV {
             assert_eq!(cmd.get_env(k), None, "{k} should be dropped");
         }
-        assert_eq!(cmd.get_env("CLAUDE_CODE_PLUGIN_DIRS"), Some(std::ffi::OsStr::new("/x")));
+        assert_eq!(
+            cmd.get_env("CLAUDE_CODE_PLUGIN_DIRS"),
+            Some(std::ffi::OsStr::new("/x"))
+        );
     }
 
     fn run(cmd: &[&str]) -> (Pane, mpsc::Receiver<String>) {
@@ -1599,12 +1813,22 @@ mod tests {
                 Out::Title(t) => format!("title {t}"),
                 Out::Notice(n) => format!("notice {}|{}", n.title, n.body),
                 Out::ImageData(d) => format!("image {} {} {}x{}", d.id, d.name, d.width, d.height),
-                Out::Placements(p) => format!("placed {:?}", p.iter().map(|p| (p.image, p.row, p.col, p.cols, p.rows)).collect::<Vec<_>>()),
+                Out::Placements(p) => format!(
+                    "placed {:?}",
+                    p.iter()
+                        .map(|p| (p.image, p.row, p.col, p.cols, p.rows))
+                        .collect::<Vec<_>>()
+                ),
                 _ => return,
             };
             let _ = tx.lock().send(msg);
         });
-        let cfg = PaneConfig { cols: 40, rows: 10, command: Some(cmd.iter().map(|s| s.to_string()).collect()), ..Default::default() };
+        let cfg = PaneConfig {
+            cols: 40,
+            rows: 10,
+            command: Some(cmd.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        };
         (Pane::spawn(cfg, sink).unwrap(), rx)
     }
 
@@ -1646,17 +1870,20 @@ mod tests {
             cols: 60,
             rows: 10,
             cwd: Some("/tmp".into()),
-            env: vec![("RSZ_USER_ZDOTDIR".into(), home.to_string_lossy().into_owned())],
+            env: vec![(
+                "RSZ_USER_ZDOTDIR".into(),
+                home.to_string_lossy().into_owned(),
+            )],
             ..Default::default()
         };
         let pane = Pane::spawn(cfg, sink).unwrap();
         let wait = |want: &dyn Fn(&ShellStatus) -> bool, what: &str| {
             let deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < deadline {
-                if let Ok(st) = rx.recv_timeout(Duration::from_millis(100)) {
-                    if want(&st) {
-                        return st;
-                    }
+                if let Ok(st) = rx.recv_timeout(Duration::from_millis(100))
+                    && want(&st)
+                {
+                    return st;
                 }
             }
             panic!("never saw {what}");
@@ -1673,11 +1900,18 @@ mod tests {
         while pane.program_name().is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(pane.program_name().as_deref(), Some("sleep"), "the program in front is named");
+        assert_eq!(
+            pane.program_name().as_deref(),
+            Some("sleep"),
+            "the program in front is named"
+        );
         wait(&|s| s.integrated && !s.program, "the prompt after sleep");
         assert_eq!(pane.program_name(), None, "back at the prompt");
         let screen = pane.screen_text();
-        assert!(!screen.contains("7878") && !screen.contains("7879"), "marks leaked: {screen}");
+        assert!(
+            !screen.contains("7878") && !screen.contains("7879"),
+            "marks leaked: {screen}"
+        );
         pane.close();
         pane.join();
         let _ = std::fs::remove_dir_all(home);
@@ -1713,7 +1947,14 @@ mod tests {
         let boot = shell::bootstrap(&[shell.to_string()]).unwrap();
         let mut env = boot.env.clone();
         env.push(("HOME".into(), home.to_string_lossy().into_owned()));
-        let cfg = PaneConfig { cols: 60, rows: 12, command: Some(boot.argv.clone()), cwd: Some("/tmp".into()), env, ..Default::default() };
+        let cfg = PaneConfig {
+            cols: 60,
+            rows: 12,
+            command: Some(boot.argv.clone()),
+            cwd: Some("/tmp".into()),
+            env,
+            ..Default::default()
+        };
         let pane = Pane::spawn(cfg, sink).unwrap();
         let typed = std::cell::RefCell::new(Vec::new());
         let prompts = std::cell::Cell::new(0);
@@ -1738,15 +1979,27 @@ mod tests {
         wait(&|s| s.program, "the command start");
         pane.write("echo $((6*7))\rnext \x1b[Aline 日本".as_bytes().to_vec());
         prompt("the prompt after sleep");
-        assert_eq!(*typed.borrow(), vec!["echo $((6*7))\nnext line 日本".to_string()]);
+        assert_eq!(
+            *typed.borrow(),
+            vec!["echo $((6*7))\nnext line 日本".to_string()]
+        );
         pane.write(b"echo A$((1+2))B\r".to_vec());
         prompt("the prompt after echo");
         let screen = pane.screen_text();
         eprintln!("bash screen:\n{screen}");
         let lines = lines_of(&screen);
-        assert!(lines.iter().any(|l| l.trim() == "A3B"), "the next command did not run clean: {lines:?}");
-        assert!(!lines.iter().any(|l| l.trim() == "42"), "the typed-ahead line ran: {lines:?}");
-        assert!(!screen.contains("7878") && !screen.contains("typeahead"), "marks leaked: {screen}");
+        assert!(
+            lines.iter().any(|l| l.trim() == "A3B"),
+            "the next command did not run clean: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.trim() == "42"),
+            "the typed-ahead line ran: {lines:?}"
+        );
+        assert!(
+            !screen.contains("7878") && !screen.contains("typeahead"),
+            "marks leaked: {screen}"
+        );
         assert_eq!(typed.borrow().len(), 1, "{:?}", typed.borrow());
         pane.close();
         pane.join();
@@ -1760,7 +2013,11 @@ mod tests {
     fn shell_exit_gives_one_exit() {
         let (pane, rx) = run(&["/bin/sh", "-c", "printf 'hi\\033]0;t1\\007'; exit 3"]);
         let seen = wait_exit(&rx);
-        assert_eq!(seen.iter().filter(|m| m.starts_with("exit")).count(), 1, "{seen:?}");
+        assert_eq!(
+            seen.iter().filter(|m| m.starts_with("exit")).count(),
+            1,
+            "{seen:?}"
+        );
         assert!(seen.contains(&"exit Some(3)".to_string()), "{seen:?}");
         assert!(seen.contains(&"title t1".to_string()), "{seen:?}");
         pane.join();
@@ -1792,13 +2049,26 @@ mod tests {
         );
         let (pane, rx) = run(&["/bin/sh", "-c", &script]);
         let seen = wait_exit(&rx);
-        assert!(seen.contains(&"notice Done|tests pass".to_string()), "{seen:?}");
-        assert!(seen.iter().any(|m| m.starts_with("image 2 cat.png 90x36")), "{seen:?}");
+        assert!(
+            seen.contains(&"notice Done|tests pass".to_string()),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter().any(|m| m.starts_with("image 2 cat.png 90x36")),
+            "{seen:?}"
+        );
         // "hi", the caption, then the image's two rows from row 2.
-        assert!(seen.iter().any(|m| m == "placed [(2, 2, 0, 10, 2)]"), "{seen:?}");
+        assert!(
+            seen.iter().any(|m| m == "placed [(2, 2, 0, 10, 2)]"),
+            "{seen:?}"
+        );
         let text = pane.screen_text();
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(&lines[..5], &["hi", "img cat.png", "", "", "after"], "{text}");
+        assert_eq!(
+            &lines[..5],
+            &["hi", "img cat.png", "", "", "after"],
+            "{text}"
+        );
         pane.join();
     }
 
@@ -1826,7 +2096,10 @@ mod tests {
         let (lines, seen) = kitty_then_x("\\033[3;5H", "c=3,r=2");
         assert_eq!(lines[3].find('X'), Some(7), "{lines:?}");
         assert!(!lines[2].contains('X'), "{lines:?}");
-        assert!(seen.iter().any(|m| m == "placed [(1, 2, 4, 3, 2)]"), "{seen:?}");
+        assert!(
+            seen.iter().any(|m| m == "placed [(1, 2, 4, 3, 2)]"),
+            "{seen:?}"
+        );
 
         // C=1: X is written on the image's top-left cell, as before.
         let (lines, _) = kitty_then_x("\\033[3;5H", "c=3,r=2,C=1");
@@ -1837,7 +2110,10 @@ mod tests {
         // row, and the image moves up with its text.
         let (lines, seen) = kitty_then_x("\\033[9;1H", "c=2,r=4");
         assert_eq!(lines[9].find('X'), Some(2), "{lines:?}");
-        assert!(seen.iter().any(|m| m == "placed [(1, 6, 0, 2, 4)]"), "{seen:?}");
+        assert!(
+            seen.iter().any(|m| m == "placed [(1, 6, 0, 2, 4)]"),
+            "{seen:?}"
+        );
     }
 
     /// S-2: dropping the last handle closes the shell (and doesn't hang).
@@ -1846,7 +2122,11 @@ mod tests {
         let (pane, rx) = run(&["/bin/cat"]);
         drop(pane);
         let seen = wait_exit(&rx);
-        assert_eq!(seen.iter().filter(|m| m.starts_with("exit")).count(), 1, "{seen:?}");
+        assert_eq!(
+            seen.iter().filter(|m| m.starts_with("exit")).count(),
+            1,
+            "{seen:?}"
+        );
     }
 
     fn wait_until(what: &str, f: impl Fn() -> bool) {
@@ -1870,7 +2150,11 @@ mod tests {
         assert_eq!(pane.try_submit("hello"), Submit::Sent);
         // The command block shows "hello" at once; cat's echo is the output.
         wait_until("cat's echo", || pane.last_output_at() > before);
-        assert_eq!(pane.try_submit("again"), Submit::Busy, "output was just now");
+        assert_eq!(
+            pane.try_submit("again"),
+            Submit::Busy,
+            "output was just now"
+        );
         assert_eq!(pane.queue_len(), 0, "try_submit never queues");
         wait_until("idle after the line", || !pane.is_busy());
         assert!(!pane.screen_text().contains("early"));
@@ -1891,7 +2175,11 @@ mod tests {
             }
         });
         let cfg = PaneConfig {
-            command: Some(vec!["/bin/sh".into(), "-c".into(), "printf '\\033]133;C\\007'; sleep 2; printf '\\033]133;A\\007'; sleep 5".into()]),
+            command: Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf '\\033]133;C\\007'; sleep 2; printf '\\033]133;A\\007'; sleep 5".into(),
+            ]),
             ..Default::default()
         };
         let pane = Pane::spawn(cfg, sink).unwrap();
@@ -1910,7 +2198,11 @@ mod tests {
     fn term_program_reaches_the_shell() {
         let sink: Sink = Arc::new(|_| {});
         let cmd = |tp: Option<&str>| PaneConfig {
-            command: Some(vec!["/bin/sh".into(), "-c".into(), "printf '[%s]' \"$TERM_PROGRAM\"; sleep 5".into()]),
+            command: Some(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf '[%s]' \"$TERM_PROGRAM\"; sleep 5".into(),
+            ]),
             term_program: tp.map(Into::into),
             ..Default::default()
         };
@@ -1943,7 +2235,10 @@ mod tests {
                 cols: 60,
                 rows: 10,
                 cwd: Some("/tmp".into()),
-                env: vec![("RSZ_USER_ZDOTDIR".into(), home.to_string_lossy().into_owned())],
+                env: vec![(
+                    "RSZ_USER_ZDOTDIR".into(),
+                    home.to_string_lossy().into_owned(),
+                )],
                 keep_prompt: keep,
                 ..Default::default()
             };
@@ -1956,13 +2251,20 @@ mod tests {
         assert_eq!(kept.submit("echo kept-$((40+2))"), Submit::Sent);
         wait_until("the result", || kept.screen_text().contains("kept-42"));
         let screen = kept.screen_text();
-        assert!(screen.contains("KEEPME> echo kept-$((40+2))"), "typed at the prompt, no block: {screen}");
+        assert!(
+            screen.contains("KEEPME> echo kept-$((40+2))"),
+            "typed at the prompt, no block: {screen}"
+        );
         kept.close();
         kept.join();
         let quiet = open(false);
         wait_until("integrated", || shell.lock().integrated);
         std::thread::sleep(Duration::from_millis(300));
-        assert!(!quiet.screen_text().contains("KEEPME>"), "the bar's prompt stays blank: {}", quiet.screen_text());
+        assert!(
+            !quiet.screen_text().contains("KEEPME>"),
+            "the bar's prompt stays blank: {}",
+            quiet.screen_text()
+        );
         quiet.close();
         quiet.join();
         let _ = std::fs::remove_dir_all(home);
@@ -1999,11 +2301,19 @@ mod tests {
                 cols: 80,
                 rows: 20,
                 cwd: Some("/tmp".into()),
-                env: vec![("RSZ_USER_ZDOTDIR".into(), home.to_string_lossy().into_owned())],
+                env: vec![(
+                    "RSZ_USER_ZDOTDIR".into(),
+                    home.to_string_lossy().into_owned(),
+                )],
                 keep_prompt,
                 ..Default::default()
             };
-            Some(Hooked { pane: Pane::spawn(cfg, sink).unwrap(), seen, typed, home })
+            Some(Hooked {
+                pane: Pane::spawn(cfg, sink).unwrap(),
+                seen,
+                typed,
+                home,
+            })
         }
 
         fn last(&self) -> ShellStatus {
@@ -2013,7 +2323,11 @@ mod tests {
         fn wait(&self, what: &str, within: Duration, f: impl Fn(&ShellStatus) -> bool) {
             let deadline = Instant::now() + within;
             while !self.seen.lock().iter().any(&f) {
-                assert!(Instant::now() < deadline, "never within {within:?}: {what}; saw {:?}", self.seen.lock());
+                assert!(
+                    Instant::now() < deadline,
+                    "never within {within:?}: {what}; saw {:?}",
+                    self.seen.lock()
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
@@ -2021,7 +2335,9 @@ mod tests {
         /// Wait for the prompt after the one counted now.
         fn next_prompt(&self, what: &str) {
             let n = self.last().prompts;
-            self.wait(what, Duration::from_secs(10), |s| s.integrated && !s.program && s.prompts > n);
+            self.wait(what, Duration::from_secs(10), |s| {
+                s.integrated && !s.program && s.prompts > n
+            });
         }
 
         fn has_line(&self, want: &str) -> bool {
@@ -2045,13 +2361,25 @@ mod tests {
     /// folder the shell starts in, and the first prompt ends the wait.
     #[test]
     fn hooked_shell_is_pending_until_its_first_prompt() {
-        let Some(h) = Hooked::open("pending", "sleep 2\n", false) else { return };
-        h.wait("pending at start", Duration::from_millis(500), |s| s.pending && !s.integrated && s.cwd.ends_with("tmp"));
-        h.wait("the first prompt", Duration::from_secs(10), |s| s.integrated);
+        let Some(h) = Hooked::open("pending", "sleep 2\n", false) else {
+            return;
+        };
+        h.wait("pending at start", Duration::from_millis(500), |s| {
+            s.pending && !s.integrated && s.cwd.ends_with("tmp")
+        });
+        h.wait("the first prompt", Duration::from_secs(10), |s| {
+            s.integrated
+        });
         let seen = h.seen.lock().clone();
         let first = seen.iter().position(|s| s.integrated).unwrap();
-        assert!(seen[..first].iter().all(|s| s.pending && !s.integrated), "{seen:?}");
-        assert!(seen[first..].iter().all(|s| s.integrated && !s.pending), "{seen:?}");
+        assert!(
+            seen[..first].iter().all(|s| s.pending && !s.integrated),
+            "{seen:?}"
+        );
+        assert!(
+            seen[first..].iter().all(|s| s.integrated && !s.pending),
+            "{seen:?}"
+        );
     }
 
     /// Enter in the bar before the first prompt types the line into the
@@ -2059,16 +2387,28 @@ mod tests {
     /// it at its first prompt, once, and the bar works as usual after.
     #[test]
     fn enter_before_the_first_prompt_runs_at_it() {
-        let Some(h) = Hooked::open("early", "sleep 2\n", false) else { return };
+        let Some(h) = Hooked::open("early", "sleep 2\n", false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(h.pane.submit("echo early-$((40+2))"), Submit::Sent);
         assert_eq!(h.pane.queue_len(), 0);
         assert!(h.last().pending, "the wait goes on");
-        h.wait("the prompt", Duration::from_secs(10), |s| s.integrated && !s.pending);
+        h.wait("the prompt", Duration::from_secs(10), |s| {
+            s.integrated && !s.pending
+        });
         wait_until("the typed line ran", || h.has_line("early-42"));
         std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(lines_of(&h.pane.screen_text()).iter().filter(|l| *l == "early-42").count(), 1, "{}", h.pane.screen_text());
+        assert_eq!(
+            lines_of(&h.pane.screen_text())
+                .iter()
+                .filter(|l| *l == "early-42")
+                .count(),
+            1,
+            "{}",
+            h.pane.screen_text()
+        );
         wait_until("idle", || !h.pane.is_busy());
         let r = h.pane.submit("echo after-$((2+3))");
         assert!(matches!(r, Submit::Sent | Submit::Queued(_)), "{r:?}");
@@ -2076,7 +2416,11 @@ mod tests {
             let _ = h.pane.flush_queue();
             h.has_line("after-5")
         });
-        assert!(h.pane.screen_text().contains('❯'), "a block again at the prompt: {}", h.pane.screen_text());
+        assert!(
+            h.pane.screen_text().contains('❯'),
+            "a block again at the prompt: {}",
+            h.pane.screen_text()
+        );
     }
 
     /// A start-up question that ends in a newline and reads a line (the
@@ -2085,23 +2429,35 @@ mod tests {
     #[test]
     fn a_start_up_question_gets_its_enter_at_once() {
         let rc = "print 'Press Enter to continue'; read; print continued; sleep 0.3\n";
-        let Some(h) = Hooked::open("enter", rc, false) else { return };
+        let Some(h) = Hooked::open("enter", rc, false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(h.pane.submit(""), Submit::Blank);
         let t = Instant::now();
         wait_until("continued", || h.has_line("continued"));
-        assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            t.elapsed()
+        );
         h.wait("the prompt", Duration::from_secs(5), |s| s.integrated);
 
         let rc = "print 'Start? (y/n)'; read ans; print \"answer=$ans\"; sleep 0.3\n";
-        let Some(h) = Hooked::open("answer", rc, false) else { return };
+        let Some(h) = Hooked::open("answer", rc, false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(h.pane.submit("y"), Submit::Sent);
         let t = Instant::now();
         wait_until("the answer", || h.has_line("answer=y"));
-        assert!(t.elapsed() < Duration::from_millis(1500), "{:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            t.elapsed()
+        );
         h.wait("the prompt", Duration::from_secs(5), |s| s.integrated);
     }
 
@@ -2109,7 +2465,9 @@ mod tests {
     #[test]
     fn a_line_question_in_the_rc_gets_its_answer_at_once() {
         let rc = "read 'ans?continue? '; print \"answer=$ans\"; sleep 0.3\n";
-        let Some(h) = Hooked::open("ask", rc, false) else { return };
+        let Some(h) = Hooked::open("ask", rc, false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(h.pane.submit("y"), Submit::Sent);
@@ -2120,7 +2478,9 @@ mod tests {
     /// try_submit (an embedder with its own queue) waits for the prompt.
     #[test]
     fn try_submit_is_busy_before_the_first_prompt() {
-        let Some(h) = Hooked::open("try", "sleep 2\n", true) else { return };
+        let Some(h) = Hooked::open("try", "sleep 2\n", true) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         std::thread::sleep(Duration::from_millis(1000));
         assert_eq!(h.pane.try_submit("x"), Submit::Busy);
@@ -2133,7 +2493,9 @@ mod tests {
     #[test]
     fn no_first_prompt_types_lines_in_order() {
         let rc = "exec /bin/sh -c 'while IFS= read -r l; do echo \"got:$l\"; done'\n";
-        let Some(h) = Hooked::open("noprompt", rc, false) else { return };
+        let Some(h) = Hooked::open("noprompt", rc, false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         for l in ["one", "two", "three"] {
             assert_eq!(h.pane.submit(l), Submit::Sent);
@@ -2144,10 +2506,17 @@ mod tests {
         let screen = h.pane.screen_text();
         let lines = lines_of(&screen);
         let at = |want: &str| {
-            assert_eq!(lines.iter().filter(|l| *l == want).count(), 1, "{want} once: {screen}");
+            assert_eq!(
+                lines.iter().filter(|l| *l == want).count(),
+                1,
+                "{want} once: {screen}"
+            );
             lines.iter().position(|l| l == want).unwrap()
         };
-        assert!(at("got:one") < at("got:two") && at("got:two") < at("got:three"), "{screen}");
+        assert!(
+            at("got:one") < at("got:two") && at("got:two") < at("got:three"),
+            "{screen}"
+        );
         assert!(!screen.contains('❯'), "no command blocks: {screen}");
         assert!(h.last().pending, "the bar stays");
     }
@@ -2157,9 +2526,13 @@ mod tests {
     #[test]
     fn a_question_in_the_rc_releases_the_hold() {
         let rc = "read -k 1 '?go? '; print \"\\nanswer=$REPLY\"; sleep 1\n";
-        let Some(h) = Hooked::open("question", rc, false) else { return };
+        let Some(h) = Hooked::open("question", rc, false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
-        h.wait("the wait given up", Duration::from_millis(1500), |s| !s.pending && !s.integrated);
+        h.wait("the wait given up", Duration::from_millis(1500), |s| {
+            !s.pending && !s.integrated
+        });
         h.pane.write(b"y".to_vec());
         wait_until("the answer", || h.pane.screen_text().contains("answer=y"));
         h.wait("the late prompt", Duration::from_secs(10), |s| s.integrated);
@@ -2170,10 +2543,14 @@ mod tests {
     #[test]
     fn enter_after_giving_up_is_typed_as_is() {
         let rc = "exec /bin/sh -c 'while IFS= read -r l; do echo \"got:$l\"; done'\n";
-        let Some(h) = Hooked::open("raced", rc, false) else { return };
+        let Some(h) = Hooked::open("raced", rc, false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         h.pane.write(b"zero\r".to_vec());
-        h.wait("the wait given up", Duration::from_millis(500), |s| !s.pending && !s.integrated);
+        h.wait("the wait given up", Duration::from_millis(500), |s| {
+            !s.pending && !s.integrated
+        });
         assert_eq!(h.pane.submit("one"), Submit::Sent);
         h.pane.write(b"two\r".to_vec());
         assert_eq!(h.pane.queue_len(), 0);
@@ -2181,7 +2558,10 @@ mod tests {
         let screen = h.pane.screen_text();
         let lines = lines_of(&screen);
         let at = |want: &str| lines.iter().position(|l| l == want).unwrap_or(usize::MAX);
-        assert!(at("got:zero") < at("got:one") && at("got:one") < at("got:two"), "{screen}");
+        assert!(
+            at("got:zero") < at("got:one") && at("got:one") < at("got:two"),
+            "{screen}"
+        );
         assert!(!screen.contains('❯'), "no command blocks: {screen}");
     }
 
@@ -2189,7 +2569,9 @@ mod tests {
     /// through reply and the wait goes on (ConPTY turns 1004 on at start).
     #[test]
     fn a_focus_report_does_not_end_the_wait() {
-        let Some(h) = Hooked::open("focus", "printf '\\033[?1004h'; sleep 1.5\n", false) else { return };
+        let Some(h) = Hooked::open("focus", "printf '\\033[?1004h'; sleep 1.5\n", false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         std::thread::sleep(Duration::from_millis(300));
         h.pane.reply(b"\x1b[I".to_vec());
@@ -2202,22 +2584,30 @@ mod tests {
     /// A full-screen program before the first prompt has the keys.
     #[test]
     fn alt_screen_before_the_first_prompt_gives_up() {
-        let Some(h) = Hooked::open("alt", "printf '\\033[?1049h'; sleep 30\n", false) else { return };
+        let Some(h) = Hooked::open("alt", "printf '\\033[?1049h'; sleep 30\n", false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
-        h.wait("the wait given up", Duration::from_millis(1500), |s| !s.pending && !s.integrated);
+        h.wait("the wait given up", Duration::from_millis(1500), |s| {
+            !s.pending && !s.integrated
+        });
     }
 
     /// ^C (or anything else written to the PTY) ends the wait at once, and
     /// a line typed from the bar before it still goes first.
     #[test]
     fn input_written_before_the_first_prompt_ends_the_wait() {
-        let Some(h) = Hooked::open("ctrlc", "sleep 3\n", false) else { return };
+        let Some(h) = Hooked::open("ctrlc", "sleep 3\n", false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         h.pane.write(b"\x03".to_vec());
         h.wait("the wait ended", Duration::from_millis(200), |s| !s.pending);
         drop(h);
 
-        let Some(h) = Hooked::open("order", "sleep 2\n", false) else { return };
+        let Some(h) = Hooked::open("order", "sleep 2\n", false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         assert_eq!(h.pane.submit("echo q-$((1+1))"), Submit::Sent);
         assert!(h.last().pending, "a bar line does not end the wait");
@@ -2236,26 +2626,42 @@ mod tests {
     /// dropped, and the shell's own line is left empty.
     #[test]
     fn zsh_hands_typeahead_to_the_bar() {
-        let Some(h) = Hooked::open("ahead", "", false) else { return };
+        let Some(h) = Hooked::open("ahead", "", false) else {
+            return;
+        };
         h.next_prompt("the first prompt");
         assert!(h.typed.lock().is_empty(), "{:?}", h.typed.lock());
         wait_until("idle", || !h.pane.is_busy());
         assert_eq!(h.pane.submit("sleep 1"), Submit::Sent);
         h.wait("the command start", Duration::from_secs(5), |s| s.program);
-        h.pane.write("echo $((6*7))\rnext \x1b[Aline 日本".as_bytes().to_vec());
+        h.pane
+            .write("echo $((6*7))\rnext \x1b[Aline 日本".as_bytes().to_vec());
         h.next_prompt("the prompt after sleep");
-        assert_eq!(*h.typed.lock(), vec!["echo $((6*7))\nnext line 日本".to_string()]);
+        assert_eq!(
+            *h.typed.lock(),
+            vec!["echo $((6*7))\nnext line 日本".to_string()]
+        );
         wait_until("idle", || !h.pane.is_busy());
         assert_eq!(h.pane.submit("echo A$((1+2))B"), Submit::Sent);
         h.next_prompt("the prompt after echo");
         let screen = h.pane.screen_text();
         eprintln!("zsh screen:\n{screen}");
-        assert!(h.has_line("A3B"), "the next command did not run clean: {screen}");
+        assert!(
+            h.has_line("A3B"),
+            "the next command did not run clean: {screen}"
+        );
         assert!(!h.has_line("42"), "the typed-ahead line ran: {screen}");
         // The tty echoed the keys while sleep ran, as any terminal does; the
         // shell's line editor must not draw them a second time at the prompt.
-        assert_eq!(screen.matches("next ").count(), 1, "the typed text shows twice: {screen}");
-        assert!(!screen.contains("7878") && !screen.contains("typeahead"), "marks leaked: {screen}");
+        assert_eq!(
+            screen.matches("next ").count(),
+            1,
+            "the typed text shows twice: {screen}"
+        );
+        assert!(
+            !screen.contains("7878") && !screen.contains("typeahead"),
+            "marks leaked: {screen}"
+        );
         assert_eq!(h.typed.lock().len(), 1, "{:?}", h.typed.lock());
         // A program that reads the keyboard still gets every key: nothing is
         // left to take back.
@@ -2264,7 +2670,12 @@ mod tests {
         h.pane.write(b"abc\r".to_vec());
         h.next_prompt("the prompt after read");
         wait_until("read got the keys", || h.has_line("got-abc"));
-        assert_eq!(h.typed.lock().len(), 1, "nothing more taken back: {:?}", h.typed.lock());
+        assert_eq!(
+            h.typed.lock().len(),
+            1,
+            "nothing more taken back: {:?}",
+            h.typed.lock()
+        );
     }
 
     /// Lines typed with Enter before the first prompt still all run (the
@@ -2272,19 +2683,34 @@ mod tests {
     /// while the first of them runs goes to the bar, not the shell's line.
     #[test]
     fn startup_lines_run_and_typeahead_after_them_goes_to_the_bar() {
-        let Some(h) = Hooked::open("ahead-startup", "sleep 1\n", false) else { return };
+        let Some(h) = Hooked::open("ahead-startup", "sleep 1\n", false) else {
+            return;
+        };
         h.wait("pending", Duration::from_millis(500), |s| s.pending);
         assert_eq!(h.pane.submit("sleep 1; echo one-$((0+1))"), Submit::Sent);
         assert_eq!(h.pane.submit("echo two-$((1+1))"), Submit::Sent);
-        h.wait("the first prompt", Duration::from_secs(10), |s| s.integrated);
+        h.wait("the first prompt", Duration::from_secs(10), |s| {
+            s.integrated
+        });
         h.wait("the first line runs", Duration::from_secs(5), |s| s.program);
         h.pane.write(b"later words".to_vec());
         wait_until("both lines ran", || h.has_line("two-2"));
-        h.wait("a prompt after both", Duration::from_secs(5), |s| s.integrated && !s.program && s.prompts >= 3);
+        h.wait("a prompt after both", Duration::from_secs(5), |s| {
+            s.integrated && !s.program && s.prompts >= 3
+        });
         // The tty echoes keys typed during a command, as in any terminal:
         // "later words" sits on the screen before one-1's output.
-        assert!(h.pane.screen_text().contains("one-1"), "{}", h.pane.screen_text());
-        assert_eq!(*h.typed.lock(), vec!["later words".to_string()], "{}", h.pane.screen_text());
+        assert!(
+            h.pane.screen_text().contains("one-1"),
+            "{}",
+            h.pane.screen_text()
+        );
+        assert_eq!(
+            *h.typed.lock(),
+            vec!["later words".to_string()],
+            "{}",
+            h.pane.screen_text()
+        );
         wait_until("idle", || !h.pane.is_busy());
         assert_eq!(h.pane.submit("echo A$((1+2))B"), Submit::Sent);
         wait_until("the next line ran clean", || h.has_line("A3B"));
@@ -2297,9 +2723,19 @@ mod tests {
         let zdot = std::env::temp_dir().join(format!("rsz-test-plain-{}", std::process::id()));
         std::fs::create_dir_all(&zdot).unwrap();
         for cfg in [
-            PaneConfig { command: Some(vec!["/bin/cat".into()]), ..Default::default() },
-            PaneConfig { plain_shell: true, env: vec![("ZDOTDIR".into(), zdot.to_string_lossy().into_owned())], ..Default::default() },
-            PaneConfig { command: Some(vec!["/bin/zsh".into(), "-c".into(), "sleep 5".into()]), ..Default::default() },
+            PaneConfig {
+                command: Some(vec!["/bin/cat".into()]),
+                ..Default::default()
+            },
+            PaneConfig {
+                plain_shell: true,
+                env: vec![("ZDOTDIR".into(), zdot.to_string_lossy().into_owned())],
+                ..Default::default()
+            },
+            PaneConfig {
+                command: Some(vec!["/bin/zsh".into(), "-c".into(), "sleep 5".into()]),
+                ..Default::default()
+            },
         ] {
             let s = seen.clone();
             let sink: Sink = Arc::new(move |o| {
@@ -2327,7 +2763,11 @@ mod tests {
         assert!(pane.screen_text().contains("ping"));
         pane.close();
         let seen = wait_exit(&rx);
-        assert_eq!(seen.iter().filter(|m| m.starts_with("exit")).count(), 1, "{seen:?}");
+        assert_eq!(
+            seen.iter().filter(|m| m.starts_with("exit")).count(),
+            1,
+            "{seen:?}"
+        );
         pane.join();
     }
 
@@ -2338,7 +2778,9 @@ mod tests {
         let (pane, rx) = run(&["/bin/sh"]);
         pane.write(format!("cd '{}'; echo here\r", dir.display()).into_bytes());
         let deadline = Instant::now() + Duration::from_secs(5);
-        while pane.cwd().map(std::path::PathBuf::from).as_ref() != Some(&dir) && Instant::now() < deadline {
+        while pane.cwd().map(std::path::PathBuf::from).as_ref() != Some(&dir)
+            && Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(pane.cwd().map(std::path::PathBuf::from), Some(dir));
@@ -2355,13 +2797,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn custom_prompt_folder_reports() {
-        let a = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("rsz-osc-{}", std::process::id()));
+        let a = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("rsz-osc-{}", std::process::id()));
         let b = a.join("b c");
         std::fs::create_dir_all(&b).unwrap();
         let (pane, rx) = run(&["/bin/sh"]);
         let until = |want: &std::path::Path| {
             let deadline = Instant::now() + Duration::from_secs(5);
-            while pane.cwd().as_deref().map(std::path::Path::new) != Some(want) && Instant::now() < deadline {
+            while pane.cwd().as_deref().map(std::path::Path::new) != Some(want)
+                && Instant::now() < deadline
+            {
                 std::thread::sleep(Duration::from_millis(20));
             }
             assert_eq!(pane.cwd().as_deref().map(std::path::Path::new), Some(want));
@@ -2371,8 +2817,14 @@ mod tests {
         pane.write(format!("printf '\\033]9;9;\"{}\"\\007'\r", b.display()).into_bytes());
         until(&b);
         pane.write(b"printf '\\033]9;9;/no/such/rsz/dir\\007'; echo mark-done\r".to_vec());
-        wait_until("mark-done", || pane.screen_text().matches("mark-done").count() >= 2);
-        assert_eq!(pane.cwd().as_deref().map(std::path::Path::new), Some(b.as_path()), "a missing folder is ignored");
+        wait_until("mark-done", || {
+            pane.screen_text().matches("mark-done").count() >= 2
+        });
+        assert_eq!(
+            pane.cwd().as_deref().map(std::path::Path::new),
+            Some(b.as_path()),
+            "a missing folder is ignored"
+        );
         pane.close();
         wait_exit(&rx);
         pane.join();
@@ -2390,7 +2842,11 @@ mod tests {
         while !pane.screen_text().contains("got reply") && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(pane.screen_text().contains("got reply"), "{}", pane.screen_text());
+        assert!(
+            pane.screen_text().contains("got reply"),
+            "{}",
+            pane.screen_text()
+        );
         // And the frame thread is still alive: new output still makes a
         // frame. Let the frames for what is already on screen go by first
         // (they wait up to ACK_TIMEOUT for an ack the test never sends), so
@@ -2400,7 +2856,10 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut framed = false;
         while !framed && Instant::now() < deadline {
-            framed = rx.recv_timeout(Duration::from_millis(100)).is_ok_and(|m| m == "frame") && pane.screen_text().contains("typed x");
+            framed = rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_ok_and(|m| m == "frame")
+                && pane.screen_text().contains("typed x");
         }
         assert!(framed, "no frame after new output: {}", pane.screen_text());
         pane.close();
@@ -2448,7 +2907,11 @@ mod windows_tests {
     /// up (`ready`), keeps all of it above the prompt under ConPTY, on
     /// screen or in the scrollback, after resizes too. Only the prompt
     /// (`prompt_line`: whether a line is it) is under the restored mark.
-    fn keeps_the_restored_text(cfg: PaneConfig, ready: impl Fn(&Pane, &[ShellStatus]) -> bool, prompt_line: impl Fn(&str) -> bool) {
+    fn keeps_the_restored_text(
+        cfg: PaneConfig,
+        ready: impl Fn(&Pane, &[ShellStatus]) -> bool,
+        prompt_line: impl Fn(&str) -> bool,
+    ) {
         let seen = Arc::new(Mutex::new(Vec::<ShellStatus>::new()));
         let s = seen.clone();
         let sink: Sink = Arc::new(move |o| {
@@ -2458,10 +2921,24 @@ mod windows_tests {
         });
         let old: String = (1..=2000).map(|i| format!("old-line-{i}\r\n")).collect();
         let preamble = format!("{old}日本語の行\r\n\x1b[2m─── restored · saved ───\x1b[0m\r\n");
-        let pane = Pane::spawn(PaneConfig { cols: 100, rows: 30, scrollback: 10_000, preamble: Some(preamble), ..cfg }, sink).unwrap();
+        let pane = Pane::spawn(
+            PaneConfig {
+                cols: 100,
+                rows: 30,
+                scrollback: 10_000,
+                preamble: Some(preamble),
+                ..cfg
+            },
+            sink,
+        )
+        .unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
         while !ready(&pane, &seen.lock()) {
-            assert!(Instant::now() < deadline, "never a prompt: {}", pane.screen_text());
+            assert!(
+                Instant::now() < deadline,
+                "never a prompt: {}",
+                pane.screen_text()
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         wait_until("idle", || !pane.is_busy());
@@ -2470,12 +2947,38 @@ mod windows_tests {
         let check = |when: &str| {
             let all = [pane.history_tail(2100), lines_of(&pane.screen_text())].concat();
             let at = |w: &str| all.iter().position(|l| l.trim_end() == w);
-            let shown = || all.iter().rev().take(40).cloned().collect::<Vec<_>>().join("\n");
-            for want in ["old-line-1", "old-line-1000", "old-line-2000", "日本語の行", mark] {
-                assert!(at(want).is_some(), "{when}: {want} gone; the end:\n{}", shown());
+            let shown = || {
+                all.iter()
+                    .rev()
+                    .take(40)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            for want in [
+                "old-line-1",
+                "old-line-1000",
+                "old-line-2000",
+                "日本語の行",
+                mark,
+            ] {
+                assert!(
+                    at(want).is_some(),
+                    "{when}: {want} gone; the end:\n{}",
+                    shown()
+                );
             }
-            assert!(at("old-line-1") < at("old-line-2000") && at("old-line-2000") < at("日本語の行") && at("日本語の行") < at(mark), "{when}: out of order:\n{}", shown());
-            let below: Vec<_> = all[at(mark).unwrap() + 1..].iter().filter(|l| !l.trim().is_empty() && !prompt_line(l)).collect();
+            assert!(
+                at("old-line-1") < at("old-line-2000")
+                    && at("old-line-2000") < at("日本語の行")
+                    && at("日本語の行") < at(mark),
+                "{when}: out of order:\n{}",
+                shown()
+            );
+            let below: Vec<_> = all[at(mark).unwrap() + 1..]
+                .iter()
+                .filter(|l| !l.trim().is_empty() && !prompt_line(l))
+                .collect();
             assert!(below.is_empty(), "{when}: under the mark: {below:?}");
         };
         check("after the first prompt");
@@ -2492,7 +2995,11 @@ mod windows_tests {
     /// hook's start clear the screen, the hook prints the text (hearth#950).
     #[test]
     fn powershell_keeps_the_restored_text_above_its_prompt() {
-        keeps_the_restored_text(PaneConfig::default(), |_, seen| seen.iter().any(|s| s.integrated), |_| false);
+        keeps_the_restored_text(
+            PaneConfig::default(),
+            |_, seen| seen.iter().any(|s| s.integrated),
+            |_| false,
+        );
     }
 
     /// The same shell with the plain-shell setting (RSZ_NO_BAR, no hooks):
@@ -2506,9 +3013,16 @@ mod windows_tests {
         let is_prompt = |l: &str| l.trim_start().starts_with("PS ") && l.trim_end().ends_with('>');
         let mut argv = default_shell();
         argv.push("-NoProfile".into());
-        assert!(shell::print_preamble(&argv, "x").is_some(), "unhooked PowerShell prints the text: {argv:?}");
+        assert!(
+            shell::print_preamble(&argv, "x").is_some(),
+            "unhooked PowerShell prints the text: {argv:?}"
+        );
         keeps_the_restored_text(
-            PaneConfig { plain_shell: true, command: Some(argv), ..Default::default() },
+            PaneConfig {
+                plain_shell: true,
+                command: Some(argv),
+                ..Default::default()
+            },
             move |p, _| lines_of(&p.screen_text()).iter().any(|l| is_prompt(l)),
             is_prompt,
         );
@@ -2518,9 +3032,13 @@ mod windows_tests {
     /// text with `type` (hearth#972).
     #[test]
     fn cmd_keeps_the_restored_text_above_its_prompt() {
-        let is_prompt = |l: &str| l.len() > 2 && l.as_bytes()[1] == b':' && l.trim_end().ends_with('>');
+        let is_prompt =
+            |l: &str| l.len() > 2 && l.as_bytes()[1] == b':' && l.trim_end().ends_with('>');
         keeps_the_restored_text(
-            PaneConfig { command: Some(vec!["cmd.exe".into()]), ..Default::default() },
+            PaneConfig {
+                command: Some(vec!["cmd.exe".into()]),
+                ..Default::default()
+            },
             move |p, _| lines_of(&p.screen_text()).iter().any(|l| is_prompt(l)),
             is_prompt,
         );
@@ -2534,9 +3052,14 @@ mod windows_tests {
     /// program that reads keys itself (cmd, Read-Host) still gets them all.
     #[test]
     fn powershell_hands_typeahead_to_the_bar() {
-        let given = std::env::var("RSZ_TEST_PWSH").ok().filter(|s| !s.is_empty());
+        let given = std::env::var("RSZ_TEST_PWSH")
+            .ok()
+            .filter(|s| !s.is_empty());
         if let Some(p) = &given {
-            assert!(std::path::Path::new(p).is_file(), "RSZ_TEST_PWSH={p} is not a file");
+            assert!(
+                std::path::Path::new(p).is_file(),
+                "RSZ_TEST_PWSH={p} is not a file"
+            );
         }
         let mut shells: Vec<String> = given.or_else(|| which("pwsh.exe")).into_iter().collect();
         if shells.is_empty() {
@@ -2558,13 +3081,23 @@ mod windows_tests {
             _ => {}
         });
         let boot = shell::bootstrap(&[exe.to_string(), "-NoLogo".into()]).unwrap();
-        let cfg = PaneConfig { cols: 100, rows: 30, command: Some(boot.argv), ..Default::default() };
+        let cfg = PaneConfig {
+            cols: 100,
+            rows: 30,
+            command: Some(boot.argv),
+            ..Default::default()
+        };
         let pane = Pane::spawn(cfg, sink).unwrap();
         let last = || seen.lock().last().cloned().unwrap_or_default();
         let wait = |what: &str, f: &dyn Fn(&ShellStatus) -> bool| {
             let deadline = Instant::now() + Duration::from_secs(30);
             while !seen.lock().iter().any(f) {
-                assert!(Instant::now() < deadline, "{exe}: never saw {what}; saw {:?}\n{}", seen.lock(), pane.screen_text());
+                assert!(
+                    Instant::now() < deadline,
+                    "{exe}: never saw {what}; saw {:?}\n{}",
+                    seen.lock(),
+                    pane.screen_text()
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
         };
@@ -2580,7 +3113,11 @@ mod windows_tests {
         std::thread::sleep(Duration::from_millis(800));
         pane.write("echo (6*7)\rnext \x1b[Aline 日本".as_bytes().to_vec());
         next_prompt("the prompt after Start-Sleep");
-        assert_eq!(*typed.lock(), vec!["echo (6*7)\nnext line 日本".to_string()], "{exe}");
+        assert_eq!(
+            *typed.lock(),
+            vec!["echo (6*7)\nnext line 日本".to_string()],
+            "{exe}"
+        );
         eprintln!("{exe}: the bar got {:?}", typed.lock());
         wait_until("idle", || !pane.is_busy());
         assert_eq!(pane.submit("echo A$(1+2)B"), Submit::Sent);
@@ -2589,7 +3126,10 @@ mod windows_tests {
         let screen = pane.screen_text();
         eprintln!("{exe} screen:\n{screen}");
         assert!(!has_line("42"), "{exe}: the typed-ahead line ran: {screen}");
-        assert!(!screen.contains("7878") && !screen.contains("typeahead"), "{exe}: marks leaked: {screen}");
+        assert!(
+            !screen.contains("7878") && !screen.contains("typeahead"),
+            "{exe}: marks leaked: {screen}"
+        );
         // Programs that read the keyboard get every key: cmd (a REPL in its
         // own process) and Read-Host (PowerShell's own), even keys typed at
         // once after the bar's Enter, which PSReadLine would read ahead and
@@ -2602,14 +3142,27 @@ mod windows_tests {
         let screen = pane.screen_text();
         eprintln!("{exe} cmd:\n{screen}");
         // cmd's own prompt read both lines (not PowerShell, later).
-        assert!(lines_of(&screen).iter().any(|l| l.ends_with(">echo got-cmd")), "{exe}: cmd never read the line: {screen}");
-        assert!(lines_of(&screen).iter().any(|l| l.ends_with(">exit")), "{exe}: cmd never read exit: {screen}");
+        assert!(
+            lines_of(&screen)
+                .iter()
+                .any(|l| l.ends_with(">echo got-cmd")),
+            "{exe}: cmd never read the line: {screen}"
+        );
+        assert!(
+            lines_of(&screen).iter().any(|l| l.ends_with(">exit")),
+            "{exe}: cmd never read exit: {screen}"
+        );
         wait_until("idle", || !pane.is_busy());
         assert_eq!(pane.submit("Read-Host | % { \"got-$_\" }"), Submit::Sent);
         pane.write(b"abc\r".to_vec());
         next_prompt("the prompt after Read-Host");
         wait_until("Read-Host got the keys", || has_line("got-abc"));
-        assert_eq!(typed.lock().len(), 1, "{exe}: nothing more taken back: {:?}", typed.lock());
+        assert_eq!(
+            typed.lock().len(),
+            1,
+            "{exe}: nothing more taken back: {:?}",
+            typed.lock()
+        );
         eprintln!("{exe}: cmd and Read-Host got every key");
         pane.close();
         pane.join();
@@ -2629,14 +3182,26 @@ mod windows_tests {
             Out::Typeahead(text) => t.lock().push(text),
             _ => {}
         });
-        let pane = Pane::spawn(PaneConfig { cols: 100, rows: 30, ..Default::default() }, sink).unwrap();
+        let pane = Pane::spawn(
+            PaneConfig {
+                cols: 100,
+                rows: 30,
+                ..Default::default()
+            },
+            sink,
+        )
+        .unwrap();
         wait_until("pending", || seen.lock().iter().any(|s| s.pending));
         assert_eq!(pane.submit("Start-Sleep 1"), Submit::Sent);
         assert_eq!(pane.submit("echo B$(2+3)C"), Submit::Sent);
         let has_line = |want: &str| lines_of(&pane.screen_text()).iter().any(|l| l == want);
         wait_until("the second line ran", || has_line("B5C"));
-        eprintln!("{} screen:
-{}", default_shell()[0], pane.screen_text());
+        eprintln!(
+            "{} screen:
+{}",
+            default_shell()[0],
+            pane.screen_text()
+        );
         assert!(typed.lock().is_empty(), "{:?}", typed.lock());
         pane.close();
         pane.join();

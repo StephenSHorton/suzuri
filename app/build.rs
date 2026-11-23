@@ -6,7 +6,9 @@ fn main() {
     let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ui/dist/index.html");
     println!("cargo:rerun-if-changed=../ui/dist/index.html");
     if !dist.exists() {
-        panic!("ui/dist is missing: run `npm ci && npm run build` in ui/ first (cargo tauri build does it for you)");
+        panic!(
+            "ui/dist is missing: run `npm ci && npm run build` in ui/ first (cargo tauri build does it for you)"
+        );
     }
     tauri_build::build();
 }

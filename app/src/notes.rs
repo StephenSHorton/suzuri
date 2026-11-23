@@ -41,13 +41,25 @@ fn new_id() -> String {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     let mut h = RandomState::new().build_hasher();
-    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
     format!("{:016x}", h.finish())
 }
 
 fn blank_bank(now: &str) -> Bank {
-    let n = Note { id: new_id(), updated: now.into(), ..Default::default() };
-    Bank { active_id: n.id.clone(), notes: vec![n] }
+    let n = Note {
+        id: new_id(),
+        updated: now.into(),
+        ..Default::default()
+    };
+    Bank {
+        active_id: n.id.clone(),
+        notes: vec![n],
+    }
 }
 
 /// Go's normalizeNotesBank: never empty, every note has an id and a time,
@@ -75,7 +87,9 @@ pub fn normalize(mut b: Bank, now: &str) -> Bank {
 
 pub fn load_from(p: &Path, now: &str) -> Result<Bank, String> {
     match std::fs::read_to_string(p) {
-        Ok(s) => serde_json::from_str::<Bank>(&s).map(|b| normalize(b, now)).map_err(|e| format!("parse notes: {e}")),
+        Ok(s) => serde_json::from_str::<Bank>(&s)
+            .map(|b| normalize(b, now))
+            .map_err(|e| format!("parse notes: {e}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(blank_bank(now)),
         Err(e) => Err(e.to_string()),
     }
@@ -145,7 +159,18 @@ mod tests {
         let b = normalize(
             Bank {
                 active_id: "gone".into(),
-                notes: vec![Note { id: " ".into(), body: long, ..Default::default() }, Note { id: "b".into(), updated: "x".into(), ..Default::default() }],
+                notes: vec![
+                    Note {
+                        id: " ".into(),
+                        body: long,
+                        ..Default::default()
+                    },
+                    Note {
+                        id: "b".into(),
+                        updated: "x".into(),
+                        ..Default::default()
+                    },
+                ],
             },
             NOW,
         );
@@ -177,7 +202,10 @@ mod tests {
         let saved = save_to(&p, b.clone(), NOW).unwrap();
         assert_eq!(saved, b);
         let raw = std::fs::read_to_string(&p).unwrap();
-        assert!(!raw.contains("\"title\": \"\""), "empty title is omitted as in Go");
+        assert!(
+            !raw.contains("\"title\": \"\""),
+            "empty title is omitted as in Go"
+        );
         assert!(raw.ends_with("}\n"));
         assert_eq!(load_from(&p, NOW).unwrap(), b);
         assert!(!p.with_extension("json.tmp").exists());

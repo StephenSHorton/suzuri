@@ -94,10 +94,16 @@ mod tests {
     fn news_is_any_change_but_the_window_frame_even_back_to_an_old_value() {
         let last = Mutex::new(None);
         assert!(is_news(&last, &json!({"font_size_px": 14})));
-        assert!(!is_news(&last, &json!({"font_size_px": 14, "window": {"x": 5}})), "only the frame moved");
+        assert!(
+            !is_news(&last, &json!({"font_size_px": 14, "window": {"x": 5}})),
+            "only the frame moved"
+        );
         // This process saves 18 (update), then another program puts 14 back.
         assert!(is_news(&last, &json!({"font_size_px": 18})));
-        assert!(is_news(&last, &json!({"font_size_px": 14})), "back to the old value is still news");
+        assert!(
+            is_news(&last, &json!({"font_size_px": 14})),
+            "back to the old value is still news"
+        );
         assert!(!is_news(&last, &json!({"font_size_px": 14})));
     }
 }

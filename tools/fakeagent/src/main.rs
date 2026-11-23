@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 
 const SPIN: [&str; 6] = ["·", "✢", "✳", "✶", "✻", "✽"];
 const WORDS: [&str; 16] = [
-    "fn", "let", "match", "impl", "pane", "frame", "resize", "grid", "cursor", "scroll", "damage", "actor", "reader", "→", "硯", "墨",
+    "fn", "let", "match", "impl", "pane", "frame", "resize", "grid", "cursor", "scroll", "damage",
+    "actor", "reader", "→", "硯", "墨",
 ];
 const EMOJI: [&str; 4] = ["✅", "🔧", "📦", "🧪"];
 
@@ -90,14 +91,20 @@ impl Agent {
             {
                 // Never wider than the pane: a wrapped line would break the
                 // cursor-up arithmetic of the next redraw.
-                let msg = format!("Synthesizing… ({secs}s · ↓ {} lines · esc to interrupt)", self.lines_out);
+                let msg = format!(
+                    "Synthesizing… ({secs}s · ↓ {} lines · esc to interrupt)",
+                    self.lines_out
+                );
                 let msg: String = msg.chars().take(width.saturating_sub(2)).collect();
                 format!("\x1b[38;2;215;119;87m{spin}\x1b[0m {msg}")
             },
             format!("\x1b[2m╭{bar}╮\x1b[0m"),
             format!("\x1b[2m│\x1b[0m > {input}"),
             format!("\x1b[2m╰{bar}╯\x1b[0m"),
-            "  \x1b[2m? for shortcuts\x1b[0m".chars().take(width + 10).collect(),
+            "  \x1b[2m? for shortcuts\x1b[0m"
+                .chars()
+                .take(width + 10)
+                .collect(),
         ];
         for (i, l) in lines.iter().enumerate() {
             self.w("\r\x1b[2K");
@@ -137,10 +144,18 @@ impl Agent {
         let text = words.join(" ");
         let ln = self.lines_out % 9999;
         match kind {
-            0 | 1 => format!("\x1b[48;2;34;60;40m\x1b[38;2;140;200;150m{ln:>5} +  {text}\x1b[K\x1b[0m"),
+            0 | 1 => {
+                format!("\x1b[48;2;34;60;40m\x1b[38;2;140;200;150m{ln:>5} +  {text}\x1b[K\x1b[0m")
+            }
             2 => format!("\x1b[48;2;70;34;38m\x1b[38;2;220;150;150m{ln:>5} -  {text}\x1b[K\x1b[0m"),
-            3 => format!("\x1b[1m\x1b[38;5;141m● Update\x1b[0m(\x1b[38;5;110msrc/{}.rs\x1b[0m)", WORDS[(ln % 12) as usize]),
-            _ => format!("\x1b[2m{ln:>5}\x1b[0m    \x1b[38;5;{}m{text}\x1b[0m", 100 + (ln % 120)),
+            3 => format!(
+                "\x1b[1m\x1b[38;5;141m● Update\x1b[0m(\x1b[38;5;110msrc/{}.rs\x1b[0m)",
+                WORDS[(ln % 12) as usize]
+            ),
+            _ => format!(
+                "\x1b[2m{ln:>5}\x1b[0m    \x1b[38;5;{}m{text}\x1b[0m",
+                100 + (ln % 120)
+            ),
         }
     }
 
@@ -181,16 +196,27 @@ impl Agent {
 }
 
 fn main() {
-    let mut seed = 0x9e37_79b9_7f4a_7c15u64 ^ (std::process::id() as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);
+    let mut seed =
+        0x9e37_79b9_7f4a_7c15u64 ^ (std::process::id() as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);
     let mut quiet = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--seed" => seed ^= args.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(1).wrapping_mul(0x2545_f491_4f6c_dd1d),
+            "--seed" => {
+                seed ^= args
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(1)
+                    .wrapping_mul(0x2545_f491_4f6c_dd1d)
+            }
             "--quiet" => quiet = true,
             "--quiet-first" => {
                 if let Some(lock) = args.next() {
-                    quiet |= std::fs::OpenOptions::new().write(true).create_new(true).open(lock).is_ok();
+                    quiet |= std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(lock)
+                        .is_ok();
                 }
             }
             _ => {}
@@ -198,7 +224,16 @@ fn main() {
     }
     let _ = crossterm::terminal::enable_raw_mode();
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let mut a = Agent { rng: Rng(seed | 1), out: std::io::stdout(), input: String::new(), frame: 0, live_drawn: false, cols, rows, lines_out: 0 };
+    let mut a = Agent {
+        rng: Rng(seed | 1),
+        out: std::io::stdout(),
+        input: String::new(),
+        frame: 0,
+        live_drawn: false,
+        cols,
+        rows,
+        lines_out: 0,
+    };
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
