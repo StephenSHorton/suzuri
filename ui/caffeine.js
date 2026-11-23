@@ -1,5 +1,6 @@
 // Caffeine (#294): keep the machine awake, as Go suzuri's ☕ strip does.
-// The hold lives in Rust (app/src/caffeine.rs) and is on from launch; this
+// The hold lives in Rust (app/src/caffeine.rs) on the switch Suzuri shares
+// with Hearth (on at first launch, then as last left); this
 // adds the palette entries and the ☕ button at the right of the bar (dim when
 // off, "☕ ∞" / "☕ 12m" when on; a click toggles).
 import { caffeineToast } from "./caffeine_chip.js"
