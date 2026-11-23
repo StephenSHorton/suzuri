@@ -315,6 +315,7 @@ mod tests {
         let row = vec![(c.id(), me, "PING.EXE".to_string())];
         let got = super::imp::pick(row, me, super::imp::created);
         let _ = c.kill();
+        let _ = c.wait();
         assert_eq!(got.map(|r| r.0), Some(c.id()));
     }
 
