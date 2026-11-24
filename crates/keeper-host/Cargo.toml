@@ -1,0 +1,25 @@
+[package]
+name = "rsz-keeper-host"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "suzuri's shell keeper host: one kept shell served on a socket, as its own small program (no Tauri, no window)"
+
+[dependencies]
+rsz-term = { path = "../term" }
+rsz-keeper = { path = "../keeper" }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+base64 = "0.22"
+log = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[[bin]]
+name = "rsz-keeper-host"
+path = "src/main.rs"

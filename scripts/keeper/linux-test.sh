@@ -4,6 +4,8 @@
 # own target folder in a Docker volume so it never mixes with the host's.
 #   scripts/keeper/linux-test.sh            # cargo test -p suzuri --test keeper
 #   scripts/keeper/linux-test.sh --ignored  # also the key-to-frame latency
+# Each run goes twice: hosts started as `suzuri --keeper-host`, then as the
+# standalone rsz-keeper-host (hearth#190), which must pass the same tests.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd)
 [ -d "$R/ui/dist" ] || { echo "build the UI first: (cd ui && npm ci && npm run build)" >&2; exit 2; }
@@ -19,4 +21,8 @@ A=$(uname -m)
 curl -fsSL "https://ziglang.org/download/0.17.0/zig-$A-linux-0.17.0.tar.xz" | tar -xJ -C /opt
 export ZIG=/opt/zig-$A-linux-0.17.0/zig
 uname -srm; . /etc/os-release; echo "$PRETTY_NAME, zig $($ZIG version)"
-cargo test -q -p suzuri --test keeper $EXTRA'
+echo "== hosts: suzuri --keeper-host"
+cargo test -q -p suzuri --test keeper $EXTRA
+echo "== hosts: the standalone rsz-keeper-host"
+cargo build -q -p rsz-keeper-host
+RSZ_KEEPER_HOST=$CARGO_TARGET_DIR/debug/rsz-keeper-host cargo test -q -p suzuri --test keeper $EXTRA'
