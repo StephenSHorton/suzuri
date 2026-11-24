@@ -1,6 +1,6 @@
 {
   "name": "suzuri-view",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "suzuri's terminal view: paints rsz-term frames and turns input into bytes, with no Tauri; its pane-tree rules; and suzuri's Settings window and command palette for React + Astryx hosts.",
   "license": "MIT",
   "type": "module",
