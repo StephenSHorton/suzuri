@@ -1,7 +1,7 @@
 {
   "name": "suzuri-view",
-  "version": "0.2.0",
-  "description": "suzuri's terminal view: paints rsz-term frames and turns input into bytes, with no Tauri; and its pane-tree rules.",
+  "version": "0.3.0",
+  "description": "suzuri's terminal view: paints rsz-term frames and turns input into bytes, with no Tauri; its pane-tree rules; and suzuri's Settings window and command palette for React + Astryx hosts.",
   "license": "MIT",
   "type": "module",
   "main": "./index.js",
@@ -15,9 +15,26 @@
     "./layout_ops.js": { "types": "./layout_ops.d.ts", "default": "./layout_ops.js" },
     "./sash_ops.js": { "types": "./sash_ops.d.ts", "default": "./sash_ops.js" },
     "./tab_rules.js": { "types": "./tab_rules.d.ts", "default": "./tab_rules.js" },
+    "./settings_rules.js": { "types": "./settings_rules.d.ts", "default": "./settings_rules.js" },
+    "./palette_rules.js": { "types": "./palette_rules.d.ts", "default": "./palette_rules.js" },
+    "./settings": { "types": "./settings.d.ts", "default": "./dist/settings.js" },
+    "./palette": { "types": "./palette.d.ts", "default": "./dist/palette.js" },
     "./fonts/*": "./fonts/*",
     "./package.json": "./package.json"
   },
-  "files": ["*.js", "*.d.ts", "view.css", "fonts", "README.md"],
-  "sideEffects": ["./view.css"]
+  "files": ["*.js", "*.d.ts", "view.css", "fonts", "dist", "README.md"],
+  "sideEffects": ["./view.css"],
+  "scripts": { "prepack": "node build.mjs" },
+  "peerDependencies": {
+    "@astryxdesign/core": "0.7.12",
+    "lucide-react": ">=1.18.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@astryxdesign/core": { "optional": true },
+    "lucide-react": { "optional": true },
+    "react": { "optional": true },
+    "react-dom": { "optional": true }
+  }
 }

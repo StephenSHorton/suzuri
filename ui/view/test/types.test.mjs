@@ -21,23 +21,50 @@ function declared(file) {
   return [...names].sort()
 }
 
-for (const [js, dts] of [["index.js", "index.d.ts"], ["frame.js", "frame.d.ts"], ["keys.js", "keys.d.ts"], ["kitty.js", "kitty.d.ts"], ["layout_ops.js", "layout_ops.d.ts"], ["sash_ops.js", "sash_ops.d.ts"], ["tab_rules.js", "tab_rules.d.ts"]]) {
+for (const [js, dts] of [["index.js", "index.d.ts"], ["frame.js", "frame.d.ts"], ["keys.js", "keys.d.ts"], ["kitty.js", "kitty.d.ts"], ["layout_ops.js", "layout_ops.d.ts"], ["sash_ops.js", "sash_ops.d.ts"], ["tab_rules.js", "tab_rules.d.ts"], ["settings_rules.js", "settings_rules.d.ts"], ["palette_rules.js", "palette_rules.d.ts"]]) {
   test(`${dts} declares exactly ${js}'s exports`, async () => {
     const mod = await import(here(js))
     assert.deepEqual(declared(dts), Object.keys(mod).sort())
   })
 }
 
+// The React parts (react/*.jsx, built to dist/ when packed) need Astryx and
+// a DOM, so their exports are read from the source: each .d.ts declares its
+// own names plus everything its rules file exports (export *).
+for (const [jsx, dts, rules] of [["react/Settings.jsx", "settings.d.ts", "settings_rules.js"], ["react/Palette.jsx", "palette.d.ts", "palette_rules.js"]]) {
+  test(`${dts} declares exactly ${jsx}'s exports`, async () => {
+    assert.ok(readFileSync(here(dts), "utf8").includes(`export * from "./${rules.replace(".js", "")}"`))
+    const types = new Set([...declared(dts), ...Object.keys(await import(here(rules)))])
+    assert.deepEqual([...types].sort(), declared(jsx))
+  })
+}
+
 test("package.json: every exported .js has types, and the files ship", () => {
   const pkg = JSON.parse(readFileSync(here("package.json"), "utf8"))
   for (const [path, target] of Object.entries(pkg.exports)) {
-    if (path !== "." && !path.endsWith(".js")) continue
+    if (path !== "." && !path.endsWith(".js") && !["./settings", "./palette"].includes(path)) continue
     assert.equal(typeof target, "object", path)
     assert.deepEqual(Object.keys(target)[0], "types", `${path}: types first`)
     assert.ok(readFileSync(here(target.types.slice(2)), "utf8").length > 0)
   }
   assert.ok(pkg.files.includes("*.d.ts"))
   assert.ok(pkg.files.includes("fonts"))
+  // The React parts ship built (no JSX), with their peers optional so a
+  // host that only mounts the terminal needs none of them.
+  assert.ok(pkg.files.includes("dist"))
+  assert.equal(pkg.exports["./settings"].default, "./dist/settings.js")
+  assert.equal(pkg.exports["./palette"].default, "./dist/palette.js")
+  assert.equal(pkg.scripts.prepack, "node build.mjs")
+  for (const peer of ["react", "react-dom", "@astryxdesign/core", "lucide-react"]) {
+    assert.ok(pkg.peerDependencies[peer], peer)
+    assert.equal(pkg.peerDependenciesMeta[peer].optional, true, peer)
+  }
+})
+
+test("the terminal's own modules import no React", () => {
+  for (const f of ["index.js", "frame.js", "keys.js", "kitty.js", "layout_ops.js", "sash_ops.js", "tab_rules.js", "settings_rules.js", "palette_rules.js"]) {
+    assert.doesNotMatch(readFileSync(here(f), "utf8"), /from\s+"(react|react-dom|@astryxdesign|lucide-react)/, f)
+  }
 })
 
 test("the bundled Gohu ships with the package and view.css declares it", async () => {

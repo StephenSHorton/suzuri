@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { hintChords } from "../palette.js"
+import { hintChords } from "../view/palette_rules.js"
 import { chordLabels } from "../shortcuts.js"
 
 test("palette hints: chord labels become Kbd keys", () => {
