@@ -15,7 +15,13 @@ function Fail([string]$m) { Write-Host "FAIL: $m"; exit 1 }
 if (-not (Test-Path $HostExe)) { Fail "no host program at $HostExe" }
 if (-not (Test-Path $KeeperExe)) { Fail "no rsz-keeper at $KeeperExe" }
 
+# The temp folder, or when its path is too long for a socket (AF_UNIX
+# takes under 104 bytes; a check runner's own temp folder can be longer)
+# the system drive's root, as the keeper's short_test_dir does.
 $t = Join-Path ([IO.Path]::GetTempPath()) "rszh-$PID"
+if ((Join-Path $t "k\4294967295.sock").Length -ge 104) {
+  $t = Join-Path "$env:SystemDrive\" "rszh-$PID"
+}
 $bin = Join-Path $t "bin"
 $kd = Join-Path $t "k"
 New-Item -ItemType Directory -Force $bin, $kd | Out-Null
