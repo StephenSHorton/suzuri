@@ -27,7 +27,8 @@ export interface SettingsPage {
 export function pagesFor(parts?: SettingsPart[]): SettingsPage[]
 
 /** A change made elsewhere while the window is open, folded into Cancel's snapshot. */
-export function foldOutside<T extends Record<string, unknown>>(snap: T, cfg: T, outside: T): T
+/** asked: the last value this window saved per key; an outside value equal to it is that save coming back. */
+export function foldOutside<T extends Record<string, unknown>>(snap: T, cfg: T, outside: T, asked?: Record<string, unknown>): T
 /** What Cancel saves: the keys that differ from the snapshot, never `window`; null when none do. */
 export function restorePatch(snap: Record<string, unknown>, cfg: Record<string, unknown>): Record<string, unknown> | null
 /** Whether two settings differ, leaving out `window`. */

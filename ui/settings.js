@@ -74,15 +74,12 @@ export class Settings {
     // Unmount now, so the dialog has let go of focus before the terminal takes it.
     flushSync(() => unmountOverlay("settings"))
     if (keep) this.onClose?.()
-    finished.then(
-      ({ changed }) => {
-        // Go toasts each save; ours save as they change, so say it once on
-        // Done, after a save still in flight (a profile row saves on blur).
-        if (keep && changed) hostToast("settings saved")
-        if (!keep) this.onClose?.()
-      },
-      () => { if (!keep) this.onClose?.() },
-    )
+    finished.then(({ changed }) => {
+      // Go toasts each save; ours save as they change, so say it once on
+      // Done, after a save still in flight (a profile row saves on blur).
+      if (keep && changed) hostToast("settings saved")
+      if (!keep) this.onClose?.()
+    })
   }
 
   render() {

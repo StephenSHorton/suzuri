@@ -75,7 +75,7 @@ import { Palette } from "suzuri-view/palette"
 
 // Open while mounted; unmount on onClose.
 <SettingsWindow
-  settings={settings}           // the settings now; a new object while open is a change made elsewhere
+  settings={settings}           // the settings now; pass new ones as they change (your own saves coming back too)
   meta={meta}                   // rsz-settings' meta(): fonts, cursors, limits, labels, path
   save={(patch) => ipc.saveSettings(patch)}   // resolves to the saved settings (or nothing)
   onClose={(kept, finished) => setOpen(false)}
@@ -90,7 +90,7 @@ import { Palette } from "suzuri-view/palette"
 />
 ```
 
-- Every change saves at once through `save`. Cancel, Esc or a click outside puts back what changed on this screen (a `save` of only those keys); Done, Enter or Ctrl/Cmd+, keeps it. `finished` (onClose's second argument) resolves once the last save has landed, to `{ changed, settings }`. A `save` that throws shows "Couldn't save: …" in the footer.
+- Every change saves at once through `save`. Cancel, Esc or a click outside puts back what changed on this screen (a `save` of only those keys); Done, Enter or Ctrl/Cmd+, keeps it. `finished` (onClose's second argument) resolves once the last save has landed, to `{ changed, settings }`, with `error` when Cancel's restore failed; it never rejects. New `settings` while open show at once, and Cancel keeps what they changed, except values this window saved itself, so a host may pass its own saves back. A `save` that throws shows "Couldn't save: …" in the footer.
 - `parts` picks what shows, from `ALL_PARTS` (the default): `theme`, `mode`, `font`, `size`, `text_size`, `cursor` on Look; `new_tab_profile`, `notice`, `animate_unfocused`, `restore_sessions`, `profiles` on Session. A page with none of them is left out, and with one page left the tabs go. Only the keys of the parts shown are read and saved (`PART_KEYS`), so a host may pass only those.
 - `themeIcon(id)` puts an icon beside each theme's name (suzuri: its colour swatch); `initialPage` and `onPageChange` keep the page between openings.
 - The footer reads "Saved to" `meta.path` when the host passes a path.

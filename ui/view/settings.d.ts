@@ -43,7 +43,7 @@ export interface SettingsMeta {
 }
 
 export interface SettingsWindowProps {
-  /** The settings now. A new object while open is a change made elsewhere: shown, and kept by Cancel. */
+  /** The settings now. A new object while open is shown; what it changed, other than this window's own saves coming back, is kept by Cancel. */
   settings: Settings
   meta: SettingsMeta
   /** Saves a patch. Resolve to the saved settings, or to nothing (the window merges the patch). A rejection shows in the footer. */
@@ -51,8 +51,9 @@ export interface SettingsWindowProps {
   /**
    * The window is done (Done, Enter, Ctrl/Cmd+, or Cancel, Esc): unmount it.
    * `finished` resolves once a save in flight, and Cancel's restore, has landed.
+   * It never rejects: `error` is set when Cancel's restore failed.
    */
-  onClose: (kept: boolean, finished: Promise<{ changed: boolean; settings: Settings }>) => void
+  onClose: (kept: boolean, finished: Promise<{ changed: boolean; settings: Settings; error?: unknown }>) => void
   /** The parts to show; default every part. Hearth's terminal: TERMINAL_PARTS. */
   parts?: SettingsPart[]
   /** The dialog's width in px; default 600. */

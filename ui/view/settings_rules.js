@@ -41,10 +41,17 @@ export function pagesFor(parts = ALL_PARTS) {
 // Hearth, a hand edit): Esc puts back what was there when the screen opened,
 // so each key the outside change set becomes part of that, and Esc undoes
 // only what was changed on this screen. Returns the new snapshot.
-export function foldOutside(snap, cfg, outside) {
+//
+// asked holds the last value this screen saved for each key: a host that
+// passes its own saves back (Hearth follows its settings event) brings
+// those values in again, and they are this screen's, not someone else's.
+export function foldOutside(snap, cfg, outside, asked = {}) {
   const next = { ...snap }
   for (const k of Object.keys(outside)) {
-    if (JSON.stringify(outside[k]) !== JSON.stringify(cfg[k])) next[k] = structuredClone(outside[k])
+    const v = JSON.stringify(outside[k])
+    if (v === JSON.stringify(cfg[k])) continue
+    if (k in asked && v === JSON.stringify(asked[k])) continue
+    next[k] = structuredClone(outside[k])
   }
   return next
 }

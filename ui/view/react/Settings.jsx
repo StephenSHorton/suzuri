@@ -50,14 +50,16 @@ export const LABELS = {
 const opts = (ids, labels) => (ids || []).map((id) => ({ value: id, label: labels?.[id] || id }))
 
 // props (settings.d.ts has them typed):
-//   settings      the settings now; a new object here while open is a change
-//                 made elsewhere, shown and kept by Cancel
+//   settings      the settings now; a new object here while open is shown,
+//                 and what it changed, other than this window's own saves
+//                 coming back, is kept by Cancel
 //   meta          the choices and limits (rsz-settings' meta())
 //   save(patch)   saves; resolves to the saved settings (or nothing: the
 //                 window then merges the patch itself); a throw shows in the footer
 //   onClose(kept, finished)  the window is done: unmount it. finished
 //                 resolves once any save in flight (and Cancel's restore)
-//                 has landed, to { changed, settings }
+//                 has landed, to { changed, settings, error? }; it never
+//                 rejects (error: Cancel's restore failed)
 //   parts         the parts to show (default ALL_PARTS)
 //   width         the dialog's width in px (default 600)
 //   themeIcon(id) an icon beside each theme's name (suzuri: its swatch)
@@ -82,6 +84,8 @@ export function SettingsWindow({
   const saving = useRef(Promise.resolve())
   const closed = useRef(false)
   const seen = useRef(settings)
+  // The last value saved from here for each key (foldOutside).
+  const asked = useRef({})
 
   const apply = (next) => {
     cur.current = next
@@ -93,13 +97,14 @@ export function SettingsWindow({
     if (settings === seen.current) return
     seen.current = settings
     if (closed.current || settings === cur.current) return
-    snap.current = foldOutside(snap.current, cur.current, settings)
+    snap.current = foldOutside(snap.current, cur.current, settings, asked.current)
     apply(settings)
   }, [settings])
 
   useEffect(() => { if (selectLast) setSelectLast(false) }, [selectLast])
 
   const set = (patch) => {
+    Object.assign(asked.current, structuredClone(patch))
     const p = (async () => {
       try {
         const next = await save(patch)
@@ -129,9 +134,15 @@ export function SettingsWindow({
       if (keep) return { changed: changed(snap.current, cur.current), settings: cur.current }
       const patch = restorePatch(snap.current, cur.current)
       if (!patch) return { changed: false, settings: cur.current }
-      const next = (await save(patch)) ?? { ...cur.current, ...patch }
-      cur.current = next
-      return { changed: true, settings: next }
+      Object.assign(asked.current, structuredClone(patch))
+      try {
+        const next = (await save(patch)) ?? { ...cur.current, ...patch }
+        cur.current = next
+        return { changed: true, settings: next }
+      } catch (error) {
+        // The restore failed: the settings stay as this window left them.
+        return { changed: true, settings: cur.current, error }
+      }
     })()
     onClose?.(keep, finished)
   }

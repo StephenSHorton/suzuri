@@ -47,3 +47,12 @@ test("a new profile's name skips names already taken", () => {
   assert.equal(newProfileName([{ name: "default" }]), "Profile 2")
   assert.equal(newProfileName([{ name: "x" }, { name: "profile 3" }]), "Profile 4")
 })
+
+test("a host passing this screen's own save back: Cancel still undoes it", () => {
+  const snap = { cursor: "block", font_size_px: 14 }
+  const cfg = { cursor: "block", font_size_px: 14 } // the save is still in flight
+  const echo = { cursor: "bar", font_size_px: 14 } // the host's settings event, with this screen's Bar
+  assert.deepEqual(foldOutside(snap, cfg, echo, { cursor: "bar" }), snap)
+  // Something else changed at the same time: that one is kept.
+  assert.deepEqual(foldOutside(snap, cfg, { cursor: "bar", font_size_px: 20 }, { cursor: "bar" }), { cursor: "block", font_size_px: 20 })
+})
