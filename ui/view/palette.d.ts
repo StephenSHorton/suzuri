@@ -17,7 +17,12 @@ export interface PaletteProps<C extends PaletteCommand = PaletteCommand> {
   isToggleKey?: (e: KeyboardEvent | { key: string; ctrlKey: boolean; metaKey: boolean }) => boolean
   /** The query field's hint; default "Type a command…". */
   placeholder?: string
+  /** The dialog's tallest: pixels or a CSS length; default PALETTE_MAX_HEIGHT, min(480px, 85dvh). */
+  maxHeight?: number | string
 }
+
+/** The default maxHeight: Astryx's 480px, capped at 85% of the view's height. */
+export const PALETTE_MAX_HEIGHT: string
 
 /** suzuri's command palette: an Astryx CommandPalette, open while mounted. */
 export function Palette<C extends PaletteCommand>(props: PaletteProps<C>): ReactElement
@@ -30,6 +35,7 @@ export interface PaletteViewProps<C extends PaletteCommand = PaletteCommand> {
   onToggle: () => void
   isToggleKey?: PaletteProps["isToggleKey"]
   placeholder?: string
+  maxHeight?: PaletteProps["maxHeight"]
 }
 
 /** The bare view under Palette, for a host that runs commands its own way. */

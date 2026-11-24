@@ -49,6 +49,9 @@ function PaletteInput({ onToggle, isToggleKey, placeholder }) {
   return <CommandPaletteInput placeholder={placeholder} onKeyDown={onKeyDown} />
 }
 
+// Astryx's own 480, but never taller than most of the view.
+export const PALETTE_MAX_HEIGHT = "min(480px, 85dvh)"
+
 // suzuri's open chords: ⌘K / Ctrl+K, or P.
 const defaultToggle = (e) => (e.metaKey || e.ctrlKey) && /^[kp]$/i.test(e.key)
 
@@ -90,7 +93,9 @@ function Row({ item }) {
 //   onClose()     the palette is done (chosen or dismissed): unmount it
 //   isToggleKey(e)  a keydown that closes it again (default ⌘/Ctrl + K or P)
 //   placeholder   the query field's hint (default "Type a command…")
-export function Palette({ commands, onRun, onClose, isToggleKey, placeholder = "Type a command…" }) {
+//   maxHeight     the dialog's tallest, a CSS length or pixels (default
+//                 min(480px, 85dvh), so a short host view needs no page style)
+export function Palette({ commands, onRun, onClose, isToggleKey, placeholder = "Type a command…", maxHeight }) {
   const done = useRef(false)
   const finish = (command) => {
     if (done.current) return
@@ -104,14 +109,16 @@ export function Palette({ commands, onRun, onClose, isToggleKey, placeholder = "
   }
   return (
     <PaletteView items={commands} onDone={finish} onToggle={() => finish(null)}
-      isToggleKey={isToggleKey} placeholder={placeholder} />
+      isToggleKey={isToggleKey} placeholder={placeholder} maxHeight={maxHeight} />
   )
 }
 
 // The bare view: items, onDone(item | null) when it closes, with the
 // command to run or null for a dismissal; onToggle when the open chord
 // comes again.
-export function PaletteView({ items, onDone, onToggle, isToggleKey, placeholder = "Type a command…" }) {
+export function PaletteView({
+  items, onDone, onToggle, isToggleKey, placeholder = "Type a command…", maxHeight = PALETTE_MAX_HEIGHT,
+}) {
   const chosen = useRef(null)
   // Not Astryx: a hand-made SearchSource rather than createStaticSource, so
   // matching stays filterCommands' (every word across title, hint, category).
@@ -137,6 +144,7 @@ export function PaletteView({ items, onDone, onToggle, isToggleKey, placeholder 
     <CommandPalette
       isOpen
       label="Command palette"
+      maxHeight={maxHeight}
       searchSource={source}
       input={<PaletteInput onToggle={onToggle} isToggleKey={isToggleKey} placeholder={placeholder} />}
       renderItem={(item) => <Row item={item} />}
