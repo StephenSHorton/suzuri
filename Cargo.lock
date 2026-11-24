@@ -3301,6 +3301,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsz-keeper-host"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "libc",
+ "log",
+ "parking_lot",
+ "rsz-keeper",
+ "rsz-term",
+ "serde_json",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "rsz-settings"
 version = "0.1.0"
 dependencies = [
@@ -3976,6 +3990,7 @@ dependencies = [
  "png",
  "rsz-caffeine",
  "rsz-keeper",
+ "rsz-keeper-host",
  "rsz-settings",
  "rsz-term",
  "rust-toast",

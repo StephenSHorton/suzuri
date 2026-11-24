@@ -43,6 +43,8 @@ NOTES="For embedders such as Hearth and Irori: the suzuri-view package (ui/view)
 suzuri-view/settings and suzuri-view/palette are suzuri's own Settings window and command palette, built for React + Astryx hosts (README, Settings window and command palette).
 
 The asset $TGZ is \`npm pack\` of ui/view at this tag. It is uploaded once and never replaced."
-gh release create "$TAG" -R "$REPO" --target "$HEAD_SHA" --title "suzuri-view $VERSION ($TAG)" --notes "$NOTES" \
+# --latest=false: the app's update feed is releases/latest/download/latest.json,
+# so only an app release may be Latest.
+gh release create "$TAG" -R "$REPO" --target "$HEAD_SHA" --title "suzuri-view $VERSION ($TAG)" --notes "$NOTES" --latest=false \
   "$OUT/$TGZ" "$OUT/SHA256SUMS"
 echo "==> published https://github.com/$REPO/releases/tag/$TAG"

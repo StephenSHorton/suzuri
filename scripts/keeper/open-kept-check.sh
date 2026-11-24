@@ -11,8 +11,12 @@
 #      on, and Hearth's viewer still draws it; so does quitting Suzuri
 #   4. the pane taking the keys sets the host's size to Suzuri's again
 #   cargo build -p suzuri -p rsz-keeper && scripts/keeper/open-kept-check.sh
+# RSZ_KEEPER_HOST=<program> runs Hearth's shell in another host program,
+# such as the standalone rsz-keeper-host (hearth#190), in place of
+# `suzuri --keeper-host`.
 source "$(dirname "$0")/lib.sh"
 APP="$ROOT/target/debug/suzuri"
+HOST="${RSZ_KEEPER_HOST:-$APP}"
 [[ -x "$APP" && -x "$KEEPER" ]] || fail "build first: cargo build -p suzuri -p rsz-keeper"
 before="$(real_stamp)"
 OUT="${SHOTS:-$S}"
@@ -32,14 +36,14 @@ trap 'hearth_stop; cleanup' EXIT
 
 say "== a host for Hearth's shell, in $HD (not Suzuri's folder)"
 # The host lives on after its "ready" line: read it from a file.
-echo '{"cols":80,"rows":24,"command":["/bin/sh"],"version":"hearth-stand-in"}' | SHELL=/bin/sh "$APP" --keeper-host "$HD" "$HID" >"$S/host.out" 2>>"$S/host.log" &
+echo '{"cols":80,"rows":24,"command":["/bin/sh"],"version":"hearth-stand-in"}' | SHELL=/bin/sh "$HOST" --keeper-host "$HD" "$HID" >"$S/host.out" 2>>"$S/host.log" &
 for _ in $(seq 100); do grep -q . "$S/host.out" 2>/dev/null && break; sleep 0.1; done
 out="$(head -1 "$S/host.out")"
 [[ "$out" == ready* ]] || fail "host said: $out"
 host="${out#ready }"
 hk() { "$KEEPER" --dir "$HD" ls | jq_ "d['$1']"; }
 shell="$(hk shell_pid)"
-say "host $host, shell $shell, socket $SOCK"
+say "host $host ($(hk exe)), shell $shell, socket $SOCK"
 
 # Hearth's own window on it: a viewer that counts frames in a file and can
 # set the size, as Hearth's terminal does (the keeper's wire format).

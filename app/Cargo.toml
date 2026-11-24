@@ -16,6 +16,7 @@ tauri-build = { workspace = true }
 [dependencies]
 rsz-term = { path = "../crates/term" }
 rsz-keeper = { path = "../crates/keeper" }
+rsz-keeper-host = { path = "../crates/keeper-host" }
 rsz-caffeine = { path = "../crates/caffeine", features = ["serde"] }
 rsz-settings = { path = "../crates/settings" }
 tauri = { workspace = true, features = ["macos-private-api"] }

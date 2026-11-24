@@ -2,6 +2,10 @@
 //! starts one (`suzuri --keeper-host`), viewers that come and go, a second
 //! program on the same shell, and a close that ends it (cards hearth#913,
 //! hearth#923 for Windows).
+//!
+//! RSZ_KEEPER_HOST=<program> runs them all against another host program,
+//! such as the standalone `rsz-keeper-host` (hearth#190): it takes the
+//! same arguments and speaks the same wire.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -39,8 +43,16 @@ impl Drop for Folder {
     }
 }
 
+/// The host program: the app (`suzuri --keeper-host`), or RSZ_KEEPER_HOST.
+fn host_program() -> PathBuf {
+    std::env::var_os("RSZ_KEEPER_HOST")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_suzuri")))
+}
+
 fn start_host(dir: &Path, id: u32, command: &[&str]) -> u32 {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_suzuri"))
+    let mut child = Command::new(host_program())
         .arg("--keeper-host")
         .arg(dir)
         .arg(id.to_string())
@@ -141,6 +153,9 @@ fn a_shell_outlives_its_viewer_and_ends_when_closed() {
     let (a, frames_a) = viewer(&d.0, 7);
     assert_eq!(a.hello["version"], "test-1");
     assert_eq!(a.hello["viewers"], 0);
+    // The host is the program asked for (RSZ_KEEPER_HOST, else suzuri).
+    let exe = std::fs::canonicalize(a.hello["exe"].as_str().unwrap()).unwrap();
+    assert_eq!(exe, std::fs::canonicalize(host_program()).unwrap());
     let shell = a.hello["shell_pid"].as_u64().unwrap() as u32;
     wait_for("a's first frame", || frames_a.load(Ordering::Relaxed) > 0);
     a.input(FIVE_LINES).unwrap();
@@ -241,7 +256,7 @@ fn one_host_two_viewers_one_leaves_the_other_still_draws() {
 fn a_host_refuses_an_id_that_is_kept_already() {
     let d = Folder::new("b");
     start_host(&d.0, 3, &[SH]);
-    let out = Command::new(env!("CARGO_BIN_EXE_suzuri"))
+    let out = Command::new(host_program())
         .arg("--keeper-host")
         .arg(&d.0)
         .arg("3")

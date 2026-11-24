@@ -37,6 +37,44 @@ package's `prepack` (`ui/view/build.mjs`), which compiles their JSX to
 `ui/view/dist` with Vite from `ui/node_modules`, so run `npm ci` in `ui/`
 first.
 
+rsz-keeper-host (`crates/keeper-host`, hearth#190) is the shell keeper's
+host as its own small program (4 to 6 MB stripped; no Tauri, no window), for
+apps that keep shells without Suzuri installed: Hearth bundles it. It is the
+same code as `suzuri --keeper-host`, takes the same arguments
+(`rsz-keeper-host [--keeper-host] <dir> <id>`, config as JSON on stdin,
+`ready <pid>` on stdout) and speaks the same wire (`crates/keeper`). It is
+released apart from the app, on its own release tagged `keeper-v<v>`, the
+version in `crates/keeper-host/Cargo.toml`; each version is released once and
+never replaced, so bump that version first. Assets, one per Rust target
+triple:
+
+| Asset | Built | Notes |
+|---|---|---|
+| `rsz-keeper-host-<v>-aarch64-apple-darwin.tar.gz` | Mac | signed with Developer ID (hardened runtime) and notarized; a bare program can't be stapled |
+| `rsz-keeper-host-<v>-x86_64-apple-darwin.tar.gz` | Mac, cross-built | the same |
+| `rsz-keeper-host-<v>-x86_64-unknown-linux-gnu.tar.gz` | Mac, cross-built with `cargo zigbuild` against glibc 2.31 | needs only glibc 2.31+ (Zig's libc++ is linked in); tried in a bare `debian:bullseye-slim`. Not built in an amd64 container: Zig crashes under Rosetta there |
+| `rsz-keeper-host-<v>-x86_64-pc-windows-msvc.zip` | PC | `rsz-keeper-host.exe` with `conpty.dll` and `OpenConsole.exe` beside it (`conpty.ps1`); keep the three together |
+
+On Windows a running exe can't be replaced, so an app that ships it should
+start hosts from a copy, as Suzuri does with `suzuri-keeper.exe`
+(`app/src/keeper.rs`, `host_exe`). The release is never marked Latest
+(`--latest=false`): the app's update feed is `releases/latest`, so only an
+app release may hold Latest.
+
+To cut one:
+1. PC: `powershell -File scripts\release\keeper-host-windows.ps1` builds the
+   zip, runs a shell in it (`scripts\keeper\host-check.ps1`) and uploads it
+   to the draft `keeper-v<v>`.
+2. Mac: `scripts/release/keeper-host.sh` builds both Mac chips and Linux,
+   signs and notarizes the Mac ones, runs a shell in each with nothing else
+   installed (`scripts/keeper/host-check.sh`; Linux in a bare
+   `debian:bullseye-slim`), writes `SHA256SUMS` over all four, uploads and
+   publishes. `--no-upload` stops after building into
+   `dist/keeper-host/<v>`; `--no-notarize`, `--no-sign`, `--no-linux` and
+   `--mac-only` are for local tries. Needs `rustup target add
+   x86_64-apple-darwin x86_64-unknown-linux-gnu`, `cargo install
+   cargo-zigbuild` and Docker, besides the setup below.
+
 The Windows install puts OpenConsole's `conpty.dll` and `OpenConsole.exe` next
 to `suzuri.exe`. portable-pty loads that `conpty.dll` before the system
 one. They come from Microsoft's `Microsoft.Windows.Console.ConPTY` NuGet package
