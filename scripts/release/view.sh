@@ -10,7 +10,9 @@
 #
 # --no-upload  pack into dist/view and stop
 #
-# Needs: node and npm, gh logged in, a clean checkout of a pushed commit.
+# Needs: node and npm, `npm ci` done in ui/ (packing builds the Settings
+# window and palette with its Vite: ui/view/build.mjs), gh logged in, a clean
+# checkout of a pushed commit.
 set -euo pipefail
 
 UPLOAD=1
@@ -37,6 +39,8 @@ if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
   exit 1
 fi
 NOTES="For embedders such as Hearth and Irori: the suzuri-view package (ui/view) and, on the same commit, the rsz-term crate (crates/term), so their frame FORMAT_VERSION matches. Not an app release.
+
+suzuri-view/settings and suzuri-view/palette are suzuri's own Settings window and command palette, built for React + Astryx hosts (README, Settings window and command palette).
 
 The asset $TGZ is \`npm pack\` of ui/view at this tag. It is uploaded once and never replaced."
 gh release create "$TAG" -R "$REPO" --target "$HEAD_SHA" --title "suzuri-view $VERSION ($TAG)" --notes "$NOTES" \

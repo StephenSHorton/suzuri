@@ -31,6 +31,11 @@ embed) is released apart from the app, by `scripts/release/view.sh`: it packs
 `suzuri-view-<v>.tgz` and puts it on its own release tagged `view-v<v>`, the
 version in `ui/view/package.json`. Each version is released once and never
 replaced, so bump that version first. 0.1.0 came out on `term-v0.10.0`.
+Since 0.3.0 it also carries suzuri's Settings window and command palette
+(`suzuri-view/settings`, `suzuri-view/palette`): `npm pack` runs the
+package's `prepack` (`ui/view/build.mjs`), which compiles their JSX to
+`ui/view/dist` with Vite from `ui/node_modules`, so run `npm ci` in `ui/`
+first.
 
 The Windows install puts OpenConsole's `conpty.dll` and `OpenConsole.exe` next
 to `suzuri.exe`. portable-pty loads that `conpty.dll` before the system
